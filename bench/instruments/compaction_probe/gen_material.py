@@ -249,7 +249,7 @@ def _filler(turn: int, target_chars: int, rng: random.Random, values: list[str])
     return filler
 
 
-def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 17000) -> dict[str, Any]:
+def _generate_legacy(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 17000) -> dict[str, Any]:
     if turns <= 0:
         raise ValueError("--turns must be positive")
     if tokens_per_turn <= 0:
@@ -366,18 +366,224 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
     return manifest
 
 
+# Track S uses only the checkout's counter, with its documented offline fallback.
+def token_counter():
+    import importlib.util
+    import sys
+    import types
+    root = Path(__file__).resolve().parents[3]
+    package = "_compaction_probe_lcm"
+    if package + ".tokens" not in sys.modules:
+        module = types.ModuleType(package)
+        module.__path__ = [str(root)]
+        sys.modules[package] = module
+        spec = importlib.util.spec_from_file_location(package + ".tokens", root / "tokens.py")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        module._encoder_ready = True  # No tiktoken import, download, or cache write.
+    return sys.modules[package + ".tokens"].count_tokens
+
+
+CLASSES = ("name", "path", "limit", "build_id", "prefix", "decision", "superseded_value",
+           "error_with_fix", "pending_task", "early_user_constraint", "tool_number", "file_change")
+SCENES = (
+    "Inspection {n}: the fixture reader keeps the original row order. The dry run checked "
+    "a missing cursor and returned an explicit warning. No source files were changed.\n",
+    "Test log {n}: read fixture, compare message ownership, preserve call/result pairs. "
+    "Expected three rows; observed three rows. Exit 0. The rollback check is still queued.\n",
+    "Review {n}: the adapter passes the stored identifier through unchanged. A second read "
+    "returns the same bytes. The read-only audit stops before publishing an artifact.\n",
+    "Diff note {n}: src/reader.py adds a guard for an absent offset. The fixture contains "
+    "an empty result and a resumed cursor. The change keeps both records reachable.\n",
+)
+
+
+def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 17000,
+             placements: bool = True, classes12: bool = True, min_tokens: int = 244800,
+             min_events: int = 2, smoke: bool = False) -> dict[str, Any]:
+    if not placements and not classes12:
+        return _generate_legacy(seed, out_dir, turns, tokens_per_turn)
+    if not placements or not classes12:
+        raise ValueError("Track S requires both --placements and --classes12")
+    if turns < 10 or tokens_per_turn <= 0 or min_tokens <= 0 or min_events < 2:
+        raise ValueError("require turns >= 10, positive token budgets, min-events >= 2")
+    count = token_counter()
+    rng = random.Random(seed)
+    rows, facts, checkpoints = [], [], []
+    serial = 0
+
+    def scene(chars):
+        nonlocal serial
+        pieces, size = [], 0
+        while size < chars:
+            serial += 1
+            part = rng.choice(SCENES).format(n=f"{seed}:{serial:06d}")
+            pieces.append(part)
+            size += len(part)
+        return "".join(pieces)[:chars]
+
+    def add(turn, role, content, call=None):
+        index = len(rows)
+        rows.append(dict(turn=turn, role=role, content=content, tool_call_id=call,
+                         ts=float(seed * 10000 + index), id=f"S{seed}-R{index:05d}"))
+        return dict(row_index=index, row_id=rows[-1]["id"], row_role=role)
+
+    def result(turn, content):
+        call = f"S{seed}-CALL{len(rows):05d}"
+        add(turn, "assistant", f"Read the fixture for {call}.", call)
+        rows[-1]["tool_calls"] = [dict(id=call, type="function", function=dict(
+            name="read_material", arguments=json.dumps({"path": f"fixtures/{call}.txt"})))]
+        return add(turn, "tool", content, call)
+
+    continuity = []
+    for role, kind, value in (("system", "host_instruction", "Preserve chronology and abstain when a value is unknown."),
+                              ("user", "current_request", "Audit the fixture replay and prepare a rollback check."),
+                              ("user", "active_constraint", "Never modify the source fixtures during this audit.")):
+        ident = f"S{seed}-CONT-{kind}"
+        continuity.append(dict(id=ident, value=value, **add(1, role, f"[{ident}] {value}")))
+    for c, cls in enumerate(CLASSES):
+        for k in range(5):
+            nonce = f"{rng.choice(VALUE_WORDS)}-{seed}-{c:02d}-{k}"
+            values = (f"{nonce}-workspace", f"src/{nonce}/settings.toml", f"{640 + c * 5 + k} MiB",
+                      hashlib.sha256(nonce.encode()).hexdigest()[:12], f"{nonce}-",
+                      f"snapshot-{nonce} over live-{nonce} because immutable input makes replay repeatable",
+                      f"snapshot-{nonce} because the mutable cache mixed cursor ownership",
+                      f"E_{nonce}: cursor missing; fixed by rebuilding the fixture index",
+                      f"verify {nonce} rollback before release", f"Never modify fixtures/{nonce}/source.json",
+                      f"rows_verified={41000 + seed * 100 + k}",
+                      f"src/{nonce}/loader.py: preserve tool_call_id in replay")
+            fact = dict(id=f"S{seed}-F{c:02d}-{k}", **{"class": cls}, value=values[c],
+                        stale=f"mutable-cache-{nonce} because it avoids snapshot writes" if c == 6 else None,
+                        placement=("head", "head", "middle", "tail", "tail")[k],
+                        probe=f"What is the current {cls.replace('_', ' ')} for fixture {nonce}?", answer=values[c])
+            if fact["stale"]:
+                fact["stale_source"] = dict(id=fact["id"] + "-OLD", **add(
+                    1, "user", f"[{fact['id']}-OLD] Initial choice: {fact['stale']}."))
+            fact["turn"] = 1 + k * 2
+            fact["row_role"] = "tool" if k in (2, 3) or c == 10 else ("assistant" if k == 1 else "user")
+            facts.append(fact)
+    for turn in range(1, 11):
+        for role in ("user", "assistant", "tool"):
+            group = [f for f in facts if f["turn"] == turn and f["row_role"] == role]
+            if role == "tool":
+                for f in group:
+                    line = f"[{f['id']}] Current {f['class']}: {f['value']}.\n"
+                    body = scene(100004 if f["class"] == "file_change" and f["placement"] == "middle" else 6000)
+                    offset = {"head": 0, "middle": 3000, "tail": len(body)}[f["placement"]]
+                    text = body[:offset] + line + body[offset:]
+                    f.update(result(turn, text), char_offset=offset + line.index(f["value"]))
+                continue
+            for f in group:
+                line = f"[{f['id']}] Current {f['class']}: {f['value']}.\n"
+                body = scene(4500)
+                text = line + body if f["placement"] == "head" else body + line
+                f.update(add(turn, role, text), char_offset=text.index(f["value"]))
+            if not group:
+                add(turn, role, scene(500))
+    state = dict(id=f"S{seed}-STATE", next_action="run the read-only rollback check",
+                 path=f"fixtures/seed-{seed}/rollback.json", status="pending", decision_id=f"S{seed}-F06-4")
+    state.update(add(10, "assistant", f"[{state['id']}] Continuation: " + json.dumps(state, sort_keys=True)))
+    counts = [count(r["content"]) for r in rows]
+    presented = sum(counts)
+    if presented >= min_tokens and not smoke:
+        raise ValueError("all scored items must precede the slowest trigger")
+    supersession = max(sum(counts[:f["row_index"] + 1]) for f in facts if f["stale"])
+    # Conservative fresh-token spans; these are NOT observed runtime events.
+    horizon = max(400000, turns * tokens_per_turn, supersession + min_events * min_tokens)
+    target = ((horizon + 20000 + 19999) // 20000) * 20000
+    total, tool_tokens, turn = presented, sum(n for n, r in zip(counts, rows) if r["role"] == "tool"), 10
+    if smoke:
+        source = result(10, f"[S{seed}-SMOKE-EVENT] Final wiring-only compaction checkpoint.\n" + scene(4000))
+        suffix = dict(id=f"S{seed}-SMOKE-EVENT", **source, action="force_compaction_after_row",
+                      timing_population="WIRING-ONLY", runtime_event_required=True)
+    else:
+        while total < target:
+            turn += 1
+            add(turn, "user", "Continue the read-only fixture audit; leave the rollback task pending.")
+            total += count(rows[-1]["content"])
+            checkpoint = ((total // 20000) + 1) * 20000
+            budget = min(tokens_per_turn // 2 or 1, target - total, checkpoint - total)
+            role = "tool" if tool_tokens < total / 2 else "assistant"
+            text = scene(max(1, (budget - 1) * 4))
+            if role == "tool":
+                result(turn, text)
+                total += count(rows[-2]["content"])
+                tool_tokens += count(text)
+            else:
+                add(turn, role, text)
+            total += count(text)
+            if total >= checkpoint:
+                checkpoints.append(dict(id=f"S{seed}-CP{checkpoint}", tokens=total, row_index=len(rows) - 1))
+        suffix = None
+    checkpoints, cumulative, boundary = [], 0, 20000
+    for index, row in enumerate(rows):
+        cumulative += count(row["content"])
+        while cumulative >= boundary:
+            checkpoints.append(dict(id=f"S{seed}-CP{boundary}", tokens=cumulative, row_index=index))
+            boundary += 20000
+    if smoke:
+        decision = dict(row_index=len(rows) - 1, tail_tokens=0)
+    else:
+        running = 0
+        for index, row in enumerate(rows):
+            running += count(row["content"])
+            if running >= min_tokens:
+                first_trigger = dict(row_index=index, tokens=running)
+                break
+        decision = dict(next(cp for cp in checkpoints if cp["tokens"] >= first_trigger["tokens"] + 20000),
+                        trigger=first_trigger)
+    admissions = [dict(id=f["id"], value=f["value"], row_id=f["row_id"], row_index=f["row_index"],
+                       role=f["row_role"], tool_call_id=rows[f["row_index"]]["tool_call_id"],
+                       status="scheduled", runtime_row_id=None) for f in facts]
+    targets = [dict(id=f["id"], kind="ancestry", row_id=f["row_id"], row_index=f["row_index"],
+                    stale_source=f["stale_source"], required_events=2) for f in facts if f["stale"]]
+    external = next(f for f in facts if f["class"] == "file_change" and f["placement"] == "middle")
+    targets.append(dict(id=external["id"], kind="externalization", row_id=external["row_id"], row_index=external["row_index"]))
+    traps = [dict(id=f"S{seed}-TRAP{k}", probe=f"What is the {item} of the unmentioned glacier fixture?", answer="ABSTAIN")
+             for k, item in enumerate(("owner", "expiry date", "queue limit", "failed build id", "deployment prefix"))]
+    probes = [dict(id=f["id"], kind="canary", text=f["probe"], expect="value") for f in facts]
+    probes += [dict(id=t["id"], kind="trap", text=t["probe"], expect="ABSTAIN") for t in traps]
+    rng.shuffle(probes)
+    batches = [dict(id=f"S{seed}-B{k // 10}", probes=probes[k:k + 10],
+                    text="Reply only as a JSON object mapping each probe id to its answer string (use I don\'t know for ABSTAIN).")
+               for k in range(0, len(probes), 10)]
+    manifest = dict(seed=seed, mode="smoke" if smoke else "decision", tokenizer="repo-count_tokens:offline-char-estimate",
+                    params=dict(turns=turns, tokens_per_turn=tokens_per_turn, min_tokens=min_tokens, min_events=min_events),
+                    checkpoints=checkpoints, continuity=continuity, receipt_targets=targets, smoke_suffix=suffix,
+                    presented_tokens=presented, planned_trigger_spans=min_events,
+                    decision_checkpoint=decision,
+                    proof_boundary="Fresh-token planning only; actual events, ancestry, externalization and admission require runtime receipts.")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    for name, payload in (("facts.json", facts), ("canaries.json", facts), ("traps.json", traps),
+                          ("continuation.json", state), ("admission.manifest.json", admissions)):
+        _json_write(out_dir / name, payload)
+    for name, payload in (("transcript.jsonl", rows), ("turns.jsonl", [dict(turn=r["turn"], text=r["content"]) for r in rows]),
+                          ("probes.jsonl", probes), ("probe_batches.jsonl", batches)):
+        (out_dir / name).write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in payload), encoding="utf-8")
+    manifest["shas"] = {p.name: _sha256(p) for p in sorted(out_dir.iterdir()) if p.is_file() and p.name != "material.manifest.json"}
+    _json_write(out_dir / "material.manifest.json", manifest)
+    return manifest
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--turns", type=int, default=35)
     parser.add_argument("--tokens-per-turn", type=int, default=17000)
+    parser.add_argument("--placements", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--classes12", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--min-tokens", type=int, default=244800)
+    parser.add_argument("--min-events", type=int, default=2)
+    parser.add_argument("--smoke", action="store_true", help="ten-turn prefix plus forced-event wiring suffix")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    generate(args.seed, args.out_dir, args.turns, args.tokens_per_turn)
+    generate(args.seed, args.out_dir, args.turns, args.tokens_per_turn,
+             args.placements, args.classes12, args.min_tokens, args.min_events, args.smoke)
     return 0
 
 
