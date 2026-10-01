@@ -1611,6 +1611,7 @@ class TestEscalationStripReasoning:
             database_path=str(tmp_path / "summary-reasoning-effort.db"),
             fresh_tail_count=1,
             leaf_chunk_tokens=1,
+            l3_truncate_tokens=1,  # #605 F2: a leaf within the level 3 bound would make no call
             summary_reasoning_effort="high",
         )
         instance = LCMEngine(config=config)

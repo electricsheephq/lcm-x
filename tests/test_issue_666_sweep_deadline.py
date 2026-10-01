@@ -124,7 +124,8 @@ def _compress(engine, view, caplog):
 
 
 def test_d3_slow_failing_routes_stay_inside_the_sweep_deadline(tmp_path, monkeypatch, clock, caplog):
-    engine = _engine(tmp_path, summary_fallback_models=["fallback-a"])
+    # #605 F2: the condensation groups are over a lowered level 3 bound, so each one calls the slow routes.
+    engine = _engine(tmp_path, summary_fallback_models=["fallback-a"], l3_truncate_tokens=2)
     route = _SlowFailingRoute(clock)
     monkeypatch.setattr(escalation, "_invoke_summary_llm", route)
     _depth_0_nodes(engine, 6)

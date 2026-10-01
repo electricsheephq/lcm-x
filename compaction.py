@@ -576,6 +576,7 @@ class CompactionMixin:
                  bypass_cooldown: bool = False) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
+        self._compress_forced_overflow = False
         budget = self._foreground_budget = self._new_foreground_budget()  # #605 K1: the clock starts here
         returned = None
         try:
@@ -615,7 +616,8 @@ class CompactionMixin:
             reason = self._survival_fit_reason or str(self._last_compression_status or "unknown")
             result = self._survival_fit(messages, result, current_tokens,
                                         **self._survival_fit_args(messages, current_tokens, reason, bypass_cooldown,
-                                                                  automatic=not force and self._last_compression_status != "error"))
+                                                                  automatic=not force and not self._compress_forced_overflow
+                                                                  and self._last_compression_status not in ("error", "host_native")))
             if self._no_progress_candidate and not bypass_cooldown and len(result) >= len(messages) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages)):
                 self._start_no_progress_hold("no_progress")  # #651: no leaf, and neither rows nor tokens fell
@@ -650,6 +652,7 @@ class CompactionMixin:
                     return fitted
             raise
         finally:
+            self._compress_forced_overflow = False
             self._foreground_budget = None
             self._finish_foreground_budget(budget, returned)
 
@@ -1321,6 +1324,7 @@ class CompactionMixin:
             observed_tokens=observed_prompt_tokens,
             messages=messages,
         )
+        self._compress_forced_overflow = force_overflow
         # NOTE: deliberately do NOT clear the spend guard on force_overflow.
         # force_overflow is automatic (set every turn the prompt exceeds the
         # assembly cap), which is exactly the sustained-over-cap state a runaway
@@ -1448,6 +1452,8 @@ class CompactionMixin:
         # #605: one clock from compress() entry; the hard bound keeps today's step checks.
         budget = self._foreground_budget or self._new_foreground_budget()
         budget.sweep_active = threshold_full_sweep_active
+        if force or force_overflow:  # #605: the soft target is for automatic compactions; these keep the hard bound
+            budget.soft = 0.0
         sweep_deadline = budget.t0 + budget.hard
         configured_sweep_target = int(self._config.summary_prefix_target_tokens)
         sweep_target_tokens = max(
@@ -1566,8 +1572,8 @@ class CompactionMixin:
             if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
                 sweep_stop_reason = "time_budget_exhausted"
                 break
-            if threshold_full_sweep_active and budget.progress:
-                try:  # #605: no pass work for a later leaf whose call could not start
+            if budget.progress:
+                try:  # #605: no pass work for a later leaf whose call could not start (sweep on or off)
                     budget.admit(self._primary_summary_route())
                 except SweepBudgetExhausted as exc:
                     sweep_stop_reason = exc.reason
@@ -1864,8 +1870,11 @@ class CompactionMixin:
                         candidate_raw,
                         max(1, int(self._config.leaf_chunk_tokens)),
                     )
-                else:
-                    to_compact = candidate_raw
+                else:  # #605 D2: one leaf is bounded, so its call fits the time budget (40% of a known window at most)
+                    ceiling = max(int(self._config.leaf_chunk_tokens), int(self._config.dynamic_leaf_chunk_max))
+                    window_cap = self._context_aware_leaf_cap()
+                    to_compact = self._select_oldest_leaf_chunk(
+                        candidate_raw, max(1, min(ceiling, window_cap) if window_cap else ceiling))
 
             if not to_compact and not hidden_backlog:
                 noop_reason = "no eligible leaf chunk selected"
@@ -1946,8 +1955,8 @@ class CompactionMixin:
                         **summary_kwargs,
                     )
                 except Exception as exc:
-                    if threshold_full_sweep_active and isinstance(exc, SweepBudgetExhausted):
-                        sweep_stop_reason = exc.reason  # #608: a stop, with or without a leaf (#605: or soft)
+                    if isinstance(exc, SweepBudgetExhausted):
+                        sweep_stop_reason = exc.reason  # #608: a stop, with or without a leaf (#605: or soft; any path)
                         break
                     if threshold_full_sweep_active and leaf_compacted_this_turn:
                         sweep_stop_reason = "leaf_summary_error"
@@ -2135,6 +2144,13 @@ class CompactionMixin:
                     leading_anchor_count:remaining_fresh_tail_start
                 ]
                 if not remaining_raw:
+                    # #597: owned hidden backlog left above the frontier is not drained; the next pass takes it
+                    # (the loop's admission, deadline and pass budget still bound it).
+                    step_started = time.monotonic()
+                    hidden_left = self._store_complete_backlog(working_messages, leading_anchor_count)
+                    sweep_step_done("store_complete", step_started)
+                    if hidden_left:
+                        continue
                     sweep_raw_drained = True
                     sweep_stop_reason = "raw_prefix_drained"
                     break
@@ -2197,7 +2213,8 @@ class CompactionMixin:
                     budget.hard,
                     ", ".join(f"{step}={seconds:.1f}s" for step, seconds in sweep_step_seconds.items()),
                 )
-                self._start_sweep_budget_hold()
+                if not force_overflow:  # #605: forced overflow fits to its cap below and is never held, as before
+                    self._start_sweep_budget_hold()
             self._refresh_raw_backlog_debt(
                 working_messages,
                 observed_tokens=observed_prompt_tokens,

@@ -24,7 +24,9 @@ ACCEPTED = "Earlier turns.\nExpand for details about: turns"
 # Captured at the base with the fixture in _compaction_fixture (one leaf per regime: floor, ratio, cap; the
 # 7-token replies fall through to L2 and L3).
 BASE_LEAF_BUDGETS = [[8633, 2000], [7, 2000], [28758, 5751], [7, 2000], [92008, 12000], [7, 2000]]
-BASE_MAX_TOKENS = [4000, 4000, 2000, 11502, 4000, 2000, 24000, 4000, 2000]
+# #605 F2: the three 7-token leaves are written verbatim with no call (at the base each made a level 1 call of
+# 4000 and a level 2 call of 2000 max tokens, both rejected as not shorter, then took that same level 3).
+BASE_MAX_TOKENS = [4000, 11502, 24000]
 BASE_LEAF_NODES = [(7, 7), (7, 7), (7, 7), (8633, 12), (28758, 12), (92008, 12)]
 
 

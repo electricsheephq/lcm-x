@@ -106,7 +106,7 @@ class StoreCompleteMixin:
             return False
         full_map = self._get_store_id_map_for_messages(working[leading:])
         frontier = self._store_complete_frontier()
-        mapped = set(full_map.values()) | set(self._get_store_ids_for_messages(working[:leading]))
+        mapped = set(full_map.values()) | set(self._get_store_ids_for_messages(working[:leading]) if leading else ())
         end = min((store_id - 1 for store_id in mapped if store_id > frontier), default=None)
         if end is not None and end <= frontier:
             return False
