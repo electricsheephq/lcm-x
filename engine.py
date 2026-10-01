@@ -52,6 +52,7 @@ from .escalation import (
     closed_summary_route_status,
     summarize_with_escalation,
     summary_route_available,
+    verbatim_source,
 )
 from .externalize import (
     _build_externalized_placeholder,
@@ -394,6 +395,11 @@ class SummaryResultRejected(RuntimeError):
     """#652: a level 3 condensation while the survival fit can rescue the request; no node was written."""
 
 
+def _condensation_source_text(nodes) -> str:
+    """The summariser source of one same-depth condensation."""
+    return "\n\n---\n\n".join(node.summary for node in nodes)
+
+
 def _normalize_total_compactions(value: Any) -> int:
     """Return a persisted compaction total only when it is a valid counter."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -693,12 +699,16 @@ class LCMEngine(
         # Cooldown timestamp to prevent compression cascade after boundary skip.
         # Set when skip-carry-over path is taken in _continue_compression_boundary.
         self._last_boundary_skip_time: float = 0
-        # #608: wall clock until which the threshold answer is no, after a sweep
+        # #608: monotonic clock until which the threshold answer is no, after a sweep
         # spent its time budget before the first leaf. A stored leaf clears it.
+        # #618: it holds only the conversation it was armed for.
         self._sweep_budget_hold_until: float = 0.0
-        # #651: (until, reason) after an automatic threshold pass made no progress or
+        self._sweep_budget_hold_conversation = ""
+        # #651: (monotonic until, reason) after an automatic threshold pass made no progress or
         # the host refused one. Like the #608 hold, only its time or a stored leaf ends it.
         self._no_progress_hold: Optional[tuple[float, str]] = None
+        # #618: one-shot from compress(): a hold is active at the survival ceiling, so the pass only fits.
+        self._hold_fit_only_requested = False
         self._no_progress_candidate = False  # set by _compress_impl for compress()
         self._last_gate_tokens = 0  # the latest should_compress/preflight observation
         # #651 one-shot handoff: preflight asked for maintenance below the host
@@ -1576,7 +1586,7 @@ class LCMEngine(
         """Return true while a boundary skip is in its short no-compress window."""
         if self._last_boundary_skip_time <= 0:
             return False
-        elapsed = time.time() - self._last_boundary_skip_time
+        elapsed = time.monotonic() - self._last_boundary_skip_time
         if elapsed < 60:
             logger.debug(
                 "LCM compression cooldown active: %.1f seconds since boundary skip",
@@ -1588,7 +1598,12 @@ class LCMEngine(
 
     def _start_sweep_budget_hold(self, seconds: Optional[float] = None) -> None:
         hold = _SWEEP_BUDGET_HOLD_SECONDS if seconds is None else min(_SWEEP_BUDGET_HOLD_SECONDS, max(1.0, seconds))
-        self._sweep_budget_hold_until = time.time() + hold
+        self._sweep_budget_hold_until = time.monotonic() + hold
+        self._sweep_budget_hold_conversation = self._hold_conversation_key()  # #618
+
+    def _hold_conversation_key(self) -> str:
+        """#618: the conversation a #608 hold belongs to."""
+        return str(self._conversation_id or self._session_id or "")
 
     def _foreground_call_budget(self) -> Optional[ForegroundBudget]:
         """#605: a leaf or condensation call inside compress() runs under that compress()'s budget, sweep on or
@@ -1624,8 +1639,11 @@ class LCMEngine(
         return not force_overflow and int(self.context_length or 0) > 0 and bool(
             getattr(self._config, "survival_fit", True))
 
-    def _summary_route_stop_applies(self, force_overflow: bool) -> bool:
-        """#628: write no leaf or node while every route is refused, unless the fit cannot rescue."""
+    def _summary_route_stop_applies(self, force_overflow: bool, source_text: Optional[str] = None) -> bool:
+        """#628: write no leaf or node while every route is refused, unless the fit cannot rescue. A known
+        ``source_text`` stored whole with no call (#605 F2) is never stopped: it needs no route."""
+        if source_text is not None and verbatim_source(source_text, self._config.l3_truncate_tokens):
+            return False
         return self._fit_can_rescue(force_overflow) and not self._summary_route_available()
 
     def _summary_route_seconds_left(self) -> float:
@@ -1643,7 +1661,9 @@ class LCMEngine(
         """#608: return true while a no-leaf sweep budget stop holds the threshold answer."""
         if self._sweep_budget_hold_until <= 0:
             return False
-        remaining = self._sweep_budget_hold_until - time.time()
+        if self._sweep_budget_hold_conversation != self._hold_conversation_key():
+            return False  # #618: armed for another conversation
+        remaining = self._sweep_budget_hold_until - time.monotonic()
         if remaining > 0:
             logger.debug("LCM threshold compression held: %.1f seconds left after a sweep budget stop", remaining)
             return True
@@ -1653,14 +1673,14 @@ class LCMEngine(
     def _start_no_progress_hold(self, reason: str) -> None:
         """#651: hold automatic threshold passes across turns, like the #608 hold: only its time or a stored leaf
         ends it."""
-        self._no_progress_hold = (time.time() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
+        self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
         logger.info("LCM automatic compaction held for %.0fs: %s", _SWEEP_BUDGET_HOLD_SECONDS, reason)
 
     def _no_progress_hold_active(self) -> bool:
         """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
         if self._no_progress_hold is None:
             return False
-        if time.time() < self._no_progress_hold[0]:
+        if time.monotonic() < self._no_progress_hold[0]:
             return True
         self._no_progress_hold = None
         return False
@@ -1669,7 +1689,7 @@ class LCMEngine(
         if not self._no_progress_hold_active():
             return None
         until, reason = self._no_progress_hold
-        return {"reason": reason, "until": until}
+        return {"reason": reason, "until": time.time() + max(0.0, until - time.monotonic())}  # #618: wall clock
 
     def record_rejected_compaction(self) -> None:
         """#651 host breaker hook: the host refused the last compaction (the result would be larger). Called
@@ -1682,10 +1702,12 @@ class LCMEngine(
     def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
         """#651 host breaker gate, read on the type before every automatic compress. A host recovery attempt
         (``ignore_cooldown``), a pending below-threshold cleanup-only pass, forced overflow and the survival
-        ceiling are never blocked; the hold governs LCM-managed compaction only, never a bypassed session."""
+        ceiling are never blocked; the hold governs LCM-managed compaction only, never a bypassed session.
+        #625: the #608 sweep hold blocks the same way."""
         if ignore_cooldown or self._preflight_below_threshold_cleanup_only:
             return False
-        return self._no_progress_hold_blocks(max(int(self.last_prompt_tokens or 0), self._last_gate_tokens))
+        tokens = max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
+        return self._no_progress_hold_blocks(tokens) or self._sweep_budget_hold_blocks(tokens)
 
     def _no_progress_hold_blocks(self, tokens: int) -> bool:
         """#651: the one hold decision the host gate and compress() share. The hold governs LCM-managed
@@ -1696,21 +1718,47 @@ class LCMEngine(
             return False
         return self._sweep_budget_hold_applies(tokens)
 
+    def _sweep_budget_hold_blocks(self, tokens: int) -> bool:
+        """#625: the #608 hold at the host gate, with the exemptions of ``_no_progress_hold_blocks``."""
+        if self._bypasses_lcm_context_management() or not self._sweep_budget_hold_active():
+            return False
+        if self._should_force_overflow_recovery(observed_tokens=tokens):
+            return False
+        return self._sweep_budget_hold_applies(tokens)
+
     def _compression_block_reason(self) -> Optional[str]:
-        """#651: the host classifies ``cooldown*`` as a transient block: defer, never exhaust."""
+        """#651: the host classifies ``cooldown*`` as a transient block: defer, never exhaust. #625: the #608
+        sweep hold is ``cooldown:lcm_sweep_budget``."""
         status = self._no_progress_hold_status()
-        return f"cooldown:lcm_{status['reason']}" if status else None
+        if status:
+            return f"cooldown:lcm_{status['reason']}"
+        return "cooldown:lcm_sweep_budget" if self._sweep_budget_hold_active() else None
+
+    def _survival_ceiling(self) -> Optional[int]:
+        """The window minus the survival reserve; None while the window is unknown."""
+        window = int(self.context_length or 0)
+        if window <= 0:
+            return None
+        reserve = min(0.9, max(0.0, float(getattr(self._config, "survival_reserve", 0.15) or 0.0)))
+        return int(window * (1 - reserve))
+
+    def _hold_fit_only_applies(self, tokens: int) -> bool:
+        """#618 item 3: either hold is active for this conversation and the request is at or over the survival
+        ceiling, so an automatic pass only fits (no sweep would store a leaf). Never without a fit to run."""
+        ceiling = self._survival_ceiling()
+        return bool(
+            ceiling is not None and tokens >= ceiling and self._fit_can_rescue(False)
+            and not self._bypasses_lcm_context_management()
+            and (self._sweep_budget_hold_active() or self._no_progress_hold_active()))
 
     def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
         """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs.
         #651: the no-progress hold applies the same way."""
         if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
             return False
-        window = int(self.context_length or 0)
-        if window <= 0 or tokens is None:
+        ceiling = self._survival_ceiling()
+        if ceiling is None or tokens is None:
             return True
-        reserve = min(0.9, max(0.0, float(getattr(self._config, "survival_reserve", 0.15) or 0.0)))
-        ceiling = int(window * (1 - reserve))
         if tokens >= ceiling:
             logger.debug("LCM sweep budget hold not applied: %d tokens >= survival ceiling %d", tokens, ceiling)
             return False
@@ -3528,7 +3576,7 @@ class LCMEngine(
             )
             self._finalize_pending_reset_boundary(previous_session_id)
             self._reset_session_scoped_runtime_state()
-            self._last_boundary_skip_time = time.time()
+            self._last_boundary_skip_time = time.monotonic()
             self._apply_session_start_metadata(session_id, kwargs)
             self._bind_lifecycle_state(
                 session_id,
@@ -6863,9 +6911,8 @@ class LCMEngine(
         max_depth = self._config.incremental_max_depth
         if max_depth == 0:
             return 0  # condensation disabled
-        if self._summary_route_stop_applies(force_overflow):
-            self._last_condensation_suppressed_reason = "summary_route_unavailable"  # #628: no level 3 node
-            return 0
+        # #628: no level 3 node while every route is refused; a group stored whole with no call still passes.
+        route_stop_at_entry = self._summary_route_stop_applies(force_overflow)
 
         # When max_depth is -1 (unlimited), derive the upper bound from
         # the deepest existing node + 1, so condensation can always
@@ -6897,13 +6944,14 @@ class LCMEngine(
             if not allow_condense:
                 suppression_reason = reason or suppression_reason
                 continue
-            if self._summary_route_stop_applies(force_overflow):  # #628: checked before every depth
-                suppression_reason = "summary_route_unavailable"
-                route_stopped = True
-                break
 
             # Take the first fanin nodes and condense
             to_condense = uncondensed[:fanin]
+            if self._summary_route_stop_applies(  # #628: checked before every depth
+                    force_overflow, _condensation_source_text(to_condense)):
+                suppression_reason = "summary_route_unavailable"
+                route_stopped = True
+                break
             try:
                 with self._condensation_in_flight(to_condense) as fresh:
                     if fresh is None:
@@ -6949,6 +6997,8 @@ class LCMEngine(
             self._last_condensation_suppressed_reason = "summary_result_rejected"
         if budget_stopped:
             self._last_condensation_suppressed_reason = suppression_reason
+        if route_stop_at_entry and not condensation_passes:
+            self._last_condensation_suppressed_reason = "summary_route_unavailable"
         return condensation_passes
 
     @contextmanager
@@ -6981,7 +7031,7 @@ class LCMEngine(
         depth = nodes[0].depth
         if any(node.depth != depth for node in nodes):
             raise ValueError("condensation requires same-depth summary nodes")
-        combined_text = "\n\n---\n\n".join(node.summary for node in nodes)
+        combined_text = _condensation_source_text(nodes)
         source_tokens = sum(node.token_count for node in nodes)
         token_budget = max(1000, int(source_tokens * 0.40))
         timeout_seconds = self._config.summary_timeout_ms / 1000

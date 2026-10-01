@@ -342,7 +342,7 @@ def test_live_interceptor_adopts_current_tool_stub_below_compaction_threshold(ma
 def test_live_stub_adoption_outranks_compression_boundary_cooldown(make_engine):
     engine = make_engine(fresh_tail_count=32, leaf_chunk_tokens=20_000)
     engine.threshold_tokens = 100_000
-    engine._last_boundary_skip_time = time.time()
+    engine._last_boundary_skip_time = time.monotonic()
     payload = "durable live payload during cooldown " * 100
     messages = [
         {"role": "system", "content": "system"},
@@ -372,7 +372,7 @@ def test_flag_off_plain_preflight_cooldown_blocks_threshold_and_overflow(make_en
         max_assembly_tokens=10,
     )
     engine.threshold_tokens = 1
-    engine._last_boundary_skip_time = time.time()
+    engine._last_boundary_skip_time = time.monotonic()
     messages = [{"role": "user", "content": "plain branch pressure " * 100}]
 
     assert engine._should_force_overflow_recovery(messages=messages) is True
@@ -385,7 +385,7 @@ def test_flag_off_replay_cleanup_preflight_outranks_boundary_cooldown(
 ):
     engine = make_engine(large_output_active_replay_stubbing_enabled=False)
     engine.threshold_tokens = 100_000
-    engine._last_boundary_skip_time = time.time()
+    engine._last_boundary_skip_time = time.monotonic()
     messages, cleanup_messages = externalized_raw_cleanup_messages()
     monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: cleanup_messages)
 
@@ -399,7 +399,7 @@ def test_flag_off_replay_cleanup_cooldown_publishes_without_summary_llm(
 ):
     engine = make_engine(large_output_active_replay_stubbing_enabled=False)
     engine.threshold_tokens = 100_000
-    engine._last_boundary_skip_time = time.time()
+    engine._last_boundary_skip_time = time.monotonic()
     messages, cleanup_messages = externalized_raw_cleanup_messages()
     monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: cleanup_messages)
     summary_spy = Mock(
@@ -422,7 +422,7 @@ def test_flag_off_noncleanup_replay_diff_remains_blocked_during_cooldown(
 ):
     engine = make_engine(large_output_active_replay_stubbing_enabled=False)
     engine.threshold_tokens = 1
-    engine._last_boundary_skip_time = time.time()
+    engine._last_boundary_skip_time = time.monotonic()
     messages = [{"role": "user", "content": "original visible payload"}]
     replay_messages = [{"role": "user", "content": "normalized visible payload"}]
     monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: replay_messages)
@@ -435,7 +435,7 @@ def test_flag_off_noncleanup_replay_diff_remains_blocked_during_cooldown(
 def test_live_stub_cooldown_adoption_skips_eligible_leaf_work(make_engine, monkeypatch):
     engine = make_engine(fresh_tail_count=2, leaf_chunk_tokens=1)
     engine.threshold_tokens = 100_000
-    engine._last_boundary_skip_time = time.time()
+    engine._last_boundary_skip_time = time.monotonic()
     payload = "fresh durable payload with old eligible backlog " * 100
     messages = [
         {"role": "system", "content": "system"},

@@ -13842,7 +13842,7 @@ class TestSessionRollover:
     def test_compression_cooldown_prevents_cascade_after_boundary_skip(self, engine):
         engine.on_session_start("session-a", platform="telegram", context_length=200000)
         engine.threshold_tokens = 100000
-        engine._last_boundary_skip_time = time.time()
+        engine._last_boundary_skip_time = time.monotonic()
 
         assert not engine.should_compress(200000)
 
