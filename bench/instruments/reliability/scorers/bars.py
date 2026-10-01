@@ -262,9 +262,11 @@ def score(cell: dict, cell_dir: Path) -> dict:
     fits = counted(cell, phases, "survival_fit")  # #582: a fit is a compaction miss
     exit_fits = counted(cell, phases, "exit_fit")  # diagnostic only: exit headroom does not fail B8
     skipped = counted(cell, phases, "exit_fit_skipped")
+    unshortened = counted(cell, phases, "fit_unshortened")  # #714: an over-budget list the fit could not shorten
     numbers["B8"] = {"survival_fit": fits, **({"exit_fit": exit_fits} if exit_fits else {}),
-                     **({"exit_fit_skipped": skipped} if skipped else {})}
-    if fits:
+                     **({"exit_fit_skipped": skipped} if skipped else {}),
+                     **({"fit_unshortened": unshortened} if unshortened else {})}
+    if fits or unshortened:
         failed["B8"] = numbers["B8"]
     if cell.get("from_ref"):  # diagnostic only: how many of those came before the candidate first published
         numbers["pre_publication_counts"] = {key: pre_publication(cell, phases, key)

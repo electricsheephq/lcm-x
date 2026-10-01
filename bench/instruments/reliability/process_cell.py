@@ -353,7 +353,7 @@ class ProcessCell:
                "citations": cite_all(self.host["src"]),
                "counters": snap.get("counters") or {"compacted_turns": [], "failed": [], "orphan_drops": 0, "native_max": 0},
                "compactions_logged": len(re.findall(r"LCM compaction #\d+", log)),
-               "log_counts": {k: log.count(v) for k, v in P1.LOG_COUNTS.items()}, "session_count": session_count(self.home),
+               "log_counts": P1._log_counts(log),  # #714: the same exit-fit normalization as in-process cells "session_count": session_count(self.home),
                "failed_turn_notices": next((n["failed_turn_notices"] for n in reversed(notes) if n.get("failed_turn_notices")), []),
                "provenance": prov, "network_attempts": [n for n in notes if n["kind"] == "network_attempt"][:20],
                "observer_errors": [n for n in notes if n["kind"] in ("observer_error", "refused")][:10], **result}
