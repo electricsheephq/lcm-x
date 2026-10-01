@@ -124,7 +124,9 @@ def _compress(engine, view, caplog, **kwargs):
 # -- T1: a leaf whose results are not shorter than its source ------------------------------------------------
 
 def test_t1_not_shorter_results_give_level_3_without_opening_the_circuit(tmp_path, monkeypatch, levels, caplog):
-    engine = _engine(tmp_path)
+    # #605 F2: a source within the level 3 bound is now written verbatim with no call, so the leaves here are over
+    # a lowered bound and the fit is off: the level 3 after two rejected calls is a truncation the #652 rule writes.
+    engine = _engine(tmp_path, l3_truncate_tokens=2, survival_fit=False)
     provider = _provider(monkeypatch, "reject", "reject", ACCEPTED)
     try:
         _compress(engine, _view(), caplog)
@@ -287,7 +289,7 @@ def _compaction_line(caplog) -> re.Match:
 
 
 def test_t7_compaction_line_without_level_3_leaves_is_unchanged(tmp_path, monkeypatch, levels, caplog):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path, l3_truncate_tokens=2)  # #605 F2: leaves over the level 3 bound call the model
     _provider(monkeypatch, ACCEPTED)
     try:
         _compress(engine, _view(), caplog)
@@ -298,7 +300,7 @@ def test_t7_compaction_line_without_level_3_leaves_is_unchanged(tmp_path, monkey
 
 
 def test_t7_compaction_line_counts_two_level_3_leaves(tmp_path, monkeypatch, levels, caplog):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path, l3_truncate_tokens=2, survival_fit=False)  # #605 F2: as in T1
     _provider(monkeypatch, "reject", "reject", "reject", "reject", ACCEPTED)
     try:
         _compress(engine, _view(), caplog)
@@ -329,11 +331,22 @@ def test_t8_full_sweep_off_with_every_route_refused_writes_no_leaf(tmp_path, mon
 
 def test_t9_circuit_opening_on_leaf_3_keeps_leaves_1_to_3_and_stops_before_leaf_4(
         tmp_path, monkeypatch, levels, caplog):
-    engine = _engine(tmp_path)
-    provider = _provider(monkeypatch, ACCEPTED, ACCEPTED, None, None, ACCEPTED)
+    """#605 F2: leaf 3 can no longer open the circuit and still be stored with the fit on (a level 3 after failed
+    calls is a truncation now, which #652 does not write), so the circuit opens right after leaf 3 is stored."""
+    engine = _engine(tmp_path, l3_truncate_tokens=2)
+    provider = _provider(monkeypatch, ACCEPTED)
+    real = engine._summarize_leaf_chunk_with_rescue
+
+    def leaf_then_open_on_the_third(*args, **kwargs):
+        result = real(*args, **kwargs)
+        if len(levels) == 3:
+            _open_circuit(engine)
+        return result
+
+    monkeypatch.setattr(engine, "_summarize_leaf_chunk_with_rescue", leaf_then_open_on_the_third)
     try:
         result = _compress(engine, _view(8), caplog)
-        assert levels == [1, 1, 3] and len(provider.calls) == 4
+        assert levels == [1, 1, 1] and len(provider.calls) == 3
         assert len(_nodes(engine)) == 3 and result is not None
         assert engine._last_compression_status == "compacted"
         telemetry = engine.get_status()["threshold_full_sweep"]
@@ -341,7 +354,7 @@ def test_t9_circuit_opening_on_leaf_3_keeps_leaves_1_to_3_and_stops_before_leaf_
         assert telemetry["status"] == "partial"
         assert _count(caplog, STOP_LINE) == 1 and _count(caplog, "3 leaves written, backlog kept") == 1
         assert engine._sweep_budget_hold_until == 0.0  # a stored leaf: no hold
-        assert _compaction_line(caplog).group("rest") == ", 1 level 3 leaves"
+        assert _compaction_line(caplog).group("rest") == ""
     finally:
         engine.shutdown()
 
@@ -452,13 +465,23 @@ def _condensation_state(engine) -> None:
 
 @pytest.mark.parametrize("force_overflow", [False, True], ids=["not-forced", "forced"])
 def test_condensation_rechecks_route_before_every_depth(tmp_path, monkeypatch, levels, force_overflow):
+    """#605 F2: each group is within the level 3 bound, so it is written verbatim with no call (it was: two
+    rejected calls whose counts 5 and 6 opened the route); the route now opens after the depth 0 pass."""
     engine = _engine(tmp_path, condensation_fanin=2, threshold_full_sweep_enabled=False)
     provider = _provider(monkeypatch, "reject")  # never shorter than its source
     _condensation_state(engine)
+    real = engine._condense_summary_nodes
+
+    def condense_then_open(*args, **kwargs):
+        result = real(*args, **kwargs)
+        _open_circuit(engine)
+        return result
+
+    monkeypatch.setattr(engine, "_condense_summary_nodes", condense_then_open)
     try:
         passes = engine._maybe_condense(force_overflow=force_overflow)
         new = sorted(node.depth for node in _nodes(engine)[3:])
-        assert len(provider.calls) == 2  # depth 0: level 1 and level 2, rejected; the counts 5 and 6 open the route
+        assert provider.calls == []
         if force_overflow:
             assert passes == 2 and new == [1, 2] and levels == [3, 3]
         else:

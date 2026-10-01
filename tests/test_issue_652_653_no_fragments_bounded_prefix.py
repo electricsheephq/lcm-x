@@ -288,7 +288,8 @@ def test_t6_partial_sweeps_do_not_grow_the_prefix(tmp_path, monkeypatch, caplog)
     """#605: the pre-leaf split is no longer half the passes and half the time; each sweep is partial by its
     60 s soft target, so the summariser takes 19 s per call on the clock (a call that takes no time would let
     every later leaf in under the target while the condensation passes are bounded by time)."""
-    engine = _engine(tmp_path, condensation_fanin=2, leaf_chunk_tokens=150)
+    # #605 F2: the 150-token leaves are over a lowered level 3 bound, so each one calls (and takes its 19 s).
+    engine = _engine(tmp_path, condensation_fanin=2, leaf_chunk_tokens=150, l3_truncate_tokens=2)
     long_leaf = "Earlier turns." + " summary words" * 20 + "\nExpand for details about: turns"
     offset = [0.0]
     real_monotonic = time.monotonic
