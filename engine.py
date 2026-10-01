@@ -5224,15 +5224,37 @@ class LCMEngine(
         )
         return active_replay_messages
 
+    @staticmethod
+    def _keep_host_held_stubs(
+        host_messages: List[Dict[str, Any]],
+        cached: List[Dict[str, Any]],
+        fresh: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """#772: a stub and its payload share an identity, so the cache would resurrect a host-held stub."""
+        def is_stub(message: Dict[str, Any]) -> bool:
+            return is_externalized_placeholder(text_content_for_pattern_matching(message.get("content")) or "")
+
+        return [
+            fresh[idx]
+            if str(host.get("role") or "") == "tool" and is_stub(host) and not is_stub(cached_row)
+            else cached_row
+            for idx, (host, cached_row) in enumerate(zip(host_messages, cached))
+        ]
+
     def _cached_active_replay_messages(
         self,
         original_messages: List[Dict[str, Any]],
+        fresh_replay_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         identities = [self._message_replay_identity(message, strip_carrier=False) for message in original_messages]
         if identities == getattr(self, "_last_active_replay_source_identities", None):
             cached = getattr(self, "_last_active_replay_messages", None)
             if cached is not None:
-                current = self._copy_active_replay_messages_preserving_generated_ids(cached)
+                current = self._keep_host_held_stubs(
+                    original_messages,
+                    self._copy_active_replay_messages_preserving_generated_ids(cached),
+                    original_messages if fresh_replay_messages is None else fresh_replay_messages,
+                )
                 self._last_active_replay_messages = current
                 self._refresh_generated_active_replay_placeholder_retention(
                     original_messages,
@@ -5806,6 +5828,7 @@ class LCMEngine(
                             len(anchor_plan["replayed"]), self._session_id, cursor, n)
         anchored_replay_indexes = anchor_plan["replayed"] if anchor_plan else set()
         anchor_remainders: dict[int, Any] = {}
+        fresh_replay_messages = replay_messages  # #772: the host's rows, before any cached copy is spliced in
         if cursor > 0:
             cached_active_replay_messages = getattr(self, "_last_active_replay_messages", None)
             if (
@@ -5820,8 +5843,12 @@ class LCMEngine(
                     ]
                 if current_prefix_identities == cached_source_identities[:cursor]:
                     replay_messages = (
-                        self._copy_active_replay_messages_preserving_generated_ids(
-                            cached_active_replay_messages[:cursor]
+                        self._keep_host_held_stubs(
+                            messages,
+                            self._copy_active_replay_messages_preserving_generated_ids(
+                                cached_active_replay_messages[:cursor]
+                            ),
+                            fresh_replay_messages,
                         )
                         + replay_messages[cursor:]
                     )
@@ -5834,7 +5861,7 @@ class LCMEngine(
         original_new_messages = messages[cursor:] if cursor < n else []
 
         if not new_messages:
-            cached_replay = self._cached_active_replay_messages(messages)
+            cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
             self._compression_boundary_ingest_pending = False
             self._compression_boundary_active_placeholder_digest_budget = {}
             self._compression_boundary_active_placeholder_digest_ordinals = {}
