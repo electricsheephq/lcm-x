@@ -16,6 +16,7 @@ FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "cras
           "publication_failure", "plugin_switch"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
+    7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
     553: (("B1", "B2", "B3", "B4"), ""), 561: (("B1", "B2"), ""), 563: (("B4",), ""),
     509: (("B7",), ""), 464: (("B7", "B6"), ""), 463: (("B7",), "Desktop/tui_gateway transport, >12k externalised user rows"),
     479: (("B7",), ""), 420: (("B4", "B5"), ""), 489: (("B1", "B2", "B4"), ""), 493: (("B1", "B2"), ""),
@@ -79,7 +80,7 @@ def registry() -> list[dict]:
             cell(f"lcm-tool-mid-turn/{m}", [], in_place=ip,
                  tool_plan=[{"turns": list(range(4, 61, 4)), "calls": [{"name": "lcm_grep", "args": {"query": "alpha"}}]}],
                  doc="A single LCM tool call every fourth turn, no crash."),
-            cell(f"cancel-retry/{m}", [493, 544], in_place=ip, faults=[{"kind": "cancel_then_retry", "turn": 22}],
+            cell(f"cancel-retry/{m}", [7, 493, 544], in_place=ip, faults=[{"kind": "cancel_then_retry", "turn": 22}],
                  doc="ACP cancel (request_hard_interrupt) during the provider call, then the same prompt re-sent: the "
                      "host re-attaches the cancelled prompt (acp_adapter/server.py _attach_interrupted_prompt)."),
             cell(f"native-short-prefix/tool-dense/{m}", [], in_place=ip, native=True,
