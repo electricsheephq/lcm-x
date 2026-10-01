@@ -168,6 +168,6 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   (mechanically verified: `git diff rcN..GA --name-only` ⊆ `.github/release-notes/`); GA notes
   link the three phase receipts. A P0/P1 gauntlet finding means fix → new rc → re-run; the only
   exception is a Phase B shape or a Phase C publication conflict that the previous GA also
-  shows (the spec's differential rule).
+  shows, with the candidate no worse than the base (the spec's differential rule).
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
   maintainers-own-releases rule above.
