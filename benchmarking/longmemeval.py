@@ -126,6 +126,11 @@ ARMS = (
     "lcm_recall",
 )
 
+
+def _active_arms(embeddings_enabled: bool) -> tuple[str, ...]:
+    return ARMS if embeddings_enabled else ("fts", "lcm_recall")
+
+
 # LongMemEval `question_type` -> reported category label. Abstention questions
 # (``question_id`` ends with ``_abs``) are excluded from recall scoring and
 # reported separately as an ``abstention`` count.
@@ -3455,6 +3460,7 @@ def _candidate_dump_record(
     rankings: dict[str, Any] | None,
     *,
     recall_rerank: bool = False,
+    embeddings_enabled: bool = True,
 ) -> dict[str, Any]:
     def _turn_sort_key(turn_key: TurnKey) -> tuple[str, int]:
         return (str(turn_key[0]), -1 if turn_key[1] is None else int(turn_key[1]))
@@ -3471,7 +3477,7 @@ def _candidate_dump_record(
                 f"{question.question_id!r}: expected arms {sorted(ARMS)}, "
                 f"got {sorted(provided)}"
             )
-        for arm in ARMS:
+        for arm in _active_arms(embeddings_enabled):
             ranking = provided[arm]
             if "sessions" not in ranking or "turns" not in ranking:
                 raise RuntimeError(
@@ -3542,6 +3548,7 @@ def _load_question_checkpoint(
     """Load a checkpoint, truncating only a malformed final crash-torn line."""
     payload = path.read_bytes()
     recall_rerank = bool(expected_header[_CHECKPOINT_HEADER_KEY].get("recall_rerank", False))
+    embeddings_enabled = expected_header[_CHECKPOINT_HEADER_KEY]["embeddings_enabled"]
     lines = payload.splitlines(keepends=True)
     records: list[dict[str, Any]] = []
     seen: set[str] = set()
@@ -3585,7 +3592,8 @@ def _load_question_checkpoint(
         if question_id in seen:
             raise ValueError(f"duplicate checkpoint question_id {question_id!r}: {path}")
         _validate_restored_checkpoint_metrics(
-            record, line_number=index + 1, path=path, recall_rerank=recall_rerank
+            record, line_number=index + 1, path=path, recall_rerank=recall_rerank,
+            embeddings_enabled=embeddings_enabled,
         )
         _validate_restored_corpus_counts(record, line_number=index + 1, path=path)
         seen.add(question_id)
@@ -3629,7 +3637,8 @@ def _fsync_parent_directory(path: Path) -> None:
 
 
 def _validate_restored_checkpoint_metrics(
-    record: dict[str, Any], *, line_number: int, path: Path, recall_rerank: bool = False
+    record: dict[str, Any], *, line_number: int, path: Path, recall_rerank: bool = False,
+    embeddings_enabled: bool = True,
 ) -> None:
     """Validate every aggregate input restored from a scored checkpoint row."""
     if record.get("abstention") is True:
@@ -3649,7 +3658,7 @@ def _validate_restored_checkpoint_metrics(
     arms = record.get("arms")
     if not isinstance(arms, dict):
         raise ValueError(f"checkpoint line {line_number} field arms must be an object: {path}")
-    for arm in ARMS:
+    for arm in _active_arms(embeddings_enabled):
         metrics = arms.get(arm)
         arm_field = f"arms.{arm}"
         if not isinstance(metrics, dict):
@@ -3736,6 +3745,7 @@ def _question_checkpoint_record(
     *,
     chunk_embedding_mode: str | None = None,
     embed_cache_enabled: bool | None = None,
+    embeddings_enabled: bool = True,
 ) -> dict[str, Any]:
     zero_privacy = {key: 0 for key in _PRIVACY_KEYS}
     if scored is None:
@@ -3773,6 +3783,10 @@ def _question_checkpoint_record(
     rerank_mode = checkpoint_scored["hybrid_rerank"].pop(
         "rerank_mode", RERANK_MODE_PLACEHOLDER
     )
+    if not embeddings_enabled:
+        checkpoint_scored = {
+            arm: checkpoint_scored[arm] for arm in _active_arms(embeddings_enabled)
+        }
     record = {
         "question_id": question.question_id,
         "category": question.category,
@@ -3938,14 +3952,17 @@ def _accumulate_question_checkpoint(
         raise ValueError(
             f"checkpoint question {record.get('question_id')!r} has invalid rerank_mode"
         )
-    if not isinstance(arms, dict) or set(arms) != set(ARMS):
+    active_arms = _active_arms(embeddings_enabled)
+    # Off checkpoints written before disabled arms were omitted remain resumable.
+    if not isinstance(arms, dict) or set(arms) not in (set(active_arms), set(ARMS)):
         raise ValueError(f"checkpoint question {record.get('question_id')!r} has invalid arms")
     ingest_ms = record.get("ingest_ms")
     if not isinstance(ingest_ms, (int, float)) or isinstance(ingest_ms, bool):
         raise ValueError(f"checkpoint question {record.get('question_id')!r} has invalid ingest_ms")
 
     ingest_samples.append(float(ingest_ms))
-    rerank_mode_counts[rerank_mode] = rerank_mode_counts.get(rerank_mode, 0) + 1
+    if embeddings_enabled:
+        rerank_mode_counts[rerank_mode] = rerank_mode_counts.get(rerank_mode, 0) + 1
     if recall_rerank_status_counts is not None:
         recall_rerank_status = arms.get("lcm_recall", {}).get("recall_rerank_status")
         if not isinstance(recall_rerank_status, str) or not recall_rerank_status:
@@ -3958,11 +3975,7 @@ def _accumulate_question_checkpoint(
         )
     bucket = by_category.setdefault(category, _new_arm_samples())
     try:
-        for arm in ARMS:
-            # Keep per-question checkpoint compatibility, but do not present
-            # disabled vector/hybrid arms as measurements of that configuration.
-            if not embeddings_enabled and arm not in {"fts", "lcm_recall"}:
-                continue
+        for arm in active_arms:
             metrics = arms[arm]
             turn = metrics["turn"]
             for k in (1, 5, 10):
@@ -4306,6 +4319,7 @@ def run_harness(
                     scored,
                     chunk_embedding_mode=resolved_chunk_embedding_mode,
                     embed_cache_enabled=live_embed_cache_enabled,
+                    embeddings_enabled=embeddings_enabled,
                 )
                 scored_delta, abstention_delta = _accumulate_question_checkpoint(
                     record,
@@ -4331,6 +4345,7 @@ def run_harness(
                             question,
                             candidate_rankings,
                             recall_rerank=recall_rerank,
+                            embeddings_enabled=embeddings_enabled,
                         ),
                     )
                 if checkpoint_file is not None:
@@ -4461,6 +4476,8 @@ def run_harness(
     }
     if recall_rerank:
         report["recall_rerank_modes"] = dict(recall_rerank_status_counts or {})
+    if not embeddings_enabled:
+        report["rerank"]["mode"] = "disabled"
     return report
 
 
