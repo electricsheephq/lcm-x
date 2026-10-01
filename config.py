@@ -651,7 +651,7 @@ class LCMConfig:
     threshold_full_sweep_enabled: bool = False
     # Target frontier-summary size after a sweep (0 = derive one leaf budget).
     summary_prefix_target_tokens: int = 0
-    # #605: from compress() entry, after the first stored leaf no summariser call starts unless it is expected
+    # #605: from compress() entry, after the first stored leaf or condensed node no summariser call starts unless it is expected
     # to end by this many seconds (0 = no soft target; at most the hard bound).
     foreground_soft_seconds: float = 60.0
     # #605: no summariser call starts unless it is expected to end, with the finalize reserve, by this many
