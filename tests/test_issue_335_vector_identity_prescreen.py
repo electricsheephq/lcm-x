@@ -175,6 +175,31 @@ def test_chunk_backfill_dry_run_accepts_composed_revision(tmp_path, monkeypatch)
     assert "pending: 1" in report
 
 
+def test_cloud_chunk_apply_completes_with_composed_prescreen_identity(tmp_path, monkeypatch):
+    config = _config(tmp_path, prescreen=True)
+    _, revision = _register(config, task="chunk")
+    assert revision == embedding_privacy_revision(config) + "+binprescreen"
+    with sqlite3.connect(config.database_path) as conn:
+        conn.execute("CREATE TABLE messages (store_id INTEGER PRIMARY KEY, "
+                     "session_id TEXT, source TEXT, role TEXT, content TEXT, timestamp REAL)")
+        conn.execute("INSERT INTO messages VALUES (1, 'test-session', 'history', "
+                     "'user', ?, 1.0)", ("api_key=abcdefghijklmnop " * 10,))
+    monkeypatch.setattr(command_mod, "count_tokens", lambda text: len(str(text)))
+    import hermes_lcm.chunking as chunking
+    monkeypatch.setattr(chunking, "count_tokens", lambda text: len(str(text)))
+    provider = CaptureProvider()
+    provider.model_id = command_mod.default_chunk_model(config.embedding_provider, config.embedding_model)
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _c, **_k: provider)
+    engine = SimpleNamespace(_config=config, _store=SimpleNamespace(db_path=config.database_path))
+    report = command_mod._chunk_backfill_text(
+        engine, apply=True, confirm_raw_text=True, limit=10,
+        retry_uncertain=False, policy="conversational",
+    )
+    assert "status: complete" in report
+    assert "embedded: 1" in report
+    assert len(provider.documents) == 1
+
+
 def test_prescreen_off_identities_unchanged(tmp_path):
     config = _config(tmp_path)
     cases = [("ollama", "model-a", ""), ("voyage", "voyage-4-large", embedding_privacy_revision(config)),
