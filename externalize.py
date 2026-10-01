@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import codecs
 import contextvars
+import errno
 import hashlib
 import json
 import logging
@@ -198,7 +199,7 @@ def _write_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
 
 
 def _replace_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
-    tmp_path = path.with_name(f"{path.name}.{time.time_ns():x}.tmp")
+    tmp_path = _temp_payload_path(path)
     try:
         _write_externalized_payload(tmp_path, payload)
         tmp_path.replace(path)
@@ -206,6 +207,22 @@ def _replace_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
     except OSError:
         _unlink_partial_payload(tmp_path)
         raise
+
+
+def _temp_payload_path(path: Path) -> Path:
+    # Unique per write; never ends in ".json", so no *.json scanner can see a leftover.
+    return path.with_name(f"{path.name}.{time.time_ns():x}.tmp")
+
+
+def _publish_new_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
+    """Publish a freshly minted payload via fsynced temp, atomic rename, and parent fsync.
+
+    Refuses an existing final name. The check/replace race is limited to writers
+    minting the identical nanosecond-suffixed name.
+    """
+    if os.path.lexists(path):
+        raise FileExistsError(errno.EEXIST, os.strerror(errno.EEXIST), str(path))
+    _replace_externalized_payload(path, payload)
 
 
 def _persisted_output_marker_entry_from_metadata(metadata: Dict[str, Any] | None) -> Dict[str, Any] | None:
@@ -961,17 +978,10 @@ def reassign_externalized_payloads(
         if (payload.get("session_id") or "") != old_session_id:
             continue
         payload["session_id"] = new_session_id
-        tmp_path = path.with_name(f"{path.name}.tmp")
         try:
-            _write_externalized_payload(tmp_path, payload)
-            tmp_path.replace(path)
-            _fsync_directory(path.parent)
+            _replace_externalized_payload(path, payload)
         except OSError as exc:
             logger.warning("Externalized payload session reassignment skipped for %s: %s", path.name, exc)
-            try:
-                tmp_path.unlink(missing_ok=True)
-            except OSError:
-                pass
             continue
         moved += 1
     return moved
@@ -1154,7 +1164,7 @@ def externalize_ingest_payload(
     }
     try:
         if ingest_payload_writes.get():
-            _write_externalized_payload(path, payload)
+            _publish_new_externalized_payload(path, payload)
     except OSError as exc:
         logger.warning("LCM ingest payload externalization skipped (non-blocking): %s", exc)
         return None
@@ -1294,7 +1304,7 @@ def maybe_externalize_payload(
         _merge_persisted_output_marker_metadata(payload, metadata)
     try:
         if write:
-            _write_externalized_payload(path, payload)
+            _publish_new_externalized_payload(path, payload)
     except OSError as exc:
         logger.warning("Large payload externalization skipped (non-blocking): %s", exc)
         return None
