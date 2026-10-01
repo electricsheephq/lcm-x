@@ -163,8 +163,8 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
                 "embedding dependency (e.g. `pip install fastembed` into the active Hermes "
                 "virtualenv) or fix LCM_EMBEDDING_PROVIDER/LCM_EMBEDDING_MODEL and the "
                 "provider credentials, then run `/lcm embed warmup` and re-run `/lcm doctor`. "
-                "A Hermes update rebuilds the virtualenv and drops optional dependencies, so "
-                "recheck this after every update. Nothing is lost meanwhile -- the lossless "
+                "A dependency installed by hand can be dropped by a Hermes update, so "
+                "recheck this after an update. Nothing is lost meanwhile -- the lossless "
                 "store is intact and recall falls back to full-text"
             )
             warning_only = True
