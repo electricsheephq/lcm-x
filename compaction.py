@@ -1519,7 +1519,16 @@ class CompactionMixin:
                 )
             )
             return sanitized_messages
-        if hold_fit_only_requested and not force and not force_overflow:
+        # #738: an automatic threshold pass with the full sweep off that would end in a fit (the #668 exit fit, or
+        # the #618 held fit-only return) summarises the raw backlog outside the fresh tail it has: no leaf-chunk
+        # minimum, and no held fit-only return while that backlog exists, so no fit drops uncovered turns.
+        fit_would_strand = bool(
+            not force and not force_overflow and not recovery_attempt and not self._config.threshold_full_sweep_enabled
+            and 0 < self.threshold_tokens <= observed_prompt_tokens
+            and self._config.survival_fit and int(self.context_length or 0) > 0)
+        if hold_fit_only_requested and not force and not force_overflow and not (fit_would_strand and any(
+                not self._is_replayed_context_scaffold_message(message) for message in working_messages[
+                    self._leading_anchor_count(working_messages):self._fresh_tail_start(working_messages)])):
             # #618 item 3: a hold of this conversation is active at the survival ceiling: no sweep and no
             # summariser call; compress() fits the sanitized list.
             sanitized_messages = self._sanitize_active_context_messages(
@@ -1972,6 +1981,7 @@ class CompactionMixin:
                     raw_tokens_outside_tail < working_leaf_chunk_tokens
                     and not force_overflow
                     and self._pressure_yield_tail_token_limit <= 0
+                    and not fit_would_strand
                 ):
                     if not (deferred_maintenance_active and critical_budget_pressure):
                         if self._maybe_engage_fresh_tail_pressure_yield(
@@ -1993,6 +2003,7 @@ class CompactionMixin:
                     raw_tokens_outside_tail < self._config.leaf_chunk_tokens
                     and not force_overflow
                     and self._pressure_yield_tail_token_limit <= 0
+                    and not fit_would_strand
                 ):
                     if not (deferred_maintenance_active and critical_budget_pressure):
                         if self._maybe_engage_fresh_tail_pressure_yield(
