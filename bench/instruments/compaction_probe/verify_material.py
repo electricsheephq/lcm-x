@@ -17,6 +17,9 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
     def load(name):
         return json.loads((directory / name).read_text(encoding="utf-8"))
 
+    def lines(name):
+        return [json.loads(line) for line in (directory / name).read_text().splitlines()]
+
     def check(ok, message):
         if not ok:
             raise ValueError(message)
@@ -112,6 +115,18 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
         if t["kind"] == "externalization":
             check(row["role"] == "tool" and len(row["content"]) > 12000 and count(row["content"]) > 25000,
                   "externalization thresholds")
+        elif t["kind"] == "ancestry":
+            check(t["required_events"] == events, "ancestry event count mismatch")
+    check(load("canaries.json") == facts, "canary answer key mismatch")
+    traps = load("traps.json")
+    check(len(traps) == 5 and all(t["answer"] == "ABSTAIN" for t in traps), "trap answer mismatch")
+    expected = {f["id"]: dict(id=f["id"], kind="canary", text=f["probe"], expect="value") for f in facts}
+    expected.update({t["id"]: dict(id=t["id"], kind="trap", text=t["probe"], expect="ABSTAIN") for t in traps})
+    probes = lines("probes.jsonl")
+    check(len(probes) == len(expected) == 65 and
+          {p["id"]: p for p in probes} == expected, "probe facts/traps mismatch")
+    check([p for b in lines("probe_batches.jsonl") for p in b["probes"]] == probes,
+          "probe batch mismatch")
     for name, digest in manifest["shas"].items():
         check(_gen._sha256(directory / name) == digest, f"digest mismatch: {name}")
     return dict(status="PASS", mode=manifest["mode"], rows=len(rows), tokens=total,

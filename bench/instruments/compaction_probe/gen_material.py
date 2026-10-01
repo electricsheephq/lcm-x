@@ -387,6 +387,7 @@ def token_counter():
 
 CLASSES = ("name", "path", "limit", "build_id", "prefix", "decision", "superseded_value",
            "error_with_fix", "pending_task", "early_user_constraint", "tool_number", "file_change")
+MATERIAL_VERSION = "track-s-v2"
 SCENES = (
     "Inspection {n}: the fixture reader keeps the original row order. The dry run checked "
     "a missing cursor and returned an explicit warning. No source files were changed.\n",
@@ -400,7 +401,7 @@ SCENES = (
 
 
 def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 17000,
-             placements: bool = True, classes12: bool = True, min_tokens: int = 244800,
+             placements: bool = False, classes12: bool = False, min_tokens: int = 244800,
              min_events: int = 2, smoke: bool = False) -> dict[str, Any]:
     if not placements and not classes12:
         return _generate_legacy(seed, out_dir, turns, tokens_per_turn)
@@ -410,6 +411,7 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
         raise ValueError("require turns >= 10, positive token budgets, min-events >= 2")
     count = token_counter()
     rng = random.Random(seed)
+    prefix_rng = random.Random(seed ^ 0x505245464958)
     rows, facts, checkpoints = [], [], []
     serial = 0
 
@@ -445,8 +447,9 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
     for c, cls in enumerate(CLASSES):
         for k in range(5):
             nonce = f"{rng.choice(VALUE_WORDS)}-{seed}-{c:02d}-{k}"
+            prefix = f"{prefix_rng.getrandbits(64):016x}-" if cls == "prefix" else ""
             values = (f"{nonce}-workspace", f"src/{nonce}/settings.toml", f"{640 + c * 5 + k} MiB",
-                      hashlib.sha256(nonce.encode()).hexdigest()[:12], f"{nonce}-",
+                      hashlib.sha256(nonce.encode()).hexdigest()[:12], prefix,
                       f"snapshot-{nonce} over live-{nonce} because immutable input makes replay repeatable",
                       f"snapshot-{nonce} because the mutable cache mixed cursor ownership",
                       f"E_{nonce}: cursor missing; fixed by rebuilding the fixture index",
@@ -537,7 +540,7 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
                        role=f["row_role"], tool_call_id=rows[f["row_index"]]["tool_call_id"],
                        status="scheduled", runtime_row_id=None) for f in facts]
     targets = [dict(id=f["id"], kind="ancestry", row_id=f["row_id"], row_index=f["row_index"],
-                    stale_source=f["stale_source"], required_events=2) for f in facts if f["stale"]]
+                    stale_source=f["stale_source"], required_events=min_events) for f in facts if f["stale"]]
     external = next(f for f in facts if f["class"] == "file_change" and f["placement"] == "middle")
     targets.append(dict(id=external["id"], kind="externalization", row_id=external["row_id"], row_index=external["row_index"]))
     traps = [dict(id=f"S{seed}-TRAP{k}", probe=f"What is the {item} of the unmentioned glacier fixture?", answer="ABSTAIN")
@@ -548,20 +551,26 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
     batches = [dict(id=f"S{seed}-B{k // 10}", probes=probes[k:k + 10],
                     text="Reply only as a JSON object mapping each probe id to its answer string (use I don\'t know for ABSTAIN).")
                for k in range(0, len(probes), 10)]
-    manifest = dict(seed=seed, mode="smoke" if smoke else "decision", tokenizer="repo-count_tokens:offline-char-estimate",
+    manifest = dict(seed=seed, material_version=MATERIAL_VERSION,
+                    mode="smoke" if smoke else "decision", tokenizer="repo-count_tokens:offline-char-estimate",
                     params=dict(turns=turns, tokens_per_turn=tokens_per_turn, min_tokens=min_tokens, min_events=min_events),
                     checkpoints=checkpoints, continuity=continuity, receipt_targets=targets, smoke_suffix=suffix,
                     presented_tokens=presented, planned_trigger_spans=min_events,
                     decision_checkpoint=decision,
                     proof_boundary="Fresh-token planning only; actual events, ancestry, externalization and admission require runtime receipts.")
     out_dir.mkdir(parents=True, exist_ok=True)
+    generated_names = []
     for name, payload in (("facts.json", facts), ("canaries.json", facts), ("traps.json", traps),
                           ("continuation.json", state), ("admission.manifest.json", admissions)):
         _json_write(out_dir / name, payload)
-    for name, payload in (("transcript.jsonl", rows), ("turns.jsonl", [dict(turn=r["turn"], text=r["content"]) for r in rows]),
+        generated_names.append(name)
+    for name, payload in (("transcript.jsonl", rows), ("turns.jsonl", [dict(
+            turn=r["turn"], text=r["content"], role=r["role"], id=r["id"],
+            tool_call_id=r["tool_call_id"], tool_calls=r.get("tool_calls", [])) for r in rows]),
                           ("probes.jsonl", probes), ("probe_batches.jsonl", batches)):
         (out_dir / name).write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in payload), encoding="utf-8")
-    manifest["shas"] = {p.name: _sha256(p) for p in sorted(out_dir.iterdir()) if p.is_file() and p.name != "material.manifest.json"}
+        generated_names.append(name)
+    manifest["shas"] = {name: _sha256(out_dir / name) for name in sorted(generated_names)}
     _json_write(out_dir / "material.manifest.json", manifest)
     return manifest
 
@@ -572,8 +581,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--turns", type=int, default=35)
     parser.add_argument("--tokens-per-turn", type=int, default=17000)
-    parser.add_argument("--placements", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--classes12", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--placements", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--classes12", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--min-tokens", type=int, default=244800)
     parser.add_argument("--min-events", type=int, default=2)
     parser.add_argument("--smoke", action="store_true", help="ten-turn prefix plus forced-event wiring suffix")
