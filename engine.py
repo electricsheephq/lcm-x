@@ -2138,7 +2138,19 @@ class LCMEngine(
                     **({"budget": budget} if budget is not None else
                        {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
                     verbatim_small_source=True,  # #605 F2
+                    context_length_rescue=True,  # #751: a refusal for size reaches the rescue below
                 )
+                if (level == 3 and provenance.get("context_length_error") and summary_text != serialized
+                        and attempt_number < max_attempts):
+                    smaller_chunk = self._next_leaf_rescue_chunk(attempt_chunk, source_tokens)
+                    if smaller_chunk and len(smaller_chunk) < len(attempt_chunk):
+                        logger.warning(
+                            "LCM leaf summarization retrying with smaller oldest chunk after a context-length "
+                            "refusal (attempt %d/%d, %d→%d messages)",
+                            attempt_number, max_attempts, len(attempt_chunk), len(smaller_chunk),
+                        )
+                        attempt_chunk = smaller_chunk
+                        continue
                 self._last_leaf_summary_model = provenance.get("model", "")
                 self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number

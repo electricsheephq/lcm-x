@@ -101,6 +101,25 @@ def is_summary_route_config_error(exc: BaseException | None) -> bool:
         "model" in message and any(token in message for token in _ROUTE_CONFIG_ERROR_GENERIC_TOKENS))
 
 
+# #751: the provider refused the request for its size; a property of the chunk, not of the route.
+_CONTEXT_LENGTH_ERROR_TOKENS = (
+    "context length", "context_length", "context window", "maximum context", "max context", "too many tokens",
+    "token limit", "prompt is too long", "input too long", "request too large",
+)
+_NOT_CONTEXT_LENGTH_TOKENS = ("rate limit", "rate_limit", "too many requests")
+
+
+def is_summary_context_length_error(exc: BaseException | None) -> bool:
+    """#751: a summary call refused because the request does not fit the route's window. A timeout or a
+    rate limit is not one."""
+    if exc is None or isinstance(exc, TimeoutError):
+        return False
+    message = str(exc).lower()
+    if any(token in message for token in _NOT_CONTEXT_LENGTH_TOKENS):
+        return False
+    return any(token in message for token in _CONTEXT_LENGTH_ERROR_TOKENS)
+
+
 def _accepts_route_info(call_llm) -> bool:
     """#682: whether the host's ``call_llm`` names a ``route_info`` parameter; inspected once per function."""
     cached = _route_info_support.get(id(call_llm))
@@ -880,10 +899,13 @@ def _invoke_summary_llm_chain(
     route_key_prefix: str = "",
     budget: ForegroundBudget | None = None,
     verbatim_small_source: bool = False,
+    context_length_rescue: bool = False,
 ) -> Optional[str]:
     """``deadline`` (absolute ``time.monotonic()``) bounds every route attempt (#666); a foreground ``budget``
     (#605) replaces it: it admits each attempt and caps its timeout at the usable time left.
-    ``route_key_prefix`` gives a caller its own breaker keys (#669: rollups); empty keeps the live keys."""
+    ``route_key_prefix`` gives a caller its own breaker keys (#669: rollups); empty keeps the live keys.
+    ``context_length_rescue`` (#751; the leaf rescue only): a context-length refusal is no circuit failure and
+    sets ``provenance["context_length_error"]``, so the caller can retry a smaller chunk."""
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
     for candidate_model in chain:
@@ -972,6 +994,9 @@ def _invoke_summary_llm_chain(
                 logger.warning("LLM summarization failed: %s", error)
             else:
                 circuit_breaker.record_config_error(route_key, route=route, error=error, sent_model=candidate_model)
+        elif result is None and context_length_rescue and is_summary_context_length_error(error):
+            if provenance is not None:  # #751: the chunk is too large for this route; the caller shrinks it
+                provenance["context_length_error"] = True
         elif circuit_breaker is not None:
             if result is None:
                 circuit_breaker.record_failure(route_key)
@@ -1160,6 +1185,7 @@ def summarize_with_escalation(
     route_key_prefix: str = "",
     budget: ForegroundBudget | None = None,
     verbatim_small_source: bool = False,
+    context_length_rescue: bool = False,
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
 
@@ -1175,6 +1201,8 @@ def summarize_with_escalation(
     ``verbatim_small_source`` (#605 F2; the foreground leaf and condensation callers): a source within
     ``l3_truncate_tokens`` is returned whole as level 3, with no call. Up to twice that bound, the first
     non-empty, not-shorter result returns the source whole as level 3 without a circuit event (#722).
+    ``context_length_rescue`` (#751; the leaf rescue only): a context-length refusal is no circuit failure, and
+    ``provenance["context_length_error"]`` is set so the caller can retry a smaller chunk.
     """
     if verbatim_small_source and verbatim_source(text, l3_truncate_tokens):
         if provenance is not None:
@@ -1203,6 +1231,7 @@ def summarize_with_escalation(
         route_key_prefix=route_key_prefix,
         budget=budget,
         verbatim_small_source=whole_if_not_shorter,
+        context_length_rescue=context_length_rescue,
     )
 
     if l1_result:
@@ -1233,6 +1262,7 @@ def summarize_with_escalation(
         route_key_prefix=route_key_prefix,
         budget=budget,
         verbatim_small_source=whole_if_not_shorter,
+        context_length_rescue=context_length_rescue,
     )
 
     if l2_result:
