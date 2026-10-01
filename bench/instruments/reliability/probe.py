@@ -76,6 +76,7 @@ LOG_COUNTS = {
     "exit_fit": "LCM survival fit applied (reason=exit_fit:",
     "exit_fit_skipped": "LCM exit fit skipped",
 }
+UNSHORTENED = "LCM survival fit could not shorten the list"
 FILLER = "alpha beta gamma delta "
 
 
@@ -83,6 +84,9 @@ def _log_counts(log: str) -> dict:
     counts = {k: log.count(v) for k, v in LOG_COUNTS.items()}
     # #668: routine threshold headroom is not a compaction miss; an exit over the window budget logs as a plain fit
     counts["survival_fit"] -= counts["exit_fit"]
+    # #714: a non-exit fit that could not shorten an over-budget list is a compaction miss too (#599 logs it apart)
+    counts["fit_unshortened"] = sum(1 for line in log.splitlines()
+                                    if UNSHORTENED in line and "reason=exit_fit:" not in line)
     return counts
 
 
@@ -94,7 +98,7 @@ def phase_log_fields(log: str) -> dict:
             "log_counts": _log_counts(log),
             "log_counts_after_commit": None if first_commit < 0 else {
                 k: v for k, v in _log_counts(log[first_commit:]).items()
-                if k in ("publication_invariant_conflict", "survival_fit")}}
+                if k in ("publication_invariant_conflict", "survival_fit") or (k == "fit_unshortened" and v)}}
 
 
 def provenance(cell, extra=()):

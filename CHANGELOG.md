@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Bench: process-transport cells count a routine exit fit once (the in-process cells' normalization), and the
+  reliability bar B8 also fails on a non-exit `LCM survival fit could not shorten the list` line. (#714)
 - Fix: a store-complete leaf counts its extended scan allowance from the first open tool group's call row, so
   rows an earlier summary covers no longer use it up and the group's results reach a summary; when a full page
   holds only rows the leaf excludes (covered, ignored, passive, system), the scan reads up to four pages before
