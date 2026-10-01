@@ -187,6 +187,22 @@ def has_resident_lcm_engine() -> bool:
         )
 
 
+def live_bound_session_ids() -> set[str]:
+    """Session ids that an LCM engine in this process currently has bound (#753).
+
+    Empty-lifecycle GC must not delete the row of a session another clone in
+    this process has bound but not ingested into yet. The registry holds only
+    live engines (weak values; shutdown and profile switches unregister), so
+    rows left by dead processes or shut-down engines stay collectable.
+    """
+    with _ACTIVE_ENGINE_REGISTRY_LOCK:
+        return {
+            str(session_id)
+            for session_id, engine in list(_ACTIVE_ENGINES_BY_SESSION_ID.items())
+            if session_id and engine is not None
+        }
+
+
 def _binding_still_selects(
     engine: Any,
     *,
