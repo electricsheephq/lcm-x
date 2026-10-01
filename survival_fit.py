@@ -410,7 +410,7 @@ class SurvivalFitMixin:
         uncovered = 0
         if reason.startswith("exit_fit:"):
             try:  # a diagnostic: its failure never fails the fit
-                uncovered = len(set(ids) - self._store_complete_node_covered(ids))
+                uncovered = None if len(ids) < count else len(set(ids) - self._store_complete_node_covered(ids))
             except Exception:
                 logger.debug("LCM exit fit: the uncovered-row count failed", exc_info=True)
                 uncovered = None
@@ -430,6 +430,7 @@ class SurvivalFitMixin:
                     "last_conversation": str(self._conversation_id or self._session_id or ""),
                     "last_reached_budget": after <= budget,
                     "last_shortened": shortened,
+                    "ever_shortened": shortened or (record.get("ever_shortened", True) if record else False),
                     "unreached_budget_count": int(record.get("unreached_budget_count") or 0) + (after > budget),
                     # fits that projected a row (#601); a record from before the key stays unknown (no key)
                     **({"projected_count": int(record.get("projected_count") or 0) + bool(projected)}

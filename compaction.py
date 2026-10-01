@@ -564,6 +564,7 @@ class CompactionMixin:
                  bypass_cooldown: bool = False) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
+        self._compress_forced_overflow = False
         try:
             self._pending_emission_candidates = []
             self._compress_occurrences = None
@@ -601,7 +602,8 @@ class CompactionMixin:
             reason = self._survival_fit_reason or str(self._last_compression_status or "unknown")
             result = self._survival_fit(messages, result, current_tokens,
                                         **self._survival_fit_args(messages, current_tokens, reason, bypass_cooldown,
-                                                                  automatic=not force and self._last_compression_status != "error"))
+                                                                  automatic=not force and not self._compress_forced_overflow
+                                                                  and self._last_compression_status not in ("error", "host_native")))
             if self._no_progress_candidate and not bypass_cooldown and len(result) >= len(messages) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages)):
                 self._start_no_progress_hold("no_progress")  # #651: no leaf, and neither rows nor tokens fell
@@ -633,6 +635,8 @@ class CompactionMixin:
                                    type(exc).__name__, exc_info=True)
                     return fitted
             raise
+        finally:
+            self._compress_forced_overflow = False
 
     @staticmethod
     def _public_compression_row(message: Any) -> Any:
@@ -1277,6 +1281,7 @@ class CompactionMixin:
             observed_tokens=observed_prompt_tokens,
             messages=messages,
         )
+        self._compress_forced_overflow = force_overflow
         # NOTE: deliberately do NOT clear the spend guard on force_overflow.
         # force_overflow is automatic (set every turn the prompt exceeds the
         # assembly cap), which is exactly the sustained-over-cap state a runaway
