@@ -835,6 +835,9 @@ What the main knobs do:
   only. When no call fits, a forced overflow recovery assembles to its cap with
   no call, and a recovery attempt is fitted under the threshold; time never makes
   a level 3 cut.
+- With the full sweep off, one leaf takes at most max(`LCM_LEAF_CHUNK_TOKENS`,
+  `LCM_DYNAMIC_LEAF_CHUNK_MAX`) of input, and never more than 40% of the window
+  (#605).
 - A leaf or condensation source of at most `LCM_L3_TRUNCATE_TOKENS` (512) is
   written whole as a level 3 node with no summariser call (#605). Rollups and
   the level 3 repair still call the model.

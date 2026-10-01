@@ -6,6 +6,7 @@ stubbed provider (at ``escalation._invoke_summary_llm``) or a wrapped engine ste
 
 from __future__ import annotations
 
+import logging
 import time
 
 import pytest
@@ -169,6 +170,38 @@ def test_u5_rollups_and_callers_without_the_flag_still_call(monkeypatch, clock):
 
 
 # -- U7: sweep off: one bounded leaf; _maybe_condense under the budget ---------------------------------------------
+
+def test_u7_sweep_off_takes_one_bounded_leaf_of_a_large_raw_prefix(tmp_path, monkeypatch, clock, caplog):
+    """D2: the leaf takes at most max(leaf_chunk_tokens, dynamic_leaf_chunk_max) of input (the base took the whole
+    raw prefix outside the fresh tail)."""
+    engine = _engine(tmp_path, dynamic_leaf_chunk_max=800)
+    provider = _provider(monkeypatch, clock, seconds=30.0)
+    view = _view(40)  # ~13k tokens outside the fresh tail
+    try:
+        engine.ingest(view)
+        with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+            engine.compress(view, current_tokens=engine.threshold_tokens + 1)
+        leaf, = _nodes(engine, 0)
+        assert leaf.source_token_count <= 800 + 200  # one capped chunk, plus at most the row that crosses it
+        assert len(provider.calls) == 1 and provider.calls[0]["timeout"] <= 60.0
+        assert _hard_bound_held(provider) and _no_fragment(engine)
+        assert "LCM compaction stop:" in caplog.text
+    finally:
+        engine.shutdown()
+
+
+def test_u7_the_sweep_off_leaf_never_takes_more_than_40_percent_of_the_window(tmp_path, monkeypatch, clock):
+    engine = _engine(tmp_path, context_length=60_000)  # 40% = 24,000 tokens, under the 40,000 dynamic cap
+    _provider(monkeypatch, clock, seconds=30.0)
+    view = _view(100)  # ~34k tokens outside the fresh tail
+    try:
+        engine.ingest(view)
+        engine.compress(view, current_tokens=engine.threshold_tokens + 1)
+        leaf, = _nodes(engine, 0)
+        assert 20_000 < leaf.source_token_count <= 24_000 + 200
+    finally:
+        engine.shutdown()
+
 
 def test_u7_maybe_condense_is_refused_by_the_soft_target_after_a_slow_leaf(tmp_path, monkeypatch, clock):
     engine = _engine(tmp_path)

@@ -1868,8 +1868,11 @@ class CompactionMixin:
                         candidate_raw,
                         max(1, int(self._config.leaf_chunk_tokens)),
                     )
-                else:
-                    to_compact = candidate_raw
+                else:  # #605 D2: one leaf is bounded, so its call fits the time budget (40% of a known window at most)
+                    ceiling = max(int(self._config.leaf_chunk_tokens), int(self._config.dynamic_leaf_chunk_max))
+                    window_cap = self._context_aware_leaf_cap()
+                    to_compact = self._select_oldest_leaf_chunk(
+                        candidate_raw, max(1, min(ceiling, window_cap) if window_cap else ceiling))
 
             if not to_compact and not hidden_backlog:
                 noop_reason = "no eligible leaf chunk selected"
