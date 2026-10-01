@@ -144,6 +144,51 @@ def test_bind_racing_a_finalize_before_its_write_rereads_and_keeps_the_checkpoin
         b.close()
 
 
+def test_bind_racing_another_bind_before_its_write_discards_the_stale_resume(tmp_path):
+    db = tmp_path / "lcm.db"
+    a, b = LifecycleStateStore(db), LifecycleStateStore(db)
+    real = a._conn
+    try:
+        _start_a(a)
+        a.finalize_session(CONV, "A", frontier_store_id=100)
+        _, fired = _other_writes_before_next_write(
+            a, lambda: b.bind_session("B", conversation_id=CONV)
+        )
+        returned = a.bind_session("A", conversation_id=CONV)
+        row = b.get_by_conversation(CONV)
+        assert fired == [1]
+        assert (row.current_session_id, row.current_frontier_store_id) == ("A", 0)
+        assert returned == row
+    finally:
+        a._conn = real
+        a.close()
+        b.close()
+
+
+def test_bind_racing_own_refinalize_before_its_write_resumes_the_new_frontier(tmp_path, monkeypatch):
+    # Keep the finalized timestamp unchanged so the frontier predicate alone catches this race.
+    monkeypatch.setattr(lifecycle_state_module.time, "time", lambda: 1000.0)
+    db = tmp_path / "lcm.db"
+    a, clone = LifecycleStateStore(db), LifecycleStateStore(db)
+    real = a._conn
+    try:
+        _start_a(a)
+        a.finalize_session(CONV, "A", frontier_store_id=100)
+        _, fired = _other_writes_before_next_write(
+            a, lambda: clone.finalize_session(CONV, "A", frontier_store_id=200)
+        )
+        returned = a.bind_session("A", conversation_id=CONV)
+        row = clone.get_by_conversation(CONV)
+        assert fired == [1]
+        assert (row.current_session_id, row.current_frontier_store_id) == ("A", 200)
+        assert row.last_finalized_frontier_store_id == 200
+        assert returned == row
+    finally:
+        a._conn = real
+        a.close()
+        clone.close()
+
+
 def test_bind_does_not_clobber_debt_recorded_in_its_window(tmp_path):
     db = tmp_path / "lcm.db"
     a, b = LifecycleStateStore(db), LifecycleStateStore(db)
@@ -215,6 +260,28 @@ def test_sequential_controls_match_todays_semantics(tmp_path, sequence):
     finally:
         a.close()
         b.close()
+
+
+@pytest.mark.parametrize("other_bound", [False, True])
+def test_bind_without_conversation_id_preserves_the_existing_session_keyed_row(tmp_path, other_bound):
+    store = LifecycleStateStore(tmp_path / "lcm.db")
+    try:
+        store.bind_session("B", conversation_id="A")
+        store.finalize_session("A", "B", frontier_store_id=300)
+        if other_bound:
+            store.bind_session("B", conversation_id="A")
+        store.record_debt("A", kind="raw_backlog", size_estimate=7)
+        assert store.get_by_session("A") is None
+
+        returned = store.bind_session("A", conversation_id=None)
+        row = store.get_by_conversation("A")
+        assert _row_tuple(row) == ("A", 0, "B", 300, "raw_backlog")
+        assert row.debt_size_estimate == 7
+        assert row.last_rollover_at is not None
+        assert returned == row
+        assert store.row_count() == 1
+    finally:
+        store.close()
 
 
 def test_finalize_of_a_missing_row_returns_none(tmp_path):

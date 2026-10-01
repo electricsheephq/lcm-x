@@ -302,7 +302,7 @@ class LifecycleStateStore:
             assert state is not None
             self._conn.commit()
             return state
-        except Exception:
+        except BaseException:
             self._conn.rollback()
             raise
 
