@@ -157,6 +157,16 @@ class SummaryNode:
     search_directness: float = 0.0
 
 
+# #635: rows decoded by SummaryDAG._row_to_node must name their columns in this order.
+# Physical column order differs on tables migrated by ALTER TABLE ADD COLUMN.
+_NODE_COLUMNS = (
+    "node_id", "session_id", "depth", "summary", "token_count", "source_token_count",
+    "source_ids", "source_type", "created_at", "earliest_at", "latest_at", "expand_hint",
+)
+_NODE_SELECT = ", ".join(_NODE_COLUMNS)
+_NODE_SELECT_N = ", ".join(f"n.{column}" for column in _NODE_COLUMNS)
+
+
 class SummaryDAG:
     """SQLite-backed DAG of summary nodes."""
 
@@ -206,8 +216,8 @@ class SummaryDAG:
             CREATE INDEX IF NOT EXISTS idx_nodes_session_depth_node
                 ON summary_nodes(session_id, depth, node_id);
 
-            -- #441: a sidecar, not a summary_nodes column, because rows are
-            -- decoded by position here and by every older build after a rollback.
+            -- #441: a sidecar, not a summary_nodes column, because older builds
+            -- decode rows by position after a rollback.
             CREATE TABLE IF NOT EXISTS summary_node_provenance (
                 node_id INTEGER PRIMARY KEY,
                 escalation_level INTEGER NOT NULL,
@@ -455,7 +465,7 @@ class SummaryDAG:
 
     def get_node(self, node_id: int) -> Optional[SummaryNode]:
         row = self._conn.execute(
-            "SELECT * FROM summary_nodes WHERE node_id = ?", (node_id,)
+            f"SELECT {_NODE_SELECT} FROM summary_nodes WHERE node_id = ?", (node_id,)
         ).fetchone()
         return self._row_to_node(row) if row else None
 
@@ -466,14 +476,14 @@ class SummaryDAG:
         with self._db_lock:
             if depth is not None:
                 rows = self._conn.execute(
-                    """SELECT * FROM summary_nodes
+                    f"""SELECT {_NODE_SELECT} FROM summary_nodes
                        WHERE session_id = ? AND depth = ?
                        ORDER BY created_at LIMIT ?""",
                     (session_id, depth, limit),
                 ).fetchall()
             else:
                 rows = self._conn.execute(
-                    """SELECT * FROM summary_nodes
+                    f"""SELECT {_NODE_SELECT} FROM summary_nodes
                        WHERE session_id = ?
                        ORDER BY depth, created_at LIMIT ?""",
                     (session_id, limit),
@@ -599,7 +609,7 @@ class SummaryDAG:
         samples: Dict[int, List[SummaryNode]] = {}
         for depth in depths:
             rows = self._conn.execute(
-                """SELECT * FROM summary_nodes
+                f"""SELECT {_NODE_SELECT} FROM summary_nodes
                    WHERE session_id = ? AND depth = ?
                    ORDER BY created_at LIMIT ?""",
                 (session_id, depth, per_depth_limit),
@@ -618,7 +628,7 @@ class SummaryDAG:
         order = "n.created_at DESC, n.node_id DESC" if newest else "n.created_at"
         with self._db_lock:
             rows = self._conn.execute(
-                f"""SELECT n.* FROM summary_nodes n
+                f"""SELECT {_NODE_SELECT_N} FROM summary_nodes n
                    WHERE n.session_id = ? AND n.depth = ?
                    AND n.node_id NOT IN (
                        SELECT json_each.value FROM summary_nodes p,
@@ -670,7 +680,7 @@ class SummaryDAG:
                 with self._db_lock:
                     if session_id is not None:
                         rows = self._conn.execute(
-                            f"""SELECT n.*, rank as search_rank FROM nodes_fts fts
+                            f"""SELECT {_NODE_SELECT_N}, rank as search_rank FROM nodes_fts fts
                                JOIN summary_nodes n ON n.node_id = fts.rowid
                                WHERE nodes_fts MATCH ? AND n.session_id = ?
                                ORDER BY {order_by} LIMIT ? OFFSET ?""",
@@ -678,7 +688,7 @@ class SummaryDAG:
                         ).fetchall()
                     else:
                         rows = self._conn.execute(
-                            f"""SELECT n.*, rank as search_rank FROM nodes_fts fts
+                            f"""SELECT {_NODE_SELECT_N}, rank as search_rank FROM nodes_fts fts
                                JOIN summary_nodes n ON n.node_id = fts.rowid
                                WHERE nodes_fts MATCH ?
                                ORDER BY {order_by} LIMIT ? OFFSET ?""",
@@ -757,7 +767,7 @@ class SummaryDAG:
         while True:
             with self._db_lock:
                 rows = self._conn.execute(
-                    f"""SELECT * FROM summary_nodes
+                    f"""SELECT {_NODE_SELECT} FROM summary_nodes
                         WHERE {' AND '.join(where)}
                         LIMIT ? OFFSET ?""",
                     [*base_args, fetch_limit, offset],
@@ -795,7 +805,7 @@ class SummaryDAG:
             return []
         placeholders = ",".join("?" * len(node.source_ids))
         rows = self._conn.execute(
-            f"""SELECT * FROM summary_nodes
+            f"""SELECT {_NODE_SELECT} FROM summary_nodes
                 WHERE node_id IN ({placeholders})
                 ORDER BY created_at""",
             node.source_ids,
@@ -986,6 +996,9 @@ class SummaryDAG:
     # -- Helpers ------------------------------------------------------------
 
     def _row_to_node(self, row) -> SummaryNode:
+        """Decode rows from _NODE_SELECT or _NODE_SELECT_N, optionally
+        followed by one trailing search_rank column.
+        """
         return SummaryNode(
             node_id=row[0],
             session_id=row[1],
