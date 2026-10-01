@@ -6,6 +6,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Docs: the release gauntlet spec (`bench/specs/RELEASE-READINESS-V1.md`) now states the rules the releases since
+  v0.23.2 ran under: the differential rule for Phase B shapes and Phase C conflicts the previous GA also shows, the
+  Phase B hands-on lane, recall-probe scoring (`exact` / `recoverable` / `LOSS`; only LOSS fails), provider failures
+  the engine handles as designed, and receipts published as GA release assets. (#427)
 - Docs: the embedding-dependency recovery note is linked from the README, the operator guide and the bundled skill, and two doctor messages say that a hand-installed dependency (not every optional dependency) can be dropped by a Hermes update. (#702)
 
 ## v0.24.8 - (unreleased; rc1) (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
