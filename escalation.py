@@ -1168,7 +1168,8 @@ def summarize_with_escalation(
         if provenance is not None:
             provenance["model"] = "deterministic"
         return text, 3
-    whole_if_not_shorter = verbatim_small_source and source_tokens <= 2 * l3_truncate_tokens  # #722
+    # #722: bound the serialized source (condensation's source_tokens omits the separators)
+    whole_if_not_shorter = verbatim_small_source and count_tokens(text) <= 2 * l3_truncate_tokens
     # Level 1: detailed summary
     l1_prompt = _build_l1_prompt(text, token_budget, depth,
                                  focus_topic=focus_topic,

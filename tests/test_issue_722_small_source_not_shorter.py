@@ -212,3 +212,14 @@ def test_threshold_is_twice_configured_bound(monkeypatch, bound, whole):
         verbatim_small_source=True)
     assert level == 3 and (summary == SOURCE) is whole
     assert len(calls) == (1 if whole else 2)
+
+
+def test_bound_counts_the_serialized_source_not_source_tokens(monkeypatch, caplog):
+    # A condensation passes the children's token sum, which omits every separator in the joined text.
+    text = "\n\n---\n\n".join(["abc " * 9] * 120)
+    assert tokens.count_tokens(text) > 1024 >= 1000
+    calls = provider(monkeypatch, LONG_RESULT)
+    summary, level = escalation.summarize_with_escalation(
+        text, source_tokens=1000, token_budget=200, verbatim_small_source=True)
+    assert level == 3 and summary != text and len(calls) == 2
+    assert len(rejected(caplog)) == 2 and INFO not in caplog.text
