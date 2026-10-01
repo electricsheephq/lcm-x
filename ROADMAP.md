@@ -11,7 +11,7 @@ Status: reconciled 2026-10-01. The [vision](VISION.md) says what we are building
 
 ## H1 — compaction you don't notice
 
-Today every compaction LCM-X starts runs on the turn thread, so the user waits for it (median ~37 s, p90 ~63 s on our synthetic long-session run). Each compaction also costs one prompt-cache break. H1 removes the wait in steps.
+Today every compaction LCM-X starts runs on the turn thread, so the user waits for it. v0.24.9 bounds that wait with a 60 s soft target and a 120 s hard bound; a summary call already running can still end past the hard bound. Each compaction also costs one prompt-cache break. H1 removes the wait in steps.
 
 | Release | Theme | GA accepts when |
 |---|---|---|

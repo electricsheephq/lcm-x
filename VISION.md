@@ -7,7 +7,7 @@ LCM-X is a lossless context engine for Hermes Agent. It is built on Lossless Con
 ## The promise
 
 1. **Long sessions keep working.** A session can run for weeks. The model's context stays inside its window, and the user does not wait on compaction.
-2. **Nothing is lost.** Raw rows are stored once and never rewritten. Every summary links back to the rows it covers.
+2. **Nothing is lost.** Raw rows are stored once and kept. Every summary links back to the rows it covers. The one rewrite is an optional cleanup, off by default, that moves a large tool output into a file and leaves a reference the agent can expand.
 3. **The agent can get the detail back.** Recall and expand tools let the agent search the store and open the source behind any summary or stub.
 4. **We measure it.** Claims about speed, continuity and recall come with a pinned commit, a configuration and a published number.
 
