@@ -75,8 +75,9 @@ hands-on results together in `PHASE-B-RECEIPT.md`.
 candidate is no worse than the base in every compared cell, is pre-existing, not a regression of
 the candidate. It is established by a base-versus-candidate probe whose pass rule is written
 down before it runs (same host pin, fixture and configuration; counts per cell on both trees).
-A cell compares the affected rows by identity (role, turn and content hash, inside one fixture
-session; a multi-session fixture adds the session and, for a tool row, its tool-call id), not
+A cell compares the affected rows by identity (role, turn and content hash; an assistant row
+that carries tool calls adds each call's id, name and arguments; inside one fixture session,
+and a multi-session fixture adds the session and, for a tool result, its tool-call id), not
 only by count:
 the candidate is no worse only when its affected rows are the base's rows or a subset of them.
 A pre-existing shape is recorded as KNOWN with a tracked issue and does not force a respin. A
@@ -93,8 +94,12 @@ one threshold, doctor at close. Minimum 30 turns. Green =
 
 - at least one compaction committed during the soak. A soak in which every compaction stopped
   (on a handled provider failure or otherwise) proves little: it is inconclusive and re-runs;
-- lossless: the stored rows equal the transcript per key as a multiset (every transcript row,
-  not only the recall-probe rows; a missing or an extra copy of a row fails);
+- lossless, as the Phase C scorer checks it: every non-empty user prompt the battery sends and
+  every final assistant answer it records (not only the recall-probe rows) is stored as often
+  as it occurs, keyed by role and content hash with leading and trailing whitespace stripped
+  (the strip the host applies to ACP prompts), counted across the store as a multiset; a
+  missing or an extra copy fails. Tool-call and tool-result rows, row order and the owning
+  session are not part of this bar;
 - zero unexpected errors in engine logs. A provider failure the engine handles as designed (a
   rejected summary result logged with its reason, after which the compaction commits or stops)
   is not unexpected; the receipt lists each one;
