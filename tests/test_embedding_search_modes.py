@@ -786,15 +786,20 @@ def test_provider_resolution_is_bounded_and_does_not_start_query_or_fallback(
 def test_hybrid_does_not_start_semantic_arm_after_fts_exhausts_deadline(
     semantic_engine, monkeypatch
 ):
-    semantic_engine._config.embedding_query_timeout_s = 0.02
+    # The 0.5 s budget lets the full-text arm start even on a busy runner;
+    # the arm then blocks until the test releases it. lcm_grep returning
+    # while the started arm is still blocked proves it did not wait for the
+    # arm, with no upper wall-clock bound to break (#791).
+    semantic_engine._config.embedding_query_timeout_s = 0.5
     provider_calls = 0
     release = threading.Event()
+    arm_started = threading.Event()
     arm_finished = threading.Event()
+    arm_threads = []
 
-    # The full-text arm blocks until the test releases it. lcm_grep returning
-    # while the arm is still blocked proves it did not wait for the arm, with
-    # no wall-clock bound that a busy runner can break (#791).
     def slow_full_text(_args, **_kwargs):
+        arm_threads.append(threading.current_thread())
+        arm_started.set()
         try:
             release.wait(5.0)
             return json.dumps({"results": []})
@@ -816,11 +821,13 @@ def test_hybrid_does_not_start_semantic_arm_after_fts_exhausts_deadline(
         )
         returned_while_arm_blocked = not arm_finished.is_set()
     finally:
-        # Let the abandoned worker finish so it frees its slot before the
+        # Let the abandoned worker exit so it frees its slot before the
         # tests that follow.
         release.set()
-        arm_finished.wait(5.0)
+        for thread in arm_threads:
+            thread.join(5.0)
 
+    assert arm_started.is_set()
     assert returned_while_arm_blocked
     assert payload["timeout"] is True
     assert payload["mode"] == "hybrid"
