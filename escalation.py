@@ -879,6 +879,7 @@ def _invoke_summary_llm_chain(
     deadline: float | None = None,
     route_key_prefix: str = "",
     budget: ForegroundBudget | None = None,
+    verbatim_small_source: bool = False,
 ) -> Optional[str]:
     """``deadline`` (absolute ``time.monotonic()``) bounds every route attempt (#666); a foreground ``budget``
     (#605) replaces it: it admits each attempt and caps its timeout at the usable time left.
@@ -948,6 +949,15 @@ def _invoke_summary_llm_chain(
                 circuit_breaker.record_success(route_key)
             if provenance is not None:  # #441: the route that actually answered
                 provenance["model"] = candidate_model
+            return result
+        if result and verbatim_small_source and source_tokens is not None and count_tokens(result) >= source_tokens:
+            # #722: the caller stores the source whole; this working route gets no circuit event.
+            logger.info(
+                "LCM summary result not shorter; small source stored whole (source_tokens=%d, result_tokens=%d, model=%s)",
+                source_tokens, count_tokens(result), candidate_model or _DEFAULT_ROUTE_KEY,
+            )
+            if provenance is not None:
+                provenance["model"] = "deterministic"
             return result
         if result is not None:  # #628: a content rejection, not a provider failure
             logger.warning(
@@ -1153,8 +1163,8 @@ def summarize_with_escalation(
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
 
-    Guarantees convergence: level 3 is deterministic and always produces
-    output shorter than the source. ``prompt_version`` 2 (#646) selects the v2
+    Level 3 is deterministic; eligible small sources are stored whole, otherwise
+    truncated. ``prompt_version`` 2 (#646) selects the v2
     prompts and a 3x output ceiling; 1 keeps the original prompts and 2x. When
     ``provenance`` is a dict, its ``"model"`` is set to the model that produced
     the accepted summary (``""`` = host default route, ``"deterministic"`` =
@@ -1163,12 +1173,15 @@ def summarize_with_escalation(
     instead of starting one with less than ``_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS``
     (#666); it never falls through to level 3. A foreground ``budget`` (#605) replaces ``deadline``.
     ``verbatim_small_source`` (#605 F2; the foreground leaf and condensation callers): a source within
-    ``l3_truncate_tokens`` is returned whole as level 3, with no call.
+    ``l3_truncate_tokens`` is returned whole as level 3, with no call. Up to twice that bound, the first
+    non-empty, not-shorter result returns the source whole as level 3 without a circuit event (#722).
     """
     if verbatim_small_source and verbatim_source(text, l3_truncate_tokens):
         if provenance is not None:
             provenance["model"] = "deterministic"
         return text, 3
+    # #722: bound the serialized source (condensation's source_tokens omits the separators)
+    whole_if_not_shorter = verbatim_small_source and count_tokens(text) <= 2 * l3_truncate_tokens
     # Level 1: detailed summary
     l1_prompt = _build_l1_prompt(text, token_budget, depth,
                                  focus_topic=focus_topic,
@@ -1189,9 +1202,12 @@ def summarize_with_escalation(
         deadline=deadline,
         route_key_prefix=route_key_prefix,
         budget=budget,
+        verbatim_small_source=whole_if_not_shorter,
     )
 
     if l1_result:
+        if whole_if_not_shorter and count_tokens(l1_result) >= source_tokens:
+            return text, 3
         logger.debug("L1 summarization succeeded (%d tokens)", count_tokens(l1_result))
         return l1_result, 1
 
@@ -1216,9 +1232,12 @@ def summarize_with_escalation(
         deadline=deadline,
         route_key_prefix=route_key_prefix,
         budget=budget,
+        verbatim_small_source=whole_if_not_shorter,
     )
 
     if l2_result:
+        if whole_if_not_shorter and count_tokens(l2_result) >= source_tokens:
+            return text, 3
         logger.debug("L2 summarization succeeded (%d tokens)", count_tokens(l2_result))
         return l2_result, 2
 
