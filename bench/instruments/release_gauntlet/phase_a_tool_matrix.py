@@ -465,9 +465,14 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
         # A split planted secret may refuse one chunk under the stable policy.
         # #759 withholds it and dispatches the protected remainder; policy or
         # provider errors still fail. The leak sweep below audits every dispatch.
-        assert "status: partial" in chunk_report, f"chunk backfill failed for a non-privacy reason: {chunk_report[:200]}"
+        assert "status: partial" in chunk_report, f"chunk backfill did not report a privacy-withheld partial: {chunk_report[:200]}"
         blocked = re.search(r"privacy_blocked: (\d+)", chunk_report)
         assert blocked is not None and int(blocked.group(1)) >= 1, "partial report carries no privacy_blocked count"
+        # Only the privacy refusal may make it partial: a provider failure, a lost
+        # lease or an exhausted budget must still fail the battery.
+        failed_count = re.search(r"^failed: (\d+)$", chunk_report, re.MULTILINE)
+        assert failed_count is not None and int(failed_count.group(1)) == 0, "partial chunk backfill also failed documents"
+        assert "stop_reason:" not in chunk_report, f"partial chunk backfill stopped early: {chunk_report[:200]}"
         # Guard chunk-coverage COLLAPSE (#391 review F6a): a refusal is only a
         # valid no-leak outcome if chunks were actually SELECTED for processing —
         # a partial report over zero selected chunks would vacuously pass.

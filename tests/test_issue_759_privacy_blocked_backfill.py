@@ -262,12 +262,27 @@ def test_gauntlet_chunk_battery_accepts_partial(tmp_path, monkeypatch):
     _gauntlet_chunk_check(report, [text for batch in provider.documents for text in batch], engine._config)
 
 
-@pytest.mark.parametrize("failure", ["error", "no_blocked", "no_selected", "no_dispatch", "leak"])
+VALID_PARTIAL_REPORT = "status: partial\nselected: 12\nfailed: 0\nprivacy_blocked: 1"
+VALID_PARTIAL_OUTBOUND = ["Chunk safety sentence [LCM embedding privacy: api_key]"]
+
+
+def test_gauntlet_chunk_battery_control_report_passes():
+    # Positive control for the rejection cases below: each one changes only one field.
+    _gauntlet_chunk_check(VALID_PARTIAL_REPORT, list(VALID_PARTIAL_OUTBOUND), LCMConfig())
+
+
+@pytest.mark.parametrize(
+    "failure", ["error", "no_blocked", "no_selected", "no_dispatch", "leak", "failed_docs", "stopped"]
+)
 def test_gauntlet_chunk_battery_rejects_invalid_partial(tmp_path, failure):
     config = LCMConfig()
-    report = "status: partial\nprivacy_blocked: 1\nselected: 12"
-    outbound = ["Chunk safety sentence [LCM embedding privacy: api_key]"]
-    if failure == "error":
+    report = VALID_PARTIAL_REPORT
+    outbound = list(VALID_PARTIAL_OUTBOUND)
+    if failure == "failed_docs":
+        report = report.replace("failed: 0", "failed: 1")
+    elif failure == "stopped":
+        report += "\nstop_reason: lease_lost"
+    elif failure == "error":
         report = report.replace("partial", "error") + "\nstop_reason: privacy_refused"
     elif failure == "no_blocked":
         report = report.replace("privacy_blocked: 1", "privacy_blocked: 0")
@@ -279,3 +294,24 @@ def test_gauntlet_chunk_battery_rejects_invalid_partial(tmp_path, failure):
         outbound.append(SYNTHETIC_SECRET)
     with pytest.raises(AssertionError):
         _gauntlet_chunk_check(report, outbound, config)
+
+
+@pytest.mark.parametrize(
+    ("embedded", "failed", "expected"),
+    [
+        (0, [("a", "provider error"), ("b", "provider error")], "failed"),
+        (1, [("a", "provider error")], "partial"),
+        (2, [], "partial"),
+    ],
+)
+def test_withheld_documents_never_hide_a_failed_run(embedded, failed, expected):
+    status = command_mod._embedding_backfill_status(
+        error=None,
+        lease_lost=False,
+        budget_exhausted=False,
+        embedded=embedded,
+        selected_embeddable=2,
+        failed=failed,
+        privacy_withheld=1,
+    )
+    assert status == expected
