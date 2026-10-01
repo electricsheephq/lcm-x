@@ -6,6 +6,11 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Docs: the release gauntlet spec (`bench/specs/RELEASE-READINESS-V1.md`) now states the rules the releases since
+  v0.23.2 ran under: the differential rule for Phase B shapes and Phase C conflicts the previous GA also shows, the
+  Phase B hands-on lane, recall-probe scoring (`exact` / `recoverable` / `LOSS`; only LOSS fails), provider failures
+  the engine handles as designed, and receipts published as GA release assets. (#427)
+
 ## v0.24.8 - (unreleased; rc1) (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
 
 - Fix: a summary route that cannot serve its model (HTTP 400/404 whose message names the model as unknown, not
