@@ -383,6 +383,9 @@ _TOTAL_COMPACTIONS_SCOPE = "current_conversation"
 _AUTO_FOCUS_MAX_TURNS = 3
 _AUTO_FOCUS_TURN_MAX_CHARS = 260
 _AUTO_FOCUS_MAX_CHARS = 700
+# escalation._normalized_focus_topic keeps the first 160 chars (its max_chars
+# default); lay out auto-focus so the newest turn fits inside that window (#613).
+_AUTO_FOCUS_PROMPT_MAX_CHARS = 160
 
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 
@@ -8210,6 +8213,8 @@ class LCMEngine(
         ``_AUTO_FOCUS_MAX_TURNS`` user messages (skipping context summaries
         and empty turns).  Returns a brief text block suitable for injection
         into the summarizer prompt as ``focus_topic``.
+        The block is emitted newest first, with its newest bullet sized to
+        survive the 160-char prompt window (#613).
 
         IMPORTANT: The ``messages`` parameter must be ``working_messages``
         (output of ``_ingest_messages``), not raw messages.  ``working_messages``
@@ -8265,10 +8270,15 @@ class LCMEngine(
         # ``candidates`` is newest-first here.  Spend the block budget from the
         # newest turn backwards so a tight budget drops stale turns rather than
         # the turn the host is about to answer.
-        header = "Recent user focus:\n"
+        header = "Recent user focus: newest first\n"
+        # The prompt normalizer keeps 159 chars plus "…" when longer. Size the
+        # newest bullet so the whitespace-joined header and bullet fit that head.
+        newest_limit = _AUTO_FOCUS_PROMPT_MAX_CHARS - 1 - len(header.strip()) - len(" - ")
         budget = _AUTO_FOCUS_MAX_CHARS - len(header)
         selected: list[str] = []
         for position, item in enumerate(candidates):
+            if position == 0:
+                item = self._clamp_focus_turn_text(item, newest_limit)
             line = f"- {item}"
             cost = len(line) + (1 if selected else 0)
             if cost > budget:
@@ -8280,7 +8290,7 @@ class LCMEngine(
             budget -= cost
             selected.append(line)
 
-        selected.reverse()
+        # Emit newest-first so the prompt's head window holds the current request (#613).
         return header + "\n".join(selected)
 
     @staticmethod
