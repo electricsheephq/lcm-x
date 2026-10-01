@@ -34,6 +34,7 @@ from .externalize import (
     load_externalized_payload,
 )
 from .ingest_protection import (
+    _active_sensitive_pattern_names,
     _add_inline_persisted_output_generation_metadata,
     _add_inline_persisted_output_identity_metadata,
     _expected_persisted_output_chars,
@@ -2528,9 +2529,12 @@ class ReconcileMixin:
     def _policy_neutral_identity(
         self, identity: tuple[str, str, str, str, str]
     ) -> tuple[str, str, str, str, str]:
-        """#758: ``identity`` with every digest-bearing catalog secret in its placeholder form."""
+        """#758: ``identity`` with every secret the CURRENT policy redacts (digest-bearing patterns
+        only) in its placeholder form: the retry never accepts an equality a store written under the
+        current policy would not, so a stored placeholder never stands in for a raw host secret."""
+        policy = self._policy_neutral_redaction()
         role, content, tool_call_id, tool_calls, tool_name = identity
-        content = redact_sensitive_value(content, _POLICY_NEUTRAL_REDACTION, parse_json_strings=False)
+        content = redact_sensitive_value(content, policy, parse_json_strings=False)
         if tool_calls:
             try:
                 decoded = json.loads(tool_calls)
@@ -2538,9 +2542,16 @@ class ReconcileMixin:
                 decoded = None
             if decoded is not None:
                 tool_calls = self._stable_tool_calls_identity(
-                    redact_sensitive_value(decoded, _POLICY_NEUTRAL_REDACTION, parse_json_strings=True)
+                    redact_sensitive_value(decoded, policy, parse_json_strings=True)
                 )
         return (role, content, tool_call_id, tool_calls, tool_name)
+
+    def _policy_neutral_redaction(self) -> SimpleNamespace:
+        active = _active_sensitive_pattern_names(self._config)
+        return SimpleNamespace(
+            sensitive_patterns_enabled=True,
+            sensitive_patterns=[name for name in active if name in _POLICY_NEUTRAL_REDACTION.sensitive_patterns],
+        )
 
     @staticmethod
     def _window_has_redaction_placeholder(
@@ -2678,7 +2689,8 @@ class ReconcileMixin:
         # #758: the retry needs the host's unredacted rows (provenance of every placeholder), runs only
         # when nothing was proven, and only when a placeholder shows on one side of the window.
         policy_retry = (
-            unredacted_messages is not None
+            bool(self._policy_neutral_redaction().sensitive_patterns)
+            and unredacted_messages is not None
             and len(unredacted_messages) == len(messages)
             and not (cursor and effective_prefix(cursor))
             and self._window_has_redaction_placeholder(messages, stored_tail)
