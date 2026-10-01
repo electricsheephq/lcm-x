@@ -8,6 +8,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## v0.24.9 - (unreleased; rc2) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
 
+- Fix: after a stub-first exit, the next turn keeps the tool-output stubs the agent already holds, so a cleanup-only pass never returns a larger list and no tool output is stored twice. (#772)
 - Fix: with semantic embeddings enabled and the provider package missing or misconfigured, `lcm_doctor` and
   `/lcm doctor` report an `embedding_provider_health` warning (provider, model, reason, fix); it also warns when
   embeddings are off but the store still holds an active embedding profile. The probe is offline. (#672, contributor PR #673)
