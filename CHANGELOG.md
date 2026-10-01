@@ -6,6 +6,19 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a threshold sweep has one time budget counted from `compress()` entry, not from after ingest (#605). No
+  summariser call or condensation pass starts unless it is expected to end, with a finalize reserve (5-20 s, the
+  p90 of recent finalize steps), by the hard bound (`LCM_FOREGROUND_HARD_SECONDS`, 120), and each call's timeout is
+  at most the time left; after the first stored leaf, a call starts only if its route's recent duration (p90 of the
+  last 8 calls, 15 s floor, 30 s cold) says it ends by the new soft target (`LCM_FOREGROUND_SOFT_SECONDS`, default 60,
+  `0` = off). The stop reason `soft_target_reached` is a partial stop in `lcm_status` and the doctor. The first leaf is
+  always tried while 15 s of usable time is left, so a stale estimate cannot starve a compaction; the pre-leaf
+  condensation (#653) now runs only while a first leaf still fits after it (its first pass against the hard bound,
+  later passes inside the soft target) instead of half the passes and half the time. One INFO line per compaction,
+  `LCM compaction stop:`, gives the reason, leaves, elapsed seconds, the seconds before, during and after the calls,
+  and the backlog left. A step already running (a store step, assembly, the fit, the host's stream read between
+  two chunks) is not interrupted, so a compaction can still end past the hard bound; the stop line measures it. The
+  sweep-off, forced-overflow and below-threshold paths keep their behaviour.
 - Fix: a Hermes process in which LCM-X did not become active (a slow load or another context engine in the slot) keeps its own
   record file, so overlapping processes no longer overwrite each other's notice; `lcm_doctor` and `/lcm doctor` report
   a live one as an `inactive_process` warning with the fix to apply; after a slot conflict the already-registered

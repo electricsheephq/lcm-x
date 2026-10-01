@@ -113,7 +113,86 @@ def _accepts_route_info(call_llm) -> bool:
 
 
 class SweepBudgetExhausted(TimeoutError):
-    """The threshold sweep's own time budget is spent: a stop condition, not a provider failure."""
+    """The threshold sweep's own time budget is spent: a stop condition, not a provider failure. ``reason`` is
+    the sweep stop reason, ``time_budget_exhausted`` or ``soft_target_reached`` (#605)."""
+
+    def __init__(self, message="threshold full sweep time budget exhausted", reason="time_budget_exhausted"):
+        super().__init__(message)
+        self.reason = reason
+
+
+def _p90(samples: list[float], cold: float) -> float:
+    return sorted(samples)[math.ceil(0.9 * len(samples)) - 1] if samples else cold
+
+
+class ForegroundEstimates:
+    """#605: process-local walls of the last 8 summariser calls per route and of the last 8 finalize steps."""
+
+    def __init__(self):
+        self.calls: dict[str, list[float]] = {}
+        self.finalize: list[float] = []
+
+    def record_call(self, route_key: str, wall: float) -> None:
+        self.calls[route_key] = [*self.calls.get(route_key, []), wall][-8:]
+
+    def call_estimate(self, route_key: str, ceiling: float) -> float:
+        """p90 of the route's last calls (30 s cold), at least 15 s, at most ``ceiling``."""
+        return min(max(_p90(self.calls.get(route_key, []), 30.0), _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS), ceiling)
+
+    def record_finalize(self, wall: float) -> None:
+        self.finalize = [*self.finalize, wall][-8:]
+
+    def finalize_reserve(self) -> float:
+        """max(5 s, p90 of the last finalize walls), at most 20 s."""
+        return min(20.0, max(5.0, _p90(self.finalize, 0.0)))
+
+
+class ForegroundBudget:
+    """#605: one clock per foreground compress(), started at its entry.
+
+    It decides when a summariser call or condensation pass may START and the timeout it gets; it cannot
+    interrupt a step already running. ``pre_leaf`` marks the pre-leaf condensation, ``leaf_stored`` the
+    first stored leaf of this compaction, ``condensed`` its first stored pre-leaf condensation."""
+
+    def __init__(self, *, soft: float, hard: float, configured_timeout: float, estimates: ForegroundEstimates):
+        self.t0 = time.monotonic()
+        self.soft, self.hard, self.configured_timeout, self.estimates = soft, hard, configured_timeout, estimates
+        self.reserve = estimates.finalize_reserve()
+        self.pre_leaf = self.condensed = self.leaf_stored = self.sweep_active = False
+        self.leaves, self.first_call_started, self.last_call_ended = 0, None, None
+
+    @property
+    def usable_deadline(self) -> float:
+        return self.t0 + self.hard - self.reserve
+
+    def estimate(self, route_key: str) -> float:
+        return self.estimates.call_estimate(route_key, min(self.configured_timeout, self.hard - self.reserve))
+
+    def admit(self, route_key: str) -> float:
+        """Raise SweepBudgetExhausted unless an attempt on ``route_key`` may start now; return the time left."""
+        now = time.monotonic()
+        estimate, usable_left = self.estimate(route_key), self.usable_deadline - now
+        if self.pre_leaf:  # condensation before the first leaf: a first leaf must still fit after it
+            if 2 * estimate > usable_left:
+                raise SweepBudgetExhausted()
+            # The first pass is bounded by hard - reserve, like the first leaf, so an oversized prefix still
+            # shrinks while two calls do not fit the soft target (#653); later passes need the soft target.
+            if self.condensed and self.soft > 0 and now + 2 * estimate > self.t0 + self.soft:
+                raise SweepBudgetExhausted("foreground soft target reached", reason="soft_target_reached")
+        elif not self.leaf_stored:  # the first leaf is never starved by an estimate
+            if usable_left < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
+                raise SweepBudgetExhausted()
+        elif estimate > usable_left:
+            raise SweepBudgetExhausted()
+        elif self.soft > 0 and now + estimate > self.t0 + self.soft:
+            raise SweepBudgetExhausted("foreground soft target reached", reason="soft_target_reached")
+        return usable_left
+
+    def record_call(self, route_key: str, started: float, ended: float) -> None:
+        self.estimates.record_call(route_key, ended - started)
+        if self.first_call_started is None:
+            self.first_call_started = started
+        self.last_call_ended = ended
 
 
 @dataclass
@@ -764,8 +843,10 @@ def _invoke_summary_llm_chain(
     provenance: dict | None = None,
     deadline: float | None = None,
     route_key_prefix: str = "",
+    budget: ForegroundBudget | None = None,
 ) -> Optional[str]:
-    """``deadline`` (absolute ``time.monotonic()``) bounds every route attempt (#666).
+    """``deadline`` (absolute ``time.monotonic()``) bounds every route attempt (#666); a foreground ``budget``
+    (#605) replaces it: it admits each attempt and caps its timeout at the usable time left.
     ``route_key_prefix`` gives a caller its own breaker keys (#669: rollups); empty keeps the live keys."""
     chain = _summary_model_chain(model, fallback_models)
     skipped = 0
@@ -779,7 +860,10 @@ def _invoke_summary_llm_chain(
             )
             continue
         call_timeout = timeout
-        if deadline is not None:  # #666: checked before the call, so nothing is recorded or spent
+        if budget is not None:  # #605: admitted before the call, so nothing is recorded or spent
+            usable_left = budget.admit(route_key)
+            call_timeout = usable_left if timeout is None else min(timeout, usable_left)
+        elif deadline is not None:  # #666: checked before the call, so nothing is recorded or spent
             remaining = deadline - time.monotonic()
             if remaining < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
                 raise SweepBudgetExhausted("threshold full sweep time budget exhausted")
@@ -793,6 +877,7 @@ def _invoke_summary_llm_chain(
             )
             break
         _summary_call.route, _summary_call.error = {}, None  # #682: filled by _call_llm_for_summary
+        started = time.monotonic()
         try:
             result = _invoke_summary_llm(
                 prompt,
@@ -807,6 +892,8 @@ def _invoke_summary_llm_chain(
                 "LLM summarization failed: %s", exc)
             result = None
         route, error = dict(_summary_call.route or {}), _summary_call.error
+        if budget is not None:
+            budget.record_call(route_key, started, time.monotonic())
         if circuit_breaker is not None and route:
             circuit_breaker.note_route(route_key, route)
         if result and (accepts_result is None or accepts_result(result)):
@@ -1009,6 +1096,7 @@ def summarize_with_escalation(
     deadline: float | None = None,
     *,
     route_key_prefix: str = "",
+    budget: ForegroundBudget | None = None,
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
 
@@ -1020,7 +1108,7 @@ def summarize_with_escalation(
     level 3) (#441). With ``deadline`` (absolute ``time.monotonic()``), every
     route attempt gets at most the time left and SweepBudgetExhausted is raised
     instead of starting one with less than ``_THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS``
-    (#666); it never falls through to level 3.
+    (#666); it never falls through to level 3. A foreground ``budget`` (#605) replaces ``deadline``.
     """
     # Level 1: detailed summary
     l1_prompt = _build_l1_prompt(text, token_budget, depth,
@@ -1041,6 +1129,7 @@ def summarize_with_escalation(
         provenance=provenance,
         deadline=deadline,
         route_key_prefix=route_key_prefix,
+        budget=budget,
     )
 
     if l1_result:
@@ -1067,12 +1156,15 @@ def summarize_with_escalation(
         provenance=provenance,
         deadline=deadline,
         route_key_prefix=route_key_prefix,
+        budget=budget,
     )
 
     if l2_result:
         logger.debug("L2 summarization succeeded (%d tokens)", count_tokens(l2_result))
         return l2_result, 2
 
+    if budget is not None:
+        deadline = budget.usable_deadline
     if deadline is not None and deadline - time.monotonic() < _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS:
         raise SweepBudgetExhausted("threshold full sweep time budget exhausted")  # #666: time never yields L3
     # Level 3: deterministic truncation — guaranteed convergence

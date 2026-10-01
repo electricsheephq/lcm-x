@@ -449,6 +449,8 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("critical_budget_pressure_ratio", "LCM_CRITICAL_BUDGET_PRESSURE_RATIO", float),
     _EnvFieldSpec("threshold_full_sweep_enabled", "LCM_THRESHOLD_FULL_SWEEP_ENABLED", bool),
     _EnvFieldSpec("summary_prefix_target_tokens", "LCM_SUMMARY_PREFIX_TARGET_TOKENS", int),
+    _EnvFieldSpec("foreground_soft_seconds", "LCM_FOREGROUND_SOFT_SECONDS", float),
+    _EnvFieldSpec("foreground_hard_seconds", "LCM_FOREGROUND_HARD_SECONDS", float),
     _EnvFieldSpec("l2_budget_ratio", "LCM_L2_BUDGET_RATIO", float),
     _EnvFieldSpec("l3_truncate_tokens", "LCM_L3_TRUNCATE_TOKENS", int),
     _EnvFieldSpec("max_assembly_tokens", "LCM_MAX_ASSEMBLY_TOKENS", int),
@@ -649,6 +651,12 @@ class LCMConfig:
     threshold_full_sweep_enabled: bool = False
     # Target frontier-summary size after a sweep (0 = derive one leaf budget).
     summary_prefix_target_tokens: int = 0
+    # #605: from compress() entry, after the first stored leaf no summariser call starts unless it is expected
+    # to end by this many seconds (0 = no soft target; at most the hard bound).
+    foreground_soft_seconds: float = 60.0
+    # #605: no summariser call starts unless it is expected to end, with the finalize reserve, by this many
+    # seconds from compress() entry (0, a negative or an invalid value = the built-in 120).
+    foreground_hard_seconds: float = 0.0
 
     # -- Escalation ---
     # L2 bullet budget as fraction of L1
