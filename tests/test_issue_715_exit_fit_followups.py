@@ -34,6 +34,7 @@ def test_native_result_keeps_plain_fit(candidate, monkeypatch, caplog):
 
 
 def test_automatic_forced_overflow_keeps_plain_fit(engine, monkeypatch, caplog):
+    """#738: an exit fit drops only covered turns."""
     view = _hidden_backlog(engine, list_users=True)
     observed = engine._survival_measure(view) + 2000
     engine._config.max_assembly_tokens = observed - 1
@@ -47,11 +48,13 @@ def test_automatic_forced_overflow_keeps_plain_fit(engine, monkeypatch, caplog):
     assert result == seen["input"] and engine._last_survival_fit is None
     assert not any("exit_fit:" in row.getMessage() for row in caplog.records)
     assert engine._compress_forced_overflow is False
-    # An unrelated automatic invocation must still get its exit cap.
+    # An unrelated automatic invocation must still get its exit cap (its uncovered rows stay: the exit fit skips).
     engine._config.max_assembly_tokens = 0
     monkeypatch.setattr(engine, "_compress_impl", lambda messages, **kwargs: messages)
-    engine.compress(result, current_tokens=observed)
-    assert _counter(engine)["last_reason"].startswith("exit_fit:")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+        engine.compress(result, current_tokens=observed)
+    assert any("LCM exit fit skipped" in row.getMessage() for row in caplog.records)
 
 
 @pytest.mark.parametrize("prior", ["none", "shortened", "legacy"])

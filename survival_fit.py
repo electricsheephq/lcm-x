@@ -244,11 +244,22 @@ class SurvivalFitMixin:
             return out + kept or result[-1:], count, ids, notice
 
         users = [i for i, message in enumerate(body) if isinstance(message, dict) and message.get("role") == "user"]
+        covered = None
+        if reason.startswith("exit_fit:"):  # #738: an exit fit drops only rows a summary node covers
+            droppable = body if keep_from is None else body[:max(0, keep_from - len(head))]
+            try:
+                covered = self._store_complete_node_covered([store_ids[id(m)] for m in droppable if id(m) in store_ids])
+            except Exception:  # unknown coverage drops nothing
+                logger.debug("LCM exit fit: the coverage read failed; no cut", exc_info=True)
+                covered = set()
         for index in users:
             if keep_from is not None and len(head) + index > keep_from:
                 break  # the cut would drop a protected row
             if index and not all(durable(message) for message in body[:index]):
                 break  # never omit a row that is not durably stored
+            if index and covered is not None and not (
+                    {store_ids[id(m)] for m in body[:index] if id(m) in store_ids} or {None}) <= covered:
+                break  # #738: a row no summary covers (or a region with no stored row) stays
             if index:
                 fitted, count, ids, notice = build(index, body[index:])
                 if self._survival_measure(fitted) <= budget:

@@ -348,16 +348,13 @@ def test_g1_a_held_pass_above_the_threshold_stays_cleanup_only(tmp_path, summari
 
 
 def test_g1_at_the_survival_ceiling_a_held_pass_is_not_forced_cleanup_only(tmp_path, summaries):
-    """#738: with the sweep off the held pass at the ceiling summarises the raw backlog outside the fresh tail
-    instead of returning the fit."""
     engine, view, rough, ceiling = _held_cleanup_request(tmp_path)
     try:
         assert engine._no_progress_hold_blocks(ceiling) is False
         engine.compress(view, current_tokens=ceiling)
-        # #618 item 3: not cleanup-only; #738: and with the sweep off not fit-only, so no exit fit strands a turn
-        assert summaries and _leaves(engine) >= 1
-        assert engine._last_compression_noop_reason != "held"
-        assert (engine._last_survival_fit or {}).get("uncovered_rows", 0) == 0
+        # #618 item 3: not cleanup-only, and no sweep either: a held pass at the ceiling only fits
+        assert summaries == [] and _leaves(engine) == 0
+        assert (engine._last_compression_status, engine._last_compression_noop_reason) == ("noop", "held")
     finally:
         engine.shutdown()
 

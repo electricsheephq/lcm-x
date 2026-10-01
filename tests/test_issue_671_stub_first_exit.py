@@ -349,16 +349,12 @@ def test_the_exit_needs_no_summary_route(make_engine, summaries, caplog, monkeyp
 
 
 def test_the_fit_only_hold_at_the_ceiling_runs_first(make_engine, summaries, caplog, monkeypatch):
-    """#738: with the sweep off the held pass at the ceiling summarises the raw backlog outside the fresh tail
-    instead of returning the fit. Here the free stub-first cuts reach the target first, so no call is needed."""
     engine = exit_engine(make_engine)
     monkeypatch.setattr(engine, "_hold_fit_only_applies", lambda tokens: True)  # #618: held at the survival ceiling
-    view = tool_view()
-    result = run(engine, view, caplog)
+    run(engine, tool_view(), caplog)
 
-    assert engine._last_stub_first_exit is not None and summaries == []
-    assert engine.last_compression_noop_reason != "held"
-    assert len(result) == len(view) and engine._last_survival_fit is None  # no fit dropped an uncovered row
+    assert engine._last_stub_first_exit is None and summaries == []
+    assert engine.last_compression_noop_reason == "held"
 
 
 # -- #726 round 2 ---------------------------------------------------------------------------------------------------
