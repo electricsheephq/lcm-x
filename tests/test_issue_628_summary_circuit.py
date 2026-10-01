@@ -200,8 +200,7 @@ def test_t4_sweep_with_every_route_refused_writes_nothing_and_holds(tmp_path, mo
         _open_circuit(engine)
         frontier = _frontier(engine)
         result = _compress(engine, view, caplog)
-        assert len(result) < len(view) and engine._last_survival_fit["reason"] == "exit_fit:noop"
-        assert _nodes(engine) == [] and _frontier(engine) == frontier
+        assert result is view and _nodes(engine) == [] and _frontier(engine) == frontier
         assert provider.calls == [] and levels == []
         assert engine._last_compression_status == "noop"
         assert engine._last_compression_noop_reason == "summary route unavailable"
@@ -318,8 +317,7 @@ def test_t8_full_sweep_off_with_every_route_refused_writes_no_leaf(tmp_path, mon
     try:
         _open_circuit(engine)
         result = _compress(engine, view, caplog)
-        assert len(result) < len(view) and engine._last_survival_fit["reason"] == "exit_fit:noop"
-        assert _nodes(engine) == [] and provider.calls == [] and levels == []
+        assert result is view and _nodes(engine) == [] and provider.calls == [] and levels == []
         assert engine._last_compression_noop_reason == "summary route unavailable"
         assert engine._sweep_budget_hold_active()
         assert _count(caplog, STOP_LINE) == 1
