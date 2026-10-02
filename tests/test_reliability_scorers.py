@@ -798,6 +798,25 @@ def test_b2_held_composite_needs_host_evidence_for_every_part(tmp_path):
     assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
 
 
+def test_b2_held_composite_the_host_stored_durably_stays_a_deficit(tmp_path):
+    """The host holds the composite itself as a durable row (and the parts): LCM should have stored it."""
+    composite = U.format(14, 14) + "\n\n" + U.format(15, 15)
+    out = make(tmp_path, rows=[("user", U.format(14, 14)), ("user", U.format(15, 15)), ("assistant", R.format(15, 15))],
+               events=turn_events(15, held=composite), parents={"S0": None}, plugin=TREE, bars=["B2"],
+               host=[("S0", "user", composite, 1), ("S0", "user", U.format(14, 14), 1), ("S0", "user", U.format(15, 15), 1)])
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
+def test_b2_composite_cover_respects_licence_capacity_while_searching():
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    lic = {("user", multiset.h(x)): {"licensed": 1} for x in (a, a + "\n\n" + a, b)}
+    assert multiset.licensed_parts(a + "\n\n" + a + "\n\n" + b, lic, 1) == {
+        ("user", multiset.h(a + "\n\n" + a)): 1, ("user", multiset.h(b)): 1}
+    assert multiset.licensed_parts(a + "\n\n" + b, {("user", multiset.h(a)): {"licensed": 1}}, 1) is None
+
+
 def test_b2_held_composite_parts_in_another_lineage_do_not_cover_it(tmp_path):
     out = _held_composite(tmp_path, parts_sid="cron_job_01")
     b2 = out["numbers"]["B2"]
