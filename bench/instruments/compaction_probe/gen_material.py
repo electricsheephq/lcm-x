@@ -387,7 +387,7 @@ def token_counter():
 
 CLASSES = ("name", "path", "limit", "build_id", "prefix", "decision", "superseded_value",
            "error_with_fix", "pending_task", "early_user_constraint", "tool_number", "file_change")
-MATERIAL_VERSION = "track-s-v2"
+MATERIAL_VERSION = "track-s-v3"
 BATCH_INSTRUCTION = "Reply only as a JSON object mapping each probe id to its answer string (use I don't know for ABSTAIN)."
 SCENES = (
     "Inspection {n}: the fixture reader keeps the original row order. The dry run checked "
@@ -475,7 +475,7 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
                         probe=f"What is the current {cls.replace('_', ' ')} for fixture {nonce}?", answer=values[c])
             if fact["stale"]:
                 fact["stale_source"] = dict(id=fact["id"] + "-OLD", **add(
-                    1, "user", f"[{fact['id']}-OLD] Initial choice: {fact['stale']}."))
+                    1, "user", f"[{fact['id']}-OLD; fixture {nonce}] Initial choice: {fact['stale']}."))
             fact["turn"] = 1 + k * 2
             fact["row_role"] = "tool" if k in (2, 3) or c == 10 else ("assistant" if k == 1 else "user")
             facts.append(fact)
@@ -557,14 +557,10 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
     external = next(f for f in facts if f["class"] == "file_change" and f["placement"] == "middle")
     targets.append(dict(id=external["id"], kind="externalization", row_id=external["row_id"], row_index=external["row_index"]))
     traps = []
-    used_names = {f["fixture"] for f in facts}
-    for k, cls in enumerate(trap_rng.sample(CLASSES, 5)):
-        while True:
-            name = f"{trap_rng.choice(VALUE_WORDS)}-{seed}-{trap_rng.randrange(len(CLASSES)):02d}-{trap_rng.randrange(5)}"
-            if name not in used_names:
-                break
-        used_names.add(name)
-        traps.append(dict(id=f"S{seed}-TRAP{k}",
+    for cls in trap_rng.sample(CLASSES, 5):
+        c, k = CLASSES.index(cls), trap_rng.randrange(5, 10)
+        name = f"{trap_rng.choice(VALUE_WORDS)}-{seed}-{c:02d}-{k}"
+        traps.append(dict(id=f"S{seed}-F{c:02d}-{k}",
                           probe=f"What is the current {cls.replace('_', ' ')} for fixture {name}?", answer="ABSTAIN"))
     probes = [dict(id=f["id"], kind="canary", text=f["probe"], expect="value") for f in facts]
     probes += [dict(id=t["id"], kind="trap", text=t["probe"], expect="ABSTAIN") for t in traps]

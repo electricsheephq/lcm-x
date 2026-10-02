@@ -142,7 +142,7 @@ def test_prefix_identifier_echo_never_scores_correct(material):
 
 
 def test_material_version_identifies_new_generator(material):
-    assert read(material, "material.manifest.json")["material_version"] == "track-s-v2"
+    assert read(material, "material.manifest.json")["material_version"] == "track-s-v3"
 
 
 def test_ancestry_required_events_follow_plan(tmp_path):
@@ -228,7 +228,7 @@ def test_mb1_traps_match_canary_wording_without_transcript_leaks(tmp_path, seed)
     classes, names = set(), set()
     rows = transcript_rows(tmp_path)
     for trap in traps:
-        match = re.fullmatch(r"What is the current (.+) for fixture ([a-z]+)-(-?\d+)-(\d{2})-([0-4])\?", trap["probe"])
+        match = re.fullmatch(r"What is the current (.+) for fixture ([a-z]+)-(-?\d+)-(\d{2})-([5-9])\?", trap["probe"])
         assert match is not None
         cls, word, fixture_seed, class_index, _ = match.groups()
         assert cls.replace(" ", "_") in gen.CLASSES
@@ -241,6 +241,50 @@ def test_mb1_traps_match_canary_wording_without_transcript_leaks(tmp_path, seed)
         assert all(name not in f["probe"] for f in facts)
         assert all(name not in r["content"] and trap["probe"] not in r["content"] for r in rows)
     assert len(classes) == len(names) == 5
+
+
+def test_mb1r_trap_ids_are_fact_shaped(material):
+    for trap in read(material, "traps.json"):
+        assert re.fullmatch(r"S1-F\d{2}-[5-9]", trap["id"])
+        assert "TRAP" not in trap["id"] + trap["probe"]
+
+
+def test_mb1r_trap_fixture_digits_match_class_and_id(material):
+    for trap in read(material, "traps.json"):
+        cls, name = trap["probe"].removeprefix("What is the current ").split(" for fixture ")
+        c, k = name.removesuffix("?").rsplit("-", 2)[1:]
+        assert int(c) == gen.CLASSES.index(cls.replace(" ", "_"))
+        assert 5 <= int(k) <= 9
+        assert trap["id"] == f"S1-F{c}-{k}"
+
+
+def test_mb1r_fact_shaped_traps_keep_scoring_metadata(material):
+    traps = {t["id"]: t for t in read(material, "traps.json")}
+    probes = [json.loads(line) for line in (material / "probes.jsonl").read_text().splitlines()]
+    for probe in probes:
+        if probe["id"] in traps:
+            assert re.fullmatch(r"S1-F\d{2}-[5-9]", probe["id"])
+            assert probe["kind"] == "trap" and probe["expect"] == "ABSTAIN"
+            assert traps[probe["id"]]["answer"] == "ABSTAIN"
+            assert scorer._is_trap(probe)
+            assert not scorer._is_trap(dict(probe, kind="canary"))
+        else:
+            assert probe["kind"] == "canary" and probe["expect"] == "value"
+            assert not scorer._is_trap(probe)
+    test_probe_format_scores_without_scorer_changes(material)
+
+
+def test_n9_stale_row_links_fixture_before_unique_current_value(material):
+    rows = transcript_rows(material)
+    for fact in read(material, "facts.json"):
+        if not fact["stale"]:
+            continue
+        old = fact["stale_source"]["row_index"]
+        assert rows[old]["content"] == (
+            f"[{fact['id']}-OLD; fixture {fact['fixture']}] Initial choice: {fact['stale']}.")
+        assert old < fact["row_index"]
+        assert sum(r["content"].count(fact["value"]) for r in rows) == 1
+        assert fact["value"] in rows[fact["row_index"]]["content"]
 
 
 @pytest.mark.parametrize("seed", [1, 2, 3, 17])
@@ -262,12 +306,12 @@ def test_mb2_answers_have_independent_payload_tokens(tmp_path, seed):
         assert row["content"].count(fact["value"]) == 1
         assert row["content"][fact["char_offset"]:fact["char_offset"] + len(fact["value"])] == fact["value"]
         assert nonce in row["content"].split("]", 1)[0]
-        assert sum(r["content"].count(nonce) for r in rows) == 1
+        assert sum(r["content"].count(nonce) for r in rows) == (2 if fact["stale"] else 1)
         assert not any(fact["value"] in r["content"] for r in rows[fact["row_index"] + 1:])
     assert verifier.verify(tmp_path)["status"] == "PASS"
 
 
-@pytest.mark.parametrize("version", [None, "track-s-v1"])
+@pytest.mark.parametrize("version", [None, "track-s-v1", "track-s-v2"])
 def test_v1_verifier_rejects_old_material_version(material, version):
     manifest = read(material, "material.manifest.json")
     if version is None:

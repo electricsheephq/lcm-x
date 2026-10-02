@@ -31,17 +31,19 @@ The defaults `--turns 35 --tokens-per-turn 17000` apply to these commands.
 `--min-events` plans opportunities and ancestry receipt requirements; it does
 not prove runtime events. The smoke's forced-event suffix is wiring only.
 
-New manifests identify `material_version: track-s-v2`. Answer payloads use a
+New manifests identify `material_version: track-s-v3`. Answer payloads use a
 separate seeded value stream, independent of fixture identifiers and sibling
 answers; fixed class wording (such as `MiB` and `because`) retains its shape.
 Traps use canary wording and nonce-shaped identifiers from their own seeded
 stream, cover five distinct classes, and never appear in the transcript.
+Trap ids and fixture names share their class index and slot (5–9); scoring uses
+explicit trap metadata. Stale and current rows both name their fixture.
 The verifier requires this material version, exact call metadata and turn/batch
 projections, and two head, one middle, and two tail facts per class.
 Material at `6748ed97` has the prior v2 answers and traps; do not mix its answer
-keys or run receipts with regenerated material. Material at `5f66cf10` remains
+keys or run receipts with regenerated v3 material. Material at `5f66cf10` remains
 reproducible using that revision and the explicit flags above; do not mix its
-answer keys or run receipts with regenerated v2 material.
+answer keys or run receipts with regenerated v3 material.
 
 Track S `transcript.jsonl` is the full replay source. Its `turns.jsonl` projection
 now retains `id`, `role`, `tool_call_id`, and `tool_calls` alongside `turn` and
