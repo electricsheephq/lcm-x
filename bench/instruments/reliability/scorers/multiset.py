@@ -35,15 +35,20 @@ def licence(key: tuple, surplus: int, expected: int, host: dict | None, store_id
         if n > 0 else None
 
 
+COVER_STEPS = 20000  # #804: expansion budget for one composite; real composites take a few dozen
+
+
 def licensed_parts(text: str, licences: dict, times: int) -> dict | None:
     """#804: split a held user composite at its "\n\n" joins into >= 2 parts that are each a host-licensed user key in
     this lineage, with ``times`` licences per use still available; returns {key: uses} or None. The host merges
     consecutive user turns as R + "\n\n" + U, so only those joins are cut points; each part uses the same edge-strip
-    key rule. Capacity is checked while searching, so a cover that over-spends a licence never hides a valid one."""
+    key rule. Capacity is checked while searching, so a cover that over-spends a licence never hides a valid one.
+    The search is fail-closed: past ``COVER_STEPS`` expansions it gives up and the composite stays a deficit."""
     starts = [0] + [i + 2 for i in range(len(text) - 1) if text.startswith("\n\n", i)]
     ends = [s - 2 for s in starts[1:]] + [len(text)]
     keys: dict[tuple, tuple] = {}
     failed: set = set()
+    steps = [COVER_STEPS]
 
     def key_of(k: int, j: int) -> tuple:
         if (k, j) not in keys:
@@ -51,9 +56,10 @@ def licensed_parts(text: str, licences: dict, times: int) -> dict | None:
         return keys[(k, j)]
 
     def cover(k: int, used: Counter) -> list | None:  # parts covering text[starts[k]:] within the licences left
-        state = (k, tuple(sorted(used.items())))
-        if state in failed:
+        state = (k, tuple(sorted((key, n) for key, n in used.items() if n)))
+        if state in failed or steps[0] <= 0:
             return None
+        steps[0] -= 1
         for j in range(k, len(ends)):
             key = key_of(k, j)
             if key not in licences or licences[key]["licensed"] < (used[key] + 1) * times:

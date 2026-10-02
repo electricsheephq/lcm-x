@@ -817,6 +817,19 @@ def test_b2_composite_cover_respects_licence_capacity_while_searching():
     assert multiset.licensed_parts(a + "\n\n" + b, {("user", multiset.h(a)): {"licensed": 1}}, 1) is None
 
 
+def test_b2_composite_cover_is_fail_closed_on_a_pathological_input():
+    """70 paragraphs, every single and adjacent pair licensed, and an unlicensed tail: the budget ends the search
+    quickly and the composite stays a deficit."""
+    import time
+    from bench.instruments.reliability.scorers import multiset
+    paras = [f"paragraph {i}" for i in range(70)]
+    lic = {("user", multiset.h(p)): {"licensed": 1} for p in paras}
+    lic.update({("user", multiset.h(a + "\n\n" + b)): {"licensed": 1} for a, b in zip(paras, paras[1:])})
+    started = time.monotonic()
+    assert multiset.licensed_parts("\n\n".join(paras + ["unlicensed tail"]), lic, 1) is None
+    assert time.monotonic() - started < 10
+
+
 def test_b2_held_composite_parts_in_another_lineage_do_not_cover_it(tmp_path):
     out = _held_composite(tmp_path, parts_sid="cron_job_01")
     b2 = out["numbers"]["B2"]
