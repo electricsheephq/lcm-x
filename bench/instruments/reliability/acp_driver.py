@@ -80,6 +80,7 @@ class AcpProcess:
         self.selector.register(self.process.stdout, selectors.EVENT_READ)
         self.buffer, self.pending = bytearray(), []
         self.next_id, self.write_lock, self.killed = 1, threading.Lock(), False
+        self.sent_term = False  # close() sent SIGTERM to a still-running host (a -SIGTERM exit is then ours)
 
     def _write(self, payload: dict) -> None:
         data = frame(payload)
@@ -156,6 +157,7 @@ class AcpProcess:
         if self.process.poll() is None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(self.pid, signal.SIGTERM)
+                self.sent_term = True
             try:
                 self.process.wait(timeout=SHUTDOWN_SECONDS)
             except subprocess.TimeoutExpired:

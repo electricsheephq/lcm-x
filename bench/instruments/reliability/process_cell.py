@@ -46,10 +46,11 @@ GATEWAY_ANCHORS = {
 }
 
 
-def graceful_exit(returncode: int | None, killed: bool) -> bool:
-    """A clean host stop: it exited on stdin EOF (0) or on the harness's own SIGTERM within the shutdown grace
-    (-SIGTERM, how a service manager stops a gateway). A SIGKILL escalation or any other code is not clean."""
-    return not killed and returncode in (0, -signal.SIGTERM)
+def graceful_exit(returncode: int | None, killed: bool, sent_term: bool) -> bool:
+    """A clean host stop: it exited on stdin EOF (0), or on the SIGTERM close() itself sent to the still-running host
+    within the shutdown grace (-SIGTERM, how a service manager stops a gateway). A SIGKILL escalation, a SIGTERM from
+    anywhere else (the host had already ended before close()) or any other code is not clean."""
+    return not killed and (returncode == 0 or (returncode == -signal.SIGTERM and sent_term))
 
 def gateway_unsupported(src: str) -> str:
     c = cite_all(src, GATEWAY_ANCHORS)
@@ -341,7 +342,7 @@ class ProcessCell:
                 if clean and t == clean.get("turn") and t != first and "clean_exit_before_turn" not in self.fired:
                     rc = self.proc.close()
                     closed = True
-                    if not graceful_exit(rc, self.proc.killed):
+                    if not graceful_exit(rc, self.proc.killed, getattr(self.proc, "sent_term", False)):
                         return {"exit": "error", "reason": f"clean exit failed: returncode={rc}, killed={self.proc.killed}"}
                     self.fire("clean_exit_before_turn", t)  # recorded only after a graceful host exit
                     return {"exit": "clean_exit", "next_turn": t}

@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import http.client
 import json
-import socket
+import os
 import signal
+import socket
 import subprocess
 import sys
 import textwrap
@@ -680,10 +681,18 @@ def test_a_clean_exit_is_eof_or_the_harness_sigterm_never_a_kill_or_an_error_cod
     proc = AD.AcpProcess([sys.executable, "-c", "import time; time.sleep(30)"], {"PATH": "/usr/bin:/bin"}, tmp_path,
                          tmp_path / "stderr.log")
     rc = proc.close()
-    assert rc == -signal.SIGTERM and not proc.killed and PC.graceful_exit(rc, proc.killed)
-    assert PC.graceful_exit(0, False)
-    assert not PC.graceful_exit(-signal.SIGKILL, True) and not PC.graceful_exit(-signal.SIGTERM, True)
-    assert not PC.graceful_exit(1, False) and not PC.graceful_exit(None, False)
+    assert rc == -signal.SIGTERM and proc.sent_term and not proc.killed and PC.graceful_exit(rc, proc.killed, True)
+    # Delta review round 4: a SIGTERM from elsewhere, before close(), is not the planned clean exit.
+    other = AD.AcpProcess([sys.executable, "-c", "import time; time.sleep(30)"], {"PATH": "/usr/bin:/bin"}, tmp_path,
+                          tmp_path / "stderr2.log")
+    os.kill(other.pid, signal.SIGTERM)
+    other.process.wait(timeout=10)
+    rc = other.close()
+    assert rc == -signal.SIGTERM and not other.sent_term and not other.killed
+    assert not PC.graceful_exit(rc, other.killed, other.sent_term)
+    assert PC.graceful_exit(0, False, False) and PC.graceful_exit(0, False, True)
+    assert not PC.graceful_exit(-signal.SIGKILL, True, True) and not PC.graceful_exit(-signal.SIGTERM, True, True)
+    assert not PC.graceful_exit(1, False, True) and not PC.graceful_exit(None, False, True)
 
 
 def test_drain_fixture_b_rotation_crosses_on_the_clean_exit_not_a_rotation(tmp_path):
