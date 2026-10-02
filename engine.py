@@ -149,7 +149,7 @@ from .reconcile import _emission_identity
 from .reconcile import _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
 from .compaction import CompactionMixin
 from .identity_anchor import IdentityAnchorMixin, _raw_remainder, identity_anchor_enabled
-from .store_complete import StoreCompleteMixin
+from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice
 from .db_bootstrap import refresh_legacy_conversation_ids
 from .reset_state import ResetStateMixin
@@ -716,8 +716,11 @@ class LCMEngine(
         self._sweep_budget_hold_until: float = 0.0
         self._sweep_budget_hold_conversation = ""
         # #651: (monotonic until, reason) after an automatic threshold pass made no progress or
-        # the host refused one. Like the #608 hold, only its time or a stored leaf ends it.
+        # the host refused one. #597: a progress refusal also ends at turn end.
         self._no_progress_hold: Optional[tuple[float, str]] = None
+        self._last_compress_leaves: Optional[tuple[str, int]] = None  # #597: latest call, bound conversation
+        self._last_hidden_backlog: Optional[HiddenBacklog] = None  # #597: latest check in this compress()
+        self._hidden_backlog_unknown_warned: set[str] = set()
         # #618: one-shot from compress(): a hold is active at the survival ceiling, so the pass only fits.
         self._hold_fit_only_requested = False
         self._no_progress_candidate = False  # set by _compress_impl for compress()
@@ -1679,10 +1682,14 @@ class LCMEngine(
         return False
 
     def _start_no_progress_hold(self, reason: str) -> None:
-        """#651: hold automatic threshold passes across turns, like the #608 hold: only its time or a stored leaf
-        ends it."""
+        """#651: hold automatic threshold passes until its time or a stored leaf; #597 progress refusals
+        also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
-        logger.info("LCM automatic compaction held for %.0fs: %s", _SWEEP_BUDGET_HOLD_SECONDS, reason)
+        if reason == "host_rejected_progress":
+            logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
+                        _SWEEP_BUDGET_HOLD_SECONDS, reason)
+        else:
+            logger.info("LCM automatic compaction held for %.0fs: %s", _SWEEP_BUDGET_HOLD_SECONDS, reason)
 
     def _no_progress_hold_active(self) -> bool:
         """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
@@ -1701,11 +1708,29 @@ class LCMEngine(
 
     def record_rejected_compaction(self) -> None:
         """#651 host breaker hook: the host refused the last compaction (the result would be larger). Called
-        without arguments inside an error-swallowing wrapper; a rejection counts as no progress. #665: a refusal
-        of a bypassed (auxiliary or stateless) session never holds the foreground's automatic compaction."""
+        without arguments inside an error-swallowing wrapper. #665: a refusal of a bypassed (auxiliary or
+        stateless) session never holds the foreground's automatic compaction.
+
+        #597: a host_rejected_progress hold lets at most one compaction per turn through; each such pass
+        either stores >=1 leaf from a finite backlog or arms no_progress / host_rejected (600 s) as today.
+        Progress refusals hold until turn end, with the same 600 s backstop if no turn end arrives."""
         if self._bypasses_lcm_context_management():
             return
-        self._start_no_progress_hold("host_rejected")
+        leaves = self._last_compress_leaves
+        progress = leaves is not None and leaves[0] == self._hold_conversation_key() and leaves[1] >= 1
+        self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
+
+    def note_turn_complete(self) -> None:
+        """#597: end only a progress-refusal hold, and only at the end of a foreground turn of this engine (never a
+        bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
+        try:
+            hold = self._no_progress_hold
+            if (hold is not None and hold[1] == "host_rejected_progress"
+                    and not self._bypasses_lcm_context_management()):
+                self._no_progress_hold = None
+                logger.info("LCM automatic compaction hold ended at turn end: host_rejected_progress")
+        except Exception:
+            pass  # a notification must never break a completed turn
 
     def _automatic_compression_blocked(self, *, ignore_cooldown: bool = False) -> bool:
         """#651 host breaker gate, read on the type before every automatic compress. A host recovery attempt
