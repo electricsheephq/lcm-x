@@ -16,7 +16,9 @@ FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "cras
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
     7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
-    553: (("B1", "B2", "B3", "B4"), ""), 561: (("B1", "B2"), ""), 563: (("B4",), ""),
+    # B5/B8 are downstream of #553 duplication in acp-history rotation (eva-0.21.5 vs customer-0.21.2,
+    # nightly aa84e61d); re-check when #553 is fixed.
+    553: (("B1", "B2", "B3", "B4", "B5", "B8"), ""), 561: (("B1", "B2"), ""), 563: (("B4",), ""),
     463: (("B7",), "Desktop/tui_gateway transport, >12k externalised user rows"),
     420: (("B4", "B5"), ""), 489: (("B1", "B2", "B4"), ""), 493: (("B1", "B2"), ""),
     496: (("B1", "B2"), "real gateway process with message timestamps rendered (gateway.message_timestamps.enabled)"),

@@ -376,7 +376,8 @@ def full_set(transport=None, **over):
 
 
 def test_ci_gate_fails_on_error_and_on_untracked_g_rel_1_fail():
-    rows = full_set(**{"crash-after-rotation/rotation": {"verdict": "FAIL", "targets": [519, 549]},
+    rows = full_set(**{"crash-after-rotation/rotation": {"verdict": "FAIL", "targets": [519, 549],
+                                                      "failed_bars": {"B1": {}}},
                        "multi-session-one-process/in-place": {"verdict": "FAIL"},
                        "baseline/in-place/acp": {"verdict": "INCONCLUSIVE"}})
     assert ci.gate(rows, {549}) == []  # an open targeted issue, a cell outside G-REL-1, a non-FAIL
@@ -385,6 +386,44 @@ def test_ci_gate_fails_on_error_and_on_untracked_g_rel_1_fail():
     assert len(ci.gate(err, {549})) == 1
     assert len(ci.gate(full_set(**{"baseline/rotation/acp": {"verdict": "FAIL"}}), {549})) == 1
     assert all(h["sha"] and h["python_version"] for h in json.loads(ci.CI_HOSTS.read_text())["hosts"].values())
+
+
+@pytest.mark.parametrize("failed_bars,targets,open_issues,uncovered", [
+    ({"B1": {}, "B8": {}}, [7], {7}, ["B8"]),
+    ({"B1": {}, "B2": {}}, [7], {7}, []),
+    ({"B1": {}, "B8": {}}, [7, 582], {7, 582}, []),
+    ({"B1": {}}, [7, 582], {582}, ["B1"]),
+    ({}, [7], {7}, None),
+    (None, [7], {7}, None),
+    ({"B1": {}}, [483], {483}, ["B1"]),
+])
+def test_ci_gate_per_bar_exemptions(failed_bars, targets, open_issues, uncovered):
+    row = {"verdict": "FAIL", "targets": targets}
+    if failed_bars is not None:
+        row["failed_bars"] = failed_bars
+    problems = ci.gate(full_set(**{"baseline/in-place/acp": row}), open_issues)
+    if uncovered == []:
+        assert problems == []
+    else:
+        assert len(problems) == 1 and "G-REL-1" in problems[0]
+        if uncovered is None:
+            assert "empty or missing failed_bars" in problems[0]
+        else:
+            assert f"uncovered bars {uncovered}" in problems[0]
+        assert f"targets {sorted(targets)}" in problems[0]
+        assert f"open targets {sorted(set(targets) & open_issues)}" in problems[0]
+
+
+def test_ci_gate_per_bar_nightly_553_replay(monkeypatch):
+    # Gate-read fields only, copied from nightly aa84e61d's eva acp-process rotation row.
+    row = {"verdict": "FAIL", "host": "eva-0.21.5", "cell": "crash-after-compaction/rotation/acp-history",
+           "transport": "acp-process", "targets": [553, 561],
+           "failed_bars": {bar: {} for bar in ("B1", "B2", "B3", "B8", "B4", "B5")}}
+    rows = [{**r, "host": row["host"]} for r in full_set(row["transport"], **{row["cell"]: row})]
+    assert ci.gate(rows, {553}) == []
+    monkeypatch.setitem(cells.ISSUES, 553, (("B1", "B2", "B3", "B4"), ""))
+    problems = ci.gate(rows, {553})
+    assert len(problems) == 1 and "uncovered bars ['B5', 'B8']" in problems[0]
 
 
 def test_unverified_host_never_executes_its_interpreter(tmp_path):
