@@ -25,8 +25,8 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
   - R1-M: `scripts/lcm_longmemeval.py` imports the product from its own checkout, so R1-M measures the instrument
     commit's product tree. R1-S / R1-L: record the tree the bridge loads.
   - Recall-path identity: `git diff --stat e36ae9c8 <measured sha>` over the product files is recorded, and the recall
-    path (`tools.py`, `retrieval_core.py`, `search_query.py`, `adaptive_retrieval.py`, `store.py`, `vector_store.py`)
-    must be byte-identical to v0.24.9. If it is, the row is
+    path (`tools.py`, `retrieval_core.py`, `search_query.py`, `adaptive_retrieval.py`, `store.py`, `vector_store.py`,
+    `dag.py` for summary full-text search, `db_bootstrap.py` for full-text setup) must be byte-identical to v0.24.9. If it is, the row is
     labelled "v0.24.9 recall path at <sha>"; if not, it is labelled with the measured sha only and the diff is listed.
 - Instruments: the lcm-x commit holding the `--embeddings` arm (#811's merge or later); the memorybench commit holding
   `HERMES_MB_EMBEDDINGS` and `scripts/run-with-watchdog.sh` (`b47f92f7` or later on `feat/locomo-hermes-prep`); blob
