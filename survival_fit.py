@@ -429,7 +429,7 @@ class SurvivalFitMixin:
 
     def _survival_record(self, reason, count, ids, before, after, budget, projected, notice, *, shortened=True,
                          warn_user=True) -> None:
-        """Loud: a WARNING line, the doctor counter (metadata only) and one user warning per conversation."""
+        """Log the fit, update the doctor counter and warn the user once per conversation."""
         uncovered = 0
         if reason.startswith("exit_fit:"):
             try:  # a diagnostic: its failure never fails the fit
@@ -438,7 +438,8 @@ class SurvivalFitMixin:
                 logger.debug("LCM exit fit: the uncovered-row count failed", exc_info=True)
                 uncovered = None
         if shortened:
-            logger.warning(
+            logger.log(
+                logging.INFO if reason.startswith("exit_fit:") else logging.WARNING,
                 "LCM survival fit applied (reason=%s, conversation=%s, dropped_rows=%d, store_ids=%s..%s, "
                 "uncovered_rows=%s, projected=%s, tokens=%d->%d, budget=%d)",
                 reason, self._conversation_id or self._session_id, count, ids[0] if ids else "-", ids[-1] if ids else "-",
