@@ -33,6 +33,7 @@ ISSUES = {
     559: (("B6", "B4"), ""), 566: (("B1", "B2", "B5"), ""),  # B5: a cross-lineage summary is recorded only there
     581: (("B3", "B4"), ""), 582: (("B8",), ""),  # native-on-off: every candidate event after the plugin switch
     597: (("D1", "D2"), ""), 626: (("D3",), ""),  # drain/hidden-backlog: data cells (ci.NON_GATE)
+    821: (("B1", "B3", "B4", "B5", "B8"), "r34.4 host: held composite vs durable parts after a crash on rotation"),
 }
 
 
@@ -151,7 +152,7 @@ def registry() -> list[dict]:
         cell("window-1m/in-place", [], in_place=True, window=1000000, turns=60,
              doc="1M window through engine.update_model; tight tuning and text volume scaled x15.6 from the 64k probes, "
                  "so LCM's threshold math runs at 1M (threshold 500k tokens, ~36k tokens per turn)."),
-        cell("crash-after-rotation/rotation", [519, 549], in_place=False, user={"trailing_ws": True},
+        cell("crash-after-rotation/rotation", [519, 549, 821], in_place=False, user={"trailing_ws": True},
              faults=[{"kind": "crash_after_rotation_before_child_row"}],
              doc="os._exit right after the engine's rotation on_session_start, before any child row (#519/#549)."),
         cell("crash-between-end-and-start/rotation", [489], in_place=False,
