@@ -855,7 +855,8 @@ def test_b2_held_composite_pairs_only_the_occurrences_the_host_did_not_store_who
     a, b = "alpha part", "beta part"
     c = a + "\n\n" + b
     rows = [(1, "S0", "user", c), (2, "S0", "user", a), (3, "S0", "user", b)]
-    host = lambda n: {("user", multiset.h(x)): {"n": k, "ids": [x]} for x, k in ((a, 1), (b, 1), (c, n))}
+    def host(n):
+        return {("user", multiset.h(x)): {"n": k, "ids": [x]} for x, k in ((a, 1), (b, 1), (c, n))}
     for held, verdict in ((0, "PASS"), (1, "PASS"), (2, "FAIL")):
         out = multiset.score([("user", c), ("user", c)], rows, host(held))
         assert out["verdict"] == verdict, (held, out)

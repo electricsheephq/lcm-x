@@ -33,7 +33,8 @@ ISSUES = {
     559: (("B6", "B4"), ""), 566: (("B1", "B2", "B5"), ""),  # B5: a cross-lineage summary is recorded only there
     581: (("B3", "B4"), ""), 582: (("B8",), ""),  # native-on-off: every candidate event after the plugin switch
     597: (("D1", "D2"), ""), 626: (("D3",), ""),  # drain/hidden-backlog: data cells (ci.NON_GATE)
-    821: (("B1", "B3", "B4", "B5", "B8"), "r34.4 host: held composite vs durable parts after a crash on rotation"),
+    # r34.4 rotation: the host keeps a held composite AND its parts active in one session; LCM stores the parts only
+    821: (("B1", "B2", "B3", "B4", "B5", "B8"), "r34.4 host: held composite vs durable parts after a crash on rotation"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
 ISSUE_HOSTS = {821: ("r34.4-",)}
@@ -73,7 +74,7 @@ def registry() -> list[dict]:
             cell(f"repeat-identical-replies/{m}", [503], in_place=ip,
                  assistant={"mode": "repeat-identical", "repeat_turns": list(range(3, 61, 3))},
                  doc="Byte-identical replies on every third turn: only the multiset bar (B2) can see duplicates."),
-            cell(f"crash-then-lcm-tool-in-merge-turn/{m}", [553, 563], in_place=ip, faults=[crash],
+            cell(f"crash-then-lcm-tool-in-merge-turn/{m}", [553, 563] + ([] if ip else [821]), in_place=ip, faults=[crash],
                  tool_plan=[{"turns": "restart", "calls": [{"name": "lcm_status", "args": {}}]}],
                  doc="#553 S1: crash after a preflight compaction; the merge turn dispatches a real LCM tool call."),
             cell(f"gateway-second-restart/{m}", [546, 547], in_place=ip, transport="gateway",
@@ -125,7 +126,7 @@ def registry() -> list[dict]:
                               "Turns 151-180 run at the tight threshold with full-size prompts on the empty restored "
                               "list. D4 counts the phase-2 compactions with out == in (the plateau)."))
         for tr in ("acp-history", "gateway-reload"):
-            cells.append(cell(f"crash-after-compaction/{m}/{tr}", [553, 561], in_place=ip,
+            cells.append(cell(f"crash-after-compaction/{m}/{tr}", [553, 561] + ([] if ip else [821]), in_place=ip,
                               transport="acp" if tr == "acp-history" else "gateway", faults=[crash],
                               doc="#553: os._exit inside the provider call of the first turn whose preflight compaction "
                                   "committed; the restart restores the dangling row and the next prompt merges into it."))
@@ -157,7 +158,7 @@ def registry() -> list[dict]:
         cell("crash-after-rotation/rotation", [519, 549, 821], in_place=False, user={"trailing_ws": True},
              faults=[{"kind": "crash_after_rotation_before_child_row"}],
              doc="os._exit right after the engine's rotation on_session_start, before any child row (#519/#549)."),
-        cell("crash-between-end-and-start/rotation", [489], in_place=False,
+        cell("crash-between-end-and-start/rotation", [489, 821], in_place=False,
              faults=[{"kind": "crash_between_session_end_and_start"}],
              doc="os._exit between on_session_end and on_session_start of a rotation (#489). UNSUPPORTED where the "
                  "host's rotation path never calls on_session_end."),
