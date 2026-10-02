@@ -69,14 +69,14 @@ def test_progress_in_another_conversation_does_not_shorten_hold(engine):
     assert engine._automatic_compression_blocked()
 
 
-def test_turn_end_of_another_conversation_keeps_the_hold(engine):
+def test_same_session_conversation_rebind_turn_end_ends_the_hold(engine):
+    """A same-session rebind keeps the engine's hold (only counters reset); the rebound conversation's turn end
+    still ends it, so the new conversation is not held for the 600 s backstop."""
     engine.compress(_view(), current_tokens=1_000)
     engine.record_rejected_compaction()
     assert engine._no_progress_hold_status()["reason"] == "host_rejected_progress"
-    engine._conversation_id = "B"
-    engine.note_turn_complete()
+    engine.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="B")
     assert engine._automatic_compression_blocked()
-    engine._conversation_id = "conv"
     engine.note_turn_complete()
     assert not engine._automatic_compression_blocked()
 
