@@ -1269,7 +1269,13 @@ corpus).** `LCM_EMBEDDING_BINARY_PRESCREEN` growing a companion sign-bit table
 means a prescreen corpus must never be read as if it were a legacy
 binary-free float32 corpus. Flipping the flag on an already-populated float32
 identity therefore mints a **new, distinct profile identity** (folded into the
-identity hash) rather than adding sign-bits to the existing one in place. As a
+identity hash) rather than adding sign-bits to the existing one in place. For cloud
+providers, the new revision is the privacy revision with a `+binprescreen` suffix;
+the new identity starts empty, so semantic recall reports no vector coverage until
+`/lcm embed backfill --corpus both --apply` re-embeds both the summary and chunk
+corpora through the provider (provider charges apply). Turning the flag off and
+re-running warmup reactivates the original
+identity without re-embedding. As a
 second, independent guard, the two-stage path only engages when the sign-bit
 table is a **complete** mirror of the vector table for that identity — every
 stored vector has a matching sign-bit row. If the two tables disagree (a

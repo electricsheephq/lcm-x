@@ -89,7 +89,7 @@ from .embedding_provider import (
     resolve_provider,
 )
 from .tokens import count_tokens
-from .vector_store import EmbeddingIdentity, EmbeddingPublishOutcome, VectorStore
+from .vector_store import EmbeddingIdentity, EmbeddingPublishOutcome, VectorStore, strip_prescreen_revision
 
 
 _EMBEDDING_BACKFILL_CLAIM_KEY = "lcm_embedding_backfill_claim"
@@ -4091,7 +4091,7 @@ def _embedding_backfill_summary_text(
         identity = str(profile["identity_hash"])
         model = str(profile["model_name"])
         provider_name = str(profile["provider"])
-        profile_revision = str(profile["revision"] or "")
+        profile_revision = strip_prescreen_revision(str(profile["revision"] or ""))
         profile_dtype = str(profile["dtype"] or "float32")
         if expected_dtype is not None and expected_dtype != profile_dtype:
             return "\n".join([
@@ -4900,7 +4900,7 @@ def _chunk_backfill_text(
             identity = str(profile["identity_hash"])
             model = str(profile["model_name"])
             provider_name = str(profile["provider"])
-            profile_revision = str(profile["revision"] or "")
+            profile_revision = strip_prescreen_revision(str(profile["revision"] or ""))
             profile_dim = int(profile["dim"])
             profile_dtype = str(profile["dtype"] or "float32")
         else:
