@@ -24,7 +24,7 @@ drains over later passes (never past a row the scan did not read).
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from .ingest_protection import quarantine_suspicious_assistant_messages
 from .message_analysis import _tool_call_id
@@ -34,6 +34,16 @@ logger = logging.getLogger(__name__)
 
 _SCAN_LIMIT = 2000  # owned rows per source page; a larger eligible backlog drains over later passes
 _SCAN_EXTEND = 4  # a first tool group open at the cap is re-read once with this many times the page
+
+
+class HiddenBacklog(NamedTuple):
+    """#597: bounded scan count; truthiness preserves the existing scheduling decision."""
+
+    rows: int
+    truncated: bool
+
+    def __bool__(self) -> bool:
+        return self.rows > 0
 
 
 class StoreCompleteMixin:
@@ -97,28 +107,50 @@ class StoreCompleteMixin:
         )
         return self._redact_active_replay_messages(messages)
 
-    def _store_complete_backlog(self, working, leading: int) -> bool:
+    def _hidden_backlog_label(self) -> int | str | None:
+        """#597: None means not evaluated; a capped empty scan cannot prove zero backlog."""
+        result = self._last_hidden_backlog
+        if result is None:
+            return None
+        if not result.truncated:
+            return result.rows
+        return f"{result.rows}+" if result.rows else "unknown"
+
+    def _hidden_backlog_status(self) -> dict:
+        label = self._hidden_backlog_label()
+        return {"hidden_rows": label} if label is not None else {}
+
+    def _store_complete_backlog(self, working, leading: int) -> HiddenBacklog:
         """#581: no host raw chunk, but owned rows the view does not show wait above the frontier and
         below the first retained row: a hidden-only leaf is scheduled instead of a no-op."""
         from .identity_anchor import identity_anchor_enabled
 
+        self._last_hidden_backlog = HiddenBacklog(0, False)
         if not identity_anchor_enabled() or not self._session_id or not self._conversation_id:
-            return False
+            return self._last_hidden_backlog
         full_map = self._get_store_id_map_for_messages(working[leading:])
         frontier = self._store_complete_frontier()
         mapped = set(full_map.values()) | set(self._get_store_ids_for_messages(working[:leading]) if leading else ())
         end = min((store_id - 1 for store_id in mapped if store_id > frontier), default=None)
         if end is not None and end <= frontier:
-            return False
-        rows, _truncated = self._store_complete_owned_rows(frontier, end, self._load_compression_carry_ranges())
+            return self._last_hidden_backlog
+        rows, truncated = self._store_complete_owned_rows(frontier, end, self._load_compression_carry_ranges())
         conversation = {"", str(self._conversation_id or "")}
         loose = [int(row["store_id"]) for row in rows if int(row["store_id"]) not in mapped and row.get("role") != "system"
                  and str(row.get("conversation_id") or "").strip() in conversation
                  and not self._matches_ignore_message_patterns(row, stored_row=True)]
-        if not set(loose) - self._store_complete_node_covered(loose):
-            return False
-        self._current_compress_store_ids_by_message_id = full_map
-        return True
+        result = self._last_hidden_backlog = HiddenBacklog(
+            len(set(loose) - self._store_complete_node_covered(loose)), truncated)
+        if result:
+            self._current_compress_store_ids_by_message_id = full_map
+        elif truncated:
+            key = self._hold_conversation_key()
+            if key not in self._hidden_backlog_unknown_warned:
+                self._hidden_backlog_unknown_warned.add(key)
+                last = max((int(row["store_id"]) for row in rows), default=frontier)
+                logger.warning("LCM hidden backlog conversation=%s frontier=%d last_store_id=%d: backlog beyond "
+                               "that point is unknown; pass scheduled as drained", key, frontier, last)
+        return result
 
     def _store_complete_input(self, chunk, claims, full_map, view, raw_chunk, frontier, carry, budget,
                               accounted_ids=(), scale: int = 1, scanned=None) -> Optional[list]:

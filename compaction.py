@@ -556,6 +556,8 @@ class CompactionMixin:
                  bypass_cooldown: bool = False) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
+        self._last_compress_leaves = None
+        self._last_hidden_backlog = None
         self._compress_forced_overflow = False
         budget = self._foreground_budget = self._new_foreground_budget()  # #605 K1: the clock starts here
         returned = None
@@ -634,6 +636,7 @@ class CompactionMixin:
                     return fitted
             raise
         finally:
+            self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
             self._compress_forced_overflow = False
             self._foreground_budget = None
             self._finish_foreground_budget(budget, returned)
@@ -2192,7 +2195,9 @@ class CompactionMixin:
                     self._ingest_cursor = len(sanitized_messages)
                 self._last_compression_status = "noop"
                 self._last_compression_noop_reason = noop_reason
-                logger.info("LCM compression no-op: %s", noop_reason)
+                hidden_label = self._hidden_backlog_label()
+                logger.info("LCM compression no-op: %s%s", noop_reason,
+                            f", hidden_rows={hidden_label}" if hidden_label is not None else "")
             if threshold_full_sweep_active:
                 duration_ms = (time.perf_counter() - _compress_started) * 1000.0
                 # #605: a stored pre-leaf condensation is progress, so its stop is a partial one, not a no-op.
@@ -2207,6 +2212,7 @@ class CompactionMixin:
                     "stop_reason": sweep_stop_reason or noop_reason,
                     "budget_exhausted": sweep_stop_reason
                     in {"pass_budget_exhausted", "time_budget_exhausted"},
+                    **self._hidden_backlog_status(),
                 }
             self._write_generated_ignored_placeholder_hash_counts(
                 self._generated_placeholder_digest_budget_for_active_replay(sanitized_messages)
@@ -2311,7 +2317,7 @@ class CompactionMixin:
         self._ingest_cursor_needs_reconcile = False
 
         logger.info(
-            "LCM compaction #%d: %d messages → %d (%d leaf pass%s, %d→%d tokens%s, %d DAG nodes%s%s)",
+            "LCM compaction #%d: %d messages → %d (%d leaf pass%s, %d→%d tokens%s, %d DAG nodes%s%s)%s",
             self.compression_count,
             len(messages),
             len(compressed),
@@ -2323,6 +2329,7 @@ class CompactionMixin:
             len(self._dag.get_session_nodes(self._session_id)),
             f", {level3_leaves} level 3 leaves" if level3_leaves else "",
             ", forced overflow recovery" if force_overflow else "",
+            f", hidden_rows={self._hidden_backlog_label()}" if self._last_hidden_backlog is not None else "",
         )
 
         # ── Active-context cleanup / tool-pair guardrail (same as _assemble_context) ──
@@ -2352,6 +2359,7 @@ class CompactionMixin:
                 "stop_reason": final_stop_reason,
                 "budget_exhausted": final_stop_reason
                 in {"pass_budget_exhausted", "time_budget_exhausted"},
+                **self._hidden_backlog_status(),
             }
         self._write_generated_ignored_placeholder_hash_counts(
             self._generated_placeholder_digest_budget_for_active_replay(compressed)

@@ -6,6 +6,12 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: a host refusal after a compaction stored leaves holds automatic compaction until turn end, with a
+  600 s backstop; refusals without a stored leaf keep the existing hold. (#597)
+- Change: hidden-backlog checks report `hidden_rows` as a count, a bounded count (`N+`), or `unknown` in
+  sweep status and compaction logs; a capped empty scan warns once per conversation. (#597)
+- Bench: the drain rotation scorer excludes the session-transition call from phase 2, so D1 measures
+  only post-rotation compactions; clean-exit cells are unchanged. (#597)
 - Removed native recovery (`LCM_NATIVE_RECOVERY`), which was off by default and off on every managed profile; the key is ignored if set (#777, #509). Stores written while it was on keep their adoption proofs and snapshot digests, which LCM still reads.
 
 ## v0.24.9 - 2026-10-01 (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
