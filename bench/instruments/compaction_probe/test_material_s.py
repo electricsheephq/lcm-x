@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -196,6 +197,150 @@ def test_turn_projection_preserves_replay_metadata(material):
     turns = [json.loads(line) for line in (material / "turns.jsonl").read_text().splitlines()]
     assert turns == [dict(turn=r["turn"], text=r["content"], id=r["id"], role=r["role"],
                           tool_call_id=r["tool_call_id"], tool_calls=r.get("tool_calls", [])) for r in rows]
+
+
+def rewrite_material(directory, name, payload):
+    """Reconcile the digest so a negative test exercises the semantic gate."""
+    if name.endswith(".jsonl"):
+        (directory / name).write_text("".join(json.dumps(row) + "\n" for row in payload))
+    else:
+        gen._json_write(directory / name, payload)
+    manifest = read(directory, "material.manifest.json")
+    manifest["shas"] = {n: gen._sha256(directory / n) for n in manifest["shas"]}
+    gen._json_write(directory / "material.manifest.json", manifest)
+
+
+def transcript_rows(directory):
+    return [json.loads(line) for line in (directory / "transcript.jsonl").read_text().splitlines()]
+
+
+def rewrite_transcript(directory, rows):
+    rewrite_material(directory, "transcript.jsonl", rows)
+    rewrite_material(directory, "turns.jsonl", [dict(
+        turn=r["turn"], text=r["content"], role=r["role"], id=r["id"],
+        tool_call_id=r["tool_call_id"], tool_calls=r.get("tool_calls", [])) for r in rows])
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 17])
+def test_mb1_traps_match_canary_wording_without_transcript_leaks(tmp_path, seed):
+    gen.generate(seed, tmp_path, placements=True, classes12=True, smoke=True)
+    facts, traps = read(tmp_path, "facts.json"), read(tmp_path, "traps.json")
+    classes, names = set(), set()
+    rows = transcript_rows(tmp_path)
+    for trap in traps:
+        match = re.fullmatch(r"What is the current (.+) for fixture ([a-z]+)-(-?\d+)-(\d{2})-([0-4])\?", trap["probe"])
+        assert match is not None
+        cls, word, fixture_seed, class_index, _ = match.groups()
+        assert cls.replace(" ", "_") in gen.CLASSES
+        assert word in gen.VALUE_WORDS and int(fixture_seed) == seed
+        assert 0 <= int(class_index) < len(gen.CLASSES)
+        name = trap["probe"].split("for fixture ", 1)[1][:-1]
+        classes.add(cls)
+        names.add(name)
+        assert trap["answer"] == "ABSTAIN"
+        assert all(name not in f["probe"] for f in facts)
+        assert all(name not in r["content"] and trap["probe"] not in r["content"] for r in rows)
+    assert len(classes) == len(names) == 5
+
+
+@pytest.mark.parametrize("seed", [1, 2, 3, 17])
+def test_mb2_answers_have_independent_payload_tokens(tmp_path, seed):
+    gen.generate(seed, tmp_path, placements=True, classes12=True, smoke=True)
+    facts, rows, seen = read(tmp_path, "facts.json"), transcript_rows(tmp_path), set()
+    for fact in facts:
+        nonce = fact["probe"].split("for fixture ", 1)[1][:-1]
+        for answer in (fact["answer"], fact["stale"]):
+            if answer is None:
+                continue
+            assert nonce not in answer
+            # Fixed class wording is not an answer payload (e.g. MiB, because).
+            tokens = set(re.findall(r"(?<![a-f0-9])[a-f0-9]{12,16}(?![a-f0-9])|\b\d{7,8}\b", answer))
+            assert tokens and tokens.isdisjoint(seen)
+            seen.update(tokens)
+        assert fact["stale"] != fact["answer"]
+        row = rows[fact["row_index"]]
+        assert row["content"].count(fact["value"]) == 1
+        assert row["content"][fact["char_offset"]:fact["char_offset"] + len(fact["value"])] == fact["value"]
+        assert nonce in row["content"].split("]", 1)[0]
+        assert sum(r["content"].count(nonce) for r in rows) == 1
+        assert not any(fact["value"] in r["content"] for r in rows[fact["row_index"] + 1:])
+    assert verifier.verify(tmp_path)["status"] == "PASS"
+
+
+@pytest.mark.parametrize("version", [None, "track-s-v1"])
+def test_v1_verifier_rejects_old_material_version(material, version):
+    manifest = read(material, "material.manifest.json")
+    if version is None:
+        del manifest["material_version"]
+    else:
+        manifest["material_version"] = version
+    rewrite_material(material, "material.manifest.json", manifest)
+    with pytest.raises(ValueError, match="material version mismatch"):
+        verifier.verify(material)
+
+
+@pytest.mark.parametrize("defect", ["missing", "extra", "id", "type", "name", "turn", "text", "role", "row_id", "tool_call_id", "tool_calls"])
+def test_v2_verifier_rejects_call_metadata_and_projection(material, defect):
+    rows = transcript_rows(material)
+    index = next(i - 1 for i, r in enumerate(rows) if r["role"] == "tool")
+    calls = rows[index]["tool_calls"]
+    if defect in ("missing", "extra", "id", "type", "name"):
+        if defect == "missing":
+            rows[index]["tool_calls"] = []
+        elif defect == "extra":
+            calls.append(dict(calls[0]))
+        elif defect == "name":
+            calls[0]["function"]["name"] = "other_function"
+        else:
+            calls[0][defect] = "other"
+        rewrite_transcript(material, rows)
+        expected = "tool call metadata mismatch"
+    else:
+        turns = [json.loads(line) for line in (material / "turns.jsonl").read_text().splitlines()]
+        field = "id" if defect == "row_id" else defect
+        turns[index][field] = [] if field == "tool_calls" else "divergent"
+        rewrite_material(material, "turns.jsonl", turns)
+        expected = "turn projection mismatch"
+    with pytest.raises(ValueError, match=expected):
+        verifier.verify(material)
+
+
+def test_v3_verifier_rejects_incomplete_class_placement_coverage(material):
+    rows, facts = transcript_rows(material), read(material, "facts.json")
+    fact = facts[0]
+    row = rows[fact["row_index"]]
+    line, body = row["content"].split("\n", 1)
+    row["content"] = body + line + "\n"
+    fact["placement"] = "tail"
+    fact["char_offset"] = row["content"].index(fact["value"])
+    rewrite_material(material, "facts.json", facts)
+    rewrite_material(material, "canaries.json", facts)
+    rewrite_transcript(material, rows)
+    with pytest.raises(ValueError, match="placement coverage mismatch"):
+        verifier.verify(material)
+
+
+@pytest.mark.parametrize("leak", ["name", "probe"])
+def test_v4_verifier_rejects_traps_in_transcript(material, leak):
+    rows, trap = transcript_rows(material), read(material, "traps.json")[0]
+    text = trap["probe"] if leak == "probe" else trap["probe"].split("for fixture ", 1)[1][:-1]
+    # Replace equal-length filler after all scored items; token checkpoints stay valid.
+    rows[-1]["content"] = text + rows[-1]["content"][len(text):]
+    rewrite_transcript(material, rows)
+    with pytest.raises(ValueError, match="trap leaked into transcript"):
+        verifier.verify(material)
+
+
+@pytest.mark.parametrize("defect", ["id", "text", "boundaries"])
+def test_v5_verifier_rejects_divergent_batch_metadata(material, defect):
+    batches = [json.loads(line) for line in (material / "probe_batches.jsonl").read_text().splitlines()]
+    if defect == "boundaries":
+        batches[1]["probes"].insert(0, batches[0]["probes"].pop())
+    else:
+        batches[0][defect] = "divergent"
+    rewrite_material(material, "probe_batches.jsonl", batches)
+    with pytest.raises(ValueError, match="probe batch mismatch"):
+        verifier.verify(material)
 
 
 @pytest.mark.parametrize("driver_name", ["drive_codex", "drive_hermes", "drive_hermes_acp", "drive_hermes_oneshot"])

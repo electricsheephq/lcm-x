@@ -26,6 +26,7 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
 
     rows = [json.loads(line) for line in (directory / "transcript.jsonl").read_text().splitlines()]
     facts, manifest, state = load("facts.json"), load("material.manifest.json"), load("continuation.json")
+    check(manifest.get("material_version") == _gen.MATERIAL_VERSION, "material version mismatch")
     admissions = load("admission.manifest.json")
     count = _gen.token_counter()
     counts = [count(r["content"]) for r in rows]
@@ -46,7 +47,14 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
             prev = rows[i - 1]
             check(prev["role"] == "assistant" and prev["turn"] == r["turn"] and
                   prev["tool_call_id"] == r["tool_call_id"] and r["tool_call_id"], "tool pairing")
+            calls = prev.get("tool_calls", [])
+            check(len(calls) == 1 and calls[0].get("id") == r["tool_call_id"] and
+                  calls[0].get("type") == "function" and
+                  calls[0].get("function", {}).get("name") == "read_material", "tool call metadata mismatch")
     check(Counter(f["class"] for f in facts) == Counter({c: 5 for c in _gen.CLASSES}), "12 classes x 5 required")
+    for cls in _gen.CLASSES:
+        check(Counter(f["placement"] for f in facts if f["class"] == cls) ==
+              Counter(head=2, middle=1, tail=2), f"placement coverage mismatch: {cls}")
     check(len({f["id"] for f in facts}) == 60, "60 unique fact ids required")
 
     def source(item):
@@ -120,13 +128,21 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
     check(load("canaries.json") == facts, "canary answer key mismatch")
     traps = load("traps.json")
     check(len(traps) == 5 and all(t["answer"] == "ABSTAIN" for t in traps), "trap answer mismatch")
+    for trap in traps:
+        name = trap["probe"].split("for fixture ", 1)[1].removesuffix("?")
+        check(not any(name in r["content"] or trap["probe"] in r["content"] for r in rows),
+              "trap leaked into transcript")
     expected = {f["id"]: dict(id=f["id"], kind="canary", text=f["probe"], expect="value") for f in facts}
     expected.update({t["id"]: dict(id=t["id"], kind="trap", text=t["probe"], expect="ABSTAIN") for t in traps})
     probes = lines("probes.jsonl")
     check(len(probes) == len(expected) == 65 and
           {p["id"]: p for p in probes} == expected, "probe facts/traps mismatch")
-    check([p for b in lines("probe_batches.jsonl") for p in b["probes"]] == probes,
-          "probe batch mismatch")
+    batches = [dict(id=f"S{manifest['seed']}-B{k // 10}", probes=probes[k:k + 10],
+                    text=_gen.BATCH_INSTRUCTION) for k in range(0, len(probes), 10)]
+    check(lines("probe_batches.jsonl") == batches, "probe batch mismatch")
+    check(lines("turns.jsonl") == [dict(turn=r["turn"], text=r["content"], role=r["role"], id=r["id"],
+                                       tool_call_id=r["tool_call_id"], tool_calls=r.get("tool_calls", []))
+                                   for r in rows], "turn projection mismatch")
     for name, digest in manifest["shas"].items():
         check(_gen._sha256(directory / name) == digest, f"digest mismatch: {name}")
     return dict(status="PASS", mode=manifest["mode"], rows=len(rows), tokens=total,

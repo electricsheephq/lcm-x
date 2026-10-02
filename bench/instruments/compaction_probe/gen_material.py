@@ -388,6 +388,7 @@ def token_counter():
 CLASSES = ("name", "path", "limit", "build_id", "prefix", "decision", "superseded_value",
            "error_with_fix", "pending_task", "early_user_constraint", "tool_number", "file_change")
 MATERIAL_VERSION = "track-s-v2"
+BATCH_INSTRUCTION = "Reply only as a JSON object mapping each probe id to its answer string (use I don't know for ABSTAIN)."
 SCENES = (
     "Inspection {n}: the fixture reader keeps the original row order. The dry run checked "
     "a missing cursor and returned an explicit warning. No source files were changed.\n",
@@ -411,9 +412,19 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
         raise ValueError("require turns >= 10, positive token budgets, min-events >= 2")
     count = token_counter()
     rng = random.Random(seed)
-    prefix_rng = random.Random(seed ^ 0x505245464958)
+    value_rng = random.Random(seed ^ 0x56414C554553)
+    trap_rng = random.Random(seed ^ 0x5452415053)
     rows, facts, checkpoints = [], [], []
     serial = 0
+    used_payloads = set()
+
+    def value_token(bits=48, bounds=None):
+        while True:
+            token = (str(value_rng.randrange(*bounds)) if bounds else
+                     f"{value_rng.getrandbits(bits):0{bits // 4}x}")
+            if token not in used_payloads:
+                used_payloads.add(token)
+                return token
 
     def scene(chars):
         nonlocal serial
@@ -447,17 +458,19 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
     for c, cls in enumerate(CLASSES):
         for k in range(5):
             nonce = f"{rng.choice(VALUE_WORDS)}-{seed}-{c:02d}-{k}"
-            prefix = f"{prefix_rng.getrandbits(64):016x}-" if cls == "prefix" else ""
-            values = (f"{nonce}-workspace", f"src/{nonce}/settings.toml", f"{640 + c * 5 + k} MiB",
-                      hashlib.sha256(nonce.encode()).hexdigest()[:12], prefix,
-                      f"snapshot-{nonce} over live-{nonce} because immutable input makes replay repeatable",
-                      f"snapshot-{nonce} because the mutable cache mixed cursor ownership",
-                      f"E_{nonce}: cursor missing; fixed by rebuilding the fixture index",
-                      f"verify {nonce} rollback before release", f"Never modify fixtures/{nonce}/source.json",
-                      f"rows_verified={41000 + seed * 100 + k}",
-                      f"src/{nonce}/loader.py: preserve tool_call_id in replay")
-            fact = dict(id=f"S{seed}-F{c:02d}-{k}", **{"class": cls}, value=values[c],
-                        stale=f"mutable-cache-{nonce} because it avoids snapshot writes" if c == 6 else None,
+            # Payloads never encode the fixture identifier or a sibling's value.
+            payload = value_token()
+            values = (f"{payload}-workspace", f"src/{payload}/settings.toml",
+                      f"{value_token(bounds=(1000000, 10000000))} MiB", payload,
+                      f"{value_token(bits=64)}-",
+                      f"snapshot-{payload} over live-{value_token()} because immutable input makes replay repeatable",
+                      f"snapshot-{payload} because the mutable cache mixed cursor ownership",
+                      f"E_{payload}: cursor missing; fixed by rebuilding the fixture index",
+                      f"verify {payload} rollback before release", f"Never modify fixtures/{payload}/source.json",
+                      f"rows_verified={value_token(bounds=(10000000, 100000000))}",
+                      f"src/{payload}/loader.py: preserve tool_call_id in replay")
+            fact = dict(id=f"S{seed}-F{c:02d}-{k}", fixture=nonce, **{"class": cls}, value=values[c],
+                        stale=f"mutable-cache-{value_token()} because it avoids snapshot writes" if c == 6 else None,
                         placement=("head", "head", "middle", "tail", "tail")[k],
                         probe=f"What is the current {cls.replace('_', ' ')} for fixture {nonce}?", answer=values[c])
             if fact["stale"]:
@@ -471,14 +484,14 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
             group = [f for f in facts if f["turn"] == turn and f["row_role"] == role]
             if role == "tool":
                 for f in group:
-                    line = f"[{f['id']}] Current {f['class']}: {f['value']}.\n"
+                    line = f"[{f['id']}; fixture {f['fixture']}] Current {f['class']}: {f['value']}.\n"
                     body = scene(100004 if f["class"] == "file_change" and f["placement"] == "middle" else 6000)
                     offset = {"head": 0, "middle": 3000, "tail": len(body)}[f["placement"]]
                     text = body[:offset] + line + body[offset:]
                     f.update(result(turn, text), char_offset=offset + line.index(f["value"]))
                 continue
             for f in group:
-                line = f"[{f['id']}] Current {f['class']}: {f['value']}.\n"
+                line = f"[{f['id']}; fixture {f['fixture']}] Current {f['class']}: {f['value']}.\n"
                 body = scene(4500)
                 text = line + body if f["placement"] == "head" else body + line
                 f.update(add(turn, role, text), char_offset=text.index(f["value"]))
@@ -543,13 +556,21 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
                     stale_source=f["stale_source"], required_events=min_events) for f in facts if f["stale"]]
     external = next(f for f in facts if f["class"] == "file_change" and f["placement"] == "middle")
     targets.append(dict(id=external["id"], kind="externalization", row_id=external["row_id"], row_index=external["row_index"]))
-    traps = [dict(id=f"S{seed}-TRAP{k}", probe=f"What is the {item} of the unmentioned glacier fixture?", answer="ABSTAIN")
-             for k, item in enumerate(("owner", "expiry date", "queue limit", "failed build id", "deployment prefix"))]
+    traps = []
+    used_names = {f["fixture"] for f in facts}
+    for k, cls in enumerate(trap_rng.sample(CLASSES, 5)):
+        while True:
+            name = f"{trap_rng.choice(VALUE_WORDS)}-{seed}-{trap_rng.randrange(len(CLASSES)):02d}-{trap_rng.randrange(5)}"
+            if name not in used_names:
+                break
+        used_names.add(name)
+        traps.append(dict(id=f"S{seed}-TRAP{k}",
+                          probe=f"What is the current {cls.replace('_', ' ')} for fixture {name}?", answer="ABSTAIN"))
     probes = [dict(id=f["id"], kind="canary", text=f["probe"], expect="value") for f in facts]
     probes += [dict(id=t["id"], kind="trap", text=t["probe"], expect="ABSTAIN") for t in traps]
     rng.shuffle(probes)
     batches = [dict(id=f"S{seed}-B{k // 10}", probes=probes[k:k + 10],
-                    text="Reply only as a JSON object mapping each probe id to its answer string (use I don\'t know for ABSTAIN).")
+                    text=BATCH_INSTRUCTION)
                for k in range(0, len(probes), 10)]
     manifest = dict(seed=seed, material_version=MATERIAL_VERSION,
                     mode="smoke" if smoke else "decision", tokenizer="repo-count_tokens:offline-char-estimate",
