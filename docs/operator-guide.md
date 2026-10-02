@@ -340,8 +340,14 @@ run `lcm_status` or `/lcm status` again for live per-session fields.
 
 ## Configuration
 
-Most installs only need `plugins.enabled` and `context.engine: lcm-x`. Useful
-environment variables:
+Most installs only need `plugins.enabled` and `context.engine: lcm-x`.
+
+`compression.target_ratio` and the host's other built-in-compressor ratios belong
+to the host's built-in compressor and are not read by LCM-X. LCM-X compaction
+depth is set by the leaf chunk/budget settings and bounded by
+`LCM_FOREGROUND_SOFT_SECONDS` / `LCM_FOREGROUND_HARD_SECONDS`.
+
+Useful environment variables:
 
 | Variable | Default | Use |
 |----------|---------|-----|
