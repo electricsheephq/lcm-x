@@ -212,7 +212,7 @@ def test_global_lcm_override_wins_in_both_process_phases_and_config(setup, monke
     assert all(value == "0.75" and "context_threshold: 0.75" in config for _, value, config in seen)
 
 
-@pytest.mark.parametrize("returncode,killed", [(0, False), (1, False), (-15, False), (-9, True), (0, True)])
+@pytest.mark.parametrize("returncode,killed", [(0, False), (1, False), (-15, False), (-15, True), (-9, True), (0, True)])
 def test_clean_exit_checks_close_before_mutation_or_restore(setup, monkeypatch, held, returncode, killed):
     setup.cell = {**cells.select("drain/hidden-backlog-large/in-place")[0], "turns": 2,
                   "faults": [{"kind": "clean_exit_before_turn", "turn": 2}], "final_compaction_check": False}
@@ -245,7 +245,7 @@ def test_clean_exit_checks_close_before_mutation_or_restore(setup, monkeypatch, 
                                identity={"method": "test"}, scratch_root=setup.scratch)
     d = Path(rec["dir"])
     first = json.loads((d / "phase-A.json").read_text())
-    if returncode == 0 and not killed:
+    if returncode in (0, -15) and not killed:  # EOF, or the harness's own SIGTERM within the grace (#801 CI)
         assert first["exit"] == "clean_exit" and steps == ["close", "forget", "restore", "close"]
     else:
         assert first["exit"] == "error" and "clean exit failed" in first["reason"]

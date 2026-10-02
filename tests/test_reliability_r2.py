@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import json
 import socket
+import signal
 import subprocess
 import sys
 import textwrap
@@ -671,6 +672,18 @@ def test_r1_probe_declines_every_drain_cell(tmp_path, monkeypatch, capsys, cell_
     result = json.loads(capsys.readouterr().out)
     assert result == {"exit": "unsupported",
                       "reason": "drain cells need the R2 observer's per-compaction counters (acp-process only)"}
+
+
+def test_a_clean_exit_is_eof_or_the_harness_sigterm_never_a_kill_or_an_error_code(tmp_path):
+    """#801 CI: on a slower runner the host had not exited on stdin EOF yet, so close() stopped it with SIGTERM
+    (returncode -15, not killed). That is a clean stop; a SIGKILL escalation or an error code is not."""
+    proc = AD.AcpProcess([sys.executable, "-c", "import time; time.sleep(30)"], {"PATH": "/usr/bin:/bin"}, tmp_path,
+                         tmp_path / "stderr.log")
+    rc = proc.close()
+    assert rc == -signal.SIGTERM and not proc.killed and PC.graceful_exit(rc, proc.killed)
+    assert PC.graceful_exit(0, False)
+    assert not PC.graceful_exit(-signal.SIGKILL, True) and not PC.graceful_exit(-signal.SIGTERM, True)
+    assert not PC.graceful_exit(1, False) and not PC.graceful_exit(None, False)
 
 
 def test_drain_fixture_b_rotation_crosses_on_the_clean_exit_not_a_rotation(tmp_path):

@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import time
 from pathlib import Path
@@ -44,6 +45,11 @@ GATEWAY_ANCHORS = {
     "api_server_bypass": ("gateway/platforms/api_server.py", "never passes through ``TurnRunner``"),
 }
 
+
+def graceful_exit(returncode: int | None, killed: bool) -> bool:
+    """A clean host stop: it exited on stdin EOF (0) or on the harness's own SIGTERM within the shutdown grace
+    (-SIGTERM, how a service manager stops a gateway). A SIGKILL escalation or any other code is not clean."""
+    return not killed and returncode in (0, -signal.SIGTERM)
 
 def gateway_unsupported(src: str) -> str:
     c = cite_all(src, GATEWAY_ANCHORS)
@@ -335,7 +341,7 @@ class ProcessCell:
                 if clean and t == clean.get("turn") and t != first and "clean_exit_before_turn" not in self.fired:
                     rc = self.proc.close()
                     closed = True
-                    if self.proc.killed or rc != 0:
+                    if not graceful_exit(rc, self.proc.killed):
                         return {"exit": "error", "reason": f"clean exit failed: returncode={rc}, killed={self.proc.killed}"}
                     self.fire("clean_exit_before_turn", t)  # recorded only after a graceful host exit
                     return {"exit": "clean_exit", "next_turn": t}
