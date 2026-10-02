@@ -135,12 +135,11 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line now identifies itself as
+The `main` line identifies itself as
 `hermes-lcm-x v0.24.9 (15 tools)` — drain: one foreground time budget, stub-first exit, exit fit,
-scan allowance — on top of the
-`v0.24.8` release tag, which identifies itself as `hermes-lcm-x v0.24.8 (15 tools)`.
-This is the forward bump for the next patch release, never a restamp
-of any past commit's own recorded identity (#385 fixed the earlier drift).
+scan allowance — the identity of the `v0.24.9` release tag, until the first v0.25.0 release
+candidate bumps it. An identity is never a restamp of any past commit's own recorded identity
+(#385 fixed the earlier drift).
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
 for it. The roadmap removes that wait in steps (v0.25.0 prepares leaves in the
@@ -625,7 +624,7 @@ moved back to that assistant even when doing so exceeds a configured bound.
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
 | `LCM_SUMMARY_PROMPT_VERSION` | `1` | 1 = today's prompts; 2 = the frontier prompt with the focus directives in the policy and a 3× output ceiling |
-| `LCM_NATIVE_RECOVERY` | `false` | Opt-in recovery mode: ingest sources normally, then generate a native active-context summary for the Hermes host's archive transaction, without attempting LCM publication. Retains LCM sources/recall and does not advance its frontier. Keeps sanitized user text in active replay even when its durable copy is externalized, so native summarization can read it; already-published references are not automatically expanded. Requires the host cancellation fence; failure retains context without trimming. |
+| `LCM_NATIVE_RECOVERY` | `false` | removed in v0.25.0; ignored if set |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |
