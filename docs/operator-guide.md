@@ -343,9 +343,10 @@ run `lcm_status` or `/lcm status` again for live per-session fields.
 Most installs only need `plugins.enabled` and `context.engine: lcm-x`.
 
 `compression.target_ratio` and the host's other built-in-compressor ratios belong
-to the host's built-in compressor and are not read by LCM-X. LCM-X compaction
-depth is set by the leaf chunk/budget settings and bounded by
-`LCM_FOREGROUND_SOFT_SECONDS` / `LCM_FOREGROUND_HARD_SECONDS`.
+to the host's built-in compressor and are not read by LCM-X. How much one LCM-X
+compaction summarises is set by `LCM_LEAF_CHUNK_TOKENS`, and how long it may take by
+`LCM_FOREGROUND_SOFT_SECONDS` / `LCM_FOREGROUND_HARD_SECONDS`; the summary DAG depth
+is `LCM_INCREMENTAL_MAX_DEPTH` (table below).
 
 Useful environment variables:
 
