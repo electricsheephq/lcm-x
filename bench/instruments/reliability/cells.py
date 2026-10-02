@@ -9,6 +9,7 @@ from __future__ import annotations
 import fnmatch
 
 BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8")
+DRAIN_BARS = ("D1", "D2", "D3")  # scorers/drain.py: the host list drains under a hidden backlog (#597, #626)
 TRANSPORTS = ("acp", "gateway")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
@@ -16,7 +17,9 @@ FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "cras
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
     7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
-    553: (("B1", "B2", "B3", "B4"), ""), 561: (("B1", "B2"), ""), 563: (("B4",), ""),
+    # B5/B8 are downstream of #553 duplication in acp-history rotation (eva-0.21.5 vs customer-0.21.2,
+    # nightly aa84e61d); re-check when #553 is fixed.
+    553: (("B1", "B2", "B3", "B4", "B5", "B8"), ""), 561: (("B1", "B2"), ""), 563: (("B4",), ""),
     463: (("B7",), "Desktop/tui_gateway transport, >12k externalised user rows"),
     420: (("B4", "B5"), ""), 489: (("B1", "B2", "B4"), ""), 493: (("B1", "B2"), ""),
     496: (("B1", "B2"), "real gateway process with message timestamps rendered (gateway.message_timestamps.enabled)"),
@@ -29,6 +32,7 @@ ISSUES = {
     485: (("B2",), "upgrade from a pre-fix DB (R2)"), 542: (("B4",), "upgrade from a pre-#535 wedged DB (R2)"),
     559: (("B6", "B4"), ""), 566: (("B1", "B2", "B5"), ""),  # B5: a cross-lineage summary is recorded only there
     581: (("B3", "B4"), ""), 582: (("B8",), ""),  # native-on-off: every candidate event after the plugin switch
+    597: (("D1", "D2"), ""), 626: (("D3",), ""),  # drain/hidden-backlog: data cells (ci.NON_GATE)
 }
 
 
@@ -96,6 +100,27 @@ def registry() -> list[dict]:
                                   "event after the plugin switch (pre_publication_counts: a diagnostic); B4 asks it "
                                   "to publish. B1/B2/B5-B7 are reported, not scored: the older "
                                   "ref's own phase decides them."))
+        cells.append(cell(f"drain/hidden-backlog/{m}", [597, 626], in_place=ip, turns=70, min_compactions=2,
+                          faults=[{"kind": "clean_exit_before_turn", "turn": 41}] if ip else [],
+                          bars=list(DRAIN_BARS), drain={"phase2_turn": 41, "hold_seconds": 10.0},
+                          doc="Data, not a gate (ci.NON_GATE): turns 1-40 store a backlog over >= 2 compactions, then "
+                              "the host session ends (in-place: a clean host exit before turn 41 and an ACP restore; "
+                              "rotation: the compaction rotation), so stored raw rows not yet summarized are no longer "
+                              "in the host's list; turns 41-70 run on the new list. Per compaction the observer "
+                              "records the list handed to compress, the list returned and how many host rows a leaf "
+                              "replaced (scorers/drain.py D1-D3). Expected to FAIL on main: that is the measurement."))
+        cells.append(cell(f"drain/hidden-backlog-large/{m}", [597, 626], in_place=ip, turns=180, repeat=100,
+                          user={"repeat_from": {"151": 800}}, min_compactions=0,
+                          lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.99"},
+                          faults=[{"kind": "clean_exit_before_turn", "turn": 151}], bars=list(DRAIN_BARS),
+                          drain={"phase2_turn": 151, "hold_seconds": 10.0, "forget_host_rows": True,
+                                 "phase2_lcm_env": {"LCM_CONTEXT_THRESHOLD": tight(128000)["LCM_CONTEXT_THRESHOLD"]}},
+                          doc="Data, not a gate (ci.NON_GATE), acp-process only. Fixture B: turns 1-150 at LCM threshold "
+                              "0.99 with short prompts (no compaction; ~300 raw stored rows), a clean host exit, then "
+                              "the harness soft-archives the ACP session's active rows in the cell's state.db (the "
+                              "host forgets its list; no host or plugin code changes), so every stored row is hidden. "
+                              "Turns 151-180 run at the tight threshold with full-size prompts on the empty restored "
+                              "list. D4 counts the phase-2 compactions with out == in (the plateau)."))
         for tr in ("acp-history", "gateway-reload"):
             cells.append(cell(f"crash-after-compaction/{m}/{tr}", [553, 561], in_place=ip,
                               transport="acp" if tr == "acp-history" else "gateway", faults=[crash],
@@ -139,7 +164,7 @@ def registry() -> list[dict]:
 
 def validate(c: dict) -> None:
     assert c["transport"] in TRANSPORTS, c["id"]
-    assert set(c["bars"]) <= set(BARS), c["id"]
+    assert set(c["bars"]) <= set(BARS + DRAIN_BARS), c["id"]
     assert {f["kind"] for f in c["faults"]} <= FAULTS, c["id"]
     assert c["window"] in (128000, 1000000), c["id"]
     assert all(t in ISSUES or t in (483, 494, 519) for t in c["targets"]), c["id"]
