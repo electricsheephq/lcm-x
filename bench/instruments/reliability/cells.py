@@ -9,15 +9,19 @@ from __future__ import annotations
 import fnmatch
 
 BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8")
+DRAIN_BARS = ("D1", "D2", "D3")  # scorers/drain.py: the host list drains under a hidden backlog (#597, #626)
 TRANSPORTS = ("acp", "gateway")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
           "publication_failure", "plugin_switch"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
-    553: (("B1", "B2", "B3", "B4"), ""), 561: (("B1", "B2"), ""), 563: (("B4",), ""),
-    509: (("B7",), ""), 464: (("B7", "B6"), ""), 463: (("B7",), "Desktop/tui_gateway transport, >12k externalised user rows"),
-    479: (("B7",), ""), 420: (("B4", "B5"), ""), 489: (("B1", "B2", "B4"), ""), 493: (("B1", "B2"), ""),
+    7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
+    # B5/B8 are downstream of #553 duplication in acp-history rotation (eva-0.21.5 vs customer-0.21.2,
+    # nightly aa84e61d); re-check when #553 is fixed.
+    553: (("B1", "B2", "B3", "B4", "B5", "B8"), ""), 561: (("B1", "B2"), ""), 563: (("B4",), ""),
+    463: (("B7",), "Desktop/tui_gateway transport, >12k externalised user rows"),
+    420: (("B4", "B5"), ""), 489: (("B1", "B2", "B4"), ""), 493: (("B1", "B2"), ""),
     496: (("B1", "B2"), "real gateway process with message timestamps rendered (gateway.message_timestamps.enabled)"),
     497: (("B6",), ""), 499: (("B1", "B2"), "fresh_tail 0 + objective-head merge + restart x3"),
     500: (("B7",), "native ON + dropped call + tool_call_id reuse"), 501: (("B1", "B2"), "fresh_tail 0 + restart x3"),
@@ -28,6 +32,7 @@ ISSUES = {
     485: (("B2",), "upgrade from a pre-fix DB (R2)"), 542: (("B4",), "upgrade from a pre-#535 wedged DB (R2)"),
     559: (("B6", "B4"), ""), 566: (("B1", "B2", "B5"), ""),  # B5: a cross-lineage summary is recorded only there
     581: (("B3", "B4"), ""), 582: (("B8",), ""),  # native-on-off: every candidate event after the plugin switch
+    597: (("D1", "D2"), ""), 626: (("D3",), ""),  # drain/hidden-backlog: data cells (ci.NON_GATE)
 }
 
 
@@ -77,19 +82,9 @@ def registry() -> list[dict]:
             cell(f"lcm-tool-mid-turn/{m}", [], in_place=ip,
                  tool_plan=[{"turns": list(range(4, 61, 4)), "calls": [{"name": "lcm_grep", "args": {"query": "alpha"}}]}],
                  doc="A single LCM tool call every fourth turn, no crash."),
-            cell(f"cancel-retry/{m}", [493, 544], in_place=ip, faults=[{"kind": "cancel_then_retry", "turn": 22}],
+            cell(f"cancel-retry/{m}", [7, 493, 544], in_place=ip, faults=[{"kind": "cancel_then_retry", "turn": 22}],
                  doc="ACP cancel (request_hard_interrupt) during the provider call, then the same prompt re-sent: the "
                      "host re-attaches the cancelled prompt (acp_adapter/server.py _attach_interrupted_prompt)."),
-            cell(f"native-short-prefix/tool-dense/{m}", [], in_place=ip, native=True,
-                 tool_plan=[{"turns": list(range(1, 61)), "calls": [{"name": "read_file", "args": {"path": "{files}/big.txt"}}]}],
-                 doc="Data, not #509: native ON under tight tuning with a large read_file result every turn. Rejected "
-                     "BEFORE the summary call (prefix_too_short, compaction.py _compress_native_recovery)."),
-            cell(f"native-long-prefix/{m}", [509, 479, 464], in_place=ip, native=True, window=1000000, turns=80,
-                 repeat=3000, lcm_env={}, assistant={"real_usage": True}, min_compactions=2,
-                 doc="Native ON, LCM default tuning (threshold 0.35, fresh tail 32), 1M window, ~17k tokens a turn: the "
-                     "host's 0.8 threshold fires at ~46 turns with a ~30-turn prefix before the fresh tail (hundreds of "
-                     "k tokens), so the host ContextCompressor "
-                     "summary call runs (stubbed aux LLM) and LCM's post-summary checks decide (#509 field shape)."),
             cell(f"long-80/{m}", [], in_place=ip, turns=80, repeat=1000, lcm_env={},
                  assistant={"real_usage": True}, min_compactions=8,
                  doc="LCM default tuning with provider-reported usage, 80 turns (the LONG cells of the #553 probe file)."),
@@ -105,6 +100,27 @@ def registry() -> list[dict]:
                                   "event after the plugin switch (pre_publication_counts: a diagnostic); B4 asks it "
                                   "to publish. B1/B2/B5-B7 are reported, not scored: the older "
                                   "ref's own phase decides them."))
+        cells.append(cell(f"drain/hidden-backlog/{m}", [597, 626], in_place=ip, turns=70, min_compactions=2,
+                          faults=[{"kind": "clean_exit_before_turn", "turn": 41}] if ip else [],
+                          bars=list(DRAIN_BARS), drain={"phase2_turn": 41, "hold_seconds": 10.0},
+                          doc="Data, not a gate (ci.NON_GATE): turns 1-40 store a backlog over >= 2 compactions, then "
+                              "the host session ends (in-place: a clean host exit before turn 41 and an ACP restore; "
+                              "rotation: the compaction rotation), so stored raw rows not yet summarized are no longer "
+                              "in the host's list; turns 41-70 run on the new list. Per compaction the observer "
+                              "records the list handed to compress, the list returned and how many host rows a leaf "
+                              "replaced (scorers/drain.py D1-D3). Expected to FAIL on main: that is the measurement."))
+        cells.append(cell(f"drain/hidden-backlog-large/{m}", [597, 626], in_place=ip, turns=180, repeat=100,
+                          user={"repeat_from": {"151": 800}}, min_compactions=0,
+                          lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.99"},
+                          faults=[{"kind": "clean_exit_before_turn", "turn": 151}], bars=list(DRAIN_BARS),
+                          drain={"phase2_turn": 151, "hold_seconds": 10.0, "forget_host_rows": True,
+                                 "phase2_lcm_env": {"LCM_CONTEXT_THRESHOLD": tight(128000)["LCM_CONTEXT_THRESHOLD"]}},
+                          doc="Data, not a gate (ci.NON_GATE), acp-process only. Fixture B: turns 1-150 at LCM threshold "
+                              "0.99 with short prompts (no compaction; ~300 raw stored rows), a clean host exit, then "
+                              "the harness soft-archives the ACP session's active rows in the cell's state.db (the "
+                              "host forgets its list; no host or plugin code changes), so every stored row is hidden. "
+                              "Turns 151-180 run at the tight threshold with full-size prompts on the empty restored "
+                              "list. D4 counts the phase-2 compactions with out == in (the plateau)."))
         for tr in ("acp-history", "gateway-reload"):
             cells.append(cell(f"crash-after-compaction/{m}/{tr}", [553, 561], in_place=ip,
                               transport="acp" if tr == "acp-history" else "gateway", faults=[crash],
@@ -130,12 +146,6 @@ def registry() -> list[dict]:
              doc="The third publication attempt raises; later passes must recover."),
         cell("separator-heavy-retained/in-place", [545], in_place=True, user={"separator_turns": "all"}, faults=[crash],
              doc="Every prompt carries >=64 blank-line separators, so the dangling retained row does too (#545)."),
-        cell("native-short-prefix/baseline/in-place", [], in_place=True, native=True,
-             doc="Data, not #509: native ON under tight tuning; rejected before the summary call (prefix_too_short)."),
-        cell("native-long-prefix/tool-dense/in-place", [509, 479, 464], in_place=True, native=True, window=1000000,
-             turns=100, repeat=400, lcm_env={}, assistant={"real_usage": True}, min_compactions=2, big_lines=400,
-             tool_plan=[{"turns": list(range(1, 101)), "calls": [{"name": "read_file", "args": {"path": "{files}/big.txt"}}]}],
-             doc="native-long-prefix with a ~20k-token read_file result every turn: a tool-heavy prefix and tail."),
         cell("pressure-disagreement/in-place", [420], in_place=True, assistant={"real_usage": True, "usage_scale": 1.3},
              doc="The provider reports 1.3x the tokens actually sent (#420)."),
         cell("window-1m/in-place", [], in_place=True, window=1000000, turns=60,
@@ -154,10 +164,12 @@ def registry() -> list[dict]:
 
 def validate(c: dict) -> None:
     assert c["transport"] in TRANSPORTS, c["id"]
-    assert set(c["bars"]) <= set(BARS), c["id"]
+    assert set(c["bars"]) <= set(BARS + DRAIN_BARS), c["id"]
     assert {f["kind"] for f in c["faults"]} <= FAULTS, c["id"]
     assert c["window"] in (128000, 1000000), c["id"]
     assert all(t in ISSUES or t in (483, 494, 519) for t in c["targets"]), c["id"]
+    # Native recovery was removed (O2): only a native-on-off cell (an older lcm-x ref with it ON) may set it.
+    assert not c["native_recovery"] or c.get("from_ref"), c["id"]
     for g in c["tool_plan"]:
         assert g["turns"] == "restart" or all(1 <= t <= c["turns"] for t in g["turns"]), c["id"]
 

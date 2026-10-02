@@ -12,7 +12,7 @@ the real ACP/gateway processes, real transports or customer boxes.
 ```
 uv run --no-project python bench/instruments/reliability/run_matrix.py \
   --hosts-file <hosts.local.json> --hosts eva-0.21.5,customer-0.21.2 \
-  --plugin-ref origin/main[,v0.24.2,...] --cells 'crash-*,baseline/*' | all --jobs 8 --out <dir> [--keep-homes] [--keep-dbs fail|all] \
+  --plugin-ref origin/main[,v0.24.2,...] --cells 'crash-*,baseline/*' | all --jobs 8 --out <dir> [--keep-homes] [--keep-dbs none|fail|all] [--scratch-root <dir>] \
   [--lcm-env LCM_KEY=VAL ...]
 ```
 - Hosts file: `--hosts-file`, else `$LCM_RELIABILITY_HOSTS`, else the host-prep lane's file; see
@@ -24,16 +24,23 @@ uv run --no-project python bench/instruments/reliability/run_matrix.py \
 - Each ref is exported once with `git archive` into `<out>/plugins/<sha12>/`; the plugin dir name,
   `plugins.enabled` entry and engine name are read from that tree (v0.23.x = `hermes-lcm`/`lcm`).
 - Per cell: `<out>/cells/<host>/<sha12>/<cell-slug>/` holds cell.json, transcript.jsonl, phase-*.json,
-  probe logs, `db/` (sqlite backup-API copies) and verdict.json. `--keep-homes` keeps hermes-home.
-- `--keep-dbs fail` (default) drops the db/ copies of PASS cells (regenerable), except a PASS that carries host-parity licences; `--lcm-env` overrides LCM_*
-  on every cell and is recorded in run.json and MATRIX.md.
+  probe logs and verdict.json: the scored outputs only. The cell's Hermes home (state.db, lcm.db), its HOME/TMPDIR
+  and the `db/` sqlite backup-API copies the scorers read live in a private scratch dir under `--scratch-root`
+  (default `$TMPDIR`), deleted once the cell is scored, an ERROR or a harness failure included. A full state.db is
+  several GB per cell, so no Hermes database is left in `<out>` by default.
+- Debugging: `--keep-dbs fail` keeps the `db/` copies of non-PASS cells and of a PASS that carries host-parity
+  licences, `--keep-dbs all` those of every cell, and `--keep-homes` the hermes-home; each is moved into the cell
+  dir (`<cell>/db/`, `<cell>/hermes-home/`); re-scoring a cell later (`scorers/cli.py --cell-dir`) needs its kept
+  `db/`. If a move fails, nothing is deleted and the error names both dirs. A caller that sandboxes host writes to one
+  dir passes a `--scratch-root` inside it.
+- `--lcm-env` overrides LCM_* on every cell and is recorded in run.json and MATRIX.md.
 - Output: `results.jsonl`, `MATRIX.md`, `ISSUE-MAP.md`. Re-render: `python report.py <out>`.
 - Standalone scoring: `python -m bench.instruments.reliability.scorers.cli --db <lcm.db> --gauntlet-run <dir>`
   (copies the DB into a private temp dir first; the source file is never opened).
 
 ## How a cell runs
 `probe.py` runs one phase: `<host python> probe.py --cell <cell.json> --phase A --start-turn N --cell-dir <dir>`
-with cwd = host src, `HERMES_HOME=<cell>/hermes-home`, `HOME=<cell>/home`. It refuses (exit 3) a
+with cwd = host src, `HERMES_HOME=<scratch>/hermes-home`, `HOME=<scratch>/home`. It refuses (exit 3) a
 HERMES_HOME/HOME at or under the real home's `.hermes`, and a cell dir under /tmp. Sockets are blocked;
 the provider is a MagicMock scripted per turn (unique or repeated replies, tool plans, usage that is
 estimated, provider-real or scaled); the host aux LLM and the LCM summariser (tag-preserving) are stubbed.
@@ -110,9 +117,9 @@ publication; the next child compaction must commit. `publication-failure/rotatio
 rotation-child publication: a data cell (no target, `ci.NON_GATE`) for the degraded mode where no child compaction can
 ever publish, a product question outside stabilization.
 
-Native cells: `native-short-prefix/*` are rejected before the host summary call (`prefix_too_short`) and are
-data; `native-long-prefix/*` (default tuning, 1M window) run the host ContextCompressor summary (stubbed aux
-LLM, so no slow-summary timeouts) and LCM's post-summary checks; every rejection reason is recorded.
+Native cells: native recovery was removed (#777), so the native-only cells (`native-short-prefix/*`,
+`native-long-prefix/*`) were retired with it. `native-on-off/*` remain: an older lcm-x runs with native recovery ON,
+then the candidate (which ignores the key) takes over the same store.
 
 Verdicts: PASS, FAIL (failed bars with numbers), INCONCLUSIVE (no bar fails, one could not decide), ERROR (harness or host failure; never a PASS),
 UNSUPPORTED (with the reason). A cell must prove its scenario ran or it is UNSUPPORTED, never PASS: every
@@ -178,9 +185,11 @@ Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `
 `hosts.ci.json` (pinned shas): eva-0.21.5 and customer-0.21.2 on Python 3.11, upstream-main on 3.14. `ci.py prep`
 fetches the sha and installs it editable with `[acp,edge-tts,bedrock,vertex,anthropic]` (the harness verifies git HEAD
 and cites source); R1 all cells and R2 acp-process all cells run with `--plugin-ref HEAD`; MATRIX.md is the job
-summary and results are uploaded. `ci.py gate` fails on any ERROR, on a FAIL in the G-REL-1 cell set unless the
-cell targets an open issue, and on an empty set or any missing, duplicate or unexpected row per (host, transport,
+summary and results are uploaded. `ci.py gate` fails on any ERROR, on a FAIL in the G-REL-1 cell set unless every
+failed bar is declared by at least one open target in `cells.ISSUES`, and on an empty set or any missing, duplicate or unexpected row per (host, transport,
 plugin sha) against that transport's `--cells all` list. Linux has no `sandbox-exec`: there containment is the proxy sink plus the socket guard.
+A FAIL with empty or missing `failed_bars` always gates; an open target absent from `ISSUES` declares no bars.
+G-REL-1 diagnostics list uncovered bars, targets and open targets.
 
 ### Claim boundary
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route

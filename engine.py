@@ -169,6 +169,7 @@ from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from . import tools as lcm_tools
 
 logger = logging.getLogger(__name__)
+_NATIVE_RECOVERY_WARNING_LOGGED = False
 
 _ASSERTION_EXTRACTION_PROCESS_SLOT = threading.BoundedSemaphore(1)
 
@@ -452,6 +453,13 @@ class LCMEngine(
     def __init__(self, config: LCMConfig | None = None,
                  hermes_home: str = ""):
         self._config = config or LCMConfig.from_env()
+        global _NATIVE_RECOVERY_WARNING_LOGGED
+        if self._config.native_recovery and not _NATIVE_RECOVERY_WARNING_LOGGED:
+            _NATIVE_RECOVERY_WARNING_LOGGED = True
+            logger.warning(
+                "LCM_NATIVE_RECOVERY is no longer supported (removed in v0.25.0) and is ignored; "
+                "compaction uses the LCM path"
+            )
         self._hermes_home = hermes_home
         self._stable_use_lock = threading.Lock()
         # #667: node ids a condensation has selected, until it publishes or fails; the level 3 repair skips them.
@@ -678,7 +686,6 @@ class LCMEngine(
         self._stub_first_exit_now: Optional[dict[str, int]] = None
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
-        self._last_native_recovery_rejection = ""
         # Ingest-failure tracking. The core promise is that nothing is ever
         # lost, but a swallowed persistence error (disk full, DB locked,
         # corruption) silently breaks it: the turn continues while messages
@@ -722,9 +729,6 @@ class LCMEngine(
         # One-shot handoff from preflight: adopt an already-durable replay
         # cleanup during boundary cooldown without running summary work.
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
-        # One-shot handoff for native recovery: deterministic ingest cleanup at
-        # low pressure must be adopted without invoking the native summarizer.
-        self._native_recovery_preflight_cleanup_only = False
         # Temporary source window used only while compress() assembles context.
         # _assemble_context also serves tests and recovery paths directly, so
         # keep anchoring opt-in rather than changing its public behavior.
@@ -1746,13 +1750,15 @@ class LCMEngine(
         return int(window * (1 - reserve))
 
     def _hold_fit_only_applies(self, tokens: int) -> bool:
-        """#618 item 3: either hold is active for this conversation and the request is at or over the survival
-        ceiling, so an automatic pass only fits (no sweep would store a leaf). Never without a fit to run."""
+        """#618 item 3: the #608 sweep hold (a no-leaf budget stop: no sweep would store a leaf) is active for
+        this conversation and the request is at or over the survival ceiling, so an automatic pass only fits.
+        The #651 no-progress hold does not make a pass fit-only at the ceiling: there a sweep can store a leaf
+        (v0.24.8 behaviour; rc4 fix)."""
         ceiling = self._survival_ceiling()
         return bool(
             ceiling is not None and tokens >= ceiling and self._fit_can_rescue(False)
             and not self._bypasses_lcm_context_management()
-            and (self._sweep_budget_hold_active() or self._no_progress_hold_active()))
+            and self._sweep_budget_hold_active())
 
     def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
         """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs.
@@ -5224,15 +5230,37 @@ class LCMEngine(
         )
         return active_replay_messages
 
+    @staticmethod
+    def _keep_host_held_stubs(
+        host_messages: List[Dict[str, Any]],
+        cached: List[Dict[str, Any]],
+        fresh: List[Dict[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        """#772: a stub and its payload share an identity, so the cache would resurrect a host-held stub."""
+        def is_stub(message: Dict[str, Any]) -> bool:
+            return is_externalized_placeholder(text_content_for_pattern_matching(message.get("content")) or "")
+
+        return [
+            fresh[idx]
+            if str(host.get("role") or "") == "tool" and is_stub(host) and not is_stub(cached_row)
+            else cached_row
+            for idx, (host, cached_row) in enumerate(zip(host_messages, cached))
+        ]
+
     def _cached_active_replay_messages(
         self,
         original_messages: List[Dict[str, Any]],
+        fresh_replay_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> Optional[List[Dict[str, Any]]]:
         identities = [self._message_replay_identity(message, strip_carrier=False) for message in original_messages]
         if identities == getattr(self, "_last_active_replay_source_identities", None):
             cached = getattr(self, "_last_active_replay_messages", None)
             if cached is not None:
-                current = self._copy_active_replay_messages_preserving_generated_ids(cached)
+                current = self._keep_host_held_stubs(
+                    original_messages,
+                    self._copy_active_replay_messages_preserving_generated_ids(cached),
+                    original_messages if fresh_replay_messages is None else fresh_replay_messages,
+                )
                 self._last_active_replay_messages = current
                 self._refresh_generated_active_replay_placeholder_retention(
                     original_messages,
@@ -5806,6 +5834,7 @@ class LCMEngine(
                             len(anchor_plan["replayed"]), self._session_id, cursor, n)
         anchored_replay_indexes = anchor_plan["replayed"] if anchor_plan else set()
         anchor_remainders: dict[int, Any] = {}
+        fresh_replay_messages = replay_messages  # #772: the host's rows, before any cached copy is spliced in
         if cursor > 0:
             cached_active_replay_messages = getattr(self, "_last_active_replay_messages", None)
             if (
@@ -5820,8 +5849,12 @@ class LCMEngine(
                     ]
                 if current_prefix_identities == cached_source_identities[:cursor]:
                     replay_messages = (
-                        self._copy_active_replay_messages_preserving_generated_ids(
-                            cached_active_replay_messages[:cursor]
+                        self._keep_host_held_stubs(
+                            messages,
+                            self._copy_active_replay_messages_preserving_generated_ids(
+                                cached_active_replay_messages[:cursor]
+                            ),
+                            fresh_replay_messages,
                         )
                         + replay_messages[cursor:]
                     )
@@ -5834,7 +5867,7 @@ class LCMEngine(
         original_new_messages = messages[cursor:] if cursor < n else []
 
         if not new_messages:
-            cached_replay = self._cached_active_replay_messages(messages)
+            cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
             self._compression_boundary_ingest_pending = False
             self._compression_boundary_active_placeholder_digest_budget = {}
             self._compression_boundary_active_placeholder_digest_ordinals = {}
@@ -6105,13 +6138,7 @@ class LCMEngine(
                 # invisible to both.  The store still holds the externalized
                 # version for durable recovery via lcm_expand.
                 _orig_role = str(active_replay_messages[absolute_idx].get("role") or "")
-                # Native recovery summarizes this active replay, not the LCM
-                # storage references. Keep already-redacted/filtered user text
-                # visible to that compressor and subsequent turns. The protected
-                # durable copy remains externalized below, as before.
-                if _orig_role == "assistant" or (
-                    _orig_role == "user" and self._config.native_recovery
-                ):
+                if _orig_role == "assistant":
                     continue
                 if active_replay_messages is replay_messages:
                     active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
@@ -7350,6 +7377,9 @@ class LCMEngine(
                 continue
             if self._is_preserved_todo_context_message(message):
                 continue
+            if self._is_verified_replay_scaffold_message(message):
+                # LCM's own summary row: never re-label it as the user's objective.
+                return None
             if any(message == selected for selected in selected_tail_messages):
                 return None
             return self._build_preserved_objective_summary_part(message)

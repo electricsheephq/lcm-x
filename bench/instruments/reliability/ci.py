@@ -3,7 +3,8 @@
     python -m bench.instruments.reliability.ci prep --host eva-0.21.5 --root "$RUNNER_TEMP/hosts" --out hosts.json
     python -m bench.instruments.reliability.ci gate r1/results.jsonl r2/results.jsonl --open-issues open-issues.txt
 
-The gate fails on any ERROR, and on a FAIL in the G-REL-1 cell set unless the cell targets an open issue. It also
+The gate fails on any ERROR, and on a FAIL in the G-REL-1 cell set unless every failed bar is declared by an
+open target in cells.ISSUES (empty or missing failed_bars always gates). It also
 fails on an empty results file, a host missing from any file, an empty set and, per (host, transport, plugin sha) present, on any missing, duplicate or unexpected cell
 row against the ``--cells all`` list run_matrix.py uses for that transport (UNSUPPORTED rows count as present).
 """
@@ -21,7 +22,8 @@ G_REL_1 = ("baseline", "acp-trailing", "preflight-continue", "repeat-identical-r
            "pressure-disagreement", "lcm-tool-mid-turn", "parallel-tool-group", "crash-", "gateway-second-restart",
            "cancel-retry", "publication-failure")
 # Data cells inside a gate family that never gate (still expected rows for completeness).
-NON_GATE = ("publication-failure/rotation-child-persistent",)
+NON_GATE = ("publication-failure/rotation-child-persistent", "drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation",
+            "drain/hidden-backlog-large/in-place", "drain/hidden-backlog-large/rotation")
 
 
 def in_gate_set(cell_id: str) -> bool:
@@ -70,13 +72,23 @@ def file_coverage(per_file: dict[str, list[dict]]) -> list[str]:
 
 
 def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[dict]] | None = None) -> list[str]:
+    from bench.instruments.reliability import cells as C
+
     problems = (file_coverage(per_file) if per_file is not None else []) + completeness(results)
     for r in results:
         where = f"{r['verdict']} {r['host']} {r['cell']} ({r.get('transport', 'in-process')})"
         if r["verdict"] == "ERROR":
             problems.append(f"{where}: {str(r.get('reason', ''))[:200]}")
-        elif r["verdict"] == "FAIL" and in_gate_set(r["cell"]) and not set(r.get("targets") or []) & open_issues:
-            problems.append(f"{where}: G-REL-1 cell fails and targets no open issue (targets {r.get('targets')})")
+        elif r["verdict"] == "FAIL" and in_gate_set(r["cell"]):
+            targets = set(r.get("targets") or [])
+            open_targets = targets & open_issues
+            declared = {bar for target in open_targets if target in C.ISSUES for bar in C.ISSUES[target][0]}
+            failed = set(r.get("failed_bars") or {})
+            uncovered = sorted(failed - declared)
+            if not failed or uncovered:
+                detail = f"uncovered bars {uncovered}" if failed else "empty or missing failed_bars; nothing attributable"
+                problems.append(f"{where}: G-REL-1 cell fails: {detail} "
+                                f"(targets {sorted(targets)}, open targets {sorted(open_targets)})")
     return problems
 
 
