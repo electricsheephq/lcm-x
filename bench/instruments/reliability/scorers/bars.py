@@ -244,6 +244,8 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     keys = ("expected_items", "missing_keys", "deficit_rows", "duplicated_keys", "surplus_rows",
             "stored_rows_not_expected", "split_keys")
     numbers["B2"] = {k: sum(m[k] for m in b2_parts.values()) for k in keys}
+    numbers["B2"]["held_composites_as_parts"] = [dict(c, session=g) for g, m in b2_parts.items()
+                                                 for c in m["held_composites_as_parts"]][:10]
     numbers["B2"]["per_session"] = {g: m["verdict"] for g, m in b2_parts.items()}
     numbers["B2"]["host_parity_licensed"] = host_parity.summary(
         [dict(r, session=g) for g, m in b2_parts.items() for r in m["host_parity_licensed"]], host_why)

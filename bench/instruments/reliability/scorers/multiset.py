@@ -35,6 +35,35 @@ def licence(key: tuple, surplus: int, expected: int, host: dict | None, store_id
         if n > 0 else None
 
 
+def licensed_parts(text: str, licences: dict, times: int) -> dict | None:
+    """#804: split a held user composite at its "\n\n" joins into >= 2 parts that are each a host-licensed user key in
+    this lineage with ``times`` licences left per use; returns {key: uses} or None. The host merges consecutive user
+    turns as R + "\n\n" + U, so only those joins are cut points; each part uses the same edge-strip key rule."""
+    starts = [0] + [i + 2 for i in range(len(text) - 1) if text.startswith("\n\n", i)]
+    ends = [s - 2 for s in starts[1:]] + [len(text)]
+    memo: dict[int, list | None] = {}
+
+    def cover(k: int) -> list | None:  # parts covering text[starts[k]:], or None
+        if k in memo:
+            return memo[k]
+        memo[k] = None
+        for j in range(k, len(ends)):
+            key = ("user", h(text[starts[k]:ends[j]]))
+            if key not in licences:
+                continue
+            rest = [] if j == len(ends) - 1 else cover(j + 1)
+            if rest is not None:
+                memo[k] = [key, *rest]
+                break
+        return memo[k]
+
+    parts = cover(0)
+    if not parts or len(parts) < 2:
+        return None
+    uses = Counter(parts)
+    return dict(uses) if all(licences[key]["licensed"] >= n * times for key, n in uses.items()) else None
+
+
 def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict | None = None) -> dict:
     """``expected``: (role, text) items; ``stored_rows``: (store_id, session_id, role, content); ``host``: the
     lineage's host occurrences (key -> {"n", "ids"}), or None."""
@@ -62,7 +91,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
                 if "split_match" in entry:
                     split.append(entry)
                     continue
-            missing.append(entry)
+            missing.append({**entry, "sha256": key[1]})
         elif have > n:
             if lic := licence(key, have - n, n, host, stored[key]):
                 licensed.append(lic)
@@ -76,6 +105,19 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             licensed += [lic] if lic else []
             if len(v) > (lic or {}).get("licensed", 0):
                 extra.append({"role": k[0], "copies": len(v) - (lic or {}).get("licensed", 0), "store_ids": v[:6]})
+    # #804: a held user composite whose parts the host durably stored apart is stored here as those parts, each
+    # licensed by host parity; the composite key is then not a deficit. Same lineage only; reported, never silent.
+    composites, by_key = [], {(r["role"], r["sha256"]): r for r in licensed}
+    for entry in list(missing):
+        if entry["role"] == "user" and not entry["stored"] and \
+                (uses := licensed_parts(norm(texts[("user", entry["sha256"])]), by_key, entry["expected"])):
+            for key, n in uses.items():
+                by_key[key]["licensed"] -= n * entry["expected"]
+            missing.remove(entry)
+            composites.append({"role": "user", "expected": entry["expected"], "preview": entry["preview"],
+                               "parts": [{"sha256": key[1], "uses": n, "store_ids": by_key[key]["store_ids"]}
+                                         for key, n in uses.items()]})
+    licensed = [r for r in licensed if r["licensed"] > 0]
     # Every stored-only key and every split reply is surplus: no host transform licenses them.
     return {
         "instrument": "multiset-v1",
@@ -87,6 +129,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
         "duplicated_keys": len(duplicated),
         "surplus_rows": sum(e["stored"] - e["expected"] - e.get("licensed", 0) for e in duplicated) + sum(e["copies"] for e in extra),
         "host_parity_licensed": licensed,
+        "held_composites_as_parts": composites,
         "missing": missing[:40],
         "duplicated": duplicated[:40],
         "split_assistant_turns": split,

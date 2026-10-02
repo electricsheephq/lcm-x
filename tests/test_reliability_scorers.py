@@ -770,6 +770,40 @@ def test_r2a4_c_a_deficit_is_never_licensed(tmp_path):
     assert out["numbers"]["B2"]["deficit_rows"] == 1 and {"B1", "B2"} <= set(out["failed_bars"])
 
 
+def _held_composite(tmp_path, *, parts_sid="S0", host_parts=(14, 15), inner=""):
+    """#804 shape: the host held T14 + "\n\n" + T15 as one live composite but stored the parts apart; LCM stored the
+    parts as two rows."""
+    t14, t15 = U.format(14, 14) + inner, U.format(15, 15)
+    host = [(parts_sid, "user", U.format(t, t) + (inner if t == 14 else ""), 1) for t in host_parts]
+    parents = {"S0": None, **({parts_sid: None} if parts_sid != "S0" else {})}
+    return make(tmp_path, rows=[("user", t14), ("user", t15), ("assistant", R.format(15, 15))],
+                sids=[parts_sid, parts_sid, "S0"], events=turn_events(15, held=t14 + "\n\n" + t15),
+                parents=parents, host=host, plugin=TREE, bars=["B2"])
+
+
+def test_b2_held_composite_stored_as_host_parts_is_not_a_deficit(tmp_path):
+    for i, inner in enumerate(("", "\n\nsecond paragraph\n\nthird")):  # a part may hold its own "\n\n"
+        out = _held_composite(tmp_path / str(i), inner=inner)
+        b2 = out["numbers"]["B2"]
+        assert "B2" not in out["failed_bars"], out["failed_bars"]
+        assert b2["missing_keys"] == b2["deficit_rows"] == b2["surplus_rows"] == 0
+        assert b2["host_parity_licensed"]["rows"] == 0  # the licences were spent on the composite
+        [composite] = b2["held_composites_as_parts"]
+        assert composite["preview"].startswith("[T14]") and [p["store_ids"] for p in composite["parts"]] == [[1], [2]]
+
+
+def test_b2_held_composite_needs_host_evidence_for_every_part(tmp_path):
+    out = _held_composite(tmp_path, host_parts=(14,))
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
+def test_b2_held_composite_parts_in_another_lineage_do_not_cover_it(tmp_path):
+    out = _held_composite(tmp_path, parts_sid="cron_job_01")
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
 def test_r2a4_d_a_licence_is_per_lineage(tmp_path):
     other = ("cron_job_01", "user", U.format(2, 2), 1)  # the second copy is held in another lineage
     out = make(tmp_path, rows=clean_rows() + [("user", U.format(2, 2))], events=clean_events(),
