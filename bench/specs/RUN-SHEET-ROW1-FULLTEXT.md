@@ -14,12 +14,20 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
 ## 1. Sub-rows (each is its own registered row; same product sha)
 | Sub-row | Instrument | Data | Configuration | Scored output |
 |---|---|---|---|---|
-| R1-M retrieval | `scripts/lcm_longmemeval.py run --embeddings off --provider stub --dataset-label m` (shorthand: plus the prepared-directory and output arguments) | LongMemEval-M, 500 q (`prepared-m`, the F53 manifest), 6 shards `qid[i::6]` | arms `fts` + `lcm_recall` only; vector arms report `run: false` | r@1 / r@5 / r@10 / ndcg@10, session and turn level |
+| R1-M retrieval | `scripts/lcm_longmemeval.py run --embeddings off --provider stub --dataset-label m` (shorthand), once per shard with that shard's own prepared directory and output directory | LongMemEval-M, 500 q (the F53 `prepared-m` manifest), run as the 6 F53 shard directories `prepared-m-shards/shard-K` (fixed interleave `qid[i::6]`; each run scores only its shard); A/A′ on `prepared-m-aprime100` | arms `fts` + `lcm_recall` only; vector arms report `run: false` | r@1 / r@5 / r@10 / ndcg@10, session and turn level |
 | R1-S QA | memorybench LongMemEval-S, hermes-lcm provider, `HERMES_MB_EMBEDDINGS=off`, fusion unset | LongMemEval-S cleaned, 500 q (dataset sha pinned at prep) | stores rebuilt from scratch with no embedder | QA accuracy (judge verdicts), per-category |
-| R1-L QA | memorybench LoCoMo, hermes-lcm provider, `HERMES_MB_EMBEDDINGS=off`, fusion unset | LoCoMo-10, 1,986 q (adversarial gold per the harness pin) | stores rebuilt from scratch | QA accuracy, strict judge rubric (the F46/F61 lineage) |
+| R1-L QA | memorybench LoCoMo, hermes-lcm provider, `HERMES_MB_EMBEDDINGS=off`, fusion unset | LoCoMo-10, 1,986 q (adversarial gold per the harness pin; the 99 corrupted-gold rows of the F46 lineage stay in and are scored as-is) | stores rebuilt from scratch | QA accuracy, strict judge rubric (the F46/F61 lineage) |
 
 ## 2. Pins (every value from a command at launch, none typed)
-- Product: the v0.24.9 GA tag commit (`git rev-parse v0.24.9^{commit}`); plugin version line; `config.py` blob sha.
+- Product: the tree each sub-row actually imports, by commit sha; plugin version line; `config.py` blob sha.
+  - `git rev-parse v0.24.9^{commit}` must equal the canonical GA commit `e36ae9c866757d531292db2bf64f5f0b59710bc8`
+    (the tag is mutable); any mismatch stops the row.
+  - R1-M: `scripts/lcm_longmemeval.py` imports the product from its own checkout, so R1-M measures the instrument
+    commit's product tree. R1-S / R1-L: record the tree the bridge loads.
+  - Recall-path identity: `git diff --stat e36ae9c8 <measured sha>` over the product files is recorded, and the recall
+    path (`tools.py`, `retrieval_core.py`, `search_query.py`, `adaptive_retrieval.py`, `store.py`, `vector_store.py`)
+    must be byte-identical to v0.24.9. If it is, the row is
+    labelled "v0.24.9 recall path at <sha>"; if not, it is labelled with the measured sha only and the diff is listed.
 - Instruments: the lcm-x commit holding the `--embeddings` arm (#811's merge or later); the memorybench commit holding
   `HERMES_MB_EMBEDDINGS` and `scripts/run-with-watchdog.sh` (`b47f92f7` or later on `feat/locomo-hermes-prep`); blob
   shas of the harness files.
@@ -27,6 +35,10 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
 - Reader and judge (R1-S, R1-L): model id, reasoning effort, codex CLI version + binary sha256. Reader = the current
   Sol generation at medium; judge = Sol at low with the strict rubric. The reader differs from the 07-29 row
   (gpt-5.6-sol), which is one more reason R1-S is a new baseline.
+- Served model: every reader answer and judge verdict, watchdog-resumed work included, carries the model that
+  actually served it (from the transport log), and it must equal the pinned id (the F59 lesson: a requested model
+  was silently served by another). If the transport does not expose the served model, that sub-row is blocked
+  until it does.
 - Recorded configuration: `retrieval_config` from every R1-M report; `embeddings_enabled` from every bridge
   `initialize` reply; an allowlisted inventory of the non-secret `LCM_*` / `HERMES_MB_*` configuration values.
   Credential variables (for example `LCM_EMBEDDING_API_KEY`) are recorded as present or absent only, never by value;
@@ -48,9 +60,11 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
 3. Cost and size per query, recorded or marked UNMEASURED with the reason: delivered context tokens per question,
    reader input and output tokens (from the transport log), wall time p50 / p90, metered dollars (expected $0:
    subscription lanes only, no embedding provider).
-4. Comparison rule: within this configuration only. The embeddings-on rows stay visible with their own pins; a
+4. R1-L: the report states the 99 corrupted-gold rows and the known-corruption ceiling of 95.02% for this 1,986-row set (F46 §6) next to
+   the headline, as the earlier LoCoMo rows did. The rows stay scored as-is; no corrected-gold rescoring.
+5. Comparison rule: within this configuration only. The embeddings-on rows stay visible with their own pins; a
    difference between the two is reported as "configuration difference", never as a regression or a gain.
-5. Negative results ship at the same resolution as positive ones.
+6. Negative results ship at the same resolution as positive ones.
 
 ## 5. Operations
 - Snapshot outputs first: copy every run's output dir to the evidence folder before any analysis touches it.
@@ -70,6 +84,7 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
 - Any embed call counted in an off run → stop.
 - Watchdog used all resumes on one run → park that sub-row, report the stall with the log.
 - More than 2 R1-M shards dead of one cause → park, root-cause first.
+- The `v0.24.9` tag does not resolve to `e36ae9c8…`, or a served model differs from its pin → stop.
 
 ## 7. Procedure
 1. Merge the kit PRs; merge this sheet (fact-check of every pin source).
