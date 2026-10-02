@@ -26,7 +26,8 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
     commit's product tree. R1-S / R1-L: record the tree the bridge loads.
   - Recall-path identity: `git diff --stat e36ae9c8 <measured sha>` over the product files is recorded, and the recall
     path (`tools.py`, `retrieval_core.py`, `search_query.py`, `adaptive_retrieval.py`, `store.py`, `vector_store.py`,
-    `dag.py` for summary full-text search, `db_bootstrap.py` for full-text setup) must be byte-identical to v0.24.9. If it is, the row is
+    `dag.py` for summary full-text search, `db_bootstrap.py` for full-text setup, `config.py` for the recall defaults
+    such as `recall_query_timeout_s` and `recall_reference_strict`) must be byte-identical to v0.24.9. If it is, the row is
     labelled "v0.24.9 recall path at <sha>"; if not, it is labelled with the measured sha only and the diff is listed.
 - Instruments: the lcm-x commit holding the `--embeddings` arm (#811's merge or later); the memorybench commit holding
   `HERMES_MB_EMBEDDINGS` and `scripts/run-with-watchdog.sh` (`b47f92f7` or later on `feat/locomo-hermes-prep`); blob
@@ -43,6 +44,13 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
   `initialize` reply; an allowlisted inventory of the non-secret `LCM_*` / `HERMES_MB_*` configuration values.
   Credential variables (for example `LCM_EMBEDDING_API_KEY`) are recorded as present or absent only, never by value;
   in this row they are expected absent. Never capture an unrestricted environment dump.
+- Shipped defaults only: apart from the row's declared configuration (embeddings off) and the storage paths the
+  harness sets for its own runs (listed), every `LCM_*` / `HERMES_MB_*` value that changes an `LCMConfig` field the
+  recall path reads (for example `LCM_RECALL_QUERY_TIMEOUT_S`, `LCM_RECALL_REFERENCE_STRICT`) must be absent or equal
+  to the product default. Otherwise the row stops (§6); it is not published as the shipped-default baseline.
+- Per-question recall provenance: every sub-row records each question's `degraded` flag and
+  `provenance.coverage` in a durable output. R1-M's harness keeps only the hits today, so R1-M is blocked until #817
+  lands. A sub-row whose bridge does not expose provenance is blocked the same way.
 
 ## 3. Proof before any scored run (positive controls)
 1. Kit unit tests green at the pinned instrument commits (off path, on path unchanged, refusal cases).
@@ -52,8 +60,10 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
 4. A control that does not separate its two arms stops the row (no scored run on an unproven arm).
 
 ## 4. Pre-declared reporting bars
-1. Headline metric with fail-closed accounting: every question scored, failed, or excluded (abstentions) is counted
-   and listed; a failed question is never dropped.
+1. Headline metric with fail-closed accounting: every question scored, failed, or excluded is counted and listed; a
+   failed question is never dropped. Exclusion applies to R1-M only: its abstention (`_abs`) questions have no
+   evidence-session target. R1-S scores all 500 and R1-L all 1,986; a false abstention there is an error, as in the
+   banked V1-S protocol (F37).
 2. Noise floor before any claim. R1-M: deterministic, A/A′ on the F53 100-question subset must give 0 discordant
    rows (any discordance is a finding). R1-S: A′ on the same fixed 100-question subset. R1-L: A/A′ full run;
    the discordant count is the floor.
@@ -82,12 +92,15 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
 ## 6. Abort / park
 - Any arm reports the wrong `embeddings_enabled` or a non-null vector metric with embeddings off → stop, root-cause.
 - Any embed call counted in an off run → stop.
+- A recall-affecting override that differs from the product default (§2) → stop, or relabel the row as a distinct
+  configuration.
 - Watchdog used all resumes on one run → park that sub-row, report the stall with the log.
 - More than 2 R1-M shards dead of one cause → park, root-cause first.
 - The `v0.24.9` tag does not resolve to `e36ae9c8…`, or a served model differs from its pin → stop.
 
 ## 7. Procedure
-1. Merge the kit PRs; merge this sheet (fact-check of every pin source).
+1. Merge the kit PRs; merge this sheet (fact-check of every pin source). R1-M also waits for #817 (per-question
+   provenance).
 2. Fresh worktrees at the pinned commits; record pins (§2).
 3. Positive controls (§3) → evidence folder.
 4. R1-M full 500 (6 shards) + A/A′ subset → snapshot → score.
