@@ -718,6 +718,7 @@ class LCMEngine(
         # #651: (monotonic until, reason) after an automatic threshold pass made no progress or
         # the host refused one. #597: a progress refusal also ends at turn end.
         self._no_progress_hold: Optional[tuple[float, str]] = None
+        self._progress_hold_conversation = ""  # #597: the conversation whose turn end may clear it
         self._last_compress_leaves: Optional[tuple[str, int]] = None  # #597: latest call, bound conversation
         self._last_hidden_backlog: Optional[HiddenBacklog] = None  # #597: latest check in this compress()
         self._hidden_backlog_unknown_warned: set[str] = set()
@@ -1685,6 +1686,7 @@ class LCMEngine(
         """#651: hold automatic threshold passes until its time or a stored leaf; #597 progress refusals
         also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
+        self._progress_hold_conversation = self._hold_conversation_key()
         if reason == "host_rejected_progress":
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
@@ -1721,9 +1723,13 @@ class LCMEngine(
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
 
     def note_turn_complete(self) -> None:
-        """#597: end only a progress-refusal hold at turn end; cheap, fail-soft host notification."""
+        """#597: end only a progress-refusal hold, and only at the end of a foreground turn of the conversation that
+        armed it (never a bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
         try:
-            if self._no_progress_hold is not None and self._no_progress_hold[1] == "host_rejected_progress":
+            hold = self._no_progress_hold
+            if (hold is not None and hold[1] == "host_rejected_progress"
+                    and not self._bypasses_lcm_context_management()
+                    and self._progress_hold_conversation == self._hold_conversation_key()):
                 self._no_progress_hold = None
                 logger.info("LCM automatic compaction hold ended at turn end: host_rejected_progress")
         except Exception:

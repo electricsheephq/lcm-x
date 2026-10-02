@@ -43,8 +43,8 @@ def exits_cleanly(cell: dict) -> bool:
 
 
 def boundary(cell: dict, cell_dir: Path | None, first: int) -> int | None:
-    """The runner's fired clean-exit fault when the cell has one, otherwise the observer's actual host session
-    transition (a rotation cell without the fault); never the turn count alone."""
+    """The runner's fired clean-exit fault when the cell has one, otherwise the observer's latest host session
+    transition at or before ``first`` (a rotation cell without the fault); never the turn count alone."""
     name = "faults-fired.jsonl" if exits_cleanly(cell) else "transcript.jsonl"
     path = Path(cell_dir) / name if cell_dir else None
     records = [json.loads(x) for x in path.read_text().splitlines() if x.strip()] if path and path.exists() else []
@@ -53,7 +53,8 @@ def boundary(cell: dict, cell_dir: Path | None, first: int) -> int | None:
                      and 0 < (r.get("turn") or 0) <= first), None)
     sessions = [r for r in records if r.get("event") in ("host_prompt", "turn_end") and r.get("session")
                 and r.get("session_prefix", "T") == "T" and 0 < (r.get("turn") or 0) <= first]
-    return next((b["turn"] for a, b in zip(sessions, sessions[1:]) if a["session"] != b["session"]), None)
+    turns = [b["turn"] for a, b in zip(sessions, sessions[1:]) if a["session"] != b["session"]]
+    return turns[-1] if turns else None  # the latest transition: earlier rotations are still phase 1
 
 
 def plateau(done: list[dict]) -> dict:

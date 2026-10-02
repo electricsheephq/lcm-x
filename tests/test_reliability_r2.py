@@ -746,6 +746,17 @@ def test_drain_fixture_b_rotation_crosses_on_the_clean_exit_not_a_rotation(tmp_p
     assert drain.boundary(cell, tmp_path, first) == first
 
 
+def test_drain_rotation_boundary_is_the_latest_transition(tmp_path):
+    """Rotation mode rotates on every compaction: phase 2 starts after the LAST transition at or before
+    phase2_turn, so a compaction that rotated at phase2_turn stays out of phase 2."""
+    from bench.instruments.reliability.scorers import drain
+    first = 41
+    cell = {"in_place": False, "drain": {"phase2_turn": first}}
+    for turn, session in ((1, "s1"), (12, "s2"), (30, "s3"), (first, "s4"), (first + 3, "s5")):
+        PC.append(tmp_path / "transcript.jsonl", {"event": "turn_end", "turn": turn, "session": session})
+    assert drain.boundary(cell, tmp_path, first) == first
+
+
 @pytest.mark.parametrize("transition", [40, 41], ids=["before-phase2", "at-phase2"])
 def test_drain_rotation_d1_excludes_transition_call(tmp_path, transition):
     from bench.instruments.reliability.scorers import drain

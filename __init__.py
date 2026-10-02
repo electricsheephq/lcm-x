@@ -722,14 +722,16 @@ def register(ctx):
             platform = str(kwargs.get("platform") or "")
 
             def _ingest_and_note(active_engine):
-                result = active_engine.ingest(history)
+                # The turn ended whether or not its ingest succeeded (#597).
                 try:
-                    note = getattr(active_engine, "note_turn_complete", None)
-                    if callable(note):
-                        note()
-                except Exception as exc:
-                    logger.debug("LCM post_llm_call turn-complete notification error: %s", exc)
-                return result
+                    return active_engine.ingest(history)
+                finally:
+                    try:
+                        note = getattr(active_engine, "note_turn_complete", None)
+                        if callable(note):
+                            note()
+                    except Exception as exc:
+                        logger.debug("LCM post_llm_call turn-complete notification error: %s", exc)
 
             def _bind_and_ingest(active_engine):
                 # The host-supplied engine or genuinely cold plugin prototype

@@ -69,6 +69,31 @@ def test_progress_in_another_conversation_does_not_shorten_hold(engine):
     assert engine._automatic_compression_blocked()
 
 
+def test_turn_end_of_another_conversation_keeps_the_hold(engine):
+    engine.compress(_view(), current_tokens=1_000)
+    engine.record_rejected_compaction()
+    assert engine._no_progress_hold_status()["reason"] == "host_rejected_progress"
+    engine._conversation_id = "B"
+    engine.note_turn_complete()
+    assert engine._automatic_compression_blocked()
+    engine._conversation_id = "conv"
+    engine.note_turn_complete()
+    assert not engine._automatic_compression_blocked()
+
+
+def test_bypassed_turn_end_keeps_the_hold(engine):
+    engine.compress(_view(), current_tokens=1_000)
+    engine.record_rejected_compaction()
+    engine._mark_thread_context_stateless("aux-597")
+    try:
+        engine.note_turn_complete()
+        assert engine._no_progress_hold is not None
+    finally:
+        engine._clear_thread_context_stateless()
+    engine.note_turn_complete()
+    assert engine._no_progress_hold is None
+
+
 def test_progress_hold_has_600_second_backstop(engine, monkeypatch):
     engine.compress(_view(), current_tokens=1_000)
     clock = SimpleNamespace(now=10.0)
@@ -125,8 +150,10 @@ def test_turn_notification_never_raises_on_logging_error(engine, monkeypatch):
 
 
 @pytest.mark.parametrize("path", ["resident", "host", "cold"])
-@pytest.mark.parametrize("broken", [False, True])
-def test_registered_hook_notifies_ingesting_engine_after_ingest(tmp_path, monkeypatch, caplog, path, broken):
+@pytest.mark.parametrize("broken,ingest_fails", [(False, False), (True, False), (False, True)],
+                         ids=["ok", "note-fails", "ingest-fails"])
+def test_registered_hook_notifies_ingesting_engine_after_ingest(tmp_path, monkeypatch, caplog, path, broken,
+                                                                ingest_fails):
     _install_host(monkeypatch, tmp_path)
     module = _load_plugin(f"hermes_lcm_597_{path}_{broken}")
     ctx = _Ctx(_Manager())
@@ -140,7 +167,10 @@ def test_registered_hook_notifies_ingesting_engine_after_ingest(tmp_path, monkey
 
     def spy_ingest(messages):
         events.append("ingest")
-        return ingest(messages)
+        result = ingest(messages)
+        if ingest_fails:
+            raise RuntimeError("ingest failed")
+        return result
 
     def note():
         assert active._store.get_session_count("S597") == len(history)
@@ -160,7 +190,7 @@ def test_registered_hook_notifies_ingesting_engine_after_ingest(tmp_path, monkey
         assert events == ["ingest", "note"]
         assert active._store.get_session_count("S597") == len(history)
         assert ("turn-complete notification error" in caplog.text) is broken
-        assert "post_llm_call ingest error" not in caplog.text
+        assert ("post_llm_call ingest error" in caplog.text) is ingest_fails
     finally:
         if active is not prototype:
             active.shutdown()
