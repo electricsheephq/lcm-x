@@ -24,7 +24,7 @@ import re
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
-from types import MappingProxyType
+from types import MappingProxyType, SimpleNamespace
 from typing import Any, Dict, List, Mapping, Optional, Sequence
 
 from .externalize import (
@@ -34,6 +34,7 @@ from .externalize import (
     load_externalized_payload,
 )
 from .ingest_protection import (
+    _active_sensitive_pattern_names,
     _add_inline_persisted_output_generation_metadata,
     _add_inline_persisted_output_identity_metadata,
     _expected_persisted_output_chars,
@@ -43,6 +44,8 @@ from .ingest_protection import (
     _json_has_duplicate_object_keys,
     _persisted_output_marker_identity_digest,
     _persisted_output_saved_path,
+    _SENSITIVE_PATTERN_CATALOG,
+    _SENSITIVE_PLACEHOLDER_PREFIX,
     protect_messages_for_ingest,
     recover_hermes_persisted_output_with_file_stat,
     redact_sensitive_value,
@@ -419,6 +422,43 @@ def _has_lossy_redacted_identity(identity: tuple[str, str, str, str, str]) -> bo
     never made.
     """
     return _has_lossy_sensitive_redaction(identity[1]) or _has_lossy_sensitive_redaction(identity[3])
+
+
+# #758: every catalog pattern whose placeholder carries a digest of the secret. Applied to BOTH
+# sides of a comparison, it erases only the difference between a secret and its own placeholder,
+# so rows written under another redaction policy compare as written under one policy. The
+# digest-less password_assignment placeholder is left out: it is not identity (#484 item 11b).
+_POLICY_NEUTRAL_REDACTION = SimpleNamespace(
+    sensitive_patterns_enabled=True,
+    sensitive_patterns=[name for name in _SENSITIVE_PATTERN_CATALOG if name != "password_assignment"],
+)
+_SENSITIVE_PLACEHOLDER_TEXT_RE = re.compile(re.escape(_SENSITIVE_PLACEHOLDER_PREFIX) + r" [^\]]*\]")
+_LITERAL_PLACEHOLDER_TAG = _SENSITIVE_PLACEHOLDER_PREFIX + " literal=1;"
+
+
+def _host_literal_placeholders(messages: List[Dict[str, Any]]) -> frozenset:
+    """#758: placeholder TEXT the host itself holds (typed, pasted, or LCM output it kept), as opposed
+    to a placeholder this process's redaction produced from a raw secret. Read from the unredacted rows."""
+    found: set = set()
+    for message in messages:
+        for text in (normalize_content_value(message.get("content")) or "", str(message.get("tool_calls") or "")):
+            if _SENSITIVE_PLACEHOLDER_PREFIX in text:
+                found.update(_SENSITIVE_PLACEHOLDER_TEXT_RE.findall(text))
+    return frozenset(found)
+
+
+def _mark_literal_placeholders(
+    identity: tuple[str, str, str, str, str], literal: frozenset
+) -> tuple[str, str, str, str, str]:
+    """#758: tag host-held placeholder text so the policy-neutral form never equates it with the raw
+    secret its digest names; a row holding the same text on both sides still compares equal."""
+    if not literal:
+        return identity
+    role, content, tool_call_id, tool_calls, tool_name = identity
+    for text in literal:
+        tagged = text.replace(_SENSITIVE_PLACEHOLDER_PREFIX + " ", _LITERAL_PLACEHOLDER_TAG + " ", 1)
+        content, tool_calls = content.replace(text, tagged), tool_calls.replace(text, tagged)
+    return (role, content, tool_call_id, tool_calls, tool_name)
 
 
 def _todo_annotation_span(content: str, start: int) -> int:
@@ -1444,7 +1484,9 @@ class ReconcileMixin:
         session_count: int,
         raw_session_count: int,
         allow_session_end_replay_proof: bool = False,
+        normalize_identity=None,
     ) -> int | None:
+        normalize = normalize_identity or (lambda identity: identity)  # #758: the policy-neutral retry
         # One projection over the complete list (#488), by position: one object per position (F6).
         seen: set = set()
         messages = [dict(m) if id(m) in seen or seen.add(id(m)) else m for m in messages]
@@ -1454,7 +1496,7 @@ class ReconcileMixin:
         occurrences, v4 = self._replay_occurrences(messages)
         occurrence_by_id = {id(m): occurrence for m, occurrence in zip(messages, occurrences)}
         occurrence_identities = {  # a #499 composite is new content, stored whole: never its remainder (F2)
-            id(m): self._message_replay_identity(m, stored_row=True) if _merged_composite(e) else i
+            id(m): normalize(self._message_replay_identity(m, stored_row=True) if _merged_composite(e) else i)
             for m, (e, i) in zip(messages, occurrences) if i is not None
         }
         scaffold_ids = {id(m) for m, (_e, i) in zip(messages, occurrences) if i is None}
@@ -1465,7 +1507,9 @@ class ReconcileMixin:
         def active_identity(
             message: Dict[str, Any],
         ) -> tuple[str, str, str, str, str]:
-            return occurrence_identities.get(id(message)) or self._message_replay_identity(message, strip_carrier=False)
+            return occurrence_identities.get(id(message)) or normalize(
+                self._message_replay_identity(message, strip_carrier=False)
+            )
 
         sanitized_replay_tail = self._stored_tail_for_sanitized_active_replay(stored_tail)
         effective_session_count = len(sanitized_replay_tail)
@@ -2162,7 +2206,9 @@ class ReconcileMixin:
                 coalesced.append((source, start, end))
         return coalesced
 
-    def _cursor_from_durable_commit_proof(self, messages, allow_replaced_tail: Optional[list] = None) -> Optional[int]:
+    def _cursor_from_durable_commit_proof(
+        self, messages, allow_replaced_tail: Optional[list] = None, normalize_identity=None,
+    ) -> Optional[int]:
         """Cursor proven by the last compaction's durable output proof, else None.
 
         The host prefix must carry exactly the compress() output's non-scaffold
@@ -2289,9 +2335,10 @@ class ReconcileMixin:
                     if index >= n:
                         return None
                     identity = proof_identity(messages[index], stored_row=index + 1 == composite)
-                    if _has_lossy_redacted_identity(identity) or identity != proof_identity(
-                        row, stored_row=True, with_host_rewrite=True
-                    ):
+                    stored_identity = proof_identity(row, stored_row=True, with_host_rewrite=True)
+                    if normalize_identity is not None:  # #758: rows stored under another redaction policy
+                        identity, stored_identity = normalize_identity(identity), normalize_identity(stored_identity)
+                    if _has_lossy_redacted_identity(identity) or identity != stored_identity:
                         return None
                     index += 1
                 after_store_id = int(page[-1]["store_id"])
@@ -2471,11 +2518,52 @@ class ReconcileMixin:
                     break
         return fits
 
+    def _policy_neutral_identity(
+        self, identity: tuple[str, str, str, str, str]
+    ) -> tuple[str, str, str, str, str]:
+        """#758: ``identity`` with every secret the CURRENT policy redacts (digest-bearing patterns
+        only) in its placeholder form: the retry never accepts an equality a store written under the
+        current policy would not, so a stored placeholder never stands in for a raw host secret."""
+        policy = self._policy_neutral_redaction()
+        role, content, tool_call_id, tool_calls, tool_name = identity
+        content = redact_sensitive_value(content, policy, parse_json_strings=False)
+        if tool_calls:
+            try:
+                decoded = json.loads(tool_calls)
+            except (TypeError, ValueError):
+                decoded = None
+            if decoded is not None:
+                tool_calls = self._stable_tool_calls_identity(
+                    redact_sensitive_value(decoded, policy, parse_json_strings=True)
+                )
+        return (role, content, tool_call_id, tool_calls, tool_name)
+
+    def _policy_neutral_redaction(self) -> SimpleNamespace:
+        active = _active_sensitive_pattern_names(self._config)
+        return SimpleNamespace(
+            sensitive_patterns_enabled=True,
+            sensitive_patterns=[name for name in active if name in _POLICY_NEUTRAL_REDACTION.sensitive_patterns],
+        )
+
+    @staticmethod
+    def _window_has_redaction_placeholder(
+        messages: List[Dict[str, Any]],
+        stored_tail: list[tuple[str, str, str, str, str]],
+        marker: str = _SENSITIVE_PLACEHOLDER_PREFIX,
+    ) -> bool:
+        """#758: a redaction policy change can only show as a placeholder on one side."""
+        return any(marker in identity[1] or marker in identity[3] for identity in stored_tail) or any(
+            marker in (normalize_content_value(message.get("content")) or "")
+            or marker in str(message.get("tool_calls") or "")
+            for message in messages
+        )
+
     def _reconcile_ingest_cursor_from_store(
         self,
         messages: List[Dict[str, Any]],
         *,
         allow_session_end_replay_proof: bool = False,
+        unredacted_messages: Optional[List[Dict[str, Any]]] = None,
     ) -> int:
         """Infer the in-memory cursor for an existing session after process restart."""
         if not self._session_id or not messages:
@@ -2581,10 +2669,56 @@ class ReconcileMixin:
             raw_session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
         )
+        effective_prefixes: dict = {}
+
+        def effective_prefix(at: int):
+            if at not in effective_prefixes:
+                effective_prefixes[at] = self._effective_replay_identities(messages[:at])
+            return effective_prefixes[at]
+
+        across_policy_change = False
+        # #758: the retry needs the host's unredacted rows (provenance of every placeholder), runs only
+        # when nothing was proven, and only when a placeholder shows on one side of the window.
+        policy_retry = (
+            bool(self._policy_neutral_redaction().sensitive_patterns)
+            and unredacted_messages is not None
+            and len(unredacted_messages) == len(messages)
+            and not (cursor and effective_prefix(cursor))
+            and self._window_has_redaction_placeholder(messages, stored_tail)
+            # the reserved tag already present as text would make the tagging ambiguous: keep main's path
+            and not self._window_has_redaction_placeholder(unredacted_messages, stored_tail, _LITERAL_PLACEHOLDER_TAG)
+        )
+        if policy_retry:
+            literal = _host_literal_placeholders(unredacted_messages)
+
+            def neutral(identity):
+                return self._policy_neutral_identity(_mark_literal_placeholders(identity, literal))
+
+            # #758: the stored rows and the replay may be redacted under different policies (the
+            # setting, the pattern list or a catalog entry changed). Retry the same matcher with
+            # both sides in one digest-bearing form; it may extend the cursor, never shrink it.
+            neutral_cursor = self._find_reconciled_cursor_for_store_tail(
+                messages,
+                [neutral(identity) for identity in stored_tail],
+                stored_tail_rows=stored_tail_rows,
+                allow_empty_prefix=True,
+                session_count=len(stored_tail),
+                raw_session_count=session_count,
+                allow_session_end_replay_proof=allow_session_end_replay_proof,
+                normalize_identity=neutral,
+            )
+            if neutral_cursor is not None and neutral_cursor > (cursor or 0):
+                cursor, across_policy_change = neutral_cursor, True
         head_cursor = self._cursor_from_host_rewrite_head(messages, session_count)
         if head_cursor is not None and head_cursor > (cursor or 0):
-            cursor = head_cursor  # the greatest independently proven cursor wins
+            cursor, across_policy_change = head_cursor, False  # the greatest independently proven cursor wins
         proof_cursor = self._cursor_from_durable_commit_proof(messages)
+        if proof_cursor is None and policy_retry and not across_policy_change:
+            # #758: the proof binds the rows LCM returned at compaction, which the host holds as
+            # written under that compaction's policy; re-redacting them under a changed policy
+            # breaks the binding. Prove those positions on the host's own rows, and the rows
+            # stored after the compaction in the policy-neutral form.
+            proof_cursor = self._cursor_from_durable_commit_proof(unredacted_messages, normalize_identity=neutral)
         if proof_cursor is not None and proof_cursor > (cursor or 0):
             # The last compaction's durable output proof covers more of this
             # snapshot than content matching could (e.g. it stopped at the
@@ -2635,7 +2769,9 @@ class ReconcileMixin:
         if cursor is not None and cursor > 0:
             reason = (
                 "skipped scaffold-only prefix"
-                if not self._effective_replay_identities(messages[:cursor])
+                if not effective_prefix(cursor)
+                else "replayed durable tail across a redaction policy change"
+                if across_policy_change
                 else "replayed durable tail"
             )
             self._record_ingest_reconciliation(
