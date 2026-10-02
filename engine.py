@@ -7378,6 +7378,9 @@ class LCMEngine(
                 continue
             if self._is_preserved_todo_context_message(message):
                 continue
+            if self._is_verified_replay_scaffold_message(message):
+                # LCM's own summary row: never re-label it as the user's objective.
+                return None
             if any(message == selected for selected in selected_tail_messages):
                 return None
             return self._build_preserved_objective_summary_part(message)

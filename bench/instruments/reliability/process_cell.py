@@ -18,6 +18,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import time
 from pathlib import Path
@@ -30,7 +31,7 @@ SANDBOX = ('(version 1)(allow default)(deny network-outbound)(allow network-outb
            '(allow network-outbound (remote unix-socket))')
 FAKE_KEY = "rel-fake-key-not-a-secret"
 PROCESS_FAULTS = {"acp-process": {"crash_after_compaction_before_reply", "cancel_then_retry",
-                                   "crash_after_rotation_before_child_row"}}
+                                   "crash_after_rotation_before_child_row", "clean_exit_before_turn"}}
 # R2-only: the main route over the Anthropic Messages API (a ``/anthropic`` base path selects the anthropic_messages
 # transport, hermes_cli/runtime_provider.py _detect_api_mode_for_url); the #550 class.
 R2_CELLS = [{**C.cell("anthropic-route/acp-process", [], in_place=True,
@@ -44,6 +45,12 @@ GATEWAY_ANCHORS = {
     "api_server_bypass": ("gateway/platforms/api_server.py", "never passes through ``TurnRunner``"),
 }
 
+
+def graceful_exit(returncode: int | None, killed: bool, sent_term: bool) -> bool:
+    """A clean host stop: it exited on stdin EOF (0), or on the SIGTERM close() itself sent to the still-running host
+    within the shutdown grace (-SIGTERM, how a service manager stops a gateway). A SIGKILL escalation, a SIGTERM from
+    anywhere else (the host had already ended before close()) or any other code is not clean."""
+    return not killed and (returncode == 0 or (returncode == -signal.SIGTERM and sent_term))
 
 def gateway_unsupported(src: str) -> str:
     c = cite_all(src, GATEWAY_ANCHORS)
@@ -97,6 +104,25 @@ def config_yaml(cell: dict, plugin: dict, base_url: str) -> str:
             # ACP session/new runs via model_catalog.build_model_state -> _fetch_opencode_free_models.
             "model_catalog:\n  enabled: false\n  excluded_providers: [opencode-free]\n"
             f"platform_toolsets:\n  acp: [{', '.join(cell.get('toolsets', ['todo', 'context_engine', 'file']))}]\n")
+
+
+def phase_lcm_env(cell: dict, phase: str) -> dict:
+    """Phase defaults (Fixture B), with the global override winning in every phase."""
+    return {**cell["lcm_env"], **((cell.get("drain") or {}).get("phase2_lcm_env") or {} if phase != "A" else {}),
+            **(cell.get("global_lcm_env") or {})}
+
+
+def forget_host_rows(state_db: Path, session_id: str) -> int:
+    """Fixture B, harness state only (no host or plugin code): the host's own soft-archive (active=0, as its in-place
+    compaction ``archive_and_compact`` leaves superseded rows) on every active row of the ACP session, so the next ACP
+    restore starts from an empty list while LCM's stored rows stay unsummarized above the frontier (hidden)."""
+    con = sqlite3.connect(state_db)
+    try:
+        n = con.execute("UPDATE messages SET active = 0 WHERE session_id = ? AND active = 1", (session_id,)).rowcount
+        con.commit()
+        return n
+    finally:
+        con.close()
 
 
 def reply_text(cell: dict, prefix: str, t: int) -> str:
@@ -240,7 +266,7 @@ class ProcessCell:
                "LCM_SUMMARY_MODEL": "rel/lcm-summary",
                # Time compression: a cell runs 60 turns in ~20 s, which trips the per-window summary spend guard
                # that a real session spreads over hours; without this the "real" summariser path is mostly skipped.
-               "LCM_SUMMARY_SPEND_MAX_CALLS": "100000", **self.cell["lcm_env"],
+               "LCM_SUMMARY_SPEND_MAX_CALLS": "100000", **phase_lcm_env(self.cell, self.phase),
                "LCM_NATIVE_RECOVERY": "true" if self.cell["native_recovery"] else "false"}
         for k in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
             env[k] = self.proxy.url  # a recording sink that refuses everything
@@ -303,6 +329,7 @@ class ProcessCell:
         self.first = first
         self.deadline = time.monotonic() + self.phase_timeout if self.phase_timeout else None
         self.proc = AD.AcpProcess(self.argv(), self.env(), self.work, self.d / f"host-{self.phase}.stderr")
+        closed = False
         try:
             self.proc.initialize(self.budget())
             if self.phase == "A":
@@ -310,7 +337,15 @@ class ProcessCell:
             else:  # ACP _restore: the stable ACP id, restored from state.db by the fresh process
                 self.proc.load_session(self.sid, self.files, self.budget())
             cancel = next((f for f in self.cell["faults"] if f["kind"] == "cancel_then_retry"), None)
+            clean = next((f for f in self.cell["faults"] if f["kind"] == "clean_exit_before_turn"), None)
             for t in P1.extend_turns(self.cell, first, self.low_backlog):
+                if clean and t == clean.get("turn") and t != first and "clean_exit_before_turn" not in self.fired:
+                    rc = self.proc.close()
+                    closed = True
+                    if not graceful_exit(rc, self.proc.killed, getattr(self.proc, "sent_term", False)):
+                        return {"exit": "error", "reason": f"clean exit failed: returncode={rc}, killed={self.proc.killed}"}
+                    self.fire("clean_exit_before_turn", t)  # recorded only after a graceful host exit
+                    return {"exit": "clean_exit", "next_turn": t}
                 if cancel and t == cancel["turn"] and "cancel_then_retry" not in self.fired:
                     self.turn(t, "cancel")
                     end = [n for n in self.notes("turn_end") if n["tag"] == f"T{t:02d}" and n["turn_kind"] == "cancel"]
@@ -336,7 +371,8 @@ class ProcessCell:
                 exc = PhaseDeadline(f"phase {self.phase} exceeded its {self.phase_timeout}s deadline ({exc})")
             return {"exit": "error", "reason": f"{type(exc).__name__}: {exc}; stderr: {self.stderr_tail()}"[:600]}
         finally:
-            rc = self.proc.close()
+            if not closed:
+                rc = self.proc.close()
             self.event(event="host_exit", returncode=rc, killed=self.proc.killed)
 
     def low_backlog(self, last_turn: int) -> bool:
@@ -452,9 +488,16 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
                 last = run.run_phase(first)
                 (d / f"phase-{phase}.json").write_text(json.dumps(run.phase_record(first, last), indent=1, default=str))
                 phases.append(phase)
-                if last["exit"] != "crash":
+                if last["exit"] not in ("crash", "clean_exit"):
                     break
                 first = last["next_turn"]
+                drain = cell.get("drain") or {}
+                if drain.get("phase2_lcm_env"):  # the next phase's config carries its LCM threshold too
+                    (home / "config.yaml").write_text(config_yaml({**cell, "lcm_env": phase_lcm_env(cell, "B")}, plugin,
+                                                                  run.provider.base_url))
+                if last["exit"] == "clean_exit" and drain.get("forget_host_rows"):
+                    append(d / "fixture.jsonl", {"kind": "forget_host_rows", "after_phase": phase, "before_turn": first,
+                                                 "rows": forget_host_rows(home / "state.db", run.sid)})
         finally:
             run.provider.stop()
             run.proxy.stop()

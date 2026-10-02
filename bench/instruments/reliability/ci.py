@@ -21,7 +21,8 @@ G_REL_1 = ("baseline", "acp-trailing", "preflight-continue", "repeat-identical-r
            "pressure-disagreement", "lcm-tool-mid-turn", "parallel-tool-group", "crash-", "gateway-second-restart",
            "cancel-retry", "publication-failure")
 # Data cells inside a gate family that never gate (still expected rows for completeness).
-NON_GATE = ("publication-failure/rotation-child-persistent",)
+NON_GATE = ("publication-failure/rotation-child-persistent", "drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation",
+            "drain/hidden-backlog-large/in-place", "drain/hidden-backlog-large/rotation")
 
 
 def in_gate_set(cell_id: str) -> bool:
