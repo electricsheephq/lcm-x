@@ -830,6 +830,40 @@ def test_b2_composite_cover_is_fail_closed_on_a_pathological_input():
     assert time.monotonic() - started < 10
 
 
+def test_b2_composite_cover_cuts_inside_a_longer_newline_run():
+    """A raw part may end or start with whitespace (the probe's trailing_ws turns): R + "\n" + "\n\n" + U + "\n" still
+    splits into the two edge-stripped keys."""
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    lic = {("user", multiset.h(x)): {"licensed": 1} for x in (a, b)}
+    assert multiset.licensed_parts(a + "\n" + "\n\n" + b + "\n", lic, 1) == {
+        ("user", multiset.h(a)): 1, ("user", multiset.h(b)): 1}
+
+
+def test_b2_composite_cover_is_fail_closed_past_its_part_cap():
+    from bench.instruments.reliability.scorers import multiset
+    paras = [f"paragraph {i}" for i in range(multiset.COVER_PARTS + 1)]
+    lic = {("user", multiset.h(p)): {"licensed": 1} for p in paras}
+    assert multiset.licensed_parts("\n\n".join(paras[:-1]), lic, 1)  # exactly COVER_PARTS parts
+    assert multiset.licensed_parts("\n\n".join(paras), lic, 1) is None
+
+
+def test_b2_held_composite_pairs_only_the_occurrences_the_host_did_not_store_whole():
+    """Expected twice, stored whole once: the other occurrence pairs with host-licensed parts unless the host stored
+    both occurrences whole."""
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    c = a + "\n\n" + b
+    rows = [(1, "S0", "user", c), (2, "S0", "user", a), (3, "S0", "user", b)]
+    host = lambda n: {("user", multiset.h(x)): {"n": k, "ids": [x]} for x, k in ((a, 1), (b, 1), (c, n))}
+    for held, verdict in ((0, "PASS"), (1, "PASS"), (2, "FAIL")):
+        out = multiset.score([("user", c), ("user", c)], rows, host(held))
+        assert out["verdict"] == verdict, (held, out)
+        assert len(out["held_composites_as_parts"]) == (verdict == "PASS")
+    [composite] = multiset.score([("user", c), ("user", c)], rows, host(1))["held_composites_as_parts"]
+    assert composite["expected"] == 2 and composite["as_parts"] == 1
+
+
 def test_b2_held_composite_parts_in_another_lineage_do_not_cover_it(tmp_path):
     out = _held_composite(tmp_path, parts_sid="cron_job_01")
     b2 = out["numbers"]["B2"]

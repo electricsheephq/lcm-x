@@ -428,6 +428,16 @@ def test_ci_gate_per_bar_nightly_553_replay(monkeypatch):
     assert len(problems) == 1 and "uncovered bars ['B5', 'B8']" in problems[0]
 
 
+def test_ci_gate_issue_hosts_scope_a_host_specific_exemption():
+    """#821 declares its bars on the r34.4 host only: the same rotation FAIL gates on every other host."""
+    fail = {"verdict": "FAIL", "targets": [519, 549, 821], "failed_bars": {"B1": {}, "B3": {}}}
+    for host, gated in (("r34.4-0.21.5", False), ("eva-0.21.5", True), ("customer-0.21.2", True)):
+        rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
+        problems = ci.gate(rows, {821})
+        assert bool(problems) == gated, (host, problems)
+        assert not gated or "uncovered bars ['B1', 'B3']" in problems[0]
+
+
 def test_unverified_host_never_executes_its_interpreter(tmp_path):
     """Regression (R2a review): the anthropic-SDK probe ran the host python before the identity check."""
     marker, venv = tmp_path / "ran", tmp_path / "venv"

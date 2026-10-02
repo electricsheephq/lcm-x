@@ -35,6 +35,8 @@ ISSUES = {
     597: (("D1", "D2"), ""), 626: (("D3",), ""),  # drain/hidden-backlog: data cells (ci.NON_GATE)
     821: (("B1", "B3", "B4", "B5", "B8"), "r34.4 host: held composite vs durable parts after a crash on rotation"),
 }
+# issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
+ISSUE_HOSTS = {821: ("r34.4-",)}
 
 
 def tight(window: int) -> dict:

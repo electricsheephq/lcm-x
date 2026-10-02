@@ -182,13 +182,14 @@ gateway cells are UNSUPPORTED with the reason; `--transport gateway-process` is 
 ### Nightly CI (`.github/workflows/reliability-nightly.yml`)
 Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `pull_request` path-filtered to
 `bench/instruments/reliability/**` and the workflow file. Not a required check; default token only. Matrix over
-`hosts.ci.json` (pinned shas): eva-0.21.5 and customer-0.21.2 on Python 3.11, upstream-main on 3.14. `ci.py prep`
+`hosts.ci.json` (pinned shas): eva-0.21.5, customer-0.21.2 and r34.4-0.21.5 on Python 3.11, upstream-main on 3.14. `ci.py prep`
 fetches the sha and installs it editable with `[acp,edge-tts,bedrock,vertex,anthropic]` (the harness verifies git HEAD
 and cites source); R1 all cells and R2 acp-process all cells run with `--plugin-ref HEAD`; MATRIX.md is the job
 summary and results are uploaded. `ci.py gate` fails on any ERROR, on a FAIL in the G-REL-1 cell set unless every
 failed bar is declared by at least one open target in `cells.ISSUES`, and on an empty set or any missing, duplicate or unexpected row per (host, transport,
 plugin sha) against that transport's `--cells all` list. Linux has no `sandbox-exec`: there containment is the proxy sink plus the socket guard.
-A FAIL with empty or missing `failed_bars` always gates; an open target absent from `ISSUES` declares no bars.
+A FAIL with empty or missing `failed_bars` always gates; an open target absent from `ISSUES` declares no bars, and a
+target listed in `cells.ISSUE_HOSTS` declares its bars only on hosts whose name starts with one of its prefixes.
 G-REL-1 diagnostics list uncovered bars, targets and open targets.
 
 ### Claim boundary

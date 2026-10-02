@@ -4,7 +4,7 @@
     python -m bench.instruments.reliability.ci gate r1/results.jsonl r2/results.jsonl --open-issues open-issues.txt
 
 The gate fails on any ERROR, and on a FAIL in the G-REL-1 cell set unless every failed bar is declared by an
-open target in cells.ISSUES (empty or missing failed_bars always gates). It also
+open target in cells.ISSUES on that host (cells.ISSUE_HOSTS; empty or missing failed_bars always gates). It also
 fails on an empty results file, a host missing from any file, an empty set and, per (host, transport, plugin sha) present, on any missing, duplicate or unexpected cell
 row against the ``--cells all`` list run_matrix.py uses for that transport (UNSUPPORTED rows count as present).
 """
@@ -82,7 +82,8 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
         elif r["verdict"] == "FAIL" and in_gate_set(r["cell"]):
             targets = set(r.get("targets") or [])
             open_targets = targets & open_issues
-            declared = {bar for target in open_targets if target in C.ISSUES for bar in C.ISSUES[target][0]}
+            declared = {bar for target in open_targets if target in C.ISSUES
+                        and r["host"].startswith(C.ISSUE_HOSTS.get(target, ("",))) for bar in C.ISSUES[target][0]}
             failed = set(r.get("failed_bars") or {})
             uncovered = sorted(failed - declared)
             if not failed or uncovered:
