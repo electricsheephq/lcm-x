@@ -178,7 +178,8 @@ def user_text(cell, prefix, t):
         return "continue"
     n = int(ut.get("identical_turns", {}).get(str(t), t))
     sep = "\n\n" if ut.get("separator_turns") == "all" or n in ut.get("separator_turns", []) else ""
-    body = (FILLER * ut["repeat"]).rstrip()
+    steps = sorted((int(k), v) for k, v in ut.get("repeat_from", {}).items() if int(k) <= t)  # {"151": 800}: from turn 151
+    body = (FILLER * (steps[-1][1] if steps else ut["repeat"])).rstrip()
     if sep:  # >=64 paragraph separators inside the prompt (#545)
         words = body.split(" ")
         step = max(1, len(words) // 70)
@@ -258,6 +259,9 @@ def main():
     needed += ["cron_agent", "cron_close"] if cell.get("cron_every") else []
     needed += ["tool_dispatch", "engine_tool_dispatch"] if cell.get("tool_plan") else []
     cited_modules += sorted({ANCHORS[k][0][:-3].replace("/", ".") for k in needed})
+    if cell.get("drain"):
+        finish("unsupported", reason="drain cells need the R2 observer's per-compaction counters (acp-process only)")
+        return
     if missing := [k for k in needed if not out["citations"][k]]:
         finish("unsupported", reason=f"host shape not citable at this sha: {missing}")
         return
