@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import codecs
 import contextvars
+from bisect import insort
+from contextlib import contextmanager
 import hashlib
 import json
 import logging
@@ -27,6 +29,58 @@ _EXTERNALIZED_REF_RE = re.compile(
 )
 _EXTERNALIZED_SEARCH_HEADER_BYTES = 64 * 1024
 _EXTERNALIZED_SEARCH_TAIL_BYTES = 64 * 1024
+
+_payload_lookup_memo: contextvars.ContextVar[dict[Path, dict[str, list[str]]] | None] = (
+    contextvars.ContextVar("lcm_payload_lookup_memo", default=None)
+)
+_PAYLOAD_NAME_PREFIX_RE = re.compile(r"(?<=_)[0-9a-f]{12}(?=_)")
+
+
+@contextmanager
+def payload_lookup_scope():
+    """Reuse one directory index within an assembly, including nested scopes."""
+    if _payload_lookup_memo.get() is not None:
+        yield
+        return
+    token = _payload_lookup_memo.set({})
+    try:
+        yield
+    finally:
+        _payload_lookup_memo.reset(token)
+
+
+def _index_payload_name(index: dict[str, list[str]], name: str) -> None:
+    # Index every matching segment, not just filenames minted by this module:
+    # the lookup's *_{digest_prefix}_*.json glob accepts arbitrary surrounding text.
+    if not name.endswith(".json"):
+        return
+    for match in _PAYLOAD_NAME_PREFIX_RE.finditer(name):
+        names = index.setdefault(match.group(), [])
+        if name not in names:
+            insort(names, name)
+
+
+def _payload_lookup_candidates(storage_dir: Path, digest_prefix: str):
+    memo = _payload_lookup_memo.get()
+    if memo is None:
+        yield sorted(storage_dir.glob(f"*_{digest_prefix}_*.json"))
+        return
+    if storage_dir not in memo:
+        index: dict[str, list[str]] = {}
+        try:
+            with os.scandir(storage_dir) as entries:
+                for entry in entries:
+                    _index_payload_name(index, entry.name)
+        except OSError:
+            pass  # The existing glob below remains the miss fallback.
+        memo[storage_dir] = index
+    index = memo[storage_dir]
+    yield [storage_dir / name for name in index.get(digest_prefix, ())]
+    # Reached only when none of the indexed candidates passed the existing checks.
+    candidates = sorted(storage_dir.glob(f"*_{digest_prefix}_*.json"))
+    for path in candidates:
+        _index_payload_name(index, path.name)
+    yield candidates
 
 
 def _placeholder_metadata(value: Any) -> str:
@@ -195,6 +249,9 @@ def _write_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
     finally:
         if fd >= 0:
             os.close(fd)
+    memo = _payload_lookup_memo.get()
+    if memo is not None and path.parent in memo:
+        _index_payload_name(memo[path.parent], path.name)
 
 
 def _replace_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
@@ -994,31 +1051,33 @@ def find_externalized_payload_for_message(
         return None
 
     digest_prefix = _content_digest_prefix(content)
-    candidates = sorted(storage_dir.glob(f"*_{digest_prefix}_*.json"))
-    fallback_match = None
-    for path in candidates:
-        try:
-            payload = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        if kind is not None and payload.get("kind", "tool_result") != kind:
-            continue
-        if (payload.get("tool_call_id") or "") != (tool_call_id or ""):
-            continue
-        payload_role = payload.get("role") or ""
-        if role and payload_role and payload_role != role:
-            continue
-        if payload.get("content") != content:
-            continue
-        summary = _externalized_summary(path, payload)
-        payload_session_id = (payload.get("session_id") or "")
-        if session_id:
-            if payload_session_id == session_id:
-                return summary
-            continue
-        if fallback_match is None:
-            fallback_match = summary
-    return fallback_match
+    for candidates in _payload_lookup_candidates(storage_dir, digest_prefix):
+        fallback_match = None
+        for path in candidates:
+            try:
+                payload = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if kind is not None and payload.get("kind", "tool_result") != kind:
+                continue
+            if (payload.get("tool_call_id") or "") != (tool_call_id or ""):
+                continue
+            payload_role = payload.get("role") or ""
+            if role and payload_role and payload_role != role:
+                continue
+            if payload.get("content") != content:
+                continue
+            summary = _externalized_summary(path, payload)
+            payload_session_id = (payload.get("session_id") or "")
+            if session_id:
+                if payload_session_id == session_id:
+                    return summary
+                continue
+            if fallback_match is None:
+                fallback_match = summary
+        if fallback_match is not None:
+            return fallback_match
+    return None
 
 
 def find_externalized_tool_result_content_for_call(
