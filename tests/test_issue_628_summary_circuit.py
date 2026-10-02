@@ -31,7 +31,7 @@ REJECTED_LINE = "LCM summary result rejected"
 COMPACTION_LINE = re.compile(
     r"^LCM compaction #\d+: \d+ messages → \d+ \(\d+ leaf pass(?:es)?, \d+→\d+ tokens(?:, host_tokens=\d+)?, "
     r"\d+ DAG nodes"
-    r"(?P<rest>.*)\)$")
+    r"(?P<rest>.*)\)(?:, hidden_rows=(?P<hidden_rows>\d+\+?|unknown))?$")
 
 
 @pytest.fixture(autouse=True)
@@ -296,6 +296,7 @@ def test_t7_compaction_line_without_level_3_leaves_is_unchanged(tmp_path, monkey
         _compress(engine, _view(), caplog)
         assert levels and 3 not in levels
         assert _compaction_line(caplog).group("rest") == ""
+        assert _compaction_line(caplog).group("hidden_rows") == "0"  # #597: evaluated, drained
     finally:
         engine.shutdown()
 
@@ -307,6 +308,7 @@ def test_t7_compaction_line_counts_two_level_3_leaves(tmp_path, monkeypatch, lev
         _compress(engine, _view(), caplog)
         assert levels.count(3) == 2
         assert _compaction_line(caplog).group("rest") == ", 2 level 3 leaves"
+        assert _compaction_line(caplog).group("hidden_rows") == "0"  # #597: evaluated, drained
     finally:
         engine.shutdown()
 
@@ -356,6 +358,7 @@ def test_t9_circuit_opening_on_leaf_3_keeps_leaves_1_to_3_and_stops_before_leaf_
         assert _count(caplog, STOP_LINE) == 1 and _count(caplog, "3 leaves written, backlog kept") == 1
         assert engine._sweep_budget_hold_until == 0.0  # a stored leaf: no hold
         assert _compaction_line(caplog).group("rest") == ""
+        assert _compaction_line(caplog).group("hidden_rows") is None  # #597: no backlog check on this stop
     finally:
         engine.shutdown()
 

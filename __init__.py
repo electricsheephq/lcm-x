@@ -721,6 +721,16 @@ def register(ctx):
             )
             platform = str(kwargs.get("platform") or "")
 
+            def _ingest_and_note(active_engine):
+                result = active_engine.ingest(history)
+                try:
+                    note = getattr(active_engine, "note_turn_complete", None)
+                    if callable(note):
+                        note()
+                except Exception as exc:
+                    logger.debug("LCM post_llm_call turn-complete notification error: %s", exc)
+                return result
+
             def _bind_and_ingest(active_engine):
                 # The host-supplied engine or genuinely cold plugin prototype
                 # may establish its first binding while the same engine lease
@@ -731,7 +741,7 @@ def register(ctx):
                         platform=platform,
                         conversation_id=conversation_id or None,
                     )
-                active_engine.ingest(history)
+                _ingest_and_note(active_engine)
 
             try:
                 if host_engine is not None:
@@ -742,7 +752,7 @@ def register(ctx):
                     )
                 else:
                     result = use_active_lcm_engine(
-                        lambda active_engine: active_engine.ingest(history),
+                        _ingest_and_note,
                         session_id=session_id,
                         conversation_id=conversation_id,
                         timeout=None,

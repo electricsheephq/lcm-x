@@ -702,9 +702,28 @@ def test_drain_fixture_b_rotation_crosses_on_the_clean_exit_not_a_rotation(tmp_p
     from bench.instruments.reliability.scorers import drain
     cell = next(c for c in cells.select("all") if c["id"] == "drain/hidden-backlog-large/rotation")
     first = cell["drain"]["phase2_turn"]
-    assert drain.boundary(cell, tmp_path, first) is False
+    assert drain.boundary(cell, tmp_path, first) is None
     PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "phase": "A", "turn": first})
-    assert drain.boundary(cell, tmp_path, first) is True
+    assert drain.boundary(cell, tmp_path, first) == first
+
+
+@pytest.mark.parametrize("transition", [40, 41], ids=["before-phase2", "at-phase2"])
+def test_drain_rotation_d1_excludes_transition_call(tmp_path, transition):
+    from bench.instruments.reliability.scorers import drain
+    first = 41
+    cell = {"in_place": False, "drain": {"phase2_turn": first}}
+    PC.append(tmp_path / "transcript.jsonl", {"event": "host_prompt", "turn": 1, "session": "parent"})
+    PC.append(tmp_path / "transcript.jsonl", {"event": "turn_end", "turn": transition, "session": "child"})
+    calls = [{"turn": turn, "in": 10, "out": 5 if turn == transition else 10,
+              "host_rows_summarized": 1, "status": "compacted", "final": False, "secs": 0.1}
+             for turn in (transition, transition + 1, transition + 2)]
+    assert drain.boundary(cell, tmp_path, first) == transition
+    failed, unsure, numbers = drain.score(cell, [{"phase": "B", "counters": {"compactions": calls}}], tmp_path)
+    assert set(failed) == {"D1"} and not unsure
+    assert [c["turn"] for c in numbers["phase2_compactions"]] == [transition + 1, transition + 2]
+    assert numbers["D1"]["first_two"] == [
+        {"turn": turn, "in": 10, "out": 10, "host_rows_summarized": 1}
+        for turn in (transition + 1, transition + 2)]
 
 
 @pytest.mark.parametrize("where", ["before", "after", "error-record", "clock"])

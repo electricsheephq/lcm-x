@@ -4,7 +4,8 @@ longer holds (a hidden backlog) wait above the frontier? Declared before any run
 Input: the observer's per-call ``counters["compactions"]`` in each phase-*.json (observer/rel_observer.py
 ``list_counts``): ``in`` / ``out`` = the lengths of the list handed to ``compress`` and of the list it returned,
 ``host_rows_summarized`` = the input rows a leaf replaced (by identity), ``secs`` = the call's wall time. A phase-2
-compaction is a non-final call at turn >= ``drain.phase2_turn`` whose status committed (compacted / host_native).
+compaction is a non-final call at turn >= ``drain.phase2_turn`` whose status committed (compacted / host_native);
+rotation cells without a clean-exit fault also require turn > the recorded session-transition turn.
 
 D1: by the SECOND phase-2 compaction, one has ``out < in`` (the host list shrinks).
 D2: every phase-2 compaction has ``host_rows_summarized >= 1`` or ``out < in``; a raised call fails this bar.
@@ -41,17 +42,18 @@ def exits_cleanly(cell: dict) -> bool:
     return bool(cell.get("in_place")) or any(f.get("kind") == "clean_exit_before_turn" for f in cell.get("faults") or [])
 
 
-def boundary(cell: dict, cell_dir: Path | None, first: int) -> bool:
+def boundary(cell: dict, cell_dir: Path | None, first: int) -> int | None:
     """The runner's fired clean-exit fault when the cell has one, otherwise the observer's actual host session
     transition (a rotation cell without the fault); never the turn count alone."""
     name = "faults-fired.jsonl" if exits_cleanly(cell) else "transcript.jsonl"
     path = Path(cell_dir) / name if cell_dir else None
     records = [json.loads(x) for x in path.read_text().splitlines() if x.strip()] if path and path.exists() else []
     if exits_cleanly(cell):
-        return any(r.get("kind") == "clean_exit_before_turn" and 0 < (r.get("turn") or 0) <= first for r in records)
-    sessions = [r["session"] for r in records if r.get("event") in ("host_prompt", "turn_end") and r.get("session")
+        return next((r["turn"] for r in records if r.get("kind") == "clean_exit_before_turn"
+                     and 0 < (r.get("turn") or 0) <= first), None)
+    sessions = [r for r in records if r.get("event") in ("host_prompt", "turn_end") and r.get("session")
                 and r.get("session_prefix", "T") == "T" and 0 < (r.get("turn") or 0) <= first]
-    return any(a != b for a, b in zip(sessions, sessions[1:]))
+    return next((b["turn"] for a, b in zip(sessions, sessions[1:]) if a["session"] != b["session"]), None)
 
 
 def plateau(done: list[dict]) -> dict:
@@ -74,7 +76,8 @@ def score(cell: dict, phases: list[dict], cell_dir: Path | None = None) -> tuple
     first, hold = int(spec.get("phase2_turn", 1)), float(spec.get("hold_seconds", 10.0))
     every = calls(phases)
     crossed = boundary(cell, cell_dir, first)
-    phase2 = [c for c in every if not c.get("final") and (c.get("turn") or 0) >= first] if crossed else []
+    phase2 = [c for c in every if not c.get("final") and (c.get("turn") or 0) >= first
+              and (exits_cleanly(cell) or (c.get("turn") or 0) > crossed)] if crossed is not None else []
     done = [c for c in phase2 if c.get("status") in COMMITTED]
     numbers = {"phase2_turn": first, "hold_seconds": hold, "calls": len(every),
                "phase1_compactions": [c for c in every if not c.get("final") and (c.get("turn") or 0) < first
@@ -82,7 +85,7 @@ def score(cell: dict, phases: list[dict], cell_dir: Path | None = None) -> tuple
                "phase2_compactions": done, "phase2_other_calls": [c for c in phase2 if c not in done]}
     numbers["D4"] = plateau(done)
     failed, inconclusive = {}, {}
-    if not crossed:
+    if crossed is None:
         why = "phase 2 has no recorded clean exit" if exits_cleanly(cell) else "phase 2 has no recorded host rotation/session change"
         return failed, {b: f"{why} at or before turn {first}" for b in ("D1", "D2", "D3")}, numbers
     errors = [{k: c.get(k) for k in ("turn", "error", "secs")} for c in phase2
