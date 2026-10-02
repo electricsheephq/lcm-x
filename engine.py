@@ -63,6 +63,7 @@ from .externalize import (
     is_externalized_placeholder,
     load_externalized_payload,
     maybe_externalize_tool_output,
+    payload_lookup_scope,
 )
 from .extraction import (
     extract_before_compaction,
@@ -7559,6 +7560,7 @@ class LCMEngine(
         body = "\n".join([header, *lines])
         return f"<relevant-memories>\n{body}\n</relevant-memories>"
 
+    @payload_lookup_scope()
     def _assemble_context(
         self,
         system_msg: Optional[Dict[str, Any]],
