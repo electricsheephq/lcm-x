@@ -44,16 +44,23 @@ def count_listings(monkeypatch, config):
     storage = Path(config.large_output_externalization_path)
     counts = {"scandir": 0, "glob": 0}
     original_scandir, original_glob = os.scandir, Path.glob
+    in_glob = []
 
     def scandir(path):
-        if Path(path) == storage:
+        # Count only the index's own listing: whether Path.glob reaches the
+        # patched os.scandir differs between Python versions.
+        if Path(path) == storage and not in_glob:
             counts["scandir"] += 1
         return original_scandir(path)
 
     def glob(path, pattern, *args, **kwargs):
         if path == storage:
             counts["glob"] += 1
-        return original_glob(path, pattern, *args, **kwargs)
+        in_glob.append(True)
+        try:
+            return iter(list(original_glob(path, pattern, *args, **kwargs)))
+        finally:
+            in_glob.pop()
 
     monkeypatch.setattr(os, "scandir", scandir)
     monkeypatch.setattr(Path, "glob", glob)
@@ -136,9 +143,9 @@ def test_i3_external_writer_found_on_miss(config, monkeypatch, rejected_candidat
         path = write_payload(config, "new", "z-new")
         found = lookup(config, "new", tool_call_id="call", session_id="s")
         assert found["ref"] == path.name
-        assert counts == {"scandir": 2, "glob": 1}
+        assert counts == {"scandir": 1, "glob": 1}
         assert lookup(config, "new", tool_call_id="call", session_id="s") == found
-        assert counts == {"scandir": 2, "glob": 1}
+        assert counts == {"scandir": 1, "glob": 1}
 
 
 @pytest.mark.parametrize("ingest", [False, True])
@@ -166,7 +173,7 @@ def test_i5_unscoped_lookup_keeps_per_call_glob(config, monkeypatch):
     for _ in range(4):
         assert lookup(config, "hit", tool_call_id="call") == found
     assert lookup(config, "miss") is None
-    assert counts == {"scandir": 6, "glob": 6}
+    assert counts == {"scandir": 0, "glob": 6}
 
 
 def test_nested_scope_reuses_index_and_resets_on_exception(config, monkeypatch):
@@ -179,4 +186,4 @@ def test_nested_scope_reuses_index_and_resets_on_exception(config, monkeypatch):
         assert counts == {"scandir": 1, "glob": 0}
         raise RuntimeError("leave scope")
     assert lookup(config, "hit", tool_call_id="call")
-    assert counts == {"scandir": 2, "glob": 1}
+    assert counts == {"scandir": 1, "glob": 1}
