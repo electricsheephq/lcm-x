@@ -524,6 +524,9 @@ def _planted_secret(mod, engine, outbound, *, expect_365_fixed):
         except mod["ingest_protection"].EmbeddingPrivacyPolicyError:
             probe_refusals += 1
             continue
+        if json.loads(payload).get("error_code") == "embedding_privacy_policy":
+            probe_refusals += 1
+            continue
         assert "[LCM sensitive redaction:" not in payload, f"recall redacted fixture {index}"
         if len(fixture["content"]) <= 512:
             assert all(secret in payload for secret in fixture["secrets"]), f"recall lost fixture {index}'s raw secret"
@@ -628,13 +631,11 @@ def _misconfiguration(mod, state: Path):
         engine._config.sensitive_patterns = ["phase_a_unrecognized_pattern"]
         engine._config.sensitive_patterns_source = "phase-a-misconfiguration"
         _seed(mod, engine)
-        error = mod["ingest_protection"].EmbeddingPrivacyPolicyError
-        try:
-            engine.handle_tool_call("lcm_recall", {"query": "Constellation anchor"})
-        except error:
-            pass
-        else:
-            raise AssertionError("lcm_recall did not raise EmbeddingPrivacyPolicyError")
+        raw = engine.handle_tool_call("lcm_recall", {"query": "Constellation anchor"})
+        envelope = json.loads(raw)
+        assert envelope.get("error_code") == "embedding_privacy_policy", f"lcm_recall did not return the privacy error envelope: {raw[:300]}"
+        assert envelope.get("error"), "privacy error envelope has an empty error"
+        assert "hits" not in envelope, "privacy error must not be served as results"
         before = engine._proactive_recall_privacy_error_count
         assert engine._build_proactive_recall_message([{"role": "user", "content": "Constellation anchor"}], "system", set()) is None
         status = _payload(engine, "lcm_status", {})
@@ -792,7 +793,7 @@ def _cloud_rows(mod, state_root, registered, missing, *, expect_365_fixed):
             if default_control_error is not None:
                 raise AssertionError(f"shipped default recall failed: {_safe_detail(default_control_error)}")
             _misconfiguration(mod, Path(tempfile.mkdtemp(prefix="cloud-misconfiguration-", dir=state_root)))
-            batteries.append(("misconfiguration", "PASS", "default recall success plus raise, counter, status, assembly checks passed"))
+            batteries.append(("misconfiguration", "PASS", "default recall success plus JSON privacy error envelope, counter, status, assembly checks passed"))
         except Exception as exc:
             batteries.append(("misconfiguration", "FAIL", _safe_detail(exc)))
     finally:

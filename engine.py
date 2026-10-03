@@ -4741,7 +4741,10 @@ class LCMEngine(
         }
         handler = handlers.get(name)
         if handler:
-            return handler(args, engine=self)
+            try:
+                return handler(args, engine=self)
+            except EmbeddingPrivacyPolicyError as exc:
+                return json.dumps(lcm_tools.embedding_privacy_tool_error(exc, tool=name))
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
