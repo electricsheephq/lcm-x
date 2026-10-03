@@ -440,6 +440,8 @@ _LCM_RECALL_VALID_INCLUDE = frozenset({"all", "summaries", "verbatim"})
 # budget; hybrid recall reserves the remainder for provider resolution, vector
 # arms, hydration, fusion, and optional reranking.
 _LCM_RECALL_FTS_MAX_BUDGET_FRACTION = 0.25
+# Disclosure for a capped FTS expiry. Removed again when the arm is re-run (#265).
+_LCM_RECALL_FTS_CAPPED_REASON = "full-text arm capped to preserve semantic recall budget"
 # The vector-corpus preflight guards the budget split above, so its own scan
 # must never be able to spend the request budget it exists to protect: a
 # no-match probe over a large fully-orphaned corpus has to exhaust candidates
@@ -5876,6 +5878,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     degraded_reasons: list[str] = []
     embedding_query_metrics: list[dict[str, Any]] = []
     timed_out = False
+    fts_capped_expiry = False
+    fts_rerun = False
     provider: Any = None
     provider_override = str(kwargs.get("provider_override") or "").strip()
 
@@ -5952,9 +5956,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 and time.monotonic() < deadline
             )
             if capped_expiry:
-                degraded_reasons.append(
-                    "full-text arm capped to preserve semantic recall budget"
-                )
+                fts_capped_expiry = True
+                degraded_reasons.append(_LCM_RECALL_FTS_CAPPED_REASON)
             else:
                 degraded_reasons.append("full-text arm unavailable")
                 timed_out = timed_out or bool(fts_error.get("timeout"))
@@ -6138,6 +6141,39 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except Exception as exc:  # noqa: BLE001
                         coverage["chunk"] = "none"
                         degraded_reasons.append(f"chunk arm failed: {exc}")
+
+    # -- FTS re-run (#265). The sub-budget cap is a bet that the semantic arms
+    # will spend the rest of the request. When the capped FTS arm expired and no
+    # semantic arm then produced a hit (provider unusable, or reference-strict
+    # summaries that yielded only non-evidence leads), FTS is again the only arm
+    # that can return evidence, so it runs ONCE more under the REQUEST deadline.
+    # Never runs when a semantic arm has hits, and never past the deadline.
+    if (
+        fts_capped_expiry
+        and not arm_hits.get("summary")
+        and not arm_hits.get("chunk")
+        and time.monotonic() < deadline
+    ):
+        fts_rerun = True
+        degraded_reasons.remove(_LCM_RECALL_FTS_CAPPED_REASON)
+        try:
+            hits, fts_error = _lcm_recall_fts_arm(
+                engine,
+                query,
+                candidate_limit=candidate_limit,
+                deadline=deadline,
+                excluded_session_ids=excluded_session_ids,
+            )
+        except (_WorkerCapacityError, TimeoutError) as exc:
+            hits, fts_error = [], {"error": str(exc)}
+        if fts_error is None:
+            arm_hits["fts"] = hits
+            coverage["fts"] = "ok"
+        else:
+            # Same classification as an uncapped FTS failure, including a
+            # worker-capacity timeout reported before the deadline.
+            degraded_reasons.append("full-text arm unavailable")
+            timed_out = timed_out or bool(fts_error.get("timeout"))
 
     # -- RRF fusion over the arms that produced hits (order fixes base-hit win) --
     # Per-arm weights down-weight the weak FTS arm so the 3-arm hybrid is never
@@ -6457,6 +6493,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     }
     if bool(getattr(engine._config, "rerank_enabled", False)) and rerank_scores:
         response["provenance"]["rerank_scores"] = rerank_scores
+    if fts_rerun:
+        response["provenance"]["fts_rerun"] = True
     if degraded:
         response["degraded_reason"] = "; ".join(dict.fromkeys(degraded_reasons))
     if timed_out:
