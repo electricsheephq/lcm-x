@@ -12,6 +12,14 @@ from __future__ import annotations
 import re
 from typing import Any, Dict, List
 
+from .config import host_message_uid_mode
+from .host_uid_emit import (
+    host_uid_capable,
+    merge_tool_call_uids,
+    per_occurrence_tool_call_uids,
+    record_absorbed_message,
+)
+
 _SYNTHETIC_ASSISTANT_NOISE = {
     "ack",
     "acknowledged",
@@ -141,6 +149,15 @@ def _merge_adjacent_assistant_messages(
             prev = dict(collapsed[-1])
             prev_calls = list(prev.get("tool_calls") or [])
             new_calls = list(msg.get("tool_calls") or [])
+            if host_message_uid_mode() != "off" and host_uid_capable():
+                record_absorbed_message(prev, msg)
+                if new_calls and isinstance(extra := msg.get("_tool_call_uids"), dict):
+                    # LCM's extractor matches coalesce_tool_call_id for the dict shapes we handle.
+                    own = prev.get("_tool_call_uids")
+                    prev["_tool_call_uids"] = merge_tool_call_uids(
+                        per_occurrence_tool_call_uids(own if isinstance(own, dict) else {}, prev_calls, _tool_call_id),
+                        per_occurrence_tool_call_uids(extra, new_calls, _tool_call_id),
+                    )
             if new_calls:
                 prev["tool_calls"] = prev_calls + new_calls
             elif prev_calls:

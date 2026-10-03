@@ -220,6 +220,10 @@ class HostUidShadowMixin:
                     target = int(rows[0]["store_id"])
                     delta["replay.bound.agree.replay" if target in bound else "replay.bound.disagree.replay_other_row"] += 1
                     checks.append((uid, target if target in bound else canonical, target in bound))
+                elif unmapped and hit is None and (merge := self._host_uid_lcm_merge(
+                        messages[idx], [uid, *absorbed(messages[idx])], bindings, fetched)):
+                    delta["replay.composite.agree.lcm_merge"] += 1  # LCM's own site-1 merge (R3-2)
+                    checks.extend((part, sid, True) for part, sid in merge)
                 elif unmapped:  # a replay with no row map: AGREE when a bound row holds these bytes
                     delta["replay.bound.agree.prefix_replay" if hit is not None else "replay.bound.disagree.prefix_replay"] += 1
                     checks.append((uid, canonical if hit is None else hit, hit is not None))
@@ -257,6 +261,28 @@ class HostUidShadowMixin:
         identity = self._message_replay_identity(identity_message, strip_carrier=False)
         return next((int(sid) for sid in store_ids if fetched.get(int(sid)) is not None
                      and identity in self._stored_row_forms(fetched[int(sid)])), None)
+
+    @staticmethod
+    def _host_uid_lcm_merge(message, uids, bindings, fetched) -> Optional[list]:
+        """Site 1: one bound row per uid, in order, whose stripped non-empty contents newline-join to this
+        assistant dict's content (only ``content`` compared) -> [(uid, store_id), ...], else None."""
+        content = message.get("role") == "assistant" and message.get("content")
+        if len(uids) < 2 or not isinstance(content, str) or not all(uid in bindings for uid in uids):
+            return None
+
+        def walk(pos: int, joined: str, picked: list) -> Optional[list]:
+            if pos == len(uids):
+                return picked if joined == content else None
+            for sid, _kind in bindings[uids[pos]]:
+                part = (fetched.get(sid) or {}).get("content")
+                part = part.strip() if isinstance(part, str) else None
+                nxt = joined if not part else f"{joined}\n{part}" if joined else part
+                if part is not None and content.startswith(nxt) and (
+                        found := walk(pos + 1, nxt, picked + [(uids[pos], sid)])):
+                    return found
+            return None
+
+        return walk(0, "", [])
 
     def _host_uid_alias_candidates(self, lineage, capture, stored_at, matched, bindings, fetched, aliases, delta):
         """R3-1 (shadow, observational): ``position_proof`` when the rows the nearest bound view neighbours map to

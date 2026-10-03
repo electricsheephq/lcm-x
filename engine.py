@@ -150,6 +150,7 @@ from .reconcile import _has_lossy_redacted_identity, _merge_append_cut, _proof_u
 from .compaction import CompactionMixin
 from .identity_anchor import IdentityAnchorMixin, _raw_remainder, identity_anchor_enabled
 from .host_uid import HostUidShadowMixin
+from .host_uid_emit import carry_identity, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice
 from .db_bootstrap import refresh_legacy_conversation_ids
@@ -5258,8 +5259,8 @@ class LCMEngine(
         )
         return active_replay_messages
 
-    @staticmethod
     def _keep_host_held_stubs(
+        self,
         host_messages: List[Dict[str, Any]],
         cached: List[Dict[str, Any]],
         fresh: List[Dict[str, Any]],
@@ -5268,12 +5269,18 @@ class LCMEngine(
         def is_stub(message: Dict[str, Any]) -> bool:
             return is_externalized_placeholder(text_content_for_pattern_matching(message.get("content")) or "")
 
-        return [
+        current = [
             fresh[idx]
             if str(host.get("role") or "") == "tool" and is_stub(host) and not is_stub(cached_row)
             else cached_row
             for idx, (host, cached_row) in enumerate(zip(host_messages, cached))
         ]
+        # Check the original cache too: zip may have hidden a length mismatch.
+        if len(host_messages) == len(cached) == len(current):
+            sync_cached_host_metadata(
+                host_messages, current, self._generated_ignored_active_replay_placeholder_message_ids,
+            )
+        return current
 
     def _cached_active_replay_messages(
         self,
@@ -5878,11 +5885,11 @@ class LCMEngine(
                 if current_prefix_identities == cached_source_identities[:cursor]:
                     replay_messages = (
                         self._keep_host_held_stubs(
-                            messages,
+                            messages[:cursor],
                             self._copy_active_replay_messages_preserving_generated_ids(
                                 cached_active_replay_messages[:cursor]
                             ),
-                            fresh_replay_messages,
+                            fresh_replay_messages[:cursor],
                         )
                         + replay_messages[cursor:]
                     )
@@ -7676,7 +7683,8 @@ class LCMEngine(
                     ):
                         # A rich ref is useful only if its call survives the budget.
                         pending_results = [
-                            self._missing_tool_result_stub(str(r.get("tool_call_id") or "").strip())
+                            carry_identity(r, self._missing_tool_result_stub(str(r.get("tool_call_id") or "").strip()),
+                                           ("message_uid", "_tool_call_uid"))
                             if is_externalized_placeholder(normalize_content_value(r.get("content")) or "")
                             else r
                             for r in pending_results
@@ -7991,8 +7999,10 @@ class LCMEngine(
                 name = message.get("tool_name") or tool_name  # the nearest preceding call's name
                 if name and existing.get("tool_name") != name:
                     existing = {**existing, "tool_name": name}
-                return {**self._missing_tool_result_stub(tool_call_id), "content": _build_externalized_placeholder(existing)}
-        return self._missing_tool_result_stub(tool_call_id)
+                return carry_identity(message, {
+                    **self._missing_tool_result_stub(tool_call_id), "content": _build_externalized_placeholder(existing),
+                }, ("message_uid", "_tool_call_uid"))
+        return carry_identity(message, self._missing_tool_result_stub(tool_call_id), ("message_uid", "_tool_call_uid"))
 
     def _is_budget_droppable_tail_message(self, message: Dict[str, Any]) -> bool:
         """Return whether an over-budget tail message may be evicted.
