@@ -410,6 +410,7 @@ class BypassMixin:
                 "were dropped to keep the request within the model context window.]"
             ),
         }
+        self._mint_engine_uids([(marker, "omitted_marker", None, "omitted_marker")])
         compacted = list(messages[:head_count]) + [marker] + list(messages[-tail_count:])
         return self._trim_bypass_compacted_to_cap(compacted, target_tokens)
 

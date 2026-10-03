@@ -236,6 +236,9 @@ def _finalize_emission_descriptors(messages, candidates, scope):
                 "suffix_length": suffix_length,
                 "retained_source": candidate.get("retained_source"),
                 "scope": dict(scope),
+                # B2 (additive, optional): the engine uid the bound row carries; readers never require it.
+                **({"engine_uid": message["message_uid"]} if candidate.get("engine_uid") is not None
+                   and message.get("message_uid") == candidate["engine_uid"] else {}),
             })
             search_from = index + 1
             break

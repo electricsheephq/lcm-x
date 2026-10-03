@@ -1,7 +1,9 @@
-"""Host-owned identity carry; no minting, storage or replay decisions."""
+"""Host-owned identity carry, plus slice B2's deterministic ENGINE uids for LCM-generated rows (REVISION 4).
+No storage or replay decisions here."""
 
 from __future__ import annotations
 
+import hashlib
 from collections import Counter
 from importlib import import_module
 from typing import Any, Callable
@@ -23,6 +25,16 @@ def host_uid_capable() -> bool:
         except Exception:
             _host_uid_capability = False
     return _host_uid_capability
+
+
+def identity_emit_enabled() -> bool:
+    """B1's gate for every key LCM ADDS: carry mode on and a capable host."""
+    return host_message_uid_mode() != "off" and host_uid_capable()
+
+
+def engine_uid(lineage_key: str, kind: str, basis: str, ordinal: int) -> str:
+    """R4-1: the same generated row in the same lineage keeps one 32-hex uid across assemblies and replays."""
+    return hashlib.sha256(f"lcmx-engine-uid\0{lineage_key}\0{kind}\0{basis}\0{ordinal}".encode()).hexdigest()[:32]
 
 
 def carry_identity(source: dict, target: dict, keys: tuple[str, ...] = IDENTITY_KEYS) -> dict:

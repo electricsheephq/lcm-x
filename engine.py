@@ -150,7 +150,7 @@ from .reconcile import _has_lossy_redacted_identity, _merge_append_cut, _proof_u
 from .compaction import CompactionMixin
 from .identity_anchor import IdentityAnchorMixin, _raw_remainder, identity_anchor_enabled
 from .host_uid import HostUidShadowMixin
-from .host_uid_emit import carry_identity, sync_cached_host_metadata
+from .host_uid_emit import carry_identity, identity_emit_enabled, record_absorbed_message, sync_cached_host_metadata
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice
 from .db_bootstrap import refresh_legacy_conversation_ids
@@ -7830,6 +7830,8 @@ class LCMEngine(
             else:
                 result.append(proactive_msg)
 
+        generated_context_row: Optional[Dict[str, Any]] = None
+        carried_tail: Optional[Dict[str, Any]] = None
         folded_source_store_id = 0
         folded_result_index: Optional[int] = None
         folded_original_tail: Optional[Dict[str, Any]] = None
@@ -7870,9 +7872,8 @@ class LCMEngine(
                         "tail occurrence lacked durable lineage"
                     )
             else:
-                result.append(
-                    {"role": summary_role, "content": generated_context}
-                )
+                generated_context_row = {"role": summary_role, "content": generated_context}
+                result.append(generated_context_row)
                 emission_candidates.append({
                     "kind": "objective" if generated_context.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary",
                     "span": generated_context,
@@ -7904,7 +7905,7 @@ class LCMEngine(
             }
             if self._generated_context_carrier_remainder(carrier) == tail_selected[0]["content"]:
                 source_ids = self._get_store_ids_for_messages([tail_selected[0]])
-                result[-1] = carrier
+                result[-1], carried_tail = carrier, tail_selected[0]
                 if summary_candidate is not None:
                     summary_candidate.update({
                         "kind": "carrier",
@@ -7914,6 +7915,8 @@ class LCMEngine(
                         "row": carrier,
                     })
                 tail_selected = tail_selected[1:]
+        self._mint_assembled_engine_uids(result, emission_candidates, summary_message, carried_tail,
+                                         proactive_msg, generated_context_row)
         result.extend(tail_selected)
 
         # ── Active-context cleanup / tool-pair guardrail ──
@@ -7967,6 +7970,33 @@ class LCMEngine(
         self._remember_compacted_active_replay_snapshot(result)
         self._pending_emission_candidates = emission_candidates
         return result
+
+    def _mint_assembled_engine_uids(self, result, candidates, summary_message, carried_tail, recall_row,
+                                    context_row) -> None:
+        """B2 (R4-1, R3-5 site 2; B1's gate): engine uids on the rows this assembly generated, in emitted order.
+        A carrier keeps the summary's uid and absorbs the tail user row's identity as the host's
+        consecutive-user merge would (no other tail key: it would replay the sidecar)."""
+        if not identity_emit_enabled():
+            return
+        carrier = result[-1] if carried_tail is not None else None
+        specs: dict = {}
+        if summary_message is not None:
+            content = summary_message["content"]
+            kind = "objective" if content.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary"
+            specs[id(carrier or summary_message)] = (kind, hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                                                     "carrier" if carrier is not None else kind)
+        if recall_row is not None:
+            specs[id(recall_row)] = ("recall", None, "recall")
+        if context_row is not None:
+            specs[id(context_row)] = ("generated_context", None, "generated_context")
+        generated = [(row, *specs[id(row)]) for row in result if id(row) in specs]
+        self._mint_engine_uids(generated)
+        if carrier is not None:
+            record_absorbed_message(carrier, carried_tail)
+        for candidate in candidates:
+            uid = next((row.get("message_uid") for row, *_spec in generated if row is candidate.get("row")), None)
+            if uid is not None:
+                candidate["engine_uid"] = uid
 
     @staticmethod
     def _missing_tool_result_stub(tool_call_id: str) -> Dict[str, Any]:
@@ -8238,6 +8268,7 @@ class LCMEngine(
                                     tokens=skipped_user_tokens, cap=cap
                                 ),
                             }
+                            self._mint_engine_uids([(note, "overflow_note", None, "overflow_note")])
                             if count_messages_tokens(option + [note]) <= cap:
                                 return option + [note]
                             # Drop the retained row, then the system anchor, before the cap.
@@ -8265,9 +8296,9 @@ class LCMEngine(
                 "sanitization (%d rows); emitting a recovery placeholder row",
                 len(tail_messages),
             )
-            return self._sanitize_active_context_messages(fallback[:-1]) + [
-                {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
-            ]
+            placeholder = {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
+            self._mint_engine_uids([(placeholder, "overflow_placeholder", None, "overflow_placeholder")])
+            return self._sanitize_active_context_messages(fallback[:-1]) + [placeholder]
         return candidate
 
     @staticmethod
