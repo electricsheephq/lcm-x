@@ -173,8 +173,10 @@ claim that Hermes core has no persisted record of pre-compression history.
 
 - Hermes Agent
 - Python 3.11+
-- No required third-party runtime dependencies
+- NumPy `>=2.2,<3`, installed from the plugin manifest by supported Hermes plugin managers
 
+The vector path still has a tested dependency-free fallback if NumPy cannot be
+imported, but normal plugin installations provision NumPy for large-corpus search.
 `tiktoken` is used if available; otherwise LCM falls back to character-based
 token estimates. `regex` is used if available to apply timeouts to message ignore
 patterns; without it, message-level regex filtering is disabled with a warning

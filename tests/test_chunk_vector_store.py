@@ -74,6 +74,81 @@ def _write(store, chunk_id, store_id, chunk_index, vec):
 
 
 class TestChunkWriteAndKnn:
+    def test_numpy_loader_reads_valid_float32_blobs_without_python_decode(
+        self, store, monkeypatch
+    ):
+        """The NumPy path keeps float32 BLOBs binary until matrix construction."""
+        numpy = pytest.importorskip("numpy")
+        _write(store, "10:0", 10, 0, [1.0, -2.0, 3.0, -4.0])
+        _write(store, "11:0", 11, 0, [4.0, 3.0, 2.0, 1.0])
+        _write(store, "12:0", 12, 0, [0.0, 1.0, 0.0, 0.0])
+        identity = _chunk_identity().identity_hash
+
+        # Match the legacy decoder's rejection of malformed storage and archive
+        # filtering while proving that valid float32 vectors do not visit it.
+        store.connection.execute(
+            "UPDATE lcm_chunk_vectors SET vec = ? WHERE chunk_id = ? AND identity_hash = ?",
+            (b"short", "11:0", identity),
+        )
+        store.connection.commit()
+        assert store.archive_chunks_for_messages([12]) == 1
+
+        def unexpected_decode(*_args, **_kwargs):
+            pytest.fail("valid float32 BLOBs should not be decoded through Python floats")
+
+        monkeypatch.setattr(store, "_load_chunk_vectors_for_ids", unexpected_decode)
+        rowids, chunk_ids, kinds, matrix = store._load_chunk_matrix(
+            numpy, identity, DIM, ["10:0", "11:0", "12:0"], "float32"
+        )
+
+        assert rowids == [1]
+        assert chunk_ids == ["10:0"]
+        assert kinds == ["chunk"]
+        assert matrix.dtype == numpy.float32
+        numpy.testing.assert_allclose(
+            matrix,
+            numpy.array(
+                [[1.0, -2.0, 3.0, -4.0]], dtype=numpy.float32
+            ) / numpy.sqrt(numpy.float32(30.0)),
+            rtol=0.0,
+            atol=1e-7,
+        )
+
+    def test_numpy_loader_keeps_int8_on_the_existing_decoder_path(self, store, monkeypatch):
+        numpy = pytest.importorskip("numpy")
+        identity = EmbeddingIdentity.canonical(
+            PROVIDER, MODEL, "", DIM, "int8", "little", "chunk"
+        )
+        store.register_profile(MODEL, PROVIDER, DIM, dtype="int8", task="chunk")
+        store.record_chunk_embedding(
+            "10:int8",
+            MODEL,
+            [0.5, -0.25, 0.125, -0.0625],
+            store_id=10,
+            chunk_index=1,
+            char_start=0,
+            char_end=10,
+            token_estimate=5,
+            identity=identity,
+        )
+        original = store._load_chunk_vectors_for_ids
+        calls = []
+
+        def observed_decode(*args, **kwargs):
+            calls.append(args[3])
+            return original(*args, **kwargs)
+
+        monkeypatch.setattr(store, "_load_chunk_vectors_for_ids", observed_decode)
+        rowids, chunk_ids, kinds, matrix = store._load_chunk_matrix(
+            numpy, identity.identity_hash, DIM, ["10:int8"], "int8"
+        )
+
+        assert calls == ["int8"]
+        assert rowids == [1]
+        assert chunk_ids == ["10:int8"]
+        assert kinds == ["chunk"]
+        assert matrix.shape == (1, DIM)
+
     def test_write_and_retrieve(self, store):
         _write(store, "10:0", 10, 0, [1.0, 0.0, 0.0, 0.0])
         _write(store, "11:0", 11, 0, [0.0, 1.0, 0.0, 0.0])

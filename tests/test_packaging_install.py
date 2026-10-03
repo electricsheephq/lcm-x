@@ -363,6 +363,13 @@ def test_plugin_manifest_lists_all_registered_tools():
         assert f"  - {tool_name}\n" in manifest
 
 
+def test_plugin_manifest_declares_a_supported_numpy_range():
+    repo_root = Path(__file__).resolve().parent.parent
+    manifest = (repo_root / "plugin.yaml").read_text(encoding="utf-8")
+
+    assert 'python_dependencies:\n  - "numpy>=2.2,<3"\n' in manifest
+
+
 def test_install_script_creates_profile_aware_symlink_and_prints_activation_steps(tmp_path):
     repo_root = Path(__file__).resolve().parent.parent
     hermes_home = tmp_path / "hermes-home"
