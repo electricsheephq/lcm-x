@@ -196,3 +196,11 @@ G-REL-1 diagnostics list uncovered bars, targets and open targets.
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route
 at a deterministic localhost fake. It does not prove live-model behaviour, the gateway process, several sessions in
 one process, or the process-side publication-failure hook (R2b, #569), and it says nothing about customer boxes.
+
+P8 / B9 audits in-process host flushes using the host's own resolvers and digests:
+I0 pins committed live addresses; I1 forbids archived writes/adopts; I2 pins role/uid
+and unique uid-snapshot resolution; I3 forbids adopts; I5 rejects active uid twins
+involving LCM output (host-only twins are reported). Events contain no payload.
+Missing host seams, audit errors, or process transport give B9 UNSUPPORTED.
+`p8-control/{archived,other-active,random-snapshot}` fail I1/I2/I3; `none` passes.
+Disable wraps with `LCM_RELIABILITY_P8=off` or `--lcm-env LCM_RELIABILITY_P8=off`; faults stay.
