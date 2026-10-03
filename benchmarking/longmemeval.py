@@ -3650,6 +3650,10 @@ def _fsync_parent_directory(path: Path) -> None:
             os.close(dir_fd)
 
 
+# lcm_recall provenance.coverage.fts values the product writes (tools.py full-text arm).
+RECALL_HEALTH_FTS_STATUSES = ("ok", "none")
+
+
 def _validate_restored_checkpoint_metrics(
     record: dict[str, Any], *, line_number: int, path: Path, recall_rerank: bool = False,
     embeddings_enabled: bool = True,
@@ -3711,6 +3715,14 @@ def _validate_restored_checkpoint_metrics(
             raise ValueError(
                 f"checkpoint line {line_number} field {health_field}.coverage "
                 f"must be an object: {path}"
+            )
+        if (
+            "fts" in health["coverage"]
+            and health["coverage"]["fts"] not in RECALL_HEALTH_FTS_STATUSES
+        ):
+            raise ValueError(
+                f"checkpoint line {line_number} field {health_field}.coverage.fts "
+                f"must be one of {RECALL_HEALTH_FTS_STATUSES} or absent: {path}"
             )
     if recall_rerank:
         recall_metrics = arms.get("lcm_recall")
@@ -4028,6 +4040,11 @@ def _accumulate_question_checkpoint(
                 recall_health_counts["fts_ok"] += 1
             elif coverage["fts"] == "none":
                 recall_health_counts["fts_none"] += 1
+            else:
+                raise ValueError(
+                    f"checkpoint question {record.get('question_id')!r} has unknown "
+                    f"recall_health coverage.fts {coverage['fts']!r}"
+                )
             if health.get("degraded") is True:
                 recall_health_counts["degraded"] += 1
     bucket = by_category.setdefault(category, _new_arm_samples())

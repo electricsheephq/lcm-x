@@ -198,6 +198,8 @@ def test_no_scored_questions_report_zero_health_counts(tmp_path):
     pytest.param([], id="not-object"),
     pytest.param({"degraded": "false", "coverage": {}}, id="bad-degraded"),
     pytest.param({"degraded": False, "coverage": []}, id="bad-coverage"),
+    pytest.param({"degraded": False, "coverage": {"fts": False}}, id="non-string-fts"),
+    pytest.param({"degraded": False, "coverage": {"fts": "partial"}}, id="unknown-fts"),
 ])
 def test_restored_malformed_recall_health_raises(tmp_path, health):
     record = _record()
@@ -206,3 +208,13 @@ def test_restored_malformed_recall_health_raises(tmp_path, health):
         lme._validate_restored_checkpoint_metrics(
             record, line_number=2, path=tmp_path / "checkpoint.jsonl",
         )
+
+
+@pytest.mark.parametrize("fts", [False, "partial", None])
+def test_unknown_fts_status_fails_aggregation(fts):
+    record = _record("q-unknown")
+    record["arms"]["lcm_recall"]["recall_health"] = {
+        "degraded": False, "coverage": {"fts": fts},
+    }
+    with pytest.raises(ValueError, match=r"unknown recall_health coverage.fts"):
+        _accumulate([record])
