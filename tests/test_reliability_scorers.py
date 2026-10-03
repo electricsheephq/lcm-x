@@ -770,6 +770,107 @@ def test_r2a4_c_a_deficit_is_never_licensed(tmp_path):
     assert out["numbers"]["B2"]["deficit_rows"] == 1 and {"B1", "B2"} <= set(out["failed_bars"])
 
 
+def _held_composite(tmp_path, *, parts_sid="S0", host_parts=(14, 15), inner=""):
+    """#804 shape: the host held T14 + "\n\n" + T15 as one live composite but stored the parts apart; LCM stored the
+    parts as two rows."""
+    t14, t15 = U.format(14, 14) + inner, U.format(15, 15)
+    host = [(parts_sid, "user", U.format(t, t) + (inner if t == 14 else ""), 1) for t in host_parts]
+    parents = {"S0": None, **({parts_sid: None} if parts_sid != "S0" else {})}
+    return make(tmp_path, rows=[("user", t14), ("user", t15), ("assistant", R.format(15, 15))],
+                sids=[parts_sid, parts_sid, "S0"], events=turn_events(15, held=t14 + "\n\n" + t15),
+                parents=parents, host=host, plugin=TREE, bars=["B2"])
+
+
+def test_b2_held_composite_stored_as_host_parts_is_not_a_deficit(tmp_path):
+    for i, inner in enumerate(("", "\n\nsecond paragraph\n\nthird")):  # a part may hold its own "\n\n"
+        out = _held_composite(tmp_path / str(i), inner=inner)
+        b2 = out["numbers"]["B2"]
+        assert "B2" not in out["failed_bars"], out["failed_bars"]
+        assert b2["missing_keys"] == b2["deficit_rows"] == b2["surplus_rows"] == 0
+        assert b2["host_parity_licensed"]["rows"] == 0  # the licences were spent on the composite
+        [composite] = b2["held_composites_as_parts"]
+        assert composite["preview"].startswith("[T14]") and [p["store_ids"] for p in composite["parts"]] == [[1], [2]]
+
+
+def test_b2_held_composite_needs_host_evidence_for_every_part(tmp_path):
+    out = _held_composite(tmp_path, host_parts=(14,))
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
+def test_b2_held_composite_the_host_stored_durably_stays_a_deficit(tmp_path):
+    """The host holds the composite itself as a durable row (and the parts): LCM should have stored it."""
+    composite = U.format(14, 14) + "\n\n" + U.format(15, 15)
+    out = make(tmp_path, rows=[("user", U.format(14, 14)), ("user", U.format(15, 15)), ("assistant", R.format(15, 15))],
+               events=turn_events(15, held=composite), parents={"S0": None}, plugin=TREE, bars=["B2"],
+               host=[("S0", "user", composite, 1), ("S0", "user", U.format(14, 14), 1), ("S0", "user", U.format(15, 15), 1)])
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
+def test_b2_composite_cover_respects_licence_capacity_while_searching():
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    lic = {("user", multiset.h(x)): {"licensed": 1} for x in (a, a + "\n\n" + a, b)}
+    assert multiset.licensed_parts(a + "\n\n" + a + "\n\n" + b, lic, 1) == {
+        ("user", multiset.h(a + "\n\n" + a)): 1, ("user", multiset.h(b)): 1}
+    assert multiset.licensed_parts(a + "\n\n" + b, {("user", multiset.h(a)): {"licensed": 1}}, 1) is None
+
+
+def test_b2_composite_cover_is_fail_closed_on_a_pathological_input():
+    """70 paragraphs, every single and adjacent pair licensed, and an unlicensed tail: the budget ends the search
+    quickly and the composite stays a deficit."""
+    import time
+    from bench.instruments.reliability.scorers import multiset
+    paras = [f"paragraph {i}" for i in range(70)]
+    lic = {("user", multiset.h(p)): {"licensed": 1} for p in paras}
+    lic.update({("user", multiset.h(a + "\n\n" + b)): {"licensed": 1} for a, b in zip(paras, paras[1:])})
+    started = time.monotonic()
+    assert multiset.licensed_parts("\n\n".join(paras + ["unlicensed tail"]), lic, 1) is None
+    assert time.monotonic() - started < 10
+
+
+def test_b2_composite_cover_cuts_inside_a_longer_newline_run():
+    """A raw part may end or start with whitespace (the probe's trailing_ws turns): R + "\n" + "\n\n" + U + "\n" still
+    splits into the two edge-stripped keys."""
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    lic = {("user", multiset.h(x)): {"licensed": 1} for x in (a, b)}
+    assert multiset.licensed_parts(a + "\n" + "\n\n" + b + "\n", lic, 1) == {
+        ("user", multiset.h(a)): 1, ("user", multiset.h(b)): 1}
+
+
+def test_b2_composite_cover_is_fail_closed_past_its_part_cap():
+    from bench.instruments.reliability.scorers import multiset
+    paras = [f"paragraph {i}" for i in range(multiset.COVER_PARTS + 1)]
+    lic = {("user", multiset.h(p)): {"licensed": 1} for p in paras}
+    assert multiset.licensed_parts("\n\n".join(paras[:-1]), lic, 1)  # exactly COVER_PARTS parts
+    assert multiset.licensed_parts("\n\n".join(paras), lic, 1) is None
+
+
+def test_b2_held_composite_pairs_only_the_occurrences_the_host_did_not_store_whole():
+    """Expected twice, stored whole once: the other occurrence pairs with host-licensed parts unless the host stored
+    both occurrences whole."""
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    c = a + "\n\n" + b
+    rows = [(1, "S0", "user", c), (2, "S0", "user", a), (3, "S0", "user", b)]
+    def host(n):
+        return {("user", multiset.h(x)): {"n": k, "ids": [x]} for x, k in ((a, 1), (b, 1), (c, n))}
+    for held, verdict in ((0, "PASS"), (1, "PASS"), (2, "FAIL")):
+        out = multiset.score([("user", c), ("user", c)], rows, host(held))
+        assert out["verdict"] == verdict, (held, out)
+        assert len(out["held_composites_as_parts"]) == (verdict == "PASS")
+    [composite] = multiset.score([("user", c), ("user", c)], rows, host(1))["held_composites_as_parts"]
+    assert composite["expected"] == 2 and composite["as_parts"] == 1
+
+
+def test_b2_held_composite_parts_in_another_lineage_do_not_cover_it(tmp_path):
+    out = _held_composite(tmp_path, parts_sid="cron_job_01")
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
 def test_r2a4_d_a_licence_is_per_lineage(tmp_path):
     other = ("cron_job_01", "user", U.format(2, 2), 1)  # the second copy is held in another lineage
     out = make(tmp_path, rows=clean_rows() + [("user", U.format(2, 2))], events=clean_events(),

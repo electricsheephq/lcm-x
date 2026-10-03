@@ -72,7 +72,7 @@ def test_legacy_record_without_ever_shortened_keeps_doctor_advice(engine):
 
 def test_unmapped_exit_coverage_is_unknown(engine, monkeypatch, caplog):
     monkeypatch.setattr(engine, "_store_complete_node_covered", lambda ids: set(ids))
-    with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
+    with caplog.at_level(logging.INFO, logger="hermes_lcm"):
         engine._survival_record("exit_fit:compressed", 2, [1], 900, 500, 600, False, "", warn_user=False)
     assert engine._last_survival_fit["uncovered_rows"] is None
     assert "uncovered_rows=unknown" in caplog.text

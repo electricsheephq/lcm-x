@@ -7260,7 +7260,12 @@ class LCMEngine(
             passes += 1
             if (budget := self._foreground_call_budget()) is not None:
                 budget.progress = budget.progress or "condensation"
-            after = self._summary_frontier_tokens()
+            try:
+                after = self._summary_frontier_tokens()
+            except Exception as exc:
+                if _is_sqlite_locked_error(exc):
+                    setattr(exc, "lcm_completed_condensation_passes", passes)
+                raise
             if after < before:
                 self._no_progress_candidate = False  # #651: a condensation that shrank the summary prefix is progress
             if after >= before:

@@ -35,6 +35,52 @@ def licence(key: tuple, surplus: int, expected: int, host: dict | None, store_id
         if n > 0 else None
 
 
+COVER_STEPS = 20000  # #804: expansion budget for one composite; real composites take a few dozen
+COVER_PARTS = 64  # #804: most parts in one cover (bounds the recursion); real composites have 2-5
+
+
+def licensed_parts(text: str, licences: dict, times: int) -> dict | None:
+    """#804: split a held user composite at its "\n\n" joins into >= 2 parts that are each a host-licensed user key in
+    this lineage, with ``times`` licences per use still available; returns {key: uses} or None. The host merges
+    consecutive user turns as R + "\n\n" + U, so only those joins are cut points; each part uses the same edge-strip
+    key rule. Capacity is checked while searching, so a cover that over-spends a licence never hides a valid one.
+    Overlapping cuts in a longer newline run are kept: a raw part may end or start with whitespace, which the key
+    rule strips. The search is fail-closed: past ``COVER_STEPS`` expansions or ``COVER_PARTS`` parts it gives up
+    and the composite stays a deficit."""
+    starts = [0] + [i + 2 for i in range(len(text) - 1) if text.startswith("\n\n", i)]
+    ends = [s - 2 for s in starts[1:]] + [len(text)]
+    keys: dict[tuple, tuple] = {}
+    failed: set = set()
+    steps = [COVER_STEPS]
+
+    def key_of(k: int, j: int) -> tuple:
+        if (k, j) not in keys:
+            keys[(k, j)] = ("user", h(text[starts[k]:ends[j]]))
+        return keys[(k, j)]
+
+    def cover(k: int, used: Counter) -> list | None:  # parts covering text[starts[k]:] within the licences left
+        state = (k, tuple(sorted((key, n) for key, n in used.items() if n)))
+        if state in failed or steps[0] <= 0 or sum(used.values()) >= COVER_PARTS:  # depth = parts used so far
+            return None
+        steps[0] -= 1
+        for j in range(k, len(ends)):
+            key = key_of(k, j)
+            if key not in licences or licences[key]["licensed"] < (used[key] + 1) * times:
+                continue
+            if j == len(ends) - 1:
+                return [key]
+            used[key] += 1
+            rest = cover(j + 1, used)
+            used[key] -= 1
+            if rest is not None:
+                return [key, *rest]
+        failed.add(state)
+        return None
+
+    parts = cover(0, Counter())
+    return dict(Counter(parts)) if parts and len(parts) >= 2 else None
+
+
 def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict | None = None) -> dict:
     """``expected``: (role, text) items; ``stored_rows``: (store_id, session_id, role, content); ``host``: the
     lineage's host occurrences (key -> {"n", "ids"}), or None."""
@@ -62,7 +108,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
                 if "split_match" in entry:
                     split.append(entry)
                     continue
-            missing.append(entry)
+            missing.append({**entry, "sha256": key[1]})
         elif have > n:
             if lic := licence(key, have - n, n, host, stored[key]):
                 licensed.append(lic)
@@ -76,6 +122,23 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             licensed += [lic] if lic else []
             if len(v) > (lic or {}).get("licensed", 0):
                 extra.append({"role": k[0], "copies": len(v) - (lic or {}).get("licensed", 0), "store_ids": v[:6]})
+    # #804: a held user composite whose parts the host durably stored apart is stored here as those parts, each
+    # licensed by host parity; the composite key is then not a deficit. Only the occurrences the host did not store
+    # as the composite itself pair (those LCM should have stored whole): the whole deficit must fit within them. Same
+    # lineage only; reported, never silent.
+    composites, by_key = [], {(r["role"], r["sha256"]): r for r in licensed}
+    for entry in list(missing):
+        deficit = entry["expected"] - entry["stored"]
+        held = ((host or {}).get(("user", entry["sha256"])) or {}).get("n", 0)
+        if entry["role"] == "user" and deficit <= entry["expected"] - held and \
+                (uses := licensed_parts(norm(texts[("user", entry["sha256"])]), by_key, deficit)):
+            for key, n in uses.items():
+                by_key[key]["licensed"] -= n * deficit
+            missing.remove(entry)
+            composites.append({"role": "user", "expected": entry["expected"], "as_parts": deficit, "preview": entry["preview"],
+                               "parts": [{"sha256": key[1], "uses": n, "store_ids": by_key[key]["store_ids"]}
+                                         for key, n in uses.items()]})
+    licensed = [r for r in licensed if r["licensed"] > 0]
     # Every stored-only key and every split reply is surplus: no host transform licenses them.
     return {
         "instrument": "multiset-v1",
@@ -87,6 +150,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
         "duplicated_keys": len(duplicated),
         "surplus_rows": sum(e["stored"] - e["expected"] - e.get("licensed", 0) for e in duplicated) + sum(e["copies"] for e in extra),
         "host_parity_licensed": licensed,
+        "held_composites_as_parts": composites,
         "missing": missing[:40],
         "duplicated": duplicated[:40],
         "split_assistant_turns": split,

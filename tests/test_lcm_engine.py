@@ -1364,9 +1364,11 @@ def test_plugin_metadata_refreshes_when_manifest_changes(tmp_path, monkeypatch):
     import hermes_lcm.runtime_identity as identity_mod
 
     repo_root = Path(identity_mod.__file__).resolve().parent
-    manifest = repo_root / "plugin.yaml"
-    original = manifest.read_text(encoding="utf-8")
+    original = (repo_root / "plugin.yaml").read_text(encoding="utf-8")
+    manifest = tmp_path / "plugin.yaml"
+    manifest.write_text(original, encoding="utf-8")
 
+    monkeypatch.setattr(identity_mod, "_PLUGIN_ROOT", tmp_path)
     monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
 
     initial = identity_mod._plugin_metadata()
@@ -1378,35 +1380,28 @@ def test_plugin_metadata_refreshes_when_manifest_changes(tmp_path, monkeypatch):
         updated = original.replace('version: 0.24.9', 'version: 9.9.9-test')
     assert updated != original
 
-    try:
-        manifest.write_text(updated, encoding="utf-8")
-        refreshed = identity_mod._plugin_metadata()
-        assert refreshed == {"name": "hermes-lcm-x", "version": "9.9.9-test"}
+    manifest.write_text(updated, encoding="utf-8")
+    refreshed = identity_mod._plugin_metadata()
+    assert refreshed == {"name": "hermes-lcm-x", "version": "9.9.9-test"}
 
-        manifest.unlink()
-        fallback = identity_mod._plugin_metadata()
-        assert fallback == {"name": "hermes-lcm-x", "version": "9.9.9-test"}
-    finally:
-        manifest.write_text(original, encoding="utf-8")
-        monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
+    manifest.unlink()
+    fallback = identity_mod._plugin_metadata()
+    assert fallback == {"name": "hermes-lcm-x", "version": "9.9.9-test"}
 
 
 def test_plugin_metadata_defaults_when_manifest_missing_before_first_read(tmp_path, monkeypatch):
     import hermes_lcm.runtime_identity as identity_mod
 
     repo_root = Path(identity_mod.__file__).resolve().parent
-    manifest = repo_root / "plugin.yaml"
-    original = manifest.read_text(encoding="utf-8")
+    manifest = tmp_path / "plugin.yaml"
+    manifest.write_text((repo_root / "plugin.yaml").read_text(encoding="utf-8"), encoding="utf-8")
 
+    monkeypatch.setattr(identity_mod, "_PLUGIN_ROOT", tmp_path)
     monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
 
-    try:
-        manifest.unlink()
-        metadata = identity_mod._plugin_metadata()
-        assert metadata == {"name": "hermes-lcm-x", "version": "unknown"}
-    finally:
-        manifest.write_text(original, encoding="utf-8")
-        monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
+    manifest.unlink()
+    metadata = identity_mod._plugin_metadata()
+    assert metadata == {"name": "hermes-lcm-x", "version": "unknown"}
 
 
 def test_lcm_doctor_json_includes_runtime_identity(engine):
