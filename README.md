@@ -141,9 +141,10 @@ The `main` line identifies itself as
 (#385 fixed the earlier drift).
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
-for it. The roadmap removes that wait in steps (v0.25.0 prepares leaves in the
-background; v0.28.0 prepares summaries in the background and publishes them at
-the threshold) and re-baselines recall on the shipped default configuration.
+for it. v0.25.0 makes a hidden backlog drain at turn pace (#597); v0.28.0
+removes the wait by preparing summaries in the background and publishing them
+at the threshold (#787). Recall is re-baselined on the shipped default
+configuration.
 See [VISION.md](VISION.md), the [roadmap](ROADMAP.md), the tracker
 [#658](https://github.com/electricsheephq/lcm-x/issues/658),
 [Current project state](docs/project-status.md) and
@@ -623,7 +624,7 @@ moved back to that assistant even when doing so exceeds a configured bound.
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
 | `LCM_SUMMARY_PROMPT_VERSION` | `1` | 1 = today's prompts; 2 = the frontier prompt with the focus directives in the policy and a 3× output ceiling |
-| `LCM_NATIVE_RECOVERY` | `false` | removed in v0.25.0; ignored if set |
+| `LCM_NATIVE_RECOVERY` | `false` | removed in v0.25.0; ignored if set (`true` logs one WARNING each time the plugin loads) |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |

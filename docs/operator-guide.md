@@ -4,7 +4,7 @@ This page holds the detailed install, activation, configuration, diagnostics,
 and slash-command reference for LCM-X. The README stays focused on first-run
 adoption; this file is the operator reference.
 
-`LCM_NATIVE_RECOVERY`: removed in v0.25.0; ignored if set
+`LCM_NATIVE_RECOVERY`: removed in v0.25.0; ignored if set (`true` logs one WARNING each time the plugin loads)
 
 ## Requirements
 
@@ -135,10 +135,13 @@ for a store that no survival fit has touched. Two
 checks establish that, and both must hold: `/lcm doctor` reports no
 `survival_fit` entry, and the logs hold no `LCM survival fit applied` line for
 that store. The doctor's entry alone can miss a fit, because the counter write
-behind it can fail; the `LCM survival fit applied` WARNING is logged before
-that write. The log check counts only when the logs cover the whole time since
-the store's first v0.24.5 start: if log files were rotated away or are missing
-for part of that time, treat the check as not established. From v0.24.6 a
+behind it can fail; the `LCM survival fit applied` line is logged before that
+write, at WARNING, except that since v0.25.0 a routine exit fit
+(`reason=exit_fit:`) logs it at INFO (#735), so search every level. The log check counts only when the logs cover the whole time since
+the store's first v0.24.5 start and kept INFO records for every part of that
+time that ran v0.25.0 or later: if log files were rotated away or are missing
+for part of that time, or the logging level dropped INFO while v0.25.0 or later
+ran, treat the check as not established. From v0.24.6 a
 failed write also logs a WARNING that starts
 `LCM survival-fit counter write failed`; v0.24.5 logs it at DEBUG. If you
 cannot establish both checks, use the backup restore. Once a fit was applied,
