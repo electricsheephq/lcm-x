@@ -3,10 +3,13 @@ each uid-bearing host dict gets one R3-3 class and the row #436 chose goes to th
 table. Nothing feeds back into ingest, replay, emission or commit; every exception is caught, counted and fails
 open. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
 host writes nothing. The shadow GATE is counted per binding in the table (``first_check`` / ``disagree_seen``),
-so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` does nothing; ``on`` runs as ``shadow``."""
+so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` does nothing; ``on`` runs as ``shadow``.
+From the first release, a persisted lineage key is ``<home_tag>:<root>`` (#836): one database shared by several
+Hermes homes never mixes two profiles' roots of the same session id."""
 from __future__ import annotations
 
 import bisect
+import hashlib
 import json
 import logging
 import os
@@ -69,9 +72,10 @@ class HostUidShadowMixin:
     """Mixed into LCMEngine; reads ``self._store``, ``_state_db_path`` and the reconcile identity helpers."""
 
     def _host_uid_lineage_key(self, session_id=None) -> tuple:
-        """R3-4: ``(root, None)`` by Hermes' own walk (``_session_turn_lease_key_on_conn``: up while the parent ended
-        by compression and the row is no fork child), else ``(None, "read_error" | "unresolved")`` (no state.db,
-        missing row, cycle, over 256 hops). Cached per (state.db, session id): a root, or a missing state.db."""
+        """R3-4: ``("<home_tag>:<root>", None)``, the root by Hermes' own walk (``_session_turn_lease_key_on_conn``:
+        up while the parent ended by compression and the row is no fork child), else ``(None, "read_error" |
+        "unresolved")`` (no state.db, missing row, cycle, over 256 hops). ``home_tag`` (#836) = 16 hex of the
+        sha256 of the resolved state.db path. Cached per (state.db, session id): a key, or a missing state.db."""
         session_id = str(self._session_id if session_id is None else session_id or "")
         cache = self.__dict__.setdefault("_host_uid_lineage_cache", {})
         try:
@@ -80,6 +84,9 @@ class HostUidShadowMixin:
             if key in cache:
                 return cache[key]
             found = self._host_uid_read_lineage(path, session_id)
+            if found[0] is not None:  # a resolve error is a read error below, never an exception into ingest
+                tag = hashlib.sha256(str(path.resolve()).encode()).hexdigest()[:16]
+                found = (f"{tag}:{found[0]}", None)
         except Exception as exc:  # host DB drift: no root, no binding; counted as an error
             self._host_uid_read_error = exc
             return None, "read_error"

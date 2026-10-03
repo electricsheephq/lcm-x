@@ -277,6 +277,14 @@ def delete_message_relations(conn: sqlite3.Connection, rows_sql: str, args: tupl
         )
 
 
+def delete_host_uid_bindings(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
+    """#836: the ``host_uid_bindings`` of rows about to be deleted go with them, on the caller's connection and
+    transaction (an error rolls back with the delete): a reused store_id never inherits a stale uid binding.
+    The side table is created lazily; when it is absent there is nothing to purge and it is not created."""
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'host_uid_bindings'").fetchone():
+        conn.execute(f"DELETE FROM host_uid_bindings WHERE store_id IN ({rows_sql})", args)
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
@@ -585,6 +593,7 @@ class MessageStore:
         """Delete all messages for a session. Returns count deleted."""
         with self._write_lock:
             delete_message_relations(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
+            delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
