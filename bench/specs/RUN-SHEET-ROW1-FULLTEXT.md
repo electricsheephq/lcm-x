@@ -38,16 +38,18 @@ tool use.
   - Recall path since `v0.24.9`: record `git diff --stat v0.24.9 <GA>` over the recall modules (`tools.py`,
     `retrieval_core.py`, `search_query.py`, `adaptive_retrieval.py`, `store.py`, `vector_store.py`, `dag.py`,
     `db_bootstrap.py`, `config.py`, `message_content.py`). From `v0.24.9` to `v0.25.0` it is a comment in `config.py`
-    and an assembly-only depth query in `dag.py` (#750).
+    and a depth query in `dag.py` that condensation and context assembly use, outside recall retrieval (#750).
 - Instruments: the lcm-x commit holding the `--embeddings` arm (#811's merge or later); the memorybench commit holding
   `HERMES_MB_EMBEDDINGS` and `scripts/run-with-watchdog.sh` (`b47f92f7` or later on `feat/locomo-hermes-prep`); blob
   shas of the harness files.
 - Data: dataset file sha256 and prepared-dir manifest sha for each sub-row; question-id list sha.
   - R1-S: the LongMemEval-S cleaned file `longmemeval_s_cleaned.json`, sha256
-    `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442` (the banked V1-S / F37 lineage). Its
-    question-id digest is the sha256 of the 500 `question_id` values in file order joined by `\n`, computed at prep and
-    recorded. A file with another sha stops the row; the original (uncleaned) LongMemEval-S release is a different
-    file and is not this dataset.
+    `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442` (the banked V1-S / F37 lineage). R1-S runs
+    exactly the banked F37 question list: 500 ids, one per line, each line ending in `\n`, list sha256
+    `42903357eb3c866f0bba2331dccd8d321a6c7ab57099eb2979c172c1d4f2bc6f`. Prep checks that list's sha and that the
+    pinned dataset holds exactly those 500 ids (set equality; the list order is not the file order). A file with
+    another sha, a list with another sha, or any id mismatch stops the row. The original (uncleaned) LongMemEval-S
+    release is a different file and is not this dataset.
 - Reader and judge (R1-S, R1-L): model id, reasoning effort, codex CLI version + binary sha256. Reader = the current
   Sol generation at medium; judge = Sol at low with the strict rubric. The reader differs from the 07-29 row
   (gpt-5.6-sol), which is one more reason R1-S is a new baseline.
@@ -120,7 +122,7 @@ tool use.
 - Watchdog used all resumes on one run → park that sub-row, report the stall with the log.
 - More than 2 R1-M shards dead of one cause → park, root-cause first.
 - The GA tag does not resolve to its canonical commit, the R1-M worktree shows a change outside the instrument
-  files, sub-row product shas differ without separate labels, the R1-S dataset sha differs from its pin, a reader
+  files, sub-row product shas differ without separate labels, the R1-S dataset or question-list sha differs from its pin, a reader
   tool call appears, or a served model differs from its pin → stop.
 
 ## 7. Procedure
