@@ -27,7 +27,23 @@ Clone/symlink distribution and Hermes package-manager membership are separate co
 
 The repository deliberately has no committed `pyproject.toml`. Package metadata waits until Hermes plugin packaging/discovery has a stable target for pip-installed plugins: adding generic Python packaging before the host install contract is clear would create a second install story without making first-run activation simpler.
 
-Lint settings live in `ruff.toml`, not a lint-only `pyproject.toml`. Hermes' package manager (`pm/`, after v2026.9.24) treats any checkout with a `pyproject.toml` as a uv workspace member. It adds a `[project]` name but a lint-only file has no `version`, so `uv lock` rejects it and the update can add `hermes-lcm-x` to `plugins.disabled` (#631). Do not add a `pyproject.toml` back just for tooling. `tests/test_issue_631_not_a_pm_member.py` guards the lint-only regression; `tests/test_packaging_install.py` verifies the supported manifest-dependency staging path with an opt-in real Hermes manager.
+Lint settings live in `ruff.toml`, not a lint-only `pyproject.toml`. Hermes' package manager (`pm/`, after v2026.9.24) treats any checkout with a `pyproject.toml` as a uv workspace member. It adds a `[project]` name but a lint-only file has no `version`, so `uv lock` rejects it and the update can add `hermes-lcm-x` to `plugins.disabled` (#631). Do not add a `pyproject.toml` back just for tooling. `tests/test_issue_631_not_a_pm_member.py` guards the lint-only regression; `tests/test_packaging_install.py` verifies the supported manifest-dependency staging path with the real Hermes manager.
+
+## Package-manager CI contract
+
+The existing `test (3.14)` CI lane always runs the real-manager staging test
+against Hermes commit `0a374d167424cdc730ce9761368b62255b551e58`.
+That pinned PM declares Python 3.14 as its runtime; the plugin's other supported
+Python versions continue through the ordinary unit-test matrix. CI installs the
+PM's own pinned dependencies from `pm/pyproject.toml` and keeps its reference tree
+outside the plugin checkout so it cannot contaminate test discovery or compilation.
+
+The CI step sets `LCM_REQUIRE_REAL_HERMES=1`, `LCM_REAL_HERMES_SRC`, and
+`LCM_REAL_HERMES_PYTHON`. Missing prerequisites fail that step rather than skip it.
+Local runs may still opt in with the latter two variables; without them and without
+the required flag, the integration test explicitly skips. The test checks actual
+declaration parsing and dependency-only workspace staging, not a complete install
+or application restart.
 
 ## Next packaging step
 

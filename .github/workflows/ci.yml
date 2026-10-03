@@ -53,8 +53,28 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      - name: Check out pinned Hermes package-manager reference
+        if: matrix.python-version == '3.14'
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 0a374d167424cdc730ce9761368b62255b551e58
+          path: .hermes-pm-reference
+          persist-credentials: false
+
+      - name: Keep the host reference outside the plugin checkout
+        if: matrix.python-version == '3.14'
+        run: mv "$GITHUB_WORKSPACE/.hermes-pm-reference" "$RUNNER_TEMP/hermes-pm-reference"
+
       - name: Install test dependencies
-        run: pip install pytest numpy
+        run: python -m pip install pytest numpy
+
+      - name: Install the pinned package-manager test dependencies
+        if: matrix.python-version == '3.14'
+        env:
+          HERMES_PM_REFERENCE: ${{ runner.temp }}/hermes-pm-reference
+        run: |
+          python -c 'import os, pathlib, subprocess, sys, tomllib; source = pathlib.Path(os.environ["HERMES_PM_REFERENCE"]); deps = tomllib.loads((source / "pm" / "pyproject.toml").read_text())["project"]["dependencies"]; subprocess.run([sys.executable, "-m", "pip", "install", *deps], check=True)'
 
       - name: Stub hermes-agent ABC
         run: |
@@ -84,6 +104,17 @@ jobs:
               def get_status(self):
                   return {}
           STUB
+
+      # This existing required matrix lane matches the pinned PM runtime (Python 3.14).
+      - name: Require real Hermes dependency staging
+        if: matrix.python-version == '3.14'
+        env:
+          LCM_REQUIRE_REAL_HERMES: "1"
+          LCM_REAL_HERMES_SRC: ${{ runner.temp }}/hermes-pm-reference
+        run: |
+          export LCM_REAL_HERMES_PYTHON
+          LCM_REAL_HERMES_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          python -m pytest tests/test_packaging_install.py::test_plugin_manifest_numpy_declaration_stages_with_real_package_manager -q
 
       - name: Run pytest under low file descriptor limit
         run: |

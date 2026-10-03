@@ -411,14 +411,36 @@ print(json.dumps({
 """
 
 
+@pytest.mark.parametrize("missing", ["source", "python"])
+def test_required_real_manager_check_fails_instead_of_skipping(tmp_path, monkeypatch, missing):
+    """Required CI coverage must fail if its checkout or interpreter is absent."""
+    tree = tmp_path / "reference"
+    (tree / "pm").mkdir(parents=True)
+    (tree / "pm" / "workspace.py").touch()
+    monkeypatch.setenv("LCM_REQUIRE_REAL_HERMES", "1")
+    monkeypatch.setenv("LCM_REAL_HERMES_SRC", str(tree if missing != "source" else tmp_path / "absent"))
+    monkeypatch.setenv("LCM_REAL_HERMES_PYTHON", sys.executable if missing != "python" else str(tmp_path / "absent-python"))
+    try:
+        with pytest.raises(pytest.fail.Exception, match="required real-manager"):
+            test_plugin_manifest_numpy_declaration_stages_with_real_package_manager(tmp_path)
+    except pytest.skip.Exception:
+        pytest.fail("Required mode skipped instead of failing")
+
+
 def test_plugin_manifest_numpy_declaration_stages_with_real_package_manager(tmp_path):
     """Use Hermes' declaration and workspace APIs to prove NumPy reaches a dependency member."""
     tree = Path(os.environ.get("LCM_REAL_HERMES_SRC") or "/nonexistent")
     python = Path(os.environ.get("LCM_REAL_HERMES_PYTHON") or "/nonexistent")
+    missing = []
     if not (tree / "pm" / "workspace.py").is_file():
-        pytest.skip("opt-in real-manager test: LCM_REAL_HERMES_SRC has no pm/workspace.py")
+        missing.append("LCM_REAL_HERMES_SRC has no pm/workspace.py")
     if not python.is_file():
-        pytest.skip("opt-in real-manager test: LCM_REAL_HERMES_PYTHON is not an interpreter")
+        missing.append("LCM_REAL_HERMES_PYTHON is not an interpreter")
+    if missing:
+        reason = "; ".join(missing)
+        if os.environ.get("LCM_REQUIRE_REAL_HERMES") == "1":
+            pytest.fail(f"required real-manager test prerequisites: {reason}")
+        pytest.skip(f"opt-in real-manager test: {reason}")
 
     home = tmp_path / "home"
     home.mkdir()
