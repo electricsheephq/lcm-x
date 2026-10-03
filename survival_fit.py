@@ -240,8 +240,11 @@ class SurvivalFitMixin:
                 for key in IDENTITY_KEYS + ADDRESS_KEYS:
                     body[0].pop(key, None)
                 absorbed = carrier.get("_absorbed_message_uids")
-                if isinstance(absorbed, list) and len(absorbed) == 1 and isinstance(absorbed[0], str) and absorbed[0]:
-                    body[0]["message_uid"] = absorbed[0]
+                absorbed = [u for u in absorbed if isinstance(u, str) and u] if isinstance(absorbed, list) else []
+                engine = self._host_uid_engine_uids(absorbed)  # F3: one host uid, never an engine one
+                hosts = [u for u in absorbed if u not in engine]
+                if len(hosts) == 1:
+                    body[0]["message_uid"] = hosts[0]
             if id(carrier) in store_ids:
                 store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
 

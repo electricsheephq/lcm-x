@@ -172,6 +172,20 @@ class HostUidShadowMixin:
         except Exception as exc:
             self._host_uid_count(Counter(errors=1), exc)
 
+    def _host_uid_engine_uids(self, uids) -> set:
+        """The ``uids`` that are engine uids of this lineage: the durable record (one batched lookup) plus the
+        uids this engine minted and has not recorded yet. Fails open to the in-memory set."""
+        uids = {uid for uid in uids if isinstance(uid, str)}
+        known = uids & (set(self.__dict__.get("_engine_uids_pending") or ()) | self.__dict__.get(
+            "_engine_uids_recorded", set()))
+        try:
+            lineage = self._host_uid_lineage_key()[0]
+            if lineage is not None and uids - known:
+                known |= set(self._store.host_uid_bindings_for(lineage, uids - known, ("engine",)))
+        except Exception as exc:
+            self._host_uid_count(Counter(errors=1), exc)
+        return known
+
     def _host_uid_capture(self, messages, identity_messages, start: int, cursor: int, plan, tool_segment,
                           session_id=None):
         """Read the uids off the HOST dicts after #436 decided and before the INSERT drops unknown keys."""
@@ -302,16 +316,22 @@ class HostUidShadowMixin:
     def _host_uid_generated(uid, absorbed, engine, bindings, rows, stored, remainder) -> str:
         """A dict naming an engine uid: AGREE when #436 stored and mapped nothing for it, ``.remainder`` for a
         carrier whose user remainder is the row its absorbed host uids are bound to (already stored, or the one
-        #436 stored or mapped; an unbound uid maps anywhere); else DISAGREE."""
+        #436 stored; every mapped row a row of those uids, else ``mapped_extra``); else DISAGREE. Nothing stored
+        or mapped is the correct outcome for a generated row: the metric measures LCM storing or mapping its own
+        rows wrongly, not recognition alone."""
         hosts = [u for u in [uid, *absorbed] if u not in engine]
-        ids = {int(row["store_id"]) for row in rows or ()} | ({int(stored)} if stored is not None else set())
-        if not ids:
+        host_rows = {sid for h in hosts for sid, _k in bindings.get(h, ())}
+        mapped = {int(row["store_id"]) for row in rows or ()}
+        if stored is None and not mapped:
             return "generated.agree.remainder" if hosts and all(bindings.get(h) for h in hosts) else "generated.agree"
         if stored is not None and not remainder:
             return "generated.disagree.stored"
+        if mapped - host_rows:  # #436 mapped a row no absorbed host uid names (a stored generated row: #534)
+            return "generated.disagree.mapped_extra"
+        ids = mapped | ({int(stored)} if stored is not None else set())
         if hosts and all(not bindings.get(h) or ids & {sid for sid, _k in bindings[h]} for h in hosts):
             return "generated.agree.remainder"
-        return "generated.disagree.remainder" if hosts or remainder else "generated.disagree.replay_row"
+        return "generated.disagree.remainder"
 
     def _host_uid_fetch(self, store_ids, fetched: dict) -> None:
         """Rows cached across one ingest: one batched, chunked read of the ids not fetched yet."""
@@ -435,9 +455,10 @@ def host_uid_doctor_lines(engine: Any) -> list[str]:
     """Doctor ``host_uid`` section: counts only (gate per binding, event counts, errors, table size)."""
     try:
         durable, rows = engine._store.read_metadata_json(HOST_UID_COUNTER_KEY), engine._store.count_host_uid_bindings()
-        gate = engine._store.host_uid_gate()
+        gate, engine_rows = engine._store.host_uid_gate(), engine._store.count_host_uid_bindings(("engine",))
     except Exception as exc:
         durable, rows, gate = None, f"error: {type(exc).__name__}", []
+        engine_rows = rows
     durable = durable if isinstance(durable, dict) else {}
     process = dict(getattr(engine, "_host_uid_counters", None) or {})
     errors = durable.get("errors") if isinstance(durable.get("errors"), int) else 0
@@ -453,4 +474,5 @@ def host_uid_doctor_lines(engine: Any) -> list[str]:
         f"host_uid_process_event_counts: {_fmt_counts({k: v for k, v in process.items() if k != 'errors'})}",
         f"host_uid_errors: {errors}" + (f" (process {process['errors']})" if process.get("errors") else ""),
         f"host_uid_bindings_rows: {'absent' if rows is None else rows}",
+        f"host_uid_engine_rows: {'absent' if engine_rows is None else engine_rows}",
     ]

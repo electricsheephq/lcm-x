@@ -102,7 +102,9 @@ def test_772_cache_and_unchanged_list_keep_one_uid_and_collapse(tmp_path, monkey
         original = engine._copy_active_replay_messages_preserving_generated_ids
         monkeypatch.setattr(engine, "_copy_active_replay_messages_preserving_generated_ids",
                             lambda *a, **k: cache_hits.append(1) or original(*a, **k))
+        count = engine.compression_count
         second = engine.compress(persisted, current_tokens=100)
+        assert (engine.compression_count, engine.last_compression_status) == (count, "noop")
         assert cache_hits  # the #772 cached prefix served this call
         assert second is persisted  # L2 §1e: unchanged, with the engine uid taking part in the comparison
         assert second[0]["message_uid"] == first[0]["message_uid"]
@@ -221,7 +223,11 @@ def test_engine_rows_recorded_once_and_ignored_by_lookups_gate_and_doctor(tmp_pa
                             "WHERE kind = 'engine'")
         store._conn.commit()
         assert store.host_uid_gate() == before
-        assert "host_uid_gate_disagree: 0" in host_uid_doctor_lines(engine)
+        doctor = host_uid_doctor_lines(engine)
+        assert "host_uid_gate_disagree: 0" in doctor and "host_uid_engine_rows: 1" in doctor
+        assert f"host_uid_bindings_rows: {store.count_host_uid_bindings()}" in doctor  # F2: engine rows not counted
+        assert store.count_host_uid_bindings() == store._conn.execute(
+            "SELECT COUNT(*) FROM host_uid_bindings WHERE kind != 'engine'").fetchone()[0]
         # #836: a session delete purges bindings by stored row; store_id 0 rows stay, which is acceptable: they
         # name no row, are keyed by lineage and only ever feed GENERATED events.
         store.delete_session_messages("S")
@@ -376,11 +382,100 @@ def test_restart_replay_counts_generated_agree_for_a_summary_and_a_carrier(tmp_p
     (9, True, [], {"h": [(9, "canonical")]}, "generated.agree.remainder"),
     (9, True, [], {"h": [(5, "canonical")]}, "generated.disagree.remainder"),
     (None, False, [{"store_id": 5}], {"h": [(5, "version")]}, "generated.agree.remainder"),
-    (None, False, [{"store_id": 5}], {}, "generated.agree.remainder"),
+    (None, False, [{"store_id": 5}], {}, "generated.disagree.mapped_extra"),  # F4(a): an unbound host maps nothing
+    (None, False, [{"store_id": 5}, {"store_id": 9}], {"h": [(5, "canonical")]}, "generated.disagree.mapped_extra"),
+    (9, True, [{"store_id": 4}], {"h": [(9, "canonical")]}, "generated.disagree.mapped_extra"),  # a stored generated row
 ])
 def test_generated_outcomes(stored, remainder, rows, bound, expected):
     from hermes_lcm.host_uid import HostUidShadowMixin
     assert HostUidShadowMixin._host_uid_generated("e", ["h"], {"e"}, bound, rows, stored, remainder) == expected
     if not bound and stored is None:
         assert HostUidShadowMixin._host_uid_generated("e", [], {"e"}, {}, rows, stored, remainder) == (
-            "generated.agree" if not rows else "generated.disagree.replay_row")
+            "generated.agree" if not rows else "generated.disagree.mapped_extra")
+
+
+# -- fix round 1 ---------------------------------------------------------------------------------------------
+
+def test_f1_carrier_uid_is_the_summary_uid_and_the_descriptor_engine_uid(tmp_path):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path)
+    try:
+        carrier = _compress(engine, _host())[0]
+        descriptor = engine._compress_commit_proof["emissions"][0]
+        assert descriptor["kind"] == "carrier" and descriptor["engine_uid"] == carrier["message_uid"]
+        assert descriptor["generated_span_sha256"] != hashlib.sha256(
+            carrier["content"][:engine._verified_lcm_summary_prefix_end(carrier["content"])].encode()).hexdigest()
+        no_carrier = engine._assemble_context(None, copy.deepcopy(_host()[-2:]))  # one user row: a summary row
+        assert "_absorbed_message_uids" not in no_carrier[0]
+        assert no_carrier[0]["message_uid"] == carrier["message_uid"]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("absorbed, expected", [(["e2"], None), (["u4", "e2"], "u4"), ([], None)])
+def test_f3_site18_counts_host_uids_only(tmp_path, absorbed, expected):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path, tail=8)
+    try:
+        out = _compress(engine, _host())
+        engine._store.add_host_uid_bindings(_lineage(engine), [(0, "e2", "engine", "recall")])  # durable only
+        _fitted, remainder = _cut(engine, out, 10_000, absorbed)
+        assert remainder.get("message_uid") == expected
+        assert set(remainder) == {"role", "content"} | ({"message_uid"} if expected else set())
+    finally:
+        engine.shutdown()
+
+
+def test_f5_identical_generated_rows_get_ordinals_and_reproduce(tmp_path):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path)
+    try:
+        def mint():
+            rows = [{"role": "user", "content": "same"}, {"role": "user", "content": "same"}]
+            engine._mint_engine_uids([(row, "recall", None, "recall") for row in rows])
+            return [row["message_uid"] for row in rows]
+        first = mint()
+        assert first[0] != first[1] and mint() == first
+        basis = hashlib.sha256(b"same").hexdigest()
+        assert first == [engine_uid(_lineage(engine), "recall", basis, n) for n in (0, 1)]
+    finally:
+        engine.shutdown()
+
+
+def test_f5_absorbed_engine_uid_classes_generated_after_a_host_fold(tmp_path):
+    _state_db(tmp_path, [("T", None, None)])
+    first = _open(tmp_path, session="T", tail=3)
+    try:
+        out = _compress(first, _host())
+    finally:
+        first.shutdown()
+    summary_uid = out[0]["message_uid"]
+    persisted = [dict(row, message_uid=row.get("message_uid") or f"minted-{i}") for i, row in enumerate(out)]
+    persisted[0] = {**persisted[0], "message_uid": "host-fold", "_absorbed_message_uids": [summary_uid]}
+    second = _open(tmp_path, session="T", tail=3)
+    try:
+        second._ingest_messages(persisted)
+        counts = _counts(second)
+        assert counts.get("generated.agree") == 1, counts
+        assert not any(key.startswith(("unbound", "replay.unbound", "replay.skipped")) for key in counts), counts
+    finally:
+        second.shutdown()
+
+
+@pytest.mark.parametrize("capable_host", [True, False])
+def test_f5_overflow_placeholder_minted_only_when_capable(tmp_path, monkeypatch, capable_host):
+    from hermes_lcm.engine import _OVERFLOW_RECOVERY_PLACEHOLDER
+    monkeypatch.setattr(emit, "_host_uid_capability", capable_host)
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path)
+    try:
+        out = engine._assemble_overflow_recovery_context(
+            None, [{"role": "tool", "tool_call_id": "orphan", "content": "status"}], assembly_cap_override=120)
+        assert out[-1]["content"] == _OVERFLOW_RECOVERY_PLACEHOLDER
+        if capable_host:
+            basis = hashlib.sha256(_OVERFLOW_RECOVERY_PLACEHOLDER.encode()).hexdigest()
+            assert out[-1]["message_uid"] == engine_uid(_lineage(engine), "overflow_placeholder", basis, 0)
+        else:
+            assert set(out[-1]) == {"role", "content"}
+    finally:
+        engine.shutdown()

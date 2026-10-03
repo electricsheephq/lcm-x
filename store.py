@@ -1060,8 +1060,10 @@ class MessageStore:
                 conn.rollback()
                 raise
 
-    def count_host_uid_bindings(self) -> Optional[int]:
-        return int(self._conn.execute("SELECT COUNT(*) FROM host_uid_bindings").fetchone()[0]) \
+    def count_host_uid_bindings(self, kinds=("canonical", "version", "alias_candidate")) -> Optional[int]:
+        kinds = tuple(kinds)
+        return int(self._conn.execute(f"SELECT COUNT(*) FROM host_uid_bindings WHERE kind IN "
+                                      f"({','.join('?' * len(kinds))})", kinds).fetchone()[0]) \
             if self._host_uid_table_exists() else None
 
     def find_rows_by_observed_at(
