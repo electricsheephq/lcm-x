@@ -1802,25 +1802,31 @@ def _has_orphan_full_width_base64_run(text: str) -> bool:
     surviving BEGIN/END marker and no placeholder in range — invisible to every
     marker- or placeholder-keyed check. Two or more contiguous strict base64
     lines of full PEM wrap width (>=40 chars) are the private-key body
-    signature; ordinary prose/config never produces them. Lines already inside
+    signature; PREFIXED_B64 width measures only the tail token (#394).
+    >=2 contiguous prefixed lines with 40+ character base64-charset tokens
+    (such as numbered lists of long IDs) still block. Lines already inside
     a redaction placeholder do not count. Fail-closed: a genuine multi-line
     base64 attachment on the cloud path blocks rather than ships (the durable
     store is untouched; a base64 blob has no embedding value anyway).
     """
     run = 0
     for kind, redact_start, content_end, _line_start, _marker_end in _pem_line_model(text):
-        if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_PREFIXED_B64) and (
-            content_end - redact_start
-        ) >= 40:
-            segment = text[redact_start:content_end]
-            if "[LCM embedding privacy:" in segment or "[LCM sensitive redaction:" in segment:
-                run = 0
+        if kind in (_PEM_LINE_KIND_STRICT_B64, _PEM_LINE_KIND_PREFIXED_B64):
+            width = content_end - redact_start
+            if kind == _PEM_LINE_KIND_PREFIXED_B64:
+                # #394: measure the base64 tail with the classification's rsplit.
+                tail = text[redact_start:content_end].rsplit(None, 1)
+                width = len(tail[-1]) if tail else 0
+            if width >= 40:
+                segment = text[redact_start:content_end]
+                if "[LCM embedding privacy:" in segment or "[LCM sensitive redaction:" in segment:
+                    run = 0
+                    continue
+                run += 1
+                if run >= 2:
+                    return True
                 continue
-            run += 1
-            if run >= 2:
-                return True
-        else:
-            run = 0
+        run = 0
     return False
 
 
