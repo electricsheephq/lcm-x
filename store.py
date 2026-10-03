@@ -988,17 +988,17 @@ class MessageStore:
         self._host_uid_write(create)
         self._host_uid_schema_ready = True
 
-    def host_uid_bindings_for(self, lineage_key: str, uids) -> dict[str, list[tuple[int, str]]]:
-        """``{uid: [(store_id, kind), ...]}`` of the canonical and version bindings of ``uids`` in a lineage."""
-        uids, out = sorted(set(uids)), {}
+    def host_uid_bindings_for(self, lineage_key: str, uids, kinds=("canonical", "version")) -> dict[str, list[tuple[int, str]]]:
+        """``{uid: [(store_id, kind), ...]}`` of the ``kinds`` bindings (canonical and version: never ``engine``)."""
+        uids, out, kinds = sorted(set(uids)), {}, tuple(kinds)
         if not uids or not self._host_uid_table_exists():
             return out
         for start in range(0, len(uids), 500):
             chunk = uids[start:start + 500]
             for uid, store_id, kind in self._conn.execute(
                 f"SELECT uid, store_id, kind FROM host_uid_bindings WHERE lineage_key = ? AND uid IN "
-                f"({','.join('?' * len(chunk))}) AND kind IN ('canonical', 'version') ORDER BY rowid",
-                [lineage_key, *chunk],
+                f"({','.join('?' * len(chunk))}) AND kind IN ({','.join('?' * len(kinds))}) ORDER BY rowid",
+                [lineage_key, *chunk, *kinds],
             ):
                 out.setdefault(str(uid), []).append((int(store_id), str(kind)))
         return out

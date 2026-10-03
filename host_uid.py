@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import host_message_uid_mode
+from .host_uid_emit import engine_uid, identity_emit_enabled
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +127,51 @@ class HostUidShadowMixin:
             conn.close()
         return (root, None) if root is not None else (None, "unresolved")
 
+    def _mint_engine_uids(self, generated) -> None:
+        """R4-1 (B1's gate, a resolved lineage): ``[(row, kind, basis | None, proof_kind)]`` in emitted order gets
+        deterministic engine uids, the ordinal counted per (kind, basis); ``basis`` None = the content's sha256.
+        Pending until the compress that returns them records them; nothing else about the row changes."""
+        try:
+            if not generated or not identity_emit_enabled():
+                return
+            lineage = self._host_uid_lineage_key()[0]
+            if lineage is None:
+                return
+            seen, pending = Counter(), self.__dict__.setdefault("_engine_uids_pending", {})
+            for row, kind, basis, proof_kind in generated:
+                basis = basis or hashlib.sha256(str(row.get("content") or "").encode("utf-8")).hexdigest()
+                row["message_uid"] = uid = engine_uid(lineage, kind, basis, seen[(kind, basis)])
+                seen[(kind, basis)] += 1
+                pending[uid] = (lineage, proof_kind)
+        except Exception as exc:  # fail open: an unminted row is a no-uid row, as at the base
+            self._host_uid_count(Counter(errors=1), exc)
+
+    def _host_uid_record_engine(self, emitted) -> None:
+        """R4-2: the engine uids ``emitted`` carries (top level or absorbed) go to ``host_uid_bindings`` as
+        ``kind='engine'``, ``store_id=0``, once per process; the shadow write path, fail-open and counted. A
+        bypassed session writes no LCM state, so its marker's uid is minted but never recorded."""
+        pending = self.__dict__.get("_engine_uids_pending")
+        if not pending:
+            return
+        try:
+            if self._bypasses_lcm_context_management():
+                pending.clear()
+                return
+            done = self.__dict__.setdefault("_engine_uids_recorded", set())
+            present = {uid for row in emitted if isinstance(row, dict)
+                       for uid in [row.get("message_uid"), *(row.get("_absorbed_message_uids") or ())]
+                       if isinstance(uid, str)}
+            records: dict = defaultdict(list)
+            for uid in (present & pending.keys()) - done:
+                lineage, proof_kind = pending[uid]
+                records[lineage].append((0, uid, "engine", proof_kind))
+            pending.clear()
+            for lineage, rows in records.items():
+                self._store.add_host_uid_bindings(lineage, rows)
+                done.update(uid for _sid, uid, _kind, _proof in rows)
+        except Exception as exc:
+            self._host_uid_count(Counter(errors=1), exc)
+
     def _host_uid_capture(self, messages, identity_messages, start: int, cursor: int, plan, tool_segment,
                           session_id=None):
         """Read the uids off the HOST dicts after #436 decided and before the INSERT drops unknown keys."""
@@ -177,8 +223,9 @@ class HostUidShadowMixin:
             values = message.get("_absorbed_message_uids")
             return [uid for uid in values if _valid_uid(uid)] if isinstance(values, (list, tuple)) else []
 
-        bindings = store.host_uid_bindings_for(
-            lineage, {uid for idx, uid in valid.items() for uid in [uid, *absorbed(messages[idx])]})
+        present = {uid for idx, uid in valid.items() for uid in [uid, *absorbed(messages[idx])]}
+        bindings, engine = store.host_uid_bindings_for(lineage, present), set(
+            store.host_uid_bindings_for(lineage, present, ("engine",)))
         by_store: dict = defaultdict(set)  # store_id -> uids bound to it (F6: built once, kept current)
         for uid, items in bindings.items():
             for sid, _kind in items:
@@ -198,6 +245,10 @@ class HostUidShadowMixin:
         for idx, uid in sorted(valid.items()):
             stored = stored_at.get(idx)
             rows = matched.get(idx) if stored is None or idx in remainders else None
+            if engine & {uid, *absorbed(messages[idx])}:  # GENERATED (R3-3 class 2): events only, no gate check
+                delta[self._host_uid_generated(uid, absorbed(messages[idx]), engine, bindings, rows, stored,
+                                               idx in remainders)] += 1
+                continue
             if idx in remainders or (rows and len(rows) > 1):  # COMPOSITE / REMAINDER (F3: prefix included)
                 ids = {int(row["store_id"]) for row in rows or ()} | ({int(stored)} if stored is not None else set())
                 agree = all(not bindings.get(present) or ids & {sid for sid, _k in bindings[present]}
@@ -246,6 +297,21 @@ class HostUidShadowMixin:
         if aliases:
             self._host_uid_alias_candidates(lineage, capture, stored_at, matched, bindings, fetched, aliases, delta)
         return None
+
+    @staticmethod
+    def _host_uid_generated(uid, absorbed, engine, bindings, rows, stored, remainder) -> str:
+        """A dict naming an engine uid: AGREE when #436 stored and mapped nothing for it, ``.remainder`` for a
+        carrier whose user remainder is the row its absorbed host uids are bound to (already stored, or the one
+        #436 stored or mapped; an unbound uid maps anywhere); else DISAGREE."""
+        hosts = [u for u in [uid, *absorbed] if u not in engine]
+        ids = {int(row["store_id"]) for row in rows or ()} | ({int(stored)} if stored is not None else set())
+        if not ids:
+            return "generated.agree.remainder" if hosts and all(bindings.get(h) for h in hosts) else "generated.agree"
+        if stored is not None and not remainder:
+            return "generated.disagree.stored"
+        if hosts and all(not bindings.get(h) or ids & {sid for sid, _k in bindings[h]} for h in hosts):
+            return "generated.agree.remainder"
+        return "generated.disagree.remainder" if hosts or remainder else "generated.disagree.replay_row"
 
     def _host_uid_fetch(self, store_ids, fetched: dict) -> None:
         """Rows cached across one ingest: one batched, chunked read of the ids not fetched yet."""
