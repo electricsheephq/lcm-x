@@ -35,6 +35,16 @@ def carry_mode(monkeypatch):
         monkeypatch.setattr(emit, "_host_uid_capability", True)
 
 
+class _ContainsPattern:
+    """A compiled-pattern stand-in, as in test_ingest_protection: the optional ``regex`` package is not in CI."""
+
+    def __init__(self, needle):
+        self.pattern = needle
+
+    def search(self, text, timeout=None):
+        return object() if self.pattern in str(text) else None
+
+
 @pytest.fixture
 def build(tmp_path):
     engines = []
@@ -45,6 +55,8 @@ def build(tmp_path):
         settings.update(overrides)
         engine = LCMEngine(config=LCMConfig(**settings), hermes_home=str(tmp_path / "host"))
         engine.on_session_start("S", conversation_id="conv", context_length=200_000)
+        if overrides.get("ignore_message_patterns"):
+            engine._compiled_ignore_message_patterns = [_ContainsPattern(p) for p in overrides["ignore_message_patterns"]]
         engines.append(engine)
         return engine
 
@@ -334,8 +346,7 @@ def test_p6_restart_persisted_rows_do_not_rebind(tmp_path, monkeypatch, site):
     first._hermes_home = str(tmp_path)
     first._config.max_assembly_tokens = 300 if site == "overflow" else 10_000
     if site == "placeholder":
-        from hermes_lcm.message_patterns import compile_message_patterns
-        first._compiled_ignore_message_patterns = compile_message_patterns(["IGNORE_THIS"])
+        first._compiled_ignore_message_patterns = [_ContainsPattern("IGNORE_THIS")]
         host = [_m("user", "IGNORE_THIS payload", 10.0, "ignored"), _m("assistant", "reply", 11.0, "reply")]
         target_uid = "ignored"
     elif site == "overflow":
