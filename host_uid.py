@@ -189,10 +189,11 @@ class HostUidShadowMixin:
             unmapped = not rows and stored is None and (idx < cursor or idx in capture["tool_segment"] or idx in replayed)
             if bound:  # BOUND: compared against the payload-matching version (R1-1); the gate marks that binding
                 hit = self._host_uid_bytes_match(bound, identity[idx], fetched) if not rows else None
-                if stored is not None:
+                if stored is not None:  # VERSION_NEW is an event only; a stored duplicate is a replay check
                     delta["bound.disagree.stored_despite_match" if hit is not None else "bound.version_new"] += 1
-                    checks.append((uid, canonical if hit is None else hit, hit is None))
-                    if hit is None:
+                    if hit is not None:
+                        checks.append((uid, hit, False))
+                    else:
                         bind(stored, uid, "version", "version_new")
                 elif rows:  # #436 replayed onto one row: AGREE when it is a row bound to this uid
                     target = int(rows[0]["store_id"])

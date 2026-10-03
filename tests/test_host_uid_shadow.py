@@ -364,6 +364,8 @@ def test_same_uid_same_bytes_stored_again_disagrees(tmp_path):
         engine.ingest([_m("user", "hello" + PAD, None, "u-1")])
         engine.ingest([_m("user", "hello" + PAD, None, "u-1"), _m("user", "hello" + PAD, None, "u-1")])
         assert _counts(engine) == {"unbound.agree_new": 1, "bound.disagree.stored_despite_match": 1}
+        assert _gate(engine) == [("u-1", "disagree", 1)]  # the duplicate is a replay check on the matched binding
+        assert "host_uid_gate_disagree: 1" in _doctor_text(engine)
         assert len(_bindings(engine)) == 1
     finally:
         engine.shutdown()
@@ -808,3 +810,27 @@ def test_f7_composite_and_remainder_real_ingest_parity_with_off(tmp_path, monkey
     assert results["off"][1][1], "the #436 relation must be recorded"
     expected = "replay.composite.agree" if case == "composite" else "composite.agree.remainder"
     assert results["shadow"][0].get(expected) == 1, results["shadow"][0]
+
+
+def test_r2_version_new_leaves_bindings_unchecked_until_a_replay(tmp_path):
+    """Reviewer A->B: a changed-bytes store is a VERSION_NEW event, never a gate check on A or B."""
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest([_m("user", "A" + PAD, 10.0, "u")])
+        engine.ingest([_m("user", "A" + PAD, 10.0, "u"), _m("user", "B" + PAD, 10.5, "u")])
+        a_id, b_id = _id_of(engine, "A" + PAD), _id_of(engine, "B" + PAD)
+        assert [(b[0], b[3]) for b in _bindings(engine)] == [(a_id, "canonical"), (b_id, "version")]
+        assert _gate(engine) == [("u", None, 0), ("u", None, 0)]
+        assert "host_uid_gate_checked: 0" in _doctor_text(engine)
+        assert _counts(engine) == {"unbound.agree_new": 1, "bound.version_new": 1}
+    finally:
+        engine.shutdown()
+    engine = _engine(tmp_path)
+    try:  # restart: the host replays u with A's bytes
+        engine.ingest([_m("user", "A" + PAD, 10.0, "u")])
+        assert _counts(engine) == {"replay.bound.agree.replay": 1}  # #436 maps it onto A
+        assert _gate(engine) == [("u", "agree", 0), ("u", None, 0)]
+        assert "host_uid_gate_checked: 1" in _doctor_text(engine)
+    finally:
+        engine.shutdown()
