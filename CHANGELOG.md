@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.25.0 - (unreleased; rc1) (long sessions: drain speed + correctness)
+
 - Fix: a host refusal after a compaction stored leaves holds automatic compaction until turn end, with a
   600 s backstop; refusals without a stored leaf keep the existing hold. (#597)
 - Change: hidden-backlog checks report `hidden_rows` as a count, a bounded count (`N+`), or `unknown` in
@@ -13,6 +15,24 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Bench: the drain rotation scorer excludes the session-transition call from phase 2, so D1 measures
   only post-rotation compactions; clean-exit cells are unchanged. (#597)
 - Removed native recovery (`LCM_NATIVE_RECOVERY`), which was off by default and off on every managed profile; the key is ignored if set (#777, #509). Stores written while it was on keep their adoption proofs and snapshot digests, which LCM still reads.
+- Fix: LCM never presents its own summary row as the user's objective. When the reverse scan for the latest user
+  request reaches a verified LCM summary row before any real user row, it returns no objective anchor, so a long tool
+  run across several compactions no longer re-renders a summary as the preserved objective. The host-carrier half
+  stays open (#576). (#84)
+- Fix: assembly and condensation see every summary depth in deep sessions. The depths came from a node query capped
+  at 1,000 rows, depth 0 first, so from about 760 leaves the oldest condensed levels dropped out of the model's
+  context. No stored row was lost. (#750)
+- Perf: replay assembly lists the large-output payload directory once per assembly instead of once per aged-tier
+  stub; a miss falls back to the original glob. (#808)
+- Change: a routine exit fit (`reason=exit_fit:`) logs "LCM survival fit applied" at INFO; every other survival-fit
+  line stays WARNING and the text is unchanged. (#735)
+- Fix: a SQLite lock on the frontier read right after a committed threshold-sweep condensation reports the completed
+  pass count in the fail-open telemetry instead of 0. (#24)
+- Docs: `compression.target_ratio` belongs to the host's built-in compressor; LCM-X does not read it. (#605)
+- Bench: drain and hidden-backlog cells (#801); gate exemptions limited to each open target's declared bars (#813)
+  and, where declared, to one host (#822); the managed-profile runtime joins the nightly matrix; the B2 scorer pairs a
+  held user composite with the parts the host stored apart (#804); an explicit `--embeddings on|off` LongMemEval arm
+  (#811).
 
 ## v0.24.9 - 2026-10-01 (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
 

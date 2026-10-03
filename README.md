@@ -136,9 +136,8 @@ separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
 The `main` line identifies itself as
-`hermes-lcm-x v0.24.9 (15 tools)` — drain: one foreground time budget, stub-first exit, exit fit,
-scan allowance — the identity of the `v0.24.9` release tag, until the first v0.25.0 release
-candidate bumps it. An identity is never a restamp of any past commit's own recorded identity
+`hermes-lcm-x v0.25.0 (15 tools)` — long sessions: drain speed + correctness — on top of the
+`v0.24.9` release tag, which identifies itself as `hermes-lcm-x v0.24.9 (15 tools)`. An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
@@ -259,7 +258,7 @@ On the `main` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.24.9 (15 tools)
+  ✓ hermes-lcm-x v0.25.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -1074,7 +1073,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
-- [Current project state](docs/project-status.md) — v0.24.8 stable baseline,
+- [Current project state](docs/project-status.md) — v0.24.9 stable baseline,
   separate main-development identity, active work, and proof boundaries
 - [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
   and judged-QA evaluation contracts, reproduction, and landed result index
