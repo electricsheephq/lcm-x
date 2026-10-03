@@ -72,6 +72,12 @@ def _root_of(key):
     return None if key is None else key.split(":", 1)[1]
 
 
+def _root_and_problem(found):
+    """``_host_uid_lineage_key()`` with the key reduced to its root, the problem kept: ``(root, problem)``."""
+    key, problem = found
+    return _root_of(key), problem
+
+
 def _counts(engine: LCMEngine) -> dict:
     return {k: v for k, v in (getattr(engine, "_host_uid_counters", None) or {}).items() if v}
 
@@ -922,9 +928,9 @@ def test_r3_the_lineage_cache_is_keyed_by_home(tmp_path):
     engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")), hermes_home=str(tmp_path / "one"))
     engine.on_session_start("S", platform="cli", context_length=200_000)
     try:
-        assert _root_of(engine._host_uid_lineage_key()[0]) == "P"
+        assert _root_and_problem(engine._host_uid_lineage_key()) == ("P", None)
         engine._hermes_home = str(tmp_path / "two")  # the same session id under another profile home
-        assert _root_of(engine._host_uid_lineage_key()[0]) == "S"
+        assert _root_and_problem(engine._host_uid_lineage_key()) == ("S", None)
     finally:
         engine.shutdown()
 
@@ -1039,7 +1045,7 @@ def test_r4_a_permission_denied_state_db_is_a_read_error_not_missing(tmp_path, m
             assert not engine.__dict__.get("_host_uid_lineage_cache")
         finally:
             home.chmod(0o700)
-        assert _root_of(engine._host_uid_lineage_key()[0]) == "S"
+        assert _root_and_problem(engine._host_uid_lineage_key()) == ("S", None)
     finally:
         engine.shutdown()
 
@@ -1049,7 +1055,7 @@ def test_r4_the_lineage_cache_keeps_the_newest_512_entries(tmp_path):
     engine = _engine(tmp_path)
     try:
         for i in range(600):
-            assert _root_of(engine._host_uid_lineage_key(f"s{i}")[0]) == f"s{i}"
+            assert _root_and_problem(engine._host_uid_lineage_key(f"s{i}")) == (f"s{i}", None)
         cache = engine._host_uid_lineage_cache
         assert len(cache) == 512
         assert [key[1] for key in cache][:1] == ["s88"] and list(cache)[-1][1] == "s599"
