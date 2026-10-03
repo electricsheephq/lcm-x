@@ -30,6 +30,7 @@ PROVIDER = "benchmark"
 
 
 def load_plugin_module():
+    """Load this checkout as a package without a Hermes profile or host runtime."""
     spec = importlib.util.spec_from_file_location(
         "hermes_lcm",
         ROOT / "__init__.py",
@@ -44,6 +45,7 @@ def load_plugin_module():
 
 
 def seed_messages(db_path: Path, count: int) -> None:
+    """Create deterministic synthetic message rows used by chunk joins."""
     connection = sqlite3.connect(db_path)
     try:
         connection.execute(
@@ -68,6 +70,7 @@ def seed_messages(db_path: Path, count: int) -> None:
 
 
 def decoder_matrix(store, identity_hash: str, dim: int, chunk_ids: list[str]):
+    """Build a matrix through the legacy Python-float decoder for comparison."""
     rowids, loaded_ids, kinds, raw_vectors = store._load_chunk_vectors_for_ids(
         identity_hash, dim, chunk_ids, "float32"
     )
@@ -75,6 +78,7 @@ def decoder_matrix(store, identity_hash: str, dim: int, chunk_ids: list[str]):
 
 
 def median_load_seconds(load, repeats: int) -> float:
+    """Return median elapsed load time, excluding fixture setup and validation."""
     samples = []
     for _ in range(repeats):
         started = time.perf_counter()
@@ -84,6 +88,7 @@ def median_load_seconds(load, repeats: int) -> float:
 
 
 def main() -> int:
+    """Verify exact synthetic parity and print host-dependent loader timings."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--count", type=int, default=2000, help="synthetic vectors (default: 2000)")
     parser.add_argument("--dim", type=int, default=384, help="vector dimensions (default: 384)")

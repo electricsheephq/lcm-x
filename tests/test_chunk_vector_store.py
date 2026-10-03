@@ -37,6 +37,7 @@ def _seed_messages(db_path, rows):
 
 
 def _chunk_identity():
+    """Return the canonical float32 identity shared by the chunk fixtures."""
     return EmbeddingIdentity.canonical(
         PROVIDER, MODEL, "", DIM, "float32", "little", "chunk"
     )
@@ -44,6 +45,7 @@ def _chunk_identity():
 
 @pytest.fixture
 def store(tmp_path):
+    """Yield an isolated vector store with synthetic messages and a chunk profile."""
     db_path = tmp_path / "lcm.db"
     _seed_messages(
         db_path,
@@ -60,6 +62,7 @@ def store(tmp_path):
 
 
 def _write(store, chunk_id, store_id, chunk_index, vec):
+    """Record a synthetic vector with consistent chunk provenance."""
     store.record_chunk_embedding(
         chunk_id,
         MODEL,
@@ -74,6 +77,50 @@ def _write(store, chunk_id, store_id, chunk_index, vec):
 
 
 class TestChunkWriteAndKnn:
+    @pytest.mark.parametrize("loader", ["python", "numpy"])
+    @pytest.mark.parametrize(
+        ("stored_value", "storage_class"),
+        [
+            (DIM * 4, "integer"),
+            (float(DIM * 4) + 0.5, "real"),
+            ("x" * (DIM * 4), "text"),
+            (b"short", "blob"),
+        ],
+    )
+    def test_chunk_loaders_skip_malformed_sqlite_values(
+        self, store, loader, stored_value, storage_class
+    ):
+        """Non-BLOB storage must not be coerced into valid float32 vectors."""
+        _write(store, "10:0", 10, 0, [1.0, 0.0, 0.0, 0.0])
+        _write(store, "11:0", 11, 0, [0.0, 1.0, 0.0, 0.0])
+        identity = _chunk_identity().identity_hash
+        store.connection.execute(
+            "UPDATE lcm_chunk_vectors SET vec = ? WHERE chunk_id = ? AND identity_hash = ?",
+            (stored_value, "11:0", identity),
+        )
+        store.connection.commit()
+        actual_type = store.connection.execute(
+            "SELECT typeof(vec) FROM lcm_chunk_vectors WHERE chunk_id = ?",
+            ("11:0",),
+        ).fetchone()[0]
+        assert actual_type == storage_class
+
+        if loader == "numpy":
+            numpy = pytest.importorskip("numpy")
+            rowids, ids, kinds, values = store._load_chunk_matrix(
+                numpy, identity, DIM, ["10:0", "11:0"], "float32"
+            )
+            assert values.shape == (1, DIM)
+            values = values.tolist()
+        else:
+            rowids, ids, kinds, values = store._load_chunk_vectors_for_ids(
+                identity, DIM, ["10:0", "11:0"], "float32"
+            )
+        assert rowids == [1]
+        assert ids == ["10:0"]
+        assert kinds == ["chunk"]
+        assert values == [[1.0, 0.0, 0.0, 0.0]]
+
     def test_numpy_loader_reads_valid_float32_blobs_without_python_decode(
         self, store, monkeypatch
     ):
@@ -94,6 +141,7 @@ class TestChunkWriteAndKnn:
         assert store.archive_chunks_for_messages([12]) == 1
 
         def unexpected_decode(*_args, **_kwargs):
+            """Fail when float32 loading regresses to Python object expansion."""
             pytest.fail("valid float32 BLOBs should not be decoded through Python floats")
 
         monkeypatch.setattr(store, "_load_chunk_vectors_for_ids", unexpected_decode)
@@ -115,6 +163,7 @@ class TestChunkWriteAndKnn:
         )
 
     def test_numpy_loader_keeps_int8_on_the_existing_decoder_path(self, store, monkeypatch):
+        """Keep quantized vectors on the established decoder and preserve metadata."""
         numpy = pytest.importorskip("numpy")
         identity = EmbeddingIdentity.canonical(
             PROVIDER, MODEL, "", DIM, "int8", "little", "chunk"
@@ -135,6 +184,7 @@ class TestChunkWriteAndKnn:
         calls = []
 
         def observed_decode(*args, **kwargs):
+            """Record the chosen dtype while executing the real legacy decoder."""
             calls.append(args[3])
             return original(*args, **kwargs)
 

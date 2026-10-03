@@ -2661,6 +2661,7 @@ class VectorStore:
         chunk_ids: Sequence[str],
         dtype: str = _VECTOR_DTYPE,
     ) -> tuple[list[int], list[str], list[str], list[list[float]]]:
+        """Decode eligible chunk BLOBs, skipping malformed SQLite storage values."""
         rowids: list[int] = []
         out_ids: list[str] = []
         kinds: list[str] = []
@@ -2681,8 +2682,13 @@ class VectorStore:
                 (identity_hash,),
             ).fetchall()
         for row in rows:
+            blob = row["vec"]
+            # SQLite permits non-BLOB storage; bytes(integer) allocates zeros.
+            # Reject it before conversion, consistently with the NumPy loader.
+            if not isinstance(blob, (bytes, bytearray, memoryview)):
+                continue
             try:
-                vector = self._decode_stored_vec(bytes(row["vec"]), dim, dtype)
+                vector = self._decode_stored_vec(bytes(blob), dim, dtype)
             except (TypeError, ValueError):
                 continue
             if vector is None:
@@ -2727,7 +2733,7 @@ class VectorStore:
     ) -> tuple[list[int], list[str], list[str], Any]:
         """Load one chunk candidate set into a NumPy matrix (no cache).
 
-        Float32 vectors are stored as native little-endian BLOBs. Build their
+        Float32 vectors are stored as little-endian BLOBs. Build their
         matrix directly from those bytes instead of materializing Python floats.
         Other storage dtypes retain the established decoder path.
         """
@@ -2762,10 +2768,13 @@ class VectorStore:
                 (identity_hash,),
             ).fetchall()
         for row in rows:
-            # Match the established decoder contract: malformed SQLite values are
-            # ignored rather than aborting the candidate set.
+            blob = row["vec"]
+            # SQLite permits non-BLOB storage; bytes(integer) allocates zeros.
+            # Reject it before conversion, consistently with the Python loader.
+            if not isinstance(blob, (bytes, bytearray, memoryview)):
+                continue
             try:
-                blob = bytes(row["vec"])
+                blob = bytes(blob)
             except (TypeError, ValueError):
                 continue
             if len(blob) != expected_bytes:
