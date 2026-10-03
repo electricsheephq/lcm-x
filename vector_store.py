@@ -2661,6 +2661,7 @@ class VectorStore:
         chunk_ids: Sequence[str],
         dtype: str = _VECTOR_DTYPE,
     ) -> tuple[list[int], list[str], list[str], list[list[float]]]:
+        """Decode eligible chunk BLOBs, skipping malformed SQLite storage values."""
         rowids: list[int] = []
         out_ids: list[str] = []
         kinds: list[str] = []
@@ -2681,8 +2682,13 @@ class VectorStore:
                 (identity_hash,),
             ).fetchall()
         for row in rows:
+            blob = row["vec"]
+            # SQLite permits non-BLOB storage; bytes(integer) allocates zeros.
+            # Reject it before conversion, consistently with the NumPy loader.
+            if not isinstance(blob, (bytes, bytearray, memoryview)):
+                continue
             try:
-                vector = self._decode_stored_vec(bytes(row["vec"]), dim, dtype)
+                vector = self._decode_stored_vec(bytes(blob), dim, dtype)
             except (TypeError, ValueError):
                 continue
             if vector is None:
@@ -2725,16 +2731,63 @@ class VectorStore:
         chunk_ids: Sequence[str],
         dtype: str,
     ) -> tuple[list[int], list[str], list[str], Any]:
-        """Decode one chunk candidate set into a NumPy matrix (no cache)."""
-        rowids, loaded_ids, kinds, raw_vectors = self._load_chunk_vectors_for_ids(
-            identity_hash, dim, chunk_ids, dtype
-        )
+        """Load one chunk candidate set into a NumPy matrix (no cache).
+
+        Float32 vectors are stored as little-endian BLOBs. Build their
+        matrix directly from those bytes instead of materializing Python floats.
+        Other storage dtypes retain the established decoder path.
+        """
+        if dtype != _VECTOR_DTYPE:
+            rowids, loaded_ids, kinds, raw_vectors = self._load_chunk_vectors_for_ids(
+                identity_hash, dim, chunk_ids, dtype
+            )
+            matrix = (
+                numpy.asarray(raw_vectors, dtype=numpy.float32)
+                if raw_vectors
+                else numpy.empty((0, dim), dtype=numpy.float32)
+            )
+            return rowids, loaded_ids, kinds, matrix
+        if not chunk_ids:
+            return [], [], [], numpy.empty((0, dim), dtype=numpy.float32)
+
+        rowids: list[int] = []
+        loaded_ids: list[str] = []
+        blobs: list[bytes] = []
+        expected_bytes = dim * 4
+        with self._temp_id_table(chunk_ids) as table:
+            rows = self._conn.execute(
+                f"""
+                SELECT v.rowid, v.chunk_id, v.vec
+                FROM {table} t
+                JOIN lcm_chunk_vectors v
+                  ON v.chunk_id = t.id AND v.identity_hash = ?
+                JOIN lcm_chunk_meta m
+                  ON m.chunk_id = v.chunk_id AND m.identity_hash = v.identity_hash
+                WHERE m.archived = 0
+                """,
+                (identity_hash,),
+            ).fetchall()
+        for row in rows:
+            blob = row["vec"]
+            # SQLite permits non-BLOB storage; bytes(integer) allocates zeros.
+            # Reject it before conversion, consistently with the Python loader.
+            if not isinstance(blob, (bytes, bytearray, memoryview)):
+                continue
+            try:
+                blob = bytes(blob)
+            except (TypeError, ValueError):
+                continue
+            if len(blob) != expected_bytes:
+                continue
+            rowids.append(int(row["rowid"]))
+            loaded_ids.append(str(row["chunk_id"]))
+            blobs.append(blob)
         matrix = (
-            numpy.asarray(raw_vectors, dtype=numpy.float32)
-            if raw_vectors
+            numpy.frombuffer(b"".join(blobs), dtype=numpy.dtype("<f4")).reshape(len(blobs), dim)
+            if blobs
             else numpy.empty((0, dim), dtype=numpy.float32)
         )
-        return rowids, loaded_ids, kinds, matrix
+        return rowids, loaded_ids, ["chunk"] * len(loaded_ids), matrix
 
     def knn_chunks(
         self,
