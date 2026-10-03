@@ -2421,6 +2421,7 @@ def production_recall_hits(
     limit: int,
     return_status: bool = False,
     accounting: ProviderAccounting | None = None,
+    recall_health: dict | None = None,
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str, list[list[Any]]]:
     """Invoke the REAL ``tools.lcm_recall`` against this question's temp store.
 
@@ -2461,6 +2462,13 @@ def production_recall_hits(
     payload = json.loads(
         lcm_tools.lcm_recall({"query": question.question, "limit": limit}, engine=engine)
     )
+    if recall_health is not None:
+        recall_health["degraded"] = bool(payload.get("degraded"))
+        recall_health["coverage"] = {
+            arm: status
+            for arm, status in payload.get("provenance", {}).get("coverage", {}).items()
+            if isinstance(status, str)
+        }
     if accounting is not None:
         degraded_outcomes = _typed_provider_degraded_outcomes(payload)
         accounting.record_degraded_outcomes(degraded_outcomes)
@@ -3138,6 +3146,7 @@ def evaluate_question(
         # 25-hit ceiling). Its hits carry session_id directly (session ranking) and
         # store_id/node_id for turn projection. Its turn keys mix precise verbatim
         # keys with (session, None) summary markers, so it carries the asterisk.
+        recall_health: dict = {}
         recall_result, recall_ms = _timed(
             lambda: production_recall_hits(
                 question,
@@ -3152,6 +3161,7 @@ def evaluate_question(
                 embeddings_enabled=embeddings_enabled, limit=fetch,
                 return_status=recall_rerank,
                 accounting=accounting,
+                recall_health=recall_health,
             )
         )
         if recall_rerank:
@@ -3188,6 +3198,10 @@ def evaluate_question(
                 },
             }
         scored["hybrid_rerank"]["rerank_mode"] = rerank_mode
+        scored["lcm_recall"]["recall_health"] = {
+            "degraded": recall_health.get("degraded"),
+            "coverage": recall_health.get("coverage", {}),
+        }
         if recall_rerank:
             scored["lcm_recall"]["recall_rerank_status"] = recall_rerank_status
         if include_rankings:
@@ -3680,6 +3694,24 @@ def _validate_restored_checkpoint_metrics(
                 f"checkpoint line {line_number} field {turn_field}.session_granularity "
                 f"must be a boolean: {path}"
             )
+    recall_metrics = arms["lcm_recall"]
+    if "recall_health" in recall_metrics:
+        health = recall_metrics["recall_health"]
+        health_field = "arms.lcm_recall.recall_health"
+        if not isinstance(health, dict):
+            raise ValueError(
+                f"checkpoint line {line_number} field {health_field} must be an object: {path}"
+            )
+        if health.get("degraded") is not None and not isinstance(health["degraded"], bool):
+            raise ValueError(
+                f"checkpoint line {line_number} field {health_field}.degraded "
+                f"must be a boolean or null: {path}"
+            )
+        if not isinstance(health.get("coverage"), dict):
+            raise ValueError(
+                f"checkpoint line {line_number} field {health_field}.coverage "
+                f"must be an object: {path}"
+            )
     if recall_rerank:
         recall_metrics = arms.get("lcm_recall")
         status = (
@@ -3936,6 +3968,7 @@ def _accumulate_question_checkpoint(
     ingest_samples: list[float],
     rerank_mode_counts: dict[str, int],
     recall_rerank_status_counts: dict[str, int] | None = None,
+    recall_health_counts: dict[str, int] | None = None,
     embeddings_enabled: bool = True,
 ) -> tuple[int, int]:
     """Seed aggregate state from one live or resumed per-question record."""
@@ -3973,6 +4006,30 @@ def _accumulate_question_checkpoint(
         recall_rerank_status_counts[recall_rerank_status] = (
             recall_rerank_status_counts.get(recall_rerank_status, 0) + 1
         )
+    if recall_health_counts is not None:
+        recall_metrics = arms["lcm_recall"]
+        if "recall_health" not in recall_metrics:
+            recall_health_counts["unrecorded"] += 1
+        else:
+            health = recall_metrics["recall_health"]
+            if (
+                not isinstance(health, dict)
+                or (health.get("degraded") is not None
+                    and not isinstance(health["degraded"], bool))
+                or not isinstance(health.get("coverage"), dict)
+            ):
+                raise ValueError(
+                    f"checkpoint question {record.get('question_id')!r} has invalid recall_health"
+                )
+            coverage = health["coverage"]
+            if "fts" not in coverage:
+                recall_health_counts["fts_absent"] += 1
+            elif coverage["fts"] == "ok":
+                recall_health_counts["fts_ok"] += 1
+            elif coverage["fts"] == "none":
+                recall_health_counts["fts_none"] += 1
+            if health.get("degraded") is True:
+                recall_health_counts["degraded"] += 1
     bucket = by_category.setdefault(category, _new_arm_samples())
     try:
         for arm in active_arms:
@@ -4121,6 +4178,9 @@ def run_harness(
     recall_rerank_status_counts: dict[str, int] | None = (
         {} if recall_rerank else None
     )
+    recall_health_counts = {
+        "fts_ok": 0, "fts_none": 0, "fts_absent": 0, "degraded": 0, "unrecorded": 0,
+    }
     consumed_count = 0
 
     completed_question_ids = {
@@ -4135,6 +4195,7 @@ def run_harness(
             ingest_samples=ingest_samples,
             rerank_mode_counts=rerank_mode_counts,
             recall_rerank_status_counts=recall_rerank_status_counts,
+            recall_health_counts=recall_health_counts,
         )
         scored_count += scored_delta
         abstention_count += abstention_delta
@@ -4329,6 +4390,7 @@ def run_harness(
                     ingest_samples=ingest_samples,
                     rerank_mode_counts=rerank_mode_counts,
                     recall_rerank_status_counts=recall_rerank_status_counts,
+                    recall_health_counts=recall_health_counts,
                 )
                 scored_count += scored_delta
                 abstention_count += abstention_delta
@@ -4459,6 +4521,10 @@ def run_harness(
             "lcm_recall_mode": "semantic_or_hybrid" if embeddings_enabled else "full_text",
         },
         "scored_count": scored_count,
+        "lcm_recall_health": {
+            **recall_health_counts,
+            "failed_searches": recall_health_counts["fts_none"],
+        },
         "abstention_excluded": abstention_count,
         "rerank": {
             **_aggregate_rerank_mode(rerank_mode_counts),
