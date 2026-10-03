@@ -614,7 +614,7 @@ def _case_multi_cycle_canary_recall(run: StressRun) -> None:
             run.fail(case, "expand_canary_recall_miss", "lcm_expand failed to recover raw planted canary content from grep result", {"missed": expanded_missed})
 
         status = run.call_tool(engine, "lcm_status", {})
-        doctor = run.call_tool(engine, "lcm_doctor", {})
+        doctor = run.call_tool(engine, "lcm_doctor", {"mode": "deep"})
         run.record(case, "compressed_lengths", compressed_lengths[-10:])
         run.record(case, "status", status)
         run.record(case, "doctor", doctor)
@@ -1070,7 +1070,7 @@ def _case_lifecycle_soak_and_profile_rebinds(run: StressRun) -> None:
         wal_max_bytes = max(wal_max_bytes, _sqlite_artifact_bytes(db_path).get(f"{db_path.name}-wal", 0))
         if wal_max_bytes > run.tier.lifecycle_wal_soft_limit_bytes:
             run.fail(case, "wal_growth_exceeded_soft_limit", "Lifecycle soak SQLite WAL grew past the tier soft limit", {"wal_max_bytes": wal_max_bytes, "soft_limit": run.tier.lifecycle_wal_soft_limit_bytes})
-        doctor = run.call_tool(engine, "lcm_doctor", {})
+        doctor = run.call_tool(engine, "lcm_doctor", {"mode": "deep"})
         if "error" in doctor:
             run.fail(case, "doctor_error_after_lifecycle_soak", "lcm_doctor returned an error after lifecycle soak", {"doctor": doctor})
         fragmentation = engine._lifecycle.get_fragmentation_stats()

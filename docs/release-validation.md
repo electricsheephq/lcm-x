@@ -89,7 +89,7 @@ The checklist is safe to paste into a release note or PR validation section afte
 - [ ] Phase A / B / C gauntlet receipts linked for this exact rc tree
 
 ### Doctor triage
-- [ ] `lcm_doctor` warnings were classified as `safe/ignore`, `inspect`, or `backup-first cleanup`
+- [ ] `lcm_doctor` (`mode: deep`) warnings were classified as `safe/ignore`, `inspect`, or `backup-first cleanup`
 - [ ] no warning-only class was auto-cleaned without operator review
 
 ### Notes

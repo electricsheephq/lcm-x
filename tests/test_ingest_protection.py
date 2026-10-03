@@ -1961,7 +1961,7 @@ def test_lcm_doctor_ignores_literal_data_uri_like_scaffold(tmp_path):
     )
     engine._store._conn.commit()
 
-    json_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    json_result = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
 
     payload_check = next(check for check in json_result["checks"] if check["check"] == "payload_storage")
     assert payload_check["status"] == "pass"
@@ -1990,7 +1990,7 @@ def test_lcm_doctor_ignores_code_data_uri_prefix_without_payload(tmp_path):
     )
     engine._store._conn.commit()
 
-    json_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    json_result = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
 
     payload_check = next(check for check in json_result["checks"] if check["check"] == "payload_storage")
     assert payload_check["status"] == "pass"
@@ -2018,7 +2018,7 @@ def test_lcm_doctor_reports_embedded_generic_base64_without_raw_preview(tmp_path
     )
     engine._store._conn.commit()
 
-    json_result_text = lcm_tools.lcm_doctor({}, engine=engine)
+    json_result_text = lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine)
     json_result = json.loads(json_result_text)
 
     assert GENERIC_BASE64[:120] not in json_result_text
@@ -2034,7 +2034,7 @@ def test_lcm_doctor_reports_externalized_payload_stats(tmp_path):
     engine._ingest_messages([{"role": "user", "content": DATA_URI}])
 
     text_result = handle_lcm_command("doctor", engine)
-    json_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    json_result = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
 
     assert "externalized_payload_count: 1" in text_result
     assert "externalized_payload_bytes:" in text_result
@@ -2255,7 +2255,7 @@ def test_externalized_payload_integrity_scan_ignores_incidental_source_excerpts(
         engine._config,
         hermes_home=engine._hermes_home,
     )
-    doctor_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor_result = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
     doctor_detail = next(
         check["detail"] for check in doctor_result["checks"] if check["check"] == "payload_storage"
     )
@@ -2423,7 +2423,7 @@ def test_externalized_payload_integrity_scan_keeps_generated_placeholder_in_sour
         engine._config,
         hermes_home=engine._hermes_home,
     )
-    doctor_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor_result = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
     doctor_detail = next(
         check["detail"] for check in doctor_result["checks"] if check["check"] == "payload_storage"
     )
@@ -2545,7 +2545,7 @@ def test_externalized_payload_integrity_scan_reports_missing_generated_ref_in_so
         engine._config,
         hermes_home=engine._hermes_home,
     )
-    doctor_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor_result = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
     doctor_detail = next(
         check["detail"] for check in doctor_result["checks"] if check["check"] == "payload_storage"
     )
@@ -3465,7 +3465,7 @@ def test_lcm_doctor_warns_on_missing_externalized_payload_refs_when_inline_paylo
     )
     engine._store._conn.commit()
 
-    json_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    json_result = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
 
     payload_check = next(check for check in json_result["checks"] if check["check"] == "payload_storage")
     assert payload_check["status"] == "warn"
