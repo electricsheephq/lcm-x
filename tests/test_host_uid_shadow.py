@@ -708,6 +708,8 @@ def test_f7_a_v0250_build_opens_ingests_and_reads_a_store_with_the_table(tmp_pat
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
+    if subprocess.run(["git", "-C", str(root), "cat-file", "-e", "c36b46e3^{commit}"], capture_output=True).returncode:
+        pytest.skip("the v0.25.0 commit c36b46e3 is not in this checkout (shallow clone)")
     archive = subprocess.run(["git", "-C", str(root), "archive", "c36b46e3"], check=True, capture_output=True).stdout
     old = tmp_path / "v0250"
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
