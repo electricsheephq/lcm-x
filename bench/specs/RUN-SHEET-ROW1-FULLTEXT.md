@@ -24,15 +24,19 @@ tool use.
 ## 2. Pins (every value from a command at launch, none typed)
 - Product: the latest lcm-x GA at launch (`v0.25.0` when this amendment lands), by commit sha; plugin version line;
   `config.py` blob sha.
-  - `git rev-parse <GA tag>^{commit}` must equal the canonical GA commit named in that release's notes (the tag is
-    mutable); any mismatch stops the row.
+  - `git rev-parse <GA tag>^{commit}` must equal the sha in the "Latest stable" row of `docs/project-status.md` on
+    `origin/main` at launch (`vX.Y.Z@<sha>`; written after the cut, outside the GA tree, because the tag is mutable and
+    a GA tree cannot name its own commit). That row must name the GA under test; if it still names an older release,
+    update the docs first and do not launch. Any mismatch stops the row.
   - R1-M runs in a detached worktree at the GA commit. Only the instrument files (`benchmarking/`,
     `scripts/lcm_longmemeval.py`) come from the instrument commit, and `git status --porcelain` lists only those
     paths. The harness imports the product from its own checkout, so the measured product is the GA tree byte for byte,
     including modules the recall path imports indirectly (for example `store.py` applies
     `message_content.normalize_content_value` before full-text insertion, so a listed-files check alone could miss a
     corpus change).
-  - R1-S / R1-L: the bridge loads the same GA commit; record the commit sha of the tree it loads.
+  - R1-S / R1-L: the lcm-x checkout each bridge loads is a detached worktree at the same GA commit with
+    `git status --porcelain` empty; record its commit sha and the empty status output. A bridge that loads any other
+    checkout, or one with local changes, stops the row (an equal `HEAD` sha alone does not prove the loaded code).
   - One product sha: at launch the three sub-rows' product commit shas must be equal. If they cannot be, each sub-row
     is labelled with its own sha and the sub-rows are never reported as one row.
   - Recall path since `v0.24.9`: record `git diff --stat v0.24.9 <GA>` over the recall modules (`tools.py`,
@@ -121,15 +125,16 @@ tool use.
   configuration.
 - Watchdog used all resumes on one run → park that sub-row, report the stall with the log.
 - More than 2 R1-M shards dead of one cause → park, root-cause first.
-- The GA tag does not resolve to its canonical commit, the R1-M worktree shows a change outside the instrument
-  files, sub-row product shas differ without separate labels, the R1-S dataset or question-list sha differs from its pin, a reader
-  tool call appears, or a served model differs from its pin → stop.
+- The GA tag does not resolve to the `docs/project-status.md` pin, the R1-M worktree shows a change outside the
+  instrument files, a bridge checkout is not clean, sub-row product shas differ without separate labels, the R1-S
+  dataset or question-list sha differs from its pin, a reader tool call appears, or a served model differs from its
+  pin → stop.
 
 ## 7. Procedure
 1. Merge the kit PRs; merge this sheet (fact-check of every pin source). R1-M also waits for #817 (per-question
    provenance).
-2. A detached worktree at the GA commit with the instrument files overlaid (R1-M), the bridge on the same commit
-   (R1-S / R1-L); record pins (§2).
+2. A detached worktree at the GA commit with the instrument files overlaid (R1-M), a clean detached worktree at the
+   same commit for the bridges (R1-S / R1-L); record pins (§2).
 3. Positive controls (§3) → evidence folder.
 4. R1-M full 500 (6 shards) + A/A′ subset → snapshot → score.
 5. R1-S 500 with A′ subset → snapshot → judge → score.
