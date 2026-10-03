@@ -15,7 +15,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Bench: the drain rotation scorer excludes the session-transition call from phase 2, so D1 measures
   only post-rotation compactions; clean-exit cells are unchanged. (#597)
 - Removed native recovery (`LCM_NATIVE_RECOVERY`), which was off by default and off on every managed profile; the key is ignored if set (#777, #509). Stores written while it was on keep their adoption proofs and snapshot digests, which LCM still reads.
-- Fix: LCM never presents its own summary row as the user's objective. When the reverse scan for the latest user
+- Fix: the objective anchor no longer picks LCM's own summary row. When the reverse scan for the latest user
   request reaches a verified LCM summary row before any real user row, it returns no objective anchor, so a long tool
   run across several compactions no longer re-renders a summary as the preserved objective. The host-carrier half
   stays open (#576). (#84)
