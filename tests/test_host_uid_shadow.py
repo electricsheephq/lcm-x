@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import pathlib
 import re
 import sqlite3
 
@@ -871,6 +873,11 @@ class _FaultyConn:
             self._armed = self._fail == "commit"
         return self._real.executemany(sql, params)
 
+    def execute(self, sql, *args):
+        if self._fail == "schema_commit" and "CREATE TABLE IF NOT EXISTS host_uid_bindings" in sql:
+            self._armed = True
+        return self._real.execute(sql, *args)
+
     def commit(self):
         if self._armed:
             self._armed = self._fail = None
@@ -946,5 +953,97 @@ def test_r3_the_gate_counts_only_canonical_and_version_bindings(tmp_path):
         engine._store._conn.commit()
         assert engine._store.host_uid_gate() == [(1, 0)]
         assert "host_uid_gate_checked: 1" in _doctor_text(engine)
+    finally:
+        engine.shutdown()
+
+
+
+# -- fix round 4 ----------------------------------------------------------------------------------------
+
+def _has_table(engine: LCMEngine) -> bool:
+    return bool(engine._store._conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'").fetchone())
+
+
+@pytest.mark.parametrize("table", ["absent", "present"])
+def test_r4_an_outer_transaction_is_never_committed_or_rolled_back(tmp_path, table):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    conn = engine._store._conn
+    try:
+        if table == "present":
+            engine.ingest([_m("user", "first" + PAD, 1.0, "u-first")])
+        stored = engine._store.append("S", {"role": "user", "content": "stored" + PAD})
+        conn.execute("INSERT INTO messages(session_id, role, content, timestamp) VALUES ('S', 'user', 'outer pending', 1.0)")
+        assert conn.in_transaction  # someone else's open transaction with a pending INSERT
+        message = _m("user", "stored" + PAD, 5.0, "u-new")
+        engine._host_uid_shadow(engine._host_uid_capture([message], [message], 0, 0, None, ()), {0: stored})
+        assert conn.in_transaction  # still open, still owned by its holder
+        assert _counts(engine)["errors"] == 2  # the skipped binding write and the skipped tally
+        assert _has_table(engine) == (table == "present")
+        conn.rollback()  # the holder decides: its pending row was never committed by the shadow
+        assert not conn.execute("SELECT 1 FROM messages WHERE content = 'outer pending'").fetchone()
+        assert "u-new" not in [b[1] for b in _bindings(engine)]
+    finally:
+        engine.shutdown()
+
+
+def test_r4_a_schema_commit_failure_rolls_back_and_the_next_ingest_is_normal(tmp_path):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    store = engine._store
+    real = store._conn
+    try:
+        store._conn = _FaultyConn(real, "schema_commit")
+        engine.ingest(_UID_LIST)
+        store._conn = real
+        assert not real.in_transaction and not _has_table(engine)
+        assert _counts(engine).get("errors") == 1
+        assert len(_rows(engine)) == len(_UID_LIST)
+        engine.ingest(_UID_LIST + [_m("user", "after" + PAD, 20.0, "u-after")])
+        assert not real.in_transaction and [b[1] for b in _bindings(engine)] == ["u-after"]
+    finally:
+        store._conn = real
+        engine.shutdown()
+
+
+@pytest.mark.skipif(not hasattr(os, "geteuid") or os.geteuid() == 0, reason="root ignores directory permissions")
+def test_r4_a_permission_denied_state_db_is_a_read_error_not_missing(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    _state_db(home, [("S", None, None)])
+    real_exists = pathlib.Path.exists
+
+    def exists_314(self, *args, **kwargs):  # Python 3.14: an OSError other than "not found" reads as False
+        try:
+            return real_exists(self, *args, **kwargs)
+        except OSError:
+            return False
+
+    monkeypatch.setattr(pathlib.Path, "exists", exists_314)
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")), hermes_home=str(home))
+    engine.on_session_start("S", platform="cli", context_length=200_000)
+    try:
+        home.chmod(0)  # the real path resolution (``_state_db_path``) now meets a permission-denied stat
+        try:
+            assert engine._host_uid_lineage_key() == (None, "read_error")
+            assert engine._host_uid_lineage_key() == (None, "read_error")  # not cached as missing
+            assert not engine.__dict__.get("_host_uid_lineage_cache")
+        finally:
+            home.chmod(0o700)
+        assert engine._host_uid_lineage_key() == ("S", None)
+    finally:
+        engine.shutdown()
+
+
+def test_r4_the_lineage_cache_keeps_the_newest_512_entries(tmp_path):
+    _state_db(tmp_path, [(f"s{i}", None, None) for i in range(600)])
+    engine = _engine(tmp_path)
+    try:
+        for i in range(600):
+            assert engine._host_uid_lineage_key(f"s{i}") == (f"s{i}", None)
+        cache = engine._host_uid_lineage_cache
+        assert len(cache) == 512
+        assert [key[1] for key in cache][:1] == ["s88"] and list(cache)[-1][1] == "s599"
     finally:
         engine.shutdown()

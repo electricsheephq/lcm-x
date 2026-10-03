@@ -963,19 +963,20 @@ class MessageStore:
         """On the first binding, NAMED step ``host_uid_bindings_v1``: no SCHEMA_VERSION bump, ``messages`` untouched."""
         if getattr(self, "_host_uid_schema_ready", False):
             return
-        with self._write_lock:
-            self._conn.executescript("""
-                CREATE TABLE IF NOT EXISTS host_uid_bindings (
-                    store_id INTEGER NOT NULL, uid TEXT NOT NULL, lineage_key TEXT NOT NULL, kind TEXT NOT NULL,
-                    binding_version INTEGER NOT NULL, proof_kind TEXT, created_at REAL,
-                    first_check TEXT, disagree_seen INTEGER NOT NULL DEFAULT 0);
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_host_uid_canonical ON host_uid_bindings(lineage_key, uid)
-                    WHERE kind = 'canonical';
-                CREATE INDEX IF NOT EXISTS idx_host_uid_store ON host_uid_bindings(store_id);
-                CREATE INDEX IF NOT EXISTS idx_host_uid_lineage_uid ON host_uid_bindings(lineage_key, uid);
-            """)
-            mark_migration_step_complete(self._conn, "host_uid_bindings_v1")
-            self._conn.commit()
+        def create(conn) -> None:  # plain ``execute`` in the write's own transaction (executescript would commit)
+            for sql in (
+                "CREATE TABLE IF NOT EXISTS host_uid_bindings (store_id INTEGER NOT NULL, uid TEXT NOT NULL, "
+                "lineage_key TEXT NOT NULL, kind TEXT NOT NULL, binding_version INTEGER NOT NULL, proof_kind TEXT, "
+                "created_at REAL, first_check TEXT, disagree_seen INTEGER NOT NULL DEFAULT 0)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_host_uid_canonical ON host_uid_bindings(lineage_key, uid) "
+                "WHERE kind = 'canonical'",
+                "CREATE INDEX IF NOT EXISTS idx_host_uid_store ON host_uid_bindings(store_id)",
+                "CREATE INDEX IF NOT EXISTS idx_host_uid_lineage_uid ON host_uid_bindings(lineage_key, uid)",
+            ):
+                conn.execute(sql)
+            mark_migration_step_complete(conn, "host_uid_bindings_v1")
+
+        self._host_uid_write(create)
         self._host_uid_schema_ready = True
 
     def host_uid_bindings_for(self, lineage_key: str, uids) -> dict[str, list[tuple[int, str]]]:
@@ -1009,10 +1010,10 @@ class MessageStore:
         checks = [(uid, sid, ok) for uid, sid, ok in checks if sid is not None]
         if not checks or not self._host_uid_table_exists():
             return
-        self._host_uid_write(
+        self._host_uid_write(lambda conn: conn.executemany(
             "UPDATE host_uid_bindings SET first_check = COALESCE(first_check, ?), disagree_seen = MAX(disagree_seen, ?) "
             "WHERE lineage_key = ? AND uid = ? AND store_id = ? AND kind IN ('canonical', 'version')",
-            [("agree" if ok else "disagree", 0 if ok else 1, lineage_key, uid, int(sid)) for uid, sid, ok in checks])
+            [("agree" if ok else "disagree", 0 if ok else 1, lineage_key, uid, int(sid)) for uid, sid, ok in checks]))
 
     def host_uid_gate(self) -> list[tuple[int, int]]:
         """Per lineage, most checked first: ``(checked, agree)``, agree = first check agreed and never disagreed."""
@@ -1027,22 +1028,24 @@ class MessageStore:
             return
         self._ensure_host_uid_schema()
         now = time.time()
-        self._host_uid_write(
+        self._host_uid_write(lambda conn: conn.executemany(
             "INSERT OR IGNORE INTO host_uid_bindings(store_id, uid, lineage_key, kind, binding_version, "
             "proof_kind, created_at) SELECT ?, ?, ?, ?, 1, ?, ? WHERE NOT EXISTS (SELECT 1 FROM "
             "host_uid_bindings WHERE store_id = ? AND uid = ? AND lineage_key = ? AND kind = ?)",
             [(int(store_id), uid, lineage_key, kind, proof_kind, now, int(store_id), uid, lineage_key, kind)
-             for store_id, uid, kind, proof_kind in rows])
+             for store_id, uid, kind, proof_kind in rows]))
 
-    def _host_uid_write(self, sql: str, params: list) -> None:
-        """One shadow write in its own transaction: ANY failure, at commit included, rolls it back before the
-        caller swallows it, so the shared connection is never left in a transaction or holding the write lock.
-        BEGIN is outside the ``try``: a connection already in someone else's transaction is never rolled back."""
+    def _host_uid_write(self, write: Callable[[sqlite3.Connection], Any]) -> None:
+        """One shadow write in its OWN transaction. Skipped (raised, so the caller counts one error) when the
+        connection is already in a transaction: someone else's work is never committed or rolled back. Any
+        failure, at commit included, rolls it back, so the connection is never left in a transaction."""
         conn = self._conn
         with self._write_lock:
+            if conn.in_transaction:
+                raise sqlite3.OperationalError("host-uid shadow write skipped: the connection is in a transaction")
             conn.execute("BEGIN IMMEDIATE")
             try:
-                conn.executemany(sql, params)
+                write(conn)
                 conn.commit()
             except BaseException:
                 conn.rollback()

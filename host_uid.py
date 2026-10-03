@@ -9,6 +9,7 @@ from __future__ import annotations
 import bisect
 import json
 import logging
+import os
 import sqlite3
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -24,6 +25,7 @@ _MAX_LINEAGE_HOPS = 256
 _FORK_MARKERS = ("_branched_from", "_delegate_from", "_reset_from")
 _AGREE_OUTCOMES = {"agree", "version_new", "agree_new", "agree_bind"}
 _NO_STATE_DB = (None, "unresolved")  # cached by identity: a host without state.db is not re-read
+_LINEAGE_CACHE_CAP = 512  # entries; the oldest is dropped first
 
 
 def _valid_uid(value) -> bool:
@@ -83,11 +85,16 @@ class HostUidShadowMixin:
             return None, "read_error"
         if found[0] is not None or found is _NO_STATE_DB:
             cache[key] = found
+            while len(cache) > _LINEAGE_CACHE_CAP:
+                cache.pop(next(iter(cache)))
         return found
 
     def _host_uid_read_lineage(self, path: Path, session_id: str) -> tuple:
-        """One uncached read of the lineage root (a missing state.db is unresolved, never an error)."""
-        if not path.exists():
+        """One uncached read of the lineage root. Only FileNotFoundError means a missing state.db (unresolved,
+        never an error); PermissionError and every other OSError propagate as a read error, never cached."""
+        try:
+            os.stat(path)
+        except FileNotFoundError:
             return _NO_STATE_DB
         root = None
         conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
@@ -302,7 +309,9 @@ class HostUidShadowMixin:
                     record[key] = value
             return record
 
-        try:
+        try:  # never inside someone else's transaction: skipped and counted
+            if getattr(self._store._conn, "in_transaction", False):
+                raise sqlite3.OperationalError("host-uid tally skipped: the connection is in a transaction")
             self._store.update_metadata_json(HOST_UID_COUNTER_KEY, merged)
         except Exception as exc:
             counts["errors"] += 1
