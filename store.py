@@ -951,6 +951,81 @@ class MessageStore:
             """)
         self._identity_anchor_schema_ready = True
 
+    # -- v0.26.0 host uid shadow bindings: a droppable side table, never read for a decision ----------
+
+    def _host_uid_table_exists(self) -> bool:
+        if not getattr(self, "_host_uid_schema_ready", False):
+            self._host_uid_schema_ready = bool(self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'").fetchone())
+        return self._host_uid_schema_ready
+
+    def _ensure_host_uid_schema(self) -> None:
+        """On the first binding, NAMED step ``host_uid_bindings_v1``: no SCHEMA_VERSION bump, ``messages`` untouched."""
+        if getattr(self, "_host_uid_schema_ready", False):
+            return
+        with self._write_lock:
+            self._conn.executescript("""
+                CREATE TABLE IF NOT EXISTS host_uid_bindings (
+                    store_id INTEGER NOT NULL, uid TEXT NOT NULL, lineage_key TEXT NOT NULL, kind TEXT NOT NULL,
+                    binding_version INTEGER NOT NULL, proof_kind TEXT, created_at REAL);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_host_uid_canonical ON host_uid_bindings(lineage_key, uid)
+                    WHERE kind = 'canonical';
+                CREATE INDEX IF NOT EXISTS idx_host_uid_store ON host_uid_bindings(store_id);
+                CREATE INDEX IF NOT EXISTS idx_host_uid_lineage_uid ON host_uid_bindings(lineage_key, uid);
+            """)
+            mark_migration_step_complete(self._conn, "host_uid_bindings_v1")
+            self._conn.commit()
+        self._host_uid_schema_ready = True
+
+    def host_uid_bindings_for(self, lineage_key: str, uids) -> dict[str, list[tuple[int, str]]]:
+        """``{uid: [(store_id, kind), ...]}`` of the canonical and version bindings of ``uids`` in a lineage."""
+        uids, out = sorted(set(uids)), {}
+        if not uids or not self._host_uid_table_exists():
+            return out
+        for start in range(0, len(uids), 500):
+            chunk = uids[start:start + 500]
+            for uid, store_id, kind in self._conn.execute(
+                f"SELECT uid, store_id, kind FROM host_uid_bindings WHERE lineage_key = ? AND uid IN "
+                f"({','.join('?' * len(chunk))}) AND kind IN ('canonical', 'version') ORDER BY rowid",
+                [lineage_key, *chunk],
+            ):
+                out.setdefault(str(uid), []).append((int(store_id), str(kind)))
+        return out
+
+    def host_uid_uids_of_store(self, lineage_key: str, store_id: int) -> set[str]:
+        return {str(uid) for (uid,) in self._conn.execute(
+            "SELECT uid FROM host_uid_bindings WHERE store_id = ? AND lineage_key = ? AND kind IN ('canonical', 'version')",
+            (int(store_id), lineage_key))} if self._host_uid_table_exists() else set()
+
+    def host_uid_canonical_neighbours(self, lineage_key: str, store_id: int) -> tuple:
+        """The nearest canonically bound store ids before and after ``store_id`` in a lineage (None: none)."""
+        rows = [self._conn.execute(
+            f"SELECT store_id FROM host_uid_bindings WHERE lineage_key = ? AND kind = 'canonical' AND store_id {op} ? "
+            f"ORDER BY store_id {order} LIMIT 1", (lineage_key, int(store_id))).fetchone()
+            for op, order in (("<", "DESC"), (">", "ASC"))] if self._host_uid_table_exists() else [None, None]
+        return tuple(int(row[0]) if row else None for row in rows)
+
+    def add_host_uid_bindings(self, lineage_key: str, rows) -> None:
+        """``[(store_id, uid, kind, proof_kind)]``: a canonical never replaces one; no row is recorded twice."""
+        rows = list(rows)
+        if not rows:
+            return
+        self._ensure_host_uid_schema()
+        now = time.time()
+        with self._write_lock:
+            for store_id, uid, kind, proof_kind in rows:
+                self._conn.execute(
+                    "INSERT OR IGNORE INTO host_uid_bindings(store_id, uid, lineage_key, kind, binding_version, "
+                    "proof_kind, created_at) SELECT ?, ?, ?, ?, 1, ?, ? WHERE NOT EXISTS (SELECT 1 FROM "
+                    "host_uid_bindings WHERE store_id = ? AND uid = ? AND lineage_key = ? AND kind = ?)",
+                    (int(store_id), uid, lineage_key, kind, proof_kind, now, int(store_id), uid, lineage_key, kind),
+                )
+            self._conn.commit()
+
+    def count_host_uid_bindings(self) -> Optional[int]:
+        return int(self._conn.execute("SELECT COUNT(*) FROM host_uid_bindings").fetchone()[0]) \
+            if self._host_uid_table_exists() else None
+
     def find_rows_by_observed_at(
         self, conversation_id: str, session_ids: List[str], observed_ats: List[float],
     ) -> List[Dict[str, Any]]:
