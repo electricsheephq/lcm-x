@@ -180,7 +180,7 @@ def test_uid_host_store_result_and_returned_list_match_off_mode(tmp_path, monkey
 def test_an_exception_in_shadow_code_leaves_ingest_unchanged(tmp_path, monkeypatch):
     off = _run(tmp_path / "off", "off", monkeypatch, _UID_LIST)
 
-    def boom(self):
+    def boom(self, *_args):
         raise RuntimeError("shadow failure")
 
     monkeypatch.setattr(LCMEngine, "_host_uid_lineage_key", boom)
@@ -219,7 +219,7 @@ def test_no_state_db_gives_no_lineage_root(tmp_path):
     engine = _engine(tmp_path)
     try:
         engine.ingest([_m("user", "hello" + PAD, 10.0, "u-1")])
-        assert _counts(engine) == {"skipped.no_lineage_root": 1}
+        assert _counts(engine) == {"skipped.no_lineage_root.read_error": 1, "errors": 1}
         assert _bindings(engine) == []
     finally:
         engine.shutdown()
@@ -261,7 +261,7 @@ def test_ignore_pattern_drop_is_skipped_not_stored(tmp_path, monkeypatch):
 def _root(tmp_path, session: str):
     engine = _engine(tmp_path, session=session)
     try:
-        return engine._host_uid_lineage_key()
+        return engine._host_uid_lineage_key()[0]
     finally:
         engine.shutdown()
 
@@ -323,7 +323,7 @@ def test_restart_prefix_replay_of_a_bound_uid_agrees(tmp_path):
     engine = _engine(tmp_path)
     try:
         engine.ingest(first + [_m("user", "next" + PAD, 12.0, "u-3")])
-        assert _counts(engine) == {"bound.agree.prefix_replay": 2, "unbound.agree_new": 1}
+        assert _counts(engine) == {"replay.bound.agree.prefix_replay": 2, "unbound.agree_new": 1}
         assert len(_bindings(engine)) == 3
     finally:
         engine.shutdown()
@@ -338,7 +338,7 @@ def test_restart_prefix_replay_of_an_unbound_uid_is_skipped_unmapped(tmp_path, m
     engine = _engine(tmp_path)
     try:
         engine.ingest(first)
-        assert _counts(engine) == {"skipped.unmapped_replay": 2}
+        assert _counts(engine) == {"replay.skipped.unmapped_replay": 2}
         assert _bindings(engine) == []
     finally:
         engine.shutdown()
@@ -394,7 +394,7 @@ def test_anchored_replay_onto_an_unbound_row_binds_it(tmp_path):
                               _m("user", "two" + PAD, 12.0, "u-3")])
         engine.ingest(view)
         counts = _counts(engine)
-        assert counts.get("unbound.agree_bind") == 3, counts
+        assert counts.get("replay.unbound.agree_bind") == 3, counts
         bound = {b[1]: b[0] for b in _bindings(engine) if b[3] == "canonical"}
         assert bound["u-1"] == seeded["one" + PAD] and bound["u-3"] == seeded["two" + PAD]
     finally:
@@ -413,8 +413,8 @@ def test_anchored_replay_onto_the_bound_row_agrees_and_onto_another_row_disagree
                                  _m("user", "two" + PAD, 12.0, "u-3")]),
                   bind=[("one" + PAD, "u-1", "canonical"), ("r1", "u-3", "canonical")])
         counts = _counts(engine)
-        assert counts.get("bound.agree.replay") == 1, counts
-        assert counts.get("bound.disagree.replay_other_row") == 1, counts
+        assert counts.get("replay.bound.agree.replay") == 1, counts
+        assert counts.get("replay.bound.disagree.replay_other_row") == 1, counts
     finally:
         engine.shutdown()
 
@@ -427,18 +427,18 @@ def test_alias_candidate_position_proof_versus_unknown(tmp_path):
     engine = _engine(tmp_path)
     try:
         # r1 is re-minted between two bound neighbours that map to its own stored neighbours; r2 is re-minted
-        # with no bound neighbour after it in the view.
+        # after a neighbour whose view bytes are a NEW version, so the neighbour maps to another row.
         _anchored(tmp_path, engine, seeded,
                   _restart_view(_m("user", "fresh" + PAD, 1.0),
                                 [_m("user", "one" + PAD, 10.0, "u-1"), _m("assistant", "r1", 11.0, "u-r1-new"),
                                  _m("user", "two" + PAD, 12.0, "u-3"), _m("assistant", "r2", 13.0, "u-r2-new"),
-                                 _m("user", "three" + PAD, 14.0)]),
+                                 _m("user", "three edited" + PAD, 14.5, "u-5")]),
                   bind=[("one" + PAD, "u-1", "canonical"), ("r1", "u-r1-old", "canonical"),
                         ("two" + PAD, "u-3", "canonical"), ("r2", "u-r2-old", "canonical"),
                         ("three" + PAD, "u-5", "canonical")])
         counts = _counts(engine)
-        assert counts.get("unbound.alias_candidate.position_proof") == 1, counts
-        assert counts.get("unbound.alias_candidate.unknown") == 1, counts
+        assert counts.get("replay.unbound.alias_candidate.position_proof") == 1, counts
+        assert counts.get("replay.unbound.alias_candidate.unknown") == 1, counts
         aliases = [b for b in _bindings(engine) if b[3] == "alias_candidate"]
         assert sorted((b[0], b[1], b[5]) for b in aliases) == sorted([
             (seeded["r1"], "u-r1-new", "position_proof"), (seeded["r2"], "u-r2-new", "unknown")])
@@ -467,8 +467,8 @@ def test_composite_and_remainder_classes(tmp_path):
         merged = _m("user", "r" + PAD + "\n\n" + "u" + PAD, 10.0, "u-r", _absorbed_message_uids=["u-u"])
         wrong = _m("user", "r" + PAD + "\n\n" + "u" + PAD, 10.0, "u-r", _absorbed_message_uids=["u-z"])
         plan = {"replayed": {0, 1}, "matched": {0: group, 1: group}}
-        assert _classify(engine, [merged, wrong], plan) == {"composite.agree.composite": 1,
-                                                            "composite.disagree.composite": 1}
+        assert _classify(engine, [merged, wrong], plan) == {"replay.composite.agree": 1,
+                                                            "replay.composite.disagree": 1}
         before = len(_bindings(engine))
         remainder = _m("user", "r" + PAD + "\n\nnew tail", 10.0, "u-r")
         new_id = engine._store.append("S", {"role": "user", "content": "new tail"})
@@ -511,8 +511,9 @@ def test_doctor_reports_counts_only(tmp_path):
         engine.ingest(_UID_LIST + [_m("user", "plain" + PAD, 20.0)])
         text = _doctor_text(engine)
         assert "host_uid_mode: shadow" in text
-        assert "host_uid_counts: unbound.agree_new=3" in text
-        assert "host_uid_process_counts: skipped.no_uid=1 unbound.agree_new=3" in text
+        assert "host_uid_event_counts: unbound.agree_new=3" in text
+        assert "host_uid_process_event_counts: skipped.no_uid=1 unbound.agree_new=3" in text
+        assert "host_uid_gate_checked: 0" in text and "host_uid_gate_per_lineage: (none)" in text
         assert "host_uid_errors: 0" in text
         assert "host_uid_bindings_rows: 3" in text
         assert "u-1" not in text and "hello" not in text  # no uid, no content
@@ -533,7 +534,277 @@ def test_one_info_summary_line_per_compaction(tmp_path, monkeypatch, caplog):
         with caplog.at_level(logging.INFO, logger="hermes_lcm"):
             engine.compress(live, force=True)
         lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("LCM host-uid shadow:")]
-        assert len(lines) == 1 and "agree=12" in lines[0] and "disagree=0" in lines[0]
+        assert len(lines) == 1 and "events agree=12" in lines[0] and "disagree=0" in lines[0]
         assert "u-1" not in lines[0] and "turn" not in lines[0]
     finally:
         engine.shutdown()
+
+
+# -- fix round 1 ----------------------------------------------------------------------------------------
+
+def _gate(engine: LCMEngine) -> list[tuple]:
+    return engine._store._conn.execute(
+        "SELECT uid, first_check, disagree_seen FROM host_uid_bindings WHERE kind != 'alias_candidate' ORDER BY rowid"
+    ).fetchall()
+
+
+def test_f1_restarts_replaying_one_prefix_count_each_binding_once(tmp_path):
+    _state_db(tmp_path, [("S", None, None)])
+    first = [_m("user", "hello" + PAD, 10.0, "u-1"), _m("assistant", "hi", 11.0, "u-2")]
+    _seed(tmp_path, first)
+    for _restart in range(3):
+        engine = _engine(tmp_path)
+        try:
+            engine.ingest(first)
+        finally:
+            engine.shutdown()
+    engine = _engine(tmp_path)
+    try:
+        assert _gate(engine) == [("u-1", "agree", 0), ("u-2", "agree", 0)]
+        text = _doctor_text(engine)
+        assert "host_uid_gate_checked: 2" in text and "host_uid_gate_agree: 2" in text
+        assert "host_uid_gate_disagree: 0" in text and "host_uid_gate_per_lineage: 2/2/0" in text
+        assert _durable(engine)["replay.bound.agree.prefix_replay"] == 6  # events still count every replay
+    finally:
+        engine.shutdown()
+
+
+def test_f1_prefix_replay_disagreement_is_sticky_on_the_binding(tmp_path):
+    _state_db(tmp_path, [("S", None, None)])
+    _seed(tmp_path, [_m("user", "one" + PAD, 10.0, "u-a"), _m("user", "two" + PAD, 11.0, "u-b")])
+    engine = _engine(tmp_path)
+    try:  # the host now names the second stored row with the first row's uid
+        engine.ingest([_m("user", "one" + PAD, 10.0, "u-a"), _m("user", "two" + PAD, 11.0, "u-a")])
+        assert _counts(engine) == {"replay.bound.agree.prefix_replay": 1, "replay.bound.disagree.prefix_replay": 1}
+        assert _gate(engine) == [("u-a", "agree", 1), ("u-b", None, 0)]
+        assert "host_uid_gate_disagree: 1" in _doctor_text(engine)
+    finally:
+        engine.shutdown()
+
+
+def test_f2_late_off_current_session_end_suffix_is_observed_under_that_session(tmp_path):
+    _state_db(tmp_path, [("A", None, None), ("B", None, None)])
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")), hermes_home=str(tmp_path))
+    engine.on_session_start("A", platform="cli", context_length=200_000)
+    engine.on_session_start("B", platform="cli", context_length=200_000)
+    try:
+        engine.on_session_end("A", [_m("user", "late" + PAD, 10.0, "u-late"), _m("assistant", "ok", 11.0)])
+        late = next(r for r in engine._store.get_session_messages("A") if r["content"] == "late" + PAD)
+        assert [b[:4] for b in _bindings(engine)] == [(late["store_id"], "u-late", "A", "canonical")]
+        assert _counts(engine) == {"unbound.agree_new": 1, "skipped.no_uid": 1}
+    finally:
+        engine.shutdown()
+
+
+def test_f2_late_suffix_without_a_lineage_is_skipped(tmp_path):
+    _state_db(tmp_path, [("B", None, None)])  # no row for A: unresolved
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")), hermes_home=str(tmp_path))
+    engine.on_session_start("A", platform="cli", context_length=200_000)
+    engine.on_session_start("B", platform="cli", context_length=200_000)
+    try:
+        engine.on_session_end("A", [_m("user", "late" + PAD, 10.0, "u-late")])
+        assert len(engine._store.get_session_messages("A")) == 1
+        assert _counts(engine) == {"skipped.no_lineage_root.unresolved": 1} and _bindings(engine) == []
+    finally:
+        engine.shutdown()
+
+
+def test_f4_read_error_is_counted_and_unresolved_is_not(tmp_path):
+    _state_db(tmp_path, [("S", None, None), ("C1", "C2", "compression"), ("C2", "C1", "compression")])
+    assert _root(tmp_path, "C1") is None  # a cycle: unresolved
+    engine = _engine(tmp_path, session="missing")
+    try:
+        assert engine._host_uid_lineage_key() == (None, "unresolved")
+        engine.ingest([_m("user", "x" + PAD, 1.0, "u-x")])
+        assert _counts(engine) == {"skipped.no_lineage_root.unresolved": 1}
+    finally:
+        engine.shutdown()
+    (tmp_path / "state.db").write_bytes(b"not a database" * 100)
+    engine = _engine(tmp_path)
+    try:
+        assert engine._host_uid_lineage_key() == (None, "read_error")
+        engine.ingest([_m("user", "y" + PAD, 2.0, "u-y")])
+        assert _counts(engine) == {"skipped.no_lineage_root.read_error": 1, "errors": 1}
+    finally:
+        engine.shutdown()
+
+
+def test_f5_reviewer_counterexample_is_unknown_not_position_proof(tmp_path):
+    _state_db(tmp_path, [("S", None, None)])
+    seeded = _seed(tmp_path, [_m("user", "A1" + PAD, 10.0, "a"), _m("assistant", "X", 11.0, "x"),
+                              _m("user", "B" + PAD, 12.0, "b")])
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest([_m("user", "A2" + PAD, 10.0, "a"), _m("assistant", "X", 11.0, "x-new"),
+                       _m("user", "B" + PAD, 12.0, "b")])
+        counts = _counts(engine)
+        assert counts.get("replay.unbound.alias_candidate.unknown") == 1, counts
+        assert "replay.unbound.alias_candidate.position_proof" not in counts
+        assert [b[0] for b in _bindings(engine) if b[3] == "alias_candidate"] == [seeded["X"]]
+    finally:
+        engine.shutdown()
+
+
+def test_f6_restart_classification_reads_rows_in_batches(tmp_path, monkeypatch):
+    _state_db(tmp_path, [("S", None, None)])
+    view = [_m("user" if i % 2 == 0 else "assistant", f"row {i}", 100.0 + i, f"u-{i}") for i in range(5000)]
+    _seed(tmp_path, view)
+    calls = {"fetch": 0, "get_batch": 0}
+    real_fetch, real_get_batch = LCMEngine._host_uid_fetch, MessageStore.get_batch
+
+    def fetch(self, store_ids, fetched):
+        calls["fetch"] += 1
+        calls["inside"] = True
+        try:
+            return real_fetch(self, store_ids, fetched)
+        finally:
+            calls["inside"] = False
+
+    def get_batch(self, store_ids):
+        calls["get_batch"] += bool(calls.get("inside"))
+        return real_get_batch(self, store_ids)
+
+    monkeypatch.setattr(LCMEngine, "_host_uid_fetch", fetch)
+    monkeypatch.setattr(MessageStore, "get_batch", get_batch)
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest(view)
+        assert _counts(engine) == {"replay.bound.agree.prefix_replay": 5000}
+        assert calls["fetch"] <= 2 and calls["get_batch"] <= 5000 // 500 + 2, calls
+    finally:
+        engine.shutdown()
+
+
+_OLD_READER = r"""
+import importlib.util, sqlite3, sys
+old, db, root = sys.argv[1], sys.argv[2], sys.argv[3]
+sys.path.insert(0, root)  # the git-ignored agent/ stub
+spec = importlib.util.spec_from_file_location("hermes_lcm", old + "/__init__.py", submodule_search_locations=[old])
+sys.modules["hermes_lcm"] = importlib.util.module_from_spec(spec)
+from hermes_lcm import store as store_mod
+from hermes_lcm.command import _doctor_text
+from hermes_lcm.config import LCMConfig
+from hermes_lcm.engine import LCMEngine
+assert store_mod.__file__.startswith(old) and importlib.util.find_spec("hermes_lcm.host_uid") is None
+engine = LCMEngine(config=LCMConfig(database_path=db))
+engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
+assert "sqlite_integrity: ok" in _doctor_text(engine)
+before = [m["content"] for m in engine._store.get_session_messages("S")]
+engine.ingest([{"role": "user", "content": "from the old build", "timestamp": 99.0, "message_uid": "u-old"}])
+after = [m["content"] for m in engine._store.get_session_messages("S")]
+assert after[:len(before)] == before and after[-1] == "from the old build", after
+engine.shutdown()
+print("OLD_READER_OK", len(before), len(after))
+"""
+
+
+def test_f7_a_v0250_build_opens_ingests_and_reads_a_store_with_the_table(tmp_path):
+    import io
+    import subprocess
+    import sys
+    import tarfile
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    archive = subprocess.run(["git", "-C", str(root), "archive", "c36b46e3"], check=True, capture_output=True).stdout
+    old = tmp_path / "v0250"
+    with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
+        tar.extractall(old, filter="data")
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest(_UID_LIST)
+        assert len(_bindings(engine)) == 3
+    finally:
+        engine.shutdown()
+    result = subprocess.run([sys.executable, "-c", _OLD_READER, str(old), str(tmp_path / "lcm.db"), str(root)],
+                            capture_output=True, text=True, cwd=str(tmp_path))
+    assert result.returncode == 0, result.stderr[-3000:]
+    assert "OLD_READER_OK 3 4" in result.stdout
+
+
+class _RaisingUidDict(dict):
+    def get(self, key, default=None):
+        if key == "message_uid":
+            raise RuntimeError("host dict failure")
+        return super().get(key, default)
+
+
+def test_f7_capture_failure_leaves_ingest_byte_identical(tmp_path, monkeypatch):
+    off = _run(tmp_path / "off", "off", monkeypatch, _UID_LIST)
+    monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)
+    (tmp_path / "shadow").mkdir()
+    _state_db(tmp_path / "shadow", [("S", None, None)])
+    engine = _engine(tmp_path / "shadow")
+    try:
+        returned = engine._ingest_messages([_RaisingUidDict(m) for m in _UID_LIST])
+        assert _rows(engine) == off[0] and returned == off[1]
+        assert _counts(engine) == {"errors": 1} and _bindings(engine) == []
+    finally:
+        engine.shutdown()
+
+
+def test_f7_counter_flush_failure_leaves_ingest_unaffected(tmp_path, monkeypatch):
+    off = _run(tmp_path / "off", "off", monkeypatch, _UID_LIST)
+
+    def boom(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(MessageStore, "update_metadata_json", boom)
+    shadow = _run(tmp_path / "shadow", None, monkeypatch, _UID_LIST)
+    assert shadow[0] == off[0] and shadow[1] == off[1] and len(shadow[2]) == 3
+    assert shadow[3] == {"unbound.agree_new": 3, "errors": 1}
+
+
+def _all_rows(db) -> tuple:
+    conn = sqlite3.connect(db)
+    try:
+        relations = conn.execute("SELECT * FROM message_relations ORDER BY relation_id").fetchall() if conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE name='message_relations'").fetchone() else []
+        return conn.execute("SELECT * FROM messages ORDER BY store_id").fetchall(), relations
+    finally:
+        conn.close()
+
+
+def _turns(start: int, count: int, base: float, uid: str) -> list[dict]:
+    rows = []
+    for i in range(start, start + count):
+        rows += [_m("user", f"[T{i}] user turn {i}:" + PAD * 10, base + i * 10, f"{uid}-u{i}"),
+                 _m("assistant", f"reply to T{i}", base + i * 10 + 1, f"{uid}-a{i}")]
+    return rows
+
+
+def _composite_steps():  # tests/test_issue_436_identity_anchor.py test_r2 (composite) and test_r3 (remainder)
+    system = {"role": "system", "content": "stable system prompt"}
+    head = [system, *_turns(1, 3, 0.0, "h")]
+    r, u = _m("user", "R prompt" + PAD, 500.0, "u-r"), _m("user", "U prompt" + PAD, 510.0, "u-u")
+    composite = _m("user", r["content"] + "\n\n" + u["content"], 500.0, "u-r", _absorbed_message_uids=["u-u"])
+    yield "composite", [[*head, r, u], [*head, composite, _m("assistant", "reply to U", 511.0, "u-ru"),
+                                        *_turns(10, 4, 600.0, "t")]]
+    r = _m("user", "head R\n\n  indented line \n\n\nthree newlines\t", 500.0, "u-r")
+    composite = _m("user", r["content"] + "\n\n  remainder U \n\nsecond  paragraph\n\n\n  tail \t", 500.0, "u-r")
+    yield "remainder", [[*head[:5], r], [*head[:5], composite, _m("assistant", "reply", 501.0, "u-reply")]]
+
+
+@pytest.mark.parametrize("case", ["composite", "remainder"])
+def test_f7_composite_and_remainder_real_ingest_parity_with_off(tmp_path, monkeypatch, case):
+    import time
+
+    steps = dict(_composite_steps())[case]
+    monkeypatch.setattr(time, "time", lambda: 1_700_000_000.0)
+    results = {}
+    for mode in ("off", "shadow"):
+        monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+        (tmp_path / mode).mkdir()
+        _state_db(tmp_path / mode, [("S", None, None)])
+        engine = _engine(tmp_path / mode)
+        try:
+            for view in steps:
+                engine.ingest([dict(m) for m in view])
+            results[mode] = (_counts(engine), _all_rows(tmp_path / mode / "lcm.db"))
+        finally:
+            engine.shutdown()
+    assert results["shadow"][1] == results["off"][1]
+    assert results["off"][1][1], "the #436 relation must be recorded"
+    expected = "replay.composite.agree" if case == "composite" else "composite.agree.remainder"
+    assert results["shadow"][0].get(expected) == 1, results["shadow"][0]

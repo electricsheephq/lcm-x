@@ -1,14 +1,16 @@
 """v0.26.0 slice A: host ``message_uid`` SHADOW bindings (design REVISION 3). After #436 decides an ingest,
 each uid-bearing host dict gets one R3-3 class and the row #436 chose goes to the droppable ``host_uid_bindings``
 table. Nothing feeds back into ingest, replay, emission or commit; every exception is caught, counted and fails
-open. Counter keys are ``class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid host writes
-nothing. ``LCM_HOST_MESSAGE_UID=off`` does nothing; ``on`` is reserved (slice C) and runs as ``shadow``."""
+open. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
+host writes nothing. The shadow GATE is counted per binding in the table (``first_check`` / ``disagree_seen``),
+so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` does nothing; ``on`` runs as ``shadow``."""
 from __future__ import annotations
 
+import bisect
 import json
 import logging
 import sqlite3
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Any, Optional
 
 from .config import host_message_uid_mode
@@ -44,8 +46,14 @@ def _is_fork_child(row: dict) -> bool:
 
 
 def _outcome(key: str) -> Optional[str]:
-    outcome = (key.split(".") + [""])[1]
+    outcome = (key.removeprefix("replay.").split(".") + [""])[1]
     return "agree" if outcome in _AGREE_OUTCOMES else "disagree" if outcome == "disagree" else None
+
+
+def _around(sorted_values: list, value) -> tuple:
+    """The nearest entries strictly before and after ``value`` in a sorted list (None: none)."""
+    lo, hi = bisect.bisect_left(sorted_values, value), bisect.bisect_right(sorted_values, value)
+    return sorted_values[lo - 1] if lo else None, sorted_values[hi] if hi < len(sorted_values) else None
 
 
 def _fmt_counts(counts: dict) -> str:
@@ -56,18 +64,19 @@ def _fmt_counts(counts: dict) -> str:
 class HostUidShadowMixin:
     """Mixed into LCMEngine; reads ``self._store``, ``_state_db_path`` and the reconcile identity helpers."""
 
-    def _host_uid_lineage_key(self) -> Optional[str]:
-        """R3-4: the lineage root by Hermes' own walk (``_session_turn_lease_key_on_conn``): up while the parent
-        ended by compression and the row is no fork child. None when unreadable, missing or over 256 hops."""
-        session_id = str(self._session_id or "")
-        cached = getattr(self, "_host_uid_lineage_cache", None)
-        if cached is not None and cached[0] == session_id:
-            return cached[1]
+    def _host_uid_lineage_key(self, session_id=None) -> tuple:
+        """R3-4: ``(root, None)`` by Hermes' own walk (``_session_turn_lease_key_on_conn``: up while the parent ended
+        by compression and the row is no fork child), else ``(None, "read_error" | "unresolved")`` (missing row,
+        cycle, over 256 hops). Cached per session id, completed reads only."""
+        session_id = str(self._session_id if session_id is None else session_id or "")
+        cache = self.__dict__.setdefault("_host_uid_lineage_cache", {})
+        if session_id in cache:
+            return cache[session_id], None
         root = None
         try:
             path = self._state_db_path()
-            if not session_id or not path.exists():
-                return None
+            if not path.exists():
+                raise FileNotFoundError("state.db")
             conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
             conn.row_factory = sqlite3.Row
             try:
@@ -75,37 +84,39 @@ class HostUidShadowMixin:
                     row = conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
                     return dict(row) if row else None
 
-                current, seen = read(session_id), {session_id}
+                current, seen = read(session_id) if session_id else None, {session_id}
                 for _ in range(_MAX_LINEAGE_HOPS + 1):
-                    if current is None:
+                    parent_id = str(current.get("parent_session_id") or "") if current else ""
+                    if current is None or parent_id in seen:  # missing row or a cycle: unresolved
                         break
-                    parent_id = current.get("parent_session_id")
-                    parent = None
-                    if parent_id and parent_id not in seen and not _is_fork_child(current):
-                        parent = read(str(parent_id))
+                    parent = read(parent_id) if parent_id and not _is_fork_child(current) else None
                     if parent is None or parent.get("end_reason") != "compression":
                         root = str(current["id"])
                         break
-                    seen.add(str(parent_id))
+                    seen.add(parent_id)
                     current = parent
             finally:
                 conn.close()
-        except Exception as exc:  # host DB drift or absence: no root, no binding
-            logger.debug("LCM host-uid lineage read failed: %s", type(exc).__name__)
-            return None
-        if root is not None:  # only a completed read is cached
-            self._host_uid_lineage_cache = (session_id, root)
-        return root
+        except Exception as exc:  # host DB drift or absence: no root, no binding; counted as an error
+            self._host_uid_read_error = exc
+            return None, "read_error"
+        if root is None:
+            return None, "unresolved"
+        cache[session_id] = root
+        return root, None
 
-    def _host_uid_capture(self, messages, identity_messages, start: int, cursor: int, plan, tool_segment):
+    def _host_uid_capture(self, messages, identity_messages, start: int, cursor: int, plan, tool_segment,
+                          session_id=None):
         """Read the uids off the HOST dicts after #436 decided and before the INSERT drops unknown keys."""
         if host_message_uid_mode() == "off":
             return None
         try:
-            values = {idx: messages[idx].get("message_uid") for idx in range(max(0, start), len(messages))}
+            decided = set(range(max(0, start), len(messages))) | set((plan or {}).get("matched") or ())  # F3: + prefix
+            values = {idx: messages[idx].get("message_uid") for idx in sorted(decided) if idx < len(messages)}
             entries = {idx: value for idx, value in values.items() if value is not None}
-            return {"entries": entries, "no_uid": len(values) - len(entries), "messages": messages, "identity": identity_messages,
-                    "cursor": cursor, "plan": plan or {}, "tool_segment": set(tool_segment or ())}
+            return {"entries": entries, "no_uid": len(values) - len(entries), "messages": messages,
+                    "identity": identity_messages, "cursor": cursor, "plan": plan or {},
+                    "tool_segment": set(tool_segment or ()), "session_id": session_id}
         except Exception as exc:
             self._host_uid_count(Counter(errors=1), exc)
             return None
@@ -116,7 +127,7 @@ class HostUidShadowMixin:
             return
         delta, error = Counter({"skipped.no_uid": capture["no_uid"]}), None
         try:
-            self._host_uid_classify(capture, stored_at or {}, set(remainders or ()), delta)
+            error = self._host_uid_classify(capture, stored_at or {}, set(remainders or ()), delta)
         except Exception as exc:
             delta["errors"] += 1
             error = exc
@@ -125,16 +136,20 @@ class HostUidShadowMixin:
         except Exception:  # pragma: no cover - counting never blocks ingest
             logger.debug("LCM host-uid count failed")
 
-    def _host_uid_classify(self, capture, stored_at: dict, remainders: set, delta: Counter) -> None:
+    def _host_uid_classify(self, capture, stored_at: dict, remainders: set, delta: Counter):
         valid = {idx: uid for idx, uid in capture["entries"].items() if _valid_uid(uid)}
         delta["skipped.invalid_uid"] += len(capture["entries"]) - len(valid)
         if not valid:
-            return
-        lineage = self._host_uid_lineage_key()
+            return None
+        lineage, problem = self._host_uid_lineage_key(capture["session_id"])
         if lineage is None:
-            delta["skipped.no_lineage_root"] += len(valid)
-            return
-        store, messages, plan = self._store, capture["messages"], capture["plan"]
+            delta[f"skipped.no_lineage_root.{problem}"] += len(valid)
+            if problem == "read_error":
+                delta["errors"] += 1
+                return getattr(self, "_host_uid_read_error", None)
+            return None
+        store, messages, identity = self._store, capture["messages"], capture["identity"]
+        plan, cursor = capture["plan"], capture["cursor"]
         replayed, matched = plan.get("replayed") or set(), plan.get("matched") or {}
 
         def absorbed(message) -> list:
@@ -143,87 +158,116 @@ class HostUidShadowMixin:
 
         bindings = store.host_uid_bindings_for(
             lineage, {uid for idx, uid in valid.items() for uid in [uid, *absorbed(messages[idx])]})
-        writes, aliases, fetched = [], [], {}
-        self._host_uid_fetch({sid for items in bindings.values() for sid, _kind in items}, fetched)  # one read
+        by_store: dict = defaultdict(set)  # store_id -> uids bound to it (F6: built once, kept current)
+        for uid, items in bindings.items():
+            for sid, _kind in items:
+                by_store[sid].add(uid)
+        fetched: dict = {}
+        self._host_uid_fetch(by_store, fetched)  # one batched read for the whole decided range
+        targets = {idx: int(matched[idx][0]["store_id"]) for idx in valid
+                   if idx not in stored_at and len(matched.get(idx) or ()) == 1}
+        held = store.host_uid_uids_of_stores(lineage, set(targets.values()))
+        writes, checks, aliases = [], [], []
 
         def bind(store_id, uid, kind, proof) -> None:
             writes.append((store_id, uid, kind, proof))
             bindings.setdefault(uid, []).append((int(store_id), kind))
+            by_store[int(store_id)].add(uid)
 
         for idx, uid in sorted(valid.items()):
-            rows = matched.get(idx) if idx in replayed or idx in remainders else None
             stored = stored_at.get(idx)
-            if idx in remainders or (rows and len(rows) > 1):  # COMPOSITE / REMAINDER
+            rows = matched.get(idx) if stored is None or idx in remainders else None
+            if idx in remainders or (rows and len(rows) > 1):  # COMPOSITE / REMAINDER (F3: prefix included)
                 ids = {int(row["store_id"]) for row in rows or ()} | ({int(stored)} if stored is not None else set())
                 agree = all(not bindings.get(present) or ids & {sid for sid, _k in bindings[present]}
                             for present in [uid, *absorbed(messages[idx])])
-                kind = "remainder" if idx in remainders else "composite"
-                delta[f"composite.{'agree' if agree else 'disagree'}.{kind}"] += 1
+                outcome = "agree" if agree else "disagree"
+                delta[f"composite.{outcome}.remainder" if idx in remainders else f"replay.composite.{outcome}"] += 1
                 continue
             bound = [sid for sid, _kind in bindings.get(uid, ())]
-            replay_unmapped = not rows and (idx < capture["cursor"] or idx in capture["tool_segment"] or idx in replayed)
-            if bound:  # BOUND: compared against the payload-matching version (R1-1)
+            canonical = next((sid for sid, kind in bindings.get(uid, ()) if kind == "canonical"), bound[0] if bound else None)
+            unmapped = not rows and stored is None and (idx < cursor or idx in capture["tool_segment"] or idx in replayed)
+            if bound:  # BOUND: compared against the payload-matching version (R1-1); the gate marks that binding
+                hit = self._host_uid_bytes_match(bound, identity[idx], fetched) if not rows else None
                 if stored is not None:
-                    if self._host_uid_bytes_match(bound, capture["identity"][idx], fetched):
-                        delta["bound.disagree.stored_despite_match"] += 1
-                    else:
-                        delta["bound.version_new"] += 1
+                    delta["bound.disagree.stored_despite_match" if hit is not None else "bound.version_new"] += 1
+                    checks.append((uid, canonical if hit is None else hit, hit is None))
+                    if hit is None:
                         bind(stored, uid, "version", "version_new")
-                elif rows:
-                    delta["bound.agree.replay" if int(rows[0]["store_id"]) in bound
-                          else "bound.disagree.replay_other_row"] += 1
-                elif replay_unmapped:
-                    delta["bound.agree.prefix_replay" if self._host_uid_bytes_match(bound, capture["identity"][idx], fetched)
-                          else "bound.disagree.prefix_replay"] += 1
+                elif rows:  # #436 replayed onto one row: AGREE when it is a row bound to this uid
+                    target = int(rows[0]["store_id"])
+                    delta["replay.bound.agree.replay" if target in bound else "replay.bound.disagree.replay_other_row"] += 1
+                    checks.append((uid, target if target in bound else canonical, target in bound))
+                elif unmapped:  # a replay with no row map: AGREE when a bound row holds these bytes
+                    delta["replay.bound.agree.prefix_replay" if hit is not None else "replay.bound.disagree.prefix_replay"] += 1
+                    checks.append((uid, canonical if hit is None else hit, hit is not None))
                 else:
                     delta["skipped.not_stored"] += 1
             elif stored is not None:  # UNBOUND
                 delta["unbound.agree_new"] += 1
                 bind(stored, uid, "canonical", "stored_new")
             elif rows:
-                target = int(rows[0]["store_id"])
-                others = store.host_uid_uids_of_store(lineage, target) | {
-                    u for u, items in bindings.items() if any(sid == target for sid, _k in items)}
-                if others - {uid}:
+                target = targets[idx]
+                if (held.get(target, set()) | by_store.get(target, set())) - {uid}:
                     aliases.append((idx, uid, target))
                 else:
-                    delta["unbound.agree_bind"] += 1
+                    delta["replay.unbound.agree_bind"] += 1
                     bind(target, uid, "canonical", "anchor_replay")
             else:
-                delta["skipped.unmapped_replay" if replay_unmapped else "skipped.not_stored"] += 1
+                delta["replay.skipped.unmapped_replay" if unmapped else "skipped.not_stored"] += 1
         store.add_host_uid_bindings(lineage, writes)
+        store.record_host_uid_checks(lineage, checks)
         if aliases:
-            self._host_uid_alias_candidates(lineage, messages, aliases, delta)
+            self._host_uid_alias_candidates(lineage, capture, stored_at, matched, bindings, fetched, aliases, delta)
+        return None
 
     def _host_uid_fetch(self, store_ids, fetched: dict) -> None:
-        """Rows cached across one ingest (a restart replays the whole prefix): one batched read, chunked."""
-        missing = sorted({int(sid) for sid in store_ids} - set(fetched))
+        """Rows cached across one ingest: one batched, chunked read of the ids not fetched yet."""
+        missing = sorted({int(sid) for sid in store_ids if int(sid) not in fetched})
         fetched.update({sid: None for sid in missing})
         for start in range(0, len(missing), 500):
             fetched.update(self._store.get_batch(missing[start:start + 500]))
 
-    def _host_uid_bytes_match(self, store_ids, identity_message, fetched: dict) -> bool:
-        """A bound canonical or version row holds this dict's payload (its stored or host-rewrite form)."""
-        self._host_uid_fetch(store_ids, fetched)
+    def _host_uid_bytes_match(self, store_ids, identity_message, fetched: dict) -> Optional[int]:
+        """The first bound row holding this dict's payload (its stored or host-rewrite form), else None."""
+        if any(int(sid) not in fetched for sid in store_ids):
+            self._host_uid_fetch(store_ids, fetched)
         identity = self._message_replay_identity(identity_message, strip_carrier=False)
-        return any(identity in self._stored_row_forms(fetched[int(sid)]) for sid in store_ids
-                   if fetched.get(int(sid)) is not None)
+        return next((int(sid) for sid in store_ids if fetched.get(int(sid)) is not None
+                     and identity in self._stored_row_forms(fetched[int(sid)])), None)
 
-    def _host_uid_alias_candidates(self, lineage: str, messages, aliases, delta: Counter) -> None:
-        """R3-1 (shadow, observational): ``position_proof`` when the occurrence's nearest canonically bound view
-        neighbours are the row's own nearest bound rows (none on a side in both matches; one side bound)."""
+    def _host_uid_alias_candidates(self, lineage, capture, stored_at, matched, bindings, fetched, aliases, delta):
+        """R3-1 (shadow, observational): ``position_proof`` when the rows the nearest bound view neighbours map to
+        IN THIS INGEST (stored now, the #436 row, the bound version whose bytes match, else the canonical) are the
+        target row's nearest rows bound to a uid of the view (none on a side in both matches; one side bound)."""
+        messages, identity = capture["messages"], capture["identity"]
         view = [(idx, message.get("message_uid")) for idx, message in enumerate(messages)
                 if _valid_uid(message.get("message_uid"))]
-        canonical = {uid: next((sid for sid, kind in items if kind == "canonical"), None)
-                     for uid, items in self._store.host_uid_bindings_for(lineage, {uid for _i, uid in view}).items()}
+        bindings.update(self._store.host_uid_bindings_for(lineage, {uid for _i, uid in view} - set(bindings)))
+        bound_pos = [pos for pos, (_idx, uid) in enumerate(view) if bindings.get(uid)]
+        rows = sorted({sid for _i, uid in view for sid, _kind in bindings.get(uid, ())})
+        position = {idx: pos for pos, (idx, _uid) in enumerate(view)}
+        resolved: dict = {}
+
+        def resolve(pos):
+            if pos is None or pos in resolved:
+                return resolved.get(pos)
+            idx, uid = view[pos]
+            if stored_at.get(idx) is not None:
+                return int(stored_at[idx])
+            if len(matched.get(idx) or ()) == 1:
+                return int(matched[idx][0]["store_id"])
+            items = bindings[uid]
+            hit = self._host_uid_bytes_match([sid for sid, _kind in items], identity[idx], fetched)
+            resolved[pos] = hit if hit is not None else next((s for s, kind in items if kind == "canonical"), items[0][0])
+            return resolved[pos]
+
         records = []
         for idx, uid, target in aliases:
-            before = next((canonical[u] for i, u in reversed(view) if i < idx and canonical.get(u)), None)
-            after = next((canonical[u] for i, u in view if i > idx and canonical.get(u)), None)
-            proof = (before, after) == self._store.host_uid_canonical_neighbours(lineage, target) and (
-                before is not None or after is not None)
+            before, after = (resolve(pos) for pos in _around(bound_pos, position[idx]))
+            proof = (before, after) == _around(rows, target) and (before is not None or after is not None)
             reason = "position_proof" if proof else "unknown"
-            delta[f"unbound.alias_candidate.{reason}"] += 1
+            delta[f"replay.unbound.alias_candidate.{reason}"] += 1
             records.append((target, uid, "alias_candidate", reason))
         self._store.add_host_uid_bindings(lineage, records)
 
@@ -265,24 +309,32 @@ class HostUidShadowMixin:
                 return
             agree = sum(v for k, v in counts.items() if _outcome(k) == "agree")
             disagree = sum(v for k, v in counts.items() if _outcome(k) == "disagree")
-            logger.info("LCM host-uid shadow: agree=%d disagree=%d counts=%s", agree, disagree, _fmt_counts(counts))
+            logger.info("LCM host-uid shadow: events agree=%d disagree=%d counts=%s", agree, disagree,
+                        _fmt_counts(counts))
         except Exception as exc:
             logger.debug("LCM host-uid summary failed (%s)", type(exc).__name__)
 
 
 def host_uid_doctor_lines(engine: Any) -> list[str]:
-    """Doctor ``host_uid`` section: counts only (per class and reason, errors, table size)."""
+    """Doctor ``host_uid`` section: counts only (gate per binding, event counts, errors, table size)."""
     try:
         durable, rows = engine._store.read_metadata_json(HOST_UID_COUNTER_KEY), engine._store.count_host_uid_bindings()
+        gate = engine._store.host_uid_gate()
     except Exception as exc:
-        durable, rows = None, f"error: {type(exc).__name__}"
+        durable, rows, gate = None, f"error: {type(exc).__name__}", []
     durable = durable if isinstance(durable, dict) else {}
     process = dict(getattr(engine, "_host_uid_counters", None) or {})
     errors = durable.get("errors") if isinstance(durable.get("errors"), int) else 0
+    checked, agree = sum(c for c, _a in gate), sum(a for _c, a in gate)
     return [
         f"host_uid_mode: {host_message_uid_mode()}",
-        f"host_uid_counts: {_fmt_counts({k: v for k, v in durable.items() if k != 'errors'})}",
-        f"host_uid_process_counts: {_fmt_counts({k: v for k, v in process.items() if k != 'errors'})}",
+        f"host_uid_gate_checked: {checked}",
+        f"host_uid_gate_agree: {agree}",
+        f"host_uid_gate_disagree: {checked - agree}",
+        "host_uid_gate_per_lineage: " + (" ".join(f"{c}/{a}/{c - a}" for c, a in gate[:10]) or "(none)")
+        + " (checked/agree/disagree)",
+        f"host_uid_event_counts: {_fmt_counts({k: v for k, v in durable.items() if k != 'errors'})}",
+        f"host_uid_process_event_counts: {_fmt_counts({k: v for k, v in process.items() if k != 'errors'})}",
         f"host_uid_errors: {errors}" + (f" (process {process['errors']})" if process.get("errors") else ""),
         f"host_uid_bindings_rows: {'absent' if rows is None else rows}",
     ]

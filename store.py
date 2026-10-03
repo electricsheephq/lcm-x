@@ -967,7 +967,8 @@ class MessageStore:
             self._conn.executescript("""
                 CREATE TABLE IF NOT EXISTS host_uid_bindings (
                     store_id INTEGER NOT NULL, uid TEXT NOT NULL, lineage_key TEXT NOT NULL, kind TEXT NOT NULL,
-                    binding_version INTEGER NOT NULL, proof_kind TEXT, created_at REAL);
+                    binding_version INTEGER NOT NULL, proof_kind TEXT, created_at REAL,
+                    first_check TEXT, disagree_seen INTEGER NOT NULL DEFAULT 0);
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_host_uid_canonical ON host_uid_bindings(lineage_key, uid)
                     WHERE kind = 'canonical';
                 CREATE INDEX IF NOT EXISTS idx_host_uid_store ON host_uid_bindings(store_id);
@@ -992,18 +993,34 @@ class MessageStore:
                 out.setdefault(str(uid), []).append((int(store_id), str(kind)))
         return out
 
-    def host_uid_uids_of_store(self, lineage_key: str, store_id: int) -> set[str]:
-        return {str(uid) for (uid,) in self._conn.execute(
-            "SELECT uid FROM host_uid_bindings WHERE store_id = ? AND lineage_key = ? AND kind IN ('canonical', 'version')",
-            (int(store_id), lineage_key))} if self._host_uid_table_exists() else set()
+    def host_uid_uids_of_stores(self, lineage_key: str, store_ids) -> dict[int, set[str]]:
+        """``{store_id: {uid, ...}}``: the canonical and version bindings of ``store_ids`` in a lineage."""
+        ids, out = sorted({int(sid) for sid in store_ids}), {}
+        for start in range(0, len(ids) if self._host_uid_table_exists() else 0, 500):
+            chunk = ids[start:start + 500]
+            for store_id, uid in self._conn.execute(
+                f"SELECT store_id, uid FROM host_uid_bindings WHERE store_id IN ({','.join('?' * len(chunk))}) "
+                "AND lineage_key = ? AND kind IN ('canonical', 'version')", [*chunk, lineage_key]):
+                out.setdefault(int(store_id), set()).add(str(uid))
+        return out
 
-    def host_uid_canonical_neighbours(self, lineage_key: str, store_id: int) -> tuple:
-        """The nearest canonically bound store ids before and after ``store_id`` in a lineage (None: none)."""
-        rows = [self._conn.execute(
-            f"SELECT store_id FROM host_uid_bindings WHERE lineage_key = ? AND kind = 'canonical' AND store_id {op} ? "
-            f"ORDER BY store_id {order} LIMIT 1", (lineage_key, int(store_id))).fetchone()
-            for op, order in (("<", "DESC"), (">", "ASC"))] if self._host_uid_table_exists() else [None, None]
-        return tuple(int(row[0]) if row else None for row in rows)
+    def record_host_uid_checks(self, lineage_key: str, checks) -> None:
+        """Gate (per binding): ``[(uid, store_id, agree)]`` sets ``first_check`` once; a disagreement is sticky."""
+        checks = [(uid, sid, ok) for uid, sid, ok in checks if sid is not None]
+        if not checks or not self._host_uid_table_exists():
+            return
+        with self._write_lock:
+            self._conn.executemany(
+                "UPDATE host_uid_bindings SET first_check = COALESCE(first_check, ?), disagree_seen = MAX(disagree_seen, ?) "
+                "WHERE lineage_key = ? AND uid = ? AND store_id = ? AND kind IN ('canonical', 'version')",
+                [("agree" if ok else "disagree", 0 if ok else 1, lineage_key, uid, int(sid)) for uid, sid, ok in checks])
+            self._conn.commit()
+
+    def host_uid_gate(self) -> list[tuple[int, int]]:
+        """Per lineage, most checked first: ``(checked, agree)``, agree = first check agreed and never disagreed."""
+        return [(int(c), int(a or 0)) for c, a in self._conn.execute(
+            "SELECT COUNT(*), SUM(first_check = 'agree' AND disagree_seen = 0) FROM host_uid_bindings "
+            "WHERE first_check IS NOT NULL GROUP BY lineage_key ORDER BY 1 DESC")] if self._host_uid_table_exists() else []
 
     def add_host_uid_bindings(self, lineage_key: str, rows) -> None:
         """``[(store_id, uid, kind, proof_kind)]``: a canonical never replaces one; no row is recorded twice."""

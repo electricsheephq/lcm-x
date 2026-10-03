@@ -319,7 +319,7 @@ class IdentityAnchorMixin:
             for idx in range(plan["cursor"], min(plan["replayed"])):
                 if self._identity_is_lcm_scaffold(identity_messages[idx], verified=True):
                     plan["replayed"].add(idx)
-        plan["matched"] = matched  # read only by the v0.26.0 host-uid shadow (never a decision input)
+        plan["matched"] = {**plan.get("matched", {}), **matched}  # read only by the v0.26.0 host-uid shadow
         return plan
 
     def _identity_anchor_audit(self, messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan) -> None:
@@ -362,10 +362,12 @@ class IdentityAnchorMixin:
             ws = self._identity_anchor_ws_row(identity, stamps[idx], copies, consumed)
             if ws is not None:  # R1-ws: the same occurrence (same stamp, edge whitespace only), recorded
                 consumed.add(int(ws["store_id"]))
+                plan.setdefault("matched", {})[idx] = [ws]  # host-uid shadow only
                 plan.setdefault("ws", []).append((ws, identity_messages[idx]))
                 continue
             if copies:
                 consumed.add(int(copies[0]["store_id"]))
+                plan.setdefault("matched", {})[idx] = [copies[0]]  # host-uid shadow only
                 if (len(copies) == 1 and copies[0].get("observed_at") is None
                         and self._message_replay_identity(copies[0], stored_row=True) == identity):
                     plan["backfill"].append((int(copies[0]["store_id"]), stamps[idx]))
@@ -385,6 +387,7 @@ class IdentityAnchorMixin:
                 copies = [row for row in held.get(key, ()) if int(row["store_id"]) not in consumed]
                 if len(copies) > reserved[key]:
                     consumed.add(int(copies[-1]["store_id"]))
+                    plan.setdefault("matched", {})[idx] = [copies[-1]]  # host-uid shadow only
                     continue
                 missed.append(idx)
         if missed:
@@ -885,6 +888,8 @@ class IdentityAnchorMixin:
                      if idx not in plan.get("explained", ())]
         if not rewritten:
             return
+        for idx in rewritten:  # a rewound row is a new store now; the host-uid shadow sees it via its store id
+            plan.get("matched", {}).pop(idx, None)
         plan["cursor"] = min(rewritten)
         plan["replayed"].update(idx for idx in range(min(rewritten), cursor) if idx not in rewritten)
         plan["replayed"].difference_update(rewritten)
