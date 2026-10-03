@@ -149,6 +149,7 @@ from .reconcile import _emission_identity
 from .reconcile import _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
 from .compaction import CompactionMixin
 from .identity_anchor import IdentityAnchorMixin, _raw_remainder, identity_anchor_enabled
+from .host_uid import HostUidShadowMixin
 from .store_complete import HiddenBacklog, StoreCompleteMixin
 from .survival_fit import SurvivalFitMixin, _carries_survival_notice
 from .db_bootstrap import refresh_legacy_conversation_ids
@@ -426,6 +427,7 @@ class LCMEngine(
     ResetStateMixin,
     ReconcileMixin,
     IdentityAnchorMixin,
+    HostUidShadowMixin,
     StoreCompleteMixin,
     SurvivalFitMixin,
     AuxiliarySessionMixin,
@@ -5889,6 +5891,10 @@ class LCMEngine(
             self._session_id, cursor, n,
         )
 
+        # v0.26.0 shadow: the host uids, read after every decision above and before the INSERT drops them.
+        host_uids = self._host_uid_capture(messages, reconcile_messages, 0 if reconciled_existing_session
+                                           else min(scan_start, cursor), cursor, anchor_plan,
+                                           replayed_tool_segment_indexes)
         new_messages = replay_messages[cursor:] if cursor < n else []
         original_new_messages = messages[cursor:] if cursor < n else []
 
@@ -5899,6 +5905,7 @@ class LCMEngine(
             self._compression_boundary_active_placeholder_digest_ordinals = {}
             self._compression_boundary_stored_placeholder_digest_counts = {}
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
+            self._host_uid_shadow(host_uids)
             if cached_replay is not None:
                 return cached_replay
             return self._remember_active_replay_messages(messages, replay_messages)
@@ -6139,6 +6146,7 @@ class LCMEngine(
             self._compression_boundary_active_placeholder_digest_ordinals = {}
             self._compression_boundary_stored_placeholder_digest_counts = {}
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
+            self._host_uid_shadow(host_uids)
             return self._remember_active_replay_messages(messages, active_replay_messages)
 
         tool_result_names = _tool_result_names(messages)
@@ -6215,6 +6223,8 @@ class LCMEngine(
                 )
             except Exception as exc:
                 logger.warning("LCM identity-anchor relation write failed (%s)", type(exc).__name__)
+        self._host_uid_shadow(host_uids, {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index,
+                                                                                         store_ids)}, anchor_remainders)
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
         # raw ingest: marking a period stale before its covering summary exists
