@@ -88,7 +88,7 @@ from .embedding_provider import (
     fastembed_download_size_note,
     resolve_provider,
 )
-from .tokens import count_tokens
+from .tokens import count_tokens, token_counter_status
 from .vector_store import EmbeddingIdentity, EmbeddingPublishOutcome, VectorStore
 
 
@@ -510,6 +510,7 @@ def _help_text(error: str | None = None) -> str:
 
 def _status_text(engine) -> str:
     status = engine.get_status()
+    counter = token_counter_status()
     db_path = Path(engine._store.db_path)
     db_exists = db_path.exists()
     db_size = db_path.stat().st_size if db_exists else 0
@@ -580,6 +581,9 @@ def _status_text(engine) -> str:
         f"last_cache_write_tokens: {status.get('last_cache_write_tokens', 0)}",
         f"last_reasoning_tokens: {status.get('last_reasoning_tokens', 0)}",
         f"cache_read_ratio: {float(status.get('cache_read_ratio', 0.0) or 0.0) * 100:.1f}%",
+        f"token_counter: {counter['counter']}",
+        f"token_counter_encoding: {counter['encoding'] or '(none)'}",
+        f"token_counter_state: {counter['state']}",
         f"sensitive_patterns_enabled: {_fmt_bool(protection.get('enabled'))}",
         f"sensitive_patterns: {', '.join(protection.get('patterns') or []) or '(none)'}",
         f"sensitive_patterns_source: {protection.get('source', 'default')}",
@@ -1829,6 +1833,7 @@ def _doctor_text(engine) -> str:
         recommended_actions.append(doctor_guidance_for_check(embedding_check)["operator_action"])
     triage_guidance = doctor_guidance_for_checks(triage_checks)
 
+    counter = token_counter_status()
     doctor_status = "issues-found" if integrity != "ok" or issues else (
         "action-recommended" if recommended_actions else "ok"
     )
@@ -1884,6 +1889,9 @@ def _doctor_text(engine) -> str:
         f"missing_externalized_payload_refs: {externalized_integrity['missing_externalized_payload_refs']}",
         f"unreferenced_externalized_payload_files: {externalized_integrity['unreferenced_externalized_payload_files']}",
         f"survival_fit_count: {'unknown' if fit_count is None else fit_count}",
+        f"token_counter: {counter['counter']}",
+        f"token_counter_encoding: {counter['encoding'] or '(none)'}",
+        f"token_counter_state: {counter['state']}",
     ]
     if inactive_process:
         lines.append(f"inactive_process: {inactive_process}")
