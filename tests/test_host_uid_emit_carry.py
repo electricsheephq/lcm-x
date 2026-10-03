@@ -376,3 +376,67 @@ def test_p6_restart_persisted_rows_do_not_rebind(tmp_path, monkeypatch, site):
         assert _rows(second) == before_rows
     finally:
         second.shutdown()
+
+
+def _merge_restart(tmp_path, mutate=None):
+    """Persist LCM's site-1 merge, re-present it after a restart; return (counts, gate rows, doctor lines)."""
+    from hermes_lcm.host_uid import host_uid_doctor_lines
+    from tests.test_host_uid_shadow import _gate
+
+    tmp_path.mkdir(exist_ok=True)
+    _state_db(tmp_path, [("S", None, None)])
+    host = [_m("user", "ask", 10.0, "ask"), _m("assistant", "first", 11.0, "first"),
+            _m("assistant", "second", 12.0, "second")]
+    first = _engine(tmp_path)
+    first._hermes_home = str(tmp_path)
+    try:
+        out = first.compress(copy.deepcopy(host), current_tokens=1000)
+    finally:
+        first.shutdown()
+    persisted = [dict(row, message_uid=row.get("message_uid") or "minted-" + str(i)) for i, row in enumerate(out)]
+    merged = next(row for row in persisted if row.get("message_uid") == "first")
+    assert merged["_absorbed_message_uids"] == ["second"]
+    if mutate:
+        mutate(persisted, merged)
+    second = _engine(tmp_path)
+    second._hermes_home = str(tmp_path)
+    try:
+        second._ingest_messages(persisted)
+        return _counts(second), _gate(second), host_uid_doctor_lines(second)
+    finally:
+        second.shutdown()
+
+
+def test_lcm_merge_gate_checks_both_constituents_as_agree(tmp_path):
+    counts, gate, doctor = _merge_restart(tmp_path)
+    assert counts.get("replay.composite.agree.lcm_merge") == 1, counts
+    assert {uid: (checked, disagree) for uid, checked, disagree in gate if uid in ("first", "second")} == {
+        "first": ("agree", 0), "second": ("agree", 0)}
+    assert "host_uid_gate_disagree: 0" in doctor
+
+
+def _classify_replayed(tmp_path, message):
+    """Seed bound assistants, then classify ``message`` as an unmapped prefix replay (no #436 row map)."""
+    from tests.test_host_uid_shadow import _classify, _seed
+
+    _state_db(tmp_path, [("S", None, None)])
+    _seed(tmp_path, [_m("user", "ask", 10.0, "ask"), _m("assistant", "  first ", 11.0, "first"),
+                     _m("assistant", "second", 12.0, "second")])
+    engine = _engine(tmp_path)
+    try:
+        return _classify(engine, [message], {"replayed": {0}, "matched": {}})
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("role, content, absorbed, expected", [
+    ("assistant", "first\nsecond", ["second"], "replay.composite.agree.lcm_merge"),  # positive control
+    ("assistant", "first\nsecomd", ["second"], "replay.bound.disagree.prefix_replay"),  # one byte changed
+    ("assistant", "first\nsecond", ["never-bound"], "replay.bound.disagree.prefix_replay"),  # absorbed unbound
+    ("assistant", "first\nsecond", [], "replay.bound.disagree.prefix_replay"),  # no absorbed uids
+    ("user", "first\nsecond", ["second"], "replay.bound.disagree.prefix_replay"),  # user role: rule not applied
+    ("user", "first\nsecond", [], "replay.bound.disagree.prefix_replay"),
+])
+def test_lcm_merge_rule_negative_controls(tmp_path, role, content, absorbed, expected):
+    message = _m(role, content, 11.0, "first", _absorbed_message_uids=absorbed)
+    assert _classify_replayed(tmp_path, message) == {expected: 1}
