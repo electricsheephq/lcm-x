@@ -4,6 +4,9 @@ Status: REGISTERED (2026-10-02), after the v0.24.9 GA cut. The kit is merged fir
 `--embeddings` arm, and memorybench PR #7 adds the full-text arm to `feat/locomo-hermes-prep` at `b47f92f7`.
 Nothing in this sheet spends money. Roadmap reference: H2 in `ROADMAP.md` (recall re-baseline).
 Public-copy rule: the merged copy carries no customer, box or person names, no internal aliases, no local paths.
+Amended (#818, before any scored run): the product is the lcm-x GA current at launch, run from a detached GA worktree
+(§2); one product sha across sub-rows; the R1-S dataset digest; phase-separated reader and judge launches; no reader
+tool use.
 
 ## 0. Why this row
 - The product default is `embeddings_enabled=False`: recall is full-text unless a deployment turns embeddings on.
@@ -11,7 +14,7 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
 - So no registered number exists for the default configuration. This row is a NEW baseline. It is never scored against the
   embeddings-on history; the history is shown beside it, labelled with its own configuration.
 
-## 1. Sub-rows (each is its own registered row; same product sha)
+## 1. Sub-rows (each is its own registered row; one product sha, gated in §2)
 | Sub-row | Instrument | Data | Configuration | Scored output |
 |---|---|---|---|---|
 | R1-M retrieval | `scripts/lcm_longmemeval.py run --embeddings off --provider stub --dataset-label m` (shorthand), once per shard with that shard's own prepared directory and output directory | LongMemEval-M, 500 q (the F53 `prepared-m` manifest), run as the 6 F53 shard directories `prepared-m-shards/shard-K` (fixed interleave `qid[i::6]`; each run scores only its shard); A/A′ on `prepared-m-aprime100` | arms `fts` + `lcm_recall` only; vector arms report `run: false` | r@1 / r@5 / r@10 / ndcg@10, session and turn level |
@@ -19,23 +22,43 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
 | R1-L QA | memorybench LoCoMo, hermes-lcm provider, `HERMES_MB_EMBEDDINGS=off`, fusion unset | LoCoMo-10, 1,986 q (adversarial gold per the harness pin; the 99 corrupted-gold rows of the F46 lineage stay in and are scored as-is) | stores rebuilt from scratch | QA accuracy, strict judge rubric (the F46/F61 lineage) |
 
 ## 2. Pins (every value from a command at launch, none typed)
-- Product: the tree each sub-row actually imports, by commit sha; plugin version line; `config.py` blob sha.
-  - `git rev-parse v0.24.9^{commit}` must equal the canonical GA commit `e36ae9c866757d531292db2bf64f5f0b59710bc8`
-    (the tag is mutable); any mismatch stops the row.
-  - R1-M: `scripts/lcm_longmemeval.py` imports the product from its own checkout, so R1-M measures the instrument
-    commit's product tree. R1-S / R1-L: record the tree the bridge loads.
-  - Recall-path identity: `git diff --stat e36ae9c8 <measured sha>` over the product files is recorded, and the recall
-    path (`tools.py`, `retrieval_core.py`, `search_query.py`, `adaptive_retrieval.py`, `store.py`, `vector_store.py`,
-    `dag.py` for summary full-text search, `db_bootstrap.py` for full-text setup, `config.py` for the recall defaults
-    such as `recall_query_timeout_s` and `recall_reference_strict`) must be byte-identical to v0.24.9. If it is, the row is
-    labelled "v0.24.9 recall path at <sha>"; if not, it is labelled with the measured sha only and the diff is listed.
+- Product: the latest lcm-x GA at launch (`v0.25.0` when this amendment lands), by commit sha; plugin version line;
+  `config.py` blob sha.
+  - `git rev-parse <GA tag>^{commit}` must equal the canonical GA commit named in that release's notes (the tag is
+    mutable); any mismatch stops the row.
+  - R1-M runs in a detached worktree at the GA commit. Only the instrument files (`benchmarking/`,
+    `scripts/lcm_longmemeval.py`) come from the instrument commit, and `git status --porcelain` lists only those
+    paths. The harness imports the product from its own checkout, so the measured product is the GA tree byte for byte,
+    including modules the recall path imports indirectly (for example `store.py` applies
+    `message_content.normalize_content_value` before full-text insertion, so a listed-files check alone could miss a
+    corpus change).
+  - R1-S / R1-L: the bridge loads the same GA commit; record the commit sha of the tree it loads.
+  - One product sha: at launch the three sub-rows' product commit shas must be equal. If they cannot be, each sub-row
+    is labelled with its own sha and the sub-rows are never reported as one row.
+  - Recall path since `v0.24.9`: record `git diff --stat v0.24.9 <GA>` over the recall modules (`tools.py`,
+    `retrieval_core.py`, `search_query.py`, `adaptive_retrieval.py`, `store.py`, `vector_store.py`, `dag.py`,
+    `db_bootstrap.py`, `config.py`, `message_content.py`). From `v0.24.9` to `v0.25.0` it is a comment in `config.py`
+    and an assembly-only depth query in `dag.py` (#750).
 - Instruments: the lcm-x commit holding the `--embeddings` arm (#811's merge or later); the memorybench commit holding
   `HERMES_MB_EMBEDDINGS` and `scripts/run-with-watchdog.sh` (`b47f92f7` or later on `feat/locomo-hermes-prep`); blob
   shas of the harness files.
 - Data: dataset file sha256 and prepared-dir manifest sha for each sub-row; question-id list sha.
+  - R1-S: the LongMemEval-S cleaned file `longmemeval_s_cleaned.json`, sha256
+    `d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442` (the banked V1-S / F37 lineage). Its
+    question-id digest is the sha256 of the 500 `question_id` values in file order joined by `\n`, computed at prep and
+    recorded. A file with another sha stops the row; the original (uncleaned) LongMemEval-S release is a different
+    file and is not this dataset.
 - Reader and judge (R1-S, R1-L): model id, reasoning effort, codex CLI version + binary sha256. Reader = the current
   Sol generation at medium; judge = Sol at low with the strict rubric. The reader differs from the 07-29 row
   (gpt-5.6-sol), which is one more reason R1-S is a new baseline.
+- Reader and judge launches: the memorybench CLI transport reads one process-wide reasoning-effort setting for both the
+  answerer and the judge. So the answer phase and the judge phase are separate launches, each with its own pinned
+  environment (reader: Sol at medium; judge: Sol at low) and its own receipt (model id, effort, CLI version, binary
+  sha256, served model).
+- Reader tool use: the reader answers from the delivered recall context only. Every reader call keeps a durable
+  per-call tool-event record, and any reader tool call (filesystem, shell, search, web) stops the sub-row: the F59
+  reference arm was invalidated by a reader that searched files instead of using its context. A transport that cannot
+  call tools satisfies this by construction (record which). If neither is available, the sub-row is blocked.
 - Served model: every reader answer and judge verdict, watchdog-resumed work included, carries the model that
   actually served it (from the transport log), and it must equal the pinned id (the F59 lesson: a requested model
   was silently served by another). If the transport does not expose the served model, that sub-row is blocked
@@ -96,12 +119,15 @@ Public-copy rule: the merged copy carries no customer, box or person names, no i
   configuration.
 - Watchdog used all resumes on one run → park that sub-row, report the stall with the log.
 - More than 2 R1-M shards dead of one cause → park, root-cause first.
-- The `v0.24.9` tag does not resolve to `e36ae9c8…`, or a served model differs from its pin → stop.
+- The GA tag does not resolve to its canonical commit, the R1-M worktree shows a change outside the instrument
+  files, sub-row product shas differ without separate labels, the R1-S dataset sha differs from its pin, a reader
+  tool call appears, or a served model differs from its pin → stop.
 
 ## 7. Procedure
 1. Merge the kit PRs; merge this sheet (fact-check of every pin source). R1-M also waits for #817 (per-question
    provenance).
-2. Fresh worktrees at the pinned commits; record pins (§2).
+2. A detached worktree at the GA commit with the instrument files overlaid (R1-M), the bridge on the same commit
+   (R1-S / R1-L); record pins (§2).
 3. Positive controls (§3) → evidence folder.
 4. R1-M full 500 (6 shards) + A/A′ subset → snapshot → score.
 5. R1-S 500 with A′ subset → snapshot → judge → score.
