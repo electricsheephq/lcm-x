@@ -1009,18 +1009,16 @@ class MessageStore:
         checks = [(uid, sid, ok) for uid, sid, ok in checks if sid is not None]
         if not checks or not self._host_uid_table_exists():
             return
-        with self._write_lock:
-            self._conn.executemany(
-                "UPDATE host_uid_bindings SET first_check = COALESCE(first_check, ?), disagree_seen = MAX(disagree_seen, ?) "
-                "WHERE lineage_key = ? AND uid = ? AND store_id = ? AND kind IN ('canonical', 'version')",
-                [("agree" if ok else "disagree", 0 if ok else 1, lineage_key, uid, int(sid)) for uid, sid, ok in checks])
-            self._conn.commit()
+        self._host_uid_write(
+            "UPDATE host_uid_bindings SET first_check = COALESCE(first_check, ?), disagree_seen = MAX(disagree_seen, ?) "
+            "WHERE lineage_key = ? AND uid = ? AND store_id = ? AND kind IN ('canonical', 'version')",
+            [("agree" if ok else "disagree", 0 if ok else 1, lineage_key, uid, int(sid)) for uid, sid, ok in checks])
 
     def host_uid_gate(self) -> list[tuple[int, int]]:
         """Per lineage, most checked first: ``(checked, agree)``, agree = first check agreed and never disagreed."""
         return [(int(c), int(a or 0)) for c, a in self._conn.execute(
             "SELECT COUNT(*), SUM(first_check = 'agree' AND disagree_seen = 0) FROM host_uid_bindings "
-            "WHERE first_check IS NOT NULL GROUP BY lineage_key ORDER BY 1 DESC")] if self._host_uid_table_exists() else []
+            "WHERE first_check IS NOT NULL AND kind IN ('canonical', 'version') GROUP BY lineage_key ORDER BY 1 DESC")] if self._host_uid_table_exists() else []
 
     def add_host_uid_bindings(self, lineage_key: str, rows) -> None:
         """``[(store_id, uid, kind, proof_kind)]``: a canonical never replaces one; no row is recorded twice."""
@@ -1029,15 +1027,26 @@ class MessageStore:
             return
         self._ensure_host_uid_schema()
         now = time.time()
+        self._host_uid_write(
+            "INSERT OR IGNORE INTO host_uid_bindings(store_id, uid, lineage_key, kind, binding_version, "
+            "proof_kind, created_at) SELECT ?, ?, ?, ?, 1, ?, ? WHERE NOT EXISTS (SELECT 1 FROM "
+            "host_uid_bindings WHERE store_id = ? AND uid = ? AND lineage_key = ? AND kind = ?)",
+            [(int(store_id), uid, lineage_key, kind, proof_kind, now, int(store_id), uid, lineage_key, kind)
+             for store_id, uid, kind, proof_kind in rows])
+
+    def _host_uid_write(self, sql: str, params: list) -> None:
+        """One shadow write in its own transaction: ANY failure, at commit included, rolls it back before the
+        caller swallows it, so the shared connection is never left in a transaction or holding the write lock.
+        BEGIN is outside the ``try``: a connection already in someone else's transaction is never rolled back."""
+        conn = self._conn
         with self._write_lock:
-            for store_id, uid, kind, proof_kind in rows:
-                self._conn.execute(
-                    "INSERT OR IGNORE INTO host_uid_bindings(store_id, uid, lineage_key, kind, binding_version, "
-                    "proof_kind, created_at) SELECT ?, ?, ?, ?, 1, ?, ? WHERE NOT EXISTS (SELECT 1 FROM "
-                    "host_uid_bindings WHERE store_id = ? AND uid = ? AND lineage_key = ? AND kind = ?)",
-                    (int(store_id), uid, lineage_key, kind, proof_kind, now, int(store_id), uid, lineage_key, kind),
-                )
-            self._conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                conn.executemany(sql, params)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
     def count_host_uid_bindings(self) -> Optional[int]:
         return int(self._conn.execute("SELECT COUNT(*) FROM host_uid_bindings").fetchone()[0]) \

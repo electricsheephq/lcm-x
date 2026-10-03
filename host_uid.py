@@ -11,6 +11,7 @@ import json
 import logging
 import sqlite3
 from collections import Counter, defaultdict
+from pathlib import Path
 from typing import Any, Optional
 
 from .config import host_message_uid_mode
@@ -22,6 +23,7 @@ _MAX_UID_CHARS = 256
 _MAX_LINEAGE_HOPS = 256
 _FORK_MARKERS = ("_branched_from", "_delegate_from", "_reset_from")
 _AGREE_OUTCOMES = {"agree", "version_new", "agree_new", "agree_bind"}
+_NO_STATE_DB = (None, "unresolved")  # cached by identity: a host without state.db is not re-read
 
 
 def _valid_uid(value) -> bool:
@@ -66,44 +68,49 @@ class HostUidShadowMixin:
 
     def _host_uid_lineage_key(self, session_id=None) -> tuple:
         """R3-4: ``(root, None)`` by Hermes' own walk (``_session_turn_lease_key_on_conn``: up while the parent ended
-        by compression and the row is no fork child), else ``(None, "read_error" | "unresolved")`` (missing row,
-        cycle, over 256 hops). Cached per session id, completed reads only."""
+        by compression and the row is no fork child), else ``(None, "read_error" | "unresolved")`` (no state.db,
+        missing row, cycle, over 256 hops). Cached per (state.db, session id): a root, or a missing state.db."""
         session_id = str(self._session_id if session_id is None else session_id or "")
         cache = self.__dict__.setdefault("_host_uid_lineage_cache", {})
-        if session_id in cache:
-            return cache[session_id], None
-        root = None
         try:
-            path = self._state_db_path()
-            if not path.exists():
-                raise FileNotFoundError("state.db")
-            conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
-            conn.row_factory = sqlite3.Row
-            try:
-                def read(sid: str) -> Optional[dict]:
-                    row = conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
-                    return dict(row) if row else None
-
-                current, seen = read(session_id) if session_id else None, {session_id}
-                for _ in range(_MAX_LINEAGE_HOPS + 1):
-                    parent_id = str(current.get("parent_session_id") or "") if current else ""
-                    if current is None or parent_id in seen:  # missing row or a cycle: unresolved
-                        break
-                    parent = read(parent_id) if parent_id and not _is_fork_child(current) else None
-                    if parent is None or parent.get("end_reason") != "compression":
-                        root = str(current["id"])
-                        break
-                    seen.add(parent_id)
-                    current = parent
-            finally:
-                conn.close()
-        except Exception as exc:  # host DB drift or absence: no root, no binding; counted as an error
+            path = Path(self._state_db_path())
+            key = (str(path), session_id)  # keyed by the home too: a profile switch changes the state.db
+            if key in cache:
+                return cache[key]
+            found = self._host_uid_read_lineage(path, session_id)
+        except Exception as exc:  # host DB drift: no root, no binding; counted as an error
             self._host_uid_read_error = exc
             return None, "read_error"
-        if root is None:
-            return None, "unresolved"
-        cache[session_id] = root
-        return root, None
+        if found[0] is not None or found is _NO_STATE_DB:
+            cache[key] = found
+        return found
+
+    def _host_uid_read_lineage(self, path: Path, session_id: str) -> tuple:
+        """One uncached read of the lineage root (a missing state.db is unresolved, never an error)."""
+        if not path.exists():
+            return _NO_STATE_DB
+        root = None
+        conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
+        conn.row_factory = sqlite3.Row
+        try:
+            def read(sid: str) -> Optional[dict]:
+                row = conn.execute("SELECT * FROM sessions WHERE id = ?", (sid,)).fetchone()
+                return dict(row) if row else None
+
+            current, seen = read(session_id) if session_id else None, {session_id}
+            for _ in range(_MAX_LINEAGE_HOPS + 1):
+                parent_id = str(current.get("parent_session_id") or "") if current else ""
+                if current is None or parent_id in seen:  # missing row or a cycle: unresolved
+                    break
+                parent = read(parent_id) if parent_id and not _is_fork_child(current) else None
+                if parent is None or parent.get("end_reason") != "compression":
+                    root = str(current["id"])
+                    break
+                seen.add(parent_id)
+                current = parent
+        finally:
+            conn.close()
+        return (root, None) if root is not None else (None, "unresolved")
 
     def _host_uid_capture(self, messages, identity_messages, start: int, cursor: int, plan, tool_segment,
                           session_id=None):

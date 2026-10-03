@@ -219,7 +219,7 @@ def test_no_state_db_gives_no_lineage_root(tmp_path):
     engine = _engine(tmp_path)
     try:
         engine.ingest([_m("user", "hello" + PAD, 10.0, "u-1")])
-        assert _counts(engine) == {"skipped.no_lineage_root.read_error": 1, "errors": 1}
+        assert _counts(engine) == {"skipped.no_lineage_root.unresolved": 1}  # a missing state.db is no error
         assert _bindings(engine) == []
     finally:
         engine.shutdown()
@@ -708,6 +708,10 @@ def test_f7_a_v0250_build_opens_ingests_and_reads_a_store_with_the_table(tmp_pat
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
+    try:
+        import agent.context_engine  # noqa: F401  (the git-ignored host stub the old build imports)
+    except ImportError:
+        pytest.skip("the agent.context_engine host stub is not importable in this checkout")
     if subprocess.run(["git", "-C", str(root), "cat-file", "-e", "c36b46e3^{commit}"], capture_output=True).returncode:
         pytest.skip("the v0.25.0 commit c36b46e3 is not in this checkout (shallow clone)")
     archive = subprocess.run(["git", "-C", str(root), "archive", "c36b46e3"], check=True, capture_output=True).stdout
@@ -833,6 +837,114 @@ def test_r2_version_new_leaves_bindings_unchecked_until_a_replay(tmp_path):
         engine.ingest([_m("user", "A" + PAD, 10.0, "u")])
         assert _counts(engine) == {"replay.bound.agree.replay": 1}  # #436 maps it onto A
         assert _gate(engine) == [("u", "agree", 0), ("u", None, 0)]
+        assert "host_uid_gate_checked: 1" in _doctor_text(engine)
+    finally:
+        engine.shutdown()
+
+
+
+# -- fix round 3 (PR bot round 1) -----------------------------------------------------------------------
+
+class _FaultyConn:
+    """The store connection with one injected shadow-write failure: ``after_first_insert`` (a binding INSERT
+    runs, then the batch fails) or ``commit`` (the shadow write fails at COMMIT)."""
+
+    def __init__(self, real, fail):
+        self._real, self._fail, self._armed = real, fail, False
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+    def __enter__(self):
+        return self._real.__enter__()
+
+    def __exit__(self, *exc):
+        return self._real.__exit__(*exc)
+
+    def executemany(self, sql, params):
+        if "host_uid_bindings" in sql and self._fail:
+            params = list(params)
+            if self._fail == "after_first_insert" and sql.lstrip().startswith("INSERT"):
+                self._fail = None
+                self._real.execute(sql, params[0])
+                raise sqlite3.OperationalError("injected after the first binding INSERT")
+            self._armed = self._fail == "commit"
+        return self._real.executemany(sql, params)
+
+    def commit(self):
+        if self._armed:
+            self._armed = self._fail = None
+            raise sqlite3.OperationalError("injected at COMMIT")
+        return self._real.commit()
+
+
+@pytest.mark.parametrize("fail", ["after_first_insert", "commit"])
+def test_r3_a_failed_shadow_write_rolls_back_and_leaves_no_transaction(tmp_path, fail):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    store = engine._store
+    real = store._conn
+    try:
+        store._conn = _FaultyConn(real, fail)
+        engine.ingest(_UID_LIST)
+        store._conn = real
+        assert not real.in_transaction
+        assert [r[2] for r in _rows(engine)] == [m["content"] for m in _UID_LIST]  # the messages were stored
+        assert _bindings(engine) == []  # no partial binding
+        assert _counts(engine).get("errors") == 1
+        engine.ingest(_UID_LIST + [_m("user", "after" + PAD, 20.0, "u-after")])  # a normal ingest afterwards
+        assert not real.in_transaction
+        assert [b[1] for b in _bindings(engine)] == ["u-after"]
+    finally:
+        store._conn = real
+        engine.shutdown()
+
+
+def test_r3_the_lineage_cache_is_keyed_by_home(tmp_path):
+    (tmp_path / "one").mkdir()
+    (tmp_path / "two").mkdir()
+    _state_db(tmp_path / "one", [("P", None, "compression"), ("S", "P", None)])
+    _state_db(tmp_path / "two", [("S", None, None)])
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")), hermes_home=str(tmp_path / "one"))
+    engine.on_session_start("S", platform="cli", context_length=200_000)
+    try:
+        assert engine._host_uid_lineage_key() == ("P", None)
+        engine._hermes_home = str(tmp_path / "two")  # the same session id under another profile home
+        assert engine._host_uid_lineage_key() == ("S", None)
+    finally:
+        engine.shutdown()
+
+
+def test_r3_a_missing_state_db_is_read_once_per_session_and_is_no_error(tmp_path, monkeypatch):
+    reads = []
+    real = LCMEngine._host_uid_read_lineage
+
+    def counted(self, path, session_id):
+        reads.append(session_id)
+        return real(self, path, session_id)
+
+    monkeypatch.setattr(LCMEngine, "_host_uid_read_lineage", counted)
+    engine = _engine(tmp_path)
+    try:
+        for i in range(3):
+            engine.ingest([_m("user", f"turn {i}" + PAD, 10.0 + i, f"u-{i}") for i in range(i + 1)])
+        assert reads == ["S"]
+        assert _counts(engine) == {"skipped.no_lineage_root.unresolved": 3}
+        assert "host_uid_errors: 0" in _doctor_text(engine)
+    finally:
+        engine.shutdown()
+
+
+def test_r3_the_gate_counts_only_canonical_and_version_bindings(tmp_path):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest([_m("user", "hello" + PAD, 10.0, "u-1")])
+        store_id = _bindings(engine)[0][0]
+        engine._store.add_host_uid_bindings("S", [(store_id, "u-alias", "alias_candidate", "unknown")])
+        engine._store._conn.execute("UPDATE host_uid_bindings SET first_check = 'disagree', disagree_seen = 1")
+        engine._store._conn.commit()
+        assert engine._store.host_uid_gate() == [(1, 0)]
         assert "host_uid_gate_checked: 1" in _doctor_text(engine)
     finally:
         engine.shutdown()
