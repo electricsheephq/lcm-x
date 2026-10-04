@@ -5,6 +5,11 @@ whose pattern does not hold is a harness finding, not a product one.
 """
 from __future__ import annotations
 
+P8_CONTROLS = {"p8-control/archived": "FAIL", "p8-control/other-active": "FAIL",
+               "p8-control/random-snapshot": "FAIL", "p8-control/none": "PASS"}
+# Measured on the four local CI hosts at 2f4b7d54: no pair has scorable B9 (missing flush seams).
+P8_MUST_SUPPORT = {None: (), "acp-process": ()}
+
 CONTROLS = {
     # Differential: the host's post-commit-proof persist strip (#494), fixed by #498 (ae1fb16d; 47bd28e7 is its
     # parent). The baseline must stay green at both refs, the trailing-whitespace shape red only before the fix.
