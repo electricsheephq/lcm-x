@@ -3688,7 +3688,7 @@ class LCMEngine(
                 for emission in scoped_proof.get("emissions") or ():
                     emission["scope"] = {**(emission.get("scope") or {}), "session_id": session_id}
             commit_proof["input"] = None
-            if commit_proof.get("published") or commit_proof.get("native"):
+            if commit_proof.get("published") or commit_proof.get("native") or commit_proof.get("recovery"):
                 self._persist_compress_commit_proof(commit_proof)
         elif can_reassign:
             # No transferred commit proof (proof creation failed, an end that
@@ -5306,8 +5306,11 @@ class LCMEngine(
         if not target:
             return None
         effective: list = []
-        for index, identity in enumerate(self._occurrence_replay_identities(messages, proof)[1]):
+        projection, identities = self._occurrence_replay_identities(messages, proof)
+        for index, identity in enumerate(identities):
             if len(effective) == len(target):
+                if identity is None and projection.entries[index].kind == "recovery":
+                    continue
                 return index if effective == target else None
             if identity is None:
                 continue
@@ -8218,6 +8221,10 @@ class LCMEngine(
                                     tokens=skipped_user_tokens, cap=cap
                                 ),
                             }
+                            self._pending_emission_candidates.append({
+                                "kind": "recovery", "span": note["content"],
+                                "full_identity": _emission_identity(note), "row": note,
+                            })
                             if count_messages_tokens(option + [note]) <= cap:
                                 return option + [note]
                             # Drop the retained row, then the system anchor, before the cap.
@@ -8245,9 +8252,12 @@ class LCMEngine(
                 "sanitization (%d rows); emitting a recovery placeholder row",
                 len(tail_messages),
             )
-            return self._sanitize_active_context_messages(fallback[:-1]) + [
-                {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
-            ]
+            placeholder = {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
+            self._pending_emission_candidates.append({
+                "kind": "recovery", "span": placeholder["content"],
+                "full_identity": _emission_identity(placeholder), "row": placeholder,
+            })
+            return self._sanitize_active_context_messages(fallback[:-1]) + [placeholder]
         return candidate
 
     @staticmethod

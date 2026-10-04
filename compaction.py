@@ -775,13 +775,14 @@ class CompactionMixin:
             ]
             proof["native"] = False
             proof["published"] = self._last_compression_status == "compacted"
+            proof["recovery"] = self._last_compression_status == "overflow_recovery"
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "emissions": copy.deepcopy(emissions),
             }
             self._compress_commit_proof = proof
-            if proof["published"] or proof["native"]:
+            if proof["published"] or proof["native"] or proof["recovery"]:
                 self._persist_compress_commit_proof(proof)
         except Exception:
             self._compress_commit_proof = None
