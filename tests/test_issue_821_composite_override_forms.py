@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tests.test_issue_436_identity_anchor import SYSTEM, _a, _engine, _relations, _rows, _turns, _u
+from tests.test_issue_436_identity_anchor import SYSTEM, _a, _engine, _relations, _rows, _state_db, _turns, _u
 
 
 def _override(engine, row, content):
@@ -12,6 +12,60 @@ def _override(engine, row, content):
                "stored_sha256": hashlib.sha256(row["content"].encode()).hexdigest()}
     engine._store.write_metadata_json([f"host_rewrite_identity:{row['store_id']}"], json.dumps(payload))
     engine._host_rewrite_state()[1].pop(int(row["store_id"]), None)
+
+
+@pytest.mark.parametrize("host_form", ["r34.4", "upstream", "recorded-override"])
+def test_new_absorbed_turn_cannot_bind_older_stored_occurrence(tmp_path, host_form):
+    """F1: an out-of-view 'continue' is not the new occurrence absorbed after a crash."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        engine.ingest([*head, _u("continue", 300.0), _a("ok old", 301.0), _u("held R\n", 500.0)])
+        row = _rows(engine)[-1]
+        if host_form == "recorded-override":
+            engine._record_ws_host_rewrite(row, _u("held R", 500.0))
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        composite = _u("held R\n\ncontinue", 500.0)
+        if host_form != "recorded-override":
+            composite["_merged_turn_prefix"] = "held R" + ("\n\n" if host_form == "r34.4" else "")
+        engine.ingest([*head, composite, _a("reply", 511.0)])
+        rows = _rows(engine)
+        assert [r["content"] for r in rows].count("continue") == 2
+        assert composite["content"] not in [r["content"] for r in rows]
+        remainder = rows[-2]
+        assert remainder["content"] == "continue" and remainder["observed_at"] is None
+        assert [rel[2] for rel in _relations(engine) if rel[1] == "composite"] == [
+            row["store_id"], remainder["store_id"]]
+        engine.ingest([*head, _u("held R", 500.0), _u("continue", 510.0), _a("reply", 511.0)])
+        assert len(_rows(engine)) == len(rows)
+        assert next(r for r in _rows(engine) if r["store_id"] == remainder["store_id"])["observed_at"] == 510.0
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("host_form", ["r34.4", "upstream", "recorded-override"])
+def test_rotation_child_stores_new_absorbed_occurrence(tmp_path, host_form):
+    """The same F1 loss shape with the dangling donor in the rotation parent."""
+    _state_db(tmp_path, [("P", None, "compression"), ("C", "P", None)])
+    engine = _engine(tmp_path, "P")
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        engine.ingest([*head, _u("continue", 300.0), _a("ok old", 301.0),
+                       *_turns(40, 2, 350.0), _u("held R\n", 500.0)])
+        if host_form == "recorded-override":
+            engine._record_ws_host_rewrite(_rows(engine)[-1], _u("held R", 500.0))
+        engine.shutdown()
+        engine = _engine(tmp_path, "C")
+        composite = _u("held R\n\ncontinue", 500.0)
+        if host_form != "recorded-override":
+            composite["_merged_turn_prefix"] = "held R" + ("\n\n" if host_form == "r34.4" else "")
+        engine.ingest([SYSTEM, *_turns(41, 1, 360.0), composite, _a("reply", 511.0)])
+        assert [r["content"] for r in _rows(engine, "P")].count("continue") == 1
+        assert [r["content"] for r in _rows(engine, "C")].count("continue") == 1
+        assert composite["content"] not in [r["content"] for r in _rows(engine, "C")]
+    finally:
+        engine.shutdown()
 
 
 def test_r3_override_head_keeps_exact_remainder_and_adoption(tmp_path):

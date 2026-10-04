@@ -472,6 +472,7 @@ class IdentityAnchorMixin:
         reserved = self._identity_anchor_reserved(pool, shown(idx))
         pool = [row for row in pool if int(row["store_id"]) not in reserved]
         donors = [row for row in donors if int(row["store_id"]) not in reserved]
+        pool = [row for row in pool if row.get("observed_at") is None or float(row["observed_at"]) >= stamp]
         texts = {text for row in pool for text in self._identity_texts(row)}
         donor_texts = {text for row in donors for text in self._identity_texts(row)}
         group, ambiguous = self._identity_anchor_compose(content, texts, pool, donors, consumed)
@@ -774,6 +775,7 @@ class IdentityAnchorMixin:
                 reserved = self._identity_anchor_reserved(pool, shown - Counter([own] if own else []))
                 pool = [row for row in pool if int(row["store_id"]) not in reserved]
                 donors = [row for row in donors if int(row["store_id"]) not in mapped | reserved]
+                pool = [row for row in pool if row.get("observed_at") is None or float(row["observed_at"]) >= stamp]
                 group, _ambiguous = self._identity_anchor_compose(
                     content, {text for row in pool for text in self._identity_texts(row)}, pool, donors, set()
                 ) if donors else (None, False)
