@@ -476,6 +476,9 @@ def test_site1_host_key_keeps_duplicate_occurrence_uids(shape, monkeypatch):
     ({"id": " |fc_1 "}, "|fc_1"),
     ({"tool_call_id": " x|fc_1 "}, "x"),
     ({"id": "x"}, "x"),
+    ({"call_id": "  ", "id": "x"}, "x"),
+    ({"call_id": 5, "id": "x"}, "x"),
+    ({"call_id": "c |fc_1"}, "c"),
     ({}, ""),
     (None, ""),
 ])
@@ -571,5 +574,87 @@ def test_lcm_merge_externalized_constituent_is_unverified(tmp_path, externalized
             assert gate_lines() == before_lines
         else:
             assert _gate(second) == [("first", "agree", 0), ("second", "agree", 0)]
+    finally:
+        second.shutdown()
+
+
+DATA_URI = "data:image/png;base64," + __import__("base64").b64encode(bytes(range(256)) * 4).decode()
+
+
+def _write_call(call_id, args):
+    return {"id": call_id, "type": "function", "function": {"name": "write_file", "arguments": json.dumps(args)}}
+
+
+def _merged_after_ingest(tmp_path, host, **config):
+    _state_db(tmp_path, [("S", None, None)])
+    first = _engine(tmp_path)
+    first._hermes_home = str(tmp_path)
+    for key, value in config.items():
+        setattr(first._config, key, value)
+    try:
+        first._ingest_messages(copy.deepcopy(host))
+        stored = json.dumps([[r.get("content"), r.get("tool_calls")] for r in first._store.get_session_messages("S")])
+        return _merge_adjacent_assistant_messages(host)[0], stored
+    finally:
+        first.shutdown()
+
+
+@pytest.mark.parametrize("where", ["none", "tool_call", "content"])
+def test_lcm_merge_compares_stored_rows_with_ingest_placeholders_restored(tmp_path, where):
+    """As the single-row path does: a protected payload stored as a placeholder still proves the merge."""
+    from tests.test_host_uid_shadow import _classify, _gate
+
+    args = {"path": "a.png", "content": DATA_URI if where == "tool_call" else "small"}
+    host = [_m("assistant", "first " + DATA_URI if where == "content" else "first", 11.0, "first",
+               tool_calls=[_write_call("a", args)]),
+            _m("assistant", "second", 12.0, "second", tool_calls=[_write_call("b", {"path": "b"})])]
+    merged, stored = _merged_after_ingest(tmp_path, host)
+    assert (DATA_URI in stored) is False
+    second = _engine(tmp_path)
+    second._hermes_home = str(tmp_path)
+    try:
+        assert _classify(second, [merged], {"replayed": {0}, "matched": {}}) == {"replay.composite.agree.lcm_merge": 1}
+        assert _gate(second) == [("first", "agree", 0), ("second", "agree", 0)]
+    finally:
+        second.shutdown()
+
+
+def test_lcm_merge_compares_the_identity_form_of_a_redacted_tool_call(tmp_path):
+    from tests.test_host_uid_shadow import _counts
+
+    secret = "Authorization: Bearer abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+    host = [_m("assistant", "first", 11.0, "first", tool_calls=[_write_call("a", {"command": f"curl -H '{secret}' x"})]),
+            _m("assistant", "second", 12.0, "second", tool_calls=[_write_call("b", {"command": "pwd"})])]
+    merged, _stored = _merged_after_ingest(tmp_path, host, sensitive_patterns_enabled=True)
+    second = _engine(tmp_path)
+    second._config.sensitive_patterns_enabled = True
+    try:
+        identity = second._redact_active_replay_messages([merged])
+        capture = second._host_uid_capture([merged], identity, 0, 0, {"replayed": {0}, "matched": {}}, set())
+        second._host_uid_shadow(capture, {}, ())
+        assert _counts(second) == {"replay.composite.agree.lcm_merge": 1}
+    finally:
+        second.shutdown()
+
+
+def test_an_unused_stub_binding_does_not_turn_a_disagreement_into_unverified(tmp_path):
+    from tests.test_host_uid_shadow import _classify
+
+    host = [_m("assistant", "first", 11.0, "first", tool_calls=[_call("a")]),
+            _m("assistant", "second", 12.0, "second", tool_calls=[_call("b")])]
+    _state_db(tmp_path, [("S", None, None)])
+    first = _engine(tmp_path)
+    try:
+        first._ingest_messages(copy.deepcopy(host))
+        sid = first._store.append("S", {"role": "assistant", "content": "[Externalized payload: kind=raw_payload; ref=x]"})
+        lineage, _ = first._host_uid_lineage_key("S")
+        first._store.add_host_uid_bindings(lineage, [(sid, "first", "version", "version_new")])
+        merged = _merge_adjacent_assistant_messages(host)[0]
+    finally:
+        first.shutdown()
+    merged["tool_calls"][0]["function"]["arguments"] = '{"path":"changed"}'
+    second = _engine(tmp_path)
+    try:
+        assert _classify(second, [merged], {"replayed": {0}, "matched": {}}) == {"replay.bound.disagree.prefix_replay": 1}
     finally:
         second.shutdown()

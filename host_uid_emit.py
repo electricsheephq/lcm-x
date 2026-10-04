@@ -54,9 +54,13 @@ def host_tool_call_key(tool_call: Any) -> str:
     # Mirror agent.message_sanitization.coalesce_tool_call_id.
     if not isinstance(tool_call, dict):
         return ""
-    value = tool_call.get("call_id") or tool_call.get("id") or tool_call.get("tool_call_id")
+    for raw in (tool_call.get("call_id"), tool_call.get("id")):
+        value = raw.strip() if isinstance(raw, str) else ""
+        if value:
+            return value.split("|", 1)[0].strip() or value
+    value = tool_call.get("tool_call_id")
     key = str(value).strip() if value else ""
-    return key.split("|", 1)[0] or key
+    return key.split("|", 1)[0].strip() or key
 
 
 def per_occurrence_tool_call_uids(uids: dict, calls: list, call_id: Callable[[Any], str]) -> dict:
