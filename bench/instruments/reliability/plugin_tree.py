@@ -74,6 +74,14 @@ def parse_bool(tree: Path, key: str, value: str) -> tuple[bool, str]:
     return bool(ns["_parse_bool_env"](key, False)), f"config.py:{fn.lineno}"
 
 
+def recovery_prefixes(tree: Path) -> tuple[str, ...]:
+    """Literal prefixes before formatting fields, from the scored tree's recovery constants."""
+    return tuple(ast.literal_eval(n.value).split("{", 1)[0]
+                 for n in ast.walk(ast.parse((Path(tree) / "engine.py").read_text()))
+                 if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
+                 and n.targets[0].id in {"_OVERFLOW_RECOVERY_PLACEHOLDER", "_OVERFLOW_RECOVERY_OVERCAP_NOTE"})
+
+
 def carrier_markers(tree: Path) -> tuple[re.Pattern, tuple[str, ...]]:
     """The plugin's OWN generated-carrier markers at this tree: engine.py ``_LCM_SUMMARY_PART_HEADER_RE`` (the
     ``[Recent|Session Arc|Durable|Depth-N Summary (dN, node N)]`` part header its carrier detection verifies) and every
@@ -89,4 +97,4 @@ def carrier_markers(tree: Path) -> tuple[re.Pattern, tuple[str, ...]]:
                     prefixes.append(value.value)
     if not header or not prefixes:
         raise ValueError(f"no generated-carrier markers in {tree}")
-    return re.compile(header), tuple(prefixes)
+    return re.compile(header), tuple(prefixes) + recovery_prefixes(tree)
