@@ -912,3 +912,15 @@ def test_ci_gate_issue_hosts_declare_the_held_composite_issue_on_upstream_uid():
     for host in ("upstream-main", "eva-0.21.5"):
         rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
         assert len(ci.gate(rows, {821})) == 1
+
+
+def test_p8_controls_must_be_scorable_on_the_uid_host():
+    """#866: upstream-uid carries the flush seams, so a missing or UNSUPPORTED P8 control row there gates on both
+    transports, while the pre-uid hosts may still report the controls UNSUPPORTED."""
+    assert controls.P8_MUST_SUPPORT == {None: ("upstream-uid",), "acp-process": ("upstream-uid",)}
+    for host, gates in (("upstream-uid", True), ("upstream-main", False), ("eva-0.21.5", False)):
+        for transport in (None, "acp-process"):
+            unsupported = {cell: {"verdict": "UNSUPPORTED", "failed_bars": {}} for cell in controls.P8_CONTROLS}
+            rows = [{**r, "host": host} for r in full_set(transport, **unsupported)]
+            problems = ci.gate(rows, set())
+            assert bool(problems) is gates, (host, transport, problems)
