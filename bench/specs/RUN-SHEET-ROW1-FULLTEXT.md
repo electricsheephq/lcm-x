@@ -6,7 +6,8 @@ Nothing in this sheet spends money. Roadmap reference: H2 in `ROADMAP.md` (recal
 Public-copy rule: the merged copy carries no customer, box or person names, no internal aliases, no local paths.
 Amended (#818, before any scored run): the product is the lcm-x GA current at launch, run from a detached GA worktree
 (§2); one product sha across sub-rows; the R1-S dataset digest; phase-separated reader and judge launches; no reader
-tool use.
+tool use. Amended again (#833): no judge tool use either; the R1-M overlay must equal the instrument commit's blobs;
+the per-session summary-node maximum of every R1-S / R1-L store is recorded (§2, §6, §7).
 
 ## 0. Why this row
 - The product default is `embeddings_enabled=False`: recall is full-text unless a deployment turns embeddings on.
