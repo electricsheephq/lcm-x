@@ -208,7 +208,7 @@ class SurvivalFitMixin:
         self._survival_record(reason, count, ids, before, after, budget, projected, notice, warn_user=not exit_fit)
         return fitted
 
-    def _survival_summary_identity(self, row: dict, summary: str, uid, proof_kind: str, absorbed_from=None) -> dict:
+    def _survival_summary_identity(self, row: dict, summary: str, uid, proof_kind: str, absorbed_from=None, taken=()) -> dict:
         """The survival summary part (B1's gate): the carrier's engine uid, else a minted ``survival_summary``
         one; a re-formed carrier absorbs its user row's identity as the host's consecutive-user merge would."""
         if identity_emit_enabled():
@@ -216,7 +216,8 @@ class SurvivalFitMixin:
                 row["message_uid"] = uid
             else:
                 basis = hashlib.sha256(summary.encode("utf-8")).hexdigest()
-                self._mint_engine_uids([(row, "survival_summary", basis, proof_kind)])
+                self._mint_engine_uids([(row, "survival_summary", basis, proof_kind)],
+                                       taken=(message.get("message_uid") for message in taken))
             if absorbed_from is not None:
                 record_absorbed_message(row, absorbed_from)
         return row
@@ -266,11 +267,12 @@ class SurvivalFitMixin:
                 if (merged and kept[0].get("role") == "user" and isinstance(kept[0].get("content"), str)
                         and any(message.get("role") == "user" for message in kept[1:])
                         and self._generated_context_carrier_remainder(merged) == kept[0]["content"]):
-                    self._survival_summary_identity(merged, summary, summary_uid, "carrier", kept[0])  # site 19
+                    self._survival_summary_identity(merged, summary, summary_uid, "carrier", kept[0],
+                                                    taken=out + kept[1:])  # site 19
                     kept = [merged, *kept[1:]]
                 else:
                     out.append(self._survival_summary_identity({"role": "user", "content": summary}, summary,
-                                                               summary_uid, "survival_summary"))
+                                                               summary_uid, "survival_summary", taken=out + kept))
             return out + kept or result[-1:], count, ids, notice
 
         users = [i for i, message in enumerate(body) if isinstance(message, dict) and message.get("role") == "user"]

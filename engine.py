@@ -7916,7 +7916,7 @@ class LCMEngine(
                     })
                 tail_selected = tail_selected[1:]
         self._mint_assembled_engine_uids(result, emission_candidates, summary_message, carried_tail,
-                                         proactive_msg, generated_context_row)
+                                         proactive_msg, generated_context_row, tail_selected)
         result.extend(tail_selected)
 
         # ── Active-context cleanup / tool-pair guardrail ──
@@ -7972,7 +7972,7 @@ class LCMEngine(
         return result
 
     def _mint_assembled_engine_uids(self, result, candidates, summary_message, carried_tail, recall_row,
-                                    context_row) -> None:
+                                    context_row, tail_selected) -> None:
         """B2 (R4-1, R3-5 site 2; B1's gate): engine uids on the rows this assembly generated, in emitted order.
         A carrier keeps the summary's uid and absorbs the tail user row's identity as the host's
         consecutive-user merge would (no other tail key: it would replay the sidecar)."""
@@ -7990,7 +7990,8 @@ class LCMEngine(
         if context_row is not None:
             specs[id(context_row)] = ("generated_context", None, "generated_context")
         generated = [(row, *specs[id(row)]) for row in result if id(row) in specs]
-        self._mint_engine_uids(generated)
+        self._mint_engine_uids(generated, taken=(row.get("message_uid") for row in result + tail_selected
+                                               if id(row) not in specs))
         if carrier is not None:
             record_absorbed_message(carrier, carried_tail)
         for candidate in candidates:
@@ -8268,7 +8269,8 @@ class LCMEngine(
                                     tokens=skipped_user_tokens, cap=cap
                                 ),
                             }
-                            self._mint_engine_uids([(note, "overflow_note", None, "overflow_note")])
+                            self._mint_engine_uids([(note, "overflow_note", None, "overflow_note")],
+                                                   taken=(row.get("message_uid") for row in option + fallback[:-1]))
                             if count_messages_tokens(option + [note]) <= cap:
                                 return option + [note]
                             # Drop the retained row, then the system anchor, before the cap.
@@ -8297,7 +8299,8 @@ class LCMEngine(
                 len(tail_messages),
             )
             placeholder = {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
-            self._mint_engine_uids([(placeholder, "overflow_placeholder", None, "overflow_placeholder")])
+            self._mint_engine_uids([(placeholder, "overflow_placeholder", None, "overflow_placeholder")],
+                                   taken=(row.get("message_uid") for row in fallback[:-1]))
             return self._sanitize_active_context_messages(fallback[:-1]) + [placeholder]
         return candidate
 

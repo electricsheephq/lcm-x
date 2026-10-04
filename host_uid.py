@@ -128,7 +128,7 @@ class HostUidShadowMixin:
             conn.close()
         return (root, None) if root is not None else (None, "unresolved")
 
-    def _mint_engine_uids(self, generated) -> None:
+    def _mint_engine_uids(self, generated, taken=()) -> None:
         """R4-1 (B1's gate, a resolved lineage): ``[(row, kind, basis | None, proof_kind)]`` in emitted order gets
         deterministic engine uids, the ordinal counted per (kind, basis); ``basis`` None = the content's sha256.
         Pending until the compress that returns them records them; nothing else about the row changes."""
@@ -139,9 +139,12 @@ class HostUidShadowMixin:
             if lineage is None:
                 return
             seen, pending = Counter(), self.__dict__.setdefault("_engine_uids_pending", {})
+            taken = set(taken)
             for row, kind, basis, proof_kind in generated:
                 basis = basis or hashlib.sha256(str(row.get("content") or "").encode("utf-8")).hexdigest()
-                row["message_uid"] = uid = engine_uid(lineage, kind, basis, seen[(kind, basis)])
+                while (uid := engine_uid(lineage, kind, basis, seen[(kind, basis)])) in taken:
+                    seen[(kind, basis)] += 1
+                row["message_uid"] = uid
                 seen[(kind, basis)] += 1
                 pending[uid] = (lineage, proof_kind)
         except Exception as exc:  # fail open: an unminted row is a no-uid row, as at the base

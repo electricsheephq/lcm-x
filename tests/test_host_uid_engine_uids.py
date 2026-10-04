@@ -66,6 +66,55 @@ def _lineage(engine):
 
 # -- mint ---------------------------------------------------------------------------------------------------
 
+def test_recompress_with_carried_recall_has_unique_uids(tmp_path, monkeypatch):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path)
+    recall = "<relevant-memories>\nEarlier context\n</relevant-memories>"
+    monkeypatch.setattr(engine, "_build_proactive_recall_message",
+                        lambda *a: {"role": "user", "content": recall})
+    try:
+        out = _compress(engine, _host())
+        for i, row in enumerate(out):
+            row.setdefault("message_uid", f"host-{i}")
+        again = engine.compress(copy.deepcopy(out), current_tokens=100_000, bypass_cooldown=True)
+        assert sum(row["content"] == recall for row in again) == 2
+        uids = [(row["role"], row["message_uid"]) for row in again if row.get("message_uid")]
+        assert len(set(uids)) == len(uids)
+    finally:
+        engine.shutdown()
+
+
+def test_repeated_fallback_marker_has_unique_uids(tmp_path):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path)
+    engine.protect_first_n, engine.protect_last_n = 3, 4
+    try:
+        rows = [_m("user" if i % 2 == 0 else "assistant", f"row {i}", 10.0 + i, f"host-{i}")
+                for i in range(6)]
+        out = engine._fallback_tail_compaction(rows)
+        again = engine._fallback_tail_compaction(copy.deepcopy(out))
+        uids = [row["message_uid"] for row in again]
+        assert len(set(uids)) == len(uids)
+    finally:
+        engine.shutdown()
+
+
+def test_recall_uid_stable_when_earlier_copy_is_absent(tmp_path, monkeypatch):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path)
+    recall = "<relevant-memories>\nEarlier context\n</relevant-memories>"
+    monkeypatch.setattr(engine, "_build_proactive_recall_message",
+                        lambda *a: {"role": "user", "content": recall})
+    try:
+        out = _compress(engine, _host())
+        earlier = next(row for row in out if row["content"] == recall)
+        again = engine._assemble_context(None, copy.deepcopy(_host()[-4:]))
+        later = next(row for row in again if row["content"] == recall)
+        assert later["message_uid"] == earlier["message_uid"]
+    finally:
+        engine.shutdown()
+
+
 def test_engine_uid_formula_is_deterministic_and_distinct():
     uid = engine_uid("tag:root", "summary", "b" * 64, 0)
     expected = "lcmx-engine-uid\0tag:root\0summary\0" + "b" * 64 + "\0" + "0"
