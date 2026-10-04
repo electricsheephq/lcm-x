@@ -54,7 +54,7 @@ def load(state: Path, group, tree: str | None = None) -> tuple[dict | None, str 
     except sqlite3.Error as exc:
         return None, f"host state.db unreadable: {exc!r}"[:200]
     held, texts = defaultdict(list), {}  # (lineage, key) -> [(row id, session, active)]
-    standalone, merges = defaultdict(dict), []
+    standalone, merges = defaultdict(dict), {}
     for rid, sid, content, active, uid, raw_absorbed in rows:
         head = (content or "").lstrip()
         if multiset.norm(content or "") and not (header.match(head) or head.startswith(prefixes)):
@@ -71,7 +71,9 @@ def load(state: Path, group, tree: str | None = None) -> tuple[dict | None, str 
             if not absorbed:
                 standalone[(g, uid)][key] = content
             elif active == 1 and len(absorbed) + 1 <= multiset.COVER_PARTS:
-                merges.append((g, key, rid, [uid, *absorbed]))
+                uids = (uid, *absorbed)
+                if len(set(uids)) == len(uids):
+                    merges.setdefault((g, key, uids), rid)
     out = defaultdict(lambda: {"keys": {}, "tags": defaultdict(lambda: {"n": 0, "ids": []})})
     for (g, key), rs in held.items():
         n = max([1, *Counter(s for _r, s, a in rs if a == 1).values()])
@@ -81,7 +83,7 @@ def load(state: Path, group, tree: str | None = None) -> tuple[dict | None, str 
         for tag in tags:
             out[g]["tags"][tag]["n"] += n
             out[g]["tags"][tag]["ids"] = sorted(out[g]["tags"][tag]["ids"] + ids)
-    for g, key, rid, uids in merges:
+    for (g, key, uids), rid in merges.items():
         parts = [standalone.get((g, uid), {}) for uid in uids]
         if all(len(p) == 1 for p in parts):
             resolved = [next(iter(p.items())) for p in parts]

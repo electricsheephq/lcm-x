@@ -99,3 +99,21 @@ def test_host_merge_provenance_one_record_cannot_cover_two_deficits(tmp_path):
     out = score(host(tmp_path), expected=[("user", A + "\n\n" + B)] * 2, texts=(A, A, B, B))
     assert out["verdict"] == "FAIL" and out["deficit_rows"] == 1
     assert sum(p["as_parts"] for p in out["held_composites_as_parts"]) == 1
+
+
+def test_host_merge_provenance_copied_record_cannot_cover_two_deficits(tmp_path):
+    composite = A + "\n\n" + B
+    h = host(tmp_path, extra=[(47, "parent", "user", composite, 1, "a", '["b"]')])
+    out = score(h, expected=[("user", composite)] * 2, texts=(A, A, B, B))
+    assert out["verdict"] == "FAIL" and out["deficit_rows"] == 1
+    [pair] = out["held_composites_as_parts"]
+    assert pair["as_parts"] == 1 and pair["host_row_id"] == 47
+
+
+@pytest.mark.parametrize("absorbed,parts", [(["b", "b"], (A, B, B)), (["a", "b"], (A, A, B))])
+def test_host_merge_provenance_repeated_uid_cannot_pair(tmp_path, absorbed, parts):
+    composite = "\n\n".join(parts)
+    h = host(tmp_path, extra=[(50, "child", "user", composite, 1, "a", json.dumps(absorbed))])
+    out = score(h, expected=[("user", composite)], texts=parts)
+    assert out["verdict"] == "FAIL" and out["deficit_rows"] == 1
+    assert out["held_composites_as_parts"] == []
