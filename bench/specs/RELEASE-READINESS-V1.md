@@ -108,7 +108,7 @@ one threshold, doctor at close. Minimum 30 turns. Green =
   check below fails the borrowed-turn case that rule guarded. A missing, unique assistant item may match exactly
   one run of 2–8 consecutive non-empty assistant rows in one session, joined with a space or directly
   under v2's NFC, CRLF and whitespace-run normalization. Tool rows may intervene; every user row,
-  even empty, is a turn boundary. No fragment key may be a transcript item or serve two answers;
+  even empty, across any owned session is a turn boundary. No fragment key may be a transcript item; no row may serve two answers;
   extra copies of used fragments fail. Whole-row absence, uniqueness and fragment ownership use
   v2-normalized keys for this split exception only. The transcript must also be a subsequence of
   store-id-ordered rows (accepted fragments represent one answer); extras may intervene but retain

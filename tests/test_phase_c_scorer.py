@@ -52,14 +52,23 @@ def test_cli_count_mismatch_is_inconclusive(tmp_path, capsys, monkeypatch):
     assert "prompt/result count mismatch" in out["multiset"]["reason"]
 
 
-def test_role_dependent_edges_for_both_callers():
+def test_b2_strips_assistant_edges_but_phase_c_keeps_exact_bytes():
     expected = [("user", " prompt \n"), ("assistant", " answer \n")]
     rows = [(1, "S", "user", "prompt", 1), (2, "S", "assistant", " answer \n", 1)]
     assert multiset.score(expected, [r[:4] for r in rows])["verdict"] == "PASS"
     assert multiset.phase_c_score(expected, rows)["verdict"] == "PASS"
     rows[1] = (2, "S", "assistant", "answer", 1)
-    for out in (multiset.score(expected, [r[:4] for r in rows]), multiset.phase_c_score(expected, rows)):
-        assert (out["verdict"], out["deficit_rows"], out["surplus_rows"]) == ("FAIL", 1, 1)
+    assert multiset.score(expected, [r[:4] for r in rows])["verdict"] == "PASS"
+    out = multiset.phase_c_score(expected, rows)
+    assert (out["verdict"], out["deficit_rows"], out["surplus_rows"]) == ("FAIL", 1, 1)
+
+
+def test_b2_split_diagnostics_keep_edge_normalization():
+    out = multiset.score([("assistant", "ab")], [
+        (1, "S", "assistant", " a"), (2, "S", "assistant", "b \n")])
+    assert out["verdict"] == "FAIL"
+    assert (out["split_keys"], out["deficit_rows"], out["surplus_rows"]) == (1, 0, 2)
+    assert out["split_assistant_turns"][0]["split_match"] == [1, 2]
 
 
 def test_row_order_reports_first_transcript_index():
@@ -127,6 +136,15 @@ def test_every_user_row_is_split_turn_boundary(boundary):
     rows = split_rows() + [(2.5, "S", "user", boundary, 1)]
     assert multiset.phase_c_score([("user", "prompt"), ("assistant", "one\n\ntwo\n\nthree")], rows)[
         "verdict"] == "FAIL"
+
+
+def test_rotated_session_user_breaks_split_in_owning_conversation():
+    expected = [("user", "P1"), ("assistant", "ab"), ("user", "P2")]
+    rows = [(1, "S1", "user", "P1", "C"), (2, "S1", "assistant", "a", "C"),
+            (3, "S2", "user", "P2", "C"), (4, "S1", "assistant", "b", "C")]
+    out = multiset.phase_c_score(expected, rows)
+    assert out["verdict"] == "FAIL"
+    assert out["phase_c_split_matches"] == []
 
 
 def test_claimed_fragment_cannot_be_borrowed():
@@ -204,6 +222,16 @@ def test_fragments_cannot_be_reused_between_answers():
     out = multiset.phase_c_score(expected, split_rows())
     assert out["verdict"] == "FAIL"
     assert out["accepted_split_keys"] == 1
+
+
+def test_same_fragment_key_in_separate_runs_matches_r2_row_ownership():
+    expected = [("user", "P1"), ("assistant", "ab"), ("user", "P2"), ("assistant", "ac")]
+    rows = [(i + 1, "S", role, text, "C") for i, (role, text) in enumerate([
+        ("user", "P1"), ("assistant", "a"), ("assistant", "b"), ("user", "P2"),
+        ("assistant", "a"), ("assistant", "c")])]
+    out = multiset.phase_c_score(expected, rows)
+    assert out["verdict"] == "PASS"
+    assert [s["split_match"] for s in out["phase_c_split_matches"]] == [[2, 3], [5, 6]]
 
 
 def test_ambiguous_first_conversation_is_inconclusive():

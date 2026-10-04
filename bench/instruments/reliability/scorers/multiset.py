@@ -1,11 +1,8 @@
 """multiset-v1 lossless bar, ported from the v0.24.3-rc1 gauntlet ``lossless_bar_multiset.py``.
 
-Key = (role, sha256(content; user edges stripped, assistant bytes exact)) over non-empty user/assistant rows:
-internal whitespace is compared EXACTLY (a collapsed "\n\n" separator is a different row). The only licensed
-transform in whole-row keys is the user edge strip, which the host performs on ACP prompts (acp_adapter/server.py
-``user_text = _extract_text(prompt).strip()``: eva/rs34 :818, customer :786, upstream :820). Hermes also strips
-assistant content on store (``_assistant_content_for_storage``), so exact assistant keys rely on the drivers
-stripping ``raw_answer`` too. No NFC or CRLF
+Key = (role, sha256(edge-stripped content)) over non-empty B2 user/assistant rows; internal whitespace is exact.
+Phase C alone keeps assistant bytes exact; Hermes strips stored content, so its drivers must strip ``raw_answer``.
+No NFC or CRLF
 normalisation is applied: neither host nor plugin performs one on message content. Per key the
 stored row count must equal the expected (transcript) count: fewer = loss (deficit), more = duplicates
 (surplus). Repeated identical items are fine as long as the multiplicity matches. A stored-only key is
@@ -89,18 +86,20 @@ def licensed_parts(text: str, licences: dict, times: int) -> dict | None:
     return dict(Counter(parts)) if parts and len(parts) >= 2 else None
 
 
-def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict | None = None) -> dict:
+def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict | None = None,
+          *, _key=None) -> dict:
     """``expected``: (role, text) items; ``stored_rows``: (store_id, session_id, role, content); ``host``: the
     lineage's host occurrences (key -> {"n", "ids"}), or None."""
+    key_of = _key or (lambda role, text: (role, h(text)))
     stored, by_session = defaultdict(list), defaultdict(list)
     for sid, session, role, content in stored_rows:
         if role not in ("user", "assistant") or not norm(content or ""):
             continue
-        stored[row_key(role, content)].append(sid)
+        stored[key_of(role, content)].append(sid)
         if role == "assistant":
             by_session[session].append((sid, content or ""))
-    want = Counter(row_key(role, text) for role, text in expected if norm(text))
-    texts = {row_key(role, text): text for role, text in expected}
+    want = Counter(key_of(role, text) for role, text in expected if norm(text))
+    texts = {key_of(role, text): text for role, text in expected}
     composites, paired = [], Counter()
     # #823: each active host merge record covers one missing composite. Reserve transcript rows first;
     # consume its parts before surplus licensing so no stored row can serve both purposes.
@@ -132,7 +131,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
                 target = texts[key]
                 for rows in by_session.values():
                     for k in range(len(rows) - 1):
-                        if target == rows[k][1] + rows[k + 1][1]:  # exact assistant bytes, as in the keys
+                        if norm(target) == norm(rows[k][1] + rows[k + 1][1]):  # B2's edge-stripped split diagnostic
                             entry["split_match"] = [rows[k][0], rows[k + 1][0]]
                 if "split_match" in entry:
                     split.append(entry)
@@ -191,7 +190,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
 
 def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
     """Phase C adopts the release multiset-v2 split predicate (r2, sha256 8943a6a7…) without its own-turn
-    prompt rule; the store-order check below fails the borrowed-turn case that rule guarded.
+    prompt rule; unlike r2, user boundaries span the owning conversation. Store order guards own turns.
     Rows: (store_id, session_id, role, content, conversation_id). v2 normalization is split-only."""
     rows = sorted(rows, key=lambda r: r[0])
     items = [(i, r, t) for i, (r, t) in enumerate(expected) if norm(t)]
@@ -225,7 +224,7 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
                         break
                     if vk in (vkey(role, " ".join(c for _, c in run)), vkey(role, "".join(c for _, c in run))):
                         ids = [s for s, _ in run]
-                        if not any(ids[0] < u < ids[-1] for u in users[session]) and all(
+                        if not any(ids[0] < u < ids[-1] for ids_in_session in users.values() for u in ids_in_session) and all(
                                 vkey(role, c) not in want for _, c in run):
                             hits.append((ids, session))
                         break
@@ -235,7 +234,7 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
             replacements.append((ids[0], session, role, text))
             splits.append({"transcript_index": index, "role": role, "split_match": ids})
     matched = sorted([r for r in owned if r[0] not in used] + replacements, key=lambda r: r[0])
-    out = score(expected, matched)  # unused fragment copies remain surplus; no stored row is borrowed twice
+    out = score(expected, matched, _key=row_key)  # unused fragment copies remain surplus; no row is borrowed twice
     keys = {row_key(r, t) for r, t in expected if norm(t)}
     foreign_transcript_rows = sum(c != owner and r in ("user", "assistant") and bool(norm(t)) and
                                   row_key(r, t) in keys for _, _, r, t, c in rows)
