@@ -190,7 +190,7 @@ def user_text(cell, prefix, t):
     return text + ("\n" if ut.get("trailing_ws") else "")
 
 
-def install_p8(cell_dir, phase, faults, fired, fire, cur):
+def install_p8(cell_dir, phase, faults, fired, fire, cur, checkpoint=None):
     """Read-only, fail-open audit of the host's own resolution and commit seams (R1)."""
     state = {"supported": False, "notes": [], "duplicates": []}
     pinned, emitted, local = {}, set(), threading.local()
@@ -272,7 +272,11 @@ def install_p8(cell_dir, phase, faults, fired, fire, cur):
             # target first, so the pre-batch digest cannot tell ADOPT from REWRITE.
             canonical = msg.get("_canonical_row")
             adopted = isinstance(canonical, dict) and not canonical.get("_metadata_only")
-            rec["action"] = ("INSERT" if row is None else "LEGACY" if not isinstance(rec["expected"], str) else
+            # A dict that carried an address resolving to nothing (e.g. a parent-session _row_id after rotation:
+            # the resolvers are session-scoped) is reported apart from a plain insert, never failed.
+            addressed = isinstance(rec["row_id"], int) or isinstance(rec["expected"], str)
+            rec["action"] = ("UNRESOLVED" if row is None and addressed else "INSERT" if row is None else
+                             "LEGACY" if not isinstance(rec["expected"], str) else
                              "ADOPT" if adopted else
                              "REWRITE" if msg.get("_db_row_snapshot") != rec["expected"] else "MATCH")
             if hasattr(local, "records"):
@@ -298,6 +302,8 @@ def install_p8(cell_dir, phase, faults, fired, fire, cur):
                     safe(log, rec)
                 with agent._session_db._lock:
                     safe(log, {"event": "sweep", "duplicates": safe(sweep, agent._session_db._conn) or []})
+            if checkpoint:
+                safe(checkpoint)
             return result
         finally:
             del local.pairs, local.records
@@ -306,6 +312,8 @@ def install_p8(cell_dir, phase, faults, fired, fire, cur):
         result = commit(agent, *args, **kwargs)
         if result.session_commit_succeeded:
             safe(check_commit, agent, result.compressed)
+            if checkpoint:
+                safe(checkpoint)
         return result
 
     def check_commit(agent, messages):
