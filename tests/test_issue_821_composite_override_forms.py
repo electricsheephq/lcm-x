@@ -42,6 +42,143 @@ def test_r3_override_head_keeps_exact_remainder_and_adoption(tmp_path):
         engine.shutdown()
 
 
+@pytest.mark.parametrize("host_form", ["r34.4", "upstream"])
+@pytest.mark.parametrize("recorded", [False, True], ids=["first-composite", "same-override"])
+def test_merge_witness_records_head_before_r3_and_adoption(tmp_path, host_form, recorded):
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    raw, rest = "held R with  inner spaces\n", "  new U\n\nsecond  paragraph\n\t"
+    prefix = raw.strip()
+    try:
+        engine.ingest([*head, _u(raw, 500.0)])
+        row = _rows(engine)[-1]
+        if recorded:
+            engine._record_ws_host_rewrite(row, _u(prefix, 500.0))
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        composite = _u(prefix + "\n\n" + rest, 500.0)
+        composite["_merged_turn_prefix"] = prefix + ("\n\n" if host_form == "r34.4" else "")
+        plan = engine._identity_anchor_prematch([*head, composite], [*head, composite], 0)
+        assert plan["remainders"][len(head)] == (rest, 500.0, [row], [prefix])
+        key = f"host_rewrite_identity:{row['store_id']}"
+        payload = engine._store.read_metadata_json(key)
+        assert payload["content"] == prefix
+        engine.ingest([*head, composite, _a("reply", 511.0)])
+        texts = [r["content"] for r in _rows(engine)]
+        assert texts.count(raw) == texts.count(rest) == 1
+        assert composite["content"] not in texts
+        remainder = next(r for r in _rows(engine) if r["content"] == rest)
+        assert remainder["observed_at"] is None
+        assert [rel[2] for rel in _relations(engine) if rel[1] == "composite"] == [
+            row["store_id"], remainder["store_id"]]
+        before = len(_rows(engine))
+        engine.ingest([*head, _u(prefix, 500.0), _u(rest, 510.0), _a("reply", 511.0)])
+        assert len(_rows(engine)) == before
+        assert engine._store.read_metadata_json(key) == payload
+        # Adoption's identical capture uses the same payload and skip_unchanged writer.
+        changes = engine._store._conn.total_changes
+        engine._record_ws_host_rewrite(row, _u(prefix, 500.0))
+        assert engine._store._conn.total_changes == changes
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("case", [
+    "no-marker", "non-string", "inner-whitespace", "two-donors", "no-stamp", "wrong-prefix",
+    "both-forms", "multi-row-head", "lossy-head", "lossy-stored", "different-override",
+])
+def test_unbound_merge_witness_stores_whole(tmp_path, case):
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    raw, prefix = "held R with  spaces\n", "held R with  spaces"
+    if case == "both-forms":
+        raw = "\t" + raw  # the raw form must not independently explain the composite
+    if case == "lossy-stored":
+        prefix = "held [LCM sensitive redaction: name=password_assignment; length=8] R"
+        raw = prefix + "\n"
+    try:
+        engine.ingest([*head, _u(raw, 500.0)])
+        row = _rows(engine)[-1]
+        key = f"host_rewrite_identity:{row['store_id']}"
+        if case == "different-override":
+            _override(engine, row, " " + prefix)
+        elif case == "two-donors":
+            engine.ingest([*head, _u(raw, 500.0), _u("other donor\n", 500.0)])
+        elif case == "multi-row-head":
+            engine.ingest([*head, _u(raw, 500.0), _u("second stored part\n", 510.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        before = engine._store.read_metadata_json(key)
+        if case == "inner-whitespace":
+            prefix = prefix.replace("  ", " ")
+        elif case == "lossy-head":
+            prefix = "held [LCM sensitive redaction: name=password_assignment; length=8] R"
+        elif case == "multi-row-head":
+            prefix += "\n\nsecond stored part"
+        composite = _u(prefix + "\n\nnew U", None if case == "no-stamp" else 500.0)
+        marker = prefix + "\n\n"
+        if case == "wrong-prefix":
+            marker = "different head\n\n"
+        elif case == "both-forms":
+            composite["content"] = marker + "\n\nnew U"
+        elif case == "non-string":
+            marker = 12
+        if case != "no-marker":
+            composite["_merged_turn_prefix"] = marker
+        engine.ingest([*head, composite, _a("reply", 511.0)])
+        assert composite["content"] in [r["content"] for r in _rows(engine)]
+        assert not [rel for rel in _relations(engine) if rel[1] == "composite"]
+        assert engine._store.read_metadata_json(key) == before
+    finally:
+        engine.shutdown()
+
+
+def test_merge_witness_preserves_different_override_even_if_replay_identity_agrees(tmp_path):
+    engine = _engine(tmp_path)
+    raw, prefix = "held R\n", "held R"
+    override = "[Note: model was just switched from X to Y.]\n\n" + prefix
+    try:
+        engine.ingest([SYSTEM, _u(raw, 500.0)])
+        row = _rows(engine)[-1]
+        _override(engine, row, override)
+        composite = _u(prefix + "\n\nnew U", 500.0)
+        composite["_merged_turn_prefix"] = prefix + "\n\n"
+        assert engine._message_replay_identity(row, stored_row=True, with_host_rewrite=True)[1] == prefix
+        engine._capture_merged_user_head(composite, [(row, engine._stored_row_forms(row))], set())
+        assert engine._host_rewrite_override_content(row) == override
+    finally:
+        engine.shutdown()
+
+
+def test_merge_witness_write_failure_keeps_ingest_and_redacts_log(tmp_path, monkeypatch, caplog):
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    raw, prefix = "held R\n", "held R"
+    try:
+        engine.ingest([*head, _u(raw, 500.0)])
+        row = _rows(engine)[-1]
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        write = engine._store.write_metadata_json
+
+        def fail(keys, *args, **kwargs):
+            if keys == [f"host_rewrite_identity:{row['store_id']}"]:
+                raise RuntimeError("private exception details")
+            return write(keys, *args, **kwargs)
+
+        monkeypatch.setattr(engine._store, "write_metadata_json", fail)
+        composite = _u(prefix + "\n\nnew U", 500.0)
+        composite["_merged_turn_prefix"] = prefix + "\n\n"
+        engine.ingest([*head, composite, _a("reply", 511.0)])
+        assert composite["content"] in [r["content"] for r in _rows(engine)]
+        assert not [rel for rel in _relations(engine) if rel[1] == "composite"]
+        assert engine._store.read_metadata_json(f"host_rewrite_identity:{row['store_id']}") is None
+        assert f"store_id {row['store_id']}" in caplog.text and "RuntimeError" in caplog.text
+        assert "private exception details" not in caplog.text
+    finally:
+        engine.shutdown()
+
+
 def test_r2_two_override_constituents_replay_and_witness(tmp_path):
     engine = _engine(tmp_path)
     head = [SYSTEM, *_turns(1, 2, 0.0)]

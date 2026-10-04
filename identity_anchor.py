@@ -291,6 +291,7 @@ class IdentityAnchorMixin:
                     plan.setdefault("ws", []).append((row, identity_messages[idx]))
                     self._identity_anchor_take(idx, [row], consumed, matched, plan)
                     continue
+                self._capture_merged_user_head(identity_messages[idx], by_stamp[stamps[idx]], consumed)
                 self._identity_anchor_user_row(idx, identity, stamps[idx], by_stamp, consumed, matched, plan, view_count,
                                                shown)
             elif idx not in stamps and idx not in plan["replayed"]:  # D-D plan (ii): H1 merged LCM's carrier
@@ -405,6 +406,36 @@ class IdentityAnchorMixin:
         opcodes = SequenceMatcher(None, list(before[start:]), now, autojunk=False).get_opcodes()
         return {start + j for tag, _i1, _i2, j1, j2 in opcodes if tag == "insert" for j in range(j1, j2)
                 if start + j < cursor}
+
+    def _capture_merged_user_head(self, message, stamped, consumed) -> None:
+        """#821: an occurrence-bound host merge marker records the head before R2/R3 matching."""
+        from .reconcile import _proof_user_identity
+
+        marker, content = message.get("_merged_turn_prefix"), message.get("content")
+        if not isinstance(marker, str) or not isinstance(content, str):
+            return
+        upstream = content == marker or content.startswith(marker + "\n\n")
+        r34 = marker.endswith("\n\n") and content.startswith(marker)
+        if upstream == r34:  # ambiguous or absent host form: nothing inferred
+            return
+        donors = [r for r, _forms in stamped if r.get("role") == "user" and int(r["store_id"]) not in consumed]
+        if len(donors) != 1:
+            return
+        row = donors[0]
+        head = {**message, "content": marker[:-2] if r34 else marker}
+        live, stored = self._message_replay_identity(head, strip_carrier=False), self._message_replay_identity(row, stored_row=True)
+        if _lossy(live) or _lossy(stored) or _proof_user_identity(live) != _proof_user_identity(stored):
+            return
+        override = self._host_rewrite_override_content(row)
+        if override is not None and override != head["content"]:
+            return
+        store_id = int(row["store_id"])
+        try:
+            self._record_ws_host_rewrite(row, head)  # existing payload, protection and skip_unchanged writer
+        except Exception as exc:
+            logger.warning("LCM merge-head capture for store_id %s failed (%s)", store_id, type(exc).__name__)
+            return
+        self._identity_anchor_text_memo.pop(store_id, None)
 
     def _identity_anchor_user_row(self, idx, identity, stamp, by_stamp, consumed, matched, plan, view_count, shown) -> None:
         """R2/R3/R5 for one unmatched user row: a recorded witness, an exact unique decomposition,
