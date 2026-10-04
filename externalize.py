@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import codecs
 import contextvars
-from bisect import insort
 from contextlib import contextmanager
 import hashlib
 import json
@@ -30,7 +29,7 @@ _EXTERNALIZED_REF_RE = re.compile(
 _EXTERNALIZED_SEARCH_HEADER_BYTES = 64 * 1024
 _EXTERNALIZED_SEARCH_TAIL_BYTES = 64 * 1024
 
-_payload_lookup_memo: contextvars.ContextVar[dict[Path, dict[str, list[str]]] | None] = (
+_payload_lookup_memo: contextvars.ContextVar[dict[Path, tuple[dict[str, set[str]], set[str]]] | None] = (
     contextvars.ContextVar("lcm_payload_lookup_memo", default=None)
 )
 _PAYLOAD_NAME_PREFIX_RE = re.compile(r"(?<=_)[0-9a-f]{12}(?=_)")
@@ -49,15 +48,13 @@ def payload_lookup_scope():
         _payload_lookup_memo.reset(token)
 
 
-def _index_payload_name(index: dict[str, list[str]], name: str) -> None:
+def _index_payload_name(index: dict[str, set[str]], name: str) -> None:
     # Index every matching segment, not just filenames minted by this module:
     # the lookup's *_{digest_prefix}_*.json glob accepts arbitrary surrounding text.
     if not name.endswith(".json"):
         return
     for match in _PAYLOAD_NAME_PREFIX_RE.finditer(name):
-        names = index.setdefault(match.group(), [])
-        if name not in names:
-            insort(names, name)
+        index.setdefault(match.group(), set()).add(name)
 
 
 def _payload_lookup_candidates(storage_dir: Path, digest_prefix: str):
@@ -66,20 +63,25 @@ def _payload_lookup_candidates(storage_dir: Path, digest_prefix: str):
         yield sorted(storage_dir.glob(f"*_{digest_prefix}_*.json"))
         return
     if storage_dir not in memo:
-        index: dict[str, list[str]] = {}
+        index: dict[str, set[str]] = {}
         try:
             with os.scandir(storage_dir) as entries:
                 for entry in entries:
                     _index_payload_name(index, entry.name)
         except OSError:
             pass  # The existing glob below remains the miss fallback.
-        memo[storage_dir] = index
-    index = memo[storage_dir]
-    yield [storage_dir / name for name in index.get(digest_prefix, ())]
+        memo[storage_dir] = (index, set())
+    index, globbed = memo[storage_dir]
+    yield [storage_dir / name for name in sorted(index.get(digest_prefix, ()))]
     # Reached only when none of the indexed candidates passed the existing checks.
+    # Another process's writes after this digest's glob wait until the next scope;
+    # this module's writes keep the index current throughout the scope.
+    if digest_prefix in globbed:
+        return
     candidates = sorted(storage_dir.glob(f"*_{digest_prefix}_*.json"))
     for path in candidates:
         _index_payload_name(index, path.name)
+    globbed.add(digest_prefix)
     yield candidates
 
 
@@ -251,7 +253,7 @@ def _write_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
             os.close(fd)
     memo = _payload_lookup_memo.get()
     if memo is not None and path.parent in memo:
-        _index_payload_name(memo[path.parent], path.name)
+        _index_payload_name(memo[path.parent][0], path.name)
 
 
 def _replace_externalized_payload(path: Path, payload: Dict[str, Any]) -> None:
