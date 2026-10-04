@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bench.instruments.reliability import acp_driver as AD, cells, ci, fake_provider as FP, hosts, plugin_tree, probe  # noqa: E402
-from bench.instruments.reliability import process_cell as PC, run_matrix as RM  # noqa: E402
+from bench.instruments.reliability import controls, process_cell as PC, run_matrix as RM  # noqa: E402
 from bench.instruments.reliability.scorers import chronology  # noqa: E402
 
 
@@ -371,10 +371,31 @@ def test_extra_turns_only_when_a_pass_just_consumed_the_backlog(tmp_path):
 
 
 def full_set(transport=None, **over):
-    """One PASS row per expected cell of one (host, transport, plugin sha), with ``over`` = {cell: row fields}."""
+    """One row per expected cell, PASS except the red P8 controls; ``over`` = {cell: row fields}."""
     extra = {"transport": transport} if transport else {}
-    return [{"verdict": "PASS", "host": "h", "plugin_sha": "s", "cell": c, "targets": [], **extra, **over.get(c, {})}
+    return [{"verdict": "PASS", "host": "h", "plugin_sha": "s", "cell": c, "targets": [], **extra,
+             **({"verdict": "FAIL", "failed_bars": {"B9": {}}}
+                if c.startswith("p8-control/") and c != "p8-control/none" else {}), **over.get(c, {})}
             for c in ci.expected_cells(transport)]
+
+
+@pytest.mark.parametrize("transport", [None, "acp-process"])
+def test_ci_gate_checks_p8_control_pattern_and_required_support(monkeypatch, transport):
+    monkeypatch.setattr(controls, "P8_MUST_SUPPORT", {transport: ("h",)}, raising=False)
+    rows = full_set(transport)
+    assert ci.gate(rows, set()) == []
+    inverted = [{**r, "verdict": "PASS" if r["verdict"] == "FAIL" else "FAIL"}
+                if r["cell"].startswith("p8-control/") else r for r in rows]
+    assert len(ci.gate(inverted, set())) == 4
+    for wrong in ({"verdict": "UNSUPPORTED"}, {"verdict": "INCONCLUSIVE"}, {"failed_bars": {}},
+                  {"failed_bars": {"B1": {}}}):
+        problems = ci.gate(full_set(transport, **{"p8-control/archived": wrong}), set())
+        assert len(problems) == 1 and "P8 control" in problems[0]
+    missing = [r for r in rows if r["cell"] != "p8-control/none"]
+    assert any("P8 control" in p for p in ci.gate(missing, set()))
+    unsupported = full_set(transport, **{"p8-control/archived": {"verdict": "UNSUPPORTED"}})
+    assert ci.gate([{**r, "host": "another-host"} for r in unsupported], set()) == []
+    assert len(ci.gate([{**r, "host": "another-host"} for r in inverted], set())) == 4
 
 
 def test_ci_gate_fails_on_error_and_on_untracked_g_rel_1_fail():
@@ -867,9 +888,10 @@ def test_drain_fixture_b_keeps_an_errored_call_failing_d2_when_nothing_was_archi
 
 
 def test_ci_gate_issue_transports_scope_an_acp_only_exemption():
-    """#861 declares B1/B2 on eva/customer for acp-process rows only: the in-process row of the same cell still gates."""
+    """#861 declares B1/B2 on eva, customer, r34.4 and upstream-uid for acp-process rows only: the in-process row of the
+    same cell still gates, and so does an acp-process FAIL on upstream-main, where the race was not seen."""
     fail = {"verdict": "FAIL", "targets": [519, 549, 821, 861], "failed_bars": {"B1": {}, "B2": {}}}
-    for host in ("eva-0.21.5", "customer-0.21.2"):
+    for host in ("eva-0.21.5", "customer-0.21.2", "r34.4-0.21.5", "upstream-uid"):
         acp = [{**r, "host": host} for r in full_set("acp-process", **{"crash-after-rotation/rotation": fail})]
         assert ci.gate(acp, {861}) == []
         in_process = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
@@ -878,3 +900,28 @@ def test_ci_gate_issue_transports_scope_an_acp_only_exemption():
     upstream = [{**r, "host": "upstream-main"} for r in full_set("acp-process", **{"crash-after-rotation/rotation": fail})]
     assert len(ci.gate(upstream, {861})) == 1
 
+
+
+def test_ci_gate_issue_hosts_declare_the_held_composite_issue_on_upstream_uid():
+    """#821 (a held composite vs its durable parts after a crash on rotation) is reproduced on r34.4 and on upstream
+    from 2667c960 (upstream-uid), so its bars are declared there. upstream-main (6f7a7991) and the other release hosts
+    do not show it, so a FAIL there still gates."""
+    fail = {"verdict": "FAIL", "targets": [519, 549, 821, 861], "failed_bars": {"B1": {}, "B3": {}, "B4": {}, "B5": {}, "B8": {}}}
+    for host in ("r34.4-0.21.5", "upstream-uid"):
+        rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
+        assert ci.gate(rows, {821}) == []
+    for host in ("upstream-main", "eva-0.21.5"):
+        rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
+        assert len(ci.gate(rows, {821})) == 1
+
+
+def test_p8_controls_must_be_scorable_on_the_uid_host():
+    """#866: upstream-uid carries the flush seams, so a missing or UNSUPPORTED P8 control row there gates on both
+    transports, while the pre-uid hosts may still report the controls UNSUPPORTED."""
+    assert controls.P8_MUST_SUPPORT == {None: ("upstream-uid",), "acp-process": ("upstream-uid",)}
+    for host, gates in (("upstream-uid", True), ("upstream-main", False), ("eva-0.21.5", False)):
+        for transport in (None, "acp-process"):
+            unsupported = {cell: {"verdict": "UNSUPPORTED", "failed_bars": {}} for cell in controls.P8_CONTROLS}
+            rows = [{**r, "host": host} for r in full_set(transport, **unsupported)]
+            problems = ci.gate(rows, set())
+            assert bool(problems) is gates, (host, transport, problems)

@@ -183,7 +183,10 @@ gateway cells are UNSUPPORTED with the reason; `--transport gateway-process` is 
 ### Nightly CI (`.github/workflows/reliability-nightly.yml`)
 Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `pull_request` path-filtered to
 `bench/instruments/reliability/**` and the workflow file. Not a required check; default token only. Matrix over
-`hosts.ci.json` (pinned shas): eva-0.21.5, customer-0.21.2 and r34.4-0.21.5 on Python 3.11, upstream-main on 3.14. `ci.py prep`
+`hosts.ci.json` (pinned shas): eva-0.21.5, customer-0.21.2 and r34.4-0.21.5 on Python 3.11, upstream-main and upstream-uid
+on 3.14. upstream-uid (2667c960) is upstream after its message-uid change: the one CI host with message uids and the P8
+flush seams. upstream-main (6f7a7991) stays before it, where the host archive copies uncovered rows behind the running
+turn (the shape that exposed #845). `ci.py prep`
 fetches the sha and installs it editable with `[acp,edge-tts,bedrock,vertex,anthropic]` (the harness verifies git HEAD
 and cites source); R1 all cells and R2 acp-process all cells run with `--plugin-ref HEAD`; MATRIX.md is the job
 summary and results are uploaded. `ci.py gate` fails on any ERROR, on a FAIL in the G-REL-1 cell set unless every
@@ -199,12 +202,17 @@ at a deterministic localhost fake. It does not prove live-model behaviour, the g
 one process, or the process-side publication-failure hook (R2b, #569), and it says nothing about customer boxes.
 
 P8 / B9 audits R1 in-process and R2 `acp-process` host flushes using the host's own resolvers and digests:
-I0 pins committed live addresses; I1 forbids archived writes/adopts; I2 pins role/uid
+I0 pins committed live addresses; I1 forbids archived writes/adopts; I2 pins session/role/uid
 and unique uid-snapshot resolution; I3 forbids adopts; I5 rejects active uid twins
 involving LCM output (host-only twins are reported). Events contain no payload.
-Missing host seams, audit errors, no observed commit or no observed host flush give B9 UNSUPPORTED; transport
-labels alone do not decide it. A flushed dict whose address resolves to no row is counted as `UNRESOLVED`
+Missing host seams, audit errors, no observed commit or no observed host flush give B9 UNSUPPORTED. At least one
+flush must follow a commit of the same session in log order, across phases; otherwise B9 is UNSUPPORTED too.
+The audit records the resolved target's session and fails I2 on a mismatch; older events without that field
+keep their previous scoring. A flushed dict whose address resolves to no row is counted as `UNRESOLVED`
 (report-only: after a rotation a parent-session `_row_id` legitimately resolves to nothing), not as `INSERT`.
 `p8-control/{archived,other-active,random-snapshot}` fail I1/I2/I3; `none` passes.
 On R2 the same controls inject after the second commit inside the ACP subprocess.
+The nightly gate checks this pattern per host and transport, with B9 required in each FAIL's failed bars.
+`controls.py` records the measured must-support pairs, where missing or UNSUPPORTED controls gate; other pairs
+may be UNSUPPORTED, but any PASS/FAIL must match.
 Disable wraps with `LCM_RELIABILITY_P8=off` or `--lcm-env LCM_RELIABILITY_P8=off`; faults stay.

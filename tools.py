@@ -90,7 +90,7 @@ from .retrieval_core import (
     run_knn,
 )
 from .rollup_store import RollupStore
-from .search_query import AGE_DECAY_RATE, normalize_search_sort
+from .search_query import AGE_DECAY_RATE, build_recall_or_query, normalize_search_sort
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
 from .store import build_message_fts_spec
@@ -3272,6 +3272,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 time_from=time_from,
                 time_to=time_to,
                 exclude_session_ids=excluded_session_ids,
+                allow_operators=bool(args.get("_allow_operators", False)),
             )
             for hit in msg_hits:
                 if hit.get("session_id") in excluded_session_ids:
@@ -4358,6 +4359,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": exclusions_error})
     parsed_args = dict(args)
     parsed_args["_excluded_session_ids"] = excluded_session_ids
+    parsed_args.pop("_allow_operators", None)
     if mode == "full_text":
         return _lcm_grep_full_text(parsed_args, **kwargs)
 
@@ -5108,9 +5110,12 @@ def _lcm_recall_fts_arm(
     excluded_session_ids: set[str],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """FTS arm: raw messages across all eligible sessions."""
+    or_query = build_recall_or_query(query)
     payload = _lcm_grep_full_text_with_deadline(
         {
-            "query": query,
+            "query": or_query or query,
+            "_allow_operators": bool(or_query),
+            "sort": "relevance" if or_query else "recency",
             "mode": "recall",
             "session_scope": "all",
             "limit": candidate_limit,
