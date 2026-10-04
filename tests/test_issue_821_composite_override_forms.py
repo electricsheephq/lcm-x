@@ -72,6 +72,27 @@ def test_r2_two_override_constituents_replay_and_witness(tmp_path):
         engine.shutdown()
 
 
+def test_existing_raw_duplicate_constituents_keep_donor_order(tmp_path):
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    r, u = _u("identical raw occurrence", 500.0), _u("identical raw occurrence", 510.0)
+    try:
+        engine.ingest([*head, r, u])
+        rows = _rows(engine)[-2:]
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        composite = _u(r["content"] + "\n\n" + u["content"], 500.0)
+        engine.ingest([*head, composite, _a("reply", 511.0)])
+        assert composite["content"] not in [row["content"] for row in _rows(engine)]
+        assert [rel[2] for rel in _relations(engine) if rel[1] == "composite"] == [
+            row["store_id"] for row in rows]
+        engine._identity_anchor_text_memo = {}
+        engine._last_compacted_store_id = rows[-1]["store_id"]
+        assert engine._identity_anchor_covered_view(composite, {})
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("case", ["inner-whitespace", "no-override", "collision", "lossy"])
 def test_unproven_or_ambiguous_constituent_stores_whole(tmp_path, case):
     engine = _engine(tmp_path)

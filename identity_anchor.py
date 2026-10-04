@@ -547,6 +547,9 @@ class IdentityAnchorMixin:
     def _identity_anchor_group_matches(self, content, group) -> bool:
         """A witnessed composite in one unique ordered choice of admissible constituent forms."""
         forms = [self._identity_texts(row) for row in group]
+        raw = [self._message_replay_identity(row, stored_row=True)[1] for row in group]
+        if content == "\n\n".join(raw) and all(text in forms[i] for i, text in enumerate(raw)):
+            return True  # keep the existing occurrence-bound raw witness, including repeated texts
         found = _decompositions(content, set().union(*forms), partial=False) if forms else None
         full = [parts for parts, rest in found or () if not rest]
         return (len(full) == 1 and len(full[0]) == len(group)
@@ -597,7 +600,8 @@ class IdentityAnchorMixin:
         return _reserve_shown(pool, self._stored_row_forms, list(enumerate(shown.elements())), aliases) if pool else set()
 
     def _identity_anchor_assign(self, parts, pool, donors, consumed) -> Optional[list]:
-        """Bind each part to one unique stored occurrence, each used once;
+        """Bind each part to one stored occurrence (a donor first), each used once;
+        an override collision cannot choose between rows whose raw forms differ from the part.
         ``pool`` holds no row the host view shows as its own occurrence (B-ID-1)."""
         taken: set[int] = set(consumed)
         donor_ids = {int(row["store_id"]) for row in donors}
@@ -606,7 +610,9 @@ class IdentityAnchorMixin:
             options = sorted((row for row in pool if text in self._identity_texts(row)
                               and int(row["store_id"]) not in taken),
                              key=lambda row: (int(row["store_id"]) not in donor_ids, int(row["store_id"])))
-            if len(options) != 1:
+            if not options or len(options) > 1 and any(
+                self._message_replay_identity(row, stored_row=True)[1] != text for row in options
+            ):
                 return None
             taken.add(int(options[0]["store_id"]))
             group.append(options[0])
