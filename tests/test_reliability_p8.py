@@ -213,6 +213,19 @@ def test_disabled_and_missing_seams_keep_original_callables(monkeypatch, tmp_pat
     assert original == (repair.resolve_and_repair_transcript_batch, persistence._db_flush_write, compression._commit_compaction)
 
 
+@pytest.mark.parametrize("history", ["{", "[]", '{"p8":{"emitted":null}}',
+                                    '{"p8":{"emitted":[["S0","user"]]}}'])
+def test_malformed_phase_history_fails_open_and_makes_b9_unsupported(monkeypatch, tmp_path, history):
+    _, persistence, _, ag, live, _, marker = fake_host(monkeypatch, tmp_path)
+    (tmp_path / "phase-A.json").write_text(history)
+    state, _, finish = probe.install_p8(tmp_path, "B", {}, set(), None, {})
+    assert state["notes"] == ["phase_history_unreadable"]
+    assert persistence._db_flush_write(ag, [live], [live], [live]) is marker
+    out = scored(tmp_path, [COMMIT, FLUSH], phases=[{"p8": finish()}], cell={"bars": ["B9"]})
+    assert out["verdict"] == "UNSUPPORTED"
+    assert out["reason"] == "incomplete audit; see phase harness notes"
+
+
 @pytest.mark.parametrize("mode", ["on", "off", "missing"])
 def test_process_observer_installs_once_pins_output_and_records_audit(monkeypatch, tmp_path, mode):
     import importlib.util

@@ -242,7 +242,13 @@ def install_p8(cell_dir, phase, faults, fired, fire, cur, checkpoint=None):
         return state, pin, lambda: state
     state["supported"] = enabled
     for path in cell_dir.glob("phase-*.json"):
-        emitted.update(tuple(k) for k in json.loads(path.read_text()).get("p8", {}).get("emitted", []))
+        try:
+            history = json.loads(path.read_text()).get("p8", {}).get("emitted", [])
+            if not isinstance(history, list) or any(not isinstance(k, list) or len(k) != 3 for k in history):
+                raise ValueError
+            emitted.update(tuple(k) for k in history)
+        except (OSError, ValueError, TypeError, AttributeError):
+            state["notes"].append("phase_history_unreadable")
 
     def before(conn, sid, rows):
         records = []
