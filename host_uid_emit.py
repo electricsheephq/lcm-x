@@ -61,8 +61,22 @@ def record_absorbed_message(survivor: dict, dropped: dict) -> None:
         survivor["_absorbed_message_uids"] = absorbed
 
 
+def host_tool_call_key(tool_call: Any) -> str:
+    """Return the host's UID-map key, with LCM's tool_call_id fallback last."""
+    # Mirror agent.message_sanitization.coalesce_tool_call_id.
+    if not isinstance(tool_call, dict):
+        return ""
+    for raw in (tool_call.get("call_id"), tool_call.get("id")):
+        value = raw.strip() if isinstance(raw, str) else ""
+        if value:
+            return value.split("|", 1)[0].strip() or value
+    value = tool_call.get("tool_call_id")
+    key = str(value).strip() if value else ""
+    return key.split("|", 1)[0].strip() or key
+
+
 def per_occurrence_tool_call_uids(uids: dict, calls: list, call_id: Callable[[Any], str]) -> dict:
-    """Mirror agent.message_metadata.per_occurrence_tool_call_uids using LCM's id extractor."""
+    """Mirror agent.message_metadata.per_occurrence_tool_call_uids using the supplied key."""
     counts = Counter(cid for call in calls if (cid := call_id(call)))
     expanded = dict(uids)
     for cid, count in counts.items():
