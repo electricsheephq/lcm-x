@@ -105,6 +105,101 @@ def test_clean_cell_passes_every_bar(tmp_path):
     assert out["applicable_bars"] == ["B1", "B2", "B3", "B4", "B5", "B8"]
 
 
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("kind", ["placeholder", "note"])
+def test_recovery_host_echo_never_licenses_stored_surplus(tmp_path, composite, kind):
+    tree = Path(__file__).resolve().parents[1]
+    prefixes = plugin_tree.recovery_prefixes(tree)
+    assert len(prefixes) == 2 and set(prefixes) <= set(plugin_tree.carrier_markers(tree)[1])
+    text = next(p for p in prefixes if ("latest message" in p) == (kind == "note"))
+    text += "123 tokens) is stored." if kind == "note" else ""
+    if composite:
+        text = U.format(1, 1) + "\n\n" + text
+    out = make(tmp_path, rows=clean_rows() + [("user", text)], events=clean_events(),
+               host=[("S0", "user", text, 1)], plugin={"tree": str(tree)})
+    assert out["verdict"] == "FAIL" and "B2" in out["failed_bars"]
+    assert out["numbers"]["B2"]["stored_rows_not_expected"] == 1
+    assert out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 0
+    if composite:
+        assert "B1" in out["failed_bars"]
+
+
+def test_recovery_exclusion_preserves_embedded_objective_licence(tmp_path):
+    tree = Path(__file__).resolve().parents[1]
+    text = "ordinary user text\n\n[Current user objective preserved from compacted history] quoted"
+    out = make(tmp_path, rows=clean_rows() + [("user", text)], events=clean_events(),
+               host=[("S0", "user", text, 1)], plugin={"tree": str(tree)})
+    assert out["verdict"] == "PASS" and out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 1
+
+
+@pytest.mark.parametrize("marked,prior,verdict", [(False, True, "UNSUPPORTED"), (True, False, "UNSUPPORTED"),
+                                                 (True, True, "PASS")])
+def test_forced_recovery_requires_marker_and_prior_compaction(tmp_path, marked, prior, verdict):
+    recovery = {"event": "compaction", "turn": 2, "compression_status": "overflow_recovery",
+                "recovery_marker": marked, "prior_compaction": prior}
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), bars=["B1", "B2"],
+               faults=[{"kind": "forced_recovery", "turn": 2}], extra_events=[recovery])
+    assert out["verdict"] == verdict
+    if verdict == "UNSUPPORTED":
+        assert "recovery" in out["reason"]
+
+
+def test_overflow_cell_restart_and_bars_contract():
+    for c in cells.select("overflow-recovery-restart/*"):
+        assert c["bars"] == ["B1", "B2"] and c["targets"] == [534]
+        assert c["faults"][1] == {"kind": "crash_after_compaction_before_reply", "after_status": "overflow_recovery", "offset": 1}
+        assert c["faults"][2] == {"kind": "clean_exit_before_turn", "after_restart": 1}
+        assert set(c["lcm_env"]) == set(cells.tight(c["window"]))
+    assert cells.ISSUES[534] == (("B1", "B2"), "")
+
+
+@pytest.mark.parametrize("stored_result,verdict", [("real host result", "PASS"), ("wrong result", "FAIL")])
+def test_forced_recovery_scores_durable_result_against_dispatch(tmp_path, stored_result, verdict):
+    ev, rows = tool_turn(1, calls=PLAN[:1], results=[stored_result],
+                         recovery_result_sha256=hashlib.sha256(b"real host result").hexdigest())
+    ev = [e for e in ev if e["event"] != "tool_seen"]
+    events = clean_events()
+    events[1:1] = ev
+    recovery = {"event": "compaction", "turn": 1, "compression_status": "overflow_recovery",
+                "recovery_marker": True, "prior_compaction": True}
+    out = make(tmp_path, rows=clean_rows(1) + rows + clean_rows(3)[2:], events=events,
+               faults=[{"kind": "forced_recovery", "turn": 1}], extra_events=[recovery], bars=["B1", "B2"],
+               tool_plan=[{"turns": [1], "calls": [{"name": n, "args": a} for n, a in PLAN[:1]]}])
+    assert out["verdict"] == verdict
+    assert out["numbers"]["B6"]["tool_execution_failures"] == 1  # result never reached the provider
+
+
+@pytest.mark.parametrize("dispatch_ok,ending,reply,gap", [
+    (False, "complete", True, "recovery tool dispatch failed"),
+    (True, "failed", True, "forced recovery turn did not complete"),
+    (True, "missing", True, "forced recovery turn did not complete"),
+    (True, "cancel", True, "forced recovery turn did not complete"),
+    (True, "complete", False, "scripted reply"),
+    (True, "complete", True, None),
+])
+def test_forced_recovery_requires_successful_dispatch_and_completed_reply(dispatch_ok, ending, reply, gap):
+    events = turn_events(32)
+    ev, _ = tool_turn(32, calls=[("write_file", {"path": "p", "content": "result"})], results=["result"],
+                      ok=dispatch_ok, recovery_result_sha256=hashlib.sha256(b"result").hexdigest())
+    events[1:1] = [e for e in ev if e["event"] != "tool_seen"]
+    if ending == "failed":
+        events[-1]["failed"] = True
+    elif ending == "cancel":
+        events[-1]["kind"] = "cancel"
+    elif ending == "missing":
+        events.pop()
+    if not reply:
+        events = [e for e in events if e["event"] != "emit"]
+    events.append({"event": "compaction", "turn": 32, "compression_status": "overflow_recovery",
+                   "recovery_marker": True, "prior_compaction": True})
+    atts = bars.attempts(events)
+    bound = bars.tool_calls.bind(atts)
+    cell = {"bars": ["B1", "B2"], "faults": [{"kind": "forced_recovery", "turn": 32}],
+            "tool_plan": [{"turns": [32], "calls": [{"name": "write_file"}]}]}
+    gaps = bars.scenario_gaps(cell, events, atts, {"groups": 0}, bound)
+    assert any(gap in g for g in gaps) if gap else not gaps
+
+
 def test_b1_b2_duplicate_user_row_fails(tmp_path):
     out = make(tmp_path, rows=clean_rows() + [("user", U.format(2, 2) + " ")], events=clean_events())
     assert out["failed_bars"]["B1"] == {"T02": {"expected": 1, "stored": 2}}
@@ -919,3 +1014,10 @@ def test_r2a4_an_echoed_lcm_carrier_is_never_licensed(tmp_path):
     out = make(tmp_path / "t", rows=clean_rows() + [("user", todo)], events=clean_events(),
                host=held() + [("S0", "user", todo, 1)], plugin=TREE)
     assert out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 0 and "B2" in out["failed_bars"]
+
+
+def test_b9_only_cell_without_the_audit_is_unsupported_never_pass(tmp_path):
+    """A P8 control proves nothing when B9 is UNSUPPORTED (audit off, or a host without the seams)."""
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), bars=["B9"])
+    assert out["verdict"] == "UNSUPPORTED" and out["applicable_bars"] == [], out
+    assert out["reason"].startswith("B9: ")
