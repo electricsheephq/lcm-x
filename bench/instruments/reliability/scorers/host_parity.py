@@ -12,7 +12,8 @@ per generation (436-host-identity-map.md), so neither rows across sessions nor d
 count is the largest number of ACTIVE rows one session of the lineage holds at once (a durable double persist: H2
 rows 105/106, PROBE.md group 1), and 1 when the lineage holds it only on inactive rows (a compacted generation).
 A key whose content begins with one of the scored plugin tree's own generated-carrier markers
-(plugin_tree.carrier_markers) is never licensed, nor counted toward a B1 tag: LCM's carriers are LCM's responsibility
+(plugin_tree.carrier_markers) is never licensed, nor counted toward a B1 tag. Recovery prefixes anywhere in a
+merged row also exclude it: LCM's carriers are LCM's responsibility
 (R8 / D-D), so a host echo of one licenses nothing. Fails closed: a missing or unreadable state.db, or a plugin tree
 whose carrier markers cannot be read, grants no licence, and the reason is recorded. The state.db is the cell's
 sqlite backup copy, opened read-only.
@@ -38,6 +39,7 @@ def load(state: Path, group, tree: str | None = None) -> tuple[dict | None, str 
         return None, "no plugin tree recorded for the cell, so no carrier markers"
     try:
         header, prefixes = plugin_tree.carrier_markers(Path(tree))
+        recovery = plugin_tree.recovery_prefixes(Path(tree))
     except (OSError, SyntaxError, ValueError) as exc:
         return None, f"plugin carrier markers unreadable ({tree}): {exc!r}"[:200]
     try:
@@ -52,7 +54,8 @@ def load(state: Path, group, tree: str | None = None) -> tuple[dict | None, str 
     held, texts = defaultdict(list), {}  # (lineage, key) -> [(row id, session, active)]
     for rid, sid, content, active in rows:
         head = (content or "").lstrip()
-        if multiset.norm(content or "") and not (header.match(head) or head.startswith(prefixes)):
+        if multiset.norm(content or "") and not (header.match(head) or head.startswith(prefixes)
+                                               or any(p in head for p in recovery)):
             key = ("user", multiset.h(content))
             held[(group(sid), key)].append((rid, sid, active))
             texts[key] = content
