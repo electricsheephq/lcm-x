@@ -277,9 +277,10 @@ class IdentityAnchorMixin:
                     view_counts[key] = view_counts.get(key, 0) + 1
             return view_counts.get(identity, 0)
 
-        def shown(idx: int) -> Counter:  # B-ID-1: the view's own occurrences no stored row has matched yet
+        def shown(idx: int, matched_too: bool = False) -> Counter:  # B-ID-1: the view's own occurrences no
+            # stored row has matched yet (matched_too: every other occurrence in the view)
             return Counter((stamps.get(i), identity_at(i)) for i in range(n)  # unstamped: (None, form)
-                           if i != idx and i not in matched and identity_at(i) is not None)
+                           if i != idx and (matched_too or i not in matched) and identity_at(i) is not None)
 
         consumed: set[int] = set()
         matched: dict[int, list] = {}
@@ -517,10 +518,11 @@ class IdentityAnchorMixin:
         if len(partials) == 1:
             parts, rest = partials[0]
             # The host kept the absorbed turn beside its in-place merge, in this same view: the remainder's own
-            # occurrence, stamped AFTER the held head, is here, so it is not new. No cut; the composite is stored
-            # whole, as before #845. An older row with the same text is another turn (B-ID-1) and does not count.
+            # occurrence, stamped AFTER the held head, is here (stored already or not), so it is not new. No cut;
+            # the composite is stored whole, as before #845. An older row with the same text is another turn
+            # (B-ID-1) and does not count.
             if any(form[0] == "user" and at is not None and stamp is not None and at > stamp
-                   and form[1].strip() == rest.strip() for at, form in shown(idx)):
+                   and form[1].strip() == rest.strip() for at, form in shown(idx, matched_too=True)):
                 return
             group = self._identity_anchor_assign(parts, pool, donors, consumed)
             if group is not None:

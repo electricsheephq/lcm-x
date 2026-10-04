@@ -444,3 +444,29 @@ def test_r3_remainder_with_same_batch_occurrence_is_not_cut(tmp_path):
         assert not [r for r in rows if r["content"] == "new U" and r["observed_at"] is None]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("host_form", ["recorded-override", "merged-prefix"])
+def test_r3_remainder_already_stored_in_an_earlier_batch_is_not_cut(tmp_path, host_form):
+    """The absorbed turn's own occurrence was stored in an earlier batch (so R1 has matched it) before the host
+    showed the in-place merge: it is still the same turn. No R3 cut, so it is never stored a second time."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        engine.ingest([*head, _u("held R\n", 500.0)])
+        if host_form == "recorded-override":
+            _override(engine, _rows(engine)[-1], "held R")
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        engine.ingest([*head, _u("held R\n", 500.0), _u("new U", 510.0), _a("reply", 511.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        composite = _u("held R\n\nnew U", 500.0)
+        if host_form == "merged-prefix":
+            composite["_merged_turn_prefix"] = "held R\n\n"
+        engine.ingest([*head, composite, _u("new U", 510.0), _a("reply", 511.0)])
+        rows = _rows(engine)
+        assert [r["content"] for r in rows].count("new U") == 1
+        assert not [r for r in rows if r["content"] == "new U" and r["observed_at"] is None]
+    finally:
+        engine.shutdown()
