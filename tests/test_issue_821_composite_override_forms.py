@@ -321,3 +321,31 @@ def test_unproven_or_ambiguous_constituent_stores_whole(tmp_path, case):
         assert not [rel for rel in _relations(engine) if rel[1] == "composite"]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("marker", [None, "r34.4", "upstream"])
+def test_null_stamped_override_row_never_absorbs_a_new_turn(tmp_path, marker):
+    """Bot P1 (#845): an older NULL-stamped row whose watched host object was trimmed in place records an
+    override; that form is not occurrence-bound, so a NEW absorbed turn with the override text is stored."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        old, reply = _u("continue\n", None), _a("ok old", None)
+        engine.ingest([*head, old, reply])
+        old["content"] = "continue"  # the host trims the same object: the watch records the override
+        engine.ingest([*head, old, reply, _u("next", 400.0), _a("next reply", 401.0)])
+        row = next(r for r in _rows(engine) if r["content"] == "continue\n")
+        assert row["observed_at"] is None and engine._host_rewrite_override_content(row) == "continue"
+        held = "held R" if marker is None else "held R\n"
+        engine.ingest([*head, _u(held, 500.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        composite = _u("held R\n\ncontinue", 500.0)
+        if marker is not None:
+            composite["_merged_turn_prefix"] = "held R" + ("\n\n" if marker == "r34.4" else "")
+        engine.ingest([*head, composite, _a("reply", 511.0)])
+        texts = [r["content"] for r in _rows(engine)]
+        assert texts.count("continue") == 1 or composite["content"] in texts
+        assert row["store_id"] not in [rel[2] for rel in _relations(engine) if rel[1] == "composite"]
+    finally:
+        engine.shutdown()

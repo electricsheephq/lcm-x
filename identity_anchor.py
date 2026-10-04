@@ -211,7 +211,9 @@ class IdentityAnchorMixin:
         memo = self._identity_anchor_text_memo
         store_id = int(row.get("store_id") or 0)
         if store_id not in memo:
-            memo[store_id] = {form[1] for form in self._stored_row_forms(row) if not _lossy(form)}
+            forms = (self._stored_row_forms(row) if row.get("observed_at") is not None  # #821: an override form
+                     else {self._message_replay_identity(row, stored_row=True)})  # needs a stamp-bound row
+            memo[store_id] = {form[1] for form in forms if not _lossy(form)}
         return memo[store_id]
 
     def _identity_anchor_prematch(self, messages, identity_messages, cursor: int, audit_from: Optional[int] = None) -> Dict[str, Any]:
