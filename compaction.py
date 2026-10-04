@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
 from .escalation import ForegroundBudget, ForegroundEstimates, SweepBudgetExhausted
-from .externalize import ingest_payload_writes
+from .externalize import ingest_payload_writes, payload_lookup_scope
 from .fresh_tail import tool_group_safe_end
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
@@ -942,6 +942,7 @@ class CompactionMixin:
             if no_write is not None:
                 ingest_payload_writes.reset(no_write)
 
+    @payload_lookup_scope()
     def _stub_first_exit(
         self,
         messages: List[Dict[str, Any]],
