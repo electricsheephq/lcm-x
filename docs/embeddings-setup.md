@@ -195,9 +195,13 @@ therefore reports bounded coverage rather than claiming universal pre-bound sour
 
 ## Performance & footprint
 
-- NumPy is declared by the plugin manifest as `numpy>=2.2,<3`, so supported
-  plugin managers provision the vectorized path for normal installations. The
-  dependency-free fallback remains available if NumPy cannot be imported.
+- NumPy remains optional. When available, it enables vectorized search and the
+  float32 chunk-loader fast path; the import guard and pure-Python fallback remain.
+  NumPy is already listed in [`requirements-semantic.txt`](../requirements-semantic.txt).
+  Install it in the Python environment that actually runs Hermes: for a user-managed
+  environment, `python -m pip install numpy`; for a managed build, use that host's
+  supported dependency-installation mechanism rather than modifying a generated venv.
+  Restart long-lived hosts after changing their dependency environment.
 - Float32 chunk matrices are loaded directly from their little-endian BLOBs,
   avoiding a round trip through Python float objects. Joining the BLOBs still
   copies bytes; this is not an end-to-end zero-copy pipeline. Int8 decoding,

@@ -5,10 +5,8 @@
 #
 # This file exists so the semantic dependency set is machine-readable rather
 # than prose buried in docs/embeddings-setup.md. LCM-X is installed by symlink
-# (scripts/install.sh), not by pip. NumPy is a required runtime dependency
-# declared in plugin.yaml, so Hermes' package manager records and provisions it.
-# The optional package below is not declared by the manifest and must go into
-# the virtualenv that runs Hermes when semantic retrieval is enabled:
+# (scripts/install.sh), not by pip, so nothing installs this automatically --
+# it must go into the virtualenv that runs Hermes:
 #
 #     pip install -r requirements-semantic.txt
 #

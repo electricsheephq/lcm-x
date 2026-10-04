@@ -18,32 +18,14 @@ For profile-specific installs, clone under `~/.hermes/profiles/<profile>/plugins
 
 The repository is a Hermes plugin, not a standalone Python application. Runtime discovery currently depends on:
 
-- `plugin.yaml` declaring the plugin name, registered tools, and the required runtime dependency `numpy>=2.2,<3`
+- `plugin.yaml` declaring the plugin name and registered tools
 - the repo root containing `__init__.py` for Hermes plugin registration
 - the operator placing or symlinking the checkout into Hermes' plugin search path
-- Python 3.11+; semantic/hybrid retrieval extras remain optional (see [`requirements-semantic.txt`](../requirements-semantic.txt))
+- no required third-party runtime dependencies beyond Python 3.11+ and optional accelerators such as `tiktoken` and `regex`
 
-Clone/symlink distribution and Hermes package-manager membership are separate concerns. The checkout remains the plugin distribution unit, while Hermes' supported package manager reads the manifest-only NumPy declaration and stages it as a generated dependency-only workspace member. The checkout itself remains free of Python package metadata.
+The repository deliberately has no `pyproject.toml` or package metadata. Package metadata waits until Hermes plugin packaging/discovery has a stable target for pip-installed plugins: adding generic Python packaging before the host install contract is clear would create a second install story without making first-run activation simpler.
 
-The repository deliberately has no committed `pyproject.toml`. Package metadata waits until Hermes plugin packaging/discovery has a stable target for pip-installed plugins: adding generic Python packaging before the host install contract is clear would create a second install story without making first-run activation simpler.
-
-Lint settings live in `ruff.toml`, not a lint-only `pyproject.toml`. Hermes' package manager (`pm/`, after v2026.9.24) treats any checkout with a `pyproject.toml` as a uv workspace member. It adds a `[project]` name but a lint-only file has no `version`, so `uv lock` rejects it and the update can add `hermes-lcm-x` to `plugins.disabled` (#631). Do not add a `pyproject.toml` back just for tooling. `tests/test_issue_631_not_a_pm_member.py` guards the lint-only regression; `tests/test_packaging_install.py` verifies the supported manifest-dependency staging path with the real Hermes manager.
-
-## Package-manager CI contract
-
-The existing `test (3.14)` CI lane always runs the real-manager staging test
-against Hermes commit `0a374d167424cdc730ce9761368b62255b551e58`.
-That pinned PM declares Python 3.14 as its runtime; the plugin's other supported
-Python versions continue through the ordinary unit-test matrix. CI installs the
-PM's own pinned dependencies from `pm/pyproject.toml` and keeps its reference tree
-outside the plugin checkout so it cannot contaminate test discovery or compilation.
-
-The CI step sets `LCM_REQUIRE_REAL_HERMES=1`, `LCM_REAL_HERMES_SRC`, and
-`LCM_REAL_HERMES_PYTHON`. Missing prerequisites fail that step rather than skip it.
-Local runs may still opt in with the latter two variables; without them and without
-the required flag, the integration test explicitly skips. The test checks actual
-declaration parsing and dependency-only workspace staging, not a complete install
-or application restart.
+The lint settings live in `ruff.toml` for the same reason. Hermes' package manager (`pm/`, after v2026.9.24) treats any plugin checkout with a `pyproject.toml` as a uv workspace member. It adds a `[project]` name to a member's `pyproject.toml` and keeps its other fields. A lint-only file has no `[project]` table, so the result has a name and no `version`, `uv lock` rejects it, and the Hermes update adds `hermes-lcm-x` to `plugins.disabled` (#631). Do not add a `pyproject.toml` back; `tests/test_issue_631_not_a_pm_member.py` guards this.
 
 ## Next packaging step
 
