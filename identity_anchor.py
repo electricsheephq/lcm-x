@@ -516,6 +516,12 @@ class IdentityAnchorMixin:
         partials = [(parts, rest) for parts, rest in partials if len(parts) == longest]  # every held part accounted
         if len(partials) == 1:
             parts, rest = partials[0]
+            # The host kept the absorbed turn beside its in-place merge, in this same view: the remainder's own
+            # occurrence, stamped AFTER the held head, is here, so it is not new. No cut; the composite is stored
+            # whole, as before #845. An older row with the same text is another turn (B-ID-1) and does not count.
+            if any(form[0] == "user" and at is not None and stamp is not None and at > stamp
+                   and form[1].strip() == rest.strip() for at, form in shown(idx)):
+                return
             group = self._identity_anchor_assign(parts, pool, donors, consumed)
             if group is not None:
                 consumed.update(int(row["store_id"]) for row in group)

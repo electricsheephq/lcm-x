@@ -424,3 +424,23 @@ def test_old_witnessed_part_never_absorbs_new_single_turn(tmp_path):
                                        if r[1] == "composite" and r[0] == copies[-1]["store_id"] - 1]
     finally:
         engine.shutdown()
+
+
+def test_r3_remainder_with_same_batch_occurrence_is_not_cut(tmp_path):
+    """The host kept the absorbed turn beside its in-place merge, so one view shows the composite AND that
+    turn's own stamped occurrence. It is not new: no R3 cut, the composite is stored whole, and the absorbed
+    turn is stored once (never a NULL-stamped remainder beside the standalone)."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        engine.ingest([*head, _u("held R\n", 500.0)])
+        _override(engine, _rows(engine)[-1], "held R")
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        engine.ingest([*head, _u("held R\n\nnew U", 500.0), _u("new U", 510.0), _a("reply", 511.0)])
+        rows = _rows(engine)
+        assert [r["content"] for r in rows].count("new U") == 1
+        assert "held R\n\nnew U" in [r["content"] for r in rows]
+        assert not [r for r in rows if r["content"] == "new U" and r["observed_at"] is None]
+    finally:
+        engine.shutdown()
