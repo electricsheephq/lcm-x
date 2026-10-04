@@ -121,7 +121,7 @@ copy-paste setups per agent type.
 ## Project status
 
 The latest stable release is
-`v0.24.9@e36ae9c866757d531292db2bf64f5f0b59710bc8` (plugin `hermes-lcm-x`, engine
+`v0.25.0@67de214f399f47d019535bf30baccf79cacc6ec4` (plugin `hermes-lcm-x`, engine
 `lcm-x`; the rename shipped in v0.24.0, #471). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
@@ -141,9 +141,10 @@ The `main` line identifies itself as
 (#385 fixed the earlier drift).
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
-for it. The roadmap removes that wait in steps (v0.25.0 prepares leaves in the
-background; v0.28.0 prepares summaries in the background and publishes them at
-the threshold) and re-baselines recall on the shipped default configuration.
+for it. v0.25.0 makes a hidden backlog drain at turn pace (#597); v0.28.0
+removes the wait by preparing summaries in the background and publishing them
+at the threshold (#787). Recall is re-baselined on the shipped default
+configuration.
 See [VISION.md](VISION.md), the [roadmap](ROADMAP.md), the tracker
 [#658](https://github.com/electricsheephq/lcm-x/issues/658),
 [Current project state](docs/project-status.md) and
@@ -623,7 +624,7 @@ moved back to that assistant even when doing so exceeds a configured bound.
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
 | `LCM_SUMMARY_PROMPT_VERSION` | `1` | 1 = today's prompts; 2 = the frontier prompt with the focus directives in the policy and a 3× output ceiling |
-| `LCM_NATIVE_RECOVERY` | `false` | removed in v0.25.0; ignored if set |
+| `LCM_NATIVE_RECOVERY` | `false` | removed in v0.25.0; ignored if set (`true` logs one WARNING each time the plugin loads) |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |
@@ -1073,7 +1074,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
-- [Current project state](docs/project-status.md) — v0.24.9 stable baseline,
+- [Current project state](docs/project-status.md) — v0.25.0 stable baseline,
   separate main-development identity, active work, and proof boundaries
 - [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
   and judged-QA evaluation contracts, reproduction, and landed result index
@@ -1125,7 +1126,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.24.9` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.25.0` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License

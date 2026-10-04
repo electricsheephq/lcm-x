@@ -72,6 +72,7 @@ the host reported `interrupted`. Any other assistant row is surplus.
   stored-only key and every split reply is surplus and fails. Expected =
   what the host held per attempt after its ACP strip and consecutive-user merge (a crashed prompt folded
   into the next composite counts once).
+  B2 strips assistant edges too; Phase C alone uses exact assistant bytes (see `RELEASE-READINESS-V1`).
 - **Host-parity licence (D-A, DESIGN-436 REVISION 2 P-HOST; `scorers/host_parity.py`).** A stored USER-row surplus
   of a B2 key (or a B1 user tag) in lineage L is licensed only up to what the cell's own host state.db holds in L:
   `min(surplus, host_count - expected)`, floored at 0. host_count is what one host view holds: the most ACTIVE rows
@@ -196,3 +197,14 @@ G-REL-1 diagnostics list uncovered bars, targets and open targets.
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route
 at a deterministic localhost fake. It does not prove live-model behaviour, the gateway process, several sessions in
 one process, or the process-side publication-failure hook (R2b, #569), and it says nothing about customer boxes.
+
+P8 / B9 audits R1 in-process and R2 `acp-process` host flushes using the host's own resolvers and digests:
+I0 pins committed live addresses; I1 forbids archived writes/adopts; I2 pins role/uid
+and unique uid-snapshot resolution; I3 forbids adopts; I5 rejects active uid twins
+involving LCM output (host-only twins are reported). Events contain no payload.
+Missing host seams, audit errors, no observed commit or no observed host flush give B9 UNSUPPORTED; transport
+labels alone do not decide it. A flushed dict whose address resolves to no row is counted as `UNRESOLVED`
+(report-only: after a rotation a parent-session `_row_id` legitimately resolves to nothing), not as `INSERT`.
+`p8-control/{archived,other-active,random-snapshot}` fail I1/I2/I3; `none` passes.
+On R2 the same controls inject after the second commit inside the ACP subprocess.
+Disable wraps with `LCM_RELIABILITY_P8=off` or `--lcm-env LCM_RELIABILITY_P8=off`; faults stay.

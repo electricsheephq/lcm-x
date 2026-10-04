@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
 from .escalation import ForegroundBudget, ForegroundEstimates, SweepBudgetExhausted
-from .externalize import ingest_payload_writes
+from .externalize import ingest_payload_writes, payload_lookup_scope
 from .fresh_tail import tool_group_safe_end
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
 from .message_content import text_content_for_pattern_matching
@@ -778,13 +778,14 @@ class CompactionMixin:
             ]
             proof["native"] = False
             proof["published"] = self._last_compression_status == "compacted"
+            proof["recovery"] = self._last_compression_status == "overflow_recovery"
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "emissions": copy.deepcopy(emissions),
             }
             self._compress_commit_proof = proof
-            if proof["published"] or proof["native"]:
+            if proof["published"] or proof["native"] or proof["recovery"]:
                 self._persist_compress_commit_proof(proof)
         except Exception:
             self._compress_commit_proof = None
@@ -945,6 +946,7 @@ class CompactionMixin:
             if no_write is not None:
                 ingest_payload_writes.reset(no_write)
 
+    @payload_lookup_scope()
     def _stub_first_exit(
         self,
         messages: List[Dict[str, Any]],

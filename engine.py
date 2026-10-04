@@ -3691,7 +3691,7 @@ class LCMEngine(
                 for emission in scoped_proof.get("emissions") or ():
                     emission["scope"] = {**(emission.get("scope") or {}), "session_id": session_id}
             commit_proof["input"] = None
-            if commit_proof.get("published") or commit_proof.get("native"):
+            if commit_proof.get("published") or commit_proof.get("native") or commit_proof.get("recovery"):
                 self._persist_compress_commit_proof(commit_proof)
         elif can_reassign:
             # No transferred commit proof (proof creation failed, an end that
@@ -5315,8 +5315,11 @@ class LCMEngine(
         if not target:
             return None
         effective: list = []
-        for index, identity in enumerate(self._occurrence_replay_identities(messages, proof)[1]):
+        projection, identities = self._occurrence_replay_identities(messages, proof)
+        for index, identity in enumerate(identities):
             if len(effective) == len(target):
+                if identity is None and projection.entries[index].kind == "recovery":
+                    continue
                 return index if effective == target else None
             if identity is None:
                 continue
@@ -8271,6 +8274,20 @@ class LCMEngine(
                             }
                             self._mint_engine_uids([(note, "overflow_note", None, "overflow_note")],
                                                    taken=(row.get("message_uid") for row in option + fallback[:-1]))
+                            self._pending_emission_candidates.append({
+                                "kind": "recovery", "span": note["content"],
+                                "full_identity": _emission_identity(note), "row": note,
+                            })
+                            # Hermes restores the latest visible reply before the note; keep it
+                            # here when it fits so the proof records the note's adopted position.
+                            reply = next((m for m in reversed(tail_messages[idx + 1:])
+                                          if m.get("role") == "assistant" and not m.get("tool_calls")
+                                          and isinstance(m.get("content"), str) and m["content"].strip()
+                                          and not self._looks_like_active_summary_blob(m["content"])), None)
+                            if reply is not None:  # the same cleaning as every other active-context row
+                                reply = _clean_active_assistant_message(reply)
+                            if reply is not None and count_messages_tokens(option + [reply, note]) <= cap:
+                                return option + [reply, note]
                             if count_messages_tokens(option + [note]) <= cap:
                                 return option + [note]
                             # Drop the retained row, then the system anchor, before the cap.
@@ -8301,6 +8318,10 @@ class LCMEngine(
             placeholder = {"role": "user", "content": _OVERFLOW_RECOVERY_PLACEHOLDER}
             self._mint_engine_uids([(placeholder, "overflow_placeholder", None, "overflow_placeholder")],
                                    taken=(row.get("message_uid") for row in fallback[:-1]))
+            self._pending_emission_candidates.append({
+                "kind": "recovery", "span": placeholder["content"],
+                "full_identity": _emission_identity(placeholder), "row": placeholder,
+            })
             return self._sanitize_active_context_messages(fallback[:-1]) + [placeholder]
         return candidate
 

@@ -31,7 +31,7 @@ SANDBOX = ('(version 1)(allow default)(deny network-outbound)(allow network-outb
            '(allow network-outbound (remote unix-socket))')
 FAKE_KEY = "rel-fake-key-not-a-secret"
 PROCESS_FAULTS = {"acp-process": {"crash_after_compaction_before_reply", "cancel_then_retry",
-                                   "crash_after_rotation_before_child_row", "clean_exit_before_turn"}}
+                                   "crash_after_rotation_before_child_row", "clean_exit_before_turn", "p8_inject"}}
 # R2-only: the main route over the Anthropic Messages API (a ``/anthropic`` base path selects the anthropic_messages
 # transport, hermes_cli/runtime_provider.py _detect_api_mode_for_url); the #550 class.
 R2_CELLS = [{**C.cell("anthropic-route/acp-process", [], in_place=True,
@@ -389,6 +389,7 @@ class ProcessCell:
         log = self.host_log()
         rec = {"phase": self.phase, "start_turn": first, "transport": self.transport, "acp_session": self.sid,
                "citations": cite_all(self.host["src"]),
+               "p8": next((n["p8"] for n in reversed(notes) if "p8" in n), {"supported": False}),
                "counters": snap.get("counters") or {"compacted_turns": [], "failed": [], "orphan_drops": 0, "native_max": 0},
                "compactions_logged": len(re.findall(r"LCM compaction #\d+", log)),
                # #714: the same exit-fit normalization as in-process cells
@@ -520,7 +521,8 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
             return done(verdict="ERROR", reason=f"unexpected main-model requests: {run.scenario.unexpected[:3]}")
         if last.get("exit") == "done" and not acct["ok"]:
             return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
-        rec.update(RM.verdict_fields({**cell, "chat_root": run.sid}, d, last, run.fired, rec["citations"], backup_errors,
+        run.fired.update(n["kind"] for n in read_jsonl(d / "faults-fired.jsonl"))
+        rec.update(RM.verdict_fields({**cell, "chat_root": run.sid, "transport": transport}, d, last, run.fired, rec["citations"], backup_errors,
                                      s / "db"))
         return done()
     finally:
