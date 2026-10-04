@@ -272,7 +272,9 @@ def build_recall_or_query(query: str) -> str:
     for term in extract_search_terms(query):
         cleaned = re.sub(r"\W+", "", term, flags=re.UNICODE)
         if cleaned and cleaned.lower() not in _RECALL_STOPWORDS:
-            barewords.append(cleaned.lower())  # lower case: a bare NOT/NEAR must stay a term, never an operator
+            # An exact operator word (NOT, NEAR) must stay a term, so it is lower-cased. Other terms keep their
+            # spelling: Python's case mapping is newer than the unicode61 tokenizer's and can change matches.
+            barewords.append(cleaned.lower() if cleaned in _BOOLEAN_OPERATORS else cleaned)
     return " OR ".join(dict.fromkeys(barewords))
 
 
