@@ -156,6 +156,76 @@ def test_public_grep_cannot_enable_recall_operators(recall_engine, monkeypatch, 
     assert operator_flags == [True, False, False]
 
 
+def test_recall_or_emoji_signal_survives_launch_distractors(recall_engine, monkeypatch):
+    engine = recall_engine
+    target = engine._store.append("emoji", {"role": "user", "content": "launch 🚀"})
+    for index in range(40):
+        engine._store.append(f"launch-{index}", {"role": "user", "content": "launch"})
+    original = engine._store._search_like
+    like_queries = []
+
+    def capture(query, **kwargs):
+        like_queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(engine._store, "_search_like", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        engine, "launch 🚀", candidate_limit=5,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert target in [hit["store_id"] for hit in hits]
+    assert len(hits) <= 5
+    assert like_queries == ["launch 🚀"]
+
+
+def test_recall_or_cjk_keeps_existing_like_route(recall_engine, monkeypatch):
+    from hermes_lcm.search_query import build_recall_or_query
+
+    target = recall_engine._store.append("cjk", {"role": "user", "content": "launch 東京"})
+    original = recall_engine._store._search_like
+    like_queries = []
+
+    def capture(query, **kwargs):
+        like_queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "_search_like", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        recall_engine, "launch 東京", candidate_limit=5,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert [hit["store_id"] for hit in hits] == [target]
+    assert like_queries == [build_recall_or_query("launch 東京")] == ["launch OR 東京"]
+
+
+@pytest.mark.parametrize("delta", [False, True])
+def test_recall_or_answer_ready_centers_content_term(recall_engine, delta):
+    recall_engine._config.embeddings_enabled = False
+    content = "somewhere Zebrawood " + "filler " * 500 + "zEBra now " + "tail " * 500
+    store_id = recall_engine._store.append("late-term", {"role": "user", "content": content})
+    store_ids = {store_id}
+    if delta:
+        store_ids.add(recall_engine._store.append("late-term-other", {"role": "user", "content": content}))
+    payload = json.loads(lcm_tools.lcm_recall({
+        "query": "where is Zebra now", "detail": "answer_ready", "limit": 1,
+        **({"seen_refs": []} if delta else {}),
+    }, engine=recall_engine))
+    hit = payload["hits"][0]
+    assert hit["store_id"] in store_ids
+    assert "zEBra now" in hit["content"]
+    assert hit["evidence_span"]["char_start"] == content.index("zEBra")
+    if delta:
+        refill = json.loads(lcm_tools.lcm_recall({
+            "query": "where is Zebra now", "detail": "answer_ready", "limit": 1,
+            "seen_refs": [hit["exact_ref"]],
+        }, engine=recall_engine))["hits"][0]
+        assert refill["store_id"] in store_ids - {hit["store_id"]}
+        assert "zEBra now" in refill["content"]
+        assert refill["evidence_span"]["char_start"] == content.index("zEBra")
+
+
 def _add_summary(
     engine,
     summary,
