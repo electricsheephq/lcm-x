@@ -8097,6 +8097,8 @@ def lcm_inspect(args: Dict[str, Any], **kwargs) -> str:
 
 def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     """Quick health overview of the LCM engine for the current session."""
+    from .tokens import token_counter_status
+
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
@@ -8115,6 +8117,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({
             "error": "No active session",
             "runtime_identity": engine.get_runtime_identity(),
+            "token_counter": token_counter_status(),
             "identity_migration": getattr(engine, "identity_migration", None),
             **inactive_payload,
         })
@@ -8265,6 +8268,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         "preset_suggestion": preset_status_payload(engine),
         "ingest_reconciliation": ingest_reconciliation,
         "runtime_identity": runtime_identity,
+        "token_counter": token_counter_status(),
         "identity_migration": full_status.get("identity_migration"),
         "lifecycle": lifecycle,
         "lifecycle_fragmentation": lifecycle_fragmentation,
@@ -8275,6 +8279,8 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
 
 def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     """Run diagnostics on the LCM database and configuration."""
+    from .tokens import token_counter_status
+
     engine = _require_engine(kwargs)
     if engine is None:
         return json.dumps({"error": "LCM engine not initialized"})
@@ -8606,6 +8612,8 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             "status": "fail",
             "detail": str(e),
         })
+
+    checks.append({"check": "token_counter", "status": "pass", "detail": token_counter_status()})
 
     # 5. Source-lineage hygiene
     try:
