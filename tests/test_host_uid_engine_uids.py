@@ -236,6 +236,87 @@ def test_engine_rows_recorded_once_and_ignored_by_lookups_gate_and_doctor(tmp_pa
         engine.shutdown()
 
 
+def test_failed_engine_binding_stays_pending_and_next_compress_retries(tmp_path, monkeypatch):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path)
+    original = engine._store.add_host_uid_bindings
+    failed = []
+
+    def write(lineage, rows):
+        if any(row[2] == "engine" for row in rows) and not failed:
+            failed.append(True)
+            raise RuntimeError("binding unavailable once")
+        return original(lineage, rows)
+
+    monkeypatch.setattr(engine._store, "add_host_uid_bindings", write)
+    try:
+        before = _counts(engine).get("errors", 0)
+        first = _compress(engine, _host())
+        uid = first[0]["message_uid"]
+        assert _engine_rows(engine) == []
+        assert engine._host_uid_engine_uids([uid]) == {uid}
+        assert uid in engine._engine_uids_pending
+        assert _counts(engine)["errors"] == before + 1
+        second = _compress(engine, _host())
+        assert second[0]["message_uid"] == uid
+        assert _engine_rows(engine) == [(0, uid, "engine", "carrier")]
+        assert uid not in engine._engine_uids_pending
+        assert _counts(engine)["errors"] == before + 1
+    finally:
+        engine.shutdown()
+
+
+def test_engine_binding_batches_fail_independently_and_drop_unemitted(tmp_path, monkeypatch):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path)
+    calls = []
+
+    def write(lineage, rows):
+        calls.append(lineage)
+        if lineage == "failed":
+            raise RuntimeError("binding unavailable")
+
+    try:
+        engine._engine_uids_pending = {"lost": ("failed", "carrier"), "kept": ("ok", "carrier"),
+                                       "absent": ("failed", "carrier")}
+        monkeypatch.setattr(engine._store, "add_host_uid_bindings", write)
+        engine._host_uid_record_engine([{"message_uid": "lost", "_absorbed_message_uids": ["kept"]}])
+        assert set(calls) == {"failed", "ok"}
+        assert engine._engine_uids_pending == {"lost": ("failed", "carrier")}
+        assert engine._engine_uids_recorded == {"kept"}
+        assert _counts(engine)["errors"] == 1
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("case", ["no_lineage", "read_failure", "bound"])
+def test_positive_host_uid_lookup_is_batched_lineage_scoped_and_fail_open(tmp_path, monkeypatch, case):
+    if case != "no_lineage":
+        _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path)
+    try:
+        if case == "bound":
+            engine._store.add_host_uid_bindings(_lineage(engine),
+                                                [(1, "H", "canonical", "stored_new"),
+                                                 (2, "V", "version", "version_new"),
+                                                 (0, "E", "engine", "carrier")])
+            engine._store.add_host_uid_bindings("other", [(1, "U", "canonical", "stored_new")])
+        original, calls = engine._store.host_uid_bindings_for, []
+
+        def lookup(lineage, uids):
+            calls.append((lineage, set(uids)))
+            if case == "read_failure":
+                raise RuntimeError("binding read unavailable")
+            return original(lineage, uids)
+
+        monkeypatch.setattr(engine._store, "host_uid_bindings_for", lookup)
+        assert engine._host_uid_host_uids(["H", "V", "E", "U"]) == ({"H", "V"} if case == "bound" else set())
+        assert calls == ([] if case == "no_lineage" else [(_lineage(engine), {"H", "V", "E", "U"})])
+        assert _counts(engine).get("errors", 0) == (1 if case == "read_failure" else 0)
+    finally:
+        engine.shutdown()
+
+
 # -- descriptors ----------------------------------------------------------------------------------------------
 
 def test_descriptor_engine_uid_is_optional(tmp_path):
@@ -303,6 +384,8 @@ def test_site19_reformed_carrier_and_site18_split(tmp_path, absorbed):
     try:
         out = _compress(engine, _host())
         uid = out[0]["message_uid"]
+        if len(absorbed) == 2:
+            engine._store.add_host_uid_bindings(_lineage(engine), [(1, "other", "canonical", "stored_new")])
         fitted, remainder = _cut(engine, out, 10_000, absorbed)
         carrier = fitted[0]
         assert carrier["content"].endswith("question 5" + PAD)
@@ -326,6 +409,84 @@ def test_site18_summary_only_row_keeps_the_engine_uid(tmp_path):
         assert set(summary_row) == {"role", "content", "message_uid"}
         assert summary_row["message_uid"] == out[0]["message_uid"]
         assert set(remainder) == {"role", "content", "message_uid"} and remainder["message_uid"] == "u6"
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("tail", [4, 8], ids=["site18", "site19"])
+@pytest.mark.parametrize("case", ["missing_engine", "bound_host", "unbound_host", "host_folded", "legacy", "normal"])
+def test_survival_carrier_uses_only_positive_identities(tmp_path, monkeypatch, tail, case):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path, tail=tail)
+    try:
+        out = _compress(engine, _host())
+        original_uid = out[0]["message_uid"]
+        host_uid = f"u{8 - tail // 2}"
+        if case == "missing_engine":
+            old = {"role": "user", "content": "earlier generated summary"}
+            engine._mint_engine_uids([(old, "summary", None, "summary")])
+            engine._host_uid_record_engine([old])
+            missing = old["message_uid"]
+            engine._store._conn.execute("DELETE FROM host_uid_bindings WHERE uid = ? AND kind = 'engine'", (missing,))
+            engine._store._conn.commit()
+            engine._engine_uids_recorded.discard(missing)
+            absorbed, remainder_uid = [missing], None
+        elif case == "unbound_host":
+            absorbed, remainder_uid = ["unbound-H"], None
+        elif case == "host_folded":
+            out[0]["message_uid"] = host_uid
+            absorbed, remainder_uid = [original_uid], host_uid
+        elif case == "legacy":
+            out[0]["message_uid"] = "legacy-U"
+            absorbed, remainder_uid = [], None
+        else:
+            absorbed, remainder_uid = [host_uid], host_uid
+        # Duplicate and invalid candidates cannot turn a single proven host identity into ambiguity.
+        if case == "bound_host":
+            absorbed += [host_uid, "", None, 1, "x" * 257]
+        fitted, remainder = _cut(engine, out, 10_000, absorbed)
+        assert remainder.get("message_uid") == remainder_uid
+        assert set(remainder) == {"role", "content"} | ({"message_uid"} if remainder_uid else set())
+        summary_uid = fitted[0]["message_uid"]
+        if case == "legacy":
+            summary = out[0]["content"][:engine._verified_lcm_summary_prefix_end(out[0]["content"])]
+            assert summary_uid == engine_uid(_lineage(engine), "survival_summary", hashlib.sha256(summary.encode()).hexdigest(), 0)
+            assert summary_uid != "legacy-U"
+        else:
+            assert summary_uid == original_uid
+        assert ("_absorbed_message_uids" in fitted[0]) is (tail == 8)
+        monkeypatch.setattr(engine, "_compress_impl", lambda *a, **k: fitted)
+        monkeypatch.setattr(engine, "_survival_fit", lambda messages, result, *a, **k: result)
+        assert engine.compress(out, current_tokens=100, force=True) is fitted
+        assert engine._store.host_uid_bindings_for(_lineage(engine), [summary_uid], ("engine",))
+        monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off")
+        base, _ = _cut(engine, out, 10_000, absorbed)
+        assert _provider(base) == _provider(fitted)
+    finally:
+        engine.shutdown()
+
+
+def test_exception_survival_return_records_new_engine_uid(tmp_path, monkeypatch):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path)
+    try:
+        out = _compress(engine, _host())
+        out[0].pop("message_uid")
+        out[0].pop("_absorbed_message_uids")
+
+        def fail(*a, **k):
+            raise RuntimeError("compress failed")
+
+        def fit(messages, result, *a, **k):
+            assert k["after_exception"] is True
+            return _cut(engine, out, 10_000, None)[0]
+
+        monkeypatch.setattr(engine, "_compress_impl", fail)
+        monkeypatch.setattr(engine, "_survival_fit", fit)
+        fitted = engine.compress(out, current_tokens=100_000, force=True)
+        uid = fitted[0]["message_uid"]
+        assert fitted is not out
+        assert (0, uid, "engine", "survival_summary") in _engine_rows(engine)
     finally:
         engine.shutdown()
 

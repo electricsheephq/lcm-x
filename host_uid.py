@@ -165,10 +165,17 @@ class HostUidShadowMixin:
             for uid in (present & pending.keys()) - done:
                 lineage, proof_kind = pending[uid]
                 records[lineage].append((0, uid, "engine", proof_kind))
-            pending.clear()
+            for uid in (pending.keys() - present) | (pending.keys() & done):
+                pending.pop(uid)
             for lineage, rows in records.items():
-                self._store.add_host_uid_bindings(lineage, rows)
-                done.update(uid for _sid, uid, _kind, _proof in rows)
+                try:
+                    self._store.add_host_uid_bindings(lineage, rows)
+                except Exception as exc:
+                    self._host_uid_count(Counter(errors=1), exc)
+                    continue
+                for _sid, uid, _kind, _proof in rows:
+                    done.add(uid)
+                    pending.pop(uid, None)
         except Exception as exc:
             self._host_uid_count(Counter(errors=1), exc)
 
@@ -185,6 +192,16 @@ class HostUidShadowMixin:
         except Exception as exc:
             self._host_uid_count(Counter(errors=1), exc)
         return known
+
+    def _host_uid_host_uids(self, uids) -> set:
+        """The uids positively bound as canonical or version in this lineage; fail open to no host uids."""
+        try:
+            lineage = self._host_uid_lineage_key()[0]
+            if lineage is not None:
+                return set(self._store.host_uid_bindings_for(lineage, {uid for uid in uids if _valid_uid(uid)}))
+        except Exception as exc:
+            self._host_uid_count(Counter(errors=1), exc)
+        return set()
 
     def _host_uid_capture(self, messages, identity_messages, start: int, cursor: int, plan, tool_segment,
                           session_id=None):

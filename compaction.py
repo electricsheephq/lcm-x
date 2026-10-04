@@ -632,6 +632,7 @@ class CompactionMixin:
                     logger.debug("LCM survival fit after a compress exception failed", exc_info=True)
                     fitted = messages
                 if fitted is not messages:
+                    self._host_uid_record_engine(fitted)
                     logger.warning("LCM compress failed (%s); returning the survival-fitted list",
                                    type(exc).__name__, exc_info=True)
                     returned = fitted

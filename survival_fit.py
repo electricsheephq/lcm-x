@@ -31,6 +31,7 @@ import re
 import time
 from typing import Any, Dict, List, Optional
 
+from .host_uid import _valid_uid
 from .host_uid_emit import ADDRESS_KEYS, IDENTITY_KEYS, identity_emit_enabled, record_absorbed_message
 from .message_content import normalize_content_value
 from .store import _normalize_observed_at
@@ -235,16 +236,17 @@ class SurvivalFitMixin:
             summary = carrier["content"][:self._verified_lcm_summary_prefix_end(carrier["content"])]
             body.insert(0, {**carrier, "content": remainder})
             if identity_emit_enabled():  # site 18 (R3-5): the summary part keeps the engine uid; the user-only
-                # remainder copies no identity or address, and gets back a single absorbed host uid
-                summary_uid = carrier.get("message_uid")
+                # remainder copies no identity or address, and gets back a single proven host uid
+                absorbed = carrier.get("_absorbed_message_uids")
+                absorbed = absorbed if isinstance(absorbed, list) else []
+                candidates = list(dict.fromkeys(u for u in [carrier.get("message_uid"), *absorbed] if _valid_uid(u)))
+                engine = self._host_uid_engine_uids(candidates)
+                summary_uid = next((u for u in candidates if u in engine), None)
                 for key in IDENTITY_KEYS + ADDRESS_KEYS:
                     body[0].pop(key, None)
-                absorbed = carrier.get("_absorbed_message_uids")
-                absorbed = [u for u in absorbed if isinstance(u, str) and u] if isinstance(absorbed, list) else []
-                engine = self._host_uid_engine_uids(absorbed)  # F3: one host uid, never an engine one
-                hosts = [u for u in absorbed if u not in engine]
+                hosts = self._host_uid_host_uids(candidates)
                 if len(hosts) == 1:
-                    body[0]["message_uid"] = hosts[0]
+                    body[0]["message_uid"] = next(iter(hosts))
             if id(carrier) in store_ids:
                 store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
 
