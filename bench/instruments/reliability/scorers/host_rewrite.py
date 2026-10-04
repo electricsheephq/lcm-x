@@ -32,6 +32,14 @@ def score(cell, cell_dir, phases):
         return {"verdict": "UNSUPPORTED", "reason": "no committed compaction observed"}
     if not any(isinstance(ev, dict) and ev.get("event") == "flush_resolve" for ev in events):
         return {"verdict": "UNSUPPORTED", "reason": "no host flush observed"}  # I1-I3 would hold vacuously
+    committed, flushed_after_commit = set(), False
+    for ev in events:
+        if ev["event"] == "commit":
+            committed.add(ev["session"])
+        elif ev["event"] == "flush_resolve" and ev["session"] in committed:
+            flushed_after_commit = True
+    if not flushed_after_commit:
+        return {"verdict": "UNSUPPORTED", "reason": "no host flush observed after a committed compaction"}
     for ev in events:
         ids = [ev.get("target_id"), ev.get("row_id")]
         if ev["event"] == "commit":

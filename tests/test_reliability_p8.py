@@ -22,7 +22,7 @@ def scored(tmp_path, events=(), phases=None, cell=None):
     if not any(e.get("event") == "commit" for e in events):  # B9 needs an observed commit (else UNSUPPORTED)
         events.insert(0, COMMIT)
     if not any(e.get("event") == "flush_resolve" for e in events):  # ... and an observed host flush
-        events.insert(0, FLUSH)
+        events.append(FLUSH)
     (tmp_path / "p8-events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
     return host_rewrite.score(cell or {}, tmp_path, phases or [{"p8": {"supported": True}}])
 
@@ -74,6 +74,15 @@ def test_actions_and_counts_are_reported(tmp_path):
     assert out["verdict"] == "PASS" and out["actions"] == dict.fromkeys(("INSERT", "REWRITE", "MATCH", "LEGACY"), 1)
     out = scored(tmp_path, [dict(COMMIT, active=0)] * 2)
     assert out["failed_invariants"]["I0"]["count"] == 2
+
+
+def test_flush_requires_an_earlier_commit_in_the_same_session(tmp_path):
+    events = [FLUSH, dict(FLUSH, session="S1", target_session="S1"), COMMIT]
+    out = scored(tmp_path, events)
+    assert out["verdict"] == "UNSUPPORTED"
+    assert out["reason"] == "no host flush observed after a committed compaction"
+    assert scored(tmp_path, [FLUSH, COMMIT, events[1]])["verdict"] == "UNSUPPORTED"
+    assert scored(tmp_path, [events[1], COMMIT, FLUSH])["verdict"] == "PASS"
 
 
 def test_missing_disabled_or_partial_audit_is_unsupported_on_recorded_process(tmp_path):
@@ -283,11 +292,10 @@ def test_one_batch_labels_each_dict_from_the_host_output(monkeypatch, tmp_path, 
     repair.resolve_and_repair_transcript_batch = host_like_resolve
     probe.install_p8(tmp_path, "A", {}, set(), None, {})
     batch = [dict(live, content=text) for text in contents]
+    (tmp_path / "p8-events.jsonl").write_text(json.dumps(COMMIT) + "\n")
     persistence._db_flush_write(ag, batch, batch, batch)
     events = [json.loads(x) for x in (tmp_path / "p8-events.jsonl").read_text().splitlines()]
     assert [e["action"] for e in events if e["event"] == "flush_resolve"] == actions
-    with (tmp_path / "p8-events.jsonl").open("a") as log:  # a committed compaction, so B9 is scorable
-        log.write(json.dumps(COMMIT) + "\n")
     out = host_rewrite.score({}, tmp_path, [{"p8": {"supported": True}}])
     assert out["verdict"] == ("FAIL" if "ADOPT" in actions else "PASS")
     assert ("I3" in out["failed_invariants"]) == ("ADOPT" in actions)
@@ -305,10 +313,9 @@ def test_an_address_that_resolves_to_nothing_is_reported_unresolved_not_insert(m
     _, persistence, _, ag, live, _, _ = fake_host(monkeypatch, tmp_path)
     probe.install_p8(tmp_path, "A", {}, set(), None, {})
     stale, new = dict(live, _row_id=99), {"role": "user", "content": "new turn"}
+    (tmp_path / "p8-events.jsonl").write_text(json.dumps(COMMIT) + "\n")
     persistence._db_flush_write(ag, [stale, new], [stale, new], [stale, new])
     events = [json.loads(x) for x in (tmp_path / "p8-events.jsonl").read_text().splitlines()]
     assert [e["action"] for e in events if e["event"] == "flush_resolve"] == ["UNRESOLVED", "INSERT"]
-    with (tmp_path / "p8-events.jsonl").open("a") as log:
-        log.write(json.dumps(COMMIT) + "\n")
     out = host_rewrite.score({}, tmp_path, [{"p8": {"supported": True}}])
     assert out["verdict"] == "PASS" and out["actions"] == {"UNRESOLVED": 1, "INSERT": 1}
