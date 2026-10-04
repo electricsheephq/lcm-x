@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import host_message_uid_mode
+from .reconcile import _has_lossy_redacted_identity as _lossy_identity
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,7 @@ class HostUidShadowMixin:
             unmapped = not rows and stored is None and (idx < cursor or idx in capture["tool_segment"] or idx in replayed)
             if bound:  # BOUND: compared against the payload-matching version (R1-1); the gate marks that binding
                 hit = self._host_uid_bytes_match(bound, identity[idx], fetched) if not rows else None
+                lossy = not rows and stored is None and _lossy_identity(self._message_replay_identity(identity[idx]))
                 if stored is not None:  # VERSION_NEW is an event only; a stored duplicate is a replay check
                     delta["bound.disagree.stored_despite_match" if hit is not None else "bound.version_new"] += 1
                     if hit is not None:
@@ -221,6 +223,8 @@ class HostUidShadowMixin:
                     target = int(rows[0]["store_id"])
                     delta["replay.bound.agree.replay" if target in bound else "replay.bound.disagree.replay_other_row"] += 1
                     checks.append((uid, target if target in bound else canonical, target in bound))
+                elif unmapped and lossy:  # a digest-free redaction collapsed the identity: equality proves nothing
+                    delta["replay.composite.unverified.lossy" if absorbed(messages[idx]) else "replay.bound.unverified.lossy"] += 1
                 elif unmapped and hit is None and (merge := self._host_uid_lcm_merge(
                         messages[idx], [uid, *absorbed(messages[idx])], bindings, fetched, identity[idx])):
                     delta["replay.composite.agree.lcm_merge"] += 1  # LCM's own site-1 merge (R3-2)

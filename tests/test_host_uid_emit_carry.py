@@ -658,3 +658,28 @@ def test_an_unused_stub_binding_does_not_turn_a_disagreement_into_unverified(tmp
         assert _classify(second, [merged], {"replayed": {0}, "matched": {}}) == {"replay.bound.disagree.prefix_replay": 1}
     finally:
         second.shutdown()
+
+
+@pytest.mark.parametrize("composite", [False, True])
+def test_a_lossy_redacted_identity_is_unverified_never_an_agreement(tmp_path, composite):
+    """A password placeholder has no digest: a changed password redacts to the same identity, so it proves nothing."""
+    from tests.test_host_uid_shadow import _counts, _gate
+
+    host = [_m("assistant", "first", 11.0, "first", tool_calls=[_write_call("a", {"password": "aaaa"})])]
+    if composite:
+        host.append(_m("assistant", "second", 12.0, "second", tool_calls=[_write_call("b", {"path": "b"})]))
+    merged, _stored = _merged_after_ingest(tmp_path, host, sensitive_patterns_enabled=True)
+    merged = copy.deepcopy(merged)
+    merged["tool_calls"][0]["function"]["arguments"] = json.dumps({"password": "bbbb"})
+    second = _engine(tmp_path)
+    second._config.sensitive_patterns_enabled = True
+    try:
+        before = _gate(second)
+        identity = second._redact_active_replay_messages([merged])
+        capture = second._host_uid_capture([merged], identity, 0, 0, {"replayed": {0}, "matched": {}}, set())
+        second._host_uid_shadow(capture, {}, ())
+        outcome = "replay.composite.unverified.lossy" if composite else "replay.bound.unverified.lossy"
+        assert _counts(second) == {outcome: 1}
+        assert _gate(second) == before
+    finally:
+        second.shutdown()
