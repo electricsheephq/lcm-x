@@ -190,6 +190,171 @@ def user_text(cell, prefix, t):
     return text + ("\n" if ut.get("trailing_ws") else "")
 
 
+def install_p8(cell_dir, phase, faults, fired, fire, cur):
+    """Read-only, fail-open audit of the host's own resolution and commit seams (R1)."""
+    state = {"supported": False, "notes": [], "duplicates": []}
+    pinned, emitted, local = {}, set(), threading.local()
+    enabled = os.environ.get("LCM_RELIABILITY_P8") != "off"
+
+    def safe(fn, *args):
+        try:
+            return fn(*args)
+        except Exception as exc:
+            state["notes"].append(type(exc).__name__)  # never exception text / payload
+
+    def key(msg):
+        uid = msg.get("message_uid")
+        return hashlib.sha256(uid.encode()).hexdigest() if isinstance(uid, str) and uid else None
+
+    def pin(messages):
+        if enabled:
+            pinned.update((id(m), m) for m in messages if isinstance(m, dict))
+
+    def log(ev):
+        with open(cell_dir / "p8-events.jsonl", "a") as fh:
+            fh.write(json.dumps({"phase": phase, **ev}) + "\n")
+
+    def sweep(conn):
+        duplicates = []
+        for sid, role, uid, ids in conn.execute(
+                "SELECT session_id,role,message_uid,group_concat(id) FROM messages WHERE active=1 "
+                "AND message_uid IS NOT NULL AND message_uid != '' GROUP BY session_id,role,message_uid HAVING count(*)>1"):
+            hashed = key({"message_uid": uid})
+            duplicates.append({"session": sid, "role": role, "uid": hashed,
+                               "row_ids": [int(i) for i in ids.split(',')], "lcm": (sid, role, hashed) in emitted})
+        return duplicates
+
+    def end_sweep():
+        if state["supported"]:
+            with sqlite3.connect(f"file:{Path(os.environ['HERMES_HOME']) / 'state.db'}?mode=ro", uri=True) as conn:
+                state["duplicates"] = sweep(conn)
+        return state
+
+    try:
+        import agent.transcript_repair as repair
+        import agent.session_persistence as persistence
+        import agent.conversation_compression as compression
+        resolve, write, commit = repair.resolve_and_repair_transcript_batch, persistence._db_flush_write, compression._commit_compaction
+        physical, logical, digest = repair._active_message_row, repair._active_logical_message_row, repair.transcript_row_snapshot
+    except (ImportError, AttributeError):
+        return state, pin, lambda: state
+    if not enabled and "p8_inject" not in faults:
+        return state, pin, lambda: state
+    state["supported"] = enabled
+    for path in cell_dir.glob("phase-*.json"):
+        emitted.update(tuple(k) for k in json.loads(path.read_text()).get("p8", {}).get("emitted", []))
+
+    def before(conn, sid, rows):
+        records = []
+        for msg in rows:
+            live = getattr(local, "pairs", {}).get(id(msg), msg)
+            rid, expected, role = msg.get("_row_id"), msg.get("_db_row_snapshot"), msg.get("role", "unknown")
+            target = physical(conn, sid, rid, role) if isinstance(rid, int) else (
+                logical(conn, sid, role, repair.message_uid_or_none(msg)) if isinstance(expected, str) else None)
+            target = dict(target) if target is not None else None
+            rec = {"event": "flush_resolve", "session": sid, "role": live.get("role"), "uid": key(live),
+                   "lcm": id(live) in pinned or (sid, live.get("role"), key(live)) in emitted,
+                   "path": "row_id" if isinstance(rid, int) else "uid_snapshot", "row_id": rid,
+                   "expected": expected, "target_id": target["id"] if target else None,
+                   "target_role": target["role"] if target else None, "target_uid": key(target or {}),
+                   "active": target["active"] if target else None, "before": digest(target) if target else None,
+                   "active_count": conn.execute("SELECT count(*) FROM messages WHERE session_id=? AND active=1 "
+                                                "AND role=? AND message_uid=?", (sid, role, msg.get("message_uid"))).fetchone()[0]}
+            records.append((msg, rec))
+        return records
+
+    def after(conn, sid, records):
+        for msg, rec in records:
+            row = conn.execute("SELECT * FROM messages WHERE session_id=? AND id=?", (sid, rec["target_id"])).fetchone()
+            rec["after"] = digest(row) if row else None
+            rec["effect"] = rec["after"] != rec["before"] or bool((msg.get("_canonical_row") or {}).get("_content_only"))
+            # Label from the host's own per-dict output: an earlier dict of the same batch can rewrite this
+            # target first, so the pre-batch digest cannot tell ADOPT from REWRITE.
+            canonical = msg.get("_canonical_row")
+            adopted = isinstance(canonical, dict) and not canonical.get("_metadata_only")
+            rec["action"] = ("INSERT" if row is None else "LEGACY" if not isinstance(rec["expected"], str) else
+                             "ADOPT" if adopted else
+                             "REWRITE" if msg.get("_db_row_snapshot") != rec["expected"] else "MATCH")
+            if hasattr(local, "records"):
+                local.records.append((msg, rec))
+            else:
+                log(rec)
+        log({"event": "sweep", "duplicates": sweep(conn)})
+
+    def resolved(conn, session_id, messages, *args, **kwargs):
+        records = safe(before, conn, session_id, messages) if enabled else None
+        result = resolve(conn, session_id, messages, *args, **kwargs)
+        if records is not None:
+            safe(after, conn, session_id, records)
+        return result
+
+    def flushed(agent, batch_rows, batch_msgs, messages):
+        local.pairs, local.records = dict(zip(map(id, batch_rows), batch_msgs)), []
+        try:
+            result = write(agent, batch_rows, batch_msgs, messages)
+            if enabled:
+                for msg, rec in local.records:
+                    rec["row_id"] = msg.get("_row_id")
+                    safe(log, rec)
+                with agent._session_db._lock:
+                    safe(log, {"event": "sweep", "duplicates": safe(sweep, agent._session_db._conn) or []})
+            return result
+        finally:
+            del local.pairs, local.records
+
+    def committed(agent, *args, **kwargs):
+        result = commit(agent, *args, **kwargs)
+        if result.session_commit_succeeded:
+            safe(check_commit, agent, result.compressed)
+        return result
+
+    def check_commit(agent, messages):
+        injection = None
+        with agent._session_db._lock:
+            conn, sid = agent._session_db._conn, agent.session_id
+            for msg in messages:
+                row = conn.execute("SELECT * FROM messages WHERE session_id=? AND id=?", (sid, msg.get("_row_id"))).fetchone()
+                if id(msg) in pinned:
+                    emitted.add((sid, msg.get("role"), key(msg)))
+                if enabled:
+                    log({"event": "commit", "session": sid, "role": msg.get("role"), "uid": key(msg),
+                         "row_id": msg.get("_row_id"), "active": row["active"] if row else None,
+                         "target_role": row["role"] if row else None, "target_uid": key(dict(row)) if row else None,
+                         "expected": msg.get("_db_row_snapshot"), "after": digest(row) if row else None})
+            if enabled:
+                log({"event": "sweep", "duplicates": sweep(conn)})
+            state["commits"] = state.get("commits", 0) + 1
+            fault = faults.get("p8_inject")
+            if fault and "p8_inject" not in fired and state["commits"] == 2:
+                variant = fault["variant"]
+                target = conn.execute("SELECT * FROM messages WHERE session_id=? AND active=? AND role='user' "
+                                      "ORDER BY id LIMIT 1", (sid, 0 if variant == "archived" else 1)).fetchone()
+                live = dict(next(m for m in messages if m.get("role") == "user"))
+                if variant == "archived":
+                    live = {**dict(target), "_row_id": target["id"], "_db_row_snapshot": digest(target), "content": "p8 control"}
+                live.pop("_db_persisted", None)
+                row = persistence._db_flush_row(agent, live, False)
+                if variant == "other-active":
+                    target = conn.execute("SELECT * FROM messages WHERE session_id=? AND active=1 AND role='user' "
+                                          "AND message_uid != ? LIMIT 1", (sid, live.get("message_uid"))).fetchone()
+                    row.pop("_row_id", None)
+                    row.update(message_uid=target["message_uid"], _db_row_snapshot=digest(target))
+                if variant == "random-snapshot":
+                    row["_db_row_snapshot"] = "0" * 32
+                injection = row, live, variant
+        if injection:
+            row, live, variant = injection
+            flushed(agent, [row], [live], messages)
+            fire("p8_inject", cur["turn"], variant=variant)
+        state["emitted"] = sorted(emitted, key=str)
+
+    if enabled:
+        repair.resolve_and_repair_transcript_batch = resolved
+        persistence._db_flush_write = flushed
+    compression._commit_compaction = committed
+    return state, pin, lambda: safe(end_sweep) or state
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cell", required=True)
@@ -219,7 +384,10 @@ def main():
             os.fsync(tfile.fileno())
     cited_modules = []
 
+    p8_finish = {"supported": False}.copy
+
     def finish(exit_kind, **extra):
+        out["p8"] = p8_finish()
         if "host_src" in cell:  # import provenance: fail closed on any host module run from outside the host tree
             out["provenance"] = provenance(cell, cited_modules)
             if out["provenance"]["violations"] and exit_kind not in ("unsupported", "refused"):
@@ -379,8 +547,11 @@ def main():
               compression_status=status, noop_reason=getattr(self, "_last_compression_noop_reason", None),
               depth0_nodes=depth0() if status == "compacted" else None,
               rejection=rejection(self), native_attempts=cur["native"])
+        p8_pin(result)
         return result
     etype.compress = traced_compress
+
+    _p8, p8_pin, p8_finish = install_p8(cell_dir, phase, faults, fired, fire, cur)
 
     depth = threading.local()
 
