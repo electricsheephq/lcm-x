@@ -194,3 +194,37 @@ def test_control_flush_releases_non_reentrant_lock(monkeypatch, tmp_path):
     compression._commit_compaction(ag, [live])
     compression._commit_compaction(ag, [live])
     assert "unlocked" in calls and "fired" in calls and state["notes"] == []
+
+
+def host_like_resolve(conn, sid, rows, *args, **kwargs):
+    """The host's per-dict order: a dict whose digest no longer matches its target ADOPTs the stored row;
+    a matching one writes its live content (REWRITE when it changes, MATCH otherwise)."""
+    snap = lambda r: hashlib.sha256(r["content"].encode()).hexdigest()
+    for msg in rows:
+        row = conn.execute("SELECT * FROM messages WHERE session_id=? AND id=?", (sid, msg["_row_id"])).fetchone()
+        if snap(row) != msg["_db_row_snapshot"]:
+            msg["_canonical_row"] = dict(row)
+        else:
+            conn.execute("UPDATE messages SET content=? WHERE id=?", (msg["content"], row["id"]))
+            msg.pop("_canonical_row", None)
+            row = conn.execute("SELECT * FROM messages WHERE id=?", (row["id"],)).fetchone()
+        msg["_db_row_snapshot"] = snap(row)
+    return []
+
+
+@pytest.mark.parametrize("contents,actions", [
+    (["rewritten A", "rewritten B"], ["REWRITE", "ADOPT"]),  # one address on two dicts in one batch (F1)
+    (["sanitized payload", "rewritten B"], ["MATCH", "REWRITE"]),
+    (["rewritten A"], ["REWRITE"]),
+])
+def test_one_batch_labels_each_dict_from_the_host_output(monkeypatch, tmp_path, contents, actions):
+    repair, persistence, _, ag, live, _, _ = fake_host(monkeypatch, tmp_path)
+    repair.resolve_and_repair_transcript_batch = host_like_resolve
+    probe.install_p8(tmp_path, "A", {}, set(), None, {})
+    batch = [dict(live, content=text) for text in contents]
+    persistence._db_flush_write(ag, batch, batch, batch)
+    events = [json.loads(x) for x in (tmp_path / "p8-events.jsonl").read_text().splitlines()]
+    assert [e["action"] for e in events if e["event"] == "flush_resolve"] == actions
+    out = host_rewrite.score({}, tmp_path, [{"p8": {"supported": True}}])
+    assert out["verdict"] == ("FAIL" if "ADOPT" in actions else "PASS")
+    assert ("I3" in out["failed_invariants"]) == ("ADOPT" in actions)

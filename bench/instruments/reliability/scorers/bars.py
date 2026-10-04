@@ -325,6 +325,9 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         failed["B9"] = numbers["B9"]["failed_invariants"]
     if numbers["B9"]["verdict"] == "UNSUPPORTED":
         applicable = [b for b in applicable if b != "B9"]
+        if not applicable:  # a B9-only cell (the P8 controls) proves nothing without the audit: never PASS
+            return {"verdict": "UNSUPPORTED", "reason": "B9: " + numbers["B9"]["reason"], "applicable_bars": [],
+                    "failed_bars": {}, "inconclusive_bars": {}, "numbers": numbers}
     failed = {b: v for b, v in failed.items() if b in applicable}
     numbers["diagnostic"] = {
         "log_counts": {k: sum(p.get("log_counts", {}).get(k, 0) for p in phases)

@@ -268,9 +268,13 @@ def install_p8(cell_dir, phase, faults, fired, fire, cur):
             row = conn.execute("SELECT * FROM messages WHERE session_id=? AND id=?", (sid, rec["target_id"])).fetchone()
             rec["after"] = digest(row) if row else None
             rec["effect"] = rec["after"] != rec["before"] or bool((msg.get("_canonical_row") or {}).get("_content_only"))
+            # Label from the host's own per-dict output: an earlier dict of the same batch can rewrite this
+            # target first, so the pre-batch digest cannot tell ADOPT from REWRITE.
+            canonical = msg.get("_canonical_row")
+            adopted = isinstance(canonical, dict) and not canonical.get("_metadata_only")
             rec["action"] = ("INSERT" if row is None else "LEGACY" if not isinstance(rec["expected"], str) else
-                             "ADOPT" if rec["expected"] != rec["before"] else
-                             "REWRITE" if rec["after"] != rec["before"] else "MATCH")
+                             "ADOPT" if adopted else
+                             "REWRITE" if msg.get("_db_row_snapshot") != rec["expected"] else "MATCH")
             if hasattr(local, "records"):
                 local.records.append((msg, rec))
             else:
