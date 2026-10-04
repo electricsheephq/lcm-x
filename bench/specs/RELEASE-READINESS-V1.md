@@ -99,10 +99,13 @@ one threshold, doctor at close. Minimum 30 turns. Green =
   `input_sha256` must match the aligned prompt's unstripped UTF-8 bytes. A mismatch is INCONCLUSIVE.
   The first non-empty transcript item must identify one owning `conversation_id`, or the bar is
   INCONCLUSIVE. Only that conversation's rows, across all its sessions (including rotation children),
-  may satisfy the transcript; foreign conversations are counted separately. Non-empty user and
+  may satisfy the transcript; foreign conversations are counted separately, and their transcript-key
+  rows fail as surplus. Other foreign keys stay report-only. Non-empty user and
   assistant rows are compared as a multiset: user edges are stripped as ACP does, assistant bytes
-  are exact. Missing copies, surplus copies and unexpected stored rows fail. Phase C alone adopts
-  the release multiset-v2 r2a split predicate: a missing, unique assistant item may match exactly
+  are exact; Hermes strips assistant content on store, so drivers must also strip `raw_answer`.
+  Missing copies, surplus copies and unexpected stored rows fail. Phase C alone adopts the release
+  multiset-v2 split predicate (r2, sha256 8943a6a7…) without its own-turn prompt rule; the store-order
+  check below fails the borrowed-turn case that rule guarded. A missing, unique assistant item may match exactly
   one run of 2–8 consecutive non-empty assistant rows in one session, joined with a space or directly
   under v2's NFC, CRLF and whitespace-run normalization. Tool rows may intervene; every user row,
   even empty, is a turn boundary. No fragment key may be a transcript item or serve two answers;

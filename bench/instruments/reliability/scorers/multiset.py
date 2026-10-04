@@ -3,7 +3,9 @@
 Key = (role, sha256(content; user edges stripped, assistant bytes exact)) over non-empty user/assistant rows:
 internal whitespace is compared EXACTLY (a collapsed "\n\n" separator is a different row). The only licensed
 transform in whole-row keys is the user edge strip, which the host performs on ACP prompts (acp_adapter/server.py
-``user_text = _extract_text(prompt).strip()``: eva/rs34 :818, customer :786, upstream :820). No NFC or CRLF
+``user_text = _extract_text(prompt).strip()``: eva/rs34 :818, customer :786, upstream :820). Hermes also strips
+assistant content on store (``_assistant_content_for_storage``), so exact assistant keys rely on the drivers
+stripping ``raw_answer`` too. No NFC or CRLF
 normalisation is applied: neither host nor plugin performs one on message content. Per key the
 stored row count must equal the expected (transcript) count: fewer = loss (deficit), more = duplicates
 (surplus). Repeated identical items are fine as long as the multiplicity matches. A stored-only key is
@@ -188,7 +190,8 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
 
 
 def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
-    """Phase C only: owning conversation, v2 r2a split predicate, then exact multiset and subsequence.
+    """Phase C adopts the release multiset-v2 split predicate (r2, sha256 8943a6a7…) without its own-turn
+    prompt rule; the store-order check below fails the borrowed-turn case that rule guarded.
     Rows: (store_id, session_id, role, content, conversation_id). v2 normalization is split-only."""
     rows = sorted(rows, key=lambda r: r[0])
     items = [(i, r, t) for i, (r, t) in enumerate(expected) if norm(t)]
@@ -233,7 +236,13 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
             splits.append({"transcript_index": index, "role": role, "split_match": ids})
     matched = sorted([r for r in owned if r[0] not in used] + replacements, key=lambda r: r[0])
     out = score(expected, matched)  # unused fragment copies remain surplus; no stored row is borrowed twice
-    out.update(owning_conversation=owner, foreign_conversations=foreign, split_assistant_turns=splits,
+    keys = {row_key(r, t) for r, t in expected if norm(t)}
+    foreign_transcript_rows = sum(c != owner and r in ("user", "assistant") and bool(norm(t)) and
+                                  row_key(r, t) in keys for _, _, r, t, c in rows)
+    if foreign_transcript_rows:
+        out.update(verdict="FAIL", surplus_rows=out["surplus_rows"] + foreign_transcript_rows)
+    out.update(owning_conversation=owner, foreign_conversations=foreign, phase_c_split_matches=splits,
+               foreign_transcript_rows=foreign_transcript_rows,
                instrument="phase-c-multiset-v2", accepted_split_keys=len(splits))
     sequence = [row_key(r, t) for _, _, r, t in matched if r in ("user", "assistant") and norm(t)]
     cursor = 0

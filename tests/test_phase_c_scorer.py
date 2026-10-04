@@ -73,14 +73,26 @@ def test_row_order_reports_first_transcript_index():
 def test_rotation_children_match_only_owning_conversation():
     expected = [("user", "prompt"), ("assistant", "answer")]
     rows = [(1, "root", "user", "prompt", 1), (2, "child", "assistant", "answer", 1),
-            (3, "foreign", "assistant", "answer", 2)]
+            (3, "foreign", "assistant", "unrelated answer", 2)]
     out = multiset.phase_c_score(expected, rows)
     assert out["verdict"] == "PASS"
     assert out["owning_conversation"] == 1
     assert out["foreign_conversations"] == {2: 1}
-    out = multiset.phase_c_score(expected, [rows[0], rows[2]])
+    out = multiset.phase_c_score(expected, [rows[0], (3, "foreign", "assistant", "answer", 2)])
     assert (out["verdict"], out["deficit_rows"]) == ("FAIL", 1)
     assert out["foreign_conversations"] == {2: 1}
+
+
+@pytest.mark.parametrize("conversation,session", [("C2", "S2"), ("", "S1")])
+def test_foreign_transcript_turn_is_surplus(conversation, session):
+    expected = [("user", "p1"), ("assistant", "a1"), ("user", "p2"), ("assistant", "a2")]
+    rows = [(i + 1, "S1", role, text, "C") for i, (role, text) in enumerate(expected)]
+    rows += [(5, session, "user", "p2", conversation), (6, session, "assistant", "a2", conversation)]
+    out = multiset.phase_c_score(expected, rows)
+    assert out["verdict"] == "FAIL"
+    assert out["surplus_rows"] == 2
+    assert out["foreign_transcript_rows"] == 2
+    assert out["foreign_conversations"] == {conversation: 2}
 
 
 def test_first_item_missing_is_inconclusive():
@@ -98,7 +110,7 @@ def test_split_with_intervening_tools_and_empty_assistant():
     rows += [(2.5, "S", "tool", "result", 1), (3.5, "S", "assistant", "", 1)]
     out = multiset.phase_c_score([("user", "prompt"), ("assistant", "one\n\ntwo\n\nthree")], rows)
     assert out["verdict"] == "PASS"
-    assert out["split_assistant_turns"][0]["split_match"] == [2, 3, 4]
+    assert out["phase_c_split_matches"][0]["split_match"] == [2, 3, 4]
     assert multiset.score([("user", "prompt"), ("assistant", "one\n\ntwo\n\nthree")],
                           [r[:4] for r in rows])["verdict"] == "FAIL"
 
@@ -133,6 +145,17 @@ def test_ambiguous_run_fails_before_fragment_use():
                            for i, p in enumerate(("one", "two", "three"))]
     assert multiset.phase_c_score([("user", "prompt"), ("assistant", "one\n\ntwo\n\nthree")], rows)[
         "verdict"] == "FAIL"
+
+
+def test_ambiguous_two_fragment_report_keeps_score_splits():
+    expected = [("user", "p1"), ("assistant", "ab"), ("user", "p2")]
+    rows = [(i + 1, "S", role, text, "C") for i, (role, text) in enumerate([
+        ("user", "p1"), ("assistant", "a"), ("assistant", "b"), ("user", "p2"),
+        ("assistant", "a"), ("assistant", "b")])]
+    out = multiset.phase_c_score(expected, rows)
+    assert out["verdict"] == "FAIL"
+    assert out["split_keys"] == len(out["split_assistant_turns"]) == 1
+    assert out["phase_c_split_matches"] == []
 
 
 @pytest.mark.parametrize("n,verdict", [(2, "PASS"), (8, "PASS"), (9, "FAIL")])
