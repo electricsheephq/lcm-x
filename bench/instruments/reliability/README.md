@@ -72,6 +72,7 @@ the host reported `interrupted`. Any other assistant row is surplus.
   stored-only key and every split reply is surplus and fails. Expected =
   what the host held per attempt after its ACP strip and consecutive-user merge (a crashed prompt folded
   into the next composite counts once).
+  B2 strips assistant edges too; Phase C alone uses exact assistant bytes (see `RELEASE-READINESS-V1`).
 - **Host-parity licence (D-A, DESIGN-436 REVISION 2 P-HOST; `scorers/host_parity.py`).** A stored USER-row surplus
   of a B2 key (or a B1 user tag) in lineage L is licensed only up to what the cell's own host state.db holds in L:
   `min(surplus, host_count - expected)`, floored at 0. host_count is what one host view holds: the most ACTIVE rows
