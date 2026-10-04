@@ -95,14 +95,23 @@ one threshold, doctor at close. Minimum 30 turns. Green =
 - at least one compaction committed during the soak. A soak in which every compaction stopped
   (on a handled provider failure or otherwise) proves little: it is inconclusive and re-runs;
 - lossless, as the Phase C scorer (`bench/instruments/reliability/scorers/`) checks it; its
-  code is the exact rule. In short: for each turn with a recorded result, the prompt sent and
-  the final answer recorded (not only the recall-probe rows) are compared with every user and
-  assistant row in the store, across all sessions, as a multiset keyed by role and the hash of
-  the content with leading and trailing whitespace stripped (the strip the host applies to ACP
-  prompts). A missing copy, an extra copy or a stored row it does not expect fails, including
-  assistant text stored next to a tool call. Prompts without a recorded result, rows that are
-  empty after the strip, tool-result rows, tool-call ids, names and arguments, row order and
-  the owning session are not part of this bar (#710);
+  code is the exact rule. Sent prompts and result records must have equal counts; each recorded
+  `input_sha256` must match the aligned prompt's unstripped UTF-8 bytes. A mismatch is INCONCLUSIVE.
+  The first non-empty transcript item must identify one owning `conversation_id`, or the bar is
+  INCONCLUSIVE. Only that conversation's rows, across all its sessions (including rotation children),
+  may satisfy the transcript; foreign conversations are counted separately. Non-empty user and
+  assistant rows are compared as a multiset: user edges are stripped as ACP does, assistant bytes
+  are exact. Missing copies, surplus copies and unexpected stored rows fail. Phase C alone adopts
+  the release multiset-v2 r2a split predicate: a missing, unique assistant item may match exactly
+  one run of 2–8 consecutive non-empty assistant rows in one session, joined with a space or directly
+  under v2's NFC, CRLF and whitespace-run normalization. Tool rows may intervene; every user row,
+  even empty, is a turn boundary. No fragment key may be a transcript item or serve two answers;
+  extra copies of used fragments fail. Whole-row absence, uniqueness and fragment ownership use
+  v2-normalized keys for this split exception only. The transcript must also be a subsequence of
+  store-id-ordered rows (accepted fragments represent one answer); extras may intervene but retain
+  their multiset checks. The first out-of-order transcript index and role are reported as FAIL.
+  Rows empty after stripping are excluded; tool-result rows, tool-call ids, names and arguments
+  are not part of this bar (#710);
 - zero unexpected errors in engine logs. A provider failure the engine handles as designed (a
   rejected summary result logged with its reason, after which the compaction commits or stops)
   is not unexpected; the receipt lists each one;

@@ -1,8 +1,8 @@
 """multiset-v1 lossless bar, ported from the v0.24.3-rc1 gauntlet ``lossless_bar_multiset.py``.
 
-Key = (role, sha256(content with leading/trailing whitespace stripped)) over non-empty user/assistant rows:
+Key = (role, sha256(content; user edges stripped, assistant bytes exact)) over non-empty user/assistant rows:
 internal whitespace is compared EXACTLY (a collapsed "\n\n" separator is a different row). The only licensed
-transform is the edge strip, which the host performs on ACP prompts (acp_adapter/server.py
+transform in whole-row keys is the user edge strip, which the host performs on ACP prompts (acp_adapter/server.py
 ``user_text = _extract_text(prompt).strip()``: eva/rs34 :818, customer :786, upstream :820). No NFC or CRLF
 normalisation is applied: neither host nor plugin performs one on message content. Per key the
 stored row count must equal the expected (transcript) count: fewer = loss (deficit), more = duplicates
@@ -15,6 +15,8 @@ nothing.
 from __future__ import annotations
 
 import hashlib
+import re
+import unicodedata
 from collections import Counter, defaultdict
 
 
@@ -24,6 +26,10 @@ def norm(text: str) -> str:
 
 def h(text: str) -> str:
     return hashlib.sha256(norm(text).encode()).hexdigest()
+
+
+def row_key(role: str, text: str) -> tuple:
+    return role, h(text) if role == "user" else hashlib.sha256((text or "").encode()).hexdigest()
 
 
 def licence(key: tuple, surplus: int, expected: int, host: dict | None, store_ids: list) -> dict | None:
@@ -88,11 +94,11 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     for sid, session, role, content in stored_rows:
         if role not in ("user", "assistant") or not norm(content or ""):
             continue
-        stored[(role, h(content))].append(sid)
+        stored[row_key(role, content)].append(sid)
         if role == "assistant":
             by_session[session].append((sid, content or ""))
-    want = Counter((role, h(text)) for role, text in expected if norm(text))
-    texts = {(role, h(text)): text for role, text in expected}
+    want = Counter(row_key(role, text) for role, text in expected if norm(text))
+    texts = {row_key(role, text): text for role, text in expected}
     composites, paired = [], Counter()
     # #823: each active host merge record covers one missing composite. Reserve transcript rows first;
     # consume its parts before surplus licensing so no stored row can serve both purposes.
@@ -121,10 +127,10 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
                  "preview": norm(texts[key])[:80]}
         if have < n:
             if key[0] == "assistant" and have == 0:
-                target = norm(texts[key])
+                target = texts[key]
                 for rows in by_session.values():
                     for k in range(len(rows) - 1):
-                        if target == norm(rows[k][1] + rows[k + 1][1]):  # same exact rule as the keys
+                        if target == rows[k][1] + rows[k + 1][1]:  # exact assistant bytes, as in the keys
                             entry["split_match"] = [rows[k][0], rows[k + 1][0]]
                 if "split_match" in entry:
                     split.append(entry)
@@ -179,3 +185,64 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
         "stored_rows_not_expected": len(extra),
         "extra": extra[:20],
     }
+
+
+def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
+    """Phase C only: owning conversation, v2 r2a split predicate, then exact multiset and subsequence.
+    Rows: (store_id, session_id, role, content, conversation_id). v2 normalization is split-only."""
+    rows = sorted(rows, key=lambda r: r[0])
+    items = [(i, r, t) for i, (r, t) in enumerate(expected) if norm(t)]
+    owners = {c for _, _, r, t, c in rows if items and row_key(r, t) == row_key(*items[0][1:])}
+    if len(owners) != 1:
+        return {"verdict": "INCONCLUSIVE", "reason": "first transcript item has no unique owning conversation"}
+    owner = owners.pop()
+    foreign = dict(Counter(c for *_, c in rows if c != owner))
+    owned = [r[:4] for r in rows if r[4] == owner]
+    def vkey(role, text):  # inherited v2 NFC/CRLF/whitespace normalization; never used by whole-row keys
+        return role, re.sub(r"\s+", " ", unicodedata.normalize("NFC", text or "").replace("\r\n", "\n")).strip()
+    want = Counter(vkey(r, t) for r, t in expected)
+    held = Counter(vkey(r, t) for _, _, r, t in owned if norm(t))
+    assistants, users = defaultdict(list), defaultdict(list)
+    for sid, session, role, text in owned:
+        if role == "user":
+            users[session].append(sid)  # empty users remain turn boundaries (v2 MB1)
+        if role == "assistant" and norm(text):
+            assistants[session].append((sid, text))
+    used, replacements, splits = set(), [], []
+    for index, role, text in items:
+        vk = vkey(role, text)
+        if role != "assistant" or held[vk] or want[vk] != 1:
+            continue
+        hits = []
+        for session, arows in assistants.items():
+            for k in range(len(arows)):
+                for n in range(2, 9):  # v2 MAX_FRAGMENTS = 8; consecutive non-empty assistant rows
+                    run = arows[k:k + n]
+                    if len(run) < n:
+                        break
+                    if vk in (vkey(role, " ".join(c for _, c in run)), vkey(role, "".join(c for _, c in run))):
+                        ids = [s for s, _ in run]
+                        if not any(ids[0] < u < ids[-1] for u in users[session]) and all(
+                                vkey(role, c) not in want for _, c in run):
+                            hits.append((ids, session))
+                        break
+        if len(hits) == 1 and not used.intersection(hits[0][0]):  # uniqueness before use (v2 MB2)
+            ids, session = hits[0]
+            used.update(ids)
+            replacements.append((ids[0], session, role, text))
+            splits.append({"transcript_index": index, "role": role, "split_match": ids})
+    matched = sorted([r for r in owned if r[0] not in used] + replacements, key=lambda r: r[0])
+    out = score(expected, matched)  # unused fragment copies remain surplus; no stored row is borrowed twice
+    out.update(owning_conversation=owner, foreign_conversations=foreign, split_assistant_turns=splits,
+               instrument="phase-c-multiset-v2", accepted_split_keys=len(splits))
+    sequence = [row_key(r, t) for _, _, r, t in matched if r in ("user", "assistant") and norm(t)]
+    cursor = 0
+    for index, role, text in items:
+        target = row_key(role, text)
+        pos = next((j for j in range(cursor, len(sequence)) if sequence[j] == target), None)
+        if pos is not None:
+            cursor = pos + 1
+        elif target in sequence:
+            out.update(verdict="FAIL", out_of_order={"transcript_index": index, "role": role})
+            break
+    return out
