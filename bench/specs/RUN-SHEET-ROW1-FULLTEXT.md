@@ -6,7 +6,8 @@ Nothing in this sheet spends money. Roadmap reference: H2 in `ROADMAP.md` (recal
 Public-copy rule: the merged copy carries no customer, box or person names, no internal aliases, no local paths.
 Amended (#818, before any scored run): the product is the lcm-x GA current at launch, run from a detached GA worktree
 (§2); one product sha across sub-rows; the R1-S dataset digest; phase-separated reader and judge launches; no reader
-tool use.
+tool use. Amended again (#833): no judge tool use either; the R1-M overlay must equal the instrument commit's blobs;
+the per-session summary-node maximum of every R1-S / R1-L store is recorded (§2, §6, §7).
 
 ## 0. Why this row
 - The product default is `embeddings_enabled=False`: recall is full-text unless a deployment turns embeddings on.
@@ -30,7 +31,10 @@ tool use.
     update the docs first and do not launch. Any mismatch stops the row.
   - R1-M runs in a detached worktree at the GA commit. Only the instrument files (`benchmarking/`,
     `scripts/lcm_longmemeval.py`) come from the instrument commit, and `git status --porcelain` lists only those
-    paths. The harness imports the product from its own checkout, so the measured product is the GA tree byte for byte,
+    paths. The overlay must equal the instrument commit's blobs:
+    `git diff --quiet <instrument sha> -- benchmarking/ scripts/lcm_longmemeval.py` exits 0, and
+    `git status --porcelain --untracked-files=all` shows no untracked file under those paths; record both outputs.
+    The harness imports the product from its own checkout, so the measured product is the GA tree byte for byte,
     including modules the recall path imports indirectly (for example `store.py` applies
     `message_content.normalize_content_value` before full-text insertion, so a listed-files check alone could miss a
     corpus change).
@@ -43,6 +47,10 @@ tool use.
     `retrieval_core.py`, `search_query.py`, `adaptive_retrieval.py`, `store.py`, `vector_store.py`, `dag.py`,
     `db_bootstrap.py`, `config.py`, `message_content.py`). From `v0.24.9` to `v0.25.0` it is a comment in `config.py`
     and a depth query in `dag.py` that condensation and context assembly use, outside recall retrieval (#750).
+    For a session with fewer than 1,000 summary nodes the new query returns the same depth set as the previous capped
+    path, so the scored context is unchanged there. Record the maximum per-session summary-node count of every R1-S /
+    R1-L store once it is built, before scoring; if any session reaches 1,000, label the change as in the scored
+    context path for that sub-row.
 - Instruments: the lcm-x commit holding the `--embeddings` arm (#811's merge or later); the memorybench commit holding
   `HERMES_MB_EMBEDDINGS` and `scripts/run-with-watchdog.sh` (`b47f92f7` or later on `feat/locomo-hermes-prep`); blob
   shas of the harness files.
@@ -61,10 +69,12 @@ tool use.
   answerer and the judge. So the answer phase and the judge phase are separate launches, each with its own pinned
   environment (reader: Sol at medium; judge: Sol at low) and its own receipt (model id, effort, CLI version, binary
   sha256, served model).
-- Reader tool use: the reader answers from the delivered recall context only. Every reader call keeps a durable
-  per-call tool-event record, and any reader tool call (filesystem, shell, search, web) stops the sub-row: the F59
-  reference arm was invalidated by a reader that searched files instead of using its context. A transport that cannot
-  call tools satisfies this by construction (record which). If neither is available, the sub-row is blocked.
+- Reader and judge tool use: the reader answers from the delivered recall context only, and the judge grades from
+  the question, gold answer and reader answer only. Every reader call and every judge call keeps a durable per-call
+  tool-event record, and any tool call by either (filesystem, shell, search, web) stops the sub-row: the F59
+  reference arm was invalidated by a reader that searched files instead of using its context, and a judge that can
+  look things up makes the strict-judge score unauditable. A transport that cannot call tools satisfies this by
+  construction (record which, per phase). If neither is available for a phase, the sub-row is blocked.
 - Served model: every reader answer and judge verdict, watchdog-resumed work included, carries the model that
   actually served it (from the transport log), and it must equal the pinned id (the F59 lesson: a requested model
   was silently served by another). If the transport does not expose the served model, that sub-row is blocked
@@ -126,15 +136,16 @@ tool use.
 - Watchdog used all resumes on one run → park that sub-row, report the stall with the log.
 - More than 2 R1-M shards dead of one cause → park, root-cause first.
 - The GA tag does not resolve to the `docs/project-status.md` pin, the R1-M worktree shows a change outside the
-  instrument files, a bridge checkout is not clean, sub-row product shas differ without separate labels, the R1-S
-  dataset or question-list sha differs from its pin, a reader tool call appears, or a served model differs from its
-  pin → stop.
+  instrument files or an overlay file that differs from the instrument commit, a bridge checkout is not clean,
+  sub-row product shas differ without separate labels, the R1-S dataset or question-list sha differs from its pin, a
+  reader or judge tool call appears, or a served model differs from its pin → stop.
 
 ## 7. Procedure
 1. Merge the kit PRs; merge this sheet (fact-check of every pin source). R1-M also waits for #817 (per-question
    provenance).
-2. A detached worktree at the GA commit with the instrument files overlaid (R1-M), a clean detached worktree at the
-   same commit for the bridges (R1-S / R1-L); record pins (§2).
+2. A detached worktree at the GA commit with the instrument files overlaid and checked against the instrument commit
+   (R1-M), a clean detached worktree at the same commit for the bridges (R1-S / R1-L); record pins (§2), including
+   the per-session summary-node maximum of every R1-S / R1-L store once it is built.
 3. Positive controls (§3) → evidence folder.
 4. R1-M full 500 (6 shards) + A/A′ subset → snapshot → score.
 5. R1-S 500 with A′ subset → snapshot → judge → score.
