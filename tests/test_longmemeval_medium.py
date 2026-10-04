@@ -633,6 +633,7 @@ def test_small_default_cli_report_is_byte_identical_to_golden(tmp_path, monkeypa
     # Keep the banked schema byte-identical after projecting away the additive
     # configuration and run-status fields. New fields have dedicated arm tests.
     report.pop("retrieval_config")
+    report.pop("lcm_recall_health")
     for arms in [report["arms"], *report["per_category"].values()]:
         for row in arms.values():
             assert row.pop("run") is True
