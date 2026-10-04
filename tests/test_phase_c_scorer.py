@@ -109,6 +109,16 @@ def test_first_item_missing_is_inconclusive():
     assert out["verdict"] == "INCONCLUSIVE"
 
 
+@pytest.mark.parametrize("unset", [None, ""])
+def test_unset_owner_conversation_is_inconclusive(unset):
+    """An unset conversation id is not an owner: rows from unrelated sessions would collapse into one."""
+    expected = [("user", "prompt"), ("assistant", "answer")]
+    rows = [(1, "S1", "user", "prompt", unset), (2, "S2", "assistant", "answer", unset)]
+    out = multiset.phase_c_score(expected, rows)
+    assert out["verdict"] == "INCONCLUSIVE"
+    assert multiset.phase_c_score(expected, [rows[0][:4] + (1,), rows[1][:4] + (2,)])["verdict"] == "FAIL"
+
+
 def split_rows(parts=("one", "two", "three")):
     return [(1, "S", "user", "prompt", 1)] + [
         (i + 2, "S", "assistant", p, 1) for i, p in enumerate(parts)]

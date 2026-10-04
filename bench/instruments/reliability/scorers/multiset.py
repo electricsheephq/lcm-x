@@ -197,7 +197,7 @@ def phase_c_score(expected: list[tuple[str, str]], rows: list[tuple]) -> dict:
     rows = sorted(rows, key=lambda r: r[0])
     items = [(i, r, t) for i, (r, t) in enumerate(expected) if norm(t)]
     owners = {c for _, _, r, t, c in rows if items and row_key(r, t) == row_key(*items[0][1:])}
-    if len(owners) != 1:
+    if len(owners) != 1 or next(iter(owners)) in (None, ""):  # an unset id names no conversation
         return {"verdict": "INCONCLUSIVE", "reason": "first transcript item has no unique owning conversation"}
     owner = owners.pop()
     foreign = dict(Counter(c for *_, c in rows if c != owner))
