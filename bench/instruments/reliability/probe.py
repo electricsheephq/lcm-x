@@ -307,7 +307,8 @@ def main():
         n_summ["c"] += 1
         text = kw.get("text") if "text" in kw else (args[0] if args else "")
         tags = sorted(set(re.findall(r"\[([A-Z]\d{2,3})\] user", text or "")))
-        return f"Stub summary #{n_summ['c']} covers " + " ".join("U" + x for x in tags) + ".\nExpand for details about: stub", 1
+        return (f"Stub summary #{n_summ['c']} covers " + " ".join("U" + x for x in tags)
+                + ".\nExpand for details about: stub" + FILLER * cell.get("summary_repeat", 0)), 1
 
     window = int(cell["window"])
     cur = {"turn": 0, "step": 0, "native": 0, "sess": "S0", "ended": None, "final": False, "commits0": 0,
@@ -368,9 +369,33 @@ def main():
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     orig_start, orig_end = etype.on_session_start, getattr(etype, "on_session_end", None)
 
+    recovery_turns = []
+    fr = faults.get("forced_recovery")
+    recovery_module = sys.modules[cell["plugin"]["module"] + ".engine"]
+    recovery_texts = {k: getattr(recovery_module, n, "") for k, n in (
+        ("placeholder", "_OVERFLOW_RECOVERY_PLACEHOLDER"), ("note", "_OVERFLOW_RECOVERY_OVERCAP_NOTE"))}
+
     def traced_compress(self, messages, *args, **kwargs):
-        result = orig_compress(self, messages, *args, **kwargs)
+        injecting = fr and cur["turn"] == fr["turn"] and cur["step"] > 0
+        if injecting:
+            if fr["kind"] not in fired:
+                fire(fr["kind"], cur["turn"])
+            # Bound the actual assembly budget despite provider overhead; keep the real system anchor.
+            cap = recovery_module.count_messages_tokens(messages[:self._leading_anchor_count(messages)]) + 120
+            with patch.object(etype, "_summary_route_stop_applies", return_value=True), \
+                    patch.object(etype, "_overflow_recovery_assembly_cap", return_value=cap):
+                result = orig_compress(self, messages, *args, **kwargs)
+        else:
+            result = orig_compress(self, messages, *args, **kwargs)
         status = getattr(self, "_last_compression_status", None)
+        recovery = {}
+        if status == "overflow_recovery":
+            paths = [k for k, text in recovery_texts.items() if text and any(
+                text.split("{", 1)[0] in str(m.get("content") or "") for m in result)]
+            recovery = {"recovery_marker": bool(paths), "recovery_paths": paths,
+                        "prior_compaction": any(t < cur["turn"] for t in counters["compacted_turns"])}
+            if paths:
+                recovery_turns.append(cur["turn"])
         self._probe_calls, self._probe_status = getattr(self, "_probe_calls", 0) + 1, status  # per-call evidence
         if status in ("compacted", "host_native"):  # a committed pass: LCM's own or the host-native summary
             counters["compacted_turns"].append(cur["turn"])
@@ -378,7 +403,7 @@ def main():
               session_prefix=cur.get("prefix", "T"),
               compression_status=status, noop_reason=getattr(self, "_last_compression_noop_reason", None),
               depth0_nodes=depth0() if status == "compacted" else None,
-              rejection=rejection(self), native_attempts=cur["native"])
+              rejection=rejection(self), native_attempts=cur["native"], **recovery)
         return result
     etype.compress = traced_compress
 
@@ -399,7 +424,9 @@ def main():
         if depth.n == 0:
             ok, detail, chars = check_result(name, args, result)
             event(turn=cur["turn"], event="tool_dispatch", tag=f"{cur.get('prefix', 'T')}{cur['turn']:02d}", id=call_id,
-                  name=name, args=args, via=via, ok=ok, detail=detail, chars=chars)
+                  name=name, args=args, via=via, ok=ok, detail=detail, chars=chars,
+                  **({"recovery_result_sha256": hashlib.sha256((result if isinstance(result, str) else json.dumps(result)).encode()).hexdigest()}
+                     if fr and cur["turn"] == fr["turn"] else {}))
         return result
 
     def traced_tool(self, name, args, **kwargs):
@@ -478,6 +505,10 @@ def main():
             return orig_stage(conn, conversation_id, session_id, *args, **kwargs)
         lifecycle.stage_compaction_publication = inject
 
+    if fr and not hasattr(etype, "_summary_route_stop_applies"):
+        finish("unsupported", reason="plugin has no _summary_route_stop_applies recovery injection seam")
+        return
+
     asst = cell["assistant"]
     plan = {}
     for group in cell.get("tool_plan", []):  # "restart": the first turn of every phase after A (the merge turn)
@@ -506,8 +537,11 @@ def main():
 
     def scripted(ag, prefix, t, est, cancel=False):
         def provider(*_a, **kw):
+            crash = faults.get("crash_after_compaction_before_reply", {})
+            crash_turns = ([n + crash.get("offset", 0) for n in recovery_turns]
+                           if crash.get("after_status") == "overflow_recovery" else counters["compacted_turns"])
             if phase == "A" and prefix == "T" and "crash_after_compaction_before_reply" in faults and \
-                    "crash_after_compaction_before_reply" not in fired and t in counters["compacted_turns"]:
+                    "crash_after_compaction_before_reply" not in fired and t in crash_turns:
                 fire("crash_after_compaction_before_reply", t)
                 finish("crash", next_turn=t + 1, turn=t)
             step, cur["step"] = cur["step"], cur["step"] + 1
@@ -526,6 +560,8 @@ def main():
                 time.sleep(float(cell.get("cancel_wait", 2.0)))
             groups = plan.get(t, []) if prefix == "T" else []
             if step < len(groups):
+                if fr and t == fr["turn"]:
+                    engine._config.max_assembly_tokens = fr["cap"]  # after preflight, before the tool-result pass
                 for c in groups[step]:
                     event(turn=t, event="tool_call", name=c["name"], session_prefix=prefix)
                 return response("", usage, groups[step], t, f"{prefix}{t:02d}_{step}")
@@ -571,8 +607,13 @@ def main():
               session_prefix=prefix, content=text, persist=persist if persist != text else None,
               content_sha256=hashlib.sha256(text.encode()).hexdigest())
         scripted(ag, prefix, t, est, cancel=kind == "cancel")
-        result = ag.run_conversation(user_message=text, conversation_history=history, task_id=task_id,
-                                     persist_user_message=persist)
+        cap = engine._config.max_assembly_tokens if fr else None
+        try:
+            result = ag.run_conversation(user_message=text, conversation_history=history, task_id=task_id,
+                                         persist_user_message=persist)
+        finally:
+            if fr:
+                engine._config.max_assembly_tokens = cap
         held, reply_held, tools, user_tags, host_replies = held_after(result, text, prefix, t)
         failed = bool(result.get("failed")) or not result.get("completed", True)
         if failed and kind != "cancel":
@@ -648,6 +689,10 @@ def main():
     if cell.get("final_compaction_check", True):
         cur["final"] = True  # its compaction events are B4 evidence, not B5 passes
         out["final_check"] = {**final_check(agent, history, buf), "backlog_checks": backlog_log}
+    if fr and phase == "A" and not recovery_turns:
+        finish("unsupported", reason="no marked overflow_recovery after the planned tool result; "
+               f"injection fired={fr['kind'] in fired}, prior compactions={counters['compacted_turns']}")
+        return
     finish("done", next_turn=None)
 
 
