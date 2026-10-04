@@ -23,8 +23,13 @@ def score(cell, cell_dir, phases):
             else:
                 reported.append(item)
 
-    for line in path.read_text().splitlines():
-        ev = json.loads(line)
+    try:
+        events = [json.loads(line) for line in path.read_text().splitlines()]
+    except (OSError, ValueError):  # a truncated line from a killed process: the audit proves nothing
+        return {"verdict": "UNSUPPORTED", "reason": "unreadable audit log"}
+    if not any(isinstance(ev, dict) and ev.get("event") == "commit" for ev in events):
+        return {"verdict": "UNSUPPORTED", "reason": "no committed compaction observed"}
+    for ev in events:
         ids = [ev.get("target_id"), ev.get("row_id")]
         if ev["event"] == "commit":
             if (ev["active"] != 1 or ev["role"] != ev["target_role"] or ev["uid"] != ev["target_uid"]

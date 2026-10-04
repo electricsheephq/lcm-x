@@ -18,6 +18,9 @@ FLUSH = dict(event="flush_resolve", session="S0", row_id=7, target_id=7, role="u
 
 
 def scored(tmp_path, events=(), phases=None, cell=None):
+    events = list(events)
+    if not any(e.get("event") == "commit" for e in events):  # B9 needs an observed commit (else UNSUPPORTED)
+        events.insert(0, COMMIT)
     (tmp_path / "p8-events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
     return host_rewrite.score(cell or {}, tmp_path, phases or [{"p8": {"supported": True}}])
 
@@ -225,6 +228,15 @@ def test_one_batch_labels_each_dict_from_the_host_output(monkeypatch, tmp_path, 
     persistence._db_flush_write(ag, batch, batch, batch)
     events = [json.loads(x) for x in (tmp_path / "p8-events.jsonl").read_text().splitlines()]
     assert [e["action"] for e in events if e["event"] == "flush_resolve"] == actions
+    with (tmp_path / "p8-events.jsonl").open("a") as log:  # a committed compaction, so B9 is scorable
+        log.write(json.dumps(COMMIT) + "\n")
     out = host_rewrite.score({}, tmp_path, [{"p8": {"supported": True}}])
     assert out["verdict"] == ("FAIL" if "ADOPT" in actions else "PASS")
     assert ("I3" in out["failed_invariants"]) == ("ADOPT" in actions)
+
+
+@pytest.mark.parametrize("text", ["", json.dumps(dict(FLUSH)) + "\n", json.dumps({"event": "sweep", "duplicates": []}) + "\n",
+                                  json.dumps(COMMIT) + "\n" + '{"event": "flush_res'])
+def test_no_commit_or_unreadable_log_is_unsupported_never_pass(tmp_path, text):
+    (tmp_path / "p8-events.jsonl").write_text(text)
+    assert host_rewrite.score({}, tmp_path, [{"p8": {"supported": True}}])["verdict"] == "UNSUPPORTED"
