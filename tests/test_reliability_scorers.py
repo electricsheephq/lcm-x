@@ -1014,3 +1014,10 @@ def test_r2a4_an_echoed_lcm_carrier_is_never_licensed(tmp_path):
     out = make(tmp_path / "t", rows=clean_rows() + [("user", todo)], events=clean_events(),
                host=held() + [("S0", "user", todo, 1)], plugin=TREE)
     assert out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 0 and "B2" in out["failed_bars"]
+
+
+def test_b9_only_cell_without_the_audit_is_unsupported_never_pass(tmp_path):
+    """A P8 control proves nothing when B9 is UNSUPPORTED (audit off, or a host without the seams)."""
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), bars=["B9"])
+    assert out["verdict"] == "UNSUPPORTED" and out["applicable_bars"] == [], out
+    assert out["reason"].startswith("B9: ")

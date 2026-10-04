@@ -33,6 +33,11 @@ logstate = {"commits": 0, "conflicts": 0}
 _depth = threading.local()
 _r1 = None
 _tap = None
+_p8_finish = {"supported": False, "notes": [], "duplicates": []}.copy
+
+
+def _p8_pin(messages):
+    pass
 
 
 def _append(path, rec):
@@ -55,7 +60,30 @@ def note(what, **rec):
 
 
 def snapshot(**extra):
-    note("counters", counters=counters, orphan_hook=cur.get("orphan_hook"), **extra)
+    note("counters", counters=counters, orphan_hook=cur.get("orphan_hook"), p8=_p8_finish(), **extra)
+
+
+def install_p8():
+    global _p8_pin, _p8_finish
+    if cur.get("p8_installed"):
+        return
+    cur["p8_installed"] = True
+    try:
+        cell = json.loads((DIR / "cell.json").read_text())
+        path = DIR / "faults-fired.jsonl"
+        fired = {json.loads(x)["kind"] for x in path.read_text().splitlines()} if path.exists() else set()
+
+        def fire(kind, turn, **extra):
+            _append(path, {"kind": kind, "phase": PHASE, "turn": turn})
+            fired.add(kind)
+            event(turn=turn, event=kind, fault=kind, session_prefix=cur["prefix"], **extra)
+
+        _, _p8_pin, _p8_finish = _r1.install_p8(
+            DIR, PHASE, {f["kind"]: f for f in cell["faults"]}, fired, fire, cur,
+            checkpoint=lambda: note("p8", p8=_p8_finish()))
+    except Exception as exc:
+        state = {"supported": False, "notes": [type(exc).__name__], "duplicates": []}
+        _p8_finish = state.copy
 
 
 def load_turn():
@@ -252,6 +280,7 @@ def patch_engine(agent):
             raise
         try:
             secs = elapsed(started)
+            _p8_pin(result)
             status = getattr(self, "_last_compression_status", None)
             cover = store_cover()  # leaves written by this call and the stored rows they newly cover (hidden or host)
             delta = [None if a is None or b is None else b - a for a, b in zip(cover0, cover)]
@@ -314,6 +343,7 @@ def patch_run_agent(mod):
     def init(self, *a, **k):
         orig_init(self, *a, **k)
         ensure_tap()
+        install_p8()
         patch_engine(self)
         note("agent_built", session=getattr(self, "session_id", None), platform=k.get("platform"),
              engine=getattr(getattr(self, "context_compressor", None), "name", None), model=getattr(self, "model", None),

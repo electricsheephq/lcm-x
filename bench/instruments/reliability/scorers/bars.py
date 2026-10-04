@@ -20,9 +20,9 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from . import chronology, drain, host_parity, multiset, summary, tool_calls, tool_groups
+from . import chronology, drain, host_parity, multiset, summary, tool_calls, tool_groups, host_rewrite
 
-ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8")
+ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 
 
 def _candidate_phases(cell: dict, phases: list[dict]) -> list[dict]:
@@ -344,6 +344,14 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         d_failed, d_inconclusive, numbers["drain"] = drain.score(cell, phases, cell_dir)
         failed.update(d_failed)
         inconclusive.update(d_inconclusive)
+    numbers["B9"] = host_rewrite.score(cell, cell_dir, phases)
+    if numbers["B9"]["verdict"] == "FAIL":
+        failed["B9"] = numbers["B9"]["failed_invariants"]
+    if numbers["B9"]["verdict"] == "UNSUPPORTED":
+        applicable = [b for b in applicable if b != "B9"]
+        if not applicable:  # a B9-only cell (the P8 controls) proves nothing without the audit: never PASS
+            return {"verdict": "UNSUPPORTED", "reason": "B9: " + numbers["B9"]["reason"], "applicable_bars": [],
+                    "failed_bars": {}, "inconclusive_bars": {}, "numbers": numbers}
     failed = {b: v for b, v in failed.items() if b in applicable}
     numbers["diagnostic"] = {
         "log_counts": {k: sum(p.get("log_counts", {}).get(k, 0) for p in phases)
