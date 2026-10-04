@@ -202,7 +202,9 @@ def test_control_flush_releases_non_reentrant_lock(monkeypatch, tmp_path):
 def host_like_resolve(conn, sid, rows, *args, **kwargs):
     """The host's per-dict order: a dict whose digest no longer matches its target ADOPTs the stored row;
     a matching one writes its live content (REWRITE when it changes, MATCH otherwise)."""
-    snap = lambda r: hashlib.sha256(r["content"].encode()).hexdigest()
+    def snap(r):
+        return hashlib.sha256(r["content"].encode()).hexdigest()
+
     for msg in rows:
         row = conn.execute("SELECT * FROM messages WHERE session_id=? AND id=?", (sid, msg["_row_id"])).fetchone()
         if snap(row) != msg["_db_row_snapshot"]:
