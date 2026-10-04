@@ -197,7 +197,6 @@ therefore reports bounded coverage rather than claiming universal pre-bound sour
 
 - NumPy remains optional. When available, it enables vectorized search and the
   float32 chunk-loader fast path; the import guard and pure-Python fallback remain.
-  NumPy is already listed in [`requirements-semantic.txt`](../requirements-semantic.txt).
   Install it in the Python environment that actually runs Hermes: for a user-managed
   environment, `python -m pip install numpy`; for a managed build, use that host's
   supported dependency-installation mechanism rather than modifying a generated venv.
