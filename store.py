@@ -951,6 +951,110 @@ class MessageStore:
             """)
         self._identity_anchor_schema_ready = True
 
+    # -- v0.26.0 host uid shadow bindings: a droppable side table, never read for a decision ----------
+
+    def _host_uid_table_exists(self) -> bool:
+        if not getattr(self, "_host_uid_schema_ready", False):
+            self._host_uid_schema_ready = bool(self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'").fetchone())
+        return self._host_uid_schema_ready
+
+    def _ensure_host_uid_schema(self) -> None:
+        """On the first binding, NAMED step ``host_uid_bindings_v1``: no SCHEMA_VERSION bump, ``messages`` untouched."""
+        if getattr(self, "_host_uid_schema_ready", False):
+            return
+        def create(conn) -> None:  # plain ``execute`` in the write's own transaction (executescript would commit)
+            for sql in (
+                "CREATE TABLE IF NOT EXISTS host_uid_bindings (store_id INTEGER NOT NULL, uid TEXT NOT NULL, "
+                "lineage_key TEXT NOT NULL, kind TEXT NOT NULL, binding_version INTEGER NOT NULL, proof_kind TEXT, "
+                "created_at REAL, first_check TEXT, disagree_seen INTEGER NOT NULL DEFAULT 0)",
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_host_uid_canonical ON host_uid_bindings(lineage_key, uid) "
+                "WHERE kind = 'canonical'",
+                "CREATE INDEX IF NOT EXISTS idx_host_uid_store ON host_uid_bindings(store_id)",
+                "CREATE INDEX IF NOT EXISTS idx_host_uid_lineage_uid ON host_uid_bindings(lineage_key, uid)",
+            ):
+                conn.execute(sql)
+            mark_migration_step_complete(conn, "host_uid_bindings_v1")
+
+        self._host_uid_write(create)
+        self._host_uid_schema_ready = True
+
+    def host_uid_bindings_for(self, lineage_key: str, uids) -> dict[str, list[tuple[int, str]]]:
+        """``{uid: [(store_id, kind), ...]}`` of the canonical and version bindings of ``uids`` in a lineage."""
+        uids, out = sorted(set(uids)), {}
+        if not uids or not self._host_uid_table_exists():
+            return out
+        for start in range(0, len(uids), 500):
+            chunk = uids[start:start + 500]
+            for uid, store_id, kind in self._conn.execute(
+                f"SELECT uid, store_id, kind FROM host_uid_bindings WHERE lineage_key = ? AND uid IN "
+                f"({','.join('?' * len(chunk))}) AND kind IN ('canonical', 'version') ORDER BY rowid",
+                [lineage_key, *chunk],
+            ):
+                out.setdefault(str(uid), []).append((int(store_id), str(kind)))
+        return out
+
+    def host_uid_uids_of_stores(self, lineage_key: str, store_ids) -> dict[int, set[str]]:
+        """``{store_id: {uid, ...}}``: the canonical and version bindings of ``store_ids`` in a lineage."""
+        ids, out = sorted({int(sid) for sid in store_ids}), {}
+        for start in range(0, len(ids) if self._host_uid_table_exists() else 0, 500):
+            chunk = ids[start:start + 500]
+            for store_id, uid in self._conn.execute(
+                f"SELECT store_id, uid FROM host_uid_bindings WHERE store_id IN ({','.join('?' * len(chunk))}) "
+                "AND lineage_key = ? AND kind IN ('canonical', 'version')", [*chunk, lineage_key]):
+                out.setdefault(int(store_id), set()).add(str(uid))
+        return out
+
+    def record_host_uid_checks(self, lineage_key: str, checks) -> None:
+        """Gate (per binding): ``[(uid, store_id, agree)]`` sets ``first_check`` once; a disagreement is sticky."""
+        checks = [(uid, sid, ok) for uid, sid, ok in checks if sid is not None]
+        if not checks or not self._host_uid_table_exists():
+            return
+        self._host_uid_write(lambda conn: conn.executemany(
+            "UPDATE host_uid_bindings SET first_check = COALESCE(first_check, ?), disagree_seen = MAX(disagree_seen, ?) "
+            "WHERE lineage_key = ? AND uid = ? AND store_id = ? AND kind IN ('canonical', 'version')",
+            [("agree" if ok else "disagree", 0 if ok else 1, lineage_key, uid, int(sid)) for uid, sid, ok in checks]))
+
+    def host_uid_gate(self) -> list[tuple[int, int]]:
+        """Per lineage, most checked first: ``(checked, agree)``, agree = first check agreed and never disagreed."""
+        return [(int(c), int(a or 0)) for c, a in self._conn.execute(
+            "SELECT COUNT(*), SUM(first_check = 'agree' AND disagree_seen = 0) FROM host_uid_bindings "
+            "WHERE first_check IS NOT NULL AND kind IN ('canonical', 'version') GROUP BY lineage_key ORDER BY 1 DESC")] if self._host_uid_table_exists() else []
+
+    def add_host_uid_bindings(self, lineage_key: str, rows) -> None:
+        """``[(store_id, uid, kind, proof_kind)]``: a canonical never replaces one; no row is recorded twice."""
+        rows = list(rows)
+        if not rows:
+            return
+        self._ensure_host_uid_schema()
+        now = time.time()
+        self._host_uid_write(lambda conn: conn.executemany(
+            "INSERT OR IGNORE INTO host_uid_bindings(store_id, uid, lineage_key, kind, binding_version, "
+            "proof_kind, created_at) SELECT ?, ?, ?, ?, 1, ?, ? WHERE NOT EXISTS (SELECT 1 FROM "
+            "host_uid_bindings WHERE store_id = ? AND uid = ? AND lineage_key = ? AND kind = ?)",
+            [(int(store_id), uid, lineage_key, kind, proof_kind, now, int(store_id), uid, lineage_key, kind)
+             for store_id, uid, kind, proof_kind in rows]))
+
+    def _host_uid_write(self, write: Callable[[sqlite3.Connection], Any]) -> None:
+        """One shadow write in its OWN transaction. Skipped (raised, so the caller counts one error) when the
+        connection is already in a transaction: someone else's work is never committed or rolled back. Any
+        failure, at commit included, rolls it back, so the connection is never left in a transaction."""
+        conn = self._conn
+        with self._write_lock:
+            if conn.in_transaction:
+                raise sqlite3.OperationalError("host-uid shadow write skipped: the connection is in a transaction")
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                write(conn)
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+
+    def count_host_uid_bindings(self) -> Optional[int]:
+        return int(self._conn.execute("SELECT COUNT(*) FROM host_uid_bindings").fetchone()[0]) \
+            if self._host_uid_table_exists() else None
+
     def find_rows_by_observed_at(
         self, conversation_id: str, session_ids: List[str], observed_ats: List[float],
     ) -> List[Dict[str, Any]]:
