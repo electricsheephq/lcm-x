@@ -191,7 +191,7 @@ def _finalize_emission_descriptors(messages, candidates, scope):
     search_from = 0
     for candidate in candidates:
         kind, span = candidate.get("kind"), candidate.get("span")
-        if kind not in {"summary", "carrier", "objective"} or not isinstance(span, str) or not span:
+        if kind not in {"summary", "carrier", "objective", "recovery"} or not isinstance(span, str) or not span:
             continue
         expected_identity = candidate.get("full_identity")
         candidate_rows = list(_emission_candidate_rows(messages, expected_identity[0] if isinstance(expected_identity, tuple) else None, span))
@@ -237,6 +237,13 @@ def _finalize_emission_descriptors(messages, candidates, scope):
                 "retained_source": candidate.get("retained_source"),
                 "scope": dict(scope),
             })
+            if kind == "recovery" and index > 0:
+                previous = messages[index - 1]
+                if previous.get("role") == "user" and isinstance(previous.get("content"), str) and not (
+                    previous.get("tool_calls") or previous.get("tool_call_id")
+                ):
+                    base = previous["content"].strip().encode("utf-8")
+                    descriptors[-1]["merge_base"] = {"sha256": hashlib.sha256(base).hexdigest(), "bytes": len(base)}
             search_from = index + 1
             break
     return descriptors
@@ -267,7 +274,7 @@ def _project_emitted_occurrences(
     search_from = 0
     for descriptor in proof.get("emissions") or ():
         if not isinstance(descriptor, Mapping) or descriptor.get("kind") not in {
-            "summary", "carrier", "objective"
+            "summary", "carrier", "objective", "recovery"
         } or descriptor.get("scope") != expected_binding:
             continue
         length = descriptor.get("generated_span_bytes")
@@ -336,13 +343,37 @@ def _project_emitted_occurrences(
             )
             search_from = index + 1
             break
+        else:
+            base = descriptor.get("merge_base")
+            if descriptor["kind"] != "recovery" or not isinstance(base, Mapping):
+                continue
+            for index in range(search_from, min(output_index, len(messages))):
+                message = messages[index]
+                content = message.get("content")
+                if message.get("role") != "user" or not isinstance(content, str) or (
+                    message.get("tool_calls") or message.get("tool_call_id")
+                ):
+                    continue
+                raw = content.encode("utf-8")
+                if raw[-length - 2:-length] != b"\n\n" or hashlib.sha256(raw[-length:]).hexdigest() != digest:
+                    continue
+                older = raw[:-length - 2].decode("utf-8")
+                normalized = older.strip().encode("utf-8")
+                if len(normalized) != base.get("bytes") or hashlib.sha256(normalized).hexdigest() != base.get("sha256"):
+                    continue
+                entries[index] = EmissionProjectionEntry(
+                    entries[index].full_identity, _emission_identity(message, older),
+                    raw[-length:].decode("utf-8"), kind="recovery_base", output_index=output_index,
+                )
+                search_from = index + 1
+                break
     return EmissionProjection(tuple(entries), complete_length=len(entries))
 
 
 def _merged_composite(entry) -> bool:
     """Bytes past a proven occurrence's recorded suffix: a row the host merged into it (#499).
     That is new content, stored whole; its remainder alone never proves replay (F2)."""
-    return entry is not None and entry.generated_span is not None and len(
+    return entry is not None and entry.kind != "recovery_base" and entry.generated_span is not None and len(
         entry.effective_identity[1].strip().encode("utf-8")
     ) > (entry.suffix_length or 0)
 
@@ -2276,6 +2307,8 @@ class ReconcileMixin:
             )
             if matched != len(target) and not safe_trailing_skip:
                 return None
+            while index < n and occurrences[index] is None and projection.entries[index].kind == "recovery":
+                index += 1
             after_store_id = int(payload.get("last_store_id") or 0)
             while True:
                 page = self._store.get_session_messages_after(
