@@ -2213,7 +2213,7 @@ def fts_hits(store, query: str, fetch: int) -> list[tuple[str, int]]:
     # build_fts_query composes FTS5 syntax on purpose (barewords joined by OR),
     # so it opts in to operator handling. Raw prose never does.
     rows = store.search(
-        match_query, session_id=None, limit=fetch, allow_operators=True
+        match_query, session_id=None, limit=fetch, sort="relevance", allow_operators=True
     )
     hits: list[tuple[str, int]] = []
     for row in rows:
@@ -3393,6 +3393,7 @@ def _checkpoint_header(
         "recall_rerank_window": recall_rerank_window,
         "embeddings_enabled": embeddings_enabled,
         "embedding_privacy_revision": privacy_revision,
+        "fts_order": "relevance",
         "dataset_label": dataset_label,
         "reuse_db_template": reuse_db_template,
         "embedding_batch_size": embedding_batch_size,
@@ -3715,6 +3716,11 @@ def _validate_restored_checkpoint_metrics(
             raise ValueError(
                 f"checkpoint line {line_number} field {health_field}.coverage "
                 f"must be an object: {path}"
+            )
+        if any(not isinstance(value, str) for value in health["coverage"].values()):
+            raise ValueError(
+                f"checkpoint line {line_number} field {health_field}.coverage "
+                f"must contain only string values: {path}"
             )
         if (
             "fts" in health["coverage"]
@@ -4044,6 +4050,11 @@ def _accumulate_question_checkpoint(
                 raise ValueError(
                     f"checkpoint question {record.get('question_id')!r} has unknown "
                     f"recall_health coverage.fts {coverage['fts']!r}"
+                )
+            if any(not isinstance(value, str) for value in coverage.values()):
+                raise ValueError(
+                    f"checkpoint question {record.get('question_id')!r} has invalid "
+                    "recall_health coverage: must contain only string values"
                 )
             if health.get("degraded") is True:
                 recall_health_counts["degraded"] += 1
@@ -4534,6 +4545,7 @@ def run_harness(
         "question_count": consumed_count,
         "retrieval_config": {
             "embeddings_enabled": embeddings_enabled,
+            "fts_order": "relevance",
             "provider": provider_name,
             "lcm_recall_mode": "semantic_or_hybrid" if embeddings_enabled else "full_text",
         },
