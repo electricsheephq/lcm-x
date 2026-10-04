@@ -1261,6 +1261,12 @@ def _query_terms_for_match_window(query: str | None) -> list[str]:
     return unique
 
 
+# Between the tokens of a quoted phrase: an FTS5 phrase matches adjacent tokens across punctuation and line breaks.
+# Only characters that are certainly unicode61 separators count (whitespace, ASCII punctuation); marks and
+# private-use characters stay inside a token, and any other gap falls back to the raw-query offset.
+_RECALL_PHRASE_GAP = r"[\s!-/:-@\[-`{-~]+"
+
+
 def _content_offset_for_query_match(content: str, query: str | None) -> int:
     folded = content.casefold()
     for term in _query_terms_for_match_window(query):
@@ -5043,7 +5049,9 @@ def _lcm_recall_answer_ready_content(
                 matches = [
                     match for term in recall_content_terms(query)
                     if (match := re.search(
-                        r"(?<!\w)(?ai:" + re.escape(term.strip('"')) + r")(?!\w)", content
+                        r"(?<!\w)" + _RECALL_PHRASE_GAP.join(
+                            "(?ai:" + re.escape(token) + ")" for token in term.strip('"').split()
+                        ) + r"(?!\w)", content
                     )) is not None
                 ]
                 if matches:

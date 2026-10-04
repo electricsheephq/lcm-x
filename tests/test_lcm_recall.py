@@ -4728,3 +4728,36 @@ def test_cross_session_summary_hint_quotes_hostile_session_ids():
     )
 
     assert hint == f"lcm_expand(node_id=7, session_id={hostile!r})"
+
+
+@pytest.mark.parametrize("late", ["New-York", "New\nYork"], ids=["hyphen", "newline"])
+def test_recall_or_answer_ready_centers_phrase_across_separators(recall_engine, late):
+    """An FTS5 phrase matches adjacent tokens across punctuation and line breaks; centring follows it."""
+    recall_engine._config.embeddings_enabled = False
+    content = "renewal notes " + "filler " * 500 + late + " office " + "tail " * 500
+    recall_engine._store.append("late-phrase", {"role": "user", "content": content})
+    hit = json.loads(lcm_tools.lcm_recall(
+        {"query": '"New York"', "detail": "answer_ready", "limit": 1}, engine=recall_engine))["hits"][0]
+    assert late in hit["content"]
+    assert hit["evidence_span"]["char_start"] == content.index(late)
+
+
+def test_recall_or_answer_ready_phrase_gap_never_splits_a_combining_mark(recall_engine):
+    """unicode61 indexes "a\u0301b" as one token, so it is no phrase match for "a b"; centring skips it."""
+    recall_engine._config.embeddings_enabled = False
+    content = "a\u0301b " + "filler " * 500 + "a b " + "tail " * 500
+    recall_engine._store.append("mark", {"role": "user", "content": content})
+    hit = json.loads(lcm_tools.lcm_recall(
+        {"query": '"a b"', "detail": "answer_ready", "limit": 1}, engine=recall_engine))["hits"][0]
+    assert hit["evidence_span"]["char_start"] == content.index("a b ")
+
+
+@pytest.mark.parametrize("inside", ["\ue000", "\U000f0000", "\u07fd", "\u0898"], ids=["pua", "pua-astral", "nko-mark", "arabic-mark"])
+def test_recall_or_answer_ready_phrase_gap_never_crosses_a_token_character(recall_engine, inside):
+    """unicode61 keeps these inside a token, so "New<c>York" is no match for "New York"; centring skips it."""
+    recall_engine._config.embeddings_enabled = False
+    content = f"New{inside}York " + "filler " * 500 + "New York office " + "tail " * 500
+    recall_engine._store.append("token-char", {"role": "user", "content": content})
+    hit = json.loads(lcm_tools.lcm_recall(
+        {"query": '"New York"', "detail": "answer_ready", "limit": 1}, engine=recall_engine))["hits"][0]
+    assert hit["evidence_span"]["char_start"] == content.index("New York office")
