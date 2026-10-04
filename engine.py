@@ -8231,6 +8231,8 @@ class LCMEngine(
                                           if m.get("role") == "assistant" and not m.get("tool_calls")
                                           and isinstance(m.get("content"), str) and m["content"].strip()
                                           and not self._looks_like_active_summary_blob(m["content"])), None)
+                            if reply is not None:  # the same cleaning as every other active-context row
+                                reply = _clean_active_assistant_message(reply)
                             if reply is not None and count_messages_tokens(option + [reply, note]) <= cap:
                                 return option + [reply, note]
                             if count_messages_tokens(option + [note]) <= cap:

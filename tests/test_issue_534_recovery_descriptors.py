@@ -3,6 +3,7 @@ import copy
 import subprocess
 import sys
 import types
+from pathlib import Path
 
 import pytest
 
@@ -13,6 +14,8 @@ from tests.test_compression_boundary import (
     _compacted_engine, _durable_commit_proof, _V0240_DURABLE_PROOF_KEYS,
 )
 from tests.test_issue_529_overflow_followups import CAP, SYSTEM, OVERSIZED, ORPHAN, _note
+
+_RC1 = "c36b46e3a7b1bff23cfa45fa117565ab8624441d"  # the v0.25.0-rc1 tag commit
 
 
 def _engine(path, sid="S0"):
@@ -255,6 +258,9 @@ def test_loss_probe_merge_base_mismatch_after_acp_strip(tmp_path, monkeypatch):
 
 
 def test_loss_probe_rc1_rollback_reader(tmp_path, monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    if subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{_RC1}^{{commit}}"], capture_output=True).returncode:
+        pytest.skip("the v0.25.0-rc1 commit c36b46e3 is not in this checkout (shallow clone)")
     engine = _engine(tmp_path)
     try:
         _pre, out = _recover(engine, monkeypatch)
@@ -262,7 +268,7 @@ def test_loss_probe_rc1_rollback_reader(tmp_path, monkeypatch):
         assert payload["version"] == 3 and payload["descriptor_version"] == 4
         assert _V0240_DURABLE_PROOF_KEYS <= payload.keys()
         # Load the actual immutable rc1 reconcile module, including its kind filter and cursor.
-        source = subprocess.run(["git", "show", "27557d88022228961fcd3515aa2870570889a316:reconcile.py"],
+        source = subprocess.run(["git", "-C", str(root), "show", f"{_RC1}:reconcile.py"],
                                 capture_output=True, text=True, check=True).stdout
         module = types.ModuleType("hermes_lcm.rc1_reconcile")
         module.__package__ = "hermes_lcm"
@@ -305,6 +311,32 @@ def test_loss_probe_two_recoveries_in_one_session(tmp_path, monkeypatch):
         assert not any("[LCM overflow recovery]" in c for c in contents)
         for c in ("older request", "second older request", "first reply", "second reply", "third request"):
             assert contents.count(c) == 1
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("content, emitted", [
+    ("<think>PRIVATE</think>visible", "visible"),
+    ("<think>PRIVATE</think>", None),
+])
+def test_kept_reply_is_cleaned_like_other_active_rows(tmp_path, monkeypatch, content, emitted):
+    engine = _engine(tmp_path)
+    newest = {"role": "user", "content": "newest request " * 300}
+    older = {"role": "user", "content": "older request"}
+    call = {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "oversized-call", "function": {"name": "write_file", "arguments": OVERSIZED}},
+    ]}
+    pre = [older, {"role": "assistant", "content": content}, newest, call, dict(ORPHAN)]
+    engine._config.max_assembly_tokens = CAP
+    monkeypatch.setattr(engine, "_summary_route_stop_applies", lambda *_a, **_kw: True)
+    try:
+        out = engine.compress(pre, force=True)
+        assert engine._last_compression_status == "overflow_recovery"
+        assert not any("PRIVATE" in (m.get("content") or "") for m in out)
+        if emitted is None:
+            assert out == [older, _note(newest)]
+        else:
+            assert out == [older, {"role": "assistant", "content": emitted}, _note(newest)]
     finally:
         engine.shutdown()
 
