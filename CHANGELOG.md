@@ -6,7 +6,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-## v0.25.0 - (unreleased; rc1) (long sessions: drain speed + correctness)
+## v0.25.0 - 2026-10-04 (long sessions: drain speed + correctness)
 
 - Fix: a host refusal after a compaction stored leaves holds automatic compaction until turn end, with a
   600 s backstop; refusals without a stored leaf keep the existing hold. (#597)
