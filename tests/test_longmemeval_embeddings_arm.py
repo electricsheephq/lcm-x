@@ -120,6 +120,7 @@ def test_retrieval_config_matches_resolved_mode(tmp_path, enabled):
     assert report["retrieval_config"] == {
         "embeddings_enabled": enabled,
         "provider": report["provider"],
+        "fts_order": "relevance",
         "lcm_recall_mode": "semantic_or_hybrid" if enabled else "full_text",
     }
     assert report["embeddings_enabled"] is enabled
