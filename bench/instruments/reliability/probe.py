@@ -252,10 +252,14 @@ def install_p8(cell_dir, phase, faults, fired, fire, cur, checkpoint=None):
             target = physical(conn, sid, rid, role) if isinstance(rid, int) else (
                 logical(conn, sid, role, repair.message_uid_or_none(msg)) if isinstance(expected, str) else None)
             target = dict(target) if target is not None else None
+            if target is not None and "session_id" not in target:
+                target["session_id"] = conn.execute("SELECT session_id FROM messages WHERE id=?",
+                                                    (target["id"],)).fetchone()[0]
             rec = {"event": "flush_resolve", "session": sid, "role": live.get("role"), "uid": key(live),
                    "lcm": id(live) in pinned or (sid, live.get("role"), key(live)) in emitted,
                    "path": "row_id" if isinstance(rid, int) else "uid_snapshot", "row_id": rid,
                    "expected": expected, "target_id": target["id"] if target else None,
+                   "target_session": target["session_id"] if target else None,
                    "target_role": target["role"] if target else None, "target_uid": key(target or {}),
                    "active": target["active"] if target else None, "before": digest(target) if target else None,
                    "active_count": conn.execute("SELECT count(*) FROM messages WHERE session_id=? AND active=1 "

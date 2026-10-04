@@ -52,6 +52,7 @@ def score(cell, cell_dir, phases):
             if ev["active"] == 0 and (action in ("REWRITE", "ADOPT") or (action == "LEGACY" and ev.get("effect"))):
                 fail("I1", ids)
             if ev["target_id"] is not None and (ev["role"] != ev["target_role"] or
+                    ("target_session" in ev and ev["target_session"] != ev["session"]) or
                     (ev["uid"] and ev["uid"] != ev["target_uid"]) or
                     (ev["path"] == "uid_snapshot" and ev["active_count"] != 1)):
                 fail("I2", ids)

@@ -14,7 +14,8 @@ from bench.instruments.reliability.scorers import host_rewrite
 COMMIT = dict(event="commit", session="S0", row_id=7, role="user", uid="hashed",
               active=1, target_role="user", target_uid="hashed", expected="digest", after="digest")
 FLUSH = dict(event="flush_resolve", session="S0", row_id=7, target_id=7, role="user", uid="hashed",
-             target_role="user", target_uid="hashed", active=1, path="row_id", active_count=1, action="MATCH", effect=True)
+             target_session="S0", target_role="user", target_uid="hashed", active=1, path="row_id", active_count=1,
+             action="MATCH", effect=True)
 
 
 def scored(tmp_path, events=(), phases=None, cell=None):
@@ -51,6 +52,13 @@ def test_i2_live_identity_and_unique_resolution(tmp_path, delta):
 def test_i3_adopt_is_failure_even_for_host_made_dict(tmp_path):
     out = scored(tmp_path, [dict(FLUSH, action="ADOPT", lcm=False)])
     assert out["failed_invariants"] == {"I3": {"count": 1, "row_ids": [7, 7]}}
+
+
+def test_i2_rejects_cross_session_target_and_accepts_older_logs(tmp_path):
+    assert scored(tmp_path, [dict(FLUSH, target_session="S1")])["failed_invariants"] == {
+        "I2": {"count": 1, "row_ids": [7, 7]}}
+    old = {k: v for k, v in FLUSH.items() if k != "target_session"}
+    assert scored(tmp_path, [old])["verdict"] == "PASS"
 
 
 @pytest.mark.parametrize("where", ["transaction", "end"])
@@ -156,6 +164,22 @@ def test_wraps_call_through_log_only_hashes_and_pair_original_live_identity(monk
     assert finish()["notes"] == [] and len(calls) == 1
     row = dict(live, message_uid="other-uid")
     persistence._db_flush_write(ag, [row], [live], [live])
+    assert state["notes"] == []
+
+
+@pytest.mark.parametrize("path", ["row_id", "uid_snapshot"])
+def test_flush_records_target_session_even_when_resolver_omits_it(monkeypatch, tmp_path, path):
+    repair, persistence, _, ag, live, _, marker = fake_host(monkeypatch, tmp_path)
+    target = dict(ag._session_db._conn.execute("SELECT * FROM messages WHERE id=7").fetchone())
+    del target["session_id"]
+    monkeypatch.setattr(repair, "_active_message_row", lambda *a: target)
+    monkeypatch.setattr(repair, "_active_logical_message_row", lambda *a: target)
+    if path == "uid_snapshot":
+        live.pop("_row_id")
+    state, _, _ = probe.install_p8(tmp_path, "A", {}, set(), None, {})
+    assert persistence._db_flush_write(ag, [live], [live], [live]) is marker
+    events = [json.loads(x) for x in (tmp_path / "p8-events.jsonl").read_text().splitlines()]
+    assert next(e for e in events if e["event"] == "flush_resolve")["target_session"] == "S0"
     assert state["notes"] == []
 
 
