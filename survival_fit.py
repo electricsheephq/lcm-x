@@ -24,12 +24,15 @@ through the host's automatic-compaction status hook. LCM_SURVIVAL_FIT=false turn
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import time
 from typing import Any, Dict, List, Optional
 
+from .host_uid import _valid_uid
+from .host_uid_emit import ADDRESS_KEYS, IDENTITY_KEYS, identity_emit_enabled, record_absorbed_message
 from .message_content import normalize_content_value
 from .store import _normalize_observed_at
 from .tokens import count_message_tokens, count_messages_tokens
@@ -205,6 +208,20 @@ class SurvivalFitMixin:
         self._survival_record(reason, count, ids, before, after, budget, projected, notice, warn_user=not exit_fit)
         return fitted
 
+    def _survival_summary_identity(self, row: dict, summary: str, uid, proof_kind: str, absorbed_from=None, taken=()) -> dict:
+        """The survival summary part (B1's gate): the carrier's engine uid, else a minted ``survival_summary``
+        one; a re-formed carrier absorbs its user row's identity as the host's consecutive-user merge would."""
+        if identity_emit_enabled():
+            if isinstance(uid, str) and uid:
+                row["message_uid"] = uid
+            else:
+                basis = hashlib.sha256(summary.encode("utf-8")).hexdigest()
+                self._mint_engine_uids([(row, "survival_summary", basis, proof_kind)],
+                                       taken=(message.get("message_uid") for message in taken))
+            if absorbed_from is not None:
+                record_absorbed_message(row, absorbed_from)
+        return row
+
     def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, store_ids,
                       whole_turns: bool, keep_from: Optional[int] = None):
         """``(fitted, count, ids, projected, notice)`` with ``result[:lead]`` kept, else None. The cut is the
@@ -213,12 +230,24 @@ class SurvivalFitMixin:
         summary is re-formed around the first kept user row as assembly forms it. ``keep_from``: no cut drops
         ``result[keep_from:]`` (#668: an exit fit keeps the fresh tail)."""
         head, body = list(result[:lead]), list(result[lead:])
-        summary = None
+        summary = summary_uid = None
         remainder = self._generated_context_carrier_remainder(head[-1]) if whole_turns and head else None
         if remainder is not None:
             carrier = head.pop()
             summary = carrier["content"][:self._verified_lcm_summary_prefix_end(carrier["content"])]
             body.insert(0, {**carrier, "content": remainder})
+            if identity_emit_enabled():  # site 18 (R3-5): the summary part keeps the engine uid; the user-only
+                # remainder copies no identity or address, and gets back a single proven host uid
+                absorbed = carrier.get("_absorbed_message_uids")
+                absorbed = absorbed if isinstance(absorbed, list) else []
+                candidates = list(dict.fromkeys(u for u in [carrier.get("message_uid"), *absorbed] if _valid_uid(u)))
+                engine = self._host_uid_engine_uids(candidates)
+                summary_uid = next((u for u in candidates if u in engine), None)
+                for key in IDENTITY_KEYS + ADDRESS_KEYS:
+                    body[0].pop(key, None)
+                hosts = self._host_uid_host_uids(candidates) - engine  # never an engine uid (F3)
+                if len(hosts) == 1:
+                    body[0]["message_uid"] = next(iter(hosts))
             if id(carrier) in store_ids:
                 store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
 
@@ -238,9 +267,12 @@ class SurvivalFitMixin:
                 if (merged and kept[0].get("role") == "user" and isinstance(kept[0].get("content"), str)
                         and any(message.get("role") == "user" for message in kept[1:])
                         and self._generated_context_carrier_remainder(merged) == kept[0]["content"]):
+                    self._survival_summary_identity(merged, summary, summary_uid, "carrier", kept[0],
+                                                    taken=out + kept[1:])  # site 19
                     kept = [merged, *kept[1:]]
                 else:
-                    out.append({"role": "user", "content": summary})
+                    out.append(self._survival_summary_identity({"role": "user", "content": summary}, summary,
+                                                               summary_uid, "survival_summary", taken=out + kept))
             return out + kept or result[-1:], count, ids, notice
 
         users = [i for i, message in enumerate(body) if isinstance(message, dict) and message.get("role") == "user"]

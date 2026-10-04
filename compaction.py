@@ -610,6 +610,7 @@ class CompactionMixin:
                     count_messages_tokens(result) >= count_messages_tokens(messages)):
                 self._start_no_progress_hold("no_progress")  # #651: no leaf, and neither rows nor tokens fell
             self._record_compress_commit_proof(messages, result)
+            self._host_uid_record_engine(result)
             self._host_uid_log_compaction_summary()
             logger.debug("LCM compaction emission descriptor count=%d",
                          len((self._compress_commit_proof or {}).get("emissions") or ()))
@@ -631,6 +632,7 @@ class CompactionMixin:
                     logger.debug("LCM survival fit after a compress exception failed", exc_info=True)
                     fitted = messages
                 if fitted is not messages:
+                    self._host_uid_record_engine(fitted)
                     logger.warning("LCM compress failed (%s); returning the survival-fitted list",
                                    type(exc).__name__, exc_info=True)
                     returned = fitted
