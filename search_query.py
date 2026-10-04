@@ -29,6 +29,8 @@ _RECALL_STOPWORDS = frozenset({
     "for", "from", "had", "has", "have", "how", "i", "in", "is", "it", "me",
     "my", "of", "on", "or", "that", "the", "to", "was", "were", "what",
     "when", "where", "which", "who", "why", "with", "you", "your",
+    # contraction tails: the tokenizer splits "Alice's" and "don't" at the apostrophe
+    "d", "ll", "m", "re", "s", "t", "ve",
 })
 _RISKY_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9][\-:/][A-Za-z0-9]")
 _SPLIT_PUNCT_RE = re.compile(r"[-:/]+")
@@ -267,15 +269,28 @@ def extract_quoted_phrases(query: str) -> List[str]:
 
 
 def build_recall_or_query(query: str) -> str:
-    """Compose recall's content barewords as OR terms, matching the FTS harness."""
-    barewords: list[str] = []
-    for term in extract_search_terms(query):
-        cleaned = re.sub(r"\W+", "", term, flags=re.UNICODE)
-        if cleaned and cleaned.lower() not in _RECALL_STOPWORDS:
-            # An exact operator word (NOT, NEAR) must stay a term, so it is lower-cased. Other terms keep their
-            # spelling: Python's case mapping is newer than the unicode61 tokenizer's and can change matches.
-            barewords.append(cleaned.lower() if cleaned in _BOOLEAN_OPERATORS else cleaned)
-    return " OR ".join(dict.fromkeys(barewords))
+    """Compose recall's content terms as one FTS5 OR expression.
+
+    Each term is split on the same boundary the sanitizer uses, which is the boundary unicode61 indexes on, so
+    ``Alice's`` searches ``Alice`` and ``3.14`` searches ``3`` and ``14``; deleting the punctuation would search
+    tokens the index never holds. A phrase the query quoted stays one quoted phrase. An exact ``NOT`` or ``NEAR``
+    is quoted so it stays a term, never an operator. Case is left to the tokenizer: Python's case mapping is
+    newer than unicode61's and would change what matches.
+    """
+    composed = unicodedata.normalize("NFC", query or "")
+    quoted = set(extract_quoted_phrases(composed))
+    parts: list[str] = []
+    for term in extract_search_terms(composed):
+        tokens = "".join(_fts5_safe_char(char) for char in term).split()
+        if term in quoted:
+            if any(token.lower() not in _RECALL_STOPWORDS for token in tokens):
+                parts.append('"' + " ".join(tokens) + '"')
+            continue
+        for token in tokens:
+            if token.lower() in _RECALL_STOPWORDS:
+                continue
+            parts.append(f'"{token}"' if token in _BOOLEAN_OPERATORS else token)
+    return " OR ".join(dict.fromkeys(parts))
 
 
 def escape_like(term: str) -> str:
