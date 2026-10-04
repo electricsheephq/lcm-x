@@ -549,6 +549,18 @@ def load_observer():
     return mod
 
 
+def test_process_phase_preserves_p8_audit_receipt_and_controls(tmp_path):
+    run = PC.ProcessCell(cells.select("p8-control/random-snapshot")[0], tmp_path,
+                         {"src": str(tmp_path)}, "acp-process", 10)
+    audit = {"supported": True, "notes": [], "duplicates": [], "emitted": [["S0", "user", "hashed"]]}
+    PC.append(tmp_path / "observer.jsonl", {"phase": "A", "kind": "counters", "p8": audit})
+    assert run.phase_record(1, {"exit": "done"})["p8"] == audit
+    assert PC.unsupported(run.cell, "acp-process") is None
+    committed = {**audit, "emitted": [["S0", "user", "new-hash"]], "commits": 2}
+    PC.append(tmp_path / "observer.jsonl", {"phase": "A", "kind": "p8", "p8": committed})
+    assert run.phase_record(1, {"exit": "crash"})["p8"] == committed
+
+
 def test_observer_counts_host_rows_a_leaf_replaced_by_identity(tmp_path, monkeypatch):
     """#597 drain cell: two summaries replace five input rows -> in 7, out 4, host_rows_summarized 5. LCM returns
     retained rows as equal copies, so an equal dict is retained too (``copied``); a changed copy is not."""
