@@ -272,7 +272,11 @@ def install_p8(cell_dir, phase, faults, fired, fire, cur, checkpoint=None):
             # target first, so the pre-batch digest cannot tell ADOPT from REWRITE.
             canonical = msg.get("_canonical_row")
             adopted = isinstance(canonical, dict) and not canonical.get("_metadata_only")
-            rec["action"] = ("INSERT" if row is None else "LEGACY" if not isinstance(rec["expected"], str) else
+            # A dict that carried an address resolving to nothing (e.g. a parent-session _row_id after rotation:
+            # the resolvers are session-scoped) is reported apart from a plain insert, never failed.
+            addressed = isinstance(rec["row_id"], int) or isinstance(rec["expected"], str)
+            rec["action"] = ("UNRESOLVED" if row is None and addressed else "INSERT" if row is None else
+                             "LEGACY" if not isinstance(rec["expected"], str) else
                              "ADOPT" if adopted else
                              "REWRITE" if msg.get("_db_row_snapshot") != rec["expected"] else "MATCH")
             if hasattr(local, "records"):

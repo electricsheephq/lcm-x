@@ -21,6 +21,8 @@ def scored(tmp_path, events=(), phases=None, cell=None):
     events = list(events)
     if not any(e.get("event") == "commit" for e in events):  # B9 needs an observed commit (else UNSUPPORTED)
         events.insert(0, COMMIT)
+    if not any(e.get("event") == "flush_resolve" for e in events):  # ... and an observed host flush
+        events.insert(0, FLUSH)
     (tmp_path / "p8-events.jsonl").write_text("".join(json.dumps(e) + "\n" for e in events))
     return host_rewrite.score(cell or {}, tmp_path, phases or [{"p8": {"supported": True}}])
 
@@ -290,7 +292,21 @@ def test_one_batch_labels_each_dict_from_the_host_output(monkeypatch, tmp_path, 
 
 
 @pytest.mark.parametrize("text", ["", json.dumps(dict(FLUSH)) + "\n", json.dumps({"event": "sweep", "duplicates": []}) + "\n",
-                                  json.dumps(COMMIT) + "\n" + '{"event": "flush_res'])
+                                  json.dumps(COMMIT) + "\n" + '{"event": "flush_res',
+                                  json.dumps(COMMIT) + "\n" + json.dumps({"event": "sweep", "duplicates": []}) + "\n"])
 def test_no_commit_or_unreadable_log_is_unsupported_never_pass(tmp_path, text):
     (tmp_path / "p8-events.jsonl").write_text(text)
     assert host_rewrite.score({}, tmp_path, [{"p8": {"supported": True}}])["verdict"] == "UNSUPPORTED"
+
+
+def test_an_address_that_resolves_to_nothing_is_reported_unresolved_not_insert(monkeypatch, tmp_path):
+    _, persistence, _, ag, live, _, _ = fake_host(monkeypatch, tmp_path)
+    probe.install_p8(tmp_path, "A", {}, set(), None, {})
+    stale, new = dict(live, _row_id=99), {"role": "user", "content": "new turn"}
+    persistence._db_flush_write(ag, [stale, new], [stale, new], [stale, new])
+    events = [json.loads(x) for x in (tmp_path / "p8-events.jsonl").read_text().splitlines()]
+    assert [e["action"] for e in events if e["event"] == "flush_resolve"] == ["UNRESOLVED", "INSERT"]
+    with (tmp_path / "p8-events.jsonl").open("a") as log:
+        log.write(json.dumps(COMMIT) + "\n")
+    out = host_rewrite.score({}, tmp_path, [{"p8": {"supported": True}}])
+    assert out["verdict"] == "PASS" and out["actions"] == {"UNRESOLVED": 1, "INSERT": 1}

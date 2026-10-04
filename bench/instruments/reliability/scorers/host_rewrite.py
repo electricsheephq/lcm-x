@@ -30,6 +30,8 @@ def score(cell, cell_dir, phases):
         return {"verdict": "UNSUPPORTED", "reason": "unreadable audit log"}
     if not any(isinstance(ev, dict) and ev.get("event") == "commit" for ev in events):
         return {"verdict": "UNSUPPORTED", "reason": "no committed compaction observed"}
+    if not any(isinstance(ev, dict) and ev.get("event") == "flush_resolve" for ev in events):
+        return {"verdict": "UNSUPPORTED", "reason": "no host flush observed"}  # I1-I3 would hold vacuously
     for ev in events:
         ids = [ev.get("target_id"), ev.get("row_id")]
         if ev["event"] == "commit":
