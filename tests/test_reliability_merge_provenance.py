@@ -117,3 +117,16 @@ def test_host_merge_provenance_repeated_uid_cannot_pair(tmp_path, absorbed, part
     out = score(h, expected=[("user", composite)], texts=parts)
     assert out["verdict"] == "FAIL" and out["deficit_rows"] == 1
     assert out["held_composites_as_parts"] == []
+
+
+@pytest.mark.parametrize("texts", [(A, A, B), (A, B, B)])
+def test_host_merge_provenance_constituent_rows_license_no_duplicate(tmp_path, texts):
+    out = score(host(tmp_path), texts=texts)  # the host rows proving record 48 cannot also license a surplus part
+    assert out["verdict"] == "FAIL" and out["surplus_rows"] == out["stored_rows_not_expected"] == 1
+    assert out["host_parity_licensed"] == [] and out["held_composites_as_parts"][0]["host_row_id"] == 48
+
+
+def test_host_merge_provenance_licenses_host_capacity_beyond_the_record(tmp_path):
+    double = [(50, "parent", "user", A, 1, "a", "[]"), (51, "parent", "user", A, 1, "a", "[]")]
+    out = score(host(tmp_path, extra=double), texts=(A, A, B))  # host view holds A twice: one spare licence
+    assert out["verdict"] == "PASS" and [r["licensed"] for r in out["host_parity_licensed"]] == [1]
