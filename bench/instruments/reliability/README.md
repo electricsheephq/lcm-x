@@ -199,12 +199,17 @@ at a deterministic localhost fake. It does not prove live-model behaviour, the g
 one process, or the process-side publication-failure hook (R2b, #569), and it says nothing about customer boxes.
 
 P8 / B9 audits R1 in-process and R2 `acp-process` host flushes using the host's own resolvers and digests:
-I0 pins committed live addresses; I1 forbids archived writes/adopts; I2 pins role/uid
+I0 pins committed live addresses; I1 forbids archived writes/adopts; I2 pins session/role/uid
 and unique uid-snapshot resolution; I3 forbids adopts; I5 rejects active uid twins
 involving LCM output (host-only twins are reported). Events contain no payload.
-Missing host seams, audit errors, no observed commit or no observed host flush give B9 UNSUPPORTED; transport
-labels alone do not decide it. A flushed dict whose address resolves to no row is counted as `UNRESOLVED`
+Missing host seams, audit errors, no observed commit or no observed host flush give B9 UNSUPPORTED. At least one
+flush must follow a commit of the same session in log order, across phases; otherwise B9 is UNSUPPORTED too.
+The audit records the resolved target's session and fails I2 on a mismatch; older events without that field
+keep their previous scoring. A flushed dict whose address resolves to no row is counted as `UNRESOLVED`
 (report-only: after a rotation a parent-session `_row_id` legitimately resolves to nothing), not as `INSERT`.
 `p8-control/{archived,other-active,random-snapshot}` fail I1/I2/I3; `none` passes.
 On R2 the same controls inject after the second commit inside the ACP subprocess.
+The nightly gate checks this pattern per host and transport, with B9 required in each FAIL's failed bars.
+`controls.py` records the measured must-support pairs, where missing or UNSUPPORTED controls gate; other pairs
+may be UNSUPPORTED, but any PASS/FAIL must match.
 Disable wraps with `LCM_RELIABILITY_P8=off` or `--lcm-env LCM_RELIABILITY_P8=off`; faults stay.
