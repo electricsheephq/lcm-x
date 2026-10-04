@@ -62,8 +62,20 @@ def _bindings(engine: LCMEngine) -> list[tuple]:
     conn = engine._store._conn
     if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'").fetchone():
         return []
-    return conn.execute("SELECT store_id, uid, lineage_key, kind, binding_version, proof_kind FROM host_uid_bindings "
+    return conn.execute("SELECT store_id, uid, substr(lineage_key, 18), kind, binding_version, proof_kind "  # root only
+                        "FROM host_uid_bindings "
                         "ORDER BY rowid").fetchall()
+
+
+def _root_of(key):
+    """The root of a persisted ``<home_tag>:<root>`` lineage key (#836); None stays None."""
+    return None if key is None else key.split(":", 1)[1]
+
+
+def _root_and_problem(found):
+    """``_host_uid_lineage_key()`` with the key reduced to its root, the problem kept: ``(root, problem)``."""
+    key, problem = found
+    return _root_of(key), problem
 
 
 def _counts(engine: LCMEngine) -> dict:
@@ -263,7 +275,7 @@ def test_ignore_pattern_drop_is_skipped_not_stored(tmp_path, monkeypatch):
 def _root(tmp_path, session: str):
     engine = _engine(tmp_path, session=session)
     try:
-        return engine._host_uid_lineage_key()[0]
+        return _root_of(engine._host_uid_lineage_key()[0])
     finally:
         engine.shutdown()
 
@@ -378,7 +390,8 @@ def test_same_uid_same_bytes_stored_again_disagrees(tmp_path):
 def _anchored(tmp_path, engine, seeded, host_view, *, bind=()):
     """Feed ``host_view`` to a restarted engine after seeding ``bind`` = [(content, uid, kind)]."""
     if bind:
-        engine._store.add_host_uid_bindings("S", [(seeded[c], uid, kind, "seed") for c, uid, kind in bind])
+        engine._store.add_host_uid_bindings(engine._host_uid_lineage_key()[0],
+                                            [(seeded[c], uid, kind, "seed") for c, uid, kind in bind])
     engine.ingest(host_view)
 
 
@@ -915,9 +928,9 @@ def test_r3_the_lineage_cache_is_keyed_by_home(tmp_path):
     engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")), hermes_home=str(tmp_path / "one"))
     engine.on_session_start("S", platform="cli", context_length=200_000)
     try:
-        assert engine._host_uid_lineage_key() == ("P", None)
+        assert _root_and_problem(engine._host_uid_lineage_key()) == ("P", None)
         engine._hermes_home = str(tmp_path / "two")  # the same session id under another profile home
-        assert engine._host_uid_lineage_key() == ("S", None)
+        assert _root_and_problem(engine._host_uid_lineage_key()) == ("S", None)
     finally:
         engine.shutdown()
 
@@ -948,7 +961,8 @@ def test_r3_the_gate_counts_only_canonical_and_version_bindings(tmp_path):
     try:
         engine.ingest([_m("user", "hello" + PAD, 10.0, "u-1")])
         store_id = _bindings(engine)[0][0]
-        engine._store.add_host_uid_bindings("S", [(store_id, "u-alias", "alias_candidate", "unknown")])
+        engine._store.add_host_uid_bindings(engine._host_uid_lineage_key()[0],
+                                            [(store_id, "u-alias", "alias_candidate", "unknown")])
         engine._store._conn.execute("UPDATE host_uid_bindings SET first_check = 'disagree', disagree_seen = 1")
         engine._store._conn.commit()
         assert engine._store.host_uid_gate() == [(1, 0)]
@@ -1031,7 +1045,7 @@ def test_r4_a_permission_denied_state_db_is_a_read_error_not_missing(tmp_path, m
             assert not engine.__dict__.get("_host_uid_lineage_cache")
         finally:
             home.chmod(0o700)
-        assert engine._host_uid_lineage_key() == ("S", None)
+        assert _root_and_problem(engine._host_uid_lineage_key()) == ("S", None)
     finally:
         engine.shutdown()
 
@@ -1041,7 +1055,7 @@ def test_r4_the_lineage_cache_keeps_the_newest_512_entries(tmp_path):
     engine = _engine(tmp_path)
     try:
         for i in range(600):
-            assert engine._host_uid_lineage_key(f"s{i}") == (f"s{i}", None)
+            assert _root_and_problem(engine._host_uid_lineage_key(f"s{i}")) == (f"s{i}", None)
         cache = engine._host_uid_lineage_cache
         assert len(cache) == 512
         assert [key[1] for key in cache][:1] == ["s88"] and list(cache)[-1][1] == "s599"

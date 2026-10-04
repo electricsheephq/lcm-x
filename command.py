@@ -63,7 +63,7 @@ from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
-from .store import build_message_fts_spec, delete_message_relations
+from .store import build_message_fts_spec, delete_host_uid_bindings, delete_message_relations
 from .survival_fit import SURVIVAL_FIT_COUNTER_KEY
 from .host_uid import host_uid_doctor_lines
 from .chunking import (
@@ -2049,6 +2049,11 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             ).fetchall()
         ]
         delete_message_relations(conn, (
+            f"SELECT store_id FROM messages WHERE EXISTS ("
+            f"SELECT 1 FROM {scope_table} AS scope "
+            "WHERE scope.session_id = messages.session_id)"
+        ))
+        delete_host_uid_bindings(conn, (
             f"SELECT store_id FROM messages WHERE EXISTS ("
             f"SELECT 1 FROM {scope_table} AS scope "
             "WHERE scope.session_id = messages.session_id)"
