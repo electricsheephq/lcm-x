@@ -470,3 +470,49 @@ def test_r3_remainder_already_stored_in_an_earlier_batch_is_not_cut(tmp_path, ho
         assert not [r for r in rows if r["content"] == "new U" and r["observed_at"] is None]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("marker", ["r34.4", "upstream"])
+@pytest.mark.parametrize("donor_ws", ["\n", ""], ids=["ws-donor", "exact-donor"])
+def test_unstamped_row_outside_the_donor_run_never_absorbs_a_new_turn(tmp_path, marker, donor_ws):
+    """An older unstamped 'continue' (answered, out of view) is not the new turn merged into a dangling R."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        old, reply = _u("continue", None), _a("ok old", None)
+        engine.ingest([*head, old, reply])
+        engine.ingest([*head, old, reply, _u("held R" + donor_ws, 500.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        composite = _u("held R\n\ncontinue", 500.0)
+        composite["_merged_turn_prefix"] = "held R" + ("\n\n" if marker == "r34.4" else "")
+        engine.ingest([*head, composite, _a("reply", 511.0)])
+        texts = [r["content"] for r in _rows(engine)]
+        assert texts.count("continue") == 2 or composite["content"] in texts
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("donor_ws", ["\n", ""], ids=["ws-donor", "exact-donor"])
+def test_an_earlier_r3_remainder_never_absorbs_a_repeated_turn(tmp_path, donor_ws):
+    """LCM's own NULL-stamped R3 remainder from an earlier crash merge is not a later merge's constituent."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        engine.ingest([*head, _u("first R" + donor_ws, 500.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        first = _u("first R\n\ncontinue", 500.0)
+        first["_merged_turn_prefix"] = "first R\n\n"
+        middle = _turns(70, 2, 600.0)
+        engine.ingest([*head, first, _a("reply 1", 511.0)])
+        engine.ingest([*head, first, _a("reply 1", 511.0), *middle, _u("second R" + donor_ws, 900.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        second = _u("second R\n\ncontinue", 900.0)
+        second["_merged_turn_prefix"] = "second R\n\n"
+        engine.ingest([*head, *middle, second, _a("reply 2", 911.0)])  # the first merge is compacted away
+        texts = [r["content"] for r in _rows(engine)]
+        assert texts.count("continue") + sum(t.endswith("\n\ncontinue") for t in texts) == 2
+    finally:
+        engine.shutdown()

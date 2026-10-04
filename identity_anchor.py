@@ -488,6 +488,7 @@ class IdentityAnchorMixin:
         pool = [row for row in pool if int(row["store_id"]) not in reserved]
         donors = [row for row in donors if int(row["store_id"]) not in reserved]
         pool = self._identity_anchor_eligible(pool, donors, content, stamp)
+        pool = [row for row in pool if row.get("observed_at") is not None or self._identity_anchor_in_run(row, donors)]
         texts = {text for row in pool for text in self._identity_texts(row)}
         donor_texts = {text for row in donors for text in self._identity_texts(row)}
         group, ambiguous = self._identity_anchor_compose(content, texts, pool, donors, consumed)
@@ -529,6 +530,18 @@ class IdentityAnchorMixin:
                 consumed.update(int(row["store_id"]) for row in group)
                 matched[idx] = group
                 plan["remainders"][idx] = (rest, stamp, group, parts)
+
+    def _identity_anchor_in_run(self, row, donors) -> bool:
+        """#851: an unstamped constituent is proven only inside a donor's own unanswered user run (the host
+        merges consecutive user rows, #583): no other stored row of the session lies between them."""
+        sid = int(row["store_id"])
+        for donor in donors:
+            lo, hi = sorted((sid, int(donor["store_id"])))
+            if str(donor.get("session_id")) == str(row.get("session_id")) and hi - lo <= _POOL_WINDOW and all(
+                    r.get("role") == "user" for r in self._store.get_range(str(row["session_id"]), start_id=lo + 1,
+                                                                            end_id=hi - 1, limit=hi - lo)):
+                return True
+        return False
 
     def _identity_anchor_ws_row(self, identity, stamp, rows, consumed) -> Optional[dict]:
         """R1-ws (D-D'): the first unconsumed stored user row at the SAME host stamp whose content differs from
@@ -813,6 +826,7 @@ class IdentityAnchorMixin:
                 pool = [row for row in pool if int(row["store_id"]) not in reserved]
                 donors = [row for row in donors if int(row["store_id"]) not in mapped | reserved]
                 pool = self._identity_anchor_eligible(pool, donors, content, stamp)
+                pool = [row for row in pool if row.get("observed_at") is not None or self._identity_anchor_in_run(row, donors)]
                 group, _ambiguous = self._identity_anchor_compose(
                     content, {text for row in pool for text in self._identity_texts(row)}, pool, donors, set()
                 ) if donors else (None, False)
