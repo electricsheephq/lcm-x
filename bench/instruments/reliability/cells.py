@@ -41,6 +41,8 @@ ISSUES = {
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
 ISSUE_HOSTS = {821: ("r34.4-",), 861: ("eva-", "customer-")}
+# issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
+ISSUE_TRANSPORTS = {861: ("acp-process",)}
 
 
 def tight(window: int) -> dict:
