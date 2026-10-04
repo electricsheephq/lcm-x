@@ -121,7 +121,7 @@ copy-paste setups per agent type.
 ## Project status
 
 The latest stable release is
-`v0.24.9@e36ae9c866757d531292db2bf64f5f0b59710bc8` (plugin `hermes-lcm-x`, engine
+`v0.25.0@67de214f399f47d019535bf30baccf79cacc6ec4` (plugin `hermes-lcm-x`, engine
 `lcm-x`; the rename shipped in v0.24.0, #471). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
@@ -1125,7 +1125,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.24.9` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.25.0` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License
