@@ -640,3 +640,22 @@ def test_f5_overflow_placeholder_minted_only_when_capable(tmp_path, monkeypatch,
             assert set(out[-1]) == {"role", "content"}
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("tail", [4, 8], ids=["site18", "site19"])
+@pytest.mark.parametrize("absorbed", [[], ["H"]], ids=["no_absorbed", "absorbed_H"])
+def test_site18_remainder_never_takes_an_engine_uid_that_is_also_host_bound(tmp_path, tail, absorbed):
+    """An engine uid with a canonical binding too (#534 stored the generated row) stays on the summary only."""
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _open(tmp_path, tail=tail)
+    try:
+        out = _compress(engine, _host())
+        e = out[0]["message_uid"]
+        rows = [(41, e, "canonical", "stored_new")] + ([(42, "H", "canonical", "stored_new")] if absorbed else [])
+        engine._store.add_host_uid_bindings(_lineage(engine), rows)
+        fitted, remainder = _cut(engine, out, 10_000, list(absorbed))
+        assert fitted[0]["message_uid"] == e
+        assert remainder.get("message_uid") == ("H" if absorbed else None)
+        assert [r.get("message_uid") for r in fitted].count(e) == 1
+    finally:
+        engine.shutdown()

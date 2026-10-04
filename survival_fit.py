@@ -244,7 +244,7 @@ class SurvivalFitMixin:
                 summary_uid = next((u for u in candidates if u in engine), None)
                 for key in IDENTITY_KEYS + ADDRESS_KEYS:
                     body[0].pop(key, None)
-                hosts = self._host_uid_host_uids(candidates)
+                hosts = self._host_uid_host_uids(candidates) - engine  # never an engine uid (F3)
                 if len(hosts) == 1:
                     body[0]["message_uid"] = next(iter(hosts))
             if id(carrier) in store_ids:
