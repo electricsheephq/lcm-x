@@ -34,13 +34,14 @@ ISSUES = {
     559: (("B6", "B4"), ""), 566: (("B1", "B2", "B5"), ""),  # B5: a cross-lineage summary is recorded only there
     581: (("B3", "B4"), ""), 582: (("B8",), ""),  # native-on-off: every candidate event after the plugin switch
     597: (("D1", "D2"), ""), 626: (("D3",), ""),  # drain/hidden-backlog: data cells (ci.NON_GATE)
-    # r34.4 rotation: the host keeps a held composite AND its parts active in one session; LCM stores the parts only
-    821: (("B1", "B2", "B3", "B4", "B5", "B8"), "r34.4 host: held composite vs durable parts after a crash on rotation"),
+    # r34.4 and upstream-uid (2667c960), rotation: the host keeps a held composite AND its parts active in one
+    # session; LCM stores the parts only
+    821: (("B1", "B2", "B3", "B4", "B5", "B8"), "r34.4/upstream-uid host: held composite vs durable parts after a crash on rotation"),
     # acp-process only in practice: the crash point races reply persistence (3 of 12 runs fail on either plugin ref)
     861: (("B1", "B2"), "eva/customer acp-process: intermittent around the crash after rotation"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
-ISSUE_HOSTS = {821: ("r34.4-",), 861: ("eva-", "customer-")}
+ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("eva-", "customer-")}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
 ISSUE_TRANSPORTS = {861: ("acp-process",)}
 
