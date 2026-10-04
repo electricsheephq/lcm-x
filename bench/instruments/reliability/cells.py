@@ -7,13 +7,14 @@ tuning with provider-reported usage, as that file's LONG cells do.
 from __future__ import annotations
 
 import fnmatch
+import os
 
-BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8")
+BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 DRAIN_BARS = ("D1", "D2", "D3")  # scorers/drain.py: the host list drains under a hidden backlog (#597, #626)
 TRANSPORTS = ("acp", "gateway")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
-          "publication_failure", "plugin_switch"}
+          "publication_failure", "plugin_switch", "forced_recovery", "p8_inject"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
     7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
@@ -25,7 +26,7 @@ ISSUES = {
     496: (("B1", "B2"), "real gateway process with message timestamps rendered (gateway.message_timestamps.enabled)"),
     497: (("B6",), ""), 499: (("B1", "B2"), "fresh_tail 0 + objective-head merge + restart x3"),
     500: (("B7",), "native ON + dropped call + tool_call_id reuse"), 501: (("B1", "B2"), "fresh_tail 0 + restart x3"),
-    503: (("B2",), ""), 534: (("B4",), "forced provider overflow after a prior compaction + cold restart"),
+    503: (("B2",), ""), 534: (("B1", "B2"), ""),
     538: (("B1", "B2"), "merge behind the todo annotation"), 540: (("B1", "B2"), "folded carrier across rotation restart"),
     541: (("B1", "B2", "B4"), ""), 544: (("B1", "B2", "B4"), ""), 545: (("B1", "B2", "B3", "B4"), ""),
     546: (("B1", "B2", "B3", "B4"), ""), 547: (("B1", "B2", "B3", "B4"), ""), 549: (("B1", "B2"), ""),
@@ -53,7 +54,9 @@ def cell(cid, targets, *, in_place, transport="acp", turns=60, window=128000, re
             "user_text": {"repeat": repeat or int(400 * window / 64000), **(user or {})},
             "assistant": {"mode": "unique", "real_usage": False, "usage_scale": 1.0, **(assistant or {})},
             "tool_plan": list(tool_plan), "faults": list(faults),
-            "lcm_env": tight(window) if lcm_env is None else lcm_env, "min_compactions": min_compactions,
+            "lcm_env": {**(tight(window) if lcm_env is None else lcm_env),
+                        **({"LCM_RELIABILITY_P8": os.environ["LCM_RELIABILITY_P8"]} if "LCM_RELIABILITY_P8" in os.environ else {})},
+            "min_compactions": min_compactions,
             "final_compaction_check": True, "bars": list(bars or BARS), "doc": doc, **extra}
 
 
@@ -68,6 +71,16 @@ def registry() -> list[dict]:
     cells = []
     for m, ip in modes():
         cells += [
+            cell(f"overflow-recovery-restart/{m}", [534], in_place=ip, turns=36,
+                 user={"repeat_from": {"31": 1, "32": 1600, "33": 800}}, bars=["B1", "B2"], min_compactions=1,
+                 summary_repeat=200,
+                 tool_plan=[{"turns": [32], "calls": [{"name": "write_file", "args": {
+                     "path": "{files}/overflow.txt", "content": "alpha beta gamma delta " * 8000}}]}],
+                 faults=[{"kind": "forced_recovery", "turn": 32, "cap": 8000},
+                         {"kind": "crash_after_compaction_before_reply", "after_status": "overflow_recovery", "offset": 1},
+                         {"kind": "clean_exit_before_turn", "after_restart": 1}],
+                 doc="#534: prior v4 compaction, marked mid-tool overflow recovery, reply, then two cold restarts; "
+                     "B1/B2 decide, B3/B4/B8 are diagnostics. No marked recovery means UNSUPPORTED."),
             cell(f"baseline/{m}/acp", [], in_place=ip, doc="Negative control: no faults, no tools; must PASS on main."),
             cell(f"acp-trailing/{m}", [483, 494], in_place=ip, user={"trailing_ws": True},
                  doc="ACP raw prompt with a trailing newline, persisted stripped (the #483/#494 persist rewrite)."),
@@ -163,6 +176,10 @@ def registry() -> list[dict]:
              doc="os._exit between on_session_end and on_session_start of a rotation (#489). UNSUPPORTED where the "
                  "host's rotation path never calls on_session_end."),
     ]
+    cells += [cell(f"p8-control/{v}", [], in_place=True, bars=["B9"],
+                   faults=[] if v == "none" else [{"kind": "p8_inject", "variant": v}],
+                   doc="P8 flush positive control; none is the negative control.")
+              for v in ("archived", "other-active", "random-snapshot", "none")]
     return cells
 
 
