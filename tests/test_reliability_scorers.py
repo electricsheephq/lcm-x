@@ -169,6 +169,37 @@ def test_forced_recovery_scores_durable_result_against_dispatch(tmp_path, stored
     assert out["numbers"]["B6"]["tool_execution_failures"] == 1  # result never reached the provider
 
 
+@pytest.mark.parametrize("dispatch_ok,ending,reply,gap", [
+    (False, "complete", True, "recovery tool dispatch failed"),
+    (True, "failed", True, "forced recovery turn did not complete"),
+    (True, "missing", True, "forced recovery turn did not complete"),
+    (True, "cancel", True, "forced recovery turn did not complete"),
+    (True, "complete", False, "scripted reply"),
+    (True, "complete", True, None),
+])
+def test_forced_recovery_requires_successful_dispatch_and_completed_reply(dispatch_ok, ending, reply, gap):
+    events = turn_events(32)
+    ev, _ = tool_turn(32, calls=[("write_file", {"path": "p", "content": "result"})], results=["result"],
+                      ok=dispatch_ok, recovery_result_sha256=hashlib.sha256(b"result").hexdigest())
+    events[1:1] = [e for e in ev if e["event"] != "tool_seen"]
+    if ending == "failed":
+        events[-1]["failed"] = True
+    elif ending == "cancel":
+        events[-1]["kind"] = "cancel"
+    elif ending == "missing":
+        events.pop()
+    if not reply:
+        events = [e for e in events if e["event"] != "emit"]
+    events.append({"event": "compaction", "turn": 32, "compression_status": "overflow_recovery",
+                   "recovery_marker": True, "prior_compaction": True})
+    atts = bars.attempts(events)
+    bound = bars.tool_calls.bind(atts)
+    cell = {"bars": ["B1", "B2"], "faults": [{"kind": "forced_recovery", "turn": 32}],
+            "tool_plan": [{"turns": [32], "calls": [{"name": "write_file"}]}]}
+    gaps = bars.scenario_gaps(cell, events, atts, {"groups": 0}, bound)
+    assert any(gap in g for g in gaps) if gap else not gaps
+
+
 def test_b1_b2_duplicate_user_row_fails(tmp_path):
     out = make(tmp_path, rows=clean_rows() + [("user", U.format(2, 2) + " ")], events=clean_events())
     assert out["failed_bars"]["B1"] == {"T02": {"expected": 1, "stored": 2}}
