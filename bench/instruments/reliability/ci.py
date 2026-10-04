@@ -100,8 +100,10 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
         elif r["verdict"] == "FAIL" and in_gate_set(r["cell"]):
             targets = set(r.get("targets") or [])
             open_targets = targets & open_issues
+            transport = r.get("transport", "in-process")
             declared = {bar for target in open_targets if target in C.ISSUES
-                        and r["host"].startswith(C.ISSUE_HOSTS.get(target, ("",))) for bar in C.ISSUES[target][0]}
+                        and r["host"].startswith(C.ISSUE_HOSTS.get(target, ("",)))
+                        and transport in C.ISSUE_TRANSPORTS.get(target, (transport,)) for bar in C.ISSUES[target][0]}
             failed = set(r.get("failed_bars") or {})
             uncovered = sorted(failed - declared)
             if not failed or uncovered:

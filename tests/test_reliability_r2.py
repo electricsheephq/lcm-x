@@ -885,3 +885,17 @@ def test_drain_fixture_b_keeps_an_errored_call_failing_d2_when_nothing_was_archi
     failed, unsure, _ = drain.score(cell, [{"phase": "B", "counters": {"compactions": calls}}], tmp_path)
     assert failed["D2"]["errored_calls"] == [{"turn": first + 1, "error": "RuntimeError: x", "secs": 0.2}]
     assert set(unsure) == {"D1", "D3"} and all("archived no row" in why for why in unsure.values())
+
+
+def test_ci_gate_issue_transports_scope_an_acp_only_exemption():
+    """#861 declares B1/B2 on eva/customer for acp-process rows only: the in-process row of the same cell still gates."""
+    fail = {"verdict": "FAIL", "targets": [519, 549, 821, 861], "failed_bars": {"B1": {}, "B2": {}}}
+    for host in ("eva-0.21.5", "customer-0.21.2"):
+        acp = [{**r, "host": host} for r in full_set("acp-process", **{"crash-after-rotation/rotation": fail})]
+        assert ci.gate(acp, {861}) == []
+        in_process = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
+        problems = ci.gate(in_process, {861})
+        assert len(problems) == 1 and "uncovered bars ['B1', 'B2']" in problems[0]
+    upstream = [{**r, "host": "upstream-main"} for r in full_set("acp-process", **{"crash-after-rotation/rotation": fail})]
+    assert len(ci.gate(upstream, {861})) == 1
+
