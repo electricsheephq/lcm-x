@@ -8225,6 +8225,14 @@ class LCMEngine(
                                 "kind": "recovery", "span": note["content"],
                                 "full_identity": _emission_identity(note), "row": note,
                             })
+                            # Hermes restores the latest visible reply before the note; keep it
+                            # here when it fits so the proof records the note's adopted position.
+                            reply = next((m for m in reversed(tail_messages[idx + 1:])
+                                          if m.get("role") == "assistant" and not m.get("tool_calls")
+                                          and isinstance(m.get("content"), str) and m["content"].strip()
+                                          and not self._looks_like_active_summary_blob(m["content"])), None)
+                            if reply is not None and count_messages_tokens(option + [reply, note]) <= cap:
+                                return option + [reply, note]
                             if count_messages_tokens(option + [note]) <= cap:
                                 return option + [note]
                             # Drop the retained row, then the system anchor, before the cap.

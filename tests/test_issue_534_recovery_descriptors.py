@@ -307,3 +307,36 @@ def test_loss_probe_two_recoveries_in_one_session(tmp_path, monkeypatch):
             assert contents.count(c) == 1
     finally:
         engine.shutdown()
+
+
+def test_fitting_last_reply_keeps_recovery_at_its_recorded_index(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    newest = {"role": "user", "content": "newest request " * 300}
+    older = {"role": "user", "content": "older request"}
+    reply = {"role": "assistant", "content": "already delivered reply"}
+    # The oversized tool-call row must not displace the latest visible reply.
+    call = {"role": "assistant", "content": None, "tool_calls": [
+        {"id": "oversized-call", "function": {"name": "write_file", "arguments": OVERSIZED}},
+    ]}
+    pre = [older, reply, newest, call, dict(ORPHAN)]
+    engine._config.max_assembly_tokens = CAP
+    monkeypatch.setattr(engine, "_summary_route_stop_applies", lambda *_a, **_kw: True)
+    try:
+        out = engine.compress(pre, force=True)
+        assert engine._last_compression_status == "overflow_recovery"
+        assert out == [older, reply, _note(newest)]
+        descriptor = next(d for d in engine._compress_commit_proof["emissions"] if d["kind"] == "recovery")
+        assert descriptor["output_occurrence"]["index"] == 2
+        assert engine._occurrence_replay_identities(copy.deepcopy(out), engine._compress_commit_proof)[1][-1] is None
+        _commit(engine, pre)
+        host = copy.deepcopy(out) + [{"role": "assistant", "content": "new reply"}]
+        engine.ingest(host)
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        engine.ingest(host + [{"role": "user", "content": "next request"}])
+        contents = _contents(engine)
+        assert not any("[LCM overflow recovery]" in (c or "") for c in contents)
+        for c in (older["content"], reply["content"], "new reply", "next request"):
+            assert contents.count(c) == 1
+    finally:
+        engine.shutdown()
