@@ -20,9 +20,9 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from . import chronology, drain, host_parity, multiset, summary, tool_calls, tool_groups
+from . import chronology, drain, host_parity, multiset, summary, tool_calls, tool_groups, host_rewrite
 
-ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8")
+ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 
 
 def _candidate_phases(cell: dict, phases: list[dict]) -> list[dict]:
@@ -142,6 +142,20 @@ def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bo
             sum(1 for e in events if e["event"] == "compaction" and e.get("compression_status") == "host_native")
         if not tried:
             gaps.append("native cell with zero native recovery attempts")
+    if fr := next((f for f in cell.get("faults", []) if f["kind"] == "forced_recovery"), None):
+        forced = [a for a in atts if a["prefix"] == "T" and a["turn"] == fr["turn"]]
+        if not forced or any(not tool_calls.completed(a) or not a["reply"] for a in forced):
+            gaps.append("forced recovery turn did not complete with its scripted reply")
+        for a in forced:
+            for d in a["tool_dispatch"]:
+                if not d.get("ok"):
+                    gaps.append(f"{a['tag']}: recovery tool dispatch failed ({d.get('id')})")
+        marked = [e for e in events if e["event"] == "compaction" and e.get("compression_status") == "overflow_recovery"
+                  and e.get("turn") == fr["turn"] and e.get("recovery_marker")]
+        if not marked:
+            gaps.append("no marked overflow_recovery on the forced recovery turn")
+        elif not any(e.get("prior_compaction") for e in marked):
+            gaps.append("marked recovery had no earlier committed compaction (v4 proof not proven)")
     return gaps
 
 
@@ -250,6 +264,16 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     numbers["B2"]["host_parity_licensed"] = host_parity.summary(
         [dict(r, session=g) for g, m in b2_parts.items() for r in m["host_parity_licensed"]], host_why)
     bound = tool_calls.bind(atts, lambda a: attempt_group(a, group))
+    # This emergency cell deliberately drops the active result before the next provider call. B2 still requires
+    # its durably stored bytes to match the real HOST dispatch; the unseen-result failure remains a B6 diagnostic.
+    recovery_turns = {f["turn"] for f in cell.get("faults", []) if f["kind"] == "forced_recovery"} & {
+        e.get("turn") for e in events if e["event"] == "compaction" and e.get("compression_status") == "overflow_recovery"
+        and e.get("recovery_marker")}
+    for a in atts:
+        for d in a["tool_dispatch"]:
+            if a["turn"] in recovery_turns and tool_calls.completed(a) and d.get("ok") and d.get("recovery_result_sha256") \
+                    and d.get("id") in {c["id"] for c in a["tool_issues"]} - {s["id"] for s in a["tool_seen"]}:
+                bound["expected"][(attempt_group(a, group), "tool", d["id"], d["recovery_result_sha256"])] += 1
     tools = tool_calls.compare(bound["expected"], bound["loose"], tool_calls.stored_keys(full, group))
     numbers["B2"].update(tools)
     if tools["tool_missing_rows"] or tools["tool_surplus_rows"]:
@@ -320,6 +344,14 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         d_failed, d_inconclusive, numbers["drain"] = drain.score(cell, phases, cell_dir)
         failed.update(d_failed)
         inconclusive.update(d_inconclusive)
+    numbers["B9"] = host_rewrite.score(cell, cell_dir, phases)
+    if numbers["B9"]["verdict"] == "FAIL":
+        failed["B9"] = numbers["B9"]["failed_invariants"]
+    if numbers["B9"]["verdict"] == "UNSUPPORTED":
+        applicable = [b for b in applicable if b != "B9"]
+        if not applicable:  # a B9-only cell (the P8 controls) proves nothing without the audit: never PASS
+            return {"verdict": "UNSUPPORTED", "reason": "B9: " + numbers["B9"]["reason"], "applicable_bars": [],
+                    "failed_bars": {}, "inconclusive_bars": {}, "numbers": numbers}
     failed = {b: v for b, v in failed.items() if b in applicable}
     numbers["diagnostic"] = {
         "log_counts": {k: sum(p.get("log_counts", {}).get(k, 0) for p in phases)

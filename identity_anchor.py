@@ -248,6 +248,13 @@ class IdentityAnchorMixin:
         for row in rows:
             by_stamp[float(row["observed_at"])].append((row, self._stored_row_forms(row)))
         identities: dict[int, Optional[tuple]] = {}
+        recovery_identities = {}
+        proof = self._active_emission_proof()
+        if proof and any(d.get("kind") == "recovery" for d in proof.get("emissions") or ()):
+            projection, projected = self._occurrence_replay_identities(identity_messages, proof)
+            recovery_identities = {i: identity for i, (entry, identity) in enumerate(zip(projection.entries, projected))
+                                   if entry.kind in {"recovery", "recovery_base"}}
+            plan["replayed"].update(i for i, identity in recovery_identities.items() if identity is None)
 
         def identity_at(idx: int) -> Optional[tuple]:
             if idx not in identities:
@@ -255,6 +262,7 @@ class IdentityAnchorMixin:
                 identity = None if self._identity_is_lcm_scaffold(message) else self._message_replay_identity(
                     message, strip_carrier=False
                 )
+                identity = recovery_identities.get(idx, identity)
                 identities[idx] = None if identity is None or _lossy(identity) else identity
             return identities[idx]
 

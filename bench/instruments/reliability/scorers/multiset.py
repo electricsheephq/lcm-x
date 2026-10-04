@@ -26,10 +26,11 @@ def h(text: str) -> str:
     return hashlib.sha256(norm(text).encode()).hexdigest()
 
 
-def licence(key: tuple, surplus: int, expected: int, host: dict | None, store_ids: list) -> dict | None:
-    """D-A: licensed = min(surplus, host_count(k) - expected(k)), floored at 0; user rows only, never a deficit."""
+def licence(key: tuple, surplus: int, expected: int, host: dict | None, store_ids: list, spent: int = 0) -> dict | None:
+    """D-A: licensed = min(surplus, host_count(k) - expected(k) - spent(k)), floored at 0; user rows only, never a
+    deficit. ``spent``: host occurrences of k already used as a paired merge record's constituents (#823)."""
     held = (host or {}).get(key) if key[0] == "user" else None
-    n = min(surplus, held["n"] - expected) if held else 0
+    n = min(surplus, held["n"] - expected - spent) if held else 0
     return {"role": key[0], "sha256": key[1], "expected": expected, "stored": expected + surplus, "host": held["n"],
             "licensed": n, "store_ids": store_ids[:10], "host_row_ids": held["ids"][:10], "tags": held.get("tags", [])} \
         if n > 0 else None
@@ -93,8 +94,30 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             by_session[session].append((sid, content or ""))
     want = Counter((role, h(text)) for role, text in expected if norm(text))
     texts = {(role, h(text)): text for role, text in expected}
+    composites, paired, spent = [], Counter(), Counter()
+    # #823: each active host merge record covers one missing composite. Reserve transcript rows first;
+    # consume its parts before surplus licensing so no stored row can serve both purposes.
+    for key, n in want.items():
+        if key[0] != "user":
+            continue
+        for merge in ((host or {}).get(key) or {}).get("merges", []):
+            if len(stored.get(key, [])) + paired[key] >= n:
+                break
+            uses = Counter(merge["parts"])
+            if any(len(stored.get(k, [])) - want[k] < count for k, count in uses.items()):
+                continue
+            parts = []
+            for k, count in uses.items():
+                ids = stored[k][want[k]:want[k] + count]
+                del stored[k][want[k]:want[k] + count]
+                parts.append({"sha256": k[1], "uses": count, "store_ids": ids})
+            paired[key] += 1
+            spent.update(uses)  # the host rows that prove the record license no surplus too
+            composites.append({"role": "user", "expected": n, "as_parts": 1, "parts": parts,
+                               "provenance": "host_merge_record", "host_row_id": merge["host_row_id"]})
     missing, duplicated, split, licensed = [], [], [], []
     for key, n in want.items():
+        n -= paired[key]
         have = len(stored.get(key, []))
         entry = {"role": key[0], "expected": n, "stored": have, "store_ids": stored.get(key, [])[:20],
                  "preview": norm(texts[key])[:80]}
@@ -110,7 +133,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
                     continue
             missing.append({**entry, "sha256": key[1]})
         elif have > n:
-            if lic := licence(key, have - n, n, host, stored[key]):
+            if lic := licence(key, have - n, n, host, stored[key], spent[key]):
                 licensed.append(lic)
                 entry["licensed"] = lic["licensed"]
             if have - n > entry.get("licensed", 0):
@@ -118,7 +141,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     extra = []
     for k, v in stored.items():
         if k not in want:
-            lic = licence(k, len(v), 0, host, v)
+            lic = licence(k, len(v), 0, host, v, spent[k])
             licensed += [lic] if lic else []
             if len(v) > (lic or {}).get("licensed", 0):
                 extra.append({"role": k[0], "copies": len(v) - (lic or {}).get("licensed", 0), "store_ids": v[:6]})
@@ -126,7 +149,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     # licensed by host parity; the composite key is then not a deficit. Only the occurrences the host did not store
     # as the composite itself pair (those LCM should have stored whole): the whole deficit must fit within them. Same
     # lineage only; reported, never silent.
-    composites, by_key = [], {(r["role"], r["sha256"]): r for r in licensed}
+    by_key = {(r["role"], r["sha256"]): r for r in licensed}
     for entry in list(missing):
         deficit = entry["expected"] - entry["stored"]
         held = ((host or {}).get(("user", entry["sha256"])) or {}).get("n", 0)
