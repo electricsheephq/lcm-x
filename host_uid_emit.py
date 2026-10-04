@@ -105,7 +105,7 @@ def sync_cached_host_metadata(host: list[dict], cached: list[dict], generated_id
     for source, target in zip(host, cached):
         generated = id(target) in generated_ids
         for key in IDENTITY_KEYS + ADDRESS_KEYS:
-            if key in source and not (generated and key in ADDRESS_KEYS):
+            if key in source and not (generated and key in ADDRESS_KEYS + ("_tool_call_uids",)):
                 target[key] = source[key]
             else:
                 target.pop(key, None)

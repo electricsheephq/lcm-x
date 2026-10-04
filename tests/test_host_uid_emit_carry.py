@@ -253,6 +253,43 @@ def test_site17_generated_placeholder_never_keeps_address(off, build, monkeypatc
         _off_receipt("cache-placeholder", out)
 
 
+@pytest.mark.parametrize("role", ["assistant", "tool"])
+def test_site17_generated_placeholder_cache_matches_construction(role, build):
+    engine = build(ignore_message_patterns=["IGNORE_THIS"])
+    source = [_m(role, "IGNORE_THIS", uid="a", _absorbed_message_uids=["old"],
+                 tool_calls=[_call("c")], _tool_call_uids={"c": "stale"},
+                 **({"tool_call_id": "c", "_tool_call_uid": "result"} if role == "tool" else {}))]
+    cached = engine._apply_ignored_active_replay_placeholders(source, copy.deepcopy(source))
+    expected = dict(role=role, content=cached[0]["content"], message_uid="a", _absorbed_message_uids=["old"])
+    if role == "tool":
+        expected.update(tool_call_id="c", _tool_call_uid="result")
+    assert cached == [expected]
+    engine._remember_active_replay_messages(source, cached)
+    assert engine._cached_active_replay_messages(copy.deepcopy(source)) == [expected]
+
+
+def test_site17_ignored_call_uid_never_leaks_into_repeated_call_compress(build):
+    engine = build(ignore_message_patterns=["IGNORE_THIS"])
+    host = [_m("user", "ask", uid="u1"),
+            _m("assistant", "IGNORE_THIS planning", uid="a-ignored", tool_calls=[_call("c")],
+               _tool_call_uids={"c": "ignored-call"}),
+            _m("tool", "result", uid="t-ignored", tool_call_id="c", _tool_call_uid="ignored-call"),
+            _m("assistant", "retrying", uid="a2", tool_calls=[_call("c")], _tool_call_uids={"c": "new-call"}),
+            _m("tool", "result again", uid="t2", tool_call_id="c", _tool_call_uid="new-call")]
+    engine.ingest(copy.deepcopy(host))
+    for messages in (host, host + [_m("user", "next", uid="u2")]):
+        out = engine.compress(copy.deepcopy(messages), current_tokens=1000)
+        generated = engine._generated_ignored_active_replay_placeholder_message_ids
+        placeholders = [row for row in engine._last_active_replay_messages if id(row) in generated]
+        assert placeholders
+        assert all("_tool_call_uids" not in row for row in placeholders)
+        merged = next(row for row in out if row.get("role") == "assistant")
+        assert merged["tool_calls"] == [_call("c")]
+        assert merged["_tool_call_uids"] == {"c": "new-call"}
+        result = next(row for row in out if row.get("message_uid") == "t2")
+        assert result["_tool_call_uid"] == merged["_tool_call_uids"]["c"]
+
+
 def test_site17_misaligned_cache_is_not_synced(build):
     engine = build()
     host = [_m("user", "a", uid="current"), _m("assistant", "b", uid="current-b")]
