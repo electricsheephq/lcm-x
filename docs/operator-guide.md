@@ -123,7 +123,7 @@ also drops rows stored since the backup. v0.23.3's native recovery needs a
 Hermes build that installs the compression cancellation check
 (`_compression_cancelled_check`); without it v0.23.3's native path returns the
 list unchanged. The Hermes builds LCM-X is tested against install it: 0.21.5
-(`f97608f1`), 0.21.2 (`2d10969e`) and upstream main (`6f7a7991`). Rolling back
+(`f97608f1`), 0.21.2 (`2d10969e`) and upstream main (`6f7a7991`, `2667c960`). Rolling back
 to v0.23.3 (`hermes-lcm`) also reverts the v0.24.0 config migration before
 Hermes restarts: `plugins.enabled` back to `hermes-lcm` and `context.engine:
 lcm` (restore the `config.yaml` backup taken before the migration); otherwise

@@ -7,8 +7,9 @@ from __future__ import annotations
 
 P8_CONTROLS = {"p8-control/archived": "FAIL", "p8-control/other-active": "FAIL",
                "p8-control/random-snapshot": "FAIL", "p8-control/none": "PASS"}
-# Measured on the four local CI hosts at 2f4b7d54: no pair has scorable B9 (missing flush seams).
-P8_MUST_SUPPORT = {None: (), "acp-process": ()}
+# The four pre-uid CI hosts lack the flush seams (no scorable B9, measured at 2f4b7d54). upstream-uid (2667c960) shows
+# the full pattern on both transports (#866: local R1+R2 at main f0e38c61 and at 8ab4eb5b).
+P8_MUST_SUPPORT = {None: ("upstream-uid",), "acp-process": ("upstream-uid",)}
 
 CONTROLS = {
     # Differential: the host's post-commit-proof persist strip (#494), fixed by #498 (ae1fb16d; 47bd28e7 is its
