@@ -7,13 +7,14 @@ tuning with provider-reported usage, as that file's LONG cells do.
 from __future__ import annotations
 
 import fnmatch
+import os
 
-BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8")
+BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 DRAIN_BARS = ("D1", "D2", "D3")  # scorers/drain.py: the host list drains under a hidden backlog (#597, #626)
 TRANSPORTS = ("acp", "gateway")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
-          "publication_failure", "plugin_switch"}
+          "publication_failure", "plugin_switch", "p8_inject"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
     7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
@@ -53,7 +54,9 @@ def cell(cid, targets, *, in_place, transport="acp", turns=60, window=128000, re
             "user_text": {"repeat": repeat or int(400 * window / 64000), **(user or {})},
             "assistant": {"mode": "unique", "real_usage": False, "usage_scale": 1.0, **(assistant or {})},
             "tool_plan": list(tool_plan), "faults": list(faults),
-            "lcm_env": tight(window) if lcm_env is None else lcm_env, "min_compactions": min_compactions,
+            "lcm_env": {**(tight(window) if lcm_env is None else lcm_env),
+                        **({"LCM_RELIABILITY_P8": os.environ["LCM_RELIABILITY_P8"]} if "LCM_RELIABILITY_P8" in os.environ else {})},
+            "min_compactions": min_compactions,
             "final_compaction_check": True, "bars": list(bars or BARS), "doc": doc, **extra}
 
 
@@ -163,6 +166,10 @@ def registry() -> list[dict]:
              doc="os._exit between on_session_end and on_session_start of a rotation (#489). UNSUPPORTED where the "
                  "host's rotation path never calls on_session_end."),
     ]
+    cells += [cell(f"p8-control/{v}", [], in_place=True, bars=["B9"],
+                   faults=[] if v == "none" else [{"kind": "p8_inject", "variant": v}],
+                   doc="P8 flush positive control; none is the negative control.")
+              for v in ("archived", "other-active", "random-snapshot", "none")]
     return cells
 
 
