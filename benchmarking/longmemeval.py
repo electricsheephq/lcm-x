@@ -3443,6 +3443,7 @@ def _candidate_dump_header(
         "recall_rerank": recall_rerank,
         "recall_rerank_window": recall_rerank_window,
         "top_k": top_k,
+        "fts_order": "relevance",
     }
     if recall_rerank or recall_rerank_margin != 0.0:
         bindings["recall_rerank_margin"] = recall_rerank_margin

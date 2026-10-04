@@ -917,6 +917,7 @@ def test_dump_candidates_stub_has_header_rows_gold_and_null_markers(tmp_path):
             "recall_rerank": False,
             "recall_rerank_window": 0,
             "top_k": 10,
+            "fts_order": "relevance",
         }
     }
 
@@ -3508,3 +3509,17 @@ def test_checkpoint_rejects_non_string_coverage_values(tmp_path, value, site):
                                           degraded=0, unrecorded=0),
                 embeddings_enabled=False,
             )
+
+
+def test_candidate_dump_header_binds_fts_order(tmp_path):
+    """A dump written under the earlier recency-ordered FTS arm (no fts_order) is never appended to."""
+    import benchmarking.longmemeval as lme
+
+    header = lme._candidate_dump_header(
+        provider="stub", model="", rerank=False, embeddings_enabled=False, dataset_label="s",
+        direct_source_sha256=None, manifest_sha256="m",
+    )
+    assert header[lme._DUMP_HEADER_KEY]["fts_order"] == "relevance"
+    legacy = {lme._DUMP_HEADER_KEY: {k: v for k, v in header[lme._DUMP_HEADER_KEY].items() if k != "fts_order"}}
+    with pytest.raises(ValueError):
+        lme._validate_candidate_dump_header(legacy, expected_header=header, path=tmp_path / "dump.jsonl")
