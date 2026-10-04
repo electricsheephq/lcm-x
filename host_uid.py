@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import host_message_uid_mode
+from .reconcile import _has_lossy_redacted_identity as _lossy_identity
 
 logger = logging.getLogger(__name__)
 
@@ -158,6 +159,7 @@ class HostUidShadowMixin:
             logger.debug("LCM host-uid count failed")
 
     def _host_uid_classify(self, capture, stored_at: dict, remainders: set, delta: Counter):
+        """An unmatched composite with an externalized constituent is unverified, without gate checks."""
         valid = {idx: uid for idx, uid in capture["entries"].items() if _valid_uid(uid)}
         delta["skipped.invalid_uid"] += len(capture["entries"]) - len(valid)
         if not valid:
@@ -210,6 +212,7 @@ class HostUidShadowMixin:
             unmapped = not rows and stored is None and (idx < cursor or idx in capture["tool_segment"] or idx in replayed)
             if bound:  # BOUND: compared against the payload-matching version (R1-1); the gate marks that binding
                 hit = self._host_uid_bytes_match(bound, identity[idx], fetched) if not rows else None
+                lossy = not rows and stored is None and _lossy_identity(self._message_replay_identity(identity[idx]))
                 if stored is not None:  # VERSION_NEW is an event only; a stored duplicate is a replay check
                     delta["bound.disagree.stored_despite_match" if hit is not None else "bound.version_new"] += 1
                     if hit is not None:
@@ -220,6 +223,17 @@ class HostUidShadowMixin:
                     target = int(rows[0]["store_id"])
                     delta["replay.bound.agree.replay" if target in bound else "replay.bound.disagree.replay_other_row"] += 1
                     checks.append((uid, target if target in bound else canonical, target in bound))
+                elif unmapped and lossy:  # a digest-free redaction collapsed the identity: equality proves nothing
+                    delta["replay.composite.unverified.lossy" if absorbed(messages[idx]) else "replay.bound.unverified.lossy"] += 1
+                elif unmapped and hit is None and (merge := self._host_uid_lcm_merge(
+                        messages[idx], [uid, *absorbed(messages[idx])], bindings, fetched, identity[idx])):
+                    delta["replay.composite.agree.lcm_merge"] += 1  # LCM's own site-1 merge (R3-2)
+                    checks.extend((part, sid, True) for part, sid in merge)
+                elif unmapped and hit is None and absorbed(messages[idx]) and any(  # a constituent bound to stubs only
+                        bindings.get(part) and all(self._protected_message_uses_raw_payload_active_stub(
+                            fetched.get(sid) or {}) for sid, _kind in bindings[part])
+                        for part in [uid, *absorbed(messages[idx])]):
+                    delta["replay.composite.unverified.externalized"] += 1
                 elif unmapped:  # a replay with no row map: AGREE when a bound row holds these bytes
                     delta["replay.bound.agree.prefix_replay" if hit is not None else "replay.bound.disagree.prefix_replay"] += 1
                     checks.append((uid, canonical if hit is None else hit, hit is not None))
@@ -257,6 +271,41 @@ class HostUidShadowMixin:
         identity = self._message_replay_identity(identity_message, strip_carrier=False)
         return next((int(sid) for sid in store_ids if fetched.get(int(sid)) is not None
                      and identity in self._stored_row_forms(fetched[int(sid)])), None)
+
+    def _host_uid_lcm_merge(self, message, uids, bindings, fetched, identity_message=None) -> Optional[list]:
+        """Site 1: one bound row per uid, in order, whose stripped non-empty contents newline-join to this
+        assistant's content and whose ordered tool calls match -> [(uid, store_id), ...], else None.
+        Compared as the single-row path compares: the dict's #436 identity form against stored rows with
+        their ingest placeholders restored. ``_tool_call_uids`` is not stored, so it cannot be compared."""
+        source = identity_message if isinstance(identity_message, dict) else message
+        content = message.get("role") == "assistant" and source.get("content")
+        if len(uids) < 2 or not isinstance(content, str) or not all(uid in bindings for uid in uids):
+            return None
+        tool_calls = self._stable_tool_calls_identity(source.get("tool_calls"))
+
+        def restored(sid: int, key: str):
+            row = fetched.get(sid) or {}
+            session = str(row.get("session_id") or self._session_id or "")
+            if key == "content":
+                value = row.get("content")
+                return self._restore_ingest_payload_placeholders_in_content_identity(
+                    value, session_id=session) if isinstance(value, str) else None
+            return self._restore_ingest_payload_placeholders_in_value(row.get(key) or [], session_id=session)
+
+        def walk(pos: int, joined: str, picked: list) -> Optional[list]:
+            if pos == len(uids):
+                calls = [call for _uid, sid in picked for call in restored(sid, "tool_calls")]
+                return picked if joined == content and self._stable_tool_calls_identity(calls) == tool_calls else None
+            for sid, _kind in bindings[uids[pos]]:
+                part = restored(sid, "content")
+                part = part.strip() if isinstance(part, str) else None
+                nxt = joined if not part else f"{joined}\n{part}" if joined else part
+                if part is not None and content.startswith(nxt) and (
+                        found := walk(pos + 1, nxt, picked + [(uids[pos], sid)])):
+                    return found
+            return None
+
+        return walk(0, "", [])
 
     def _host_uid_alias_candidates(self, lineage, capture, stored_at, matched, bindings, fetched, aliases, delta):
         """R3-1 (shadow, observational): ``position_proof`` when the rows the nearest bound view neighbours map to
