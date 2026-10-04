@@ -1,11 +1,12 @@
-"""B9: host flush/commit identity invariants; payload-free R1 audit evidence."""
+"""B9: host flush/commit identity invariants; payload-free R1/R2 audit evidence."""
 import json
 
 
 def score(cell, cell_dir, phases):
-    if cell.get("transport") not in (None, "acp", "gateway") or not phases or any(
+    transports = sorted({p.get("transport", cell.get("transport", "acp")) for p in phases})
+    if not phases or any(
             not p.get("p8", {}).get("supported") for p in phases):
-        return {"verdict": "UNSUPPORTED", "reason": "in-process host flush seams unavailable or audit disabled"}
+        return {"verdict": "UNSUPPORTED", "reason": "host flush seams unavailable or audit disabled", "transports": transports}
     path = cell_dir / "p8-events.jsonl"
     if not path.exists() or any(p["p8"].get("notes") for p in phases):
         return {"verdict": "UNSUPPORTED", "reason": "incomplete audit; see phase harness notes"}
@@ -51,4 +52,4 @@ def score(cell, cell_dir, phases):
     for p in phases:
         duplicates(p["p8"].get("duplicates", []))
     return {"verdict": "FAIL" if failed else "PASS", "failed_invariants": failed,
-            "reported_duplicates": reported, "actions": actions}
+            "reported_duplicates": reported, "actions": actions, "transports": transports}

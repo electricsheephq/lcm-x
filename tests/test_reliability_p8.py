@@ -74,13 +74,21 @@ def test_actions_and_counts_are_reported(tmp_path):
     assert out["failed_invariants"]["I0"]["count"] == 2
 
 
-def test_missing_disabled_process_or_partial_audit_is_unsupported(tmp_path):
+def test_missing_disabled_or_partial_audit_is_unsupported_on_recorded_process(tmp_path):
     for phases in ([{}], [{"p8": {"supported": False}}], [{"p8": {"supported": True, "notes": ["OSError"]}}]):
-        assert scored(tmp_path, [COMMIT], phases)["verdict"] == "UNSUPPORTED"
-    for transport in ("acp-process", "gateway-process", "api-server"):
-        assert scored(tmp_path, [COMMIT], cell={"transport": transport})["verdict"] == "UNSUPPORTED"
+        phases = [dict(p, transport="acp-process") for p in phases]
+        assert scored(tmp_path, [COMMIT], phases, cell={"transport": "acp"})["verdict"] == "UNSUPPORTED"
     (tmp_path / "p8-events.jsonl").unlink()
     assert host_rewrite.score({}, tmp_path, [{"p8": {"supported": True}}])["verdict"] == "UNSUPPORTED"
+
+
+def test_recorded_process_audit_overrides_the_original_r1_cell_transport(tmp_path):
+    phases = [{"transport": "acp-process", "p8": {"supported": True}}]
+    out = scored(tmp_path, [COMMIT], phases, cell={"transport": "acp"})
+    assert out["verdict"] == "PASS"
+    assert out["transports"] == ["acp-process"]
+    assert scored(tmp_path, [dict(FLUSH, action="ADOPT")], phases,
+                  cell={"transport": "acp"})["failed_invariants"] == {"I3": {"count": 1, "row_ids": [7, 7]}}
 
 
 def fake_host(monkeypatch, tmp_path):
@@ -168,6 +176,52 @@ def test_disabled_and_missing_seams_keep_original_callables(monkeypatch, tmp_pat
     del repair._active_message_row
     assert not probe.install_p8(tmp_path, "A", {}, set(), None, {})[0]["supported"]
     assert original == (repair.resolve_and_repair_transcript_batch, persistence._db_flush_write, compression._commit_compaction)
+
+
+@pytest.mark.parametrize("mode", ["on", "off", "missing"])
+def test_process_observer_installs_once_pins_output_and_records_audit(monkeypatch, tmp_path, mode):
+    import importlib.util
+    from bench.instruments.reliability import process_cell
+    repair, persistence, compression, ag, live, calls, marker = fake_host(monkeypatch, tmp_path)
+    spec = importlib.util.spec_from_file_location("_p8_observer_test", process_cell.OBSERVER / "rel_observer.py")
+    obs = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(obs)
+    monkeypatch.setattr(obs, "DIR", tmp_path)
+    monkeypatch.setattr(obs, "_r1", probe)
+    monkeypatch.setattr(obs, "ensure_tap", lambda: None)
+    (tmp_path / "cell.json").write_text(json.dumps({"faults": []}))
+    if mode == "off":
+        monkeypatch.setenv("LCM_RELIABILITY_P8", "off")
+    if mode == "missing":
+        del repair._active_message_row
+
+    class Agent:
+        def __init__(self):
+            self.session_id, self._session_db = ag.session_id, ag._session_db
+            self.context_compressor = None
+
+        def run_conversation(self, *args, **kwargs):
+            return marker
+
+    obs.patch_run_agent(SimpleNamespace(AIAgent=Agent))
+    built = Agent()
+    wrapped = compression._commit_compaction
+    Agent()
+    assert compression._commit_compaction is wrapped  # no nested wrap on a second agent
+    obs._p8_pin([live])
+    assert persistence._db_flush_write(built, [dict(live)], [live], [live]) is marker
+    compression._commit_compaction(built, [live])
+    if mode == "on":  # a SIGKILL before turn_end must not lose the just-committed emission receipt
+        assert process_cell.read_jsonl(tmp_path / "observer.jsonl")[-1]["p8"]["emitted"]
+    obs.snapshot()
+    audit = process_cell.read_jsonl(tmp_path / "observer.jsonl")[-1]["p8"]
+    assert audit["supported"] == (mode == "on") and not audit["notes"]
+    if mode == "on":
+        assert audit["emitted"] == [["S0", "user", hashlib.sha256(b"fixture-uid").hexdigest()]]
+        events = process_cell.read_jsonl(tmp_path / "p8-events.jsonl")
+        assert next(e for e in events if e["event"] == "flush_resolve")["lcm"]
+    else:
+        assert not (tmp_path / "p8-events.jsonl").exists()
 
 
 def test_controls_are_exactly_registered():
