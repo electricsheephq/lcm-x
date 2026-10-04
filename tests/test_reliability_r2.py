@@ -18,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bench.instruments.reliability import acp_driver as AD, cells, ci, fake_provider as FP, hosts, plugin_tree, probe  # noqa: E402
-from bench.instruments.reliability import process_cell as PC, run_matrix as RM  # noqa: E402
+from bench.instruments.reliability import controls, process_cell as PC, run_matrix as RM  # noqa: E402
 from bench.instruments.reliability.scorers import chronology  # noqa: E402
 
 
@@ -371,10 +371,31 @@ def test_extra_turns_only_when_a_pass_just_consumed_the_backlog(tmp_path):
 
 
 def full_set(transport=None, **over):
-    """One PASS row per expected cell of one (host, transport, plugin sha), with ``over`` = {cell: row fields}."""
+    """One row per expected cell, PASS except the red P8 controls; ``over`` = {cell: row fields}."""
     extra = {"transport": transport} if transport else {}
-    return [{"verdict": "PASS", "host": "h", "plugin_sha": "s", "cell": c, "targets": [], **extra, **over.get(c, {})}
+    return [{"verdict": "PASS", "host": "h", "plugin_sha": "s", "cell": c, "targets": [], **extra,
+             **({"verdict": "FAIL", "failed_bars": {"B9": {}}}
+                if c.startswith("p8-control/") and c != "p8-control/none" else {}), **over.get(c, {})}
             for c in ci.expected_cells(transport)]
+
+
+@pytest.mark.parametrize("transport", [None, "acp-process"])
+def test_ci_gate_checks_p8_control_pattern_and_required_support(monkeypatch, transport):
+    monkeypatch.setattr(controls, "P8_MUST_SUPPORT", {transport: ("h",)}, raising=False)
+    rows = full_set(transport)
+    assert ci.gate(rows, set()) == []
+    inverted = [{**r, "verdict": "PASS" if r["verdict"] == "FAIL" else "FAIL"}
+                if r["cell"].startswith("p8-control/") else r for r in rows]
+    assert len(ci.gate(inverted, set())) == 4
+    for wrong in ({"verdict": "UNSUPPORTED"}, {"verdict": "INCONCLUSIVE"}, {"failed_bars": {}},
+                  {"failed_bars": {"B1": {}}}):
+        problems = ci.gate(full_set(transport, **{"p8-control/archived": wrong}), set())
+        assert len(problems) == 1 and "P8 control" in problems[0]
+    missing = [r for r in rows if r["cell"] != "p8-control/none"]
+    assert any("P8 control" in p for p in ci.gate(missing, set()))
+    unsupported = full_set(transport, **{"p8-control/archived": {"verdict": "UNSUPPORTED"}})
+    assert ci.gate([{**r, "host": "another-host"} for r in unsupported], set()) == []
+    assert len(ci.gate([{**r, "host": "another-host"} for r in inverted], set())) == 4
 
 
 def test_ci_gate_fails_on_error_and_on_untracked_g_rel_1_fail():

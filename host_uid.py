@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any, Optional
 
 from .config import host_message_uid_mode
+from .host_uid_emit import engine_uid, identity_emit_enabled
+from .reconcile import _has_lossy_redacted_identity as _lossy_identity
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +128,85 @@ class HostUidShadowMixin:
             conn.close()
         return (root, None) if root is not None else (None, "unresolved")
 
+    def _mint_engine_uids(self, generated, taken=()) -> None:
+        """R4-1 (B1's gate, a resolved lineage): ``[(row, kind, basis | None, proof_kind)]`` in emitted order gets
+        deterministic engine uids, the ordinal counted per (kind, basis); ``basis`` None = the content's sha256.
+        Pending until the compress that returns them records them; nothing else about the row changes."""
+        try:
+            if not generated or not identity_emit_enabled():
+                return
+            lineage = self._host_uid_lineage_key()[0]
+            if lineage is None:
+                return
+            seen, pending = Counter(), self.__dict__.setdefault("_engine_uids_pending", {})
+            taken = set(taken)
+            for row, kind, basis, proof_kind in generated:
+                basis = basis or hashlib.sha256(str(row.get("content") or "").encode("utf-8")).hexdigest()
+                while (uid := engine_uid(lineage, kind, basis, seen[(kind, basis)])) in taken:
+                    seen[(kind, basis)] += 1
+                row["message_uid"] = uid
+                seen[(kind, basis)] += 1
+                pending[uid] = (lineage, proof_kind)
+        except Exception as exc:  # fail open: an unminted row is a no-uid row, as at the base
+            self._host_uid_count(Counter(errors=1), exc)
+
+    def _host_uid_record_engine(self, emitted) -> None:
+        """R4-2: the engine uids ``emitted`` carries (top level or absorbed) go to ``host_uid_bindings`` as
+        ``kind='engine'``, ``store_id=0``, once per process; the shadow write path, fail-open and counted. A
+        bypassed session writes no LCM state, so its marker's uid is minted but never recorded."""
+        pending = self.__dict__.get("_engine_uids_pending")
+        if not pending:
+            return
+        try:
+            if self._bypasses_lcm_context_management():
+                pending.clear()
+                return
+            done = self.__dict__.setdefault("_engine_uids_recorded", set())
+            present = {uid for row in emitted if isinstance(row, dict)
+                       for uid in [row.get("message_uid"), *(row.get("_absorbed_message_uids") or ())]
+                       if isinstance(uid, str)}
+            records: dict = defaultdict(list)
+            for uid in (present & pending.keys()) - done:
+                lineage, proof_kind = pending[uid]
+                records[lineage].append((0, uid, "engine", proof_kind))
+            for uid in (pending.keys() - present) | (pending.keys() & done):
+                pending.pop(uid)
+            for lineage, rows in records.items():
+                try:
+                    self._store.add_host_uid_bindings(lineage, rows)
+                except Exception as exc:
+                    self._host_uid_count(Counter(errors=1), exc)
+                    continue
+                for _sid, uid, _kind, _proof in rows:
+                    done.add(uid)
+                    pending.pop(uid, None)
+        except Exception as exc:
+            self._host_uid_count(Counter(errors=1), exc)
+
+    def _host_uid_engine_uids(self, uids) -> set:
+        """The ``uids`` that are engine uids of this lineage: the durable record (one batched lookup) plus the
+        uids this engine minted and has not recorded yet. Fails open to the in-memory set."""
+        uids = {uid for uid in uids if isinstance(uid, str)}
+        known = uids & (set(self.__dict__.get("_engine_uids_pending") or ()) | self.__dict__.get(
+            "_engine_uids_recorded", set()))
+        try:
+            lineage = self._host_uid_lineage_key()[0]
+            if lineage is not None and uids - known:
+                known |= set(self._store.host_uid_bindings_for(lineage, uids - known, ("engine",)))
+        except Exception as exc:
+            self._host_uid_count(Counter(errors=1), exc)
+        return known
+
+    def _host_uid_host_uids(self, uids) -> set:
+        """The uids positively bound as canonical or version in this lineage; fail open to no host uids."""
+        try:
+            lineage = self._host_uid_lineage_key()[0]
+            if lineage is not None:
+                return set(self._store.host_uid_bindings_for(lineage, {uid for uid in uids if _valid_uid(uid)}))
+        except Exception as exc:
+            self._host_uid_count(Counter(errors=1), exc)
+        return set()
+
     def _host_uid_capture(self, messages, identity_messages, start: int, cursor: int, plan, tool_segment,
                           session_id=None):
         """Read the uids off the HOST dicts after #436 decided and before the INSERT drops unknown keys."""
@@ -158,6 +239,7 @@ class HostUidShadowMixin:
             logger.debug("LCM host-uid count failed")
 
     def _host_uid_classify(self, capture, stored_at: dict, remainders: set, delta: Counter):
+        """An unmatched composite with an externalized constituent is unverified, without gate checks."""
         valid = {idx: uid for idx, uid in capture["entries"].items() if _valid_uid(uid)}
         delta["skipped.invalid_uid"] += len(capture["entries"]) - len(valid)
         if not valid:
@@ -177,8 +259,9 @@ class HostUidShadowMixin:
             values = message.get("_absorbed_message_uids")
             return [uid for uid in values if _valid_uid(uid)] if isinstance(values, (list, tuple)) else []
 
-        bindings = store.host_uid_bindings_for(
-            lineage, {uid for idx, uid in valid.items() for uid in [uid, *absorbed(messages[idx])]})
+        present = {uid for idx, uid in valid.items() for uid in [uid, *absorbed(messages[idx])]}
+        bindings, engine = store.host_uid_bindings_for(lineage, present), set(
+            store.host_uid_bindings_for(lineage, present, ("engine",)))
         by_store: dict = defaultdict(set)  # store_id -> uids bound to it (F6: built once, kept current)
         for uid, items in bindings.items():
             for sid, _kind in items:
@@ -198,6 +281,10 @@ class HostUidShadowMixin:
         for idx, uid in sorted(valid.items()):
             stored = stored_at.get(idx)
             rows = matched.get(idx) if stored is None or idx in remainders else None
+            if engine & {uid, *absorbed(messages[idx])}:  # GENERATED (R3-3 class 2): events only, no gate check
+                delta[self._host_uid_generated(uid, absorbed(messages[idx]), engine, bindings, rows, stored,
+                                               idx in remainders)] += 1
+                continue
             if idx in remainders or (rows and len(rows) > 1):  # COMPOSITE / REMAINDER (F3: prefix included)
                 ids = {int(row["store_id"]) for row in rows or ()} | ({int(stored)} if stored is not None else set())
                 agree = all(not bindings.get(present) or ids & {sid for sid, _k in bindings[present]}
@@ -210,6 +297,7 @@ class HostUidShadowMixin:
             unmapped = not rows and stored is None and (idx < cursor or idx in capture["tool_segment"] or idx in replayed)
             if bound:  # BOUND: compared against the payload-matching version (R1-1); the gate marks that binding
                 hit = self._host_uid_bytes_match(bound, identity[idx], fetched) if not rows else None
+                lossy = not rows and stored is None and _lossy_identity(self._message_replay_identity(identity[idx]))
                 if stored is not None:  # VERSION_NEW is an event only; a stored duplicate is a replay check
                     delta["bound.disagree.stored_despite_match" if hit is not None else "bound.version_new"] += 1
                     if hit is not None:
@@ -220,6 +308,17 @@ class HostUidShadowMixin:
                     target = int(rows[0]["store_id"])
                     delta["replay.bound.agree.replay" if target in bound else "replay.bound.disagree.replay_other_row"] += 1
                     checks.append((uid, target if target in bound else canonical, target in bound))
+                elif unmapped and lossy:  # a digest-free redaction collapsed the identity: equality proves nothing
+                    delta["replay.composite.unverified.lossy" if absorbed(messages[idx]) else "replay.bound.unverified.lossy"] += 1
+                elif unmapped and hit is None and (merge := self._host_uid_lcm_merge(
+                        messages[idx], [uid, *absorbed(messages[idx])], bindings, fetched, identity[idx])):
+                    delta["replay.composite.agree.lcm_merge"] += 1  # LCM's own site-1 merge (R3-2)
+                    checks.extend((part, sid, True) for part, sid in merge)
+                elif unmapped and hit is None and absorbed(messages[idx]) and any(  # a constituent bound to stubs only
+                        bindings.get(part) and all(self._protected_message_uses_raw_payload_active_stub(
+                            fetched.get(sid) or {}) for sid, _kind in bindings[part])
+                        for part in [uid, *absorbed(messages[idx])]):
+                    delta["replay.composite.unverified.externalized"] += 1
                 elif unmapped:  # a replay with no row map: AGREE when a bound row holds these bytes
                     delta["replay.bound.agree.prefix_replay" if hit is not None else "replay.bound.disagree.prefix_replay"] += 1
                     checks.append((uid, canonical if hit is None else hit, hit is not None))
@@ -243,6 +342,27 @@ class HostUidShadowMixin:
             self._host_uid_alias_candidates(lineage, capture, stored_at, matched, bindings, fetched, aliases, delta)
         return None
 
+    @staticmethod
+    def _host_uid_generated(uid, absorbed, engine, bindings, rows, stored, remainder) -> str:
+        """A dict naming an engine uid: AGREE when #436 stored and mapped nothing for it, ``.remainder`` for a
+        carrier whose user remainder is the row its absorbed host uids are bound to (already stored, or the one
+        #436 stored; every mapped row a row of those uids, else ``mapped_extra``); else DISAGREE. Nothing stored
+        or mapped is the correct outcome for a generated row: the metric measures LCM storing or mapping its own
+        rows wrongly, not recognition alone."""
+        hosts = [u for u in [uid, *absorbed] if u not in engine]
+        host_rows = {sid for h in hosts for sid, _k in bindings.get(h, ())}
+        mapped = {int(row["store_id"]) for row in rows or ()}
+        if stored is None and not mapped:
+            return "generated.agree.remainder" if hosts and all(bindings.get(h) for h in hosts) else "generated.agree"
+        if stored is not None and not remainder:
+            return "generated.disagree.stored"
+        if mapped - host_rows:  # #436 mapped a row no absorbed host uid names (a stored generated row: #534)
+            return "generated.disagree.mapped_extra"
+        ids = mapped | ({int(stored)} if stored is not None else set())
+        if hosts and all(not bindings.get(h) or ids & {sid for sid, _k in bindings[h]} for h in hosts):
+            return "generated.agree.remainder"
+        return "generated.disagree.remainder"
+
     def _host_uid_fetch(self, store_ids, fetched: dict) -> None:
         """Rows cached across one ingest: one batched, chunked read of the ids not fetched yet."""
         missing = sorted({int(sid) for sid in store_ids if int(sid) not in fetched})
@@ -257,6 +377,41 @@ class HostUidShadowMixin:
         identity = self._message_replay_identity(identity_message, strip_carrier=False)
         return next((int(sid) for sid in store_ids if fetched.get(int(sid)) is not None
                      and identity in self._stored_row_forms(fetched[int(sid)])), None)
+
+    def _host_uid_lcm_merge(self, message, uids, bindings, fetched, identity_message=None) -> Optional[list]:
+        """Site 1: one bound row per uid, in order, whose stripped non-empty contents newline-join to this
+        assistant's content and whose ordered tool calls match -> [(uid, store_id), ...], else None.
+        Compared as the single-row path compares: the dict's #436 identity form against stored rows with
+        their ingest placeholders restored. ``_tool_call_uids`` is not stored, so it cannot be compared."""
+        source = identity_message if isinstance(identity_message, dict) else message
+        content = message.get("role") == "assistant" and source.get("content")
+        if len(uids) < 2 or not isinstance(content, str) or not all(uid in bindings for uid in uids):
+            return None
+        tool_calls = self._stable_tool_calls_identity(source.get("tool_calls"))
+
+        def restored(sid: int, key: str):
+            row = fetched.get(sid) or {}
+            session = str(row.get("session_id") or self._session_id or "")
+            if key == "content":
+                value = row.get("content")
+                return self._restore_ingest_payload_placeholders_in_content_identity(
+                    value, session_id=session) if isinstance(value, str) else None
+            return self._restore_ingest_payload_placeholders_in_value(row.get(key) or [], session_id=session)
+
+        def walk(pos: int, joined: str, picked: list) -> Optional[list]:
+            if pos == len(uids):
+                calls = [call for _uid, sid in picked for call in restored(sid, "tool_calls")]
+                return picked if joined == content and self._stable_tool_calls_identity(calls) == tool_calls else None
+            for sid, _kind in bindings[uids[pos]]:
+                part = restored(sid, "content")
+                part = part.strip() if isinstance(part, str) else None
+                nxt = joined if not part else f"{joined}\n{part}" if joined else part
+                if part is not None and content.startswith(nxt) and (
+                        found := walk(pos + 1, nxt, picked + [(uids[pos], sid)])):
+                    return found
+            return None
+
+        return walk(0, "", [])
 
     def _host_uid_alias_candidates(self, lineage, capture, stored_at, matched, bindings, fetched, aliases, delta):
         """R3-1 (shadow, observational): ``position_proof`` when the rows the nearest bound view neighbours map to
@@ -343,9 +498,10 @@ def host_uid_doctor_lines(engine: Any) -> list[str]:
     """Doctor ``host_uid`` section: counts only (gate per binding, event counts, errors, table size)."""
     try:
         durable, rows = engine._store.read_metadata_json(HOST_UID_COUNTER_KEY), engine._store.count_host_uid_bindings()
-        gate = engine._store.host_uid_gate()
+        gate, engine_rows = engine._store.host_uid_gate(), engine._store.count_host_uid_bindings(("engine",))
     except Exception as exc:
         durable, rows, gate = None, f"error: {type(exc).__name__}", []
+        engine_rows = rows
     durable = durable if isinstance(durable, dict) else {}
     process = dict(getattr(engine, "_host_uid_counters", None) or {})
     errors = durable.get("errors") if isinstance(durable.get("errors"), int) else 0
@@ -361,4 +517,5 @@ def host_uid_doctor_lines(engine: Any) -> list[str]:
         f"host_uid_process_event_counts: {_fmt_counts({k: v for k, v in process.items() if k != 'errors'})}",
         f"host_uid_errors: {errors}" + (f" (process {process['errors']})" if process.get("errors") else ""),
         f"host_uid_bindings_rows: {'absent' if rows is None else rows}",
+        f"host_uid_engine_rows: {'absent' if engine_rows is None else engine_rows}",
     ]
