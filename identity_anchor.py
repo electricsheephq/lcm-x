@@ -488,10 +488,10 @@ class IdentityAnchorMixin:
         pool = [row for row in pool if int(row["store_id"]) not in reserved]
         donors = [row for row in donors if int(row["store_id"]) not in reserved]
         pool = self._identity_anchor_eligible(pool, donors, content, stamp)
-        pool = [row for row in pool if row.get("observed_at") is not None or self._identity_anchor_in_run(row, donors)]
+        pool, runs = self._identity_anchor_scope_unstamped(pool, donors)
         texts = {text for row in pool for text in self._identity_texts(row)}
         donor_texts = {text for row in donors for text in self._identity_texts(row)}
-        group, ambiguous = self._identity_anchor_compose(content, texts, pool, donors, consumed)
+        group, ambiguous = self._identity_anchor_compose(content, texts, pool, donors, consumed, runs=runs)
         if group is not None:
             plan["relations"].append(("composite", stamp, group, None))
             return self._identity_anchor_take(idx, group, consumed, matched, plan)
@@ -525,23 +525,56 @@ class IdentityAnchorMixin:
             if any(form[0] == "user" and at is not None and stamp is not None and at > stamp
                    and form[1].strip() == rest.strip() for at, form in shown(idx, matched_too=True)):
                 return
-            group = self._identity_anchor_assign(parts, pool, donors, consumed)
+            group = self._identity_anchor_assign(parts, pool, donors, consumed, runs=runs)
             if group is not None:
                 consumed.update(int(row["store_id"]) for row in group)
                 matched[idx] = group
                 plan["remainders"][idx] = (rest, stamp, group, parts)
 
-    def _identity_anchor_in_run(self, row, donors) -> bool:
-        """#851: an unstamped constituent is proven only inside a donor's own unanswered user run (the host
-        merges consecutive user rows, #583): no other stored row of the session lies between them."""
-        sid = int(row["store_id"])
+    def _identity_anchor_scope_unstamped(self, pool, donors) -> tuple:
+        """#851: ``(pool, runs)``: an unstamped row stays only inside some donor's run; ``runs`` later binds it
+        to the donor its group actually uses (``_identity_anchor_assign``). No unstamped row: no read."""
+        if all(row.get("observed_at") is not None for row in pool):
+            return pool, {}
+        runs = self._identity_anchor_runs(donors)
+        return [row for row in pool if row.get("observed_at") is not None
+                or any(self._identity_anchor_in_run(row, donor, runs) for donor in donors)], runs
+
+    def _identity_anchor_runs(self, donors) -> dict:
+        """#851: store id -> run for the stored rows near each donor, one read per merged window. A run is a
+        stretch of a session's user rows of one conversation (a blank legacy id joins any) with no other stored
+        row between them: the host merges only back-to-back user messages (#583)."""
+        windows: dict[str, list] = defaultdict(list)
         for donor in donors:
-            lo, hi = sorted((sid, int(donor["store_id"])))
-            if str(donor.get("session_id")) == str(row.get("session_id")) and hi - lo <= _POOL_WINDOW and all(
-                    r.get("role") == "user" for r in self._store.get_range(str(row["session_id"]), start_id=lo + 1,
-                                                                            end_id=hi - 1, limit=hi - lo)):
-                return True
-        return False
+            store_id = int(donor["store_id"])
+            windows[str(donor["session_id"])].append([max(0, store_id - _POOL_WINDOW), store_id + _POOL_WINDOW])
+        runs: dict[int, tuple] = {}
+        for session, spans in windows.items():
+            merged: list = []
+            for lo, hi in sorted(spans):
+                if merged and lo <= merged[-1][1] + 1:
+                    merged[-1][1] = max(merged[-1][1], hi)
+                else:
+                    merged.append([lo, hi])
+            for lo, hi in merged:
+                run = conversation = None
+                for row in self._store.get_range(session, start_id=lo, end_id=hi, limit=hi - lo + 1):
+                    if row.get("role") != "user":
+                        run = conversation = None
+                        continue
+                    own = str(row.get("conversation_id") or "").strip() or None
+                    if run is None or own and conversation and own != conversation:
+                        run, conversation = (session, int(row["store_id"])), None
+                    conversation = conversation or own
+                    runs[int(row["store_id"])] = run
+        return runs
+
+    @staticmethod
+    def _identity_anchor_in_run(row, donor, runs) -> bool:
+        """#851: an unstamped constituent is proven only inside the run of the donor it is composed with."""
+        run = runs.get(int(row["store_id"]))
+        return (run is not None and run == runs.get(int(donor["store_id"]))
+                and abs(int(row["store_id"]) - int(donor["store_id"])) <= _POOL_WINDOW)
 
     def _identity_anchor_ws_row(self, identity, stamp, rows, consumed) -> Optional[dict]:
         """R1-ws (D-D'): the first unconsumed stored user row at the SAME host stamp whose content differs from
@@ -600,7 +633,7 @@ class IdentityAnchorMixin:
                 plan["backfill"].append((int(members[0]["store_id"]), stamp))
                 return self._identity_anchor_take(idx, members, consumed, matched, plan)
 
-    def _identity_anchor_compose(self, content, texts, pool, donors, consumed) -> tuple:
+    def _identity_anchor_compose(self, content, texts, pool, donors, consumed, runs=None) -> tuple:
         """R2 form (i): ``(group, ambiguous)``; ``group`` is the one exact, unique, ordered decomposition
         of ``content`` into stored occurrences (a stamp donor among them), each used once."""
         donor_texts = {text for row in donors for text in self._identity_texts(row)}
@@ -608,7 +641,7 @@ class IdentityAnchorMixin:
         if found is None:  # T3: search budget spent: ambiguous, the composite is stored whole
             return None, True
         full = [parts for parts, rest in found if not rest and donor_texts & set(parts)]
-        group = self._identity_anchor_assign(full[0], pool, donors, consumed) if len(full) == 1 else None
+        group = self._identity_anchor_assign(full[0], pool, donors, consumed, runs=runs) if len(full) == 1 else None
         return group, len(full) > 1 or bool(full) and group is None
 
     def _identity_anchor_group_matches(self, content, group) -> bool:
@@ -681,10 +714,24 @@ class IdentityAnchorMixin:
                 aliases[int(rel["store_id"])].add(_normalize_observed_at(rel["observed_at"]))
         return _reserve_shown(pool, self._stored_row_forms, list(enumerate(shown.elements())), aliases) if pool else set()
 
-    def _identity_anchor_assign(self, parts, pool, donors, consumed) -> Optional[list]:
+    def _identity_anchor_assign(self, parts, pool, donors, consumed, runs=None) -> Optional[list]:
         """Bind each part to one stored occurrence (a donor first), each used once;
         an override collision cannot choose between rows whose raw forms differ from the part.
-        ``pool`` holds no row the host view shows as its own occurrence (B-ID-1)."""
+        ``pool`` holds no row the host view shows as its own occurrence (B-ID-1).
+        #851: an unstamped row binds only inside the run of a donor in the same group: one attempt per donor;
+        distinct groups from different donors are ambiguous (None)."""
+        if not runs:
+            return self._identity_anchor_bind(parts, pool, donors, consumed)
+        found: dict[tuple, list] = {}
+        for donor in donors:
+            scoped = [row for row in pool
+                      if row.get("observed_at") is not None or self._identity_anchor_in_run(row, donor, runs)]
+            group = self._identity_anchor_bind(parts, scoped, donors, consumed)
+            if group is not None and int(donor["store_id"]) in {int(row["store_id"]) for row in group}:
+                found[tuple(int(row["store_id"]) for row in group)] = group
+        return next(iter(found.values())) if len(found) == 1 else None
+
+    def _identity_anchor_bind(self, parts, pool, donors, consumed) -> Optional[list]:
         taken: set[int] = set(consumed)
         donor_ids = {int(row["store_id"]) for row in donors}
         group = []
@@ -826,9 +873,9 @@ class IdentityAnchorMixin:
                 pool = [row for row in pool if int(row["store_id"]) not in reserved]
                 donors = [row for row in donors if int(row["store_id"]) not in mapped | reserved]
                 pool = self._identity_anchor_eligible(pool, donors, content, stamp)
-                pool = [row for row in pool if row.get("observed_at") is not None or self._identity_anchor_in_run(row, donors)]
+                pool, runs = self._identity_anchor_scope_unstamped(pool, donors)
                 group, _ambiguous = self._identity_anchor_compose(
-                    content, {text for row in pool for text in self._identity_texts(row)}, pool, donors, set()
+                    content, {text for row in pool for text in self._identity_texts(row)}, pool, donors, set(), runs=runs
                 ) if donors else (None, False)
                 if group is not None:
                     self._store.add_message_relations([_composite_relation(group, stamp)])
