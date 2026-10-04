@@ -19,6 +19,7 @@ sqlite backup copy, opened read-only.
 """
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 from collections import Counter, defaultdict
@@ -43,19 +44,34 @@ def load(state: Path, group, tree: str | None = None) -> tuple[dict | None, str 
     try:
         con = sqlite3.connect(f"file:{state}?mode=ro", uri=True)
         try:
-            rows = con.execute("select id, session_id, content, active from messages"
+            columns = {r[1] for r in con.execute("pragma table_info(messages)")}
+            provenance = {"message_uid", "absorbed_message_uids"} <= columns
+            extra = ", message_uid, absorbed_message_uids" if provenance else ", NULL, NULL"
+            rows = con.execute("select id, session_id, content, active" + extra + " from messages"
                                " where role = 'user' order by id").fetchall()
         finally:
             con.close()
     except sqlite3.Error as exc:
         return None, f"host state.db unreadable: {exc!r}"[:200]
     held, texts = defaultdict(list), {}  # (lineage, key) -> [(row id, session, active)]
-    for rid, sid, content, active in rows:
+    standalone, merges = defaultdict(dict), []
+    for rid, sid, content, active, uid, raw_absorbed in rows:
         head = (content or "").lstrip()
         if multiset.norm(content or "") and not (header.match(head) or head.startswith(prefixes)):
             key = ("user", multiset.h(content))
-            held[(group(sid), key)].append((rid, sid, active))
+            g = group(sid)
+            held[(g, key)].append((rid, sid, active))
             texts[key] = content
+            try:
+                absorbed = json.loads(raw_absorbed or "[]")
+            except (ValueError, TypeError):
+                continue
+            if not uid or not isinstance(absorbed, list) or not all(isinstance(u, str) and u for u in absorbed):
+                continue
+            if not absorbed:
+                standalone[(g, uid)][key] = content
+            elif active == 1 and len(absorbed) + 1 <= multiset.COVER_PARTS:
+                merges.append((g, key, rid, [uid, *absorbed]))
     out = defaultdict(lambda: {"keys": {}, "tags": defaultdict(lambda: {"n": 0, "ids": []})})
     for (g, key), rs in held.items():
         n = max([1, *Counter(s for _r, s, a in rs if a == 1).values()])
@@ -65,6 +81,13 @@ def load(state: Path, group, tree: str | None = None) -> tuple[dict | None, str 
         for tag in tags:
             out[g]["tags"][tag]["n"] += n
             out[g]["tags"][tag]["ids"] = sorted(out[g]["tags"][tag]["ids"] + ids)
+    for g, key, rid, uids in merges:
+        parts = [standalone.get((g, uid), {}) for uid in uids]
+        if all(len(p) == 1 for p in parts):
+            resolved = [next(iter(p.items())) for p in parts]
+            if multiset.norm("\n\n".join(text for _k, text in resolved)) == multiset.norm(texts[key]):
+                out[g]["keys"][key].setdefault("merges", []).append(
+                    {"host_row_id": rid, "parts": [k for k, _text in resolved]})  # no payload or full uids
     return out, None
 
 
