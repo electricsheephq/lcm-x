@@ -75,6 +75,87 @@ def recall_engine(tmp_path):
         store.close()
 
 
+def test_fulltext_recall_natural_language_question(recall_engine):
+    engine = recall_engine
+    engine._config.embeddings_enabled = False
+    engine._store.append("session-old", {
+        "role": "user",
+        "content": "We adopted a beagle puppy last spring and named him Biscuit.",
+    })
+    engine._store.append("session-other", {
+        "role": "user", "content": "Quarterly budget review moved to Thursday afternoon.",
+    })
+
+    payload = json.loads(lcm_tools.lcm_recall(
+        {"query": "What name did we give the beagle puppy?"}, engine=engine,
+    ))
+    assert payload["hits"]
+    assert payload["hits"][0]["session_id"] == "session-old"
+    assert payload["provenance"]["coverage"]["fts"] == "ok"
+    assert payload["degraded"] is True
+
+
+@pytest.mark.parametrize("query", ["what did the?", "?!,", "and OR the!"])
+def test_fulltext_recall_empty_content_query_keeps_raw_path(recall_engine, monkeypatch, query):
+    from hermes_lcm.search_query import build_recall_or_query
+
+    assert build_recall_or_query(query) == ""
+    engine = recall_engine
+    engine._config.embeddings_enabled = False
+    engine._store.append("session-old", {"role": "user", "content": "what did the"})
+    original = lcm_tools._lcm_grep_full_text_with_deadline
+    calls = []
+
+    def capture(args, **kwargs):
+        calls.append(dict(args))
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", capture)
+    payload = json.loads(lcm_tools.lcm_recall({"query": query}, engine=engine))
+    assert calls[0]["query"] == query
+    assert not calls[0].get("_allow_operators", False)
+    assert calls[0].get("sort", "recency") == "recency"
+    expected = json.loads(lcm_tools._lcm_grep_full_text(
+        {"query": query, "session_scope": "all"}, engine=engine,
+    ))
+    assert [hit["store_id"] for hit in payload["hits"]] == [
+        hit["store_id"] for hit in expected["results"]
+    ]
+    assert payload["provenance"]["coverage"]["fts"] == "ok"
+    assert payload["degraded"] is True
+
+
+@pytest.mark.parametrize("mode", ["full_text", "semantic", "hybrid"])
+def test_public_grep_cannot_enable_recall_operators(recall_engine, monkeypatch, mode):
+    engine = recall_engine
+    engine._config.embeddings_enabled = False
+    engine._store.append("session-old", {"role": "user", "content": "beagle puppy"})
+    original = engine._store.search
+    operator_flags = []
+
+    def capture(query, **kwargs):
+        operator_flags.append(kwargs.get("allow_operators"))
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(engine._store, "search", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        engine, "beagle puppy", candidate_limit=10,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert hits
+    assert operator_flags == [True]
+
+    args = {"query": "beagle OR puppy", "session_scope": "all", "mode": mode}
+    ordinary = json.loads(lcm_tools.lcm_grep(args, engine=engine))
+    crafted = json.loads(lcm_tools.lcm_grep(
+        {**args, "_allow_operators": True}, engine=engine,
+    ))
+    assert crafted == ordinary
+    assert crafted["results"] == []
+    assert operator_flags == [True, False, False]
+
+
 def _add_summary(
     engine,
     summary,

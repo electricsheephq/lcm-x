@@ -24,6 +24,12 @@ _EMOJI_RE = re.compile(
 )
 _QUOTED_PHRASE_RE = re.compile(r'"([^"]+)"')
 _BOOLEAN_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
+_RECALL_STOPWORDS = frozenset({
+    "a", "an", "and", "are", "as", "at", "be", "by", "did", "do", "does",
+    "for", "from", "had", "has", "have", "how", "i", "in", "is", "it", "me",
+    "my", "of", "on", "or", "that", "the", "to", "was", "were", "what",
+    "when", "where", "which", "who", "why", "with", "you", "your",
+})
 _RISKY_FTS_TOKEN_RE = re.compile(r"[A-Za-z0-9][\-:/][A-Za-z0-9]")
 _SPLIT_PUNCT_RE = re.compile(r"[-:/]+")
 _STRIP_EDGE_PUNCT = "\"'()[]{}.,;"
@@ -258,6 +264,16 @@ def extract_search_terms(query: str) -> List[str]:
 
 def extract_quoted_phrases(query: str) -> List[str]:
     return [phrase.strip() for phrase in _QUOTED_PHRASE_RE.findall(query or "") if phrase.strip()]
+
+
+def build_recall_or_query(query: str) -> str:
+    """Compose recall's content barewords as OR terms, matching the FTS harness."""
+    barewords: list[str] = []
+    for term in extract_search_terms(query):
+        cleaned = re.sub(r"\W+", "", term, flags=re.UNICODE)
+        if cleaned and cleaned.lower() not in _RECALL_STOPWORDS:
+            barewords.append(cleaned)
+    return " OR ".join(dict.fromkeys(barewords))
 
 
 def escape_like(term: str) -> str:
