@@ -486,7 +486,7 @@ class IdentityAnchorMixin:
         reserved = self._identity_anchor_reserved(pool, shown(idx))
         pool = [row for row in pool if int(row["store_id"]) not in reserved]
         donors = [row for row in donors if int(row["store_id"]) not in reserved]
-        pool = [row for row in pool if row.get("observed_at") is None or float(row["observed_at"]) >= stamp]
+        pool = self._identity_anchor_eligible(pool, donors, content, stamp)
         texts = {text for row in pool for text in self._identity_texts(row)}
         donor_texts = {text for row in donors for text in self._identity_texts(row)}
         group, ambiguous = self._identity_anchor_compose(content, texts, pool, donors, consumed)
@@ -602,16 +602,31 @@ class IdentityAnchorMixin:
                 and all(text in forms[i] and sum(text in f for f in forms) == 1
                         for i, text in enumerate(full[0])))
 
+    def _identity_anchor_eligible(self, pool, donors, content, stamp) -> list:
+        """#821: older rows replay only as one whole recorded composite behind the donor head."""
+        newer = [row for row in pool if row.get("observed_at") is None or float(row["observed_at"]) >= stamp]
+        older = {int(row["store_id"]): row for row in pool if row not in newer}
+        tails = {content[len(text) + 2:] for row in donors for text in self._identity_texts(row)
+                 if content.startswith(text + "\n\n") and "\n\n" in content[len(text) + 2:]}
+        if not older or not tails:
+            return newer
+        groups = {tuple(int(row["store_id"]) for row in group): group
+                  for group in self._identity_anchor_witnesses(list(older.values()), stamp, older=True)
+                  if len(group) >= 2 and all(int(row["store_id"]) in older for row in group)
+                  and any(self._identity_anchor_group_matches(tail, group) for tail in tails)}
+        return newer + next(iter(groups.values())) if len(groups) == 1 else newer
+
     def _identity_anchor_take(self, idx, rows, consumed, matched, plan) -> None:
         consumed.update(int(row["store_id"]) for row in rows)
         matched[idx] = list(rows)
         plan["replayed"].add(idx)
 
-    def _identity_anchor_witnesses(self, donors, stamp) -> list:
-        """Recorded composite groups at ``stamp`` headed by a donor, constituents in order."""
+    def _identity_anchor_witnesses(self, donors, stamp, *, older=False) -> list:
+        """Recorded composite groups at ``stamp`` (or older), headed by a donor, in order."""
         groups: dict[tuple, list] = defaultdict(list)
         for rel in self._store.get_message_relations([int(row["store_id"]) for row in donors], "composite"):
-            if rel["observed_at"] == stamp and rel["related_store_id"] is not None:
+            eligible = (rel["observed_at"] is not None and float(rel["observed_at"]) < stamp) if older else rel["observed_at"] == stamp
+            if eligible and rel["related_store_id"] is not None:
                 groups[(rel["store_id"], rel["created_at"])].append((int(rel["ordinal"] or 0), int(rel["related_store_id"])))
         out = []
         for members in groups.values():
@@ -789,7 +804,7 @@ class IdentityAnchorMixin:
                 reserved = self._identity_anchor_reserved(pool, shown - Counter([own] if own else []))
                 pool = [row for row in pool if int(row["store_id"]) not in reserved]
                 donors = [row for row in donors if int(row["store_id"]) not in mapped | reserved]
-                pool = [row for row in pool if row.get("observed_at") is None or float(row["observed_at"]) >= stamp]
+                pool = self._identity_anchor_eligible(pool, donors, content, stamp)
                 group, _ambiguous = self._identity_anchor_compose(
                     content, {text for row in pool for text in self._identity_texts(row)}, pool, donors, set()
                 ) if donors else (None, False)

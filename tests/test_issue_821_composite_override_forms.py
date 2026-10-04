@@ -349,3 +349,78 @@ def test_null_stamped_override_row_never_absorbs_a_new_turn(tmp_path, marker):
         assert row["store_id"] not in [rel[2] for rel in _relations(engine) if rel[1] == "composite"]
     finally:
         engine.shutdown()
+
+
+
+def _resequenced_setup(tmp_path):
+    engine = _engine(tmp_path)
+    engine.ingest([SYSTEM, _u("T14", 100.0)])
+    engine.shutdown()  # crash-held head, then the host's merged view
+    engine = _engine(tmp_path)
+    engine.ingest([SYSTEM, _u("T14\n\nT15", 100.0)])
+    # Durable constituent copies backfill the initially unknown remainder stamp.
+    engine.ingest([SYSTEM, _u("T14", 100.0), _u("T15", 101.0), _a("reply", 102.0)])
+    rows = {r["content"]: r for r in _rows(engine)}
+    assert rows["T15"]["observed_at"] == 101.0
+    assert [r[2] for r in _relations(engine) if r[1] == "composite"] == [
+        rows["T14"]["store_id"], rows["T15"]["store_id"]]
+    return engine
+
+
+def test_resequenced_witness_behind_newer_head_replays(tmp_path):
+    engine = _resequenced_setup(tmp_path)
+    try:
+        for text, stamp, suffix in [("T23", 200.0, "T14\n\nT15"),
+                                    ("T30", 300.0, "T23\n\nT14\n\nT15")]:
+            engine.ingest([SYSTEM, _u(text, stamp)])
+            before = _rows(engine)
+            engine.shutdown()
+            engine = _engine(tmp_path)
+            engine.ingest([SYSTEM, _u(text + "\n\n" + suffix, stamp)])
+            assert _rows(engine) == before
+            by_text = {r["content"]: r["store_id"] for r in before}
+            donor = by_text[text]
+            assert [r[2] for r in _relations(engine) if r[1] == "composite" and r[0] == donor] == [
+                by_text[part] for part in [text, *suffix.split("\n\n")]]
+    finally:
+        engine.shutdown()
+
+
+def test_resequenced_witness_summary_input_claims_constituents(tmp_path):
+    engine = _resequenced_setup(tmp_path)
+    try:
+        for text, stamp, suffix in [("T23", 200.0, "T14\n\nT15"),
+                                    ("T30", 300.0, "T23\n\nT14\n\nT15")]:
+            engine.ingest([SYSTEM, _u(text, stamp)])
+            before = _rows(engine)
+            composite = _u(text + "\n\n" + suffix, stamp)
+            anchored = engine._identity_anchor_summary_input([composite], {}, view=[composite], budget=10000)
+            expected = {r["content"]: r["store_id"] for r in before}
+            assert next(ids for row, ids in anchored if row is composite) == [
+                expected[part] for part in [text, *suffix.split("\n\n")]]
+            assert _rows(engine) == before
+            assert [r[2] for r in _relations(engine) if r[1] == "composite" and r[0] == expected[text]] == [
+                expected[part] for part in [text, *suffix.split("\n\n")]]
+    finally:
+        engine.shutdown()
+
+
+def test_old_witnessed_part_never_absorbs_new_single_turn(tmp_path):
+    engine = _resequenced_setup(tmp_path)
+    try:
+        engine.ingest([SYSTEM, _u("old head", 150.0)])
+        engine.ingest([SYSTEM, _u("old head\n\ncontinue", 150.0)])
+        engine.ingest([SYSTEM, _u("old head", 150.0), _u("continue", 151.0), _a("old reply", 152.0)])
+        old = next(r for r in _rows(engine) if r["content"] == "continue")
+        assert old["store_id"] in [r[2] for r in _relations(engine) if r[1] == "composite"]
+        engine.ingest([SYSTEM, _u("held new", 200.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        engine.ingest([SYSTEM, _u("held new\n\ncontinue", 200.0)])
+        copies = [r for r in _rows(engine) if r["content"] == "continue"]
+        assert len(copies) == 2
+        assert copies[-1]["observed_at"] is None
+        assert old["store_id"] not in [r[2] for r in _relations(engine)
+                                       if r[1] == "composite" and r[0] == copies[-1]["store_id"] - 1]
+    finally:
+        engine.shutdown()
