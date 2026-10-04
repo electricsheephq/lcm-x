@@ -230,7 +230,7 @@ def test_loss_probe_same_bytes_left_and_right_of_recorded_index(tmp_path):
         _, identities = engine._occurrence_replay_identities(host, proof)
         assert identities[0] == identities[4] == engine._message_replay_identity(real, strip_carrier=False)
         assert identities[2] is None
-        # Even when the generated row has been dropped, multiplicity declines the binding.
+        # With the generated row dropped, the real row may take the `recovery` binding; N6 restores its full identity.
         _, identities = engine._occurrence_replay_identities(host[:2] + host[3:], proof)
         assert all(identity is not None for identity in identities)
     finally:
