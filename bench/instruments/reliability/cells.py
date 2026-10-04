@@ -37,11 +37,13 @@ ISSUES = {
     # r34.4 and upstream-uid (2667c960), rotation: the host keeps a held composite AND its parts active in one
     # session; LCM stores the parts only
     821: (("B1", "B2", "B3", "B4", "B5", "B8"), "r34.4/upstream-uid host: held composite vs durable parts after a crash on rotation"),
-    # acp-process only in practice: the crash point races reply persistence (3 of 12 runs fail on either plugin ref)
-    861: (("B1", "B2"), "eva/customer acp-process: intermittent around the crash after rotation"),
+    871: (("B2",), "r34.4 rotation: crash between parent end and child start, the crash turn's user row unstored"),
+    # acp-process only in practice: the crash point races reply persistence (3 of 12 runs fail on either plugin ref);
+    # the same two shapes occur on eva, customer, r34.4 and upstream-uid (not seen on upstream-main)
+    861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
-ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("eva-", "customer-")}
+ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("eva-", "customer-", "r34.4-", "upstream-uid"), 871: ("r34.4-",)}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
 ISSUE_TRANSPORTS = {861: ("acp-process",)}
 
@@ -176,7 +178,7 @@ def registry() -> list[dict]:
         cell("crash-after-rotation/rotation", [519, 549, 821, 861], in_place=False, user={"trailing_ws": True},
              faults=[{"kind": "crash_after_rotation_before_child_row"}],
              doc="os._exit right after the engine's rotation on_session_start, before any child row (#519/#549)."),
-        cell("crash-between-end-and-start/rotation", [489, 821], in_place=False,
+        cell("crash-between-end-and-start/rotation", [489, 821, 871], in_place=False,
              faults=[{"kind": "crash_between_session_end_and_start"}],
              doc="os._exit between on_session_end and on_session_start of a rotation (#489). UNSUPPORTED where the "
                  "host's rotation path never calls on_session_end."),
