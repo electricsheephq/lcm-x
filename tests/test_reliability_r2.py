@@ -878,3 +878,16 @@ def test_ci_gate_issue_transports_scope_an_acp_only_exemption():
     upstream = [{**r, "host": "upstream-main"} for r in full_set("acp-process", **{"crash-after-rotation/rotation": fail})]
     assert len(ci.gate(upstream, {861})) == 1
 
+
+
+def test_ci_gate_issue_hosts_declare_the_held_composite_issue_on_upstream_uid():
+    """#821 (a held composite vs its durable parts after a crash on rotation) is reproduced on r34.4 and on upstream
+    from 2667c960 (upstream-uid), so its bars are declared there. upstream-main (6f7a7991) and the other release hosts
+    do not show it, so a FAIL there still gates."""
+    fail = {"verdict": "FAIL", "targets": [519, 549, 821, 861], "failed_bars": {"B1": {}, "B3": {}, "B4": {}, "B5": {}, "B8": {}}}
+    for host in ("r34.4-0.21.5", "upstream-uid"):
+        rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
+        assert ci.gate(rows, {821}) == []
+    for host in ("upstream-main", "eva-0.21.5"):
+        rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
+        assert len(ci.gate(rows, {821})) == 1

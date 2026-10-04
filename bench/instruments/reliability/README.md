@@ -183,7 +183,10 @@ gateway cells are UNSUPPORTED with the reason; `--transport gateway-process` is 
 ### Nightly CI (`.github/workflows/reliability-nightly.yml`)
 Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `pull_request` path-filtered to
 `bench/instruments/reliability/**` and the workflow file. Not a required check; default token only. Matrix over
-`hosts.ci.json` (pinned shas): eva-0.21.5, customer-0.21.2 and r34.4-0.21.5 on Python 3.11, upstream-main on 3.14. `ci.py prep`
+`hosts.ci.json` (pinned shas): eva-0.21.5, customer-0.21.2 and r34.4-0.21.5 on Python 3.11, upstream-main and upstream-uid
+on 3.14. upstream-uid (2667c960) is upstream after its message-uid change: the one CI host with message uids and the P8
+flush seams. upstream-main (6f7a7991) stays before it, where the host archive copies uncovered rows behind the running
+turn (the shape that exposed #845). `ci.py prep`
 fetches the sha and installs it editable with `[acp,edge-tts,bedrock,vertex,anthropic]` (the harness verifies git HEAD
 and cites source); R1 all cells and R2 acp-process all cells run with `--plugin-ref HEAD`; MATRIX.md is the job
 summary and results are uploaded. `ci.py gate` fails on any ERROR, on a FAIL in the G-REL-1 cell set unless every
