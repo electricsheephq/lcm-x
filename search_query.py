@@ -272,7 +272,7 @@ def build_recall_or_query(query: str) -> str:
     for term in extract_search_terms(query):
         cleaned = re.sub(r"\W+", "", term, flags=re.UNICODE)
         if cleaned and cleaned.lower() not in _RECALL_STOPWORDS:
-            barewords.append(cleaned)
+            barewords.append(cleaned.lower())  # lower case: a bare NOT/NEAR must stay a term, never an operator
     return " OR ".join(dict.fromkeys(barewords))
 
 
