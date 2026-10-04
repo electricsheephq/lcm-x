@@ -143,6 +143,13 @@ def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bo
         if not tried:
             gaps.append("native cell with zero native recovery attempts")
     if fr := next((f for f in cell.get("faults", []) if f["kind"] == "forced_recovery"), None):
+        forced = [a for a in atts if a["prefix"] == "T" and a["turn"] == fr["turn"]]
+        if not forced or any(not tool_calls.completed(a) or not a["reply"] for a in forced):
+            gaps.append("forced recovery turn did not complete with its scripted reply")
+        for a in forced:
+            for d in a["tool_dispatch"]:
+                if not d.get("ok"):
+                    gaps.append(f"{a['tag']}: recovery tool dispatch failed ({d.get('id')})")
         marked = [e for e in events if e["event"] == "compaction" and e.get("compression_status") == "overflow_recovery"
                   and e.get("turn") == fr["turn"] and e.get("recovery_marker")]
         if not marked:
