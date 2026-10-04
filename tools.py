@@ -90,7 +90,9 @@ from .retrieval_core import (
     run_knn,
 )
 from .rollup_store import RollupStore
-from .search_query import AGE_DECAY_RATE, build_recall_or_query, normalize_search_sort
+from .search_query import (
+    AGE_DECAY_RATE, build_recall_or_query, contains_emoji, normalize_search_sort, recall_content_terms,
+)
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
 from .store import build_message_fts_spec
@@ -1257,6 +1259,12 @@ def _query_terms_for_match_window(query: str | None) -> list[str]:
             seen.add(key)
             unique.append(term)
     return unique
+
+
+# Between the tokens of a quoted phrase: an FTS5 phrase matches adjacent tokens across punctuation and line breaks.
+# Only characters that are certainly unicode61 separators count (whitespace, ASCII punctuation); marks and
+# private-use characters stay inside a token, and any other gap falls back to the raw-query offset.
+_RECALL_PHRASE_GAP = r"[\s!-/:-@\[-`{-~]+"
 
 
 def _content_offset_for_query_match(content: str, query: str | None) -> int:
@@ -4976,6 +4984,7 @@ def _lcm_recall_answer_ready_content(
     query: str,
     expanded_limit: int = _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT,
     rows_by_id: dict[int, dict[str, Any]] | None = None,
+    fts_arm_index: int | None = None,
 ) -> dict[tuple, dict[str, Any]]:
     """Hydrate selected exact refs with bounded reads and no retrieval search.
 
@@ -5036,6 +5045,18 @@ def _lcm_recall_answer_ready_content(
             match_end = match_start + min(
                 max(1, len(query)), _LCM_RECALL_SNIPPET_CHARS
             )
+            if fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
+                matches = [
+                    match for term in recall_content_terms(query)
+                    if (match := re.search(
+                        r"(?<!\w)" + _RECALL_PHRASE_GAP.join(
+                            "(?ai:" + re.escape(token) + ")" for token in term.strip('"').split()
+                        ) + r"(?!\w)", content
+                    )) is not None
+                ]
+                if matches:
+                    match = min(matches, key=lambda match: match.start())
+                    match_start, match_end = match.span()
         window = _lcm_recall_content_window(
             content,
             match_start=match_start,
@@ -5110,12 +5131,13 @@ def _lcm_recall_fts_arm(
     excluded_session_ids: set[str],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """FTS arm: raw messages across all eligible sessions."""
-    or_query = build_recall_or_query(query)
+    # Emoji cannot reach MATCH: keep the raw query on the existing LIKE route.
+    or_query = "" if contains_emoji(query) else build_recall_or_query(query)
     payload = _lcm_grep_full_text_with_deadline(
         {
             "query": or_query or query,
             "_allow_operators": bool(or_query),
-            "sort": "relevance" if or_query else "recency",
+            "sort": "relevance" if or_query or contains_emoji(query) else "recency",
             "mode": "recall",
             "session_scope": "all",
             "limit": candidate_limit,
@@ -6280,6 +6302,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             query=query,
             expanded_limit=expanded_limit,
             rows_by_id=strict_rows,
+            fts_arm_index=fts_arm_index,
         )
         if delta_requested:
             def _novel(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -6325,6 +6348,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         query=query,
                         expanded_limit=len(more),
                         rows_by_id=strict_selector.rows,
+                        fts_arm_index=fts_arm_index,
                     )
                 )
                 selected_entries.extend(_novel(more))

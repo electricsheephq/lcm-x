@@ -24,6 +24,7 @@ _EMOJI_RE = re.compile(
 )
 _QUOTED_PHRASE_RE = re.compile(r'"([^"]+)"')
 _BOOLEAN_OPERATORS = {"AND", "OR", "NOT", "NEAR"}
+_ASCII_CASE_FOLD = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz")
 _RECALL_STOPWORDS = frozenset({
     "a", "an", "and", "are", "as", "at", "be", "by", "did", "do", "does",
     "for", "from", "had", "has", "have", "how", "i", "in", "is", "it", "me",
@@ -268,8 +269,8 @@ def extract_quoted_phrases(query: str) -> List[str]:
     return [phrase.strip() for phrase in _QUOTED_PHRASE_RE.findall(query or "") if phrase.strip()]
 
 
-def build_recall_or_query(query: str) -> str:
-    """Compose recall's content terms as one FTS5 OR expression.
+def recall_content_terms(query: str) -> list[str]:
+    """Return recall's FTS5-ready content terms, including quoted literals/phrases.
 
     Each term is split on the same boundary the sanitizer uses, which is the boundary unicode61 indexes on, so
     ``Alice's`` searches ``Alice`` and ``3.14`` searches ``3`` and ``14``; deleting the punctuation would search
@@ -280,17 +281,28 @@ def build_recall_or_query(query: str) -> str:
     composed = unicodedata.normalize("NFC", query or "")
     quoted = set(extract_quoted_phrases(composed))
     parts: list[str] = []
-    for term in extract_search_terms(composed):
+    terms = extract_search_terms(composed)
+    terms.extend(token for token in _QUOTED_PHRASE_RE.sub(" ", composed).split() if token in {"NOT", "NEAR"})
+    for term in terms:
         tokens = "".join(_fts5_safe_char(char) for char in term).split()
         if term in quoted:
-            if any(token.lower() not in _RECALL_STOPWORDS for token in tokens):
+            if tokens:
                 parts.append('"' + " ".join(tokens) + '"')
             continue
         for token in tokens:
-            if token.lower() in _RECALL_STOPWORDS:
+            if token.translate(_ASCII_CASE_FOLD) in _RECALL_STOPWORDS:
                 continue
             parts.append(f'"{token}"' if token in _BOOLEAN_OPERATORS else token)
-    return " OR ".join(dict.fromkeys(parts))
+    # Keep the first spelling; Python's Unicode case mapping is newer than unicode61's.
+    unique: dict[str, str] = {}
+    for part in parts:
+        unique.setdefault(part.translate(_ASCII_CASE_FOLD), part)
+    return list(unique.values())
+
+
+def build_recall_or_query(query: str) -> str:
+    """Compose recall's content terms as one FTS5 OR expression."""
+    return " OR ".join(recall_content_terms(query))
 
 
 def escape_like(term: str) -> str:
