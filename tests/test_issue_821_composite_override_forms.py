@@ -470,3 +470,132 @@ def test_r3_remainder_already_stored_in_an_earlier_batch_is_not_cut(tmp_path, ho
         assert not [r for r in rows if r["content"] == "new U" and r["observed_at"] is None]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("marker", ["r34.4", "upstream"])
+@pytest.mark.parametrize("donor_ws", ["\n", ""], ids=["ws-donor", "exact-donor"])
+def test_unstamped_row_outside_the_donor_run_never_absorbs_a_new_turn(tmp_path, marker, donor_ws):
+    """An older unstamped 'continue' (answered, out of view) is not the new turn merged into a dangling R."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        old, reply = _u("continue", None), _a("ok old", None)
+        engine.ingest([*head, old, reply])
+        engine.ingest([*head, old, reply, _u("held R" + donor_ws, 500.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        composite = _u("held R\n\ncontinue", 500.0)
+        composite["_merged_turn_prefix"] = "held R" + ("\n\n" if marker == "r34.4" else "")
+        engine.ingest([*head, composite, _a("reply", 511.0)])
+        texts = [r["content"] for r in _rows(engine)]
+        assert texts.count("continue") == 2 or composite["content"] in texts
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("donor_ws", ["\n", ""], ids=["ws-donor", "exact-donor"])
+def test_an_earlier_r3_remainder_never_absorbs_a_repeated_turn(tmp_path, donor_ws):
+    """LCM's own NULL-stamped R3 remainder from an earlier crash merge is not a later merge's constituent."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        engine.ingest([*head, _u("first R" + donor_ws, 500.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        first = _u("first R\n\ncontinue", 500.0)
+        first["_merged_turn_prefix"] = "first R\n\n"
+        middle = _turns(70, 2, 600.0)
+        engine.ingest([*head, first, _a("reply 1", 511.0)])
+        engine.ingest([*head, first, _a("reply 1", 511.0), *middle, _u("second R" + donor_ws, 900.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        second = _u("second R\n\ncontinue", 900.0)
+        second["_merged_turn_prefix"] = "second R\n\n"
+        engine.ingest([*head, *middle, second, _a("reply 2", 911.0)])  # the first merge is compacted away
+        texts = [r["content"] for r in _rows(engine)]
+        assert texts.count("continue") + sum(t.endswith("\n\ncontinue") for t in texts) == 2
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("donor_ws", ["", "\n"], ids=["exact-donor", "ws-donor"])
+def test_unstamped_row_binds_only_inside_the_run_of_the_donor_its_group_uses(tmp_path, donor_ws):
+    """#879 r1: two stored user rows share the composite's stamp; an old unstamped 'continue' is contiguous with
+    donor A only. The composite is headed by donor B (an assistant reply between B and that row): the new
+    'continue' must not bind to it."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        engine.ingest([*head, _u("held A", 500.0), _u("continue", None), _a("ok old", None),
+                       _u("held B" + donor_ws, 500.0)])
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        composite = _u("held B\n\ncontinue", 500.0)
+        composite["_merged_turn_prefix"] = "held B\n\n"
+        engine.ingest([*head, composite, _a("reply", 511.0)])  # the old run is out of view
+        texts = [r["content"] for r in _rows(engine)]
+        assert texts.count("continue") == 2 or composite["content"] in texts
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("donor_ws", ["", "\n"], ids=["exact-donor", "ws-donor"])
+def test_unstamped_row_of_another_conversation_never_absorbs_a_new_turn(tmp_path, donor_ws):
+    """#879 r1: a session id rebound to another conversation: the old conversation's unstamped 'continue' is
+    adjacent in store order to the new conversation's donor, but it is not that donor's run."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        old, reply = _u("continue", None), _a("ok old", None)
+        engine.ingest([*head, old, reply])
+        engine.ingest([*head, old, reply, _u("held R" + donor_ws, 500.0)])
+        rows = _rows(engine)
+        cont = next(r for r in rows if r["content"] == "continue")
+        donor = next(r for r in rows if r["content"] == "held R" + donor_ws)
+        conn = engine._store._conn
+        conn.execute("DELETE FROM messages WHERE store_id > ? AND store_id < ?", (cont["store_id"], donor["store_id"]))
+        # the old conversation's row; the donor stays in the engine's bound conversation ('conv')
+        conn.execute("UPDATE messages SET conversation_id = 'conv-old' WHERE store_id = ?", (cont["store_id"],))
+        conn.commit()
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        composite = _u("held R\n\ncontinue", 500.0)
+        composite["_merged_turn_prefix"] = "held R\n\n"
+        engine.ingest([*head, composite, _a("reply", 511.0)])
+        texts = [r["content"] for r in _rows(engine)]
+        assert texts.count("continue") == 2 or composite["content"] in texts
+    finally:
+        engine.shutdown()
+
+
+def test_a_blank_legacy_conversation_id_joins_the_donor_run(tmp_path):
+    """#879 r1: rows stored before conversation ids existed (blank) stay in their donor's run."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        engine.ingest([*head, _u("continue", None), _u("held R", 500.0)])
+        rows = _rows(engine)
+        cont = next(r for r in rows if r["content"] == "continue")
+        donor = next(r for r in rows if r["content"] == "held R")
+        conn = engine._store._conn
+        conn.execute("UPDATE messages SET conversation_id = NULL WHERE store_id = ?", (cont["store_id"],))
+        assert engine._identity_anchor_in_run(cont, donor, engine._identity_anchor_runs([donor]))
+    finally:
+        engine.shutdown()
+
+
+def test_runs_are_read_once_per_merged_donor_window(tmp_path, monkeypatch):
+    """#879 r1: the run proof costs one store read per merged donor window, not one per candidate-donor pair."""
+    engine = _engine(tmp_path)
+    head = [SYSTEM, *_turns(1, 2, 0.0)]
+    try:
+        engine.ingest([*head, _u("a", 500.0), _u("b", 500.0), _u("c", 500.0), _u("x", None), _u("y", None)])
+        donors = [r for r in _rows(engine) if r["content"] in ("a", "b", "c")]
+        calls = []
+        real = engine._store.get_range
+        monkeypatch.setattr(engine._store, "get_range", lambda *a, **k: calls.append(1) or real(*a, **k))
+        runs = engine._identity_anchor_runs(donors)
+        assert len(calls) == 1
+        assert len({runs[int(r["store_id"])] for r in _rows(engine) if r["content"] in ("a", "b", "c", "x", "y")}) == 1
+    finally:
+        engine.shutdown()
