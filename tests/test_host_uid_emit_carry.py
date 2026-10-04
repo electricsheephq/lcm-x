@@ -451,3 +451,125 @@ def _classify_replayed(tmp_path, message):
 def test_lcm_merge_rule_negative_controls(tmp_path, role, content, absorbed, expected):
     message = _m(role, content, 11.0, "first", _absorbed_message_uids=absorbed)
     assert _classify_replayed(tmp_path, message) == {expected: 1}
+
+
+@pytest.mark.parametrize("shape", ["responses", "bridge", "chat"])
+def test_site1_host_key_keeps_duplicate_occurrence_uids(shape, monkeypatch):
+    calls = [_call("c") for _ in range(3)]
+    for i, call in enumerate(calls):
+        if shape == "responses":
+            call.update(call_id=" c ", id=f"fc_{i}")
+        elif shape == "bridge":
+            call["id"] = f" c|fc_{i} "
+    rows = [_m("assistant", "first", uid="first", tool_calls=calls[:2], _tool_call_uids={"c": "a"}),
+            _m("assistant", "second", uid="second", tool_calls=calls[2:], _tool_call_uids={"c": "b"})]
+    merged = _merge_adjacent_assistant_messages(rows)
+    assert merged[0]["_tool_call_uids"] == {"c": ["a", "a", "b"]}
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off")
+    off = _merge_adjacent_assistant_messages(rows)
+    assert off == [dict(rows[0], content="first\nsecond", tool_calls=calls)]
+    assert _provider(merged) == _provider(off)
+
+
+@pytest.mark.parametrize("call, expected", [
+    ({"call_id": " c|fc_1 ", "id": "other"}, "c"),
+    ({"id": " |fc_1 "}, "|fc_1"),
+    ({"tool_call_id": " x|fc_1 "}, "x"),
+    ({"id": "x"}, "x"),
+    ({}, ""),
+    (None, ""),
+])
+def test_host_tool_call_key(call, expected):
+    assert emit.host_tool_call_key(call) == expected
+
+
+@pytest.mark.parametrize("mutation", [None, "added", "removed", "removed-all", "reordered", "changed"])
+def test_lcm_merge_tool_calls_after_restart(tmp_path, mutation):
+    from hermes_lcm.host_uid import host_uid_doctor_lines
+    from tests.test_host_uid_shadow import _classify, _gate
+
+    _state_db(tmp_path, [("S", None, None)])
+    host = [_m("assistant", "first", 11.0, "first", tool_calls=[_call("a")]),
+            _m("assistant", "second", 12.0, "second", tool_calls=[_call("b")])]
+    first = _engine(tmp_path)
+    try:
+        first._ingest_messages(copy.deepcopy(host))
+        merged = _merge_adjacent_assistant_messages(host)[0]
+    finally:
+        first.shutdown()
+    if mutation == "added":
+        merged["tool_calls"].append(_call("c"))
+    elif mutation == "removed":
+        merged["tool_calls"].pop()
+    elif mutation == "removed-all":
+        merged["tool_calls"].clear()  # No calls must not match constituents carrying calls.
+    elif mutation == "reordered":
+        merged["tool_calls"].reverse()
+    elif mutation == "changed":
+        merged["tool_calls"][0]["function"]["arguments"] = '{"path":"changed"}'
+    second = _engine(tmp_path)
+    try:
+        counts = _classify(second, [merged], {"replayed": {0}, "matched": {}})
+        outcome = "replay.bound.disagree.prefix_replay" if mutation else "replay.composite.agree.lcm_merge"
+        assert counts == {outcome: 1}
+        gate = {uid: (checked, disagree) for uid, checked, disagree in _gate(second)}
+        assert gate == ({"first": ("disagree", 1), "second": (None, 0)} if mutation else {
+            "first": ("agree", 0), "second": ("agree", 0)})
+        if mutation is None:
+            assert "host_uid_gate_disagree: 0" in host_uid_doctor_lines(second)
+    finally:
+        second.shutdown()
+
+
+def test_lcm_merge_tool_call_mismatch_backtracks(build):
+    engine = build()
+    message = _m("assistant", "first\nsecond", tool_calls=[_call("a"), _call("b")])
+    changed = copy.deepcopy(_call("a"))
+    changed["function"]["arguments"] = '{"changed":true}'
+    normalized = copy.deepcopy(_call("a"))
+    normalized["function"]["arguments"] = "{ }"  # Existing replay normalizer treats this as {}.
+    fetched = {1: dict(content="first", tool_calls=[changed]),
+               2: dict(content="first", tool_calls=[normalized]),
+               3: dict(content="second", tool_calls=[_call("b")])}
+    bindings = {"first": [(1, "canonical"), (2, "version")], "second": [(3, "canonical")]}
+    assert engine._host_uid_lcm_merge(message, ["first", "second"], bindings, fetched) == [
+        ("first", 2), ("second", 3)]
+
+
+@pytest.mark.parametrize("externalized", [False, True])
+def test_lcm_merge_externalized_constituent_is_unverified(tmp_path, externalized):
+    from hermes_lcm.host_uid import host_uid_doctor_lines
+    from tests.test_host_uid_shadow import _classify, _gate
+
+    _state_db(tmp_path, [("S", None, None)])
+    host = [_m("assistant", "first payload " * 100, 11.0, "first"),
+            _m("assistant", "second", 12.0, "second")]
+    first = _engine(tmp_path)
+    first._hermes_home = str(tmp_path)
+    first._config.large_output_externalization_enabled = externalized
+    first._config.large_output_externalization_threshold_chars = 100
+    try:
+        first._ingest_messages(copy.deepcopy(host))
+        stored = first._store.get_session_messages("S")
+        assert any(first._protected_message_uses_raw_payload_active_stub(row) for row in stored) is externalized
+        merged = _merge_adjacent_assistant_messages(host)[0]
+    finally:
+        first.shutdown()
+    second = _engine(tmp_path)
+    try:
+        before = _gate(second)
+
+        def gate_lines():
+            return [line for line in host_uid_doctor_lines(second) if line.startswith("host_uid_gate_")]
+
+        before_lines = gate_lines()
+        counts = _classify(second, [merged], {"replayed": {0}, "matched": {}})
+        outcome = "replay.composite.unverified.externalized" if externalized else "replay.composite.agree.lcm_merge"
+        assert counts == {outcome: 1}
+        if externalized:
+            assert _gate(second) == before
+            assert gate_lines() == before_lines
+        else:
+            assert _gate(second) == [("first", "agree", 0), ("second", "agree", 0)]
+    finally:
+        second.shutdown()
