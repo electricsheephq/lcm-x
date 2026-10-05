@@ -44,7 +44,7 @@ arguments documented below.
 | `lcm_expand_query` | Retrieve from the active session by default or up to 20 explicit `session_ids`. `output='answer'` runs bounded synthesis; `output='evidence'` returns bounded serialized context without an LLM call. Responses include bounded, tool-extracted `evidence_provenance` for the context supplied to synthesis. |
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, message/frontier metadata, fresh tail, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. It returns metadata only; use `lcm_load_session`/`lcm_expand` when you need content. |
-| `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
+| `lcm_doctor` | Run diagnostics. Default `mode: fast` is bounded (schema, SQLite `quick_check`, ingest/lifecycle, config); `mode: deep` adds full SQLite/FTS integrity and store-wide payload/lineage scans. |
 
 ### Retrieval contract
 

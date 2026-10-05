@@ -601,7 +601,7 @@ def test_lcm_doctor_tool_reports_heartbeat_noise_as_read_only_payload_detail(eng
     engine._store.append("heartbeat-session", {"role": "assistant", "content": "Still working..."}, token_estimate=2)
     engine._store.append("heartbeat-session", {"role": "user", "content": "Still working..."}, token_estimate=2)
 
-    doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
     payload = next(check for check in doctor["checks"] if check["check"] == "payload_storage")
     rows = payload["detail"]["heartbeat_noise_rows"]
 
@@ -702,7 +702,7 @@ def test_lcm_doctor_finds_heartbeat_noise_after_many_short_nonmatches(engine):
         )
     engine._store.append("heartbeat-session", {"role": "assistant", "content": "Still working..."}, token_estimate=2)
 
-    doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
     payload = next(check for check in doctor["checks"] if check["check"] == "payload_storage")
     rows = payload["detail"]["heartbeat_noise_rows"]
 
@@ -816,7 +816,7 @@ def test_lcm_doctor_tool_guidance_maps_warning_classes_to_operator_actions(engin
         )
     )
 
-    doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
     guidance = {item["check"]: item for item in doctor["guidance"]}
 
     assert guidance["payload_storage"]["action"] == "safe/ignore"
@@ -908,7 +908,7 @@ def test_lcm_doctor_tool_source_lineage_read_error_guidance_requires_inspection(
 
     monkeypatch.setattr(engine._store, "get_source_stats", fail_source_stats)
 
-    doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
     guidance = {item["check"]: item for item in doctor["guidance"]}
 
     assert doctor["overall"] == "unhealthy"
@@ -1193,7 +1193,7 @@ def test_lcm_doctor_text_reports_same_count_stale_message_fts(engine):
     engine._store._conn.commit()
 
     fts_integrity = check_external_content_fts_integrity(engine._store._conn, build_message_fts_spec())
-    json_result = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    json_result = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
     text_result = handle_lcm_command("doctor", engine)
 
     assert fts_integrity["status"] == "fail"
@@ -1231,7 +1231,7 @@ def test_lcm_doctor_json_preserves_unchecked_fts_detail_for_guidance(engine, mon
 
     monkeypatch.setattr(lcm_tools, "check_external_content_fts_integrity", fake_fts_integrity)
 
-    doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+    doctor = json.loads(lcm_tools.lcm_doctor({"mode": "deep"}, engine=engine))
     messages_check = next(check for check in doctor["checks"] if check["check"] == "messages_fts_integrity")
     guidance = {item["check"]: item for item in doctor["guidance"]}
 

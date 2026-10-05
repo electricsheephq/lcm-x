@@ -8302,6 +8302,13 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     })
 
 
+_DOCTOR_DEEP_ONLY_DETAIL = "not run in fast mode; call lcm_doctor with mode=deep (or run /lcm doctor) for the full scan"
+
+
+def _doctor_not_run(check: str, detail: str = _DOCTOR_DEEP_ONLY_DETAIL) -> dict:
+    return {"check": check, "status": "not_run", "detail": detail}
+
+
 def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     """Run diagnostics on the LCM database and configuration."""
     engine = _require_engine(kwargs)
@@ -8325,6 +8332,11 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             **({"next_cursor": cursor + 50} if cursor + 50 < max(total_flagged, total_ancestors) else {}),
         })
 
+    mode = str(args.get("mode") or "fast").strip().lower()
+    if mode not in ("fast", "deep"):
+        return json.dumps({"error": f"unknown lcm_doctor mode: {mode} (use fast or deep)"})
+    deep = mode == "deep"
+
     checks: list[dict] = []
     inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
     checks.append({
@@ -8346,20 +8358,27 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     })
 
     # 1. Database integrity
-    try:
-        result = engine._store.connection.execute("PRAGMA integrity_check").fetchone()
-        ok = result and result[0] == "ok"
-        checks.append({
-            "check": "database_integrity",
-            "status": "pass" if ok else "fail",
-            "detail": result[0] if result else "no response",
-        })
-    except Exception as e:
-        checks.append({
-            "check": "database_integrity",
-            "status": "fail",
-            "detail": str(e),
-        })
+    if deep:
+        try:
+            result = engine._store.connection.execute("PRAGMA integrity_check").fetchone()
+            ok = result and result[0] == "ok"
+            checks.append({
+                "check": "database_integrity",
+                "status": "pass" if ok else "fail",
+                "detail": result[0] if result else "no response",
+            })
+        except Exception as e:
+            checks.append({
+                "check": "database_integrity",
+                "status": "fail",
+                "detail": str(e),
+            })
+    else:
+        checks.append(_doctor_not_run(
+            "database_integrity",
+            "PRAGMA integrity_check not run in fast mode; sqlite_storage reports PRAGMA quick_check; "
+            "call lcm_doctor with mode=deep (or run /lcm doctor) for the full scan",
+        ))
 
     # Ingest health: a swallowed persistence error means turns were not
     # durably stored, silently breaking the lossless guarantee. Surface it.
@@ -8424,20 +8443,23 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         ("messages_fts_integrity", engine._store.connection, build_message_fts_spec()),
         ("nodes_fts_integrity", engine._dag.connection, build_nodes_fts_spec()),
     ):
-        try:
-            fts_integrity = check_external_content_fts_integrity(conn, spec)
-            status = fts_integrity["status"]
-            checks.append({
-                "check": check_name,
-                "status": "warn" if status == "unchecked" else status,
-                "detail": fts_integrity if status == "unchecked" else fts_integrity["detail"],
-            })
-        except Exception as e:
-            checks.append({
-                "check": check_name,
-                "status": "fail",
-                "detail": str(e),
-            })
+        if deep:
+            try:
+                fts_integrity = check_external_content_fts_integrity(conn, spec)
+                status = fts_integrity["status"]
+                checks.append({
+                    "check": check_name,
+                    "status": "warn" if status == "unchecked" else status,
+                    "detail": fts_integrity if status == "unchecked" else fts_integrity["detail"],
+                })
+            except Exception as e:
+                checks.append({
+                    "check": check_name,
+                    "status": "fail",
+                    "detail": str(e),
+                })
+        else:
+            checks.append(_doctor_not_run(check_name))
         # A prior non-blocking background integrity scan records a persisted
         # ``fts_integrity_failed:<table>`` flag when it finds corruption
         # without rebuilding. Surface it even when this run's live check is
@@ -8458,12 +8480,12 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
             })
 
     # 2. SQLite storage posture and payload diagnostics
-    try:
+    def _sqlite_storage_check() -> dict:
         journal_mode_row = engine._store.connection.execute("PRAGMA journal_mode").fetchone()
         quick_check_row = engine._store.connection.execute("PRAGMA quick_check").fetchone()
         db_path = Path(engine._store.db_path)
         wal_path = Path(str(db_path) + "-wal")
-        checks.append({
+        return {
             "check": "sqlite_storage",
             "status": "pass" if quick_check_row and quick_check_row[0] == "ok" else "fail",
             "detail": {
@@ -8474,37 +8496,47 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
                 "database_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
                 "wal_size_bytes": wal_path.stat().st_size if wal_path.exists() else 0,
             },
-        })
-        payload_risks = scan_sqlite_payload_risks(engine._store.connection)
-        externalized_stats = externalized_payload_stats(engine._config, hermes_home=engine._hermes_home)
-        externalized_integrity = scan_externalized_payload_integrity(
-            engine._store.connection,
-            engine._config,
-            hermes_home=engine._hermes_home,
-        )
-        suspicious_count = (
-            len(payload_risks["suspicious_data_uri_content_rows"])
-            + len(payload_risks["suspicious_data_uri_tool_calls_rows"])
-            + len(payload_risks["suspicious_base64_like_rows"])
-            + len(payload_risks["suspicious_repetitive_assistant_rows"])
-            + len(payload_risks["heartbeat_noise_rows"])
-        )
-        missing_externalized_refs = int(externalized_integrity.get("externalized_payload_refs_missing", 0) or 0)
-        checks.append({
-            "check": "payload_storage",
-            "status": "warn" if suspicious_count or missing_externalized_refs else "pass",
-            "detail": {
-                **payload_risks,
-                **externalized_stats,
-                **externalized_integrity,
-            },
-        })
-    except Exception as e:
-        checks.append({
-            "check": "payload_storage",
-            "status": "fail",
-            "detail": str(e),
-        })
+        }
+
+    if deep:
+        try:
+            checks.append(_sqlite_storage_check())
+            payload_risks = scan_sqlite_payload_risks(engine._store.connection)
+            externalized_stats = externalized_payload_stats(engine._config, hermes_home=engine._hermes_home)
+            externalized_integrity = scan_externalized_payload_integrity(
+                engine._store.connection,
+                engine._config,
+                hermes_home=engine._hermes_home,
+            )
+            suspicious_count = (
+                len(payload_risks["suspicious_data_uri_content_rows"])
+                + len(payload_risks["suspicious_data_uri_tool_calls_rows"])
+                + len(payload_risks["suspicious_base64_like_rows"])
+                + len(payload_risks["suspicious_repetitive_assistant_rows"])
+                + len(payload_risks["heartbeat_noise_rows"])
+            )
+            missing_externalized_refs = int(externalized_integrity.get("externalized_payload_refs_missing", 0) or 0)
+            checks.append({
+                "check": "payload_storage",
+                "status": "warn" if suspicious_count or missing_externalized_refs else "pass",
+                "detail": {
+                    **payload_risks,
+                    **externalized_stats,
+                    **externalized_integrity,
+                },
+            })
+        except Exception as e:
+            checks.append({
+                "check": "payload_storage",
+                "status": "fail",
+                "detail": str(e),
+            })
+    else:
+        try:
+            checks.append(_sqlite_storage_check())
+        except Exception as e:
+            checks.append({"check": "sqlite_storage", "status": "fail", "detail": str(e)})
+        checks.append(_doctor_not_run("payload_storage"))
 
     try:
         protection = sensitive_pattern_status(engine._config)
@@ -8637,22 +8669,25 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
         })
 
     # 5. Source-lineage hygiene
-    try:
-        source_stats = engine._store.get_source_stats()
-        checks.append({
-            "check": "source_lineage_hygiene",
-            "status": "pass",
-            "detail": {
-                **source_stats,
-                "normalization_mode": "backcompat-normalization",
-            },
-        })
-    except Exception as e:
-        checks.append({
-            "check": "source_lineage_hygiene",
-            "status": "fail",
-            "detail": str(e),
-        })
+    if deep:
+        try:
+            source_stats = engine._store.get_source_stats()
+            checks.append({
+                "check": "source_lineage_hygiene",
+                "status": "pass",
+                "detail": {
+                    **source_stats,
+                    "normalization_mode": "backcompat-normalization",
+                },
+            })
+        except Exception as e:
+            checks.append({
+                "check": "source_lineage_hygiene",
+                "status": "fail",
+                "detail": str(e),
+            })
+    else:
+        checks.append(_doctor_not_run("source_lineage_hygiene"))
 
     # 6. Lifecycle/session fragmentation
     try:
@@ -8688,9 +8723,18 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     elif any(ch["status"] == "warn" for ch in checks):
         overall = "warnings"
 
-    return json.dumps({
+    payload = {
         "overall": overall,
+        "mode": mode,
+        "checks_not_run": [ch["check"] for ch in checks if ch["status"] == "not_run"],
         "runtime_identity": engine.get_runtime_identity(),
         "checks": checks,
         "guidance": doctor_guidance_for_checks(checks),
-    })
+    }
+    if not deep:
+        payload["note"] = (
+            "fast mode: full SQLite integrity_check, FTS5 integrity checks, store-wide payload scans "
+            "and source-lineage counts were not run; overall reflects only the checks that ran. "
+            "Use mode=deep for the full scan."
+        )
+    return json.dumps(payload)
