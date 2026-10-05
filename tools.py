@@ -7526,6 +7526,17 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
         "reachability_probed": bool(probe.get("probed")),
         "reason": probe.get("detail"),
     }
+    # An unavailable provider is the prerequisite blocker: warmup cannot succeed until it is fixed.
+    if not probe.get("available"):
+        detail["impact"] = (
+            "semantic retrieval is degraded: lcm_recall reports degraded=true and "
+            "lcm_grep mode=semantic falls back to full-text"
+        )
+        return {
+            "check": "embedding_provider_health",
+            "status": "warn",
+            "detail": detail,
+        }
     provider_id = str(probe.get("provider") or "")
     if embedding_provider_requires_privacy(provider_id):
         provider_id = {
@@ -7563,16 +7574,6 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
                 "status": "warn",
                 "detail": detail,
             }
-    if not probe.get("available"):
-        detail["impact"] = (
-            "semantic retrieval is degraded: lcm_recall reports degraded=true and "
-            "lcm_grep mode=semantic falls back to full-text"
-        )
-        return {
-            "check": "embedding_provider_health",
-            "status": "warn",
-            "detail": detail,
-        }
     return {
         "check": "embedding_provider_health",
         "status": "pass",

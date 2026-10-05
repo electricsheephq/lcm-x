@@ -294,3 +294,14 @@ def test_shared_cloud_query_checks_chunk_identity_before_scan(engine, monkeypatc
     assert payload["degraded_reason"] == REASON
     assert payload["provenance"]["coverage"]["chunk"] == "none"
     assert len(instances[model].queries) == 1  # Healthy summary arm only.
+
+
+def test_doctor_reports_unavailable_provider_before_stale_identity(engine, monkeypatch):
+    # No profile AND no credential: warmup cannot succeed until the provider is available, so the
+    # availability blocker is reported, not the stale-identity remedy (#884 review).
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+    check = tools._embedding_provider_health_check(engine)
+    assert check["status"] == "warn"
+    assert check["detail"]["available"] is False
+    assert "embedding_identity_stale" not in check["detail"]
+    assert "semantic retrieval is degraded" in check["detail"]["impact"]
