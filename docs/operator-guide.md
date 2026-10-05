@@ -434,7 +434,8 @@ Useful environment variables:
 `privacy_policy_errors`. A nonzero `privacy_policy_errors` is a deterministic configuration
 fault, not load shedding: proactive injection is disabled until the embedding-privacy policy
 is fixed, one WARNING is logged per engine instance, and `lcm_recall` raises rather than degrading to
-full-text on the same fault (#370).
+full-text on the same fault (#370). A stale embedding identity instead returns degraded
+full-text hits and does not increment this counter (#387).
 
 ### Summary prompt version
 
@@ -634,8 +635,10 @@ The transform version and a digest of sorted active pattern names are stored in 
 profile revision; the explicit opt-out stores the distinguished `privacy:off` revision
 instead. While the transform is on, changing the pattern policy changes that identity, as
 does flipping `LCM_EMBEDDING_PRIVACY_ENABLED` in either direction after warmup; either
-change causes query and backfill dispatch to refuse until a new warmup registers it —
-existing vectors under the old revision stay ineligible until re-embedded (run
+change keeps existing vectors ineligible until re-embedded. `lcm_recall` serves full-text
+hits with `degraded=true` and an `embedding_identity_stale:` reason; `lcm_grep` semantic
+mode falls back to full-text, and `lcm_doctor` warns. Backfill still refuses until a new
+warmup registers the profile (run
 `/lcm embed warmup` then `/lcm embed backfill --apply`; LCM never re-embeds
 automatically). Under the explicit opt-out the pattern catalog is not part of the
 `privacy:off` identity, so catalog edits alone change nothing until you opt back in. Durable messages, summaries, FTS rows, and payloads are not

@@ -6,6 +6,14 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: stale or missing cloud embedding identities preserve full-text `lcm_recall` hits,
+  report `embedding_identity_stale:` with the warmup/backfill remedy, and keep the full-text
+  time budget. Semantic `lcm_grep` reports the same reason; invalid privacy policies still
+  fail closed. (#387)
+- Fix: `lcm_doctor` warns when the configured cloud privacy revision lacks a matching
+  active summary profile. The check reads local state without loading a provider or
+  making a network call. (#882)
+
 ## v0.25.0 - 2026-10-04 (long sessions: drain speed + correctness)
 
 - Fix: a host refusal after a compaction stored leaves holds automatic compaction until turn end, with a

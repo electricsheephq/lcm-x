@@ -1621,6 +1621,10 @@ class EmbeddingPrivacyPolicyError(RuntimeError):
     """Cloud embedding input cannot be proven safe under the active policy."""
 
 
+class EmbeddingIdentityStaleError(EmbeddingPrivacyPolicyError):
+    """The configured cloud privacy revision has no matching active vector identity (re-register with warmup)."""
+
+
 def embedding_provider_requires_privacy(provider_id: str) -> bool:
     """Return whether a provider may send embedding input off-machine."""
     return str(provider_id or "").strip().lower() in _EMBEDDING_PRIVACY_CLOUD_PROVIDERS
