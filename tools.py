@@ -7493,12 +7493,22 @@ def _active_embedding_profile_exists(engine: "LCMEngine") -> bool:
 
 
 def _lcm_store_has_live_chunk_vectors(conn: sqlite3.Connection) -> bool:
+    # Same joins as the recall preflight: a chunk counts only with its vector
+    # and its source message.
     try:
         return conn.execute(
-            "SELECT 1 FROM lcm_chunk_meta WHERE archived = 0 LIMIT 1"
+            """
+            SELECT 1
+            FROM lcm_chunk_meta m
+            JOIN lcm_chunk_vectors v
+              ON v.chunk_id = m.chunk_id AND v.identity_hash = m.identity_hash
+            JOIN messages src ON src.store_id = m.store_id
+            WHERE m.archived = 0
+            LIMIT 1
+            """
         ).fetchone() is not None
     except sqlite3.OperationalError as exc:
-        if "no such table: lcm_chunk_meta" not in str(exc):
+        if "no such table" not in str(exc):
             raise
         return False
 
@@ -7602,7 +7612,7 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
                 "embedding_identity_stale": True,
                 "stale_tasks": stale_tasks,
                 "reason": _EMBEDDING_IDENTITY_STALE_REASON,
-                "impact": "lcm_recall serves full-text only until the profile is re-registered",
+                "impact": "lcm_recall skips the stale semantic arm until the profile is re-registered",
                 "remedy": "/lcm embed warmup, then /lcm embed backfill --apply",
             })
             return {
