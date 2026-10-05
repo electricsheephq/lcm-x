@@ -54,7 +54,7 @@ accepts that partial shape with a real dispatch (any error still fails), and the
 that did dispatch. Opt-out proves `privacy:off`
 preserves byte-identical provider input. Durable-redaction preserves those same redaction and
 placeholder checks as an opt-in posture. Misconfiguration uses an invalid pattern catalog to
-prove lcm_recall raises, the proactive counter increments, status exposes privacy_policy_errors,
+prove the lcm_recall tool call returns the `embedding_privacy_policy` JSON error, the proactive counter increments, status exposes privacy_policy_errors,
 and assembly never breaks; its negative control proves the shipped default recall succeeds.
 
 ## Phase B — P0/P1 adversarial sweep (ultracode)

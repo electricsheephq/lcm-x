@@ -3762,6 +3762,23 @@ def _lcm_active_embedding_revision(
     return str(row[0] or "")
 
 
+EMBEDDING_PRIVACY_ERROR_CODE = "embedding_privacy_policy"
+_EMBEDDING_PRIVACY_REMEDIATION = (
+    "Semantic retrieval was refused by the cloud embedding privacy policy. If the message mentions the "
+    "registered vector identity (for example after an upgrade), run `/lcm embed warmup`; otherwise fix the "
+    "sensitive-pattern configuration or retry without secret-like values."
+)
+
+
+def embedding_privacy_tool_error(exc: BaseException, *, tool: str) -> dict[str, Any]:
+    return {
+        "error": str(exc),
+        "error_code": EMBEDDING_PRIVACY_ERROR_CODE,
+        "tool": str(tool),
+        "remediation": _EMBEDDING_PRIVACY_REMEDIATION,
+    }
+
+
 def _lcm_grep_embed_query(
     provider: Any,
     query: str,
@@ -4095,6 +4112,11 @@ def _lcm_grep_semantic(
             task="summary",
             remaining_s=deadline - time.monotonic(),
         )
+    except EmbeddingPrivacyPolicyError as exc:
+        payload = degraded(f"query embedding failed: {exc}")
+        if "error" not in payload:
+            payload["degraded_code"] = EMBEDDING_PRIVACY_ERROR_CODE
+        return payload
     except VoyageError as exc:
         if exc.kind == "auth":
             return {
@@ -4294,10 +4316,13 @@ def _lcm_grep_hybrid(
             )
         return semantic
     if semantic.get("degraded_to_fts"):
-        return degraded_to_fts(
+        response = degraded_to_fts(
             str(semantic.get("degraded_reason", "semantic arm unavailable")),
             coverage=str(semantic.get("coverage", "none")),
         )
+        if semantic.get("degraded_code"):
+            response["degraded_code"] = semantic["degraded_code"]
+        return response
 
     if time.monotonic() >= deadline:
         return _lcm_grep_deadline_error("hybrid", "fusion")
