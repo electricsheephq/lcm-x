@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import socket
+import sqlite3
 import time
 from types import SimpleNamespace
 
@@ -225,7 +226,7 @@ def test_doctor_identity_health_is_inert(engine, monkeypatch, state):
         detail = check["detail"]
         assert detail["embedding_identity_stale"] is True
         assert detail["reason"] == REASON
-        assert detail["impact"] == "lcm_recall serves full-text only until the profile is re-registered"
+        assert detail["impact"] == "lcm_recall skips the stale semantic arm until the profile is re-registered"
         assert detail["remedy"] == "/lcm embed warmup, then /lcm embed backfill --apply"
     elif state == "invalid":
         assert check["status"] == "warn"
@@ -336,3 +337,66 @@ def test_matching_summaries_only_recall_runs_no_fts_arm(engine, monkeypatch):
     monkeypatch.setattr(tools, "_lcm_recall_fts_arm", no_fts)
     payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
     assert "fts" not in payload["provenance"]["coverage"]
+
+
+@pytest.mark.parametrize(
+    ("summary", "chunk", "expected"),
+    [
+        ("matching", "old", ["chunk"]),
+        ("old", "old", ["summary", "chunk"]),
+        ("matching", "matching", None),
+        ("matching", None, None),
+    ],
+)
+def test_doctor_reports_a_stale_chunk_identity_when_chunk_vectors_exist(engine, monkeypatch, summary, chunk, expected):
+    _seed(engine, summary)
+    if chunk is not None:
+        _seed(engine, chunk, task="chunk")
+    monkeypatch.setenv("VOYAGE_API_KEY", "synthetic-test-key")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("doctor constructed a provider")
+
+    monkeypatch.setattr(tools, "resolve_provider", forbidden)
+    monkeypatch.setattr(providers, "resolve_provider", forbidden)
+    check = tools._embedding_provider_health_check(engine)
+    if expected is None:
+        assert check["status"] == "pass"
+    else:
+        assert check["status"] == "warn"
+        assert check["detail"]["stale_tasks"] == expected
+        assert check["detail"]["reason"] == REASON
+
+
+@pytest.mark.parametrize("orphan", ["vector", "source"])
+def test_doctor_ignores_stale_chunk_metadata_recall_cannot_use(engine, monkeypatch, orphan):
+    _seed(engine, "matching")
+    _seed(engine, "old", task="chunk")
+    conn = sqlite3.connect(engine._store.db_path)
+    try:
+        if orphan == "vector":
+            conn.execute("DELETE FROM lcm_chunk_vectors")
+        else:
+            conn.execute("UPDATE lcm_chunk_meta SET store_id = store_id + 1000000")
+        conn.commit()
+    finally:
+        conn.close()
+    monkeypatch.setenv("VOYAGE_API_KEY", "synthetic-test-key")
+    check = tools._embedding_provider_health_check(engine)
+    assert check["status"] == "pass"
+
+
+def test_summary_scan_stale_race_falls_back_to_fts_for_summaries_only(engine, monkeypatch):
+    _seed(engine, "matching")
+    _providers(monkeypatch)
+
+    def drifted(*args, **kwargs):
+        raise privacy.EmbeddingIdentityStaleError("identity changed before the scan")
+
+    monkeypatch.setattr(tools, "_lcm_recall_summary_arm", drifted)
+    payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
+    assert engine.store_id in [hit["store_id"] for hit in payload["hits"]]
+    coverage = payload["provenance"]["coverage"]
+    assert coverage["fts"] == "ok"
+    assert coverage["summary"] == "none"
+    assert payload["degraded_reason"] == REASON

@@ -195,8 +195,20 @@ therefore reports bounded coverage rather than claiming universal pre-bound sour
 
 ## Performance & footprint
 
-- Vector math is dependency-free by default; installing **numpy** (optional) accelerates large
-  corpora — the top-k scan is milliseconds warm once numpy is loaded.
+- NumPy remains optional. When available, it enables vectorized search and the
+  float32 chunk-loader fast path; the import guard and pure-Python fallback remain.
+  Install it in the Python environment that actually runs Hermes: for a user-managed
+  environment, `python -m pip install numpy`; for a managed build, use that host's
+  supported dependency-installation mechanism rather than modifying a generated venv.
+  Restart long-lived hosts after changing their dependency environment.
+- Float32 chunk matrices are loaded directly from their little-endian BLOBs,
+  avoiding a round trip through Python float objects. Joining the BLOBs still
+  copies bytes; this is not an end-to-end zero-copy pipeline. Int8 decoding,
+  stored vector identities, and search coverage are unchanged.
+- Reproduce the loader comparison without a profile or provider call with
+  `python benchmarks/benchmark_float32_chunk_loader.py --count 2000 --dim 384`.
+  The synthetic benchmark checks exact IDs, matrix values and dot-product scores;
+  timings are host-dependent and are not asserted by tests.
 - Metadata/id resolution uses a temp-table join rather than a giant `IN (...)` list, so it scales
   past the SQLite host-parameter limit that previously failed near ~32k ids (validated to 40k).
 - Without numpy, search scans the most recent `LCM_EMBEDDING_BOUNDED_SCAN_ROWS` vectors (default
