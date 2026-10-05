@@ -15,7 +15,7 @@ import pytest
     ("pi is 3.14", "pi OR 3 OR 14"),
     ("don't forget it's due", "don OR forget OR due"),
     ('meet in "New York" soon', '"New York" OR meet OR soon'),
-    ('"the of"', ""),
+    ('"the of"', '"the of"'),
     ("", ""),
     ("what did the?", ""),
     ("?!,", ""),
@@ -24,6 +24,38 @@ def test_build_recall_or_query(query, expected):
     from hermes_lcm.search_query import build_recall_or_query
 
     assert build_recall_or_query(query) == expected
+
+
+def test_recall_or_stopword_phrase_survives():
+    from hermes_lcm.search_query import build_recall_or_query
+
+    assert build_recall_or_query('"The Who" band') == '"The Who" OR band'
+
+
+def test_recall_or_dedupes_ascii_case_only():
+    from hermes_lcm.search_query import build_recall_or_query
+
+    assert build_recall_or_query("Project project Zebra") == "Project OR Zebra"
+    assert build_recall_or_query("Project Zebra project") == "Project OR Zebra"
+    assert build_recall_or_query("\u13a0 \uab70 \u1c90 \u10d0") == "\u13a0 OR \uab70 OR \u1c90 OR \u10d0"
+
+
+@pytest.mark.parametrize("word", ["NOT", "NEAR"])
+def test_recall_or_mixed_operator_is_literal(word):
+    from hermes_lcm.search_query import build_recall_or_query, extract_search_terms
+
+    assert set(build_recall_or_query(f"{word} status").split(" OR ")) == {f'"{word}"', "status"}
+    assert extract_search_terms(f"{word} status") == ["status"]
+
+
+def test_bundled_recall_policy_distinguishes_or_and():
+    from pathlib import Path
+
+    policy = (Path(__file__).resolve().parents[1] / "skills/hermes-lcm/references/recall-policy.md").read_text()
+    assert "`lcm_recall`'s full-text arm ORs content words" in policy
+    assert "stop words dropped, quoted phrases kept" in policy
+    assert "`lcm_grep`, its fallbacks, and `lcm_expand_query` still AND their terms" in policy
+    assert "Do not pad a query with synonyms." in policy
 
 
 @pytest.mark.parametrize("word", ["NOT", "NEAR"])
