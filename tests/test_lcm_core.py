@@ -8052,6 +8052,7 @@ class TestExtraction:
                 database_path=str(tmp_path / "lcm.db"),
                 large_output_externalization_enabled=False,
                 large_output_externalization_threshold_chars=200,
+                summary_input_clip="legacy",  # #611: the 2,000 + 800 clip is the legacy arm
             ),
             hermes_home=str(hermes_home),
         )
@@ -8081,6 +8082,7 @@ class TestExtraction:
                 large_output_externalization_enabled=True,
                 large_output_externalization_threshold_chars=200,
                 large_output_externalization_path=str(blocked_path),
+                summary_input_clip="legacy",  # #611: the 2,000 + 800 clip is the legacy arm
             )
         )
 
