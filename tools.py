@@ -5944,7 +5944,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     provider_override = str(kwargs.get("provider_override") or "").strip()
 
     # -- FTS arm (the default-on value: works with embeddings disabled) --
-    if run_fts:
+    def _run_fts_arm() -> None:
+        nonlocal timed_out
         fts_deadline = deadline
         fts_sub_budget_applied = False
         configured_provider = provider_override or str(
@@ -6026,6 +6027,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             arm_hits["fts"] = hits
             coverage["fts"] = "ok"
 
+    if run_fts:
+        _run_fts_arm()
+    # include='summaries' runs no FTS arm while embeddings are on. When its only
+    # semantic arm has a stale identity, it falls back to full text, as it
+    # already does with embeddings off.
+    summary_stale_fts_fallback = False
+
     # -- Vector arms. Local/same-model corpora share one query embedding;
     # Voyage's context chunk corpus resolves and embeds with its own model. --
     if run_summary or run_chunk:
@@ -6084,6 +6092,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             except EmbeddingIdentityStaleError:
                 coverage["summary"] = "none"
                 degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                summary_stale_fts_fallback = not run_fts
             except EmbeddingPrivacyPolicyError:
                 # Deterministic configuration error — never degrade (#367).
                 raise
@@ -6096,6 +6105,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             except Exception as exc:  # noqa: BLE001 - degrade, never bare-error the whole tool
                 provider = None
                 degraded_reasons.append(f"embedding provider unavailable: {exc}")
+            if summary_stale_fts_fallback:
+                _run_fts_arm()
 
             if run_chunk and provider is not None:
                 try:

@@ -305,3 +305,34 @@ def test_doctor_reports_unavailable_provider_before_stale_identity(engine, monke
     assert check["detail"]["available"] is False
     assert "embedding_identity_stale" not in check["detail"]
     assert "semantic retrieval is degraded" in check["detail"]["impact"]
+
+
+@pytest.mark.parametrize("state", ["old", "missing"])
+def test_stale_summaries_only_recall_falls_back_to_fts(engine, monkeypatch, state):
+    _seed(engine, state)
+    instances = _providers(monkeypatch)
+
+    def no_scan(*args, **kwargs):
+        pytest.fail("stale arm read stored vectors")
+
+    monkeypatch.setattr(tools, "_lcm_recall_summary_arm", no_scan)
+    payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
+    assert engine.store_id in [hit["store_id"] for hit in payload["hits"]]
+    assert payload["degraded"] is True
+    assert payload["degraded_reason"] == REASON
+    coverage = payload["provenance"]["coverage"]
+    assert coverage["fts"] == "ok"
+    assert coverage["summary"] == "none"
+    assert sum(len(provider.queries) for provider in instances.values()) == 0
+
+
+def test_matching_summaries_only_recall_runs_no_fts_arm(engine, monkeypatch):
+    _seed(engine, "matching")
+    _providers(monkeypatch)
+
+    def no_fts(*args, **kwargs):
+        pytest.fail("summaries-only recall with a usable identity ran the FTS arm")
+
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", no_fts)
+    payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
+    assert "fts" not in payload["provenance"]["coverage"]
