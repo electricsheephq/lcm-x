@@ -281,7 +281,7 @@ Expected signals:
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm-x:hermes-lcm` on hosts that support plugin skills
 
-On the `main` line, typical output is:
+On the `v0.25.1` release tag, typical output is:
 
 ```text
 Plugins (1):

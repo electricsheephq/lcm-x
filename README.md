@@ -135,10 +135,11 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line identifies itself as
+The `v0.25.1` release tag (branch `release/v0.25.x`) identifies itself as
 `hermes-lcm-x v0.25.1 (15 tools)` — v0.25.0 (long sessions: drain speed + correctness) plus the
 recall-only patch for natural-language `lcm_recall` queries with embeddings off — on top of the
-`v0.25.0` release tag, which identifies itself as `hermes-lcm-x v0.25.0 (15 tools)`. An identity is never a restamp of any past commit's own recorded identity
+`v0.25.0` release tag, which identifies itself as `hermes-lcm-x v0.25.0 (15 tools)`. The `main`
+line keeps its own forward identity until its next minor release. An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
