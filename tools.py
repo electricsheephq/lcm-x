@@ -6188,12 +6188,16 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except EmbeddingIdentityStaleError:
                         coverage["summary"] = "none"
                         degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                        summary_stale_fts_fallback = not run_fts
                     except EmbeddingPrivacyPolicyError:
                         # Deterministic configuration error — never degrade (#367).
                         raise
                     except Exception as exc:  # noqa: BLE001
                         coverage["summary"] = "none"
                         degraded_reasons.append(f"summary arm failed: {exc}")
+            # The identity can also drift between the query check and the scan.
+            if summary_stale_fts_fallback and "fts" not in coverage:
+                _run_fts_arm()
             if chunk_query_vector is not None:
                 if run_chunk:
                     try:

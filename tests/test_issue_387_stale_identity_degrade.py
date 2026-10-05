@@ -365,3 +365,19 @@ def test_doctor_reports_a_stale_chunk_identity_when_chunk_vectors_exist(engine, 
         assert check["status"] == "warn"
         assert check["detail"]["stale_tasks"] == expected
         assert check["detail"]["reason"] == REASON
+
+
+def test_summary_scan_stale_race_falls_back_to_fts_for_summaries_only(engine, monkeypatch):
+    _seed(engine, "matching")
+    _providers(monkeypatch)
+
+    def drifted(*args, **kwargs):
+        raise privacy.EmbeddingIdentityStaleError("identity changed before the scan")
+
+    monkeypatch.setattr(tools, "_lcm_recall_summary_arm", drifted)
+    payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
+    assert engine.store_id in [hit["store_id"] for hit in payload["hits"]]
+    coverage = payload["provenance"]["coverage"]
+    assert coverage["fts"] == "ok"
+    assert coverage["summary"] == "none"
+    assert payload["degraded_reason"] == REASON
