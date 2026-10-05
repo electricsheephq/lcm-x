@@ -715,22 +715,38 @@ print("OLD_READER_OK", len(before), len(after))
 """
 
 
-def test_f7_a_v0250_build_opens_ingests_and_reads_a_store_with_the_table(tmp_path):
+# Old readers a rollback can land on. CI fetches both commits before pytest (#841).
+ROLLBACK_READERS = {
+    "v0.25.0-rc1": "c36b46e3a7b1bff23cfa45fa117565ab8624441d",
+    "v0.25.1": "f47b55e031b507b424ff5f480d8f2a80d358f1f0",
+}
+
+
+def _skip_or_fail_in_ci(reason):
+    # Under CI a missing prerequisite must not hide the rollback check (#841).
+    if os.environ.get("CI"):
+        pytest.fail(f"{reason}; CI must provide it")
+    pytest.skip(reason)
+
+
+@pytest.mark.parametrize("reader", sorted(ROLLBACK_READERS))
+def test_f7_a_v0250_build_opens_ingests_and_reads_a_store_with_the_table(tmp_path, reader):
     import io
     import subprocess
     import sys
     import tarfile
     from pathlib import Path
 
+    commit = ROLLBACK_READERS[reader]
     root = Path(__file__).resolve().parents[1]
     try:
         import agent.context_engine  # noqa: F401  (the git-ignored host stub the old build imports)
     except ImportError:
-        pytest.skip("the agent.context_engine host stub is not importable in this checkout")
-    if subprocess.run(["git", "-C", str(root), "cat-file", "-e", "c36b46e3^{commit}"], capture_output=True).returncode:
-        pytest.skip("the v0.25.0 commit c36b46e3 is not in this checkout (shallow clone)")
-    archive = subprocess.run(["git", "-C", str(root), "archive", "c36b46e3"], check=True, capture_output=True).stdout
-    old = tmp_path / "v0250"
+        _skip_or_fail_in_ci("the agent.context_engine host stub is not importable in this checkout")
+    if subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True).returncode:
+        _skip_or_fail_in_ci(f"the {reader} commit {commit[:8]} is not in this checkout (shallow clone)")
+    archive = subprocess.run(["git", "-C", str(root), "archive", commit], check=True, capture_output=True).stdout
+    old = tmp_path / "old-reader"
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         tar.extractall(old, filter="data")
     _state_db(tmp_path, [("S", None, None)])
