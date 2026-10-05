@@ -29,30 +29,31 @@ The per-rule table is in [identity-ledger-inventory.md](identity-ledger-inventor
 
 | decision | meaning | rules |
 |---|---|---|
-| **KEEP** | Stays, and keeps deciding. Either it is not a question a uid answers (lifecycle, publication, store hygiene, record formats, byte splits, ownership ranges), or it is the uid route itself. | 183 |
+| **KEEP** | Stays, and keeps deciding. Either it is not a question a uid answers (lifecycle, publication, store hygiene, record formats, byte splits, ownership ranges), or it is the uid route itself. | 189 |
 | **KEEP (legacy reader)** | Reads state that a deleted writer persisted: native recovery, removed in v0.25.0, and proofs written before v4 descriptors. Frozen. Deleted only when a read-only count finds none of that state on managed stores. | 7 |
-| **DEMOTE-UNDER-ON** | Becomes the fallback. In `on` mode it runs only for rows the uid route cannot decide. On hosts that send no uid it keeps deciding exactly as today. Frozen: bug fixes only. | 189 |
-| **DEMOTE+MERGE** | Demoted, and first folded into one sibling implementation. | 29 |
+| **SPLIT** | Does two jobs. Its non-identity job (a persisted record it writes or validates, an ownership or carry update, a scope guard, a byte split) stays and keeps running. Only its matching part demotes. | 80 |
+| **DEMOTE-UNDER-ON** | Becomes the fallback. In `on` mode it runs only for rows the uid route cannot decide. On hosts that send no uid it keeps deciding exactly as today. Frozen: bug fixes only. | 111 |
+| **DEMOTE+MERGE** | Demoted, and first folded into one sibling implementation. | 21 |
 | **MERGE** | Copies of one predicate become one function. The refactor is behaviour-neutral. A parity test runs every copy's existing test inputs through the merged function. | 33 |
-| **DELETE** | No production caller, or unreachable. Removed with proof: a grep of code, tests and docs, the git history, and the full suite. | 19 |
+| **DELETE** | Changes no identity decision. Each row names its kind: **dead** (no caller), **unreachable** (no input reaches it), **ineffective** (it runs, but its result cannot change a decision), **redundant** (it repeats a computation already made), or **retired write** (it writes a field or relation that no reader in this version or the previous GA reads). Removed with proof: a grep of code, tests and docs, the git history, and the full suite. | 19 |
 
 No rule is deleted just because uids exist. LCM keeps supporting hosts that send no uid, so every demoted rule stays
 for as long as that support does.
 
 ### Counts per system
 
-| system | KEEP | KEEP (legacy reader) | DEMOTE-UNDER-ON | DEMOTE+MERGE | MERGE | DELETE | total |
-|---|---|---|---|---|---|---|---|
-| SYS-1 Cursor/replay matcher | 15 | 2 | 53 | 18 | 10 | 5 | 103 |
-| SYS-2 Commit proof, emission descriptors & occurrence projection | 18 | 5 | 48 | 1 | 3 | 4 | 79 |
-| SYS-3 #436 identity anchor | 17 | 0 | 47 | 1 | 4 | 1 | 70 |
-| SYS-4 Externalized payload & prefix matching | 17 | 0 | 32 | 1 | 2 | 7 | 59 |
-| SYS-5 Host uid (shadow/on, engine uids) | 57 | 0 | 0 | 0 | 5 | 0 | 62 |
-| SYS-6 Placeholder ledger & ignore policy | 5 | 0 | 5 | 3 | 4 | 1 | 18 |
-| SYS-7 Generated-row recognition (scaffold, carrier, survival fit, retained anchor) | 8 | 0 | 3 | 5 | 4 | 0 | 20 |
-| SYS-8 Lifecycle, rotation, publication & DAG lineage | 41 | 0 | 0 | 0 | 1 | 0 | 42 |
-| SYS-9 Store columns & metadata hygiene | 5 | 0 | 1 | 0 | 0 | 1 | 7 |
-| **all** | **183** | **7** | **189** | **29** | **33** | **19** | **460** |
+| system | KEEP | KEEP (legacy reader) | SPLIT | DEMOTE-UNDER-ON | DEMOTE+MERGE | MERGE | DELETE | total |
+|---|---|---|---|---|---|---|---|---|
+| SYS-1 Cursor/replay matcher | 16 | 2 | 14 | 38 | 18 | 10 | 5 | 103 |
+| SYS-2 Commit proof, emission descriptors & occurrence projection | 18 | 5 | 21 | 27 | 1 | 3 | 4 | 79 |
+| SYS-3 #436 identity anchor | 20 | 0 | 19 | 26 | 0 | 4 | 1 | 70 |
+| SYS-4 Externalized payload & prefix matching | 18 | 0 | 16 | 15 | 1 | 2 | 7 | 59 |
+| SYS-5 Host uid (shadow/on, engine uids) | 57 | 0 | 0 | 0 | 0 | 5 | 0 | 62 |
+| SYS-6 Placeholder ledger & ignore policy | 5 | 0 | 3 | 4 | 1 | 4 | 1 | 18 |
+| SYS-7 Generated-row recognition (scaffold, carrier, survival fit, retained anchor) | 8 | 0 | 7 | 1 | 0 | 4 | 0 | 20 |
+| SYS-8 Lifecycle, rotation, publication & DAG lineage | 41 | 0 | 0 | 0 | 0 | 1 | 0 | 42 |
+| SYS-9 Store columns & metadata hygiene | 6 | 0 | 0 | 0 | 0 | 0 | 1 | 7 |
+| **all** | **189** | **7** | **80** | **111** | **21** | **33** | **19** | **460** |
 
 ## Principles
 
@@ -63,18 +64,37 @@ for as long as that support does.
 
    A uid does not split bytes (composite remainders), own ranges (carry ranges) or validate a persisted record.
    The rules that do those things stay.
-2. **First sight goes through the content rules once.** An unbound uid can belong to a row stored before the host
-   stamped uids. So the content rules decide that row once, and the result is bound (binding kinds `canonical` and
-   `version`). From then on the uid decides. The content matchers run once per row, when it is bound, instead of on
-   every replay.
-3. **Readers of persisted state outlive their writers.** This is the rule v0.25.0 applied when it removed native
+2. **Only the match demotes.** A DEMOTE decision covers a rule's identity matching and nothing else. Anything the
+   rule also does keeps running in `on` mode:
+   - a persisted record it writes or validates, which this version or the previous GA reads;
+   - the identity bytes that a persisted proof or digest is computed from: a rollback reader recomputes the
+     digest, so that form stays byte-for-byte;
+   - an ownership, carry or frontier update, or the compaction boundary it sets;
+   - a session or privacy guard on payload content;
+   - routing between normal ingest and the bypass or host-fallback path;
+   - chronology columns;
+   - a byte split.
+
+   Such a rule is SPLIT in the inventory. Every DEMOTE row was read against the code by an independent reader, and
+   72 of them turned out to be SPLIT. The slice C PR lists, for each rule it stops consulting, the jobs that keep
+   running, and its review checks that list.
+3. **The content rules decide what the uid cannot.**
+   - **First sight.** An unbound uid can belong to a row stored before the host stamped uids. The content rules
+     decide that row, and the result is bound (binding kind `canonical`).
+   - **Changed bytes.** One uid can hold several stored versions. A row whose bytes match one bound version
+     replays that version. A row whose bytes match none of them goes to the content rules, and a new version is
+     bound (kind `version`).
+
+   Otherwise the uid decides, so the content matchers run only on first sight and on changed bytes, not on every
+   replay.
+4. **Readers of persisted state outlive their writers.** This is the rule v0.25.0 applied when it removed native
    recovery. A store written by an older version can still hold that state, and a plugin-only rollback to the
    previous GA must read what this version writes.
-4. **Fail open to today's decision.** Any exception on the uid route returns the content decision and is counted,
+5. **Fail open to today's decision.** Any exception on the uid route returns the content decision and is counted,
    as the #436 anchor's fail-open does today.
-5. **No schema version change.** Bindings live in the droppable `host_uid_bindings` side table. A new column comes
+6. **No schema version change.** Bindings live in the droppable `host_uid_bindings` side table. A new column comes
    only through `add_column_if_missing`, with a rollback-reader test.
-6. **One step per PR.**
+7. **One step per PR.**
    - Steps: the DELETE batch first, then one MERGE cluster per PR, then the planner with `on` mode.
    - A step that changes behaviour is red-first.
    - Every step is reviewed by a model other than its author.
@@ -92,11 +112,21 @@ Slice C puts one planner in front of that chain:
 
 ```text
 plan_ingest(view):
-  for each host row, in order:
-    engine uid of this lineage          -> GENERATED (never stored)
-    uid bound in this lineage           -> REPLAY(bound store_id)          binding kind canonical or version
-    all _absorbed_message_uids bound    -> COMPOSITE(constituents), remainder by the byte split (KEEP rules)
-    otherwise                           -> FALLBACK: today's content rules decide once, then the uid is bound
+  for each host row, in order (the first matching branch decides):
+    1. composites first
+       carries _absorbed_message_uids          -> COMPOSITE: each constituent by its own binding; a constituent with
+                                                   no binding goes to the content rules; never skipped as a whole
+       engine uid of this lineage, with bytes   -> CARRIER: the generated part is GENERATED; the remainder is split by
+       beyond the generated row                    the byte rules (KEEP) and decided as its own row
+    2. engine uid of this lineage, bytes equal to the generated row
+                                              -> GENERATED (never stored)
+    3. uid bound in this lineage (canonical or version)
+       bytes match one bound version            -> REPLAY(that version's store_id)
+       bytes match none                         -> content rules decide; a stored row is bound as a new version
+    4. otherwise (unbound uid, or no uid)       -> content rules decide; the uid is bound canonical, except when the
+                                                   target row already holds another uid (a host that re-minted uids,
+                                                   e.g. after a downgrade): no canonical binding, as shadow does today
+  alias candidates stay observational: they never decide
   check the plan invariants (KEEP rules):
     a stored row is consumed at most once; a tool segment is replayed whole or not at all;
     carry ranges and the frontier hold; nothing inside the fresh tail is dropped
@@ -111,9 +141,21 @@ content decision:
 
 `on` mode changes which answer is applied. The counters keep running, so a disagreement stays visible.
 
+**What `on` mode saves, and what it does not.**
+- **What stops.** The 132 matching rules (DEMOTE and DEMOTE+MERGE) are no longer consulted on a replay that the
+  uid decides.
+- **What keeps running.** The SPLIT rules keep doing their other jobs: they write the proof and digest records,
+  keep the identity forms those records hash, update carry ranges and the frontier, and guard payload scope. This
+  is the price of a plugin-only rollback.
+- **When those writers can go.** Only in a release whose rollback target no longer reads those records.
+
 **Entry conditions for `on` mode:**
 - **Shadow gate (v0.26.0).** At least 99% agreement over at least 200 counted bindings (`stored_new`,
   `version_new`) across at least 24 h. Every disagreement is explained with row evidence. Durable shadow errors are 0.
+- **The planner decides in qualification first.** Before `on` ships, a build where the planner decides runs the
+  existing version, carrier, composite and rollback cases, and the shadow window reports the generated, carrier and
+  composite outcomes next to the counted bindings. Any disagreement that would lose, duplicate or reorder a row is
+  fixed, or that case stays on the content rules. #891 (fork-child anchor scope) is fixed.
 - **A deployed host carries uids.** Today no managed runtime sends them.
 - **Persistence-only probe.** The host declares `message_uid` persistence-only. The probe runs once per process
   and fails closed.
@@ -122,51 +164,57 @@ content decision:
 ## What each system keeps
 
 - **SYS-1 Cursor/replay matcher (103).**
-  - **KEEP:** the replay identity tuple (role, normalised content, tool call id, tool calls, tool name). It is the
-    only identity a row without a uid has.
+  - **KEEP:** the replay identity tuple. It is the only identity a row without a uid has.
+  - **SPLIT:** the parts of that identity which set the bytes persisted proofs and digests hash; the write-failure
+    guard; and the digest writers.
   - **DEMOTE:** the OR-ed replay proofs (sanitised suffix, raw suffix, tool-pair end, stale window, durable proof
     cursor). 19 of them are the planner cluster.
   - **Legacy readers:** the native-recovery snapshot digests.
 - **SYS-2 Commit proof, emission descriptors and occurrence projection (79).**
   - **KEEP:** the proof record format, its digest and version contract, and proof-source selection. A rollback
     reader reads them.
-  - **DEMOTE:** descriptor binding, because an engine uid identifies the generated occurrence.
-  - **Legacy readers:** the durable native proof walk, the native digest adopted by an empty rollover session,
-    and pre-v4 occurrence identities.
+  - **SPLIT:** descriptor binding, which picks the occurrence the persisted proof records; the proof writer and its
+    carry-range rewrite. Their matching use demotes.
+  - **Legacy readers:** the durable native proof walk, the native digest adopted by an empty rollover session, and
+    pre-v4 occurrence identities.
 - **SYS-3 #436 identity anchor (70).**
-  - **DEMOTE:** candidate scope, prematch and rewind.
-  - **KEEP:** the byte split of a composite remainder, and the relation writes that record it.
+  - **DEMOTE:** candidate matching, prematch and rewind.
+  - **SPLIT:** the composite and `alt_stamp` relation writes, the host-rewrite override records, the
+    `observed_at` backfills, the session and conversation scope of candidates, and the ownership and frontier
+    checks on summary claims.
+  - **KEEP:** the byte split of a composite remainder.
 - **SYS-4 Externalised payload and prefix matching (59).**
-  - **KEEP:** the payload session-ownership guards. They protect privacy scope, not identity.
-  - **DEMOTE:** the prefix matchers.
+  - **KEEP and SPLIT:** the payload session-ownership guards and the persisted marker metadata.
+  - **DEMOTE:** the prefix and occurrence matches.
 - **SYS-5 Host uid (62).** **KEEP.** This becomes the deciding route; five rules merge into their siblings.
 - **SYS-6 Placeholder ledger and ignore policy (18).**
-  - **KEEP:** the persisted record formats.
-  - **MERGE, then DEMOTE:** the ordinal and budget matchers.
+  - **KEEP and SPLIT:** the persisted count, ordinal and dependent-reply records, which the previous GA reads.
+  - **DEMOTE:** the matchers.
 - **SYS-7 Generated-row recognition (20).**
-  - **DEMOTE to engine uids:** summary-carrier recognition.
-  - **KEEP:** the carrier split.
-  - **MERGE:** the eight scaffold classifier copies become one.
+  - **SPLIT:** carrier recognition (its byte split stays), and the survival-fit layout and compaction-boundary
+    decisions.
+  - **MERGE:** the scaffold classifier copies become one.
 - **SYS-8 Lifecycle, rotation, publication and DAG lineage (42).** **KEEP.** These rules decide when to compact and
   publish, not which row is which.
 - **SYS-9 Store columns and metadata hygiene (7).** **KEEP,** except one dead helper.
 
 ## DELETE list (19)
 
-Each row was checked against the code at `9afb80d0`. The deleting PR repeats the grep at its own base.
+Each row was checked against the code at `9afb80d0`, and an independent review confirmed each kind. The deleting PR
+repeats the grep at its own base. Rows not marked otherwise are **dead** or **unreachable**.
 
 | id | where | why it is dead |
 |---|---|---|
 | R017 | `reconcile._session_end_replay_snapshot_metadata_key` | no caller |
-| R040 | `reconcile._strip_inline_persisted_output_generation_identity` and its two OR terms | both terms need an unrecoverable marker, which always hits the earlier `continue` veto (since the #313 era) |
+| R040 | `reconcile._strip_inline_persisted_output_generation_identity` and its two OR terms | **ineffective**: the helper runs, but its result feeds only two OR terms that need an unrecoverable marker, and such a candidate always hits the later `continue` veto first (since the #313 era) |
 | R057 | parameter `session_count` of `_find_reconciled_cursor_for_store_tail` | never read |
 | R086 | `engine._is_active_context_droppable_identity` | no caller; `reconcile` has its own inline copy |
 | R087 | `engine._ignored_message_is_quarantinable_assistant` | no caller |
-| R133 | second `_cursor_from_durable_commit_proof` call in `_reconcile_ingest_cursor_from_store` | same input as the first call, and nothing between them changes what the proof reads; the only difference is a diagnostic label on a zero cursor |
+| R133 | second `_cursor_from_durable_commit_proof` call in `_reconcile_ingest_cursor_from_store` | **redundant**: same input as the first call, and nothing between them changes what the proof reads; the only difference is a diagnostic label on a zero cursor |
 | R164 | native-lossy veto in `_ingest_messages` | the in-memory commit proof is always written with `native = False` (compaction is its only writer since v0.25.0) |
 | R168 | `engine._remap_cursor_through_native_host_repair` | reachable only through a native in-memory proof (see R164) |
-| R181 | legacy native fields written into the commit proof | written as false; readers use `.get`, so the previous GA reads a proof without them unchanged |
-| R232 | `identity_anchor._identity_anchor_record_versions` (the `supersedes` relation) | written, never read; existing rows are inert and are purged with their messages |
+| R181 | legacy native fields written into the commit proof | **retired write**: always written as false or empty; every reader, the previous GA's included, uses `.get` with the same default |
+| R232 | `identity_anchor._identity_anchor_record_versions` (the `supersedes` relation) | **retired write**: written on every rewritten-row store, never read by this version or the previous GA; its two test assertions go with it; existing rows are inert and are purged with their messages |
 | R258 | `recovered_identity_content` fallback in `_message_replay_identity` | unreachable: the earlier `recovered_with_stat` branch always fires first |
 | R282 | `prefix_matching._messages_match_fingerprint_prefix` | no reference in code, tests or docs |
 | R283 | `prefix_matching._messages_match_lcm_bypass_prefix` | no reference |
@@ -206,7 +254,9 @@ Each row was checked against the code at `9afb80d0`. The deleting PR repeats the
    - **Sunset:** a read-only count of native digest keys and native durable proofs on managed stores returns zero.
 2. **Store-id reuse (R250, R317, R401, R454).** One reader said ids are never reused; others found guards against
    reuse.
-   - `messages.store_id` has been `INTEGER PRIMARY KEY AUTOINCREMENT` since the first commit, so ids are not reused.
+   - Every store LCM creates has `messages.store_id INTEGER PRIMARY KEY AUTOINCREMENT` (since the first commit), so
+     ids are not reused there. A `messages` table that something else created with a plain primary key keeps that
+     shape (`CREATE TABLE IF NOT EXISTS`), and its ids can be reused; the hygiene tests open such a table.
    - The plain `INTEGER PRIMARY KEY` table in `db_bootstrap.py` is an in-memory scratch for a schema-contract check,
      not a store.
    - **Resolution:** the purge of relations and bindings together with their rows stays (KEEP). Its real job is that
@@ -259,7 +309,8 @@ Results (checked against the code, with synthetic repros):
 
 1. **This ledger** (a v0.26.0 GA criterion).
 2. **The DELETE batch**, one PR after v0.26.0 GA.
-   - It changes no behaviour, except R133's diagnostic label.
+   - It changes no identity decision. Observable differences: R133's diagnostic label on a zero cursor, and R181
+     and R232 stop writing fields and relations that no reader in this version or the previous GA reads.
    - Proof: the full suite and the rollback-reader tests.
 3. **The MERGE clusters**, one PR each, with parity tests. The lineage-walker merge follows #891.
 4. **The planner with `on` mode (slice C)** in its own minor, once the entry conditions hold.
