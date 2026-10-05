@@ -4,8 +4,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-IDENTITY_VERSION = "0.25.0"
-RC_TAG = "0.25.0-rc1"
+IDENTITY_VERSION = "0.26.0"
+RC_TAG = "0.26.0-rc1"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RC_TAG}.md"
 
 
@@ -40,7 +40,10 @@ def test_release_candidate_identity_surfaces_are_synchronized():
     assert f"version: {IDENTITY_VERSION}" in manifest
     assert f"hermes-lcm-x v{IDENTITY_VERSION} (15 tools)" in readme
     assert f"hermes-lcm-x v{IDENTITY_VERSION} (15 tools)" in operator_guide
-    assert f"## v{IDENTITY_VERSION} - " in changelog
+    header = next((line for line in changelog.splitlines()
+                   if line.startswith(f"## v{IDENTITY_VERSION} (")), "")
+    assert header
+    assert not re.search(r"unreleased|rc\d", header, re.IGNORECASE)
     assert f"Exact commit SHA for v{IDENTITY_VERSION} or main" in bug_report
 
 
@@ -102,7 +105,7 @@ def test_release_candidate_notes_cover_only_the_merged_release_scope():
     section_headers = [line for line in lines if line.startswith("## ")]
 
     assert notes.startswith(f"# v{RC_TAG} — ")
-    assert any(header.startswith("## Changes since v0.24.9") for header in section_headers)
+    assert any(header.startswith("## Changes since v0.25.1") for header in section_headers)
     assert any(header.startswith("## Qualification") for header in section_headers)
     assert any(header.startswith("## Known follow-ups") for header in section_headers)
     assert "## Benchmark boundary" in section_headers

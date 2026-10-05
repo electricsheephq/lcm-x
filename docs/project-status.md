@@ -1,6 +1,6 @@
 # LCM-X project state
 
-This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05; the naming table and latest-stable identity were updated on 2026-09-24 for the #471 rename and on 2026-09-25 for the v0.24.1 GA, and on 2026-09-26 for the v0.24.2 GA, and on 2026-09-28 for the v0.24.3 GA; and on 2026-09-28 for the v0.24.4 GA; and on 2026-09-29 for the v0.24.5 GA; and on 2026-09-30 for the v0.24.6 GA; and on 2026-09-30 for the v0.24.7 GA; and on 2026-09-30 for the v0.24.8 GA; the main identity was updated on 2026-10-01 for the v0.24.9 release candidate; and on 2026-10-01 for the v0.24.9 GA and the roadmap reset (#658); the main identity was updated on 2026-10-03 for the v0.25.0 release candidate; and on 2026-10-04 for the v0.25.0 GA.
+This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05; the naming table and latest-stable identity were updated on 2026-09-24 for the #471 rename and on 2026-09-25 for the v0.24.1 GA, and on 2026-09-26 for the v0.24.2 GA, and on 2026-09-28 for the v0.24.3 GA; and on 2026-09-28 for the v0.24.4 GA; and on 2026-09-29 for the v0.24.5 GA; and on 2026-09-30 for the v0.24.6 GA; and on 2026-09-30 for the v0.24.7 GA; and on 2026-09-30 for the v0.24.8 GA; the main identity was updated on 2026-10-01 for the v0.24.9 release candidate; and on 2026-10-01 for the v0.24.9 GA and the roadmap reset (#658); the main identity was updated on 2026-10-03 for the v0.25.0 release candidate; and on 2026-10-04 for the v0.25.0 GA; and on 2026-10-05 for the v0.25.1 stable; the main identity was updated on 2026-10-05 for the v0.26.0 release candidate.
 
 ## Naming and compatibility
 
@@ -12,17 +12,17 @@ The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#4
 | Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
 | Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
 | Bundled skill | `hermes-lcm` (unchanged) |
-| Latest stable | `v0.25.0@67de214f399f47d019535bf30baccf79cacc6ec4` (ships `hermes-lcm-x` / `lcm-x`) |
+| Latest stable | `v0.25.1@f47b55e031b507b424ff5f480d8f2a80d358f1f0` (ships `hermes-lcm-x` / `lcm-x`; `v0.26.0` follows its rc gauntlet) |
 
 The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is `v0.25.0` at `67de214f399f47d019535bf30baccf79cacc6ec4`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
+The latest stable release is `v0.25.1` at `f47b55e031b507b424ff5f480d8f2a80d358f1f0`. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
 
-The source snapshot used for this reconciliation is `main@67de214f399f47d019535bf30baccf79cacc6ec4` (the v0.25.0 GA merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
+The source snapshot used for this reconciliation is `main@d62bc6bdaf20d4da8c9130246722ec80287ffa26` (the #893 merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
-Main keeps the identity `0.25.0` (`hermes-lcm-x`) until the first v0.26.0 release candidate bumps it (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
+Main carries the forward identity `0.26.0` (`hermes-lcm-x`) (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 v0.23.2 (2026-08-27) shipped those contracts: durable redaction and cloud-embedding privacy are
 independent flags (`LCM_SENSITIVE_PATTERNS_ENABLED` vs `LCM_EMBEDDING_PRIVACY_ENABLED`, #374),

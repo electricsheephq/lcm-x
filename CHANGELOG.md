@@ -6,13 +6,51 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-- Fix: stale or missing cloud embedding identities preserve full-text `lcm_recall` hits,
-  report `embedding_identity_stale:` with the warmup/backfill remedy, and keep the full-text
-  time budget. Semantic `lcm_grep` reports the same reason; invalid privacy policies still
-  fail closed. (#387)
-- Fix: `lcm_doctor` warns when the configured cloud privacy revision lacks a matching
-  active summary profile. The check reads local state without loading a provider or
-  making a network call. (#882)
+## v0.26.0 (host message identity)
+
+- Feature: host message identity in shadow mode. On a host that stamps `message_uid`, LCM records which stored row each
+  uid belongs to in a droppable `host_uid_bindings` side table and counts agreement with its existing identity matching;
+  `/lcm doctor` reports the `host_uid_*` counts. Ingest, replay and emission decisions are unchanged, and hosts without
+  the uid feature see no new key. New setting `LCM_HOST_MESSAGE_UID=off|shadow|on` (default `shadow`; `on` is reserved and behaves
+  as `shadow`). No schema version change. (#643)
+- Change: LCM's emit path keeps the host's uid on rows it reshapes (adjacent-assistant merges, ignored-message
+  placeholders, over-cap tool stubs, the cached replay prefix), and rows LCM generates carry a deterministic engine uid
+  when the host declares `message_uid` persistence-only. Provider-visible bytes are unchanged. (#643)
+- Fix: deleting messages also deletes their host-uid bindings, and the lineage key is namespaced by Hermes home. (#836)
+- Fix: a forced-overflow recovery note, echoed alone or merged onto the previous user turn by the host, binds back to
+  the recovery emission when the proof covers it, instead of being stored as a user turn. (#534, partial)
+- Fix: after a crash on rotation, a held composite user row whose parts the host also keeps is no longer stored twice;
+  older re-sequenced rows are readmitted only as one whole composite LCM recorded. (#821)
+- Fix: an older unstamped stored row can serve as a composite constituent only inside its donor's run of back-to-back
+  user rows (within 256 store ids), so a new turn is not consumed by an older identical row. (#851)
+- Fix: on a host that rotates sessions, a branch of a session that ended by compression no longer treats that
+  session as its ancestor, so its copied rows are stored as its own instead of matched to the parent's. (#891)
+- Fix: one privacy-refused document no longer stops a cloud embedding backfill; refused documents are withheld and stay
+  pending, and an apply run that withheld documents reports `partial` with a `privacy_withheld` count. (#759)
+- Fix: stored vectors with an older privacy revision no longer make `lcm_recall` raise; recall answers from full text,
+  for every `include`, marked degraded with an `embedding_identity_stale:` reason, and `lcm_doctor` warns with the
+  remedy (`/lcm embed warmup`, then `/lcm embed backfill --apply`). An invalid privacy policy still raises. (#387, #882)
+- Fix: `lcm_doctor` also checks the chunk identity once the store holds chunk vectors that recall can use, and
+  `stale_tasks` names each stale corpus; a summaries-only `lcm_recall` falls back to full text when the summary
+  identity goes stale during the scan. (#888)
+- Perf: the payload lookup index uses set buckets, globs once per digest per scope, and shares one listing between the
+  stub-first trial and its final assembly. (#827)
+- Perf: when NumPy is available, float32 chunk vectors load straight into the search matrix instead of through Python
+  floats; NumPy stays optional. Both chunk loaders reject a malformed stored value instead of decoding it. (#834)
+- Docs: `docs/identity-ledger.md` records, for each of the 460 identity rules, what happens once a host uid decides
+  identity, which rules are dead, and the entry conditions for `on` mode. (#643)
+- Bench: an upstream host with message uids joins reliability CI with the P8 controls required (#866); the flush audit
+  (B9) on in-process and acp-process transports (#859); the #534 recovery restart cell; B2 composite pairing through the
+  host's merge record (#823); per-question `lcm_recall` health and FTS relevance ranking in the recall harnesses (#817);
+  the Phase C scorer's multiset-v2 split rule (#710); the rollback-reader tests run in CI and cover `v0.25.1` (#841).
+
+## v0.25.1 - 2026-10-05 (recall: natural-language queries with embeddings off)
+
+- Fix: with embeddings off (the default), `lcm_recall` on a natural-language question returned only rows containing
+  every word, newest first, so it mostly surfaced large tool outputs or nothing. The full-text arm now ORs the
+  question's content words and ranks by relevance. `lcm_grep` and explicit full-text queries are unchanged. (#864, #870)
+- Fix: the OR query keeps quoted phrases that contain stop words, routes emoji-only questions, centres answer-ready
+  windows on a phrase matched across separators, folds case duplicates, and treats NOT/NEAR as literal words. (#873, #874)
 
 ## v0.25.0 - 2026-10-04 (long sessions: drain speed + correctness)
 

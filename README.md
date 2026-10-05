@@ -121,7 +121,7 @@ copy-paste setups per agent type.
 ## Project status
 
 The latest stable release is
-`v0.25.0@67de214f399f47d019535bf30baccf79cacc6ec4` (plugin `hermes-lcm-x`, engine
+`v0.25.1@f47b55e031b507b424ff5f480d8f2a80d358f1f0` (plugin `hermes-lcm-x`, engine
 `lcm-x`; the rename shipped in v0.24.0, #471). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
@@ -136,8 +136,8 @@ separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
 The `main` line identifies itself as
-`hermes-lcm-x v0.25.0 (15 tools)` — long sessions: drain speed + correctness — on top of the
-`v0.24.9` release tag, which identifies itself as `hermes-lcm-x v0.24.9 (15 tools)`. An identity is never a restamp of any past commit's own recorded identity
+`hermes-lcm-x v0.26.0 (15 tools)` — host message identity — on top of the
+`v0.25.1` release tag, which identifies itself as `hermes-lcm-x v0.25.1 (15 tools)`. An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
@@ -259,7 +259,7 @@ On the `main` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.25.0 (15 tools)
+  ✓ hermes-lcm-x v0.26.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -1074,7 +1074,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
-- [Current project state](docs/project-status.md) — v0.25.0 stable baseline,
+- [Current project state](docs/project-status.md) — v0.25.1 stable baseline,
   separate main-development identity, active work, and proof boundaries
 - [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
   and judged-QA evaluation contracts, reproduction, and landed result index
@@ -1126,7 +1126,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.25.0` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.25.1` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License
