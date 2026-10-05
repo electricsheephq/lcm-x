@@ -114,15 +114,21 @@ class IdentityAnchorMixin:
         chain: list[str] = []
         read = False
         try:
+            from .host_uid import _is_fork_child
+
             path = self._state_db_path()
             if session_id and path.exists():
                 conn = sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True, timeout=1.0)
+                conn.row_factory = sqlite3.Row
                 try:
                     current, seen = session_id, {session_id}
                     for _ in range(256):
+                        child = conn.execute("SELECT * FROM sessions WHERE id = ?", (current,)).fetchone()
+                        if not child or _is_fork_child(dict(child)):
+                            break
                         row = conn.execute(
-                            "SELECT p.id, p.end_reason FROM sessions c JOIN sessions p ON p.id = c.parent_session_id "
-                            "WHERE c.id = ? LIMIT 1", (current,),
+                            "SELECT id, end_reason FROM sessions WHERE id = ? LIMIT 1",
+                            (child["parent_session_id"],),
                         ).fetchone()
                         if not row or str(row[1] or "") != "compression" or str(row[0]) in seen:
                             break
