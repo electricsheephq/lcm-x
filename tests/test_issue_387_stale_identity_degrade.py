@@ -336,3 +336,32 @@ def test_matching_summaries_only_recall_runs_no_fts_arm(engine, monkeypatch):
     monkeypatch.setattr(tools, "_lcm_recall_fts_arm", no_fts)
     payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
     assert "fts" not in payload["provenance"]["coverage"]
+
+
+@pytest.mark.parametrize(
+    ("summary", "chunk", "expected"),
+    [
+        ("matching", "old", ["chunk"]),
+        ("old", "old", ["summary", "chunk"]),
+        ("matching", "matching", None),
+        ("matching", None, None),
+    ],
+)
+def test_doctor_reports_a_stale_chunk_identity_when_chunk_vectors_exist(engine, monkeypatch, summary, chunk, expected):
+    _seed(engine, summary)
+    if chunk is not None:
+        _seed(engine, chunk, task="chunk")
+    monkeypatch.setenv("VOYAGE_API_KEY", "synthetic-test-key")
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("doctor constructed a provider")
+
+    monkeypatch.setattr(tools, "resolve_provider", forbidden)
+    monkeypatch.setattr(providers, "resolve_provider", forbidden)
+    check = tools._embedding_provider_health_check(engine)
+    if expected is None:
+        assert check["status"] == "pass"
+    else:
+        assert check["status"] == "warn"
+        assert check["detail"]["stale_tasks"] == expected
+        assert check["detail"]["reason"] == REASON

@@ -7488,6 +7488,17 @@ def _active_embedding_profile_exists(engine: "LCMEngine") -> bool:
     return row is not None
 
 
+def _lcm_store_has_live_chunk_vectors(conn: sqlite3.Connection) -> bool:
+    try:
+        return conn.execute(
+            "SELECT 1 FROM lcm_chunk_meta WHERE archived = 0 LIMIT 1"
+        ).fetchone() is not None
+    except sqlite3.OperationalError as exc:
+        if "no such table: lcm_chunk_meta" not in str(exc):
+            raise
+        return False
+
+
 def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
     """Return the ``embedding_provider_health`` lcm_doctor check (#672).
 
@@ -7564,18 +7575,28 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
                 "status": "warn",
                 "detail": detail,
             }
+        model = str(probe.get("model") or "")
         db_path = Path(engine._store.db_path).resolve()
         conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
         try:
-            revision = _lcm_embedding_profile_revision(
-                conn, provider=provider_id, model=str(probe.get("model") or ""),
-                task="summary",
-            )
+            stale_tasks = []
+            if _lcm_embedding_profile_revision(
+                conn, provider=provider_id, model=model, task="summary",
+            ) != current_revision:
+                stale_tasks.append("summary")
+            # The chunk corpus is opt-in, so its identity matters only once the
+            # store holds live chunk vectors (#888).
+            if _lcm_store_has_live_chunk_vectors(conn) and _lcm_embedding_profile_revision(
+                conn, provider=provider_id, model=default_chunk_model(provider_id, model),
+                task="chunk",
+            ) != current_revision:
+                stale_tasks.append("chunk")
         finally:
             conn.close()
-        if revision != current_revision:
+        if stale_tasks:
             detail.update({
                 "embedding_identity_stale": True,
+                "stale_tasks": stale_tasks,
                 "reason": _EMBEDDING_IDENTITY_STALE_REASON,
                 "impact": "lcm_recall serves full-text only until the profile is re-registered",
                 "remedy": "/lcm embed warmup, then /lcm embed backfill --apply",
