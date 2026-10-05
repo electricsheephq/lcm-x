@@ -15,7 +15,7 @@ from tests.test_compression_boundary import (
 )
 from tests.test_issue_529_overflow_followups import CAP, SYSTEM, OVERSIZED, ORPHAN, _note
 
-_RC1 = "c36b46e3a7b1bff23cfa45fa117565ab8624441d"  # the v0.25.0-rc1 tag commit
+from tests.test_host_uid_shadow import ROLLBACK_READERS, _skip_or_fail_in_ci
 
 
 def _engine(path, sid="S0"):
@@ -257,23 +257,25 @@ def test_loss_probe_merge_base_mismatch_after_acp_strip(tmp_path, monkeypatch):
         engine.shutdown()
 
 
-def test_loss_probe_rc1_rollback_reader(tmp_path, monkeypatch):
+@pytest.mark.parametrize("reader", sorted(ROLLBACK_READERS))
+def test_loss_probe_rc1_rollback_reader(tmp_path, monkeypatch, reader):
+    commit = ROLLBACK_READERS[reader]
     root = Path(__file__).resolve().parents[1]
-    if subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{_RC1}^{{commit}}"], capture_output=True).returncode:
-        pytest.skip("the v0.25.0-rc1 commit c36b46e3 is not in this checkout (shallow clone)")
+    if subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True).returncode:
+        _skip_or_fail_in_ci(f"the {reader} commit {commit[:8]} is not in this checkout (shallow clone)")
     engine = _engine(tmp_path)
     try:
         _pre, out = _recover(engine, monkeypatch)
         payload = _durable_commit_proof(engine, "S0")
         assert payload["version"] == 3 and payload["descriptor_version"] == 4
         assert _V0240_DURABLE_PROOF_KEYS <= payload.keys()
-        # Load the actual immutable rc1 reconcile module, including its kind filter and cursor.
-        source = subprocess.run(["git", "-C", str(root), "show", f"{_RC1}:reconcile.py"],
+        # Load the actual immutable old reconcile module, including its kind filter and cursor.
+        source = subprocess.run(["git", "-C", str(root), "show", f"{commit}:reconcile.py"],
                                 capture_output=True, text=True, check=True).stdout
         module = types.ModuleType("hermes_lcm.rc1_reconcile")
         module.__package__ = "hermes_lcm"
         monkeypatch.setitem(sys.modules, module.__name__, module)
-        exec(compile(source, "v0.25.0-rc1:reconcile.py", "exec"), module.__dict__)
+        exec(compile(source, f"{reader}:reconcile.py", "exec"), module.__dict__)
         host = out + [{"role": "assistant", "content": "rollback reply"}]
         engine.ingest(host)
         for name in ("_occurrence_replay_identities", "_durable_commit_proof_payload", "_cursor_from_durable_commit_proof"):
