@@ -26,7 +26,12 @@ placeholders; replaces matches with pattern-only placeholders; scans for residua
 and fails closed before transport on any invalid state. `LCM_EMBEDDING_PRIVACY_ENABLED=false`
 is an explicit opt-out that dispatches raw input under the `privacy:off` revision. Optional
 Voyage reranking is covered by the same resolution. A privacy-policy error on the
-`lcm_recall` path raises; it is never a silent degrade to full-text.
+`lcm_recall` path (an invalid catalog, a residual match, dispatch-time drift) raises; it is
+never a silent degrade to full-text. A stale vector identity is different: when no active
+cloud profile matches, or the stored vectors carry an older privacy revision, `lcm_recall`
+answers from its full-text arm (for every `include`) with `degraded=true` and an
+`embedding_identity_stale:` reason, sends no query to the stale arm, and reads none of its
+vectors. The remedy is `/lcm embed warmup`, then `/lcm embed backfill --apply`.
 
 Vector identity binds provider, model, dimension, storage shape, and the active
 privacy revision. A policy change requires a new warmup/identity rather than
