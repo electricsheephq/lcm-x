@@ -3892,7 +3892,8 @@ def _embedding_backfill_report(
     if privacy_withheld:
         lines.append(
             f"privacy_withheld: {privacy_withheld} document(s) refused by the "
-            "privacy policy; they stay pending"
+            "privacy policy; not sent, they stay pending (an uncertain row "
+            "retried with --retry-uncertain keeps its in-flight marker)"
         )
     if error:
         lines.append(f"error: {error}")
