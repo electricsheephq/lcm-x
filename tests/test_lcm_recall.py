@@ -75,6 +75,157 @@ def recall_engine(tmp_path):
         store.close()
 
 
+def test_fulltext_recall_natural_language_question(recall_engine):
+    engine = recall_engine
+    engine._config.embeddings_enabled = False
+    engine._store.append("session-old", {
+        "role": "user",
+        "content": "We adopted a beagle puppy last spring and named him Biscuit.",
+    })
+    engine._store.append("session-other", {
+        "role": "user", "content": "Quarterly budget review moved to Thursday afternoon.",
+    })
+
+    payload = json.loads(lcm_tools.lcm_recall(
+        {"query": "What name did we give the beagle puppy?"}, engine=engine,
+    ))
+    assert payload["hits"]
+    assert payload["hits"][0]["session_id"] == "session-old"
+    assert payload["provenance"]["coverage"]["fts"] == "ok"
+    assert payload["degraded"] is True
+
+
+@pytest.mark.parametrize("query", ["what did the?", "?!,", "and OR the!"])
+def test_fulltext_recall_empty_content_query_keeps_raw_path(recall_engine, monkeypatch, query):
+    from hermes_lcm.search_query import build_recall_or_query
+
+    assert build_recall_or_query(query) == ""
+    engine = recall_engine
+    engine._config.embeddings_enabled = False
+    engine._store.append("session-old", {"role": "user", "content": "what did the"})
+    original = lcm_tools._lcm_grep_full_text_with_deadline
+    calls = []
+
+    def capture(args, **kwargs):
+        calls.append(dict(args))
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", capture)
+    payload = json.loads(lcm_tools.lcm_recall({"query": query}, engine=engine))
+    assert calls[0]["query"] == query
+    assert not calls[0].get("_allow_operators", False)
+    assert calls[0].get("sort", "recency") == "recency"
+    expected = json.loads(lcm_tools._lcm_grep_full_text(
+        {"query": query, "session_scope": "all"}, engine=engine,
+    ))
+    assert [hit["store_id"] for hit in payload["hits"]] == [
+        hit["store_id"] for hit in expected["results"]
+    ]
+    assert payload["provenance"]["coverage"]["fts"] == "ok"
+    assert payload["degraded"] is True
+
+
+@pytest.mark.parametrize("mode", ["full_text", "semantic", "hybrid"])
+def test_public_grep_cannot_enable_recall_operators(recall_engine, monkeypatch, mode):
+    engine = recall_engine
+    engine._config.embeddings_enabled = False
+    engine._store.append("session-old", {"role": "user", "content": "beagle puppy"})
+    original = engine._store.search
+    operator_flags = []
+
+    def capture(query, **kwargs):
+        operator_flags.append(kwargs.get("allow_operators"))
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(engine._store, "search", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        engine, "beagle puppy", candidate_limit=10,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert hits
+    assert operator_flags == [True]
+
+    args = {"query": "beagle OR puppy", "session_scope": "all", "mode": mode}
+    ordinary = json.loads(lcm_tools.lcm_grep(args, engine=engine))
+    crafted = json.loads(lcm_tools.lcm_grep(
+        {**args, "_allow_operators": True}, engine=engine,
+    ))
+    assert crafted == ordinary
+    assert crafted["results"] == []
+    assert operator_flags == [True, False, False]
+
+
+def test_recall_or_emoji_signal_survives_launch_distractors(recall_engine, monkeypatch):
+    engine = recall_engine
+    target = engine._store.append("emoji", {"role": "user", "content": "launch 🚀"})
+    for index in range(40):
+        engine._store.append(f"launch-{index}", {"role": "user", "content": "launch"})
+    original = engine._store._search_like
+    like_queries = []
+
+    def capture(query, **kwargs):
+        like_queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(engine._store, "_search_like", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        engine, "launch 🚀", candidate_limit=5,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert target in [hit["store_id"] for hit in hits]
+    assert len(hits) <= 5
+    assert like_queries == ["launch 🚀"]
+
+
+def test_recall_or_cjk_keeps_existing_like_route(recall_engine, monkeypatch):
+    from hermes_lcm.search_query import build_recall_or_query
+
+    target = recall_engine._store.append("cjk", {"role": "user", "content": "launch 東京"})
+    original = recall_engine._store._search_like
+    like_queries = []
+
+    def capture(query, **kwargs):
+        like_queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "_search_like", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        recall_engine, "launch 東京", candidate_limit=5,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert [hit["store_id"] for hit in hits] == [target]
+    assert like_queries == [build_recall_or_query("launch 東京")] == ["launch OR 東京"]
+
+
+@pytest.mark.parametrize("delta", [False, True])
+def test_recall_or_answer_ready_centers_content_term(recall_engine, delta):
+    recall_engine._config.embeddings_enabled = False
+    content = "somewhere Zebrawood " + "filler " * 500 + "zEBra now " + "tail " * 500
+    store_id = recall_engine._store.append("late-term", {"role": "user", "content": content})
+    store_ids = {store_id}
+    if delta:
+        store_ids.add(recall_engine._store.append("late-term-other", {"role": "user", "content": content}))
+    payload = json.loads(lcm_tools.lcm_recall({
+        "query": "where is Zebra now", "detail": "answer_ready", "limit": 1,
+        **({"seen_refs": []} if delta else {}),
+    }, engine=recall_engine))
+    hit = payload["hits"][0]
+    assert hit["store_id"] in store_ids
+    assert "zEBra now" in hit["content"]
+    assert hit["evidence_span"]["char_start"] == content.index("zEBra")
+    if delta:
+        refill = json.loads(lcm_tools.lcm_recall({
+            "query": "where is Zebra now", "detail": "answer_ready", "limit": 1,
+            "seen_refs": [hit["exact_ref"]],
+        }, engine=recall_engine))["hits"][0]
+        assert refill["store_id"] in store_ids - {hit["store_id"]}
+        assert "zEBra now" in refill["content"]
+        assert refill["evidence_span"]["char_start"] == content.index("zEBra")
+
+
 def _add_summary(
     engine,
     summary,
@@ -4577,3 +4728,36 @@ def test_cross_session_summary_hint_quotes_hostile_session_ids():
     )
 
     assert hint == f"lcm_expand(node_id=7, session_id={hostile!r})"
+
+
+@pytest.mark.parametrize("late", ["New-York", "New\nYork"], ids=["hyphen", "newline"])
+def test_recall_or_answer_ready_centers_phrase_across_separators(recall_engine, late):
+    """An FTS5 phrase matches adjacent tokens across punctuation and line breaks; centring follows it."""
+    recall_engine._config.embeddings_enabled = False
+    content = "renewal notes " + "filler " * 500 + late + " office " + "tail " * 500
+    recall_engine._store.append("late-phrase", {"role": "user", "content": content})
+    hit = json.loads(lcm_tools.lcm_recall(
+        {"query": '"New York"', "detail": "answer_ready", "limit": 1}, engine=recall_engine))["hits"][0]
+    assert late in hit["content"]
+    assert hit["evidence_span"]["char_start"] == content.index(late)
+
+
+def test_recall_or_answer_ready_phrase_gap_never_splits_a_combining_mark(recall_engine):
+    """unicode61 indexes "a\u0301b" as one token, so it is no phrase match for "a b"; centring skips it."""
+    recall_engine._config.embeddings_enabled = False
+    content = "a\u0301b " + "filler " * 500 + "a b " + "tail " * 500
+    recall_engine._store.append("mark", {"role": "user", "content": content})
+    hit = json.loads(lcm_tools.lcm_recall(
+        {"query": '"a b"', "detail": "answer_ready", "limit": 1}, engine=recall_engine))["hits"][0]
+    assert hit["evidence_span"]["char_start"] == content.index("a b ")
+
+
+@pytest.mark.parametrize("inside", ["\ue000", "\U000f0000", "\u07fd", "\u0898"], ids=["pua", "pua-astral", "nko-mark", "arabic-mark"])
+def test_recall_or_answer_ready_phrase_gap_never_crosses_a_token_character(recall_engine, inside):
+    """unicode61 keeps these inside a token, so "New<c>York" is no match for "New York"; centring skips it."""
+    recall_engine._config.embeddings_enabled = False
+    content = f"New{inside}York " + "filler " * 500 + "New York office " + "tail " * 500
+    recall_engine._store.append("token-char", {"role": "user", "content": content})
+    hit = json.loads(lcm_tools.lcm_recall(
+        {"query": '"New York"', "detail": "answer_ready", "limit": 1}, engine=recall_engine))["hits"][0]
+    assert hit["evidence_span"]["char_start"] == content.index("New York office")

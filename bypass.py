@@ -402,6 +402,7 @@ class BypassMixin:
             return self._trim_bypass_compacted_to_cap(messages, target_tokens)
         head_count = max(1, min(self.protect_first_n, len(messages)))
         tail_count = max(1, min(self.protect_last_n, len(messages) - head_count))
+        head, tail = list(messages[:head_count]), list(messages[-tail_count:])
         marker = {
             "role": "user",
             "content": (
@@ -410,7 +411,9 @@ class BypassMixin:
                 "were dropped to keep the request within the model context window.]"
             ),
         }
-        compacted = list(messages[:head_count]) + [marker] + list(messages[-tail_count:])
+        self._mint_engine_uids([(marker, "omitted_marker", None, "omitted_marker")],
+                               taken=(row.get("message_uid") for row in head + tail))
+        compacted = head + [marker] + tail
         return self._trim_bypass_compacted_to_cap(compacted, target_tokens)
 
     def _compress_lcm_bypassed_session(

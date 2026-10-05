@@ -73,8 +73,26 @@ def file_coverage(per_file: dict[str, list[dict]]) -> list[str]:
 
 def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[dict]] | None = None) -> list[str]:
     from bench.instruments.reliability import cells as C
+    from bench.instruments.reliability import controls as CT
 
     problems = (file_coverage(per_file) if per_file is not None else []) + completeness(results)
+    groups = {}
+    for r in results:
+        groups.setdefault((r["host"], r.get("transport")), []).append(r)
+    for (host, transport), rows in groups.items():
+        required = host in CT.P8_MUST_SUPPORT.get(transport, ())
+        for cell, want in CT.P8_CONTROLS.items():
+            got = [r for r in rows if r["cell"] == cell]
+            where = f"{host} {cell} ({transport or 'in-process'}): P8 control"
+            if not got and required:
+                problems.append(f"{where}: missing row")
+            for r in got:
+                if r["verdict"] == "UNSUPPORTED" and not required:
+                    continue
+                if r["verdict"] != want:
+                    problems.append(f"{where}: {r['verdict']}, expected {want}")
+                elif want == "FAIL" and "B9" not in (r.get("failed_bars") or {}):
+                    problems.append(f"{where}: FAIL without B9")
     for r in results:
         where = f"{r['verdict']} {r['host']} {r['cell']} ({r.get('transport', 'in-process')})"
         if r["verdict"] == "ERROR":
@@ -82,8 +100,10 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
         elif r["verdict"] == "FAIL" and in_gate_set(r["cell"]):
             targets = set(r.get("targets") or [])
             open_targets = targets & open_issues
+            transport = r.get("transport", "in-process")
             declared = {bar for target in open_targets if target in C.ISSUES
-                        and r["host"].startswith(C.ISSUE_HOSTS.get(target, ("",))) for bar in C.ISSUES[target][0]}
+                        and r["host"].startswith(C.ISSUE_HOSTS.get(target, ("",)))
+                        and transport in C.ISSUE_TRANSPORTS.get(target, (transport,)) for bar in C.ISSUES[target][0]}
             failed = set(r.get("failed_bars") or {})
             uncovered = sorted(failed - declared)
             if not failed or uncovered:

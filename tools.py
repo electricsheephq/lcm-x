@@ -45,7 +45,9 @@ from .extraction import sanitize_pre_compaction_content
 from .inactive_record import inactive_record_notice
 from .level3_repair import scan_level3_fragments
 from .ingest_protection import (
+    EmbeddingIdentityStaleError,
     EmbeddingPrivacyPolicyError,
+    embedding_privacy_revision,
     embedding_provider_requires_privacy,
     externalized_payload_stats,
     extract_ingest_externalized_refs,
@@ -90,7 +92,9 @@ from .retrieval_core import (
     run_knn,
 )
 from .rollup_store import RollupStore
-from .search_query import AGE_DECAY_RATE, normalize_search_sort
+from .search_query import (
+    AGE_DECAY_RATE, build_recall_or_query, contains_emoji, normalize_search_sort, recall_content_terms,
+)
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
 from .store import build_message_fts_spec
@@ -1257,6 +1261,12 @@ def _query_terms_for_match_window(query: str | None) -> list[str]:
             seen.add(key)
             unique.append(term)
     return unique
+
+
+# Between the tokens of a quoted phrase: an FTS5 phrase matches adjacent tokens across punctuation and line breaks.
+# Only characters that are certainly unicode61 separators count (whitespace, ASCII punctuation); marks and
+# private-use characters stay inside a token, and any other gap falls back to the raw-query offset.
+_RECALL_PHRASE_GAP = r"[\s!-/:-@\[-`{-~]+"
 
 
 def _content_offset_for_query_match(content: str, query: str | None) -> int:
@@ -3272,6 +3282,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 time_from=time_from,
                 time_to=time_to,
                 exclude_session_ids=excluded_session_ids,
+                allow_operators=bool(args.get("_allow_operators", False)),
             )
             for hit in msg_hits:
                 if hit.get("session_id") in excluded_session_ids:
@@ -3726,31 +3737,50 @@ def _lcm_grep_full_text_with_deadline(
         }
 
 
-def _lcm_active_embedding_revision(
-    engine: "LCMEngine", provider: Any, *, task: str
-) -> str:
-    db_path = Path(engine._store.db_path).resolve()
-    conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+_EMBEDDING_IDENTITY_STALE_REASON = (
+    "embedding_identity_stale: stored vectors use an older embedding privacy "
+    "revision; run /lcm embed warmup, then /lcm embed backfill --apply"
+)
+
+
+def _lcm_embedding_profile_revision(
+    conn: sqlite3.Connection, *, provider: str, model: str, task: str
+) -> str | None:
     try:
         row = conn.execute(
             "SELECT revision FROM lcm_embedding_profile "
             "WHERE active=1 AND archived_at IS NULL AND task=? "
             "AND provider=? AND model_name=? "
             "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1",
-            (
-                str(task),
-                str(getattr(provider, "provider_id", "") or "").strip().lower(),
-                str(getattr(provider, "model_id", "") or "").strip(),
-            ),
+            (task, provider, model),
         ).fetchone()
+    except sqlite3.OperationalError as exc:
+        if "no such table: lcm_embedding_profile" not in str(exc):
+            raise
+        return None
+    return str(row[0] or "") if row is not None else None
+
+
+def _lcm_active_embedding_revision(
+    engine: "LCMEngine", provider: Any, *, task: str
+) -> str:
+    db_path = Path(engine._store.db_path).resolve()
+    conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+    try:
+        revision = _lcm_embedding_profile_revision(
+            conn,
+            task=str(task),
+            provider=str(getattr(provider, "provider_id", "") or "").strip().lower(),
+            model=str(getattr(provider, "model_id", "") or "").strip(),
+        )
     finally:
         conn.close()
-    if row is None:
-        raise EmbeddingPrivacyPolicyError(
+    if revision is None:
+        raise EmbeddingIdentityStaleError(
             f"no active {task} vector identity matches the configured cloud provider; "
             "run `/lcm embed warmup` before semantic retrieval"
         )
-    return str(row[0] or "")
+    return revision
 
 
 def _lcm_grep_embed_query(
@@ -3760,6 +3790,7 @@ def _lcm_grep_embed_query(
     engine: "LCMEngine | None" = None,
     task: str = "summary",
     remaining_s: float,
+    reuse_vector: list[float] | None = None,
 ) -> list[float]:
     """Embed one query within the operation's remaining absolute budget."""
     outbound_query = str(query)
@@ -3779,10 +3810,13 @@ def _lcm_grep_embed_query(
             engine, provider, task=task
         )
         if current_revision != privacy_revision:
-            raise EmbeddingPrivacyPolicyError(
+            raise EmbeddingIdentityStaleError(
                 "cloud embedding privacy policy differs from registered vector "
                 "identity; run `/lcm embed warmup` before semantic retrieval"
             )
+
+    if reuse_vector is not None:
+        return reuse_vector  # Identity must match even when sharing a query embed.
 
     def invoke() -> list[float]:
         if privacy_revision is not None:
@@ -4086,6 +4120,8 @@ def _lcm_grep_semantic(
             task="summary",
             remaining_s=deadline - time.monotonic(),
         )
+    except EmbeddingIdentityStaleError:
+        return degraded(_EMBEDDING_IDENTITY_STALE_REASON)
     except VoyageError as exc:
         if exc.kind == "auth":
             return {
@@ -4358,6 +4394,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": exclusions_error})
     parsed_args = dict(args)
     parsed_args["_excluded_session_ids"] = excluded_session_ids
+    parsed_args.pop("_allow_operators", None)
     if mode == "full_text":
         return _lcm_grep_full_text(parsed_args, **kwargs)
 
@@ -4974,6 +5011,7 @@ def _lcm_recall_answer_ready_content(
     query: str,
     expanded_limit: int = _LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT,
     rows_by_id: dict[int, dict[str, Any]] | None = None,
+    fts_arm_index: int | None = None,
 ) -> dict[tuple, dict[str, Any]]:
     """Hydrate selected exact refs with bounded reads and no retrieval search.
 
@@ -5034,6 +5072,18 @@ def _lcm_recall_answer_ready_content(
             match_end = match_start + min(
                 max(1, len(query)), _LCM_RECALL_SNIPPET_CHARS
             )
+            if fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
+                matches = [
+                    match for term in recall_content_terms(query)
+                    if (match := re.search(
+                        r"(?<!\w)" + _RECALL_PHRASE_GAP.join(
+                            "(?ai:" + re.escape(token) + ")" for token in term.strip('"').split()
+                        ) + r"(?!\w)", content
+                    )) is not None
+                ]
+                if matches:
+                    match = min(matches, key=lambda match: match.start())
+                    match_start, match_end = match.span()
         window = _lcm_recall_content_window(
             content,
             match_start=match_start,
@@ -5108,9 +5158,13 @@ def _lcm_recall_fts_arm(
     excluded_session_ids: set[str],
 ) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
     """FTS arm: raw messages across all eligible sessions."""
+    # Emoji cannot reach MATCH: keep the raw query on the existing LIKE route.
+    or_query = "" if contains_emoji(query) else build_recall_or_query(query)
     payload = _lcm_grep_full_text_with_deadline(
         {
-            "query": query,
+            "query": or_query or query,
+            "_allow_operators": bool(or_query),
+            "sort": "relevance" if or_query or contains_emoji(query) else "recency",
             "mode": "recall",
             "session_scope": "all",
             "limit": candidate_limit,
@@ -5650,6 +5704,12 @@ def _lcm_recall_has_usable_vector_corpus(
     model_name = str(model_name or "").strip()
     if not provider_name or not model_name or time.monotonic() >= deadline:
         return False
+    privacy_revision = None
+    if embedding_provider_requires_privacy(provider_name):
+        try:
+            privacy_revision = embedding_privacy_revision(engine._config)
+        except EmbeddingPrivacyPolicyError:
+            pass  # Preserve the preflight; query dispatch still raises (#367).
     scan_deadline = _lcm_recall_preflight_scan_deadline(time.monotonic(), deadline)
 
     conn: sqlite3.Connection | None = None
@@ -5696,6 +5756,10 @@ def _lcm_recall_has_usable_vector_corpus(
             # this check makes the scan budget binding regardless of handler
             # granularity.
             if time.monotonic() >= scan_deadline:
+                return False
+            if privacy_revision is not None and _lcm_embedding_profile_revision(
+                conn, provider=provider_name, model=selected_model, task=task
+            ) != privacy_revision:
                 return False
             profile = conn.execute(
                 """
@@ -5880,7 +5944,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     provider_override = str(kwargs.get("provider_override") or "").strip()
 
     # -- FTS arm (the default-on value: works with embeddings disabled) --
-    if run_fts:
+    def _run_fts_arm() -> None:
+        nonlocal timed_out
         fts_deadline = deadline
         fts_sub_budget_applied = False
         configured_provider = provider_override or str(
@@ -5962,6 +6027,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             arm_hits["fts"] = hits
             coverage["fts"] = "ok"
 
+    if run_fts:
+        _run_fts_arm()
+    # include='summaries' runs no FTS arm while embeddings are on. When its only
+    # semantic arm has a stale identity, it falls back to full text, as it
+    # already does with embeddings off.
+    summary_stale_fts_fallback = False
+
     # -- Vector arms. Local/same-model corpora share one query embedding;
     # Voyage's context chunk corpus resolves and embeds with its own model. --
     if run_summary or run_chunk:
@@ -6017,6 +6089,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     embedding_query_metrics.append(
                         _lcm_embedding_query_metric(provider)
                     )
+            except EmbeddingIdentityStaleError:
+                coverage["summary"] = "none"
+                degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                summary_stale_fts_fallback = not run_fts
             except EmbeddingPrivacyPolicyError:
                 # Deterministic configuration error — never degrade (#367).
                 raise
@@ -6029,6 +6105,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             except Exception as exc:  # noqa: BLE001 - degrade, never bare-error the whole tool
                 provider = None
                 degraded_reasons.append(f"embedding provider unavailable: {exc}")
+            if summary_stale_fts_fallback:
+                _run_fts_arm()
 
             if run_chunk and provider is not None:
                 try:
@@ -6048,7 +6126,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         and chunk_provider.provider_id == provider.provider_id
                         and chunk_provider.model_id == provider.model_id
                     ):
-                        chunk_query_vector = query_vector
+                        chunk_query_vector = _lcm_grep_embed_query(
+                            chunk_provider, query, engine=engine, task="chunk",
+                            remaining_s=deadline - time.monotonic(),
+                            reuse_vector=query_vector,
+                        )
                     else:
                         chunk_query_vector = _lcm_grep_embed_query(
                             chunk_provider,
@@ -6060,6 +6142,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         embedding_query_metrics.append(
                             _lcm_embedding_query_metric(chunk_provider)
                         )
+                except EmbeddingIdentityStaleError:
+                    coverage["chunk"] = "none"
+                    degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
                 except EmbeddingPrivacyPolicyError:
                     # Deterministic configuration error — never degrade (#367).
                     raise
@@ -6100,6 +6185,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["summary"] = "none"
+                    except EmbeddingIdentityStaleError:
+                        coverage["summary"] = "none"
+                        degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
                     except EmbeddingPrivacyPolicyError:
                         # Deterministic configuration error — never degrade (#367).
                         raise
@@ -6132,6 +6220,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["chunk"] = "none"
+                    except EmbeddingIdentityStaleError:
+                        coverage["chunk"] = "none"
+                        degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
                     except EmbeddingPrivacyPolicyError:
                         # Deterministic configuration error — never degrade (#367).
                         raise
@@ -6275,6 +6366,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             query=query,
             expanded_limit=expanded_limit,
             rows_by_id=strict_rows,
+            fts_arm_index=fts_arm_index,
         )
         if delta_requested:
             def _novel(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -6320,6 +6412,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         query=query,
                         expanded_limit=len(more),
                         rows_by_id=strict_selector.rows,
+                        fts_arm_index=fts_arm_index,
                     )
                 )
                 selected_entries.extend(_novel(more))
@@ -7444,6 +7537,7 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
         "reachability_probed": bool(probe.get("probed")),
         "reason": probe.get("detail"),
     }
+    # An unavailable provider is the prerequisite blocker: warmup cannot succeed until it is fixed.
     if not probe.get("available"):
         detail["impact"] = (
             "semantic retrieval is degraded: lcm_recall reports degraded=true and "
@@ -7454,6 +7548,43 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
             "status": "warn",
             "detail": detail,
         }
+    provider_id = str(probe.get("provider") or "")
+    if embedding_provider_requires_privacy(provider_id):
+        provider_id = {
+            "voyageai": "voyage",
+            "openai": "openai-compatible",
+            "siliconflow": "openai-compatible",
+        }.get(provider_id, provider_id)
+        try:
+            current_revision = embedding_privacy_revision(config)
+        except EmbeddingPrivacyPolicyError as exc:
+            detail["reason"] = str(exc)
+            return {
+                "check": "embedding_provider_health",
+                "status": "warn",
+                "detail": detail,
+            }
+        db_path = Path(engine._store.db_path).resolve()
+        conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True)
+        try:
+            revision = _lcm_embedding_profile_revision(
+                conn, provider=provider_id, model=str(probe.get("model") or ""),
+                task="summary",
+            )
+        finally:
+            conn.close()
+        if revision != current_revision:
+            detail.update({
+                "embedding_identity_stale": True,
+                "reason": _EMBEDDING_IDENTITY_STALE_REASON,
+                "impact": "lcm_recall serves full-text only until the profile is re-registered",
+                "remedy": "/lcm embed warmup, then /lcm embed backfill --apply",
+            })
+            return {
+                "check": "embedding_provider_health",
+                "status": "warn",
+                "detail": detail,
+            }
     return {
         "check": "embedding_provider_health",
         "status": "pass",

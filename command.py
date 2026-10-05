@@ -63,8 +63,9 @@ from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
-from .store import build_message_fts_spec, delete_message_relations
+from .store import build_message_fts_spec, delete_host_uid_bindings, delete_message_relations
 from .survival_fit import SURVIVAL_FIT_COUNTER_KEY
+from .host_uid import host_uid_doctor_lines
 from .chunking import (
     VALID_CONTENT_POLICIES,
     chunk_message,
@@ -1884,6 +1885,7 @@ def _doctor_text(engine) -> str:
         f"missing_externalized_payload_refs: {externalized_integrity['missing_externalized_payload_refs']}",
         f"unreferenced_externalized_payload_files: {externalized_integrity['unreferenced_externalized_payload_files']}",
         f"survival_fit_count: {'unknown' if fit_count is None else fit_count}",
+        *host_uid_doctor_lines(engine),
     ]
     if inactive_process:
         lines.append(f"inactive_process: {inactive_process}")
@@ -2047,6 +2049,11 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             ).fetchall()
         ]
         delete_message_relations(conn, (
+            f"SELECT store_id FROM messages WHERE EXISTS ("
+            f"SELECT 1 FROM {scope_table} AS scope "
+            "WHERE scope.session_id = messages.session_id)"
+        ))
+        delete_host_uid_bindings(conn, (
             f"SELECT store_id FROM messages WHERE EXISTS ("
             f"SELECT 1 FROM {scope_table} AS scope "
             "WHERE scope.session_id = messages.session_id)"
@@ -3848,6 +3855,7 @@ def _embedding_backfill_report(
     privacy_revision: str | None = None,
     privacy_transformed: int = 0,
     privacy_blocked: int = 0,
+    privacy_withheld: int = 0,
 ) -> str:
     header = "LCM embedding backfill" if corpus is None else f"LCM {corpus} backfill"
     lines = [header, f"mode: {mode}"]
@@ -3881,6 +3889,12 @@ def _embedding_backfill_report(
         ])
     if stop_reason:
         lines.append(f"stop_reason: {stop_reason}")
+    if privacy_withheld:
+        lines.append(
+            f"privacy_withheld: {privacy_withheld} document(s) refused by the "
+            "privacy policy; not sent, they stay pending (an uncertain row "
+            "retried with --retry-uncertain keeps its in-flight marker)"
+        )
     if error:
         lines.append(f"error: {error}")
     if uncertain:
@@ -4146,6 +4160,13 @@ def _embedding_backfill_summary_text(
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == profile_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
         estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
         return _embedding_backfill_report(
             mode=mode,
@@ -4168,6 +4189,7 @@ def _embedding_backfill_summary_text(
             privacy_revision=privacy_revision,
             privacy_transformed=privacy_transformed,
             privacy_blocked=privacy_blocked,
+            privacy_withheld=privacy_withheld,
         )
 
     ttl_s = _embedding_backfill_lease_ttl_s()
@@ -4190,6 +4212,7 @@ def _embedding_backfill_summary_text(
     privacy_revision: str | None = None
     privacy_transformed = 0
     privacy_blocked = 0
+    privacy_withheld = 0
     try:
         store = VectorStore(db_path, config=engine._config)
         conn = store.connection
@@ -4244,6 +4267,13 @@ def _embedding_backfill_summary_text(
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == profile_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
         if privacy_error is not None:
             error = privacy_error
             stop_reason = "privacy_refused"
@@ -4253,10 +4283,10 @@ def _embedding_backfill_summary_text(
         # 60/min guard mid-way and stalls.
         provider = (
             None
-            if privacy_error is not None
+            if privacy_error is not None or (privacy_withheld and not documents)
             else resolve_provider(engine._config, for_backfill=True)
         )
-        if privacy_error is not None:
+        if privacy_error is not None or (privacy_withheld and not documents):
             pass
         elif provider is None:
             error = "embedding provider is not configured; run `/lcm embed warmup`"
@@ -4570,6 +4600,7 @@ def _embedding_backfill_summary_text(
         failed=failed,
         uncertain=uncertain_count,
         skipped=len(skipped),
+        privacy_withheld=privacy_withheld,
     )
     estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
     return _embedding_backfill_report(
@@ -4578,7 +4609,7 @@ def _embedding_backfill_summary_text(
         provider=provider_name,
         model=model,
         pending=pending,
-        selected=len(documents),
+        selected=len(documents) + privacy_withheld,
         estimated_tokens=estimated_tokens,
         estimated_cost_tokens=estimated_cost_tokens,
         estimated_batches=estimated_batches,
@@ -4595,6 +4626,7 @@ def _embedding_backfill_summary_text(
         privacy_revision=privacy_revision,
         privacy_transformed=privacy_transformed,
         privacy_blocked=privacy_blocked,
+        privacy_withheld=privacy_withheld,
     )
 
 
@@ -4980,6 +5012,13 @@ def _chunk_backfill_text(
             provider_name=provider_name,
             expected_revision=expected_privacy_revision,
         )
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == expected_privacy_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
         estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(
             documents
         )
@@ -5006,6 +5045,7 @@ def _chunk_backfill_text(
             privacy_revision=privacy_revision,
             privacy_transformed=privacy_transformed,
             privacy_blocked=privacy_blocked,
+            privacy_withheld=privacy_withheld,
         )
 
     # -- apply --
@@ -5053,6 +5093,7 @@ def _chunk_backfill_text(
     privacy_revision: str | None = None
     privacy_transformed = 0
     privacy_blocked = 0
+    privacy_withheld = 0
     try:
         store = VectorStore(db_path, config=engine._config)
         store.ensure_chunk_schema()
@@ -5103,6 +5144,13 @@ def _chunk_backfill_text(
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == profile_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
         if privacy_error is not None:
             error = privacy_error
             stop_reason = "privacy_refused"
@@ -5112,10 +5160,10 @@ def _chunk_backfill_text(
         )
         provider = (
             None
-            if privacy_error is not None
+            if privacy_error is not None or (privacy_withheld and not documents)
             else resolve_provider(chunk_provider_config, for_backfill=True)
         )
-        if privacy_error is not None:
+        if privacy_error is not None or (privacy_withheld and not documents):
             pass
         elif provider is None:
             error = "embedding provider is not configured; run `/lcm embed warmup`"
@@ -5382,11 +5430,12 @@ def _chunk_backfill_text(
         error=error, lease_lost=lease_lost, budget_exhausted=budget_exhausted,
         embedded=embedded, selected_embeddable=selected_embeddable,
         failed=failed, uncertain=uncertain_count, skipped=len(skipped),
+        privacy_withheld=privacy_withheld,
     )
     estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
     return _embedding_backfill_report(
         mode=mode, status=status, provider=provider_name, model=model,
-        pending=pending, selected=len(documents),
+        pending=pending, selected=len(documents) + privacy_withheld,
         estimated_tokens=estimated_tokens, estimated_cost_tokens=estimated_cost_tokens,
         estimated_batches=estimated_batches, embedded=embedded, skipped=skipped,
         failed=failed, remaining=remaining, duration=time.monotonic() - started,
@@ -5396,6 +5445,7 @@ def _chunk_backfill_text(
         privacy_revision=privacy_revision,
         privacy_transformed=privacy_transformed,
         privacy_blocked=privacy_blocked,
+        privacy_withheld=privacy_withheld,
     )
 
 
@@ -5409,6 +5459,7 @@ def _embedding_backfill_status(
     failed: list[tuple[str, str]],
     uncertain: int = 0,
     skipped: int = 0,
+    privacy_withheld: int = 0,
 ) -> str:
     """Report the truthful terminal status — never a premature ``complete``."""
     if error:
@@ -5419,6 +5470,8 @@ def _embedding_backfill_status(
         return "partial"
     if failed:
         return "failed" if embedded == 0 else "partial"
+    if privacy_withheld:
+        return "partial"
     if embedded >= selected_embeddable:
         return "complete"
     return "partial"
