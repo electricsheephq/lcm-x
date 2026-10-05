@@ -25,8 +25,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   user rows (within 256 store ids), so a new turn is not consumed by an older identical row. (#851)
 - Fix: on a host that rotates sessions, a branch of a session that ended by compression no longer treats that
   session as its ancestor, so its copied rows are stored as its own instead of matched to the parent's. (#891)
-- Fix: one privacy-refused document no longer stops a cloud embedding backfill; refused documents are withheld and stay
-  pending, and an apply run that withheld documents reports `partial` with a `privacy_withheld` count. (#759)
+- Fix: one privacy-refused document no longer stops a cloud embedding backfill; refused documents are withheld and never sent,
+  and an apply run that withheld documents and had no failure reports `partial` with a `privacy_withheld` count. (#759)
 - Fix: stored vectors with an older privacy revision no longer make `lcm_recall` raise; recall answers from full text,
   for every `include`, marked degraded with an `embedding_identity_stale:` reason, and `lcm_doctor` warns with the
   remedy (`/lcm embed warmup`, then `/lcm embed backfill --apply`). An invalid privacy policy still raises. (#387, #882)
