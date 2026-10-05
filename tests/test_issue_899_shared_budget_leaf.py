@@ -66,8 +66,9 @@ def test_shared_budget_random_middle_determinism_and_forced_input(tmp_path, monk
                         for _ in range(rng.randint(1, 8))]
             serialized = engine._serialize_messages(messages)
             fixed = "\n\n".join(f"[{m['role'].upper()}]: " + CLIP_MARKER for m in messages)
-            # Character shares allow 2% approximation; labels and markers sit outside the budget.
-            assert count_tokens(serialized) <= 8_000 * 1.02 + count_tokens(fixed)
+            legacy = [m["content"] if len(m["content"]) <= 3_000 else
+                      m["content"][:2_000] + CLIP_MARKER + m["content"][-800:] for m in messages]
+            assert count_tokens(serialized) <= sum(map(count_tokens, legacy)) + 8_000 * 1.02 + count_tokens(fixed)
             assert serialized == engine._serialize_messages(messages)
             for role in ("user", "assistant"):
                 assert serialized.count(f"[{role.upper()}]: ") == sum(m["role"] == role for m in messages)
@@ -81,13 +82,20 @@ def test_shared_budget_random_middle_determinism_and_forced_input(tmp_path, monk
         seen = []
         monkeypatch.setattr("hermes_lcm.engine.summarize_with_escalation",
                             lambda **kwargs: (seen.append(kwargs["text"]) or "summary", 1))
-        view = [{"role": "user", "content": "word " * 40_000},
-                {"role": "assistant", "content": "word " * 40_000},
-                {"role": "user", "content": "fresh user"}, {"role": "assistant", "content": "fresh reply"}]
+        old = [{"role": "user" if i % 2 == 0 else "assistant",
+                "content": f"chunk-{i} " + "abc " * 1_250, "timestamp": float(i + 1)} for i in range(30)]
+        assert sum(count_tokens(m["content"]) for m in old) > 30_000
+        view = old + [{"role": "user", "content": "fresh user"}, {"role": "assistant", "content": "fresh reply"}]
         engine.ingest(view)
         assert engine._should_force_overflow_recovery(200_000, view)
         engine.compress(view, current_tokens=200_000, force=True)
         assert seen
-        assert all(count_tokens(text) <= 8_000 * 1.02 + 100 for text in seen)
+        originals = {m["content"].split(" ", 1)[0]: m["content"] for m in old}
+        for text in seen:
+            parts = [part.split(": ", 1)[1] for part in text.split("\n\n")]
+            assert all(len(part.replace(CLIP_MARKER, "")) >= 2_800 for part in parts)
+            sources = [originals[part.split(" ", 1)[0]] for part in parts]
+            legacy_total = sum(count_tokens(src[:2_000] + CLIP_MARKER + src[-800:]) for src in sources)
+            assert count_tokens(text) <= legacy_total + 8_000 * 1.02 + 100
     finally:
         engine.shutdown()

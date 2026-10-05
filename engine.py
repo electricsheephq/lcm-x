@@ -6550,9 +6550,11 @@ class LCMEngine(
         """
         parts: List[List[Any]] = []  # per message: literal strings and indexes into texts
         texts: List[str] = []
+        kinds: List[str] = []
 
-        def text(value: str) -> int:
+        def text(value: str, kind: str = "message") -> int:
             texts.append(value)
+            kinds.append(kind)
             return len(texts) - 1
 
         matched_tool_ids = _matched_tool_call_ids(messages)
@@ -6576,7 +6578,7 @@ class LCMEngine(
                 )
                 if externalized:
                     preview = externalized_preview(sanitize_pre_compaction_content(content))
-                    parts.append([f"[TOOL RESULT {tool_id}]: " + externalized["placeholder"], text(preview)])
+                    parts.append([f"[TOOL RESULT {tool_id}]: " + externalized["placeholder"], text(preview, "preview")])
                 else:
                     parts.append([f"[TOOL RESULT {tool_id}]: ", text(sanitize_pre_compaction_content(content))])
                 continue
@@ -6612,7 +6614,7 @@ class LCMEngine(
                                 parse_json_strings=True,
                             )
                             args = sanitize_pre_compaction_tool_arguments(args)
-                            part += [("" if first else "\n") + f"  {name}(", text(args), ")"]
+                            part += [("" if first else "\n") + f"  {name}(", text(args, "arguments"), ")"]
                             first = False
                     part.append("\n]")
                 parts.append(part)
@@ -6620,7 +6622,7 @@ class LCMEngine(
 
             parts.append([f"[{role.upper()}]: ", text(content)])
 
-        texts = clip_to_budget(texts, self._config.leaf_chunk_tokens)
+        texts = clip_to_budget(texts, self._config.leaf_chunk_tokens, kinds)
         return "\n\n".join("".join(texts[x] if isinstance(x, int) else x for x in part) for part in parts)
 
     # -- Internal: tool-pair sanitization ------------------------------------

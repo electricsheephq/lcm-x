@@ -8031,7 +8031,7 @@ class TestExtraction:
 
         assert "[Externalized tool output" in serialized
         assert "call_big_default" in serialized
-        assert content[:500] not in serialized
+        assert "\n[preview: " + content[:600] + " … " + content[-300:] + "]" in serialized
 
         payload_dir = hermes_home / "lcm-large-outputs"
         payload_files = list(payload_dir.glob("*.json"))
@@ -8052,7 +8052,6 @@ class TestExtraction:
                 database_path=str(tmp_path / "lcm.db"),
                 large_output_externalization_enabled=False,
                 large_output_externalization_threshold_chars=200,
-                summary_input_clip="legacy",  # #611: the 2,000 + 800 clip is the legacy arm
             ),
             hermes_home=str(hermes_home),
         )
@@ -8067,7 +8066,7 @@ class TestExtraction:
         ])
 
         assert "[Externalized tool output" not in serialized
-        assert "...[truncated]..." in serialized
+        assert serialized == "[TOOL RESULT call_disabled]: " + content
         assert not (hermes_home / "lcm-large-outputs").exists()
 
     def test_serialize_messages_falls_back_to_truncation_when_externalization_path_is_unwritable(self, tmp_path):
@@ -8082,7 +8081,7 @@ class TestExtraction:
                 large_output_externalization_enabled=True,
                 large_output_externalization_threshold_chars=200,
                 large_output_externalization_path=str(blocked_path),
-                summary_input_clip="legacy",  # #611: the 2,000 + 800 clip is the legacy arm
+                leaf_chunk_tokens=1,  # Exercise the floor when the inline fallback exceeds its share.
             )
         )
 
@@ -8202,7 +8201,7 @@ class TestExtraction:
 
         assert "[Externalized tool output" in serialized
         assert "call_big_custom" in serialized
-        assert content[:500] not in serialized
+        assert "\n[preview: " + content[:600] + " … " + content[-300:] + "]" in serialized
 
         payload_files = list(output_dir.glob("*.json"))
         assert len(payload_files) == 1
