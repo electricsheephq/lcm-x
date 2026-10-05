@@ -22,6 +22,8 @@ import hermes_lcm.embedding_provider as embedding_provider
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.diagnostics import doctor_guidance_for_check
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.ingest_protection import embedding_privacy_revision
+from hermes_lcm.vector_store import VectorStore
 
 
 def probe_provider_availability(config):
@@ -190,6 +192,14 @@ def test_probe_performs_no_network_or_model_load(tmp_path, monkeypatch):
         embedding_model="voyage-3",
     )
     try:
+        vectors = VectorStore(engine._store.db_path, config=engine._config)
+        try:
+            vectors.register_profile(
+                "voyage-3", "voyage", 2,
+                revision=embedding_privacy_revision(engine._config),
+            )
+        finally:
+            vectors.close()
         _, check = _doctor_check(engine)
         assert check["status"] == "pass"
         # Credential presence is not reachability, and the check must say so.
