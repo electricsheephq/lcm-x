@@ -184,9 +184,9 @@ Each row was checked against the code at `9afb80d0`. The deleting PR repeats the
 | Cursor OR-lattice → the ingest planner | R018 R027 R028 R036 R041 R045–R056 R064 R134 | 19 | merges into the planner (slice C), not on its own |
 | Merge-survivor recognisers (#535, #436 R2–R3, host-uid composite) | R077 R114 R115 R117 R209 R220 R240 R334 R335 R343 R392 R402 | 12 | |
 | Scaffold classifiers | R125 R196 R395 R396 R397 R406 R407 R408 | 8 | |
-| Session-end prefix arbitration | R274 R287–R291 R309 R310 | 8 | waits on the tie-break check (finding (b) below) |
+| Session-end prefix arbitration | R274 R287–R291 R309 R310 | 8 | keeps the tie-break asymmetry as an explicit input (finding (b) below) |
 | Placeholder ordinal and budget matchers | R062 R375 R378 R386 R388 R389 | 6 | |
-| State-store lineage walkers | R193 R195 R325 R326 R459 | 5 | waits on the fork-child check (finding (a) below) |
+| State-store lineage walkers | R193 R195 R325 R326 R459 | 5 | after #891 (finding (a) below) |
 | Content identity tuples and digests | R001 R118 R269 R275 R370 | 5 | the digest bytes must not change: rollback readers compare them |
 | Payload session-ownership guards | R270 R271 R294 R307 R308 | 5 | |
 | Lossy-redaction fence copies | R009 R035 R065 R198 | 4 | |
@@ -220,10 +220,10 @@ Each row was checked against the code at `9afb80d0`. The deleting PR repeats the
 
    The per-rule results are in the inventory table.
 
-## Findings to verify before the merges that depend on them
+## Findings checked before the merges that depend on them
 
-Readers flagged three possible defects in existing rules. Each is checked against the code before the merge that
-depends on it; a real defect gets its own issue and a red-first fix.
+Readers flagged three possible defects in existing rules. Each was checked against the code. A real defect gets its own
+issue and a red-first fix.
 
 - **(a) Fork-child scope in the anchor chain (R193 vs R326).** The host-uid lineage walk excludes fork children, but
   `_identity_anchor_chain` has no such check. A fork child of a session that ended by compression may count as a
@@ -233,7 +233,27 @@ depends on it; a real defect gets its own issue and a red-first fix.
 - **(c) Lineage coverage (R438 vs R448).** The lineage-claimed check covers only the same session; the
   node-covered check in `store_complete` accepts a node from any session.
 
-Status: being verified. The two merge clusters that depend on (a) and (b) wait for the result.
+Results (checked against the code, with synthetic repros):
+
+- **(a) is a real defect: #891.**
+  - A branch child of a compression-ended parent stores 2 of its 10 rows and carries the parent's rows instead.
+    With host uids, its lineage binds to the parent's store ids (proof kind `anchor_replay`, which the shadow gate
+    reports apart).
+  - No row was lost or duplicated.
+  - Trigger: a host that rotates sessions, a gateway chat (the parent and the branch share one conversation id),
+    and a branch that ingests the copied rows after the parent rotated.
+  - Fix: the anchor chain stops at a fork child, with the same predicate as the host-uid walk. The lineage-walker
+    merge then makes the two walks one resolver.
+- **(b) is deliberate.**
+  - While the session is still bound, a tie between the normal and bypass prefixes stores the final row (`>=`).
+  - Once the engine has moved on, a tie does not store it (`>`): it fails closed. The host keeps the reply, and a
+    later ingest of that session stores it.
+  - Tests pin both directions. The merged arbitration keeps the asymmetry behind an explicit "the session still has
+    a live normal binding" input; neither operator can replace both.
+- **(c) is a real difference, but not a defect on its own.**
+  - A session can summarise only rows it owns, and compression moves the parent's summaries to the child. So two
+    live sessions own the same rows only through (a).
+  - The any-session coverage check stays as it is.
 
 ## Execution order
 
@@ -241,6 +261,6 @@ Status: being verified. The two merge clusters that depend on (a) and (b) wait f
 2. **The DELETE batch**, one PR after v0.26.0 GA.
    - It changes no behaviour, except R133's diagnostic label.
    - Proof: the full suite and the rollback-reader tests.
-3. **The MERGE clusters**, one PR each, with parity tests. The two clusters marked above wait on their findings.
+3. **The MERGE clusters**, one PR each, with parity tests. The lineage-walker merge follows #891.
 4. **The planner with `on` mode (slice C)** in its own minor, once the entry conditions hold.
 5. **The legacy readers** are deleted once the sunset count is zero, with a rollback-reader test.
