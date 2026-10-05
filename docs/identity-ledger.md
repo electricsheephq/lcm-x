@@ -35,7 +35,7 @@ The per-rule table is in [identity-ledger-inventory.md](identity-ledger-inventor
 | **DEMOTE-UNDER-ON** | Becomes the fallback. In `on` mode it runs only for rows the uid route cannot decide. On hosts that send no uid it keeps deciding exactly as today. Frozen: bug fixes only. | 111 |
 | **DEMOTE+MERGE** | Demoted, and first folded into one sibling implementation. | 21 |
 | **MERGE** | Copies of one predicate become one function. The refactor is behaviour-neutral. A parity test runs every copy's existing test inputs through the merged function. | 33 |
-| **DELETE** | Changes no identity decision. Each row names its kind: **dead** (no caller), **unreachable** (no input reaches it), **ineffective** (it runs, but its result cannot change a decision), **redundant** (it repeats a computation already made), or **retired write** (it writes a field or relation that no reader in this version or the previous GA reads). Removed with proof: a grep of code, tests and docs, the git history, and the full suite. | 19 |
+| **DELETE** | Changes no identity decision. Each row names its kind: **dead** (no caller), **unreachable** (no input reaches it), **ineffective** (it runs, but its result cannot change a decision), **redundant** (it repeats a computation already made), or **retired write** (it writes a value no reader needs: nothing reads it, or every reader, the previous GA's included, falls back to the same default when it is absent). Removed with proof: a grep of code, tests and docs, the git history, and the full suite. | 19 |
 
 No rule is deleted just because uids exist. LCM keeps supporting hosts that send no uid, so every demoted rule stays
 for as long as that support does.
@@ -295,11 +295,13 @@ Results (checked against the code, with synthetic repros):
   - Fix: the anchor chain stops at a fork child, with the same predicate as the host-uid walk. The lineage-walker
     merge then makes the two walks one resolver.
 - **(b) is deliberate.**
-  - While the session is still bound, a tie between the normal and bypass prefixes stores the final row (`>=`).
+  - While the session is still bound, a tie between the normal and bypass prefixes stores the final row (`>=`),
+    unless the bypass prefix was truncated and the end view is longer than it. That ambiguity vetoes the normal
+    path even on a tie.
   - Once the engine has moved on, a tie does not store it (`>`): it fails closed. The host keeps the reply, and a
     later ingest of that session stores it.
-  - Tests pin both directions. The merged arbitration keeps the asymmetry behind an explicit "the session still has
-    a live normal binding" input; neither operator can replace both.
+  - Tests pin both directions and the veto. The merged arbitration keeps the veto, and keeps the asymmetry behind an
+    explicit "the session still has a live normal binding" input; neither operator can replace both.
 - **(c) is a real difference, but not a defect on its own.**
   - A session can summarise only rows it owns, and compression moves the parent's summaries to the child. So two
     live sessions own the same rows only through (a).
@@ -310,7 +312,8 @@ Results (checked against the code, with synthetic repros):
 1. **This ledger** (a v0.26.0 GA criterion).
 2. **The DELETE batch**, one PR after v0.26.0 GA.
    - It changes no identity decision. Observable differences: R133's diagnostic label on a zero cursor, and R181
-     and R232 stop writing fields and relations that no reader in this version or the previous GA reads.
+     stops writing fields whose readers fall back to the same default when they are absent, and R232 stops writing a
+     relation that nothing reads.
    - Proof: the full suite and the rollback-reader tests.
 3. **The MERGE clusters**, one PR each, with parity tests. The lineage-walker merge follows #891.
 4. **The planner with `on` mode (slice C)** in its own minor, once the entry conditions hold.
