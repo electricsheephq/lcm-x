@@ -472,7 +472,6 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("reserve_tokens_floor", "LCM_RESERVE_TOKENS_FLOOR", int),
     _EnvFieldSpec("custom_instructions", "LCM_CUSTOM_INSTRUCTIONS", str),
     _EnvFieldSpec("summary_prompt_version", "LCM_SUMMARY_PROMPT_VERSION", int),
-    _EnvFieldSpec("summary_input_clip", "LCM_SUMMARY_INPUT_CLIP", str),
     _EnvFieldSpec("extraction_enabled", "LCM_EXTRACTION_ENABLED", bool),
     _EnvFieldSpec("extraction_model", "LCM_EXTRACTION_MODEL", str),
     _EnvFieldSpec("extraction_output_path", "LCM_EXTRACTION_OUTPUT_PATH", str),
@@ -596,7 +595,6 @@ _SOURCE_TRACKED_ENV_FIELDS = frozenset({
     "summary_spend_backoff_seconds",
     "summary_timeout_ms",
     "summary_prompt_version",
-    "summary_input_clip",
 })
 
 # Fields exposed as runtime preset overrides (consumed by presets.py).
@@ -1016,10 +1014,6 @@ class LCMConfig:
     # Summariser prompt version (#646): 1 = original prompts and 2x output
     # ceiling; 2 = v2 prompts, focus directives in the policy, 3x ceiling.
     summary_prompt_version: int = 1
-    # Summariser input clip (#611 / #440): legacy = 2,000 + 800 characters over 3,000 (today); whole12k = whole
-    # up to 12,000, else 8,000 + 2,000, plus a preview after an externalised placeholder; budget = the chunk's
-    # texts share leaf_chunk_tokens proportionally. See summary_input_clip.py.
-    summary_input_clip: str = "legacy"
 
     @classmethod
     def from_env(cls) -> "LCMConfig":
@@ -1136,15 +1130,6 @@ class LCMConfig:
             warning = f"unsupported env LCM_SUMMARY_PROMPT_VERSION={c.summary_prompt_version!r} ignored; using 1"
             c.summary_prompt_version, source = 1, "default"
         _record("summary_prompt_version", source, warning)
-        raw_clip = os.environ.get("LCM_SUMMARY_INPUT_CLIP")
-        source, warning = "default", None
-        if raw_clip is not None:
-            clip = raw_clip.strip().lower()
-            if clip in ("legacy", "whole12k", "budget"):
-                c.summary_input_clip, source = clip, "env:LCM_SUMMARY_INPUT_CLIP"
-            else:
-                warning = f"unsupported env LCM_SUMMARY_INPUT_CLIP={raw_clip!r} ignored; using legacy"
-        _record("summary_input_clip", source, warning)
 
         # Every other scalar LCM_* override is applied uniformly from the spec.
         for spec in ENV_FIELD_SPECS:
