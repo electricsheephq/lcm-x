@@ -6,7 +6,15 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-## v0.25.0 - (unreleased; rc1) (long sessions: drain speed + correctness)
+## v0.25.1 - 2026-10-05 (recall: natural-language queries with embeddings off)
+
+- Fix: with embeddings off (the default), `lcm_recall` on a natural-language question returned only rows containing
+  every word, newest first, so it mostly surfaced large tool outputs or nothing. The full-text arm now ORs the
+  question's content words and ranks by relevance. `lcm_grep` and explicit full-text queries are unchanged. (#864, #870)
+- Fix: the OR query keeps quoted phrases that contain stop words, routes emoji-only questions, centres answer-ready
+  windows on a phrase matched across separators, folds case duplicates, and treats NOT/NEAR as literal words. (#873, #874)
+
+## v0.25.0 - 2026-10-04 (long sessions: drain speed + correctness)
 
 - Fix: a host refusal after a compaction stored leaves holds automatic compaction until turn end, with a
   600 s backstop; refusals without a stored leaf keep the existing hold. (#597)
