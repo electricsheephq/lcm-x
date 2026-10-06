@@ -258,6 +258,8 @@ class SurvivalFitMixin:
             if id(carrier) in store_ids:
                 store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
 
+        body_ids = {id(m) for m in body}
+
         def durable(message) -> bool:  # unproven rows: only DAG-verified scaffold, never a phrase match
             return persisted or id(message) in store_ids or self._is_verified_replay_scaffold_message(message)
 
@@ -324,7 +326,7 @@ class SurvivalFitMixin:
             if index:
                 fitted, count, ids, notice = build(index, kept, reply)
                 if self._survival_measure(fitted) <= budget:
-                    return fitted, count, ids, any(all(m is not old for old in body) for m in kept), notice
+                    return fitted, count, ids, any(id(m) not in body_ids for m in kept), notice
         if whole_turns:
             return None
         # the newest user turn alone is over budget: a bounded projection of it
@@ -336,7 +338,7 @@ class SurvivalFitMixin:
         kept = self._survival_projection(body[cut:], store_ids, budget - self._survival_measure(noticed))
         kept, reply = keep_reply(cut, kept)
         fitted, count, ids, notice = build(cut, kept, reply)
-        return fitted, count, ids, any(all(m is not old for old in body) for m in kept), notice
+        return fitted, count, ids, any(id(m) not in body_ids for m in kept), notice
 
     @staticmethod
     def _survival_with_notice(content: Any, notice: str) -> Any:

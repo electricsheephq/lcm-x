@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import time
 
 import pytest
 
@@ -75,6 +76,19 @@ def test_1_verbatim_reply_object_and_notice_excludes_reply(engine, rough_counts)
     assert engine._last_survival_fit["dropped_rows"] == 1
     assert engine._last_survival_fit["notice"] == survival_fit._NOTICE.format(n=1, first=ids[0], last=ids[0])
     assert rough_counts(fitted) <= 100
+
+
+def test_whole_turn_early_cut_projected_flag_is_linear(engine, rough_counts):
+    view = [{"role": role, "content": "tiny"}
+            for _ in range(4000) for role in ("user", "assistant")]
+    budget = rough_counts(view[2:])
+    started = time.perf_counter()
+    cut = engine._survival_cut(view, 0, budget, True, "issue_798", {}, True)
+    elapsed = time.perf_counter() - started
+    assert cut is not None
+    assert cut[0] == view[2:] and cut[1] == 2  # the first whole-turn cut fits.
+    assert cut[3] is False
+    assert elapsed < 0.5, f"early whole-turn cut took {elapsed:.3f}s"
 
 
 def test_2_head_tail_reply_recognizes_source_and_adds_only_new_rows(tmp_path, rough_counts):
