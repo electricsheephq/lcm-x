@@ -7402,10 +7402,10 @@ class LCMEngine(
         emitted inside the summary block so restart reconciliation ignores it
         instead of ingesting a duplicate non-contiguous user message.
 
-        Previous preserved-objective scaffolds are derived context, not real
-        user turns, so they are not eligible as the next anchor source. Once a
-        reverse scan reaches one, older user turns are stale relative to that
-        synthetic continuity marker and must not be promoted as current intent.
+        Previous preserved-objective scaffolds carry the same objective across
+        assemblies within a turn. Reuse only their objective part verbatim,
+        without carrying old summaries or promoting older user turns past that
+        synthetic continuity marker as current intent.
         """
         selected_tail_messages = [msg for msg in selected_tail if isinstance(msg, dict)]
         for message in reversed(messages):
@@ -7422,8 +7422,9 @@ class LCMEngine(
                 or self._is_ignored_active_replay_placeholder(message, content_text)
             ):
                 continue
-            if self._preserved_objective_context_content(message):
-                return None
+            preserved_objective = self._preserved_objective_context_content(message)
+            if preserved_objective:
+                return preserved_objective.partition("\n\n---\n\n")[0]
             if message.get("role") != "user":
                 continue
             if self._is_preserved_todo_context_message(message):

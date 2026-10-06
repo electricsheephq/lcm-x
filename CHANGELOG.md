@@ -6,6 +6,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+### v0.27.0 (summary quality)
+
+- Fix: a second context assembly in the same user turn keeps the preserved objective verbatim instead of dropping the sole user request. (#921)
+
 ## v0.26.0 (host message identity)
 
 - Feature: host message identity in shadow mode. On a host that stamps `message_uid`, LCM records which stored row each
