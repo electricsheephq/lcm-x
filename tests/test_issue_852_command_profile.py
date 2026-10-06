@@ -91,7 +91,10 @@ def test_unresolved_session_refuses_writes(plugin, engines, monkeypatch, raw_arg
     assert len(calls) == 1
 
 
-@pytest.mark.parametrize("raw_args", ["", "status", "help", "doctor source", "rollups"])
+@pytest.mark.parametrize("raw_args", [
+    "", "status", "help", "doctor clean", "doctor clean lifecycle", "doctor source",
+    "doctor retention", "rotate", "rollups", "preset show", "preset suggest",
+])
 def test_unresolved_session_read_names_fallback_store(plugin, engines, monkeypatch, raw_args):
     prototype, _session = engines
     expected = command.handle_lcm_command(raw_args, prototype)
@@ -106,10 +109,11 @@ def test_unresolved_session_read_names_fallback_store(plugin, engines, monkeypat
 
 def test_no_session_context_write_uses_prototype(plugin, engines, monkeypatch):
     prototype, session = engines
+    expected = command.handle_lcm_command("embed warmup", session)
     before = _snapshot(session)
     handler, calls = _handler(plugin, monkeypatch, prototype, {})
 
-    assert "status: ready" in handler("embed warmup")
+    assert handler("embed warmup") == expected
     assert _snapshot(prototype)["lcm_embedding_profile"] == 2
     assert _snapshot(session) == before
     assert calls == []
@@ -131,3 +135,20 @@ def test_resolver_legacy_return_stays_an_engine(plugin, engines, monkeypatch):
     prototype, _session = engines
     monkeypatch.setattr(plugin, "_session_context_value", lambda _key: "")
     assert plugin._command_engine_for_current_session(prototype, lambda **_kw: None) is prototype
+
+
+@pytest.mark.parametrize("raw_args", [
+    "doctor", "doctor clean apply", "doctor clean lifecycle apply", "doctor repair",
+    "doctor repair apply", "doctor repair level3", "doctor repair level3 apply",
+    "doctor repair schema-stamp", "doctor repair schema-stamp apply", "doctor source apply",
+    "backup", "rotate apply", "rollups rebuild day", "assertions rebuild --apply",
+    "preset apply codex_gpt_long_context --dry-run", "embed backfill", "future-command",
+])
+def test_other_write_paths_fail_closed(plugin, engines, monkeypatch, raw_args):
+    prototype, _session = engines
+    before = _snapshot(prototype)
+    handler, _calls = _handler(
+        plugin, monkeypatch, prototype, {"HERMES_SESSION_KEY": "other-profile"}
+    )
+    assert handler(raw_args) == REFUSAL
+    assert _snapshot(prototype) == before

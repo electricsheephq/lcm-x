@@ -97,6 +97,21 @@ _EMBEDDING_BACKFILL_CLAIM_KEY = "lcm_embedding_backfill_claim"
 _EMBEDDING_BACKFILL_CLAIM_TTL_S = 10 * 60
 _EMBEDDING_BACKFILL_BATCH_SIZE = 32
 
+# Command paths; arguments do not change WRITE classification. Unknown paths
+# also default to WRITE. Plain doctor uses SQLite's FTS integrity-check INSERT.
+READ_LCM_SUBCOMMANDS = frozenset({
+    "status", "help", "doctor clean", "doctor clean lifecycle", "doctor source",
+    "doctor retention", "rotate", "rollups", "preset show", "preset suggest",
+})
+WRITE_LCM_SUBCOMMANDS = frozenset({
+    "doctor", "doctor clean apply", "doctor clean lifecycle apply",
+    "doctor repair", "doctor repair apply", "doctor repair level3",
+    "doctor repair level3 apply", "doctor repair schema-stamp",
+    "doctor repair schema-stamp apply", "doctor source apply", "backup",
+    "rotate apply", "rollups rebuild", "assertions rebuild", "preset apply",
+    "embed warmup", "embed backfill",
+})
+
 
 def _env_float(key: str, default: float) -> float:
     raw = os.environ.get(key)
@@ -5477,8 +5492,22 @@ def _embedding_backfill_status(
     return "partial"
 
 
-def handle_lcm_command(raw_args: str | None, engine) -> str:
+def handle_lcm_command(
+    raw_args: str | None, engine, *,
+    session_engine_resolved: bool = True, session_context_present: bool = False,
+) -> str:
     tokens = [part.strip() for part in (raw_args or "").strip().split() if part.strip()]
+    if not session_engine_resolved:
+        path = " ".join(part.lower() for part in tokens) or "status"
+        if path.startswith("preset show "):
+            path = "preset show"
+        if session_context_present and path not in READ_LCM_SUBCOMMANDS:
+            return (
+                "The command could not resolve this session's LCM engine in this process; "
+                "run it from a process launched for this profile."
+            )
+        result = handle_lcm_command(raw_args, engine)
+        return result + f"\nstore: {engine._config.database_path}" if path in READ_LCM_SUBCOMMANDS else result
     if not tokens:
         return _status_text(engine)
 
