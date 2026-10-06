@@ -137,6 +137,16 @@ def _command_engine_for_current_session(engine, resolve_active_lcm_engine, *, wi
     return (engine, False, bool(session_id or conversation_id)) if with_resolution else engine
 
 
+def _command_engine_profile(engine) -> str:
+    """Resolve the captured engine home through the optional host helper."""
+    try:
+        from hermes_constants import profile_name_for_home
+        home = getattr(engine, "_hermes_home", "")
+        return str(profile_name_for_home(home) or "") if home else ""
+    except Exception:
+        return ""
+
+
 def _make_command_handler(handle_lcm_command, engine, resolve_active_lcm_engine):
     def _handler(raw_args: str):
         active_engine, resolved, context_present = _command_engine_for_current_session(
@@ -145,6 +155,8 @@ def _make_command_handler(handle_lcm_command, engine, resolve_active_lcm_engine)
         return handle_lcm_command(
             raw_args, active_engine,
             session_engine_resolved=resolved, session_context_present=context_present,
+            session_profile=_session_context_value("HERMES_SESSION_PROFILE") if not resolved else "",
+            engine_profile=_command_engine_profile(active_engine) if not resolved else "",
         )
 
     return _handler

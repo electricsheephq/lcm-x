@@ -8,7 +8,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ### v0.27.0
 
-- Fix: `/lcm` refuses writes when a session's own engine cannot be resolved; fallback reads name the store they report on. (#852)
+- Fix: `/lcm` refuses unresolved cross-profile writes, preserves same-profile cold starts, and names fallback stores when profiles differ or are unknown. (#852)
 
 ## v0.26.0 (host message identity)
 

@@ -3,6 +3,8 @@
 import importlib.util
 from pathlib import Path
 import sqlite3
+import sys
+import types
 
 import pytest
 
@@ -19,7 +21,10 @@ REFUSAL = (
 
 
 @pytest.fixture
-def plugin():
+def plugin(monkeypatch):
+    host = types.ModuleType("hermes_constants")
+    host.profile_name_for_home = lambda home: Path(home).name
+    monkeypatch.setitem(sys.modules, "hermes_constants", host)
     path = Path(__file__).resolve().parents[1] / "__init__.py"
     spec = importlib.util.spec_from_file_location("issue_852_plugin", path)
     module = importlib.util.module_from_spec(spec)
@@ -82,7 +87,10 @@ def test_unresolved_session_refuses_writes(plugin, engines, monkeypatch, raw_arg
         vectors.register_profile("test-model", "ollama", 3)
         vectors.close()
     before = _snapshot(prototype)
-    handler, calls = _handler(plugin, monkeypatch, prototype, {context_key: "other-profile"})
+    # review F1: refusal requires a known different session profile.
+    handler, calls = _handler(plugin, monkeypatch, prototype, {
+        context_key: "other-profile", "HERMES_SESSION_PROFILE": "session",
+    })
 
     result = handler(raw_args)
 
@@ -113,7 +121,8 @@ def test_no_session_context_write_uses_prototype(plugin, engines, monkeypatch):
     before = _snapshot(session)
     handler, calls = _handler(plugin, monkeypatch, prototype, {})
 
-    assert handler("embed warmup") == expected
+    # review F1: an unknown session profile now discloses the fallback store.
+    assert handler("embed warmup") == expected + f"\nstore: {prototype._config.database_path}"
     assert _snapshot(prototype)["lcm_embedding_profile"] == 2
     assert _snapshot(session) == before
     assert calls == []
@@ -147,8 +156,85 @@ def test_resolver_legacy_return_stays_an_engine(plugin, engines, monkeypatch):
 def test_other_write_paths_fail_closed(plugin, engines, monkeypatch, raw_args):
     prototype, _session = engines
     before = _snapshot(prototype)
-    handler, _calls = _handler(
-        plugin, monkeypatch, prototype, {"HERMES_SESSION_KEY": "other-profile"}
-    )
+    # review F1: refusal requires a known different session profile.
+    handler, _calls = _handler(plugin, monkeypatch, prototype, {
+        "HERMES_SESSION_KEY": "other-profile", "HERMES_SESSION_PROFILE": "session",
+    })
     assert handler(raw_args) == REFUSAL
     assert _snapshot(prototype) == before
+
+
+@pytest.mark.parametrize("raw_args", ["embed warmup", "doctor", "status"])
+def test_cold_start_same_profile_matches_resolved_output(
+    plugin, engines, monkeypatch, raw_args,
+):
+    prototype, _session = engines
+    context = {"HERMES_SESSION_ID": "fresh-session", "HERMES_SESSION_PROFILE": "launch"}
+    resolved, _ = _handler(plugin, monkeypatch, prototype, context, prototype)
+    expected = resolved(raw_args)
+    fallback, _ = _handler(plugin, monkeypatch, prototype, context)
+
+    assert fallback(raw_args).encode() == expected.encode()
+    if raw_args == "embed warmup":
+        assert _snapshot(prototype)["lcm_embedding_profile"] == 2
+
+
+def test_different_profile_read_names_store(plugin, engines, monkeypatch):
+    prototype, _session = engines
+    expected = command.handle_lcm_command("status", prototype)
+    before = _snapshot(prototype)
+    handler, _ = _handler(plugin, monkeypatch, prototype, {
+        "HERMES_SESSION_ID": "fresh-session", "HERMES_SESSION_PROFILE": "session",
+    })
+
+    assert handler("status") == expected + f"\nstore: {prototype._config.database_path}"
+    assert _snapshot(prototype) == before
+
+
+def test_session_profile_unset_write_runs_with_store_line(plugin, engines, monkeypatch):
+    prototype, session = engines
+    expected = command.handle_lcm_command("embed warmup", session)
+    handler, _ = _handler(plugin, monkeypatch, prototype, {"HERMES_SESSION_ID": "fresh"})
+
+    assert handler("embed warmup") == expected + f"\nstore: {prototype._config.database_path}"
+    assert _snapshot(prototype)["lcm_embedding_profile"] == 2
+
+
+@pytest.mark.parametrize("failure", ["import", "helper", "home"])
+def test_host_profile_helper_failure_is_unknown(plugin, engines, monkeypatch, failure):
+    prototype, session = engines
+    expected = command.handle_lcm_command("embed warmup", session)
+    if failure == "import":
+        monkeypatch.setitem(sys.modules, "hermes_constants", None)
+    elif failure == "helper":
+        def broken(_home):
+            raise RuntimeError("profile lookup unavailable")
+        monkeypatch.setattr(sys.modules["hermes_constants"], "profile_name_for_home", broken)
+    else:
+        monkeypatch.setattr(prototype, "_hermes_home", "")
+    handler, _ = _handler(plugin, monkeypatch, prototype, {
+        "HERMES_SESSION_ID": "fresh", "HERMES_SESSION_PROFILE": "session",
+    })
+
+    assert handler("embed warmup") == expected + f"\nstore: {prototype._config.database_path}"
+    assert _snapshot(prototype)["lcm_embedding_profile"] == 2
+
+
+def test_engine_profile_seam_uses_captured_home(plugin, engines, monkeypatch):
+    prototype, _session = engines
+    seen = []
+    def profile_for_home(home):
+        seen.append(home)
+        return "launch"
+    monkeypatch.setattr(sys.modules["hermes_constants"], "profile_name_for_home", profile_for_home)
+    assert plugin._command_engine_profile(prototype) == "launch"
+    assert seen == [prototype._hermes_home]
+
+
+def test_plugin_import_does_not_require_host(monkeypatch):
+    monkeypatch.setitem(sys.modules, "hermes_constants", None)
+    path = Path(__file__).resolve().parents[1] / "__init__.py"
+    spec = importlib.util.spec_from_file_location("issue_852_no_host_plugin", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert callable(module._command_engine_profile)

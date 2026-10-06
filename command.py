@@ -5495,19 +5495,23 @@ def _embedding_backfill_status(
 def handle_lcm_command(
     raw_args: str | None, engine, *,
     session_engine_resolved: bool = True, session_context_present: bool = False,
+    session_profile: str = "", engine_profile: str = "",
 ) -> str:
     tokens = [part.strip() for part in (raw_args or "").strip().split() if part.strip()]
     if not session_engine_resolved:
         path = " ".join(part.lower() for part in tokens) or "status"
         if path.startswith("preset show "):
             path = "preset show"
-        if session_context_present and path not in READ_LCM_SUBCOMMANDS:
+        profiles_known = bool(session_profile and engine_profile)
+        if profiles_known and session_profile != engine_profile and path not in READ_LCM_SUBCOMMANDS:
             return (
                 "The command could not resolve this session's LCM engine in this process; "
                 "run it from a process launched for this profile."
             )
         result = handle_lcm_command(raw_args, engine)
-        return result + f"\nstore: {engine._config.database_path}" if path in READ_LCM_SUBCOMMANDS else result
+        if profiles_known and session_profile == engine_profile:
+            return result
+        return result + f"\nstore: {engine._config.database_path}"
     if not tokens:
         return _status_text(engine)
 
