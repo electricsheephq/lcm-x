@@ -137,9 +137,10 @@ class SurvivalFitMixin:
                 or self._is_context_summary_content(message.get("content")))  # a host summary of stored rows
 
     def _survival_completed_reply(self, message) -> bool:
-        """#798: only a completed textual reply, never an interrupted tool turn or LCM scaffold."""
+        """#798: a completed textual reply needs a host stamp for replay on cold resume."""
         return (message.get("role") == "assistant" and not message.get("tool_calls")
                 and bool((normalize_content_value(message.get("content")) or "").strip())
+                and _normalize_observed_at(message.get("timestamp")) is not None
                 and not self._survival_generated(message))
 
     def _survival_fit(self, messages, result, observed_tokens, reason: str, *, after_exception: bool = False,
