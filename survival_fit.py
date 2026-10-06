@@ -340,20 +340,24 @@ class SurvivalFitMixin:
             if not row or str(row.get("role") or "") != str(message.get("role") or ""):
                 continue
             fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL)
-            out[index] = {key: value for key, value in {**message, **fields}.items()
-                          if key != "tool_calls" or value}
+            projected = {key: value for key, value in {**message, **fields}.items()
+                         if key != "tool_calls" or value}
+            if projected != message:
+                out[index] = projected
         return out
 
     @staticmethod
     def _survival_projected_fields(row: Dict[str, Any], tokens: int, head: int, tail: int) -> Dict[str, Any]:
-        """The projection of a stored row: its content as head/tail around the mark (the mark alone when
-        short), its tool calls with arguments over ``head`` characters replaced by the mark, and its
+        """The projection of a stored row: its content as head/tail around the mark, head plus mark when
+        shorter, or whole when at most ``head``; tool-call arguments over ``head`` replaced by the mark, and
         stored tool linkage. Deterministic in (row bytes, tokens, head, tail)."""
         store_id = int(row["store_id"])
         marker = _PROJECTED.format(role=row.get("role"), tokens=tokens, store_id=store_id, head=head, tail=tail)
         text = normalize_content_value(row.get("content")) or ""
-        if text:
-            text = f"{text[:head]}\n...\n{marker}\n...\n{text[-tail:]}" if len(text) > 2 * head else marker
+        if len(text) > 2 * head:
+            text = f"{text[:head]}\n...\n{marker}\n...\n{text[-tail:]}"
+        elif len(text) > head:
+            text = f"{text[:head]}\n...\n{marker}"
         calls = row.get("tool_calls")
         if isinstance(calls, str):
             try:
