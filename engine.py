@@ -7424,6 +7424,8 @@ class LCMEngine(
                 continue
             preserved_objective = self._preserved_objective_context_content(message)
             if preserved_objective:
+                if any(message == selected for selected in selected_tail_messages):
+                    return None
                 return preserved_objective.partition("\n\n---\n\n")[0]
             if message.get("role") != "user":
                 continue
