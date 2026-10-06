@@ -97,6 +97,9 @@ def test_normalized_short_body_still_rejects(body):
     ("## Expand for details about:PRIVATE", "heading"),
     ("**Expand for details about**:PRIVATE", "bold"),
     (f"{HINT}\nPRIVATE after the hint", "trailing"),
+    (f"{HINT}\n\nPRIVATE first line\n\nPRIVATE last line", "trailing"),
+    (f"{HINT}\nPRIVATE one\nPRIVATE two\nPRIVATE three", "missing"),
+    (f"{HINT}\nPRIVATE one\nPRIVATE two\nPRIVATE three\nPRIVATE four\nPRIVATE five", "missing"),
     ("PRIVATE no hint", "missing"),
     ("Expand for details about:PRIVATE", "other"),
 ])
