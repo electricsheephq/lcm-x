@@ -41,6 +41,7 @@ ISSUES = {
     # acp-process only in practice: the crash point races reply persistence (3 of 12 runs fail on either plugin ref);
     # the same two shapes occur on eva, customer, r34.4 and upstream-uid (not seen on upstream-main)
     861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
+    916: (("F4",), "acp-process continuity: survival projection removes the current user tag"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
 ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("eva-", "customer-", "r34.4-", "upstream-uid"), 871: ("r34.4-",)}
@@ -82,12 +83,19 @@ def continuity_cells() -> list[dict]:
                             "path": "{files}/big.txt"}, "expect": {"min_chars": 10000}}]} for _ in range(24)],
                         continuity={"sole_user": True}, final_compaction_check=False,
                         doc="Diagnostic #900: one user prompt, 24 tool rounds; require two commits before a second prompt."))
-        out.append(cell(f"continuity/survival-fit/{m}", [], in_place=ip, turns=12, repeat=1600,
+        out.append(cell(f"continuity/survival-fit/{m}", [916], in_place=ip, turns=12, repeat=1600,
                         user={"repeat_from": {"9": 100}}, min_compactions=0,
                         lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_SURVIVAL_FIT": "true",
                                  "LCM_SURVIVAL_RESERVE": "0.9", "LCM_FRESH_TAIL_COUNT": "24"},
                         continuity={"require_survival_fit": True}, final_compaction_check=False,
-                        doc="Diagnostic #798: low survival ceiling, large turns followed by ordinary short turns."))
+                        doc="Diagnostic #916: low survival ceiling can project the newest user; F4 decides."))
+        out.append(cell(f"continuity/survival-fit-older-turns/{m}", [], in_place=ip, turns=16, repeat=4000,
+                        user={"repeat_from": {"9": 1}}, min_compactions=0,
+                        lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.8", "LCM_SURVIVAL_FIT": "true",
+                                 "LCM_SURVIVAL_RESERVE": "0.5", "LCM_FRESH_TAIL_COUNT": "24",
+                                 "LCM_FRESH_TAIL_MAX_TOKENS": "80000"},
+                        continuity={"require_survival_fit": True}, final_compaction_check=False,
+                        doc="Diagnostic #798: fit older whole turns with a moderate ceiling; newest short turns fit."))
         out.append(cell(f"continuity/forced-compaction-then-turn/{m}", [], in_place=ip, turns=20, min_compactions=0,
                         faults=[{"kind": "forced_compaction_then_turn", "turn": 19}],
                         continuity={"forced_followup": True}, final_compaction_check=False,

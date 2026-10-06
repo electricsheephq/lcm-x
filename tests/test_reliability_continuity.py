@@ -99,7 +99,7 @@ def test_marker_metadata_has_no_message_text_and_handles_anthropic_system_blocks
 
 def test_new_cells_are_r2_only_non_gating_and_express_existing_knobs():
     selected = cells.select("continuity/*", extra=PC.R2_CELLS)
-    assert len(selected) == 6
+    assert len(selected) == 8
     assert not any(c["id"].startswith("continuity/") for c in cells.registry())
     for c in selected:
         assert PC.unsupported(c, "acp-process") is None
@@ -108,9 +108,15 @@ def test_new_cells_are_r2_only_non_gating_and_express_existing_knobs():
         if c["continuity"].get("sole_user"):
             assert c["turns"] == 1 and len(c["tool_plan"]) == 24
             assert all(g["turns"] == [1] for g in c["tool_plan"])
-        if c["continuity"].get("require_survival_fit"):
+        if c["id"].startswith("continuity/survival-fit/"):
+            assert c["targets"] == [916] and cells.ISSUES[916][0] == ("F4",)
             assert c["lcm_env"]["LCM_SURVIVAL_RESERVE"] == "0.9"
             assert c["user_text"]["repeat_from"] == {"9": 100}
+        if c["id"].startswith("continuity/survival-fit-older-turns/"):
+            assert c["lcm_env"]["LCM_SURVIVAL_RESERVE"] == "0.5"
+            assert c["window"] == 128000 and c["user_text"]["repeat_from"] == {"9": 1}
+            assert len(PC.P1.user_text(c, "T", 8)) > 30000
+            assert len(PC.P1.user_text(c, "T", 9)) < 100
 
 
 def test_continuity_absences_and_survival_bar_failures_do_not_gate():
@@ -141,6 +147,78 @@ def test_matrix_section_renders_per_host_counts_and_no_request(tmp_path):
 def test_untagged_completed_reply_does_not_reuse_an_older_tag():
     obs = observations() + [{"kind": "turn_end", "ts": 2, "reply_tag": None}]
     assert CT.score({}, [request()], obs)["rows"][0]["previous_reply_tag"] is None
+
+
+@pytest.mark.parametrize("cid,verdict", [("continuity/survival-fit/in-place", "FAIL"),
+                                       ("baseline/in-place/acp", "ERROR")])
+@pytest.mark.parametrize("projected", [True, False])
+def test_missing_current_user_fixture_preserves_cell_boundary(tmp_path, monkeypatch, cid, verdict, projected):
+    """Exercise request logging and final scoring with a fixture phase; no host."""
+    from bench.instruments.reliability import run_matrix as RM
+    c = cells.select(cid, extra=PC.R2_CELLS)[0]
+    plugin = {"ref": "HEAD", "sha": "p" * 40, "tree": str(tmp_path), "dir": "fixture",
+              "enabled": "fixture", "engine": "fixture"}
+    host = {"src": str(tmp_path), "python": sys.executable, "sha": "h" * 40}
+    message = "[LCM survival fit: this user message is stored verbatim]" if projected else "untagged fixture"
+
+    def phase(run, first):
+        run.text_tag = "T02"
+        run.scenario.begin(2, "chat", "A", first)
+        for o in observations("survival fit"):
+            PC.append(run.d / "observer.jsonl", {"phase": "A", **o})
+        # A tag in an older row must not hide its absence in the LAST user row.
+        messages = [{"role": "user", "content": "[T02] older summary mention"},
+                    {"role": "assistant", "content": "reply to T01: completed fixture"},
+                    {"role": "user", "content": message}]
+        handler = types.SimpleNamespace(path="/v1/chat/completions")
+        run.provider.serve(handler, {"model": "rel/main", "messages": messages}, "openai")
+        return {"exit": "done", "next_turn": None}
+
+    monkeypatch.setattr(PC.ProcessCell, "run_phase", phase)
+    monkeypatch.setattr(PC.FP.FakeProvider, "json_reply", lambda *a: None)
+    monkeypatch.setattr(RM, "copy_dbs", lambda *a: [])
+    monkeypatch.setattr(RM, "verdict_fields", lambda *a: {"verdict": "PASS", "failed_bars": {},
+                                                       "applicable_bars": [], "numbers": {}})
+    (tmp_path / "scratch").mkdir()
+    rec = PC.run_cell_process(c, "fixture", host, plugin, tmp_path / "out", 5, False,
+                               identity={"method": "fixture"}, scratch_root=tmp_path / "scratch")
+    assert rec["verdict"] == verdict
+    req = PC.read_jsonl(Path(rec["dir"]) / "provider-requests.jsonl")[0]
+    assert req["continuity"]["current_user_projected"] is projected
+    if verdict == "ERROR":
+        assert rec["reason"].startswith("unexpected main-model requests:")
+        assert req["continuity"]["F4"] is True  # existing non-continuity semantics
+        return
+    assert rec["targets"] == [916] and set(rec["failed_bars"]) == {"F4"}
+    assert "current user tag missing" in rec["failed_bars"]["F4"]["reason"]
+    assert req["continuity"]["F4"] is False and "last_user" not in req
+    [row] = rec["continuity"]["rows"]
+    assert row["F4"] is False and row["current_user_projected"] is projected
+    assert rec["continuity"]["totals"]["F4"]["absent"] == 1
+    rows = [{"cell": cid, "host": "fixture", "transport": "acp-process", "plugin_sha": "p" * 40,
+             "verdict": "PASS", "targets": []} for cid in ci.expected_cells("acp-process")]
+    for r in rows:
+        if r["cell"].startswith("p8-control/") and not r["cell"].endswith("/none"):
+            r.update(verdict="FAIL", failed_bars={"B9": {}})
+    rows = [rec if r["cell"] == rec["cell"] else r for r in rows]
+    assert ci.gate(rows, {916}) == []
+    # The open-target rule also recognizes F4 if this diagnostic were gated.
+    original = ci.in_gate_set
+    monkeypatch.setattr(ci, "in_gate_set", lambda cid: cid == rec["cell"] or original(cid))
+    assert ci.gate(rows, {916}) == []
+    assert any("uncovered bars ['F4']" in p for p in ci.gate(rows, set()))
+    report.write(Path(rec["dir"]), [rec], 1)
+    assert "916 | F4 | `continuity/survival-fit/in-place`" in (Path(rec["dir"]) / "ISSUE-MAP.md").read_text()
+
+
+@pytest.mark.parametrize("mode", ["in-place", "rotation"])
+def test_older_turn_survival_fixture_keeps_current_and_measures_previous_reply(mode):
+    c = cells.select(f"continuity/survival-fit-older-turns/{mode}", extra=PC.R2_CELLS)[0]
+    result = CT.score(c, [request(previous=False)], observations("survival fit"))
+    [row] = result["rows"]
+    assert row["kind"] == "survival fit" and row["F4"] is True
+    assert row["F3"] is False and row["current_user_projected"] is False
+    assert result["scenario_observed"] is True
 
 
 def test_optional_fault_reuses_compress_then_sends_an_ordinary_turn(tmp_path, monkeypatch):

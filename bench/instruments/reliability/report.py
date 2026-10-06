@@ -145,14 +145,15 @@ def write(out: Path, results: list[dict], wall: float, lcm_env: dict | None = No
     if not observed:
         lines.append("| - | - | - | no R2 continuity observations | - | - | - | - | - | - | - |")
     lines += ["", "### Per-compaction observations", "",
-              "| host | plugin | cell | phase/turn | kind | request/turn | previous reply | inside compacted span | status | F1 | F2 | F3 | F4 |",
-              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+              "| host | plugin | cell | phase/turn | kind | request/turn | previous reply | inside compacted span | status | F1 | F2 | F3 | F4 | current user projected |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
     for r in sorted(observed, key=lambda r: (r["host"], r["cell"], r["plugin_sha"])):
         for row in r["continuity"]["rows"]:
             values = [str(row[f]) if row[f] is not None else "unknown" for f in ("F1", "F2", "F3", "F4")]
             lines.append(f"| {r['host']} | {r['plugin_sha'][:12]} | `{r['cell']}` | {row['phase']}/{row['turn']} | "
                          f"{row['kind']} | {row['request_id']}/{row['request_turn']} | {row['previous_reply_tag'] or '-'} | "
-                         f"{row['previous_reply_in_compacted_span']} | {row['status']} | " + " | ".join(values) + " |")
+                         f"{row['previous_reply_in_compacted_span']} | {row['status']} | " + " | ".join(values)
+                         + f" | {row.get('current_user_projected', 'unknown')} |")
     lines.append("")
     (out / "MATRIX.md").write_text("\n".join(lines) + "\n")
 
@@ -160,6 +161,10 @@ def write(out: Path, results: list[dict], wall: float, lcm_env: dict | None = No
     for c in registry():
         for t in c["targets"]:
             targeting[t].append(c["id"])
+    for r in results:  # R2-only targeting cells are not in the R1 registry.
+        for t in r.get("targets") or []:
+            if r["cell"] not in targeting[t]:
+                targeting[t].append(r["cell"])
     im = ["# Issue map", "", boundary, "", env, "",
           "\"target cell FAILS\" = a cell targeting the issue fails that issue's bar at the evaluated ref. It is a "
           "signal, not an attribution: whether the failure IS that issue is a human call from the signature.", ""]

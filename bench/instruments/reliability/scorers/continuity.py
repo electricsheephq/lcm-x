@@ -25,9 +25,11 @@ def markers(messages: list[dict], *, anchor=None, previous=None, current=None) -
         users.update(u)
         replies.update(r)
         roles.append({"role": m.get("role"), "user_tags": len(u), "reply_tags": len(r)})
+    last_user = next((m.get("content") or "" for m in reversed(messages) if m.get("role") == "user"), "")
     return {"F1": any(m.get("role") == "system" and NOTE in (m.get("content") or "") for m in messages),
             "F2": anchor in users if anchor else None, "F3": previous in replies if previous else None,
             "F4": current in users if current else None,
+            "current_user_projected": last_user.startswith("[LCM survival fit:"),
             "user_tags": sorted(users), "reply_tags": sorted(replies), "message_roles": roles,
             "role_counts": dict(Counter(m.get("role") for m in messages))}
 
@@ -67,13 +69,15 @@ def score(cell: dict, requests: list[dict], observations: list[dict]) -> dict:
                "status": "observed" if req and data else "no request" if req is None else "no markers",
                "request_id": (req or {}).get("rid"), "request_turn": (req or {}).get("turn"),
                "previous_reply_tag": prev, "current_user_tag": current,
+               "current_user_projected": data.get("current_user_projected"),
                "survival_fit": c.get("survival_fit", False), "fit_reason": c.get("fit_reason"),
                "previous_reply_in_compacted_span": prev in c["compacted_reply_tags"]
                if prev and "compacted_reply_tags" in c else None,
                "F1": data.get("F1"),
                "F2": "not applicable" if not sole else "T01" in data["user_tags"] if "user_tags" in data else None,
                "F3": prev in data["reply_tags"] if prev and "reply_tags" in data else None,
-               "F4": current in data["user_tags"] if current and "user_tags" in data else None}
+               "F4": data.get("F4") if "F4" in data else
+               current in data["user_tags"] if current and "user_tags" in data else None}
         for f in CHECKS:
             value = row[f]
             key = "present" if value is True else "absent" if value is False else \

@@ -206,6 +206,8 @@ class FakeProvider:
         except Exception as exc:  # a scenario bug is a 500 the host sees, and it is in the log
             reply = {"status": 500, "error": f"scenario raised {exc!r}"[:300]}
         rec.update(reply.get("log") or {})
+        if rec.get("current_user_missing"):
+            rec["continuity"]["F4"] = False
         if reply.get("hold_until_killed") or reply.get("hold"):
             rec["fault"] = "hold_until_killed" if reply.get("hold_until_killed") else "slow"
             self.log(**rec, phase="held")

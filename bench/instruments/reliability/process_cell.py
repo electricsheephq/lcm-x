@@ -168,6 +168,11 @@ class Scenario:
         t, text_tag = st["t"], run.text_tag
         last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
         if t is None or (f"[{text_tag}]" not in last_user if text_tag else "continue" not in last_user):
+            if self.cell["id"].startswith("continuity/") and t is not None and text_tag:
+                finding = {"turn": t, "current_user_missing": True,
+                           "current_user_projected": last_user.startswith("[LCM survival fit:")}
+                self.unexpected.append(finding)
+                return {"content": "ok", "log": {"unexpected": True, **finding}}
             self.unexpected.append({"turn": t, "last_user": last_user[:120]})
             return {"content": "ok", "log": {"unexpected": True}}
         step, st["step"] = st["step"], st["step"] + 1
@@ -531,13 +536,20 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
             return done(verdict="ERROR", reason=f"import provenance / observer failure: {(prov + observer)[:3]}")
         if acct["unexpected_requests"]:
             return done(verdict="ERROR", reason=f"unexpected provider requests: {acct['unexpected_requests'][:3]}")
-        if run.scenario.unexpected:
+        if run.scenario.unexpected and not (cell["id"].startswith("continuity/") and
+                                           all(n.get("current_user_missing") for n in run.scenario.unexpected)):
             return done(verdict="ERROR", reason=f"unexpected main-model requests: {run.scenario.unexpected[:3]}")
         if last.get("exit") == "done" and not acct["ok"]:
             return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
         run.fired.update(n["kind"] for n in read_jsonl(d / "faults-fired.jsonl"))
         rec.update(RM.verdict_fields({**cell, "chat_root": run.sid, "transport": transport}, d, last, run.fired, rec["citations"], backup_errors,
                                      s / "db"))
+        if cell["id"].startswith("continuity/") and rec["verdict"] not in ("ERROR", "UNSUPPORTED"):
+            rec.setdefault("applicable_bars", []).append("F4")
+        if run.scenario.unexpected and rec["verdict"] not in ("ERROR", "UNSUPPORTED"):
+            reason = "current user tag missing from the last user message"
+            rec.setdefault("failed_bars", {})["F4"] = {"reason": reason, "requests": run.scenario.unexpected}
+            rec.update(verdict="FAIL", reason=f"continuity F4: {reason}")
         return done()
     finally:
         RM.release_scratch(s, d, rec, keep_dbs, keep)

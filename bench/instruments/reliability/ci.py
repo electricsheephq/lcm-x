@@ -25,7 +25,8 @@ G_REL_1 = ("baseline", "acp-trailing", "preflight-continue", "repeat-identical-r
 NON_GATE = ("publication-failure/rotation-child-persistent", "drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation",
             "drain/hidden-backlog-large/in-place", "drain/hidden-backlog-large/rotation",
             *(f"continuity/{shape}/{mode}" for shape in
-              ("sole-user-tool-loop", "survival-fit", "forced-compaction-then-turn") for mode in ("in-place", "rotation")))
+              ("sole-user-tool-loop", "survival-fit", "survival-fit-older-turns", "forced-compaction-then-turn")
+              for mode in ("in-place", "rotation")))
 
 
 def in_gate_set(cell_id: str) -> bool:

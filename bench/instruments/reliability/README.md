@@ -141,11 +141,19 @@ F1 is the system LCM note, F2 the first user's tag in sole-user cells, F3 the
 last completed assistant reply's tag, and F4 the current user's tag. The new
 `continuity/sole-user-tool-loop/{in-place,rotation}` cells send one prompt and
 24 tool rounds; `continuity/survival-fit/{in-place,rotation}` lowers the survival
-ceiling and follows large turns with ordinary turns. The optional
+ceiling and follows large turns with ordinary turns.
+`continuity/survival-fit-older-turns/{in-place,rotation}` uses a moderate reserve
+and short later turns to measure F3 while the newest turn fits. The optional
 `continuity/forced-compaction-then-turn/{in-place,rotation}` reuses `/compress`
 after turn 19 and sends turn 20. Existing `baseline/{mode}/acp` cells supply
 the F3 negative control. These checks are outside `BARS`; the new cells are in
 `ci.NON_GATE`. Existing bars and cell definitions are unchanged.
+
+In continuity cells only, a missing current tag in the last user message is
+a diagnostic `FAIL` on F4, targeting #916 in `survival-fit`; a last user message
+starting with `[LCM survival fit:` records `current_user_projected=true`.
+Other cells still report this condition as `ERROR`. Infrastructure errors
+still gate; continuity findings do not.
 
 `MATRIX.md` reports per-host/cell counts and each compaction's kind, turn,
 previous-reply tag and whether its input row was replaced. Unknown data and
