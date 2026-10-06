@@ -39,7 +39,7 @@ ISSUES = {
     821: (("B1", "B2", "B3", "B4", "B5", "B8"), "r34.4/upstream-uid host: held composite vs durable parts after a crash on rotation"),
     871: (("B2",), "r34.4 rotation: crash between parent end and child start, the crash turn's user row unstored"),
     # acp-process only in practice: the crash point races reply persistence (3 of 12 runs fail on either plugin ref);
-    # the same two shapes occur on eva, customer, r34.4 and upstream-uid (not seen on upstream-main)
+    # the same two shapes occur on ref, customer, r34.4 and upstream-uid (not seen on upstream-main)
     861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it

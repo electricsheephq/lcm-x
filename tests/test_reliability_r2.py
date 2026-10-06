@@ -438,7 +438,7 @@ def test_ci_gate_per_bar_exemptions(failed_bars, targets, open_issues, uncovered
 
 
 def test_ci_gate_per_bar_nightly_553_replay(monkeypatch):
-    # Gate-read fields only, copied from nightly aa84e61d's eva acp-process rotation row.
+    # Gate-read fields only, copied from nightly aa84e61d's ref acp-process rotation row.
     row = {"verdict": "FAIL", "host": "ref-0.21.5", "cell": "crash-after-compaction/rotation/acp-history",
            "transport": "acp-process", "targets": [553, 561],
            "failed_bars": {bar: {} for bar in ("B1", "B2", "B3", "B8", "B4", "B5")}}
@@ -888,7 +888,7 @@ def test_drain_fixture_b_keeps_an_errored_call_failing_d2_when_nothing_was_archi
 
 
 def test_ci_gate_issue_transports_scope_an_acp_only_exemption():
-    """#861 declares B1/B2 on eva, customer, r34.4 and upstream-uid for acp-process rows only: the in-process row of the
+    """#861 declares B1/B2 on ref, customer, r34.4 and upstream-uid for acp-process rows only: the in-process row of the
     same cell still gates, and so does an acp-process FAIL on upstream-main, where the race was not seen."""
     fail = {"verdict": "FAIL", "targets": [519, 549, 821, 861], "failed_bars": {"B1": {}, "B2": {}}}
     for host in ("ref-0.21.5", "customer-0.21.2", "r34.4-0.21.5", "upstream-uid"):
