@@ -393,6 +393,7 @@ _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across co
 # #608: after a sweep that spent its budget before the first leaf, the threshold answer is no for the hold
 # time. The minimum time for a summariser call and SweepBudgetExhausted live in escalation (#666).
 _SWEEP_BUDGET_HOLD_SECONDS = 600.0
+_TURN_END_HOLD_REASONS = frozenset({"host_rejected_progress", "objective_only", "hidden_only"})
 
 
 class SummaryResultRejected(RuntimeError):
@@ -1686,10 +1687,10 @@ class LCMEngine(
         return False
 
     def _start_no_progress_hold(self, reason: str) -> None:
-        """#651: hold automatic threshold passes until its time or a stored leaf; #597 progress refusals
-        and #922 objective-only no-ops also end at turn end."""
+        """#651: hold automatic threshold passes until its time or a stored leaf; turn-paced reasons
+        (#597 progress refusals, #922 objective-only no-ops, #904 hidden-only passes) also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
-        if reason in ("host_rejected_progress", "objective_only"):
+        if reason in _TURN_END_HOLD_REASONS:
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
         else:
@@ -1725,11 +1726,11 @@ class LCMEngine(
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
 
     def note_turn_complete(self) -> None:
-        """#597/#922: end progress-refusal/objective-only holds at the end of a foreground turn of this engine (never a
+        """#597/#922/#904: end turn-paced holds at the end of a foreground turn of this engine (never a
         bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
         try:
             hold = self._no_progress_hold
-            if (hold is not None and hold[1] in ("host_rejected_progress", "objective_only")
+            if (hold is not None and hold[1] in _TURN_END_HOLD_REASONS
                     and not self._bypasses_lcm_context_management()):
                 self._no_progress_hold = None
                 logger.info("LCM automatic compaction hold ended at turn end: %s", hold[1])

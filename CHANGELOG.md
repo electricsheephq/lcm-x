@@ -8,6 +8,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ### v0.27.0
 
+- Fix: hidden-only compaction keeps the host list unchanged when neither rows nor tokens shrink, while publishing the leaves and draining once per foreground turn. (#904)
 - Fix: skip a leaf that only repeats the preserved objective; keep the in-turn hold and release it at foreground turn end, avoiding the wasted summary and host growth refusal. (#922)
 
 ## v0.26.0 (host message identity)
