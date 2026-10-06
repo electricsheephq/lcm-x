@@ -578,10 +578,10 @@ def test_lcm_doctor_survival_fit_guidance_names_the_backup_restore_rollback(engi
         assert "the plugin alone to v0.24.5 or later is fine" in observation
         # #919: positive or unknown projections add the v0.27.0 plugin-only rollback floor.
         assert "a plugin-only rollback must target v0.27.0 or later" in observation
-        # #919: the floor explains the cold-resume duplicate risk and older-target procedure.
+        # #919 F2: the floor explains the cold-resume risk and a self-contained older-target procedure.
         assert ("v0.26.x or earlier cannot recognise a short projected row (head + mark) and stores it again "
-                "on a cold resume (#601 duplicates); to roll back further, stop Hermes and move the database "
-                "aside as described above") in observation
+                "on a cold resume (#601 duplicates); to roll back further, stop Hermes and move the configured "
+                "database file (by default lcm.db, with its -wal and -shm companions) aside and keep it") in observation
         # #919: triage guidance retains its existing advice without the projection clause.
         assert "plugin-only" not in line
     else:

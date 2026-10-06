@@ -28,7 +28,9 @@ PROJECTION_FLOOR = (
     "; a survival fit projected rows (or the projection count is unknown): from v0.27.0 on, "
     "a plugin-only rollback must target v0.27.0 or later; v0.26.x or earlier cannot recognise "
     "a short projected row (head + mark) and stores it again on a cold resume (#601 duplicates); "
-    "to roll back further, stop Hermes and move the database aside as described above"
+    # #919 F2: the projection rollback procedure is self-contained.
+    "to roll back further, stop Hermes and move the configured database file (by default lcm.db, "
+    "with its -wal and -shm companions) aside and keep it"
 )
 
 

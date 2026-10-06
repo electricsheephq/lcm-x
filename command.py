@@ -1792,6 +1792,8 @@ def _doctor_text(engine) -> str:
         fit_count = None
     if fit_count != 0:
         projected = survival_fit.get("projected_count")  # absent on a record from before the key: unknown
+        if type(projected) is not int or projected < 0:
+            projected = None  # damaged projection metadata: conservatively unknown
         within = ("rollback to a 0.24.x version older than v0.24.5: that plugin cannot compact stored rows that a "
                   "survival fit removed from the live context; stop Hermes, move the configured database file (by "
                   "default lcm.db, with its -wal and -shm companions) aside and keep it, then restore the database "
@@ -1807,7 +1809,8 @@ def _doctor_text(engine) -> str:
             rollback += ("; a survival fit projected rows (or the projection count is unknown): from v0.27.0 on, "
                          "a plugin-only rollback must target v0.27.0 or later; v0.26.x or earlier cannot recognise "
                          "a short projected row (head + mark) and stores it again on a cold resume (#601 duplicates); "
-                         "to roll back further, stop Hermes and move the database aside as described above")
+                         "to roll back further, stop Hermes and move the configured database file (by default lcm.db, "
+                         "with its -wal and -shm companions) aside and keep it")
         observations.append(f"survival_fit: {applied}; last reason "
                             f"{survival_fit.get('last_reason') or '(unknown)'}; projected_count "
                             f"{'unknown' if projected is None else projected}; unreached_budget_count "
