@@ -25,7 +25,11 @@ def compacted_head(tmp_path, request):
                          "function": {"name": "read", "arguments": "{}"}}]},
         {"role": "tool", "content": "Read result", "tool_call_id": "call_923", "timestamp": 1002.0},
     ]
-    before = [prompt, *tail]
+    older_tail = [
+        {"role": "assistant", "content": "Earlier work", "timestamp": 1000.1},
+        {"role": "tool", "content": "Earlier result", "tool_call_id": "call_earlier", "timestamp": 1000.2},
+    ]
+    before = [prompt, *older_tail, *tail]
     engine.ingest(before)
     prompt_id = engine._store.get_session_messages("S0")[0]["store_id"]
     engine._last_compacted_store_id = prompt_id
