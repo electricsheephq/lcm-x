@@ -1803,6 +1803,11 @@ def _doctor_text(engine) -> str:
             applied = applied.replace("applied", "attempted", 1) + "; could not shorten the list on the last attempt"
         rollback = (f"; {within}; a rollback to v0.23.3 keeps the database file and needs native recovery ON "
                     "(see triage_guidance)" if survival_fit.get("ever_shortened", True) else "")
+        if projected is None or projected > 0:
+            rollback += ("; a survival fit projected rows (or the projection count is unknown): from v0.27.0 on, "
+                         "a plugin-only rollback must target v0.27.0 or later; v0.26.x or earlier cannot recognise "
+                         "a short projected row (head + mark) and stores it again on a cold resume (#601 duplicates); "
+                         "to roll back further, stop Hermes and move the database aside as described above")
         observations.append(f"survival_fit: {applied}; last reason "
                             f"{survival_fit.get('last_reason') or '(unknown)'}; projected_count "
                             f"{'unknown' if projected is None else projected}; unreached_budget_count "
