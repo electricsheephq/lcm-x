@@ -106,6 +106,7 @@ def test_unproven_head_rewrite_keeps_duplicate_over_loss(compacted_head, mismatc
         engine._store._conn.execute("DELETE FROM metadata WHERE key LIKE 'compaction_commit_proof%'")
         engine._compress_commit_proof = None
         engine._last_emission_descriptors = None
+        engine._ingest_cursor_needs_reconcile = True
     engine.ingest([rewritten, *returned[1:]])
     expected = 1 if mismatch == "session" else 2
     assert len(_users(engine)) == expected
