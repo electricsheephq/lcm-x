@@ -612,7 +612,8 @@ class CompactionMixin:
                 # #904: published hidden leaves advance the frontier, not the host-visible list.
                 result = messages
                 self._ingest_cursor = len(messages)
-                self._start_no_progress_hold("hidden_only")
+                if not force and not bypass_cooldown and not self._compress_forced_overflow:
+                    self._start_no_progress_hold("hidden_only")
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
                             budget.leaves, self._compress_hidden_rows_consumed)
             if self._no_progress_candidate and not bypass_cooldown and len(result) >= len(messages) and (

@@ -88,6 +88,26 @@ def test_hidden_only_returns_identical_list_and_holds_attempts(engine, caplog):
         assert not instance.should_compress(observed)
 
 
+@pytest.mark.parametrize("options", [{"force": True}, {"bypass_cooldown": True}], ids=["forced", "bypass"])
+def test_hidden_only_nonautomatic_pass_returns_input_without_hold(engine, options):
+    instance, summarize = engine
+    host = _hidden_view(instance)
+    original = deepcopy(host)
+    frontier = instance._store_complete_frontier()
+
+    # Isolate F1's non-shrinking path: recovery survival fitting would otherwise
+    # shrink this fixture before the hidden-only guard can run.
+    instance._config.survival_fit = False
+    result = instance.compress(host, current_tokens=count_messages_tokens(host), **options)
+
+    assert result is host
+    assert result == original
+    assert summarize.call_count >= 1
+    assert instance._store_complete_frontier() > frontier
+    assert instance._no_progress_hold is None
+    assert not instance._no_progress_hold_active()
+
+
 def test_turn_end_allows_drain_then_host_consumption(engine):
     instance, _ = engine
     host = _hidden_view(instance)
