@@ -18,7 +18,7 @@ FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "cras
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
     7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
-    # B5/B8 are downstream of #553 duplication in acp-history rotation (eva-0.21.5 vs customer-0.21.2,
+    # B5/B8 are downstream of #553 duplication in acp-history rotation (ref-0.21.5 vs customer-0.21.2,
     # nightly aa84e61d); re-check when #553 is fixed.
     553: (("B1", "B2", "B3", "B4", "B5", "B8"), ""), 561: (("B1", "B2"), ""), 563: (("B4",), ""),
     463: (("B7",), "Desktop/tui_gateway transport, >12k externalised user rows"),
@@ -43,7 +43,7 @@ ISSUES = {
     861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
-ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("eva-", "customer-", "r34.4-", "upstream-uid"), 871: ("r34.4-",)}
+ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "upstream-uid"), 871: ("r34.4-",)}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
 ISSUE_TRANSPORTS = {861: ("acp-process",)}
 
