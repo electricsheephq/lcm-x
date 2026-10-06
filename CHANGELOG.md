@@ -6,6 +6,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+### v0.27.0
+
+- Fix: an unstamped host rewrite of a proven LCM summary or objective slot replays the session's exact durable user row at or below the frontier instead of storing it again. (#923)
+
 ## v0.26.0 (host message identity)
 
 - Feature: host message identity in shadow mode. On a host that stamps `message_uid`, LCM records which stored row each

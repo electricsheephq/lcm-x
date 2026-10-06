@@ -704,6 +704,37 @@ class ReconcileMixin:
         except Exception:  # malformed durable history: no proof, full identity everywhere
             return None
 
+    def _host_head_rewrite_replay_indexes(self, messages) -> set[int]:
+        """#923: an unstamped persist override of a proven scaffold is replay."""
+        try:
+            proof = self._durable_commit_proof_payload() or {}
+            if proof.get("version") != 4:
+                return set()
+            replayed = set()
+            for emission in proof.get("emissions") or ():
+                if (emission.get("kind") not in {"summary", "objective"}
+                        or emission.get("retained_source") is not None
+                        or emission.get("suffix_length") != 0):
+                    continue
+                index = emission["output_occurrence"]["index"]
+                if index >= len(messages):
+                    continue
+                message = messages[index]
+                if message.get("role") != "user" or message.get("timestamp") is not None:
+                    continue
+                identity = self._message_replay_identity(message, strip_carrier=False)
+                if _has_lossy_redacted_identity(identity):
+                    continue
+                candidates = self._store.find_session_rows_by_content(
+                    self._session_id, "user", identity[1], self._last_compacted_store_id,
+                )
+                if any(self._message_replay_identity(row, stored_row=True, strip_carrier=False) == identity
+                       for row in candidates):
+                    replayed.add(index)
+            return replayed
+        except Exception:  # uncertain continuity keeps duplicate-over-loss
+            return set()
+
     def _occurrence_replay_identities(self, messages, proof, projection=None):
         """#488: per occurrence of the COMPLETE list, from its one projection: None for a proven
         emitted scaffold, the remainder of a proven emitted prefix, else FULL identity. Legacy,
