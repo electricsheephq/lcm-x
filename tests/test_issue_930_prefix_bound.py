@@ -92,6 +92,33 @@ def test_default_prefix_bound_keeps_newest_and_preserves_dag(engine, survival_en
     assert expanded["node_id"] == ids[0]
 
 
+def test_tail_heavy_assembly_keeps_prefix_for_survival_fit(engine):
+    ids = add_nodes(engine, 1, 5, token_count=2_000)
+    ceiling = engine._survival_ceiling()
+    tail = [message for index in range(4) for message in (
+        {"role": "user", "content": f"Turn {index}"},
+        {"role": "assistant", "content": "abcd" * (ceiling // 5)},
+    )]
+    system = {"role": "system", "content": "Synthetic system prompt."}
+    source = [system, *tail]
+    engine.ingest(source)
+    engine.last_prompt_tokens = tokens.count_messages_tokens(source) + 20_000
+    remaining = ceiling - 20_000 - tokens.count_messages_tokens(source)
+    assert remaining < 10_000 < ceiling // 4
+    assembled = assemble(engine, tail)
+    assert visible_node_ids(assembled) == ids
+    assert assembled[-len(tail):] == tail
+    assert tokens.count_messages_tokens(assembled[1:-len(tail)]) < ceiling // 4
+    budget = engine._survival_fit_budget(source, engine.last_prompt_tokens)
+    assert engine._survival_measure(assembled) > budget
+    engine._ingest_cursor = len(assembled)  # The host list contains only stored turns and DAG summaries.
+    fitted = engine._survival_fit(source, assembled, engine.last_prompt_tokens, "issue-930")
+    assert visible_node_ids(fitted) == ids
+    assert len(fitted) < len(assembled)
+    assert engine._survival_measure(fitted) <= budget
+    assert fitted[-1] == tail[-1]
+
+
 def test_below_bound_is_byte_identical_to_uncapped_path(engine):
     add_nodes(engine, 0, 4, token_count=200)
     add_nodes(engine, 1, 4, token_count=300)

@@ -135,7 +135,6 @@ def test_t1_hermes_list_keeps_the_summary_row(tmp_path, host, monkeypatch, list_
     the first kept user row), the list fits, re-ingesting it stores nothing, and a turn the host appends
     stores exactly its own rows (same process and cold)."""
     engine = _engine(tmp_path)
-    engine._config.max_assembly_tokens = 1_000_000  # #930: keep an over-budget prefix to test survival-fit retention.
     try:
         view = _hidden_backlog(engine, list_users=list_users)
         seen = _spy(engine, monkeypatch)
@@ -208,7 +207,6 @@ def test_t1_hermes_commit_branch_then_cold_resume(tmp_path, host, monkeypatch, l
 
 def test_t2_system_head_keeps_the_summary_after_it_and_the_notice_in_it(tmp_path, host, monkeypatch):
     engine = _engine(tmp_path)
-    engine._config.max_assembly_tokens = 1_000_000  # #930: keep an over-budget prefix to test the system-slot fit.
     try:
         view = _hidden_backlog(engine, system=True)
         seen = _spy(engine, monkeypatch)
@@ -234,7 +232,6 @@ def test_t2_system_head_keeps_the_summary_after_it_and_the_notice_in_it(tmp_path
 def _emergency(tmp_path, host, monkeypatch, *, list_users):
     """The assembled list, and a budget the newest turn fits but the summary prefix plus it does not."""
     engine = _engine(tmp_path)
-    engine._config.max_assembly_tokens = 1_000_000  # #930: assemble the emergency fixture before survival fit runs.
     view = _hidden_backlog(engine, list_users=list_users, big_newest=4000)
     seen = _spy(engine, monkeypatch, fit=False)
     pre = engine.compress(view, current_tokens=host(view))
@@ -249,7 +246,6 @@ def _emergency(tmp_path, host, monkeypatch, *, list_users):
 
 
 def test_t3_prefix_plus_newest_turn_over_budget_falls_back_to_the_old_rule(tmp_path, host, monkeypatch, caplog):
-    # #930: _emergency's explicit cap preserves the oversized-prefix fallback scenario.
     engine, pre, budget, prefix = _emergency(tmp_path, host, monkeypatch, list_users=True)
     try:
         with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
@@ -268,7 +264,6 @@ def test_t4_a_carrier_in_the_prefix_is_never_silently_lost(tmp_path, host, monke
     """The carrier (summary + a real user row) either stays as a carrier, re-formed around the first kept
     user row once its own row left with its turn (counted), within budget; or, in the emergency, leaves
     whole with its turn as v0.24.6 drops it (its row stored; the emergency WARNING says so)."""
-    # #930: _emergency's explicit cap preserves both carrier retention and emergency scenarios.
     engine, pre, budget, _ = _emergency(tmp_path, host, monkeypatch, list_users=False)
     try:
         remainder = engine._generated_context_carrier_remainder(pre[0])
@@ -404,7 +399,6 @@ def test_r3_f5_a_real_row_quoting_a_summary_phrase_is_not_protected(tmp_path, ho
     recognised by provenance (scaffold or verified carrier), never by the phrase; the phrase row is an
     ordinary turn: it and its reply stay together, and no kept request loses its reply."""
     engine = _engine(tmp_path)
-    engine._config.max_assembly_tokens = 1_000_000  # #930: keep the summary ahead of the phrase row for provenance checks.
     try:
         head = [{"role": "system", "content": "system prompt"}] if system else []
         turns = [r for i in range(108) for r in _turn(f"T{i:03d}", 10.0 * i)]
