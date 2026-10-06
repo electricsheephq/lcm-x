@@ -29,7 +29,10 @@ Plan, todo and goal survival across a compaction is host behaviour. It is being 
 
 ## H2 — memory that measurably wins (in parallel)
 
-1. Re-baseline recall on the v0.26.0 GA in three configurations: the default (full-text recall), a cached Voyage tracker, and local fastembed. Rows: LongMemEval retrieval, then LongMemEval-S QA and LoCoMo. Turning embeddings on by default for managed deployments is decided on this data.
+1. Re-baseline recall on v0.26.0 in three configurations. LongMemEval retrieval is done for two of them on the release candidate, whose tree the GA ships unchanged:
+   - the default (full-text recall): R@10 0.847, with no question changed against v0.25.1;
+   - a cached Voyage tracker: 0.950 on the 456 questions it scores (0.847 without embeddings on the same questions).
+   Next: local fastembed, then LongMemEval-S QA and LoCoMo. Turning embeddings on by default for managed deployments is decided on this data.
 2. B3-A: treat retrieved context as untrusted evidence (#317), then keep timestamp, role and sender provenance in summariser inputs (#324), then re-measure.
 3. Publish the results in the repository scoreboard with tokens per query and cost; add BEAM.
 
