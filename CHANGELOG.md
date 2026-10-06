@@ -6,6 +6,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+### v0.27.0
+
+- Fix: bound the summary prefix by default when the context window is known, retaining the newest summaries without removing DAG nodes, and condense the heaviest eligible depth first. (#930)
+
 ## v0.26.0 (host message identity)
 
 - Feature: host message identity in shadow mode. On a host that stamps `message_uid`, LCM records which stored row each
