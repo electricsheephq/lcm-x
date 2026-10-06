@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 from bench.instruments.reliability import acp_driver as AD, cells as C, fake_provider as FP, probe as P1, run_matrix as RM
+from bench.instruments.reliability.scorers import continuity
 
 OBSERVER = Path(__file__).with_name("observer")
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
@@ -31,12 +32,13 @@ SANDBOX = ('(version 1)(allow default)(deny network-outbound)(allow network-outb
            '(allow network-outbound (remote unix-socket))')
 FAKE_KEY = "rel-fake-key-not-a-secret"
 PROCESS_FAULTS = {"acp-process": {"crash_after_compaction_before_reply", "cancel_then_retry",
-                                   "crash_after_rotation_before_child_row", "clean_exit_before_turn", "p8_inject"}}
+                                   "crash_after_rotation_before_child_row", "clean_exit_before_turn", "p8_inject",
+                                   "forced_compaction_then_turn"}}
 # R2-only: the main route over the Anthropic Messages API (a ``/anthropic`` base path selects the anthropic_messages
 # transport, hermes_cli/runtime_provider.py _detect_api_mode_for_url); the #550 class.
 R2_CELLS = [{**C.cell("anthropic-route/acp-process", [], in_place=True,
                       doc="baseline/in-place/acp with the main model on the Anthropic Messages API (fake provider)"),
-             "api": "anthropic"}]
+             "api": "anthropic"}] + C.continuity_cells()
 # gateway-process: why no local platform can drive an R1 gateway cell, cited per host at run time.
 GATEWAY_ANCHORS = {
     "turn_runner": ("gateway/run_turn.py", "TurnRunner(self, turn_ctx)"),
@@ -212,7 +214,8 @@ class ProcessCell:
         self.phase, self.log_mark, self.fired, self.backlog_log, self.last_turn = "A", 0, set(), [], 0
         self.scenario = Scenario(self)
         self.provider = FP.FakeProvider(d / "provider-requests.jsonl", main=self.scenario.main,
-                                        usage_scale=float(cell["assistant"].get("usage_scale", 1.0)))
+                                        usage_scale=float(cell["assistant"].get("usage_scale", 1.0)),
+                                        continuity_context=self.continuity_context)
         self.proxy = FP.ProxySink(d / "proxy-attempts.jsonl")
 
     # -- records ---------------------------------------------------------------------------------------------
@@ -225,6 +228,12 @@ class ProcessCell:
 
     def notes(self, kind: str) -> list[dict]:
         return [n for n in read_jsonl(self.d / "observer.jsonl") if n["kind"] == kind]
+
+    def continuity_context(self) -> dict:
+        ends = [n for n in self.notes("turn_end") if n.get("turn_kind") != "final" and not n.get("failed")
+                and not n.get("interrupted")]
+        return {"anchor": "T01" if (self.cell.get("continuity") or {}).get("sole_user") else None,
+                "previous": ends[-1].get("reply_tag") if ends else None, "current": self.text_tag}
 
     def fire(self, kind: str, turn: int, **extra) -> None:
         append(self.d / "faults-fired.jsonl", {"kind": kind, "phase": self.phase, "turn": turn})
@@ -338,6 +347,7 @@ class ProcessCell:
                 self.proc.load_session(self.sid, self.files, self.budget())
             cancel = next((f for f in self.cell["faults"] if f["kind"] == "cancel_then_retry"), None)
             clean = next((f for f in self.cell["faults"] if f["kind"] == "clean_exit_before_turn"), None)
+            forced = next((f for f in self.cell["faults"] if f["kind"] == "forced_compaction_then_turn"), None)
             for t in P1.extend_turns(self.cell, first, self.low_backlog):
                 if clean and t == clean.get("turn") and t != first and "clean_exit_before_turn" not in self.fired:
                     rc = self.proc.close()
@@ -354,6 +364,9 @@ class ProcessCell:
                         self.turn(t, "retry")
                 else:
                     self.turn(t)
+                if forced and t == forced["turn"] and forced["kind"] not in self.fired:
+                    check = self.final_check()
+                    self.fire(forced["kind"], t, published=check["published"], outcome=check["outcome"])
             final = {**self.final_check(), "backlog_checks": self.backlog_log} \
                 if self.cell.get("final_compaction_check", True) else None
             self.budget()  # work after the last request may have crossed the deadline: never a late "done"
@@ -511,6 +524,7 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         observer = [n for r in records for n in r.get("observer_errors", [])]
         rec.update(phases=phases, wall_s=round(time.time() - started, 1), acp_session=run.sid, accounting=acct,
                    citations=records[0]["citations"] if records else {}, sandbox=os.path.exists(SANDBOX_EXEC))
+        rec["continuity"] = continuity.score_dir(cell, d)
         if network:  # stop condition: a host process tried to leave localhost
             return done(verdict="ERROR", reason=f"STOP: host attempted non-localhost network access: {network[:3]}")
         if prov or observer:

@@ -126,6 +126,34 @@ def write(out: Path, results: list[dict], wall: float, lcm_env: dict | None = No
         lines += [f"- `{r['cell']}` on {r['host']}: " + "B2 {} / B1 {} rows licensed".format(*licensed(r))
                   for r in sorted(rs, key=lambda r: (r["cell"], r["host"])) if r["verdict"] == "PASS" and any(licensed(r))] or ["- none"]
         lines.append("")
+    lines += ["## Continuity (diagnostic, non-gating)", "",
+              "First main-role request received after each committed compaction (R2 only). "
+              "F1: system LCM note; F2: sole-user anchor; F3: previous completed reply; F4: current user. "
+              "Counts are present/absent/unknown/not-applicable. No request is never a pass. "
+              "Tag presence does not prove operative instruction continuity (#659).", "",
+              "| host | host sha | plugin | cell | commits | no request | scenario observed | F1 | F2 | F3 | F4 |",
+              "|---|---|---|---|---|---|---|---|---|---|---|"]
+    observed = [r for r in results if "continuity" in r]
+    for r in sorted(observed, key=lambda r: (r["host"], r["cell"], r["plugin_sha"])):
+        c = r["continuity"]
+        counts = ["/".join(str(c["totals"][f][k]) for k in ("present", "absent", "unknown", "not_applicable"))
+                  for f in ("F1", "F2", "F3", "F4")]
+        scenario = c.get("scenario_observed")
+        lines.append(f"| {r['host']} | {r['host_sha'][:12]} | {r['plugin_sha'][:12]} | `{r['cell']}` | "
+                     f"{c['compactions']} | {c['no_request']} | {scenario if scenario is not None else '-'} | "
+                     + " | ".join(counts) + " |")
+    if not observed:
+        lines.append("| - | - | - | no R2 continuity observations | - | - | - | - | - | - | - |")
+    lines += ["", "### Per-compaction observations", "",
+              "| host | plugin | cell | phase/turn | kind | request/turn | previous reply | inside compacted span | status | F1 | F2 | F3 | F4 |",
+              "|---|---|---|---|---|---|---|---|---|---|---|---|---|"]
+    for r in sorted(observed, key=lambda r: (r["host"], r["cell"], r["plugin_sha"])):
+        for row in r["continuity"]["rows"]:
+            values = [str(row[f]) if row[f] is not None else "unknown" for f in ("F1", "F2", "F3", "F4")]
+            lines.append(f"| {r['host']} | {r['plugin_sha'][:12]} | `{r['cell']}` | {row['phase']}/{row['turn']} | "
+                         f"{row['kind']} | {row['request_id']}/{row['request_turn']} | {row['previous_reply_tag'] or '-'} | "
+                         f"{row['previous_reply_in_compacted_span']} | {row['status']} | " + " | ".join(values) + " |")
+    lines.append("")
     (out / "MATRIX.md").write_text("\n".join(lines) + "\n")
 
     targeting = defaultdict(list)

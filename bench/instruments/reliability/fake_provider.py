@@ -26,6 +26,8 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from bench.instruments.reliability.scorers.continuity import markers
+
 TAG = re.compile(r"\[([A-Z]\d{2,3})\] user")
 NONCE = re.compile(r'<lcm-summary nonce="([0-9a-f]+)">')
 
@@ -98,8 +100,9 @@ def lcm_summary(messages: list[dict], n: int) -> str:
 
 
 class FakeProvider:
-    def __init__(self, log_path, main=None, usage_scale: float = 1.0, hold_cap: float = 120.0):
+    def __init__(self, log_path, main=None, usage_scale: float = 1.0, hold_cap: float = 120.0, continuity_context=None):
         self.log_path, self.main, self.usage_scale, self.hold_cap = log_path, main, usage_scale, hold_cap
+        self.continuity_context = continuity_context
         self.lock, self.n_summary, self.n_requests, self.in_flight = threading.Lock(), 0, 0, threading.Event()
         provider = self
 
@@ -193,6 +196,9 @@ class FakeProvider:
                "api": api, "role": role, "model": body.get("model"), "stream": stream,
                "messages_sha256": hashlib.sha256(blob).hexdigest(), "messages": len(messages),
                "token_estimate": usage_for(messages, 1.0)}
+        context = self.continuity_context() if role == "main" and self.continuity_context else {}
+        rec["continuity"] = markers(messages, **context)
+        rec["current_user_tag"] = context.get("current")
         if role == "main":
             rec["tools"] = sorted((t.get("function") or t).get("name", "?") for t in body.get("tools") or [])
         try:

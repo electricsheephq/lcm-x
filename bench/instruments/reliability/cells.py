@@ -14,7 +14,7 @@ DRAIN_BARS = ("D1", "D2", "D3")  # scorers/drain.py: the host list drains under 
 TRANSPORTS = ("acp", "gateway")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
-          "publication_failure", "plugin_switch", "forced_recovery", "p8_inject"}
+          "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
     7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
@@ -69,6 +69,30 @@ def cell(cid, targets, *, in_place, transport="acp", turns=60, window=128000, re
 
 def modes():
     return (("in-place", True), ("rotation", False))
+
+
+def continuity_cells() -> list[dict]:
+    """R2-only diagnostics: ordinary turns and the existing multi-round tool plan."""
+    out = []
+    for m, ip in modes():
+        out.append(cell(f"continuity/sole-user-tool-loop/{m}", [], in_place=ip, turns=1, min_compactions=2,
+                        lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_FRESH_TAIL_COUNT": "4",
+                                 "LCM_FRESH_TAIL_MAX_TOKENS": "2000", "LCM_LEAF_CHUNK_TOKENS": "1000"},
+                        tool_plan=[{"turns": [1], "calls": [{"name": "read_file", "args": {
+                            "path": "{files}/big.txt"}, "expect": {"min_chars": 10000}}]} for _ in range(24)],
+                        continuity={"sole_user": True}, final_compaction_check=False,
+                        doc="Diagnostic #900: one user prompt, 24 tool rounds; require two commits before a second prompt."))
+        out.append(cell(f"continuity/survival-fit/{m}", [], in_place=ip, turns=12, repeat=1600,
+                        user={"repeat_from": {"9": 100}}, min_compactions=0,
+                        lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_SURVIVAL_FIT": "true",
+                                 "LCM_SURVIVAL_RESERVE": "0.9", "LCM_FRESH_TAIL_COUNT": "24"},
+                        continuity={"require_survival_fit": True}, final_compaction_check=False,
+                        doc="Diagnostic #798: low survival ceiling, large turns followed by ordinary short turns."))
+        out.append(cell(f"continuity/forced-compaction-then-turn/{m}", [], in_place=ip, turns=20, min_compactions=0,
+                        faults=[{"kind": "forced_compaction_then_turn", "turn": 19}],
+                        continuity={"forced_followup": True}, final_compaction_check=False,
+                        doc="Diagnostic: reuse ACP /compress after turn 19, then ordinary turn 20."))
+    return out
 
 
 def registry() -> list[dict]:
