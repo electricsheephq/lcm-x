@@ -347,15 +347,19 @@ class SurvivalFitMixin:
         return out
 
     @staticmethod
-    def _survival_projected_fields(row: Dict[str, Any], tokens: int, head: int, tail: int) -> Dict[str, Any]:
+    def _survival_projected_fields(row: Dict[str, Any], tokens: int, head: int, tail: int,
+                                  *, legacy: bool = False) -> Dict[str, Any]:
         """The projection of a stored row: its content as head/tail around the mark, head plus mark when
         shorter, or whole when at most ``head``; tool-call arguments over ``head`` replaced by the mark, and
-        stored tool linkage. Deterministic in (row bytes, tokens, head, tail)."""
+        stored tool linkage. ``legacy`` recomputes old mark-only text for recognition, never emission.
+        Deterministic in (row bytes, tokens, head, tail) for each form."""
         store_id = int(row["store_id"])
         marker = _PROJECTED.format(role=row.get("role"), tokens=tokens, store_id=store_id, head=head, tail=tail)
         text = normalize_content_value(row.get("content")) or ""
         if len(text) > 2 * head:
             text = f"{text[:head]}\n...\n{marker}\n...\n{text[-tail:]}"
+        elif legacy and text:
+            text = marker
         elif len(text) > head:
             text = f"{text[:head]}\n...\n{marker}"
         calls = row.get("tool_calls")
@@ -416,7 +420,8 @@ class SurvivalFitMixin:
             if not self._survival_stamp_matches(message, row):
                 continue
             fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail))
-            if (content == fields["content"]
+            legacy_fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail), legacy=True)
+            if (content in (fields["content"], legacy_fields["content"])
                     and str(message.get("tool_call_id") or "") == str(row.get("tool_call_id") or "")
                     and (calls or None) == fields["tool_calls"]
                     and (role != "tool" or str(message.get("tool_name") or message.get("name") or "")
