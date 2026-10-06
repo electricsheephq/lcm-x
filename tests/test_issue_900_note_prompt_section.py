@@ -3,6 +3,7 @@
 import importlib
 import logging
 import re
+import threading
 
 import pytest
 
@@ -91,9 +92,12 @@ def test_u2_resolves_only_lcm_sessions_and_fails_empty(plugin, monkeypatch):
     module, register = plugin
     ctx = register(SectionContext())
     content = ctx.sections[0][1]
+    registry = importlib.import_module(f"{module.__name__}.engine_registry")
+    assert registry.resolve_active_lcm_engine(session_id="bound") is None
     assert content({"session_id": "bound"}) == ""
     assert content({}) == ""
     ctx.engine.on_session_start("bound", platform="cli")
+    assert registry.resolve_active_lcm_engine(session_id="bound") is ctx.engine
     assert content({"session_id": "bound"}) == module.LCM_SYSTEM_PROMPT_NOTE
     assert content({"session_id": "other"}) == ""
     # Keep a strong reference: the registry holds weak values.
@@ -103,7 +107,6 @@ def test_u2_resolves_only_lcm_sessions_and_fails_empty(plugin, monkeypatch):
     other_engine.name = "other-context-engine"
     other_engine._session_id = "other"
     other_engine.ingest = None
-    registry = importlib.import_module(f"{module.__name__}.engine_registry")
     monkeypatch.setitem(registry._ACTIVE_ENGINES_BY_SESSION_ID, "other", other_engine)
     assert content({"session_id": "other"}) == ""
 
@@ -112,6 +115,42 @@ def test_u2_resolves_only_lcm_sessions_and_fails_empty(plugin, monkeypatch):
 
     monkeypatch.setattr(registry, "resolve_active_lcm_engine", broken_resolution)
     assert content({"session_id": "bound"}) == ""
+
+
+def test_prompt_section_does_not_wait_for_stable_use_lock(plugin):
+    module, register = plugin
+    ctx = register(SectionContext())
+    ctx.engine.on_session_start("bound", platform="cli")
+    content = ctx.sections[0][1]
+    locked = threading.Event()
+    release = threading.Event()
+    rendered = threading.Event()
+    results = []
+
+    def hold_lock():
+        with ctx.engine._stable_use_lock:
+            locked.set()
+            release.wait(10)
+
+    def render():
+        results.append(content({"session_id": "bound"}))
+        rendered.set()
+
+    holder = threading.Thread(target=hold_lock)
+    caller = threading.Thread(target=render)
+    holder.start()
+    try:
+        assert locked.wait(1), "lock holder did not start"
+        caller.start()
+        assert rendered.wait(0.5), "prompt section waited on the stable-use lock"
+        assert results == [module.LCM_SYSTEM_PROMPT_NOTE]
+    finally:
+        release.set()
+        holder.join(2)
+        if caller.ident is not None:
+            caller.join(6)
+    assert not holder.is_alive()
+    assert not caller.is_alive()
 
 
 def test_u3_older_host_keeps_all_other_registrations(plugin, caplog):

@@ -469,6 +469,7 @@ def _engine_took_slot(ctx, engine, hermes_home: str) -> bool:
 
 def register(ctx):
     """Plugin entry point — register the LCM context engine and tools."""
+    from . import engine_registry
     from .config import LCMConfig
     from .engine import LCMEngine
     from .engine_registry import (
@@ -572,11 +573,11 @@ def register(ctx):
                 session_id = str(info.get("session_id") or "")
                 if not session_id:
                     return ""
-                result = use_active_lcm_engine(
-                    lambda active_engine: LCM_SYSTEM_PROMPT_NOTE,
-                    session_id=session_id,
+                return (
+                    LCM_SYSTEM_PROMPT_NOTE
+                    if engine_registry.resolve_active_lcm_engine(session_id=session_id) is not None
+                    else ""
                 )
-                return result.value if result.used else ""
             except Exception:
                 return ""
 
