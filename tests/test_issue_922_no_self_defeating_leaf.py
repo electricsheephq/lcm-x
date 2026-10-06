@@ -1,6 +1,8 @@
 """#922: do not summarize the sole prompt that assembly would repeat verbatim."""
 
 from copy import deepcopy
+import logging
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -77,15 +79,33 @@ def test_cell_no_leaf_no_growth_no_rejection(engine, monkeypatch):
     assert result == original
     assert count_messages_tokens(result) <= count_messages_tokens(original)
     rejected.assert_not_called()
-    assert instance._no_progress_hold is None
-    assert instance.should_compress(count_messages_tokens(result))
+    assert instance.get_status()["no_progress_hold"]["reason"] == "objective_only"
+    assert instance._compression_block_reason() == "cooldown:lcm_objective_only"
+    assert not instance.should_compress(count_messages_tokens(result))
     assert instance._store.get_session_count(instance._session_id) == 3
 
 
-def test_next_round_compacts_earlier_tool_pair_and_preserves_objective(engine):
+def test_next_round_compacts_earlier_tool_pair_and_preserves_objective(engine, caplog):
     instance, summarize = engine
     messages = _cell()
-    first = _host_anti_growth(instance, messages)
+    with caplog.at_level(logging.INFO):
+        first = _host_anti_growth(instance, messages)
+    assert "held until turn end (cap 600s): objective_only" in caplog.text
+    assert instance.get_status()["no_progress_hold"]["reason"] == "objective_only"
+    ceiling = instance._survival_ceiling()
+    assert ceiling == 108_800
+    for current_tokens in (instance.threshold_tokens, 25_000, 45_000, 80_000, ceiling - 1):
+        assert not instance.should_compress(current_tokens)
+    assert instance.should_compress(ceiling)
+    assert instance.should_compress(ceiling + 1)
+    instance._mark_thread_context_stateless("aux-922")
+    try:
+        instance.note_turn_complete()
+        assert instance.get_status()["no_progress_hold"]["reason"] == "objective_only"
+    finally:
+        instance._clear_thread_context_stateless()
+    instance.note_turn_complete()
+    assert instance._no_progress_hold is None
     following = first + _round(2)
     assert instance.should_compress(count_messages_tokens(following))
 
@@ -100,6 +120,7 @@ def test_next_round_compacts_earlier_tool_pair_and_preserves_objective(engine):
     assert result[0]["content"].startswith("[Current user objective preserved from compacted history]")
     assert count_messages_tokens(result) < count_messages_tokens(following)
     assert instance._no_progress_hold is None
+    assert not instance._objective_only_noop
 
 
 def test_user_plus_other_backlog_still_forms_leaf(engine):
@@ -114,3 +135,39 @@ def test_user_plus_other_backlog_still_forms_leaf(engine):
     assert {1, 2, 3} <= {store_id for node in nodes for store_id in node.source_ids}
     assert messages[0]["content"] in result[0]["content"]
     assert result[-2:] == messages[-2:]
+
+
+def test_all_rows_in_tail_keeps_no_progress_hold(engine):
+    instance, summarize = engine
+    messages = _cell()
+    instance._config.fresh_tail_max_tokens = 0
+    assert instance._fresh_tail_start(messages) == 0
+
+    result = _host_anti_growth(instance, messages)
+
+    assert result == messages
+    summarize.assert_not_called()
+    assert instance._dag.get_session_nodes(instance._session_id) == []
+    assert instance.get_status()["no_progress_hold"]["reason"] == "no_progress"
+    instance.note_turn_complete()
+    assert instance.get_status()["no_progress_hold"]["reason"] == "no_progress"
+    assert not instance.should_compress(count_messages_tokens(messages))
+
+
+def test_objective_only_hold_has_600_second_cap_and_flag_resets(engine, monkeypatch):
+    instance, _ = engine
+    clock = SimpleNamespace(now=10.0)
+    monkeypatch.setattr(engine_module, "time", SimpleNamespace(
+        monotonic=lambda: clock.now, time=lambda: clock.now))
+    _host_anti_growth(instance, _cell())
+    assert instance._no_progress_hold == (610.0, "objective_only")
+    clock.now = 609.999
+    assert not instance.should_compress(instance.threshold_tokens)
+    clock.now = 610.0
+    assert instance.should_compress(instance.threshold_tokens)
+    assert instance._no_progress_hold is None
+    instance._compress_impl([])
+    assert not instance._objective_only_noop
+    instance._objective_only_noop = True
+    instance._reset_session_scoped_runtime_state()
+    assert not instance._objective_only_noop
