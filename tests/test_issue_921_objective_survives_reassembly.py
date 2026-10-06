@@ -86,6 +86,25 @@ def test_second_same_turn_compress_keeps_objective(engine, more_rounds):
     assert second[-2:] == continued[-2:]  # preserve the active call/result pair
 
 
+def test_three_same_turn_assemblies_keep_objective_stable(engine):
+    assembled = _first_assembly(engine)
+    expected_objective = (PREFIX + "\n" + PROMPT).encode("utf-8")
+    assert assembled[0]["content"].partition(SEPARATOR)[0].encode("utf-8") == expected_objective
+    for index in range(5, 8):
+        continued = [*assembled, *_round(index)]
+        fresh_tail = continued[engine._fresh_tail_start(continued):]
+        assert fresh_tail
+        assert all(row["role"] != "user" for row in fresh_tail)
+        assembled = engine.compress(continued)
+        objective, separator, _ = assembled[0]["content"].partition(SEPARATOR)
+        assert separator == SEPARATOR
+        objective_bytes = objective.encode("utf-8")
+        assert objective_bytes == expected_objective
+        assert len(objective_bytes) == len(expected_objective)
+        assert sum(row.get("content", "").count(PREFIX) for row in assembled) == 1
+        assert assembled[-2:] == continued[-2:]
+
+
 def test_newer_real_user_wins_over_carried_scaffold(engine):
     first = _first_assembly(engine)
     newer = {"role": "user", "content": "The newer request is the current objective.", "timestamp": 100.0}
