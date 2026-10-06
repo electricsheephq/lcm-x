@@ -187,7 +187,8 @@ def test_a_oversized_frontier_ends_by_60_and_no_leaf_starts_past_the_soft_target
     """Updated for addendum r2.1: the over-target condensation is the progress call; after it every call needs
     the soft target. With 29 s calls a second condensation fits (+29..+58); a third or the first leaf would end
     near +87, so the compaction stops at +58 with no leaf. (r2 asserted one condensation and a leaf ending by +58;
-    the r1 half-budget split admitted condensations at +0 and +29 and a first leaf ending at +87.)"""
+    the r1 half-budget split admitted condensations at +0 and +29 and a first leaf ending at +87.) #909's leaf
+    reserve makes the next condensation hit its reduced hard budget; the leaf still hits the soft target."""
     engine = _engine(tmp_path)
     for _ in range(8):  # 29 s walls (30 s would sit on the 60 s boundary with the real clock's slack)
         engine._foreground_estimates.record_call("", 29.0)
@@ -197,7 +198,7 @@ def test_a_oversized_frontier_ends_by_60_and_no_leaf_starts_past_the_soft_target
         _compress(engine, _view(), caplog)
         telemetry = engine.get_status()["threshold_full_sweep"]
         assert telemetry["pre_leaf_condensation_passes"] == 2
-        assert telemetry["pre_leaf_condensation_stop_reason"] == "soft_target_reached"
+        assert telemetry["pre_leaf_condensation_stop_reason"] == "time_budget_exhausted"
         assert [round(started) for _model, _timeout, started in provider.calls] == [0, 29]  # two condensations
         assert telemetry["leaf_passes"] == 0 and clock.offset == pytest.approx(58.0)
         assert telemetry["stop_reason"] == "soft_target_reached"
@@ -313,10 +314,10 @@ def test_r3_a_condensation_that_shrinks_the_frontier_is_progress_and_arms_no_hol
         engine.shutdown()
 
 
-def test_r3_b_a_stored_condensation_whose_frontier_did_not_fall_still_arms_the_hold(
+def test_r3_b_a_stored_condensation_whose_frontier_did_not_fall_arms_no_hold(
         tmp_path, monkeypatch, clock, caplog):
-    """Control: the condensation is stored, but the frontier reads the same after it; the pass stays a no-progress
-    candidate and the #651 hold is armed."""
+    """#909: a stored condensation is progress even if the frontier token count does not fall; the #651
+    no-progress hold must agree with the partial-progress classification."""
     engine = _engine(tmp_path)
     for _ in range(8):
         engine._foreground_estimates.record_call("", 31.0)
@@ -330,7 +331,7 @@ def test_r3_b_a_stored_condensation_whose_frontier_did_not_fall_still_arms_the_h
         assert len(_condensations(engine)) == 1
         assert telemetry["pre_leaf_condensation_stop_reason"] == "condensation_no_progress"
         assert telemetry["leaf_passes"] == 0 and len(result) >= len(view)
-        assert engine._no_progress_hold is not None and engine._no_progress_hold[1] == "no_progress"
+        assert engine._no_progress_hold is None
     finally:
         engine.shutdown()
 
