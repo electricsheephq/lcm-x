@@ -1,6 +1,7 @@
 """Continuity controls use fixture logs only; never launch a Hermes host."""
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import types
@@ -194,6 +195,29 @@ def test_matrix_section_renders_per_host_counts_and_no_request(tmp_path):
 def test_untagged_completed_reply_does_not_reuse_an_older_tag():
     obs = observations() + [{"kind": "turn_end", "ts": 2, "reply_tag": None}]
     assert CT.score({}, [request()], obs)["rows"][0]["previous_reply_tag"] is None
+
+
+@pytest.mark.parametrize("cid", ["continuity/sole-user-tool-loop/in-place", "baseline/in-place/acp"])
+def test_tool_result_is_seen_before_missing_current_tag_reply(cid):
+    """A missing user tag must not hide tool results already received by the provider."""
+    c = cells.select(cid, extra=PC.R2_CELLS)[0]
+    events = []
+    run = types.SimpleNamespace(cell=c, text_tag="T01", event=lambda **ev: events.append(ev))
+    scenario = PC.Scenario(run)
+    scenario.begin(1, "chat", "A", 1)
+    tool_id, body = "call_T01_4_0", "synthetic tool result"
+    scenario.st["issued"].add(tool_id)
+    messages = [{"role": "user", "content": "untagged summary"},
+                {"role": "tool", "tool_call_id": tool_id, "content": body}]
+
+    reply = scenario.main(messages)
+
+    assert reply["content"] == "ok" and reply["log"]["unexpected"] is True
+    assert scenario.st["seen"] == {tool_id} and scenario.st["step"] == 0
+    assert events == [{"turn": 1, "event": "tool_seen", "id": tool_id,
+                       "sha": hashlib.sha256(body.encode()).hexdigest(), "chars": len(body)}]
+    scenario.main(messages)
+    assert len(events) == 1  # Replayed results retain the existing once-per-id semantics.
 
 
 @pytest.mark.parametrize("cid,verdict", [("continuity/survival-fit/in-place", "FAIL"),

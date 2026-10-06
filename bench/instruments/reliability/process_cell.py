@@ -166,6 +166,12 @@ class Scenario:
     def main(self, messages: list[dict]) -> dict:
         st, run = self.st, self.run
         t, text_tag = st["t"], run.text_tag
+        for m in messages:  # record received results even when the scripted reply returns early
+            cid = m.get("tool_call_id") if m["role"] == "tool" else None
+            if cid in st["issued"] and cid not in st["seen"]:
+                st["seen"].add(cid)
+                body = m.get("content") or ""
+                run.event(turn=t, event="tool_seen", id=cid, sha=hashlib.sha256(body.encode()).hexdigest(), chars=len(body))
         last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
         if t is None or (f"[{text_tag}]" not in last_user if text_tag else "continue" not in last_user):
             if self.cell["id"].startswith("continuity/") and t is not None and text_tag:
@@ -176,12 +182,6 @@ class Scenario:
             self.unexpected.append({"turn": t, "last_user": last_user[:120]})
             return {"content": "ok", "log": {"unexpected": True}}
         step, st["step"] = st["step"], st["step"] + 1
-        for m in messages:  # a tool result as the model receives it (post host transform)
-            cid = m.get("tool_call_id") if m["role"] == "tool" else None
-            if cid in st["issued"] and cid not in st["seen"]:
-                st["seen"].add(cid)
-                body = m.get("content") or ""
-                run.event(turn=t, event="tool_seen", id=cid, sha=hashlib.sha256(body.encode()).hexdigest(), chars=len(body))
         log = {"turn": t, "kind": st["kind"], "step": step}
         if run.crash_due(t):
             return {"hold_until_killed": True, "on_hold": lambda: run.crash(t), "log": log}
