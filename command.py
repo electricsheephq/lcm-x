@@ -1465,6 +1465,7 @@ def _doctor_text(engine) -> str:
     if node_fts_failed_flag and "nodes_fts" not in issues:
         issues.append("nodes_fts")
 
+    sqlite_mmap_bytes = _safe_count(store_conn, "PRAGMA mmap_size", "sqlite_mmap_size")
     total_messages = _safe_count(store_conn, "SELECT COUNT(*) FROM messages", "messages_total")
     total_message_sessions = _safe_count(
         store_conn,
@@ -1850,7 +1851,7 @@ def _doctor_text(engine) -> str:
         f"schema_core_tables: {schema_core_status}",
         f"schema_missing_tables: {', '.join(schema_missing_tables) or '(none)'}",
         f"schema_existing_tables: {', '.join(schema_existing_tables) or '(none)'}",
-        f"journal_mode: {journal_mode}; sqlite_mmap_bytes={store_conn.execute('PRAGMA mmap_size').fetchone()[0]}",
+        f"journal_mode: {journal_mode}; sqlite_mmap_bytes={sqlite_mmap_bytes}",
         f"quick_check: {quick_check}",
         f"sqlite_integrity: {integrity}",
         f"messages_total: {total_messages}",
