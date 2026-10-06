@@ -1705,9 +1705,12 @@ class CompactionMixin:
             candidate_raw = working_messages[leading_anchor_count:fresh_tail_start]
             # #922: assembly repeats the current objective verbatim, so a leaf
             # containing only that prompt cannot reduce the active context.
+            # Keep filtering/publication and assistant-tail bookkeeping on their existing paths.
             if (
                 len(candidate_raw) == 1
                 and not hidden_backlog
+                and not dropped_replayed_scaffold_messages
+                and any(msg.get("role") == "tool" for msg in working_messages[fresh_tail_start:])
                 and candidate_raw[0].get("role") == "user"
                 and self._latest_user_context_anchor(
                     anchor_source_messages, working_messages[fresh_tail_start:]
