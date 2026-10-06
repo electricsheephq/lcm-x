@@ -463,11 +463,11 @@ class SurvivalFitMixin:
                          warn_user=True) -> None:
         """Log the fit, update the doctor counter and warn the user once per conversation."""
         uncovered = 0
-        if reason.startswith("exit_fit:"):
+        if shortened:
             try:  # a diagnostic: its failure never fails the fit
                 uncovered = None if len(ids) < count else len(set(ids) - self._store_complete_node_covered(ids))
             except Exception:
-                logger.debug("LCM exit fit: the uncovered-row count failed", exc_info=True)
+                logger.debug("LCM survival fit: the uncovered-row count failed", exc_info=True)
                 uncovered = None
         if shortened:
             logger.log(
@@ -489,12 +489,16 @@ class SurvivalFitMixin:
             return {"count": count + 1, "last_reason": reason, "last_at": time.time(),
                     "last_conversation": str(self._conversation_id or self._session_id or ""),
                     "last_reached_budget": after <= budget,
+                    "last_uncovered_rows": uncovered,
                     "last_shortened": shortened,
                     "ever_shortened": shortened or (record.get("ever_shortened", True) if record else False),
                     "unreached_budget_count": int(record.get("unreached_budget_count") or 0) + (after > budget),
                     # fits that projected a row (#601); a record from before the key stays unknown (no key)
                     **({"projected_count": int(record.get("projected_count") or 0) + bool(projected)}
                        if "projected_count" in record or not record.get("count") else {}),
+                    **({"uncovered_fit_count": int(record.get("uncovered_fit_count") or 0)
+                       + bool(shortened and uncovered is not None and uncovered > 0)}
+                       if "uncovered_fit_count" in record or not record.get("count") else {}),
                     **({"count_lost": True} if record.get("count_lost") else {})}  # #618 item 14: kept
 
         try:

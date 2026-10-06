@@ -218,6 +218,9 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
                      "an exit fit tried to leave threshold headroom; uncovered_rows names unsummarised stored rows"
                      if str(detail.get("last_reason") or "").startswith("exit_fit:") else
                      "a survival fit kept an over-window session alive; it points at a compaction that could not publish")
+        rationale += ("; uncovered rows are counted for every survival fit; last_uncovered_rows reports the last "
+                      "count (unknown if it could not be read); uncovered_fit_count counts shortened fits with "
+                      "unsummarised stored rows removed from live context")
     elif name == "cleanup_candidates":
         action = DOCTOR_ACTION_BACKUP_FIRST_CLEANUP
         command = "run `/lcm doctor clean` first; if candidates are expected junk/noise, run `/lcm backup` before `/lcm doctor clean apply`"
