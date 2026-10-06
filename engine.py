@@ -5699,6 +5699,7 @@ class LCMEngine(
             return self._redact_active_replay_messages(messages)
 
         self._capture_host_rewrites(messages)
+        host_head_replay_indexes = self._host_head_rewrite_replay_indexes(messages)
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         proof = getattr(self, "_compress_commit_proof", None)
@@ -5871,6 +5872,8 @@ class LCMEngine(
                 logger.info("LCM identity-anchor recognised %d replayed rows: session=%s cursor=%d incoming=%d",
                             len(anchor_plan["replayed"]), self._session_id, cursor, n)
         anchored_replay_indexes = anchor_plan["replayed"] if anchor_plan else set()
+        if host_head_replay_indexes:
+            self._last_ingest_reconciliation["host_head_rewrite_rows"] = len(host_head_replay_indexes)
         anchor_remainders: dict[int, Any] = {}
         fresh_replay_messages = replay_messages  # #772: the host's rows, before any cached copy is spliced in
         if cursor > 0:
@@ -5991,7 +5994,7 @@ class LCMEngine(
             )
             for offset, (original_msg, replay_msg) in enumerate(zip(original_new_messages, new_messages)):
                 absolute_idx = cursor + offset
-                if absolute_idx in replayed_tool_segment_indexes:
+                if absolute_idx in replayed_tool_segment_indexes or absolute_idx in host_head_replay_indexes:
                     continue
                 replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
                 original_text = text_content_for_pattern_matching(original_msg.get("content")) or ""
