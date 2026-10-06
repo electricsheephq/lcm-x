@@ -166,7 +166,7 @@ def per_arm():
                 for e in s["events"]:
                     if e["is_compaction"]:
                         comp.append(e["compress_wall_s"])
-                    elif e.get("compress_wall_s", 0) > 0:
+                    elif e["summariser_calls"]:
                         failed.append(e["compress_wall_s"])
                     for x in e["levels"]:
                         if x.get("depth") == 0 and x.get("wall_s") is not None:
@@ -185,7 +185,9 @@ def per_arm():
         out[arm] = {
             "leaf_call_wall_s": st(leaf),
             "compaction_wall_s": st(comp),
+            "failed_sweep_count": len(failed),
             "failed_sweep_wall_s": st(failed),
+            "compaction_including_failed_sweeps_wall_s": st(comp + failed),
             "completion_tokens": st(compl),
             "timeouts": timeouts,
             "level3_stored_nodes": l3,
