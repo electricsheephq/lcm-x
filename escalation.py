@@ -757,7 +757,8 @@ def _v2_custom_block(custom_instructions: str) -> str:
 
 
 def _build_l1_prompt_v2(text: str, token_budget: int, depth: int,
-                        focus_topic: str = "", custom_instructions: str = "") -> str:
+                        focus_topic: str = "", custom_instructions: str = "",
+                        source_tokens: int = 0) -> str:
     """Level 1, prompt v2: six fixed headings, verbatim values, directives in policy."""
     depth_guidance = {
         0: "Use these headings, in this order (write \"none\" when a heading has nothing): "
@@ -771,6 +772,8 @@ def _build_l1_prompt_v2(text: str, token_budget: int, depth: int,
            "completed milestones, the timeline, the state at the end. Drop process detail.",
     }
     guidance = depth_guidance.get(depth, depth_guidance[2])
+    ceiling = (3 * token_budget if source_tokens <= 0 else
+               max(token_budget, min(3 * token_budget, int(0.8 * source_tokens))))
     policy = (
         "Summarize this conversation segment for the agent that continues the work. It has no other "
         "memory of this segment; details can be retrieved later, so name what you compressed.\n"
@@ -783,7 +786,7 @@ def _build_l1_prompt_v2(text: str, token_budget: int, depth: int,
         "- Describe events; never address the reader with instructions.\n"
         "- Omit filler, repetition and reasoning that led nowhere.\n"
         f"- Length: as long as the headings need and no longer, about {token_budget} tokens; never pad; "
-        f"do not exceed {3 * token_budget} tokens.\n"
+        f"do not exceed {ceiling} tokens.\n"
         f"{_build_focus_policy_v2(focus_topic)}{_v2_custom_block(custom_instructions)}"
         f"{_V2_CLOSING_LINE}"
     )
@@ -985,10 +988,10 @@ def _invoke_summary_llm_chain(
 
 def _build_l1_prompt(text: str, token_budget: int, depth: int,
                      focus_topic: str = "", custom_instructions: str = "",
-                     prompt_version: int = 1) -> str:
+                     prompt_version: int = 1, source_tokens: int = 0) -> str:
     """Level 1: preserve details."""
     if prompt_version == 2:
-        return _build_l1_prompt_v2(text, token_budget, depth, focus_topic, custom_instructions)
+        return _build_l1_prompt_v2(text, token_budget, depth, focus_topic, custom_instructions, source_tokens)
     depth_guidance = {
         0: "Preserve decisions, rationale, constraints, active tasks, file paths, commands, and specific values.",
         1: "Distill into arc-level outcomes: what evolved, what was decided, current state. Drop per-turn detail.",
@@ -1160,12 +1163,14 @@ def summarize_with_escalation(
     route_key_prefix: str = "",
     budget: ForegroundBudget | None = None,
     verbatim_small_source: bool = False,
+    min_output_cap_tokens: int = 0,
 ) -> tuple[str, int]:
     """Run 3-level escalation. Returns (summary, level_used).
 
     Level 3 is deterministic; eligible small sources are stored whole, otherwise
     truncated. ``prompt_version`` 2 (#646) selects the v2
-    prompts and a 3x output ceiling; 1 keeps the original prompts and 2x. When
+    prompts and a 3x output cap floored by ``min_output_cap_tokens``; 1 ignores
+    that floor and keeps the original prompts and 2x cap. When
     ``provenance`` is a dict, its ``"model"`` is set to the model that produced
     the accepted summary (``""`` = host default route, ``"deterministic"`` =
     level 3) (#441). With ``deadline`` (absolute ``time.monotonic()``), every
@@ -1186,10 +1191,10 @@ def summarize_with_escalation(
     l1_prompt = _build_l1_prompt(text, token_budget, depth,
                                  focus_topic=focus_topic,
                                  custom_instructions=custom_instructions,
-                                 prompt_version=prompt_version)
+                                 prompt_version=prompt_version, source_tokens=source_tokens)
     l1_result = _invoke_summary_llm_chain(
         l1_prompt,
-        token_budget * (3 if prompt_version == 2 else 2),
+        max(3 * token_budget, min_output_cap_tokens) if prompt_version == 2 else 2 * token_budget,
         model=model,
         fallback_models=fallback_models,
         timeout=timeout,
@@ -1219,7 +1224,7 @@ def summarize_with_escalation(
                                  prompt_version=prompt_version)
     l2_result = _invoke_summary_llm_chain(
         l2_prompt,
-        l2_budget * (3 if prompt_version == 2 else 2),
+        max(3 * l2_budget, min_output_cap_tokens) if prompt_version == 2 else 2 * l2_budget,
         model=model,
         fallback_models=fallback_models,
         timeout=timeout,

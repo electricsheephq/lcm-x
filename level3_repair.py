@@ -13,6 +13,7 @@ import time
 from collections import Counter, defaultdict
 from typing import Any
 
+from .config import LCMConfig
 from .escalation import (
     _L3_TRUNCATION_MARKER, SummarySpendGuard, summarize_with_escalation, summary_route_available,
 )
@@ -153,6 +154,7 @@ def _summarise_group(engine, rows, group, result, spend_guard) -> tuple[dict[int
                 fallback_models=cfg.summary_fallback_models, reasoning_effort=cfg.summary_reasoning_effort,
                 circuit_breaker=engine._summary_circuit_breaker, spend_guard=spend_guard,  # never the live budget
                 prompt_version=getattr(cfg, "summary_prompt_version", 1), provenance=provenance,
+                min_output_cap_tokens=3 * getattr(cfg, "leaf_target_min_tokens", LCMConfig.leaf_target_min_tokens),
                 timeout=cfg.summary_timeout_ms / 1000, l2_budget_ratio=cfg.l2_budget_ratio,
                 l3_truncate_tokens=cfg.l3_truncate_tokens, custom_instructions=cfg.custom_instructions,
                 route_key_prefix="repair:",  # repair rejections never count against the live route's keys
