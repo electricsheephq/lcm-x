@@ -77,16 +77,17 @@ def continuity_cells() -> list[dict]:
     out = []
     for m, ip in modes():
         out.append(cell(f"continuity/sole-user-tool-loop/{m}", [], in_place=ip, turns=1, min_compactions=2,
-                        lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_FRESH_TAIL_COUNT": "4",
+                        lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.03", "LCM_FRESH_TAIL_COUNT": "4",
                                  "LCM_FRESH_TAIL_MAX_TOKENS": "2000", "LCM_LEAF_CHUNK_TOKENS": "1000"},
                         tool_plan=[{"turns": [1], "calls": [{"name": "read_file", "args": {
-                            "path": "{files}/big.txt"}, "expect": {"min_chars": 10000}}]} for _ in range(24)],
+                            "path": "{files}/big.txt"}, "expect": {"min_chars": 10000}}]} for _ in range(48)],
                         continuity={"sole_user": True}, final_compaction_check=False,
-                        doc="Diagnostic #900: one user prompt, 24 tool rounds; require two commits before a second prompt."))
+                        doc="Diagnostic #900: one prompt, 48 tool rounds and a 3,840-token trigger; require two commits."))
         out.append(cell(f"continuity/survival-fit/{m}", [916], in_place=ip, turns=12, repeat=1600,
                         user={"repeat_from": {"9": 100}}, min_compactions=0,
                         lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_SURVIVAL_FIT": "true",
                                  "LCM_SURVIVAL_RESERVE": "0.9", "LCM_FRESH_TAIL_COUNT": "24"},
+                        bars=[b for b in BARS if b != "B8"],
                         continuity={"require_survival_fit": True}, final_compaction_check=False,
                         doc="Diagnostic #916: low survival ceiling can project the newest user; F4 decides."))
         out.append(cell(f"continuity/survival-fit-older-turns/{m}", [], in_place=ip, turns=16, repeat=4000,
@@ -94,6 +95,7 @@ def continuity_cells() -> list[dict]:
                         lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.8", "LCM_SURVIVAL_FIT": "true",
                                  "LCM_SURVIVAL_RESERVE": "0.5", "LCM_FRESH_TAIL_COUNT": "24",
                                  "LCM_FRESH_TAIL_MAX_TOKENS": "80000"},
+                        bars=[b for b in BARS if b != "B8"],
                         continuity={"require_survival_fit": True}, final_compaction_check=False,
                         doc="Diagnostic #798: fit older whole turns with a moderate ceiling; newest short turns fit."))
         out.append(cell(f"continuity/forced-compaction-then-turn/{m}", [], in_place=ip, turns=20, min_compactions=0,

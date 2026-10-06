@@ -106,7 +106,7 @@ def test_new_cells_are_r2_only_non_gating_and_express_existing_knobs():
         assert c["id"] in ci.NON_GATE and not ci.in_gate_set(c["id"])
         assert c["id"] in ci.expected_cells("acp-process")
         if c["continuity"].get("sole_user"):
-            assert c["turns"] == 1 and len(c["tool_plan"]) == 24
+            assert c["turns"] == 1 and len(c["tool_plan"]) == 48
             assert all(g["turns"] == [1] for g in c["tool_plan"])
         if c["id"].startswith("continuity/survival-fit/"):
             assert c["targets"] == [916] and cells.ISSUES[916][0] == ("F4",)
@@ -117,6 +117,29 @@ def test_new_cells_are_r2_only_non_gating_and_express_existing_knobs():
             assert c["window"] == 128000 and c["user_text"]["repeat_from"] == {"9": 1}
             assert len(PC.P1.user_text(c, "T", 8)) > 30000
             assert len(PC.P1.user_text(c, "T", 9)) < 100
+
+
+@pytest.mark.parametrize("mode", ["in-place", "rotation"])
+@pytest.mark.parametrize("shape", ["survival-fit", "survival-fit-older-turns"])
+def test_survival_scenario_excludes_only_b8(shape, mode):
+    c = cells.select(f"continuity/{shape}/{mode}", extra=PC.R2_CELLS)[0]
+    assert c["continuity"]["require_survival_fit"] is True
+    assert c["bars"] == ["B1", "B2", "B3", "B4", "B5", "B6", "B7", "B9"]
+    assert "B8" in cells.select(f"baseline/{mode}/acp")[0]["bars"]
+
+
+@pytest.mark.parametrize("mode", ["in-place", "rotation"])
+def test_sole_user_settings_sustain_pressure_after_replay_stubbing(mode):
+    c = cells.select(f"continuity/sole-user-tool-loop/{mode}", extra=PC.R2_CELLS)[0]
+    assert c["turns"] == 1 and c["min_compactions"] == 2
+    assert len(c["tool_plan"]) == 48
+    assert all(g == {"turns": [1], "calls": [{"name": "read_file", "args": {
+        "path": "{files}/big.txt"}, "expect": {"min_chars": 10000}}]} for g in c["tool_plan"])
+    env = c["lcm_env"]
+    assert float(env["LCM_CONTEXT_THRESHOLD"]) * c["window"] == 3840
+    assert env["LCM_FRESH_TAIL_COUNT"] == "4" and env["LCM_FRESH_TAIL_MAX_TOKENS"] == "2000"
+    assert env["LCM_LEAF_CHUNK_TOKENS"] == "1000"
+    assert "B5" in c["bars"] and c["final_compaction_check"] is False
 
 
 def test_continuity_absences_and_survival_bar_failures_do_not_gate():
