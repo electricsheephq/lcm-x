@@ -73,8 +73,8 @@ def test_no_system_orphan_tool_tail_overflow_recovery_not_empty(engine, head_rol
 
 
 def test_newest_non_tool_row_that_fits_is_chosen_over_older_head(engine):
-    # Round 3: a preserved objective that fits outranks a newer assistant
-    # status that also fits (the name is kept from round 2 for traceability).
+    # #921: normal assembly carries the objective forward, so it no longer
+    # needs the singleton fallback and also keeps a fitting assistant status.
     objective = {"role": "assistant", "content": OBJECTIVE}
     tail = [
         objective,
@@ -85,9 +85,10 @@ def test_newest_non_tool_row_that_fits_is_chosen_over_older_head(engine):
 
     final = _recover(engine, tail)
 
-    assert final == [objective]
+    assert final == [{"role": "user", "content": OBJECTIVE}, tail[2]]
+    assert_provider_shape(final)
     assert engine._last_compression_status == "overflow_recovery"
-    assert engine._ingest_cursor == 1
+    assert engine._ingest_cursor == len(final)
     assert engine._last_overflow_recovery_failed is False
 
 
