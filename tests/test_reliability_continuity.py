@@ -106,7 +106,7 @@ def test_new_cells_are_r2_only_non_gating_and_express_existing_knobs():
         assert c["id"] in ci.NON_GATE and not ci.in_gate_set(c["id"])
         assert c["id"] in ci.expected_cells("acp-process")
         if c["continuity"].get("sole_user"):
-            assert c["turns"] == 1 and len(c["tool_plan"]) == 48
+            assert c["turns"] == 1 and len(c["tool_plan"]) == 12
             assert all(g["turns"] == [1] for g in c["tool_plan"])
         if c["id"].startswith("continuity/survival-fit/"):
             assert c["targets"] == [916] and cells.ISSUES[916][0] == ("F4",)
@@ -129,17 +129,41 @@ def test_survival_scenario_excludes_only_b8(shape, mode):
 
 
 @pytest.mark.parametrize("mode", ["in-place", "rotation"])
-def test_sole_user_settings_sustain_pressure_after_replay_stubbing(mode):
+def test_sole_user_settings_use_distinct_reads_to_sustain_pressure(mode):
+    # Identical reads are deduplicated/blocked before replay stubbing can matter.
     c = cells.select(f"continuity/sole-user-tool-loop/{mode}", extra=PC.R2_CELLS)[0]
     assert c["turns"] == 1 and c["min_compactions"] == 2
-    assert len(c["tool_plan"]) == 48
-    assert all(g == {"turns": [1], "calls": [{"name": "read_file", "args": {
-        "path": "{files}/big.txt"}, "expect": {"min_chars": 10000}}]} for g in c["tool_plan"])
+    assert c["big_files"] == len(c["tool_plan"]) == 12
+    assert c["tool_plan"] == [{"turns": [1], "calls": [{"name": "read_file", "args": {
+        "path": f"{{files}}/big-{k:02d}.txt"}, "expect": {"min_chars": 10000}}]} for k in range(1, 13)]
     env = c["lcm_env"]
-    assert float(env["LCM_CONTEXT_THRESHOLD"]) * c["window"] == 3840
+    assert float(env["LCM_CONTEXT_THRESHOLD"]) * c["window"] == 15360
     assert env["LCM_FRESH_TAIL_COUNT"] == "4" and env["LCM_FRESH_TAIL_MAX_TOKENS"] == "2000"
     assert env["LCM_LEAF_CHUNK_TOKENS"] == "1000"
     assert "B5" in c["bars"] and c["final_compaction_check"] is False
+
+
+@pytest.mark.parametrize("big_lines", [400, 3])
+def test_shared_r1_r2_tool_fixture_writer_creates_distinct_files(tmp_path, big_lines):
+    # Both transports call this helper; exercise fixture writing without a host.
+    PC.P1.write_tool_files(tmp_path / "files", {"big_files": 12, "big_lines": big_lines})
+    files = tmp_path / "files"
+    payloads = [(files / f"big-{k:02d}.txt").read_bytes() for k in range(1, 13)]
+    assert len(set(payloads)) == 12
+    for k, payload in enumerate(payloads, 1):
+        assert payload.decode().splitlines() == [
+            f"f{k:02d} line {i:05d}: " + PC.P1.FILLER * 8 for i in range(big_lines)]
+    assert (files / "big.txt").read_text() == "".join(
+        f"line {i:05d}: " + PC.P1.FILLER * 8 + "\n" for i in range(big_lines))
+    assert (files / "small.txt").read_text() == "small deterministic file\n"
+
+
+def test_shared_tool_fixture_writer_defaults_leave_existing_files_unchanged(tmp_path):
+    PC.P1.write_tool_files(tmp_path / "files", {})
+    files = tmp_path / "files"
+    assert sorted(p.name for p in files.iterdir()) == ["big.txt", "small.txt"]
+    assert (files / "big.txt").read_text() == "".join(
+        f"line {i:05d}: " + PC.P1.FILLER * 8 + "\n" for i in range(400))
 
 
 def test_continuity_absences_and_survival_bar_failures_do_not_gate():

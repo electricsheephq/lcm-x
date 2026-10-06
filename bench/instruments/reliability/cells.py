@@ -77,12 +77,13 @@ def continuity_cells() -> list[dict]:
     out = []
     for m, ip in modes():
         out.append(cell(f"continuity/sole-user-tool-loop/{m}", [], in_place=ip, turns=1, min_compactions=2,
-                        lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.03", "LCM_FRESH_TAIL_COUNT": "4",
+                        lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_FRESH_TAIL_COUNT": "4",
                                  "LCM_FRESH_TAIL_MAX_TOKENS": "2000", "LCM_LEAF_CHUNK_TOKENS": "1000"},
                         tool_plan=[{"turns": [1], "calls": [{"name": "read_file", "args": {
-                            "path": "{files}/big.txt"}, "expect": {"min_chars": 10000}}]} for _ in range(48)],
-                        continuity={"sole_user": True}, final_compaction_check=False,
-                        doc="Diagnostic #900: one prompt, 48 tool rounds and a 3,840-token trigger; require two commits."))
+                            "path": f"{{files}}/big-{k:02d}.txt"}, "expect": {"min_chars": 10000}}]} for k in range(1, 13)],
+                        big_files=12, continuity={"sole_user": True}, final_compaction_check=False,
+                        doc="Diagnostic #900: one prompt, 12 distinct files/rounds because the host deduplicates identical reads; "
+                            "15,360-token trigger, require two commits."))
         out.append(cell(f"continuity/survival-fit/{m}", [916], in_place=ip, turns=12, repeat=1600,
                         user={"repeat_from": {"9": 100}}, min_compactions=0,
                         lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_SURVIVAL_FIT": "true",

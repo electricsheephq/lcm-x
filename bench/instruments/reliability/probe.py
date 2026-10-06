@@ -80,6 +80,17 @@ UNSHORTENED = "LCM survival fit could not shorten the list"
 FILLER = "alpha beta gamma delta "
 
 
+def write_tool_files(files: Path, cell: dict) -> None:
+    """Shared R1/R2 fixtures; distinct paths bypass the host's identical-read dedup."""
+    files.mkdir(exist_ok=True)
+    (files / "small.txt").write_text("small deterministic file\n")
+    lines = cell.get("big_lines", 400)
+    (files / "big.txt").write_text("".join(f"line {i:05d}: " + FILLER * 8 + "\n" for i in range(lines)))
+    for n in range(1, cell.get("big_files", 0) + 1):
+        (files / f"big-{n:02d}.txt").write_text(
+            "".join(f"f{n:02d} line {i:05d}: " + FILLER * 8 + "\n" for i in range(lines)))
+
+
 def _log_counts(log: str) -> dict:
     counts = {k: log.count(v) for k, v in LOG_COUNTS.items()}
     # #668: routine threshold headroom is not a compaction miss; an exit over the window budget logs as a plain fit
@@ -476,9 +487,7 @@ def main():
     out["failed_turn_notices"] = notices
     home = Path(os.environ["HERMES_HOME"])
     files = cell_dir / "files"
-    files.mkdir(exist_ok=True)
-    (files / "small.txt").write_text("small deterministic file\n")
-    (files / "big.txt").write_text("".join(f"line {i:05d}: " + FILLER * 8 + "\n" for i in range(cell.get("big_lines", 400))))
+    write_tool_files(files, cell)
 
     def aux_llm(**kwargs):
         text = "## Goal\nstub\n## Progress\nstub" if kwargs.get("task") == "compression" else "Title"

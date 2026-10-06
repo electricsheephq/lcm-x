@@ -493,8 +493,7 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         # A fresh, non-empty models.dev disk cache (agent/models_dev.py serves it for 4 h), so model metadata
         # resolution never fetches models.dev; the main model's context_length is pinned in config.yaml.
         (home / "models_dev_cache.json").write_text(json.dumps({"rel": {"id": "rel", "name": "reliability fake", "models": {}}}))
-        (d / "files" / "small.txt").write_text("small deterministic file\n")
-        (d / "files" / "big.txt").write_text("".join(f"line {i:05d}: " + P1.FILLER * 8 + "\n" for i in range(cell.get("big_lines", 400))))
+        P1.write_tool_files(d / "files", cell)
         run = ProcessCell(cell, d, host, transport, turn_timeout, phase_timeout=timeout, scratch=s)
         run.provider.start()
         (home / "config.yaml").write_text(config_yaml(cell, plugin, run.provider.base_url))

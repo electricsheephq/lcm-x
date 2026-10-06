@@ -140,7 +140,8 @@ R2 records the first `main` provider request after each committed compaction:
 F1 is the system LCM note, F2 the first user's tag in sole-user cells, F3 the
 last completed assistant reply's tag, and F4 the current user's tag. The new
 `continuity/sole-user-tool-loop/{in-place,rotation}` cells send one prompt and
-48 tool rounds with a 3,840-token trigger; `continuity/survival-fit/{in-place,rotation}` lowers the survival
+12 tool rounds reading distinct files because the host deduplicates identical reads,
+with a 15,360-token trigger; `continuity/survival-fit/{in-place,rotation}` lowers the survival
 ceiling and follows large turns with ordinary turns.
 `continuity/survival-fit-older-turns/{in-place,rotation}` uses a moderate reserve
 and short later turns to measure F3 while the newest turn fits. The optional
