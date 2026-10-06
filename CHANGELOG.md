@@ -6,6 +6,10 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+### v0.27.0
+
+- Fix: `LCM_SQLITE_MMAP_SIZE` configures SQLite mapped reads in bytes (default unchanged at 268435456); use `0` on SD-card hosts, and `/lcm doctor` reports the effective value. (#903)
+
 ## v0.26.0 (host message identity)
 
 - Feature: host message identity in shadow mode. On a host that stamps `message_uid`, LCM records which stored row each

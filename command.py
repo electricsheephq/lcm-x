@@ -1850,7 +1850,7 @@ def _doctor_text(engine) -> str:
         f"schema_core_tables: {schema_core_status}",
         f"schema_missing_tables: {', '.join(schema_missing_tables) or '(none)'}",
         f"schema_existing_tables: {', '.join(schema_existing_tables) or '(none)'}",
-        f"journal_mode: {journal_mode}",
+        f"journal_mode: {journal_mode}; sqlite_mmap_bytes={store_conn.execute('PRAGMA mmap_size').fetchone()[0]}",
         f"quick_check: {quick_check}",
         f"sqlite_integrity: {integrity}",
         f"messages_total: {total_messages}",
