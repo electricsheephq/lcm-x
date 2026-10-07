@@ -8,6 +8,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ### v0.27.0
 
+- Fix: under an assembly cap, a newer request the host merged onto the carried objective survives on its own when the whole row does not fit; a sanitized tail copy of the objective is no longer emitted twice; the objective scan no longer re-verifies parts inside a verified summary run. (#958)
 - Change: summaries now see the middle of long messages using a shared input budget with a legacy retention floor; measured middle-fact retention rose from 0/72 to 42/72. (#611)
 - Fix: a clipped long message no longer becomes a verbatim level-3 leaf with the default or fleet input budgets. (#899)
 - Bench: Track S decision scoring uses per-file digest admission, durable revocation, and complete paired metrics while retaining separate prefix timing. (#946, #948)
@@ -20,6 +21,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: a second context assembly in the same user turn keeps the preserved objective verbatim instead of dropping the sole user request. (#921)
 - Fix: `/lcm` refuses every subcommand when the session and engine profiles are known and differ, refuses unproven writes when a profile is unknown, preserves same-profile cold starts, and names the opened store when a profile is unknown. (#852)
 - Fix: withhold the LCM note from active auxiliary and rotated bypass sessions. (#953)
+- Fix: reset session gate observations, rank the oldest condensation group, and reserve tool-result stubs and proactive recall when bounding summaries, including inactive explicit caps. (#954)
 
 ## v0.26.1 (delegated-child compaction fix)
 

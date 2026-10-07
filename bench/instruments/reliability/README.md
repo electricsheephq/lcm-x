@@ -134,6 +134,38 @@ whose plugin module is not the exported tree, or whose interpreter is not the ho
 `sql_dup_counter.py`, `summary_nodes_report.py` and `compaction_ledger.py`
 are ported as `scorers/dupes.py` and `scorers/summary.py` (diagnostics and the B5 ledger).
 
+## First-request continuity (diagnostic, non-gating)
+
+R2 records the first `main` provider request after each committed compaction:
+F1 is the system LCM note, F2 the first user's tag in sole-user cells, F3 the
+last completed assistant reply's tag, and F4 the current user's tag. The new
+`continuity/sole-user-tool-loop/{in-place,rotation}` cells send one prompt and
+12 tool rounds reading distinct files because the host deduplicates identical reads,
+with a 15,360-token trigger; `continuity/survival-fit/{in-place,rotation}` lowers the survival
+ceiling and follows large turns with ordinary turns.
+`continuity/survival-fit-older-turns/{in-place,rotation}` uses a moderate reserve
+and short later turns to measure F3 while the newest turn fits. The optional
+`continuity/forced-compaction-then-turn/{in-place,rotation}` reuses `/compress`
+after turn 19 and sends turn 20. Existing `baseline/{mode}/acp` cells supply
+the F3 negative control. These checks are outside `BARS`; the new cells are in
+`ci.NON_GATE`. The two survival-fit shapes keep B1–B7 and B9, but omit B8
+because survival fitting is their required scenario. Other cell definitions and
+the bar implementations are unchanged.
+
+In continuity cells only, a missing current tag in the last user message is
+a diagnostic `FAIL` on F4, targeting #916 in `survival-fit`; a last user message
+starting with `[LCM survival fit:` records `current_user_projected=true`.
+Other cells still report this condition as `ERROR`. Infrastructure errors
+still gate; continuity findings do not.
+
+`MATRIX.md` reports per-host/cell counts and each compaction's kind, turn,
+previous-reply tag and whether its input row was replaced. Unknown data and
+compactions with no following request are explicit; a missing scenario is
+reported, never inferred from configuration. New provider metadata contains
+only booleans, synthetic tags and message role/counts, with no request text.
+This answers #900/#798 on pinned CI hosts and seeds #659; literal presence
+does not prove an instruction remains operative. No real model is called.
+
 ## Positive controls
 `controls.py` holds each control's refs, hosts, cells and expected red/green pattern; `run_matrix.py --control
 PC-1 --out <dir>` runs it and writes CONTROL.json (HOLDS or the mismatches). PC-1 is a differential: lcm-x `47bd28e7` (before #498, the #494 fix) vs `ae1fb16d` on ref-0.21.5, rs34-0.21.5
