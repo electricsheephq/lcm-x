@@ -1723,7 +1723,9 @@ class CompactionMixin:
                     anchor_source_messages, working_messages[fresh_tail_start:]
                 ) == (anchor := self._build_preserved_objective_summary_part(candidate_raw[0]))
                 and (
-                    (cap := self._effective_assembly_token_cap()) is None
+                    # Forced-overflow recovery assembles under the smaller recovery cap.
+                    (cap := recovery_assembly_cap if recovery_assembly_cap is not None
+                     else self._effective_assembly_token_cap()) is None
                     or (
                         count_messages_tokens(working_messages[:leading_anchor_count])
                         + count_message_tokens({"role": "user", "content": anchor})

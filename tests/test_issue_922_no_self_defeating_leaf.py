@@ -111,6 +111,32 @@ def test_objective_only_writes_leaf_when_anchor_exceeds_assembly_cap(engine):
     assert result[-2:] == messages[-2:]
 
 
+def test_objective_only_writes_leaf_when_anchor_exceeds_recovery_cap(engine):
+    instance, summarize = engine
+    messages = _cell()
+    summary = "SOLE-OBJECTIVE: continue the requested work.\nExpand for details about: user's request"
+    summarize.return_value = (summary, 1)
+    fresh_tail_start = instance._fresh_tail_start(messages)
+    tail_tokens = count_messages_tokens(messages[fresh_tail_start:])
+    anchor = instance._build_preserved_objective_summary_part(messages[0])
+    anchor_tokens = count_message_tokens({"role": "user", "content": anchor})
+    instance._config.max_assembly_tokens = tail_tokens + anchor_tokens + 500
+    observed = count_messages_tokens(messages) + 2000  # host overhead outside the messages
+    assert instance._should_force_overflow_recovery(observed_tokens=observed, messages=messages)
+    recovery_cap = instance._overflow_recovery_assembly_cap(observed_tokens=observed, messages=messages)
+    assert tail_tokens + anchor_tokens <= instance._effective_assembly_token_cap()
+    assert tail_tokens + anchor_tokens > recovery_cap
+    assert tail_tokens + count_message_tokens({"role": "user", "content": summary}) <= recovery_cap
+
+    result = instance.compress(messages, current_tokens=observed)
+
+    assert not instance._objective_only_noop
+    nodes = instance._dag.get_session_nodes(instance._session_id)
+    assert nodes and summarize.called
+    assert any(summary in (message.get("content") or "") for message in result)
+    assert result[-2:] == messages[-2:]
+
+
 def test_next_round_compacts_earlier_tool_pair_and_preserves_objective(engine, caplog):
     instance, summarize = engine
     messages = _cell()
