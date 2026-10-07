@@ -103,3 +103,14 @@ def test_setup_refuses_a_symlinked_home(tmp_path, link):
     with pytest.raises(RuntimeError, match="symlink"):
         ns["setup_home"]()
     assert not any(target.rglob("auth.json"))
+
+
+def test_readmit_reads_the_home_the_run_recorded():
+    # A run recorded before the per-run home keeps its rollout under its recorded codex_home.
+    tree = ast.parse(SCRIPT.read_text())
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    readmit = next(n for n in ast.walk(main) if isinstance(n, ast.If) and ast.unparse(n.test) == "a.readmit")
+    body = [ast.unparse(n) for n in readmit.body]
+    rebind = next(i for i, line in enumerate(body) if line.startswith("HOME = "))
+    assert "codex_home" in body[rebind - 1] + body[rebind]
+    assert rebind < next(i for i, line in enumerate(body) if "rollout_items(" in line)
