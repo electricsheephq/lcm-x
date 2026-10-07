@@ -81,11 +81,13 @@ the per-session summary-node maximum of every R1-S / R1-L store is recorded (§2
   was silently served by another). If the transport does not expose the served model, that sub-row is blocked
   until it does, except for the Codex CLI transport, which is handled as follows.
   The Codex CLI transport (`codex exec`) reports no served model: its `--json` events carry none, and its session
-  record holds only the configured model. For that transport the served-model evidence is the per-call session record
-  (run without `--ephemeral`; its `turn_context.model` must equal the pinned id), the pinned `-m` argument with the user
-  configuration ignored (no profile can change the model), the CLI version and binary sha256, and fail-closed handling of
-  every transport error (a failed call is never answered by another model). The row's `caveats` states that the model is
-  the configured one as recorded by the client, because the server does not report it to this transport.
+  record holds only the configured model. For that transport the served-model evidence is the harness's per-call
+  telemetry record (requested model and its pin source, effort, CLI version, and every attempt's status), which must
+  name the pinned id. The calls also use the pinned `-m` argument with the user configuration ignored, so no profile can
+  change the model. The run receipt records the CLI binary sha256, and every transport error fails closed (a failed call
+  is never answered by another model). Calls stay `--ephemeral`: a session record would repeat only the configured model,
+  and persisting it would store benchmark content in the operator's agent history. The row's `caveats` states that the
+  model is the configured one as recorded by the client, because the server does not report it to this transport.
 - Recorded configuration: `retrieval_config` from every R1-M report; `embeddings_enabled` from every bridge
   `initialize` reply; an allowlisted inventory of the non-secret `LCM_*` / `HERMES_MB_*` configuration values.
   Credential variables (for example `LCM_EMBEDDING_API_KEY`) are recorded as present or absent only, never by value;
