@@ -22,6 +22,7 @@ SCORER = T / "scorer"
 sys.path.insert(0, str(SCORER))
 sys.path.insert(0, str(H))
 from loss_class import classify_loss  # noqa: E402
+import score_manifest  # noqa: E402
 from score_s import score  # noqa: E402
 
 CPS = (176, 304)
@@ -61,18 +62,18 @@ def main():
     args.logs = args.logs or args.run_root.parent / "decision" / "logs"
     args.out.mkdir(parents=True, exist_ok=True)
     manifest_path = args.out / "manifest.json"
-    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+    manifest = score_manifest.load(manifest_path) or {"schema": score_manifest.SCHEMA, "entries": {}}
     done = []
     for n in args.seeds:
         for arm, label, rdir, cps in runs(n, args):
             if args.arms and arm not in args.arms:
                 continue
             name = f"{arm}.seed-{n}.{label}.json"
-            stem = Path(name).stem
-            manifest.pop(stem, None)
-            for cp in cps:
-                for population in ("scores", "loss"):
-                    (args.out / population / f"cp-{cp}" / name).unlink(missing_ok=True)
+            manifest["entries"] = {k: v for k, v in manifest["entries"].items() if Path(k).name != name}
+            score_manifest.write_atomic(manifest_path, manifest)
+            for population in ("scores", "loss"):
+                for directory in (args.out / population).glob("cp-*"):
+                    (directory / name).unlink(missing_ok=True)
             lane = "s2" if arm.startswith("LCMX") else "s4" if arm == "codex-native" else "s1"
             receipt = args.logs / f"{lane}-{arm}-{label}.log.wall"
             if not receipt.exists() or re.findall(r"^exit (\d+) end", receipt.read_text(), re.M) != ["0"]:
@@ -98,12 +99,16 @@ def main():
                 out["run"] = label  # the decision run id (writers record their own run field)
                 (args.out / "scores" / f"cp-{cp}").mkdir(parents=True, exist_ok=True)
                 (args.out / "loss" / f"cp-{cp}").mkdir(parents=True, exist_ok=True)
-                (args.out / "scores" / f"cp-{cp}" / name).write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n")
-                (args.out / "loss" / f"cp-{cp}" / name).write_text(json.dumps(classify_loss(out), indent=1) + "\n")
+                for population, payload in (("scores", out), ("loss", classify_loss(out))):
+                    file_path = args.out / population / f"cp-{cp}" / name
+                    file_path.write_text(json.dumps(payload, indent=1, ensure_ascii=False) + "\n")
+                    manifest["entries"][file_path.relative_to(args.out).as_posix()] = {
+                        "sha256": hashlib.sha256(file_path.read_bytes()).hexdigest(),
+                        "receipt_sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
+                        "scored_at": datetime.now(timezone.utc).isoformat()}
                 done.append(f"cp-{cp} {name}")
-                manifest[stem] = {"receipt_sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
-                                  "scored_at": datetime.now(timezone.utc).isoformat()}
-    manifest_path.write_text(json.dumps(manifest, indent=1) + "\n")
+            score_manifest.write_atomic(manifest_path, manifest)
+    score_manifest.write_atomic(manifest_path, manifest)
     for cp in args.checkpoints:
         if (args.out / "scores" / f"cp-{cp}").exists():
             subprocess.run([sys.executable, str(SCORER / "report_s.py"), "--scores", str(args.out / "scores" / f"cp-{cp}"),

@@ -12,8 +12,12 @@ import math
 import os
 import re
 import statistics
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scorer"))
+import score_manifest  # noqa: E402
 
 AP = argparse.ArgumentParser(description=__doc__)
 AP.add_argument("--arms", nargs=2, required=True, metavar=("FIRST", "SECOND"))
@@ -54,7 +58,8 @@ def st(xs):
 
 def score(arm, seed, run, cp):
     p = H / "scores" / f"cp-{cp}" / f"{arm}.seed-{seed}.d{seed}-{run}.json"
-    return json.loads(p.read_text()) if p.exists() else None
+    manifest = score_manifest.load(H / "manifest.json")
+    return json.loads(p.read_text()) if score_manifest.admitted(H, manifest, p) else None
 
 
 def grid_by_row(sc, arm, seed, run, cp):
@@ -79,12 +84,17 @@ def pair_axes(cp):
         )
     }  # [b, c, v1 kept, v2 kept] + n below
     n_items = {k: 0 for k in axes}
-    pairs = []
+    pairs, missing = [], []
     signs = {k: {"wins": 0, "losses": 0, "ties": 0} for k in axes}
     for seed in SEEDS:
         for run in ("r1", "r2"):
             s1, s2 = score(ARMS[0], seed, run, cp), score(ARMS[1], seed, run, cp)
             if not (s1 and s2):
+                missing.append(f"seed-{seed}/{run}")
+                continue
+            if not all(s.get("metrics", {}).get(m, {}).get("complete") is True
+                       for s in (s1, s2) for m in ("facts_kept", "continuation", "continuity")):
+                missing.append(f"seed-{seed}/{run} (incomplete score)")
                 continue
             pairs.append(f"seed-{seed}/{run}")
             run_delta = {k: 0 for k in axes}
@@ -135,8 +145,6 @@ def pair_axes(cp):
             "p": round(mcnemar(b, c), 4),
             "sign_test": {**signs[ax], "p": round(mcnemar(signs[ax]["wins"], signs[ax]["losses"]), 4)},
         }
-    missing = [f"seed-{seed}/{run}" for seed in SEEDS for run in ("r1", "r2")
-               if f"seed-{seed}/{run}" not in pairs]
     return {"status": "INCOMPLETE" if missing else "COMPLETE", "missing_pairs": missing, "pairs": pairs, "axes": out}
 
 
@@ -206,10 +214,13 @@ def per_arm():
 
 def losses(cp):
     out = {}
+    manifest = score_manifest.load(H / "manifest.json")
     for arm in ARMS:
         tot = {}
         for seed in SEEDS:
             for p in (H / "loss" / f"cp-{cp}").glob(f"{arm}.seed-{seed}.*.json"):
+                if not score_manifest.admitted(H, manifest, p):
+                    continue
                 for k, v in json.loads(p.read_text())["counts"].items():
                     tot[k] = tot.get(k, 0) + v
         out[arm] = tot

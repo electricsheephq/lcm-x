@@ -1,5 +1,6 @@
 """Offline measurement-integrity regressions for the Track S run kit."""
 import ast
+import hashlib
 import json
 import os
 import runpy
@@ -64,8 +65,9 @@ def test_paired_admission_losses(tmp_path):
         {"id": f, "placement": "head", "class": "early_user_constraint"} for f in ("a", "b")]))
     def score(arm, *args):
         return {"probes": {f: {"class": "CORRECT"} for f in ("a", "b")}, "metrics": {
-            "facts_kept": {"lost_before_compaction": {"ids": ["a" if arm == "first" else "b"]}},
-            "continuation": {"correct_fields": [], "denominator": 0}}}
+            "facts_kept": {"complete": True, "lost_before_compaction": {"ids": ["a" if arm == "first" else "b"]}},
+            "continuation": {"complete": True, "correct_fields": [], "denominator": 0},
+            "continuity": {"complete": True}}}
     ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", MATERIAL=tmp_path,
         SEEDS=[1], ARMS=["first", "second"], score=score, grid_by_row=lambda *a: {}, json=json,
         math=__import__("math"))
@@ -215,8 +217,9 @@ def test_paired_missing_scores_incomplete(tmp_path, missing_arm):
     def score(arm, seed, rep, cp):
         if arm == missing_arm and rep == "r2":
             return None
-        return {"probes": {}, "metrics": {"facts_kept": {},
-                "continuation": {"correct_fields": [], "denominator": 0}}}
+        return {"probes": {}, "metrics": {"facts_kept": {"complete": True},
+                "continuation": {"complete": True, "correct_fields": [], "denominator": 0},
+                "continuity": {"complete": True}}}
     ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", MATERIAL=tmp_path,
         SEEDS=[1], ARMS=["first", "second"], score=score, grid_by_row=lambda *a: {},
         json=json, math=__import__("math"))
@@ -353,9 +356,12 @@ def test_scoring_manifest_filters_and_removes_runs(tmp_path, monkeypatch):
         ns["main"]()
     manifest_path = out / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    assert set(manifest) == {f"lossless-claw.seed-{s}.d{s}-r1" for s in (1, 2)}
-    for stem, entry in manifest.items():
-        seed = stem.split("seed-")[1][0]
+    assert manifest["schema"] == "track-s-score-manifest-v2"
+    assert set(manifest["entries"]) == {f"{p}/cp-304/lossless-claw.seed-{s}.d{s}-r1.json"
+                                       for p in ("scores", "loss") for s in (1, 2)}
+    for key, entry in manifest["entries"].items():
+        seed = key.split("seed-")[1][0]
+        assert entry["sha256"] == hashlib.sha256((out / key).read_bytes()).hexdigest()
         assert entry["receipt_sha256"] == hashlib.sha256((logs / f"s1-lossless-claw-d{seed}-r1.log.wall").read_bytes()).hexdigest()
         datetime.fromisoformat(entry["scored_at"])
     scores = out / "scores/cp-304"
@@ -370,9 +376,171 @@ def test_scoring_manifest_filters_and_removes_runs(tmp_path, monkeypatch):
     (logs / "s1-lossless-claw-d1-r1.log.wall").write_text("exit 7 end 2\n")
     monkeypatch.setattr(sys, "argv", argv + ["1"])
     ns["main"]()
-    assert set(json.loads(manifest_path.read_text())) == {"lossless-claw.seed-2.d2-r1"}
+    assert set(json.loads(manifest_path.read_text())["entries"]) == {
+        f"{p}/cp-304/lossless-claw.seed-2.d2-r1.json" for p in ("scores", "loss")}
     assert not (scores / "lossless-claw.seed-1.d1-r1.json").exists()
     manifest_path.unlink()
     (scores / "stray.json").write_text("{}")
     report["main"](report_args)
     assert json.loads((out / "report.json").read_text())["manifest"] == "absent"
+
+
+@pytest.fixture
+def manifest_api(monkeypatch):
+    monkeypatch.syspath_prepend(str(TRACK / "scorer"))
+    return SimpleNamespace(**runpy.run_path(str(TRACK / "scorer/score_manifest.py")))
+
+
+def manifest_file(api, root, key, payload):
+    path = root / key
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+    manifest = api.load(root / "manifest.json") or {"schema": api.SCHEMA, "entries": {}}
+    manifest["entries"][key] = {"sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                              "receipt_sha256": "synthetic", "scored_at": "synthetic"}
+    api.write_atomic(root / "manifest.json", manifest)
+    return path
+
+
+@pytest.fixture
+def decision_scorer(tmp_path, monkeypatch, manifest_api):
+    out, logs = tmp_path / "decision", tmp_path / "logs"
+    logs.mkdir()
+    for cp in (176, 304):
+        directory = tmp_path / "external/lc-runs/seed-1/d1-r1-default" / f"cp-{cp}"
+        directory.mkdir(parents=True)
+        (directory / "summary.json").write_text("{}")
+    (logs / "s1-lossless-claw-d1-r1.log.wall").write_text("exit 0 end 2\n")
+    main = runpy.run_path(str(TRACK / "decision/score_decision.py"))["main"]
+    main.__globals__.update(score=lambda *a: {"schema": "score-s-v1", "arm": "lossless-claw", "seed": "seed-1"},
+                            classify_loss=lambda s: {"counts": {"synthetic": 1}})
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+    argv = ["score_decision", "--run-root", str(tmp_path / "runs"), "--external-root", str(tmp_path / "external"),
+            "--material", str(tmp_path), "--logs", str(logs), "--out", str(out),
+            "--arms", "lossless-claw", "--seeds", "1", "--checkpoints"]
+    def invoke(*cps):
+        monkeypatch.setattr(sys, "argv", argv + [str(cp) for cp in cps])
+        main()
+    return out, main, invoke
+
+
+def paired_analysis(root, material, api):
+    directory = material / "seed-1"
+    directory.mkdir(exist_ok=True)
+    (directory / "facts.json").write_text("[]")
+    return functions("decision/analyze_paired.py", "score", "losses", "pair_axes", "mcnemar",
+        H=root, MATERIAL=material, SEEDS=[1], ARMS=["first", "second"], score_manifest=api,
+        grid_by_row=lambda *a: {}, json=json, math=__import__("math"))
+
+
+def test_manifest_admission_binds_file_bytes_and_checkpoint(tmp_path, manifest_api):
+    key = "scores/cp-304/arm.seed-1.d1-r1.json"
+    path = manifest_file(manifest_api, tmp_path, key, {"schema": "score-s-v1", "arm": "arm", "seed": "seed-1"})
+    manifest = manifest_api.load(tmp_path / "manifest.json")
+    assert manifest_api.admitted(tmp_path, manifest, path)
+    other = tmp_path / "scores/cp-176" / path.name
+    other.parent.mkdir()
+    other.write_bytes(path.read_bytes())
+    assert not manifest_api.admitted(tmp_path, manifest, other)
+    path.write_text(path.read_text() + "\n")
+    assert not manifest_api.admitted(tmp_path, manifest, path)
+    report = functions("scorer/report_s.py", "load", json=json, score_manifest=manifest_api, PREFIX={})
+    assert report["load"](path.parent) == report["load"](other.parent) == {}
+    (tmp_path / "manifest.json").write_text(json.dumps({path.stem: {"receipt_sha256": "synthetic"}}))
+    assert manifest_api.load(tmp_path / "manifest.json")["entries"] == {}
+    assert not manifest_api.admitted(tmp_path, manifest_api.load(tmp_path / "manifest.json"), path)
+    (tmp_path / "manifest.json").unlink()
+    assert manifest_api.load(tmp_path / "manifest.json") is None
+
+
+def test_incremental_scoring_revokes_other_checkpoints(decision_scorer, manifest_api):
+    out, _, invoke = decision_scorer
+    invoke(176, 304)
+    invoke(304)
+    manifest = manifest_api.load(out / "manifest.json")
+    assert set(manifest["entries"]) == {f"{p}/cp-304/lossless-claw.seed-1.d1-r1.json" for p in ("scores", "loss")}
+    for population in ("scores", "loss"):
+        old = out / population / "cp-176/lossless-claw.seed-1.d1-r1.json"
+        assert not old.exists() and not manifest_api.admitted(out, manifest, old)
+        assert manifest_api.admitted(out, manifest, out / population / "cp-304" / old.name)
+
+
+def test_scoring_revocation_persisted_before_delete_and_failure(decision_scorer, manifest_api, tmp_path, monkeypatch):
+    out, main, invoke = decision_scorer
+    invoke(176, 304)
+    name, deleted = "lossless-claw.seed-1.d1-r1.json", []
+    unlink = Path.unlink
+    def checked_unlink(path, *args, **kwargs):
+        if path.name == name:
+            assert not any(Path(k).name == name for k in manifest_api.load(out / "manifest.json")["entries"])
+            deleted.append(path)
+        return unlink(path, *args, **kwargs)
+    monkeypatch.setattr(Path, "unlink", checked_unlink)
+    def fail_score(*args):
+        raise RuntimeError("synthetic scoring interruption")
+    main.__globals__["score"] = fail_score
+    with pytest.raises(RuntimeError, match="synthetic scoring interruption"):
+        invoke(304)
+    assert len(deleted) == 4 and manifest_api.load(out / "manifest.json")["entries"] == {}
+    report = functions("scorer/report_s.py", "load", json=json, score_manifest=manifest_api, PREFIX={})
+    analysis = paired_analysis(out, tmp_path, manifest_api)
+    analysis["ARMS"] = ["lossless-claw", "second"]
+    # Even leftover valid bytes cannot regain admission after the interruption.
+    leftover = out / "scores/cp-304" / name
+    leftover.write_text(json.dumps({"schema": "score-s-v1", "arm": "lossless-claw", "seed": "seed-1"}))
+    assert report["load"](leftover.parent) == {}
+    assert analysis["score"]("lossless-claw", 1, "r1", 304) is None
+    assert analysis["losses"](304)["lossless-claw"] == {}
+    assert analysis["pair_axes"](304)["status"] == "INCOMPLETE"
+
+
+@pytest.mark.parametrize("mode", ["absent", "unmanifested", "facts_kept", "continuation", "continuity"])
+def test_paired_analysis_requires_admission_and_complete_metrics(tmp_path, manifest_api, mode):
+    root = tmp_path / "decision"
+    for arm in ("first", "second"):
+        for run in ("r1", "r2"):
+            payload = {"probes": {}, "metrics": {"facts_kept": {"complete": True},
+                       "continuation": {"complete": True, "denominator": 0}, "continuity": {"complete": True}}}
+            if mode in payload["metrics"] and arm == "first" and run == "r1":
+                payload["metrics"][mode]["complete"] = False
+            manifest_file(manifest_api, root, f"scores/cp-304/{arm}.seed-1.d1-{run}.json", payload)
+    admitted_loss = manifest_file(manifest_api, root, "loss/cp-304/first.seed-1.d1-r1.json", {"counts": {"synthetic": 1}})
+    (admitted_loss.parent / "first.seed-1.stray.json").write_text(json.dumps({"counts": {"synthetic": 99}}))
+    if mode == "absent":
+        (root / "manifest.json").unlink()
+    elif mode == "unmanifested":
+        manifest = manifest_api.load(root / "manifest.json")
+        del manifest["entries"]["scores/cp-304/first.seed-1.d1-r1.json"]
+        manifest_api.write_atomic(root / "manifest.json", manifest)
+    analysis = paired_analysis(root, tmp_path, manifest_api)
+    result = analysis["pair_axes"](304)
+    assert result["status"] == "INCOMPLETE" and "seed-1/r1" not in result["pairs"]
+    suffix = "" if mode in ("absent", "unmanifested") else " (incomplete score)"
+    assert f"seed-1/r1{suffix}" in result["missing_pairs"]
+    assert analysis["losses"](304)["first"] == ({} if mode == "absent" else {"synthetic": 1})
+
+
+def test_report_keeps_unmanifested_prefix_timing(tmp_path, manifest_api):
+    scores = tmp_path / "scores/cp-304"
+    scores.mkdir(parents=True)
+    manifest_api.write_atomic(tmp_path / "manifest.json", {"schema": manifest_api.SCHEMA, "entries": {}})
+    (scores / "prefix.json").write_text(json.dumps({"schema": "score-s-v1", "population": "prefix60k", "arm": "arm",
+        "seed": "seed-1", "run_dir": "synthetic", "metrics": {"latency": {"status": "OK", "timing_label": "synthetic",
+        "events": {"count": 1, "p90": 1, "max": 1}, "calls": {"count": 1, "p90": 1, "max": 1}}}}))
+    report = functions("scorer/report_s.py", "load", "prefix_cell", "fmt", json=json, score_manifest=manifest_api, PREFIX={})
+    metadata = {}
+    assert report["load"](scores, metadata) == {}
+    assert metadata["prefix_unmanifested"] == ["prefix.json"] and metadata["ignored_unmanifested"] == []
+    assert "seed-1 synthetic" in report["prefix_cell"]("arm")
+
+
+def test_report_without_manifest_reads_every_score(tmp_path, manifest_api):
+    """score_s.py output (run_smoke.sh) has no manifest: the report reads it and records the manifest as absent."""
+    scores = tmp_path / "plain"
+    scores.mkdir()
+    (scores / "arm.seed-1.json").write_text(json.dumps({"schema": "score-s-v1", "arm": "arm", "seed": "seed-1",
+                                                         "run": "r1", "metrics": {}}))
+    report = functions("scorer/report_s.py", "load", json=json, score_manifest=manifest_api, PREFIX={})
+    metadata = {}
+    assert list(report["load"](scores, metadata)) == [("arm", "seed-1")]
+    assert metadata["manifest"] == "absent" and metadata["ignored_unmanifested"] == []

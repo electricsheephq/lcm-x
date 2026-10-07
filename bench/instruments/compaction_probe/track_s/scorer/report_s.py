@@ -10,6 +10,8 @@ import argparse
 import json
 from pathlib import Path
 
+import score_manifest
+
 QUALITY = ("facts_kept", "stale_rate", "trap_abstention", "continuation", "recall")
 LOWER = {"stale_rate", "trap_failure_rate", "level3", "latency"}
 NOT_IN_S = (("Reliability matrix", "bench/instruments/reliability receipts on three hosts (G-REL-1)"),
@@ -23,17 +25,22 @@ def load(d: Path, metadata=None):
     runs = {}
     manifest_path = next((p / "manifest.json" for p in (d, d.parent, d.parent.parent)
                           if (p / "manifest.json").exists()), None)
-    manifest = json.loads(manifest_path.read_text()) if manifest_path else None
-    ignored = []
+    manifest = score_manifest.load(manifest_path) if manifest_path else None
+    ignored, prefix = [], []
     if metadata is not None:
-        metadata.update(manifest=str(manifest_path) if manifest_path else "absent", ignored_unmanifested=ignored)
+        metadata.update(manifest=str(manifest_path) if manifest_path else "absent",
+                        ignored_unmanifested=ignored, prefix_unmanifested=prefix)
     for p in sorted(d.glob("*.json")):
-        if manifest is not None and p.stem not in manifest:
+        try:
+            s = json.loads(p.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
             ignored.append(p.name)
             continue
-        s = json.loads(p.read_text(encoding="utf-8"))
         if s.get("schema") == "score-s-v1" and s.get("population") == "prefix60k":
             PREFIX.setdefault(s["arm"], []).append(s)
+            prefix.append(p.name)
+        elif manifest is not None and not score_manifest.admitted(manifest_path.parent, manifest, p):
+            ignored.append(p.name)
         elif s.get("schema") == "score-s-v1":
             runs.setdefault((s["arm"], s["seed"]), []).append(s)
     return {k: sorted(v, key=lambda s: str(s.get("run") or 0)) for k, v in runs.items()}
