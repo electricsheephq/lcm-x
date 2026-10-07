@@ -205,19 +205,22 @@ def test_t3_the_hold_survives_a_following_turn_that_stores_new_rows(tmp_path, su
         engine.shutdown()
 
 
-def test_t3_a_hidden_only_leaf_is_progress_and_does_not_arm_the_hold(tmp_path, summaries):
+def test_t3_a_hidden_only_leaf_advances_coverage_and_holds_until_turn_end(tmp_path, summaries):
     """#581 (b): the view is all fresh tail; the leaf covers owned rows the view does not show. It consumes no
-    host row and the returned list grows, yet coverage advanced: no hold."""
+    host row; #904 keeps the host list unchanged and holds further passes until turn end."""
     engine = _engine(tmp_path, leaf_chunk_tokens=400, context_threshold=0.001)
     old = [*_turn("H1", 100.0), *_turn("H2", 110.0)]
     tail = _turn("T9", 900.0)
     try:
         engine.ingest([*old, *tail])
-        result = engine.compress(list(tail))
+        view = list(tail)
+        result = engine.compress(view)
         assert engine._last_compression_status == "compacted", engine._last_compression_noop_reason
-        assert _leaves(engine) == 1 and len(result) >= len(tail)
-        assert count_messages_tokens(result) >= count_messages_tokens(tail)
-        assert engine._no_progress_hold is None and engine.get_status()["no_progress_hold"] is None
+        assert _leaves(engine) == 1 and result is view
+        assert result == tail
+        assert engine.get_status()["no_progress_hold"]["reason"] == "hidden_only"
+        engine.note_turn_complete()
+        assert engine._no_progress_hold is None
     finally:
         engine.shutdown()
 
