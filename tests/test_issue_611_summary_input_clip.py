@@ -34,7 +34,9 @@ def _engine(tmp_path, **config) -> LCMEngine:
 
 
 def _legacy(text, kind="message"):
-    if kind == "preview" or len(text) <= (500 if kind == "arguments" else 3_000):
+    if kind == "preview":
+        return ""
+    if len(text) <= (500 if kind == "arguments" else 3_000):
         return text
     return text[:400] + "..." if kind == "arguments" else text[:2_000] + CLIP_MARKER + text[-800:]
 
@@ -119,13 +121,15 @@ def test_random_leaves_keep_legacy_characters_and_bound_total_tokens(budget):
         clipped = clip_to_budget(texts, budget, kinds)
         legacy = [_legacy(text, kind) for text, kind in zip(texts, kinds)]
         for text, kind, kept in zip(texts, kinds, clipped):
-            floor_chars = len(text) if kind == "preview" or len(text) <= (
-                500 if kind == "arguments" else 3_000) else (400 if kind == "arguments" else 2_800)
+            floor_chars = 0 if kind == "preview" else (len(text) if len(text) <= (
+                500 if kind == "arguments" else 3_000) else (400 if kind == "arguments" else 2_800))
             kept_chars = len(kept.replace(CLIP_MARKER, ""))
             if kind == "arguments" and len(text) > 500 and kept == text[:400] + "...":
                 kept_chars -= 3
             assert kept_chars >= floor_chars
             assert kept != CLIP_MARKER
+            if kind == "preview" and sum(map(count_tokens, texts)) > budget:
+                assert kept_chars == 0 or kept_chars >= 200
         # Fixed clip markers are allowed outside the share; this stricter check includes them.
         assert sum(map(count_tokens, clipped)) <= sum(map(count_tokens, legacy)) + budget * 1.02
         assert clipped == clip_to_budget(texts, budget, kinds)
@@ -134,13 +138,15 @@ def test_random_leaves_keep_legacy_characters_and_bound_total_tokens(budget):
 
 
 @pytest.mark.parametrize("kind,chars", [("message", 3_000), ("message", 3_001),
-                                        ("arguments", 500), ("arguments", 501), ("preview", 900)])
+                                        ("arguments", 500), ("arguments", 501),
+                                        ("preview", 199), ("preview", 200), ("preview", 900)])
 def test_tiny_budget_keeps_the_legacy_floor_at_boundaries(kind, chars):
     text = ("word " * (chars // 5 + 1))[:chars]
     assert clip_to_budget([text], 1, [kind]) == [_legacy(text, kind)]
 
 
 def test_fitting_texts_are_all_whole_at_the_budget_boundary():
+    # Previews have no floor when clipping, but fitting previews stay whole.
     texts = [_long(10_000), _long(2_000), "preview " * 100]
     budget = sum(map(count_tokens, texts))
     assert clip_to_budget(texts, budget, ["message", "arguments", "preview"]) == texts
@@ -226,10 +232,69 @@ def test_externalized_result_preview_is_outside_the_placeholder(tmp_path, budget
         serialized = engine._serialize_messages([{"role": "tool", "tool_call_id": "call_ext", "content": content}])
         label = "[TOOL RESULT call_ext]: "
         assert serialized.startswith(label)
-        placeholder, preview = serialized[len(label):].split("\n[preview: ", 1)
+        placeholder, separator, preview = serialized[len(label):].partition("\n[preview: ")
         assert is_externalized_placeholder(placeholder) and len(placeholder.strip()) <= 512
-        assert preview == content[:600] + " … " + content[-300:] + "]"
+        if budget == 1:
+            assert separator == preview == ""
+        else:
+            assert separator and preview == content[:600] + " … " + content[-300:] + "]"
         assert FACT not in serialized
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("chars", [300, 850, 2_000])
+def test_externalized_preview_content_appears_once(chars):
+    content = _long(chars)
+    preview = summary_input_clip.externalized_preview(content)
+    if chars <= 900:
+        assert preview == f"\n[preview: {content}]"
+        assert preview.count(content) == 1
+    else:
+        assert preview == f"\n[preview: {content[:600]} … {content[-300:]}]"
+
+
+def test_preview_recount_has_no_message_floor(clip_counter):
+    text, budget = "漢" * 100 + "a" * 700 + "漢" * 100, 200
+    kept, = clip_to_budget([text], budget, ["preview"])
+    retained = kept.replace(CLIP_MARKER, "")
+    assert count_tokens(retained) <= budget * 1.02
+    assert not retained or len(retained) >= 200
+
+
+@pytest.mark.parametrize("budget", [1_000, 4_000])
+def test_many_externalized_previews_share_final_leaf_input_budget(tmp_path, monkeypatch, clip_counter, budget):
+    seen = []
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation",
+                        lambda **kwargs: (seen.append(kwargs["text"]) or "summary", 1))
+    engine = _engine(tmp_path, leaf_chunk_tokens=budget, large_output_externalization_enabled=True,
+                     large_output_externalization_threshold_chars=200)
+    try:
+        message, args, content = _long(4_000), _long(2_000), _long(950)
+        messages = [
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c0", "type": "function", "function": {"name": "write", "arguments": args}}]},
+        ] + [{"role": "tool", "tool_call_id": f"c{i}", "content": content} for i in range(60)]
+        assert 60 * count_tokens(summary_input_clip.externalized_preview(content)) > budget
+        engine._summarize_leaf_chunk_with_rescue(messages)
+        assert len(seen) == 1
+        parts = seen[0].split("\n\n")
+        assert len(parts) == 62
+        retained_message = parts[0].removeprefix("[USER]: ")
+        retained_args = parts[1].removeprefix("[ASSISTANT]: \n[Tool calls:\n  write(").removesuffix(")\n]")
+        assert retained_message == _legacy(message)
+        assert len(retained_args.replace(CLIP_MARKER, "").removesuffix("...")) >= 400
+        previews = []
+        for i, part in enumerate(parts[2:]):
+            placeholder, _, preview = part.removeprefix(f"[TOOL RESULT c{i}]: ").partition("\n")
+            assert is_externalized_placeholder(placeholder)
+            previews.append(preview)
+        retained = [retained_message, retained_args, *previews]
+        floors = [_legacy(message), _legacy(args, "arguments")]
+        assert sum(count_tokens(text.replace(CLIP_MARKER, "")) for text in retained) <= (
+            sum(count_tokens(text.replace(CLIP_MARKER, "")) for text in floors) + budget * 1.02)
+        assert any(previews) if budget == 4_000 else not any(previews)
     finally:
         engine.shutdown()
 
@@ -317,3 +382,7 @@ def test_consumer_level3_repair(tmp_path, monkeypatch):
         assert refusal == "" and len(seen) == 1 and FACT in seen[0]
     finally:
         engine.shutdown()
+
+
+def test_empty_externalized_content_has_no_preview():
+    assert summary_input_clip.externalized_preview("") == ""

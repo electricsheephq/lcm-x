@@ -10,17 +10,22 @@ CLIP_MARKER = "\n...[truncated]...\n"
 
 def externalized_preview(content: str) -> str:
     """Budgeted text appended after, never inside, an externalised placeholder."""
-    return f"\n[preview: {content[:600]} … {content[-300:]}]" if content else ""
+    if not content:
+        return ""
+    if len(content) <= 900:
+        return f"\n[preview: {content}]"
+    return f"\n[preview: {content[:600]} … {content[-300:]}]"
 
 
 def clip_to_budget(texts: List[str], budget_tokens: int, kinds: Optional[List[str]] = None) -> List[str]:
-    """Keep each text's legacy floor or a token-bounded proportional clip.
+    """Keep message/argument legacy floors; previews share the budget with no floor.
 
     ``kinds`` distinguishes message contents, arguments and externalized previews.
     Labels, placeholders and share clip markers sit outside the text budget.
     """
-    # No text keeps fewer characters than v0.26.0. Text tokens are bounded by
-    # the legacy total plus leaf_chunk_tokens (2% token-share allowance).
+    # Messages and arguments keep at least as many characters as v0.26.0;
+    # previews have no legacy floor. Text tokens are bounded by the legacy
+    # total plus leaf_chunk_tokens (2% token-share allowance).
     # #899: a single proportional clip targets leaf_chunk_tokens, outside the #722
     # verbatim window while leaf_chunk_tokens > 2 * l3_truncate_tokens
     # (defaults: 20,000 > 1,024; fleet: 8,000 > 1,024).
@@ -31,13 +36,18 @@ def clip_to_budget(texts: List[str], budget_tokens: int, kinds: Optional[List[st
     out = []
     for index, (text, tokens) in enumerate(zip(texts, counts)):
         kind = kinds[index] if kinds is not None else "message"
-        if kind == "preview" or len(text) <= (500 if kind == "arguments" else 3_000):
+        if kind == "preview":
+            floor, floor_chars = "", 0
+        elif len(text) <= (500 if kind == "arguments" else 3_000):
             floor, floor_chars = text, len(text)
         elif kind == "arguments":
             floor, floor_chars = text[:400] + "...", 400
         else:
             floor, floor_chars = text[:2_000] + CLIP_MARKER + text[-800:], 2_800
         keep = len(text) * budget // total if tokens else 0
+        if kind == "preview" and keep < 200:
+            out.append("")
+            continue
         if keep <= floor_chars:
             out.append(floor)
             continue
@@ -49,7 +59,7 @@ def clip_to_budget(texts: List[str], budget_tokens: int, kinds: Optional[List[st
         share = (tokens * budget + total - 1) // total
         target = share * 102 // 100
         if count_tokens(text[:head] + (text[-tail:] if tail else "")) > target:
-            floor_text = floor if kind == "arguments" else text[:2_000] + text[-800:]
+            floor_text = floor if kind in ("arguments", "preview") else text[:2_000] + text[-800:]
             if count_tokens(floor_text) > target:
                 out.append(floor)
                 continue
@@ -62,7 +72,7 @@ def clip_to_budget(texts: List[str], budget_tokens: int, kinds: Optional[List[st
                     low = keep
                 else:
                     high = keep
-            if low == floor_chars:
+            if low == floor_chars or (kind == "preview" and low < 200):
                 out.append(floor)
                 continue
             head = low * 5 // 7
