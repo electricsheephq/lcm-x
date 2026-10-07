@@ -284,11 +284,11 @@ Expected signals:
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm-x:hermes-lcm` on hosts that support plugin skills
 
-On the `main` line, typical output is:
+On the `release/v0.26.x` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.26.0 (15 tools)
+  ✓ hermes-lcm-x v0.26.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -296,9 +296,10 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.26.0` is the identity the next minor release carries: the `v0.26.0-rc1`
-tag carries it first, the gauntlet runs at the last rc tag, and the GA tree is
-that rc tree plus the GA release-notes file (`v0.25.0` at `67de214f` shipped the same way).
+and tag. `0.26.1` is a patch cut from the `release/v0.26.x` branch at `v0.26.0` (`867eb587`): it adds
+the delegated-child compaction fix (#937). Its `v0.26.1-rc1` tag carries the identity first, the gauntlet
+runs at the last rc tag, and the GA tree is that rc tree plus the GA release-notes file (`v0.26.0` shipped
+the same way). The `main` line keeps `0.26.0` until the first v0.27.0 release candidate.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
