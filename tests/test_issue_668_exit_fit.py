@@ -41,6 +41,7 @@ def _counter(engine):
 
 @pytest.mark.parametrize("at_threshold", [False, True], ids=["above", "at"])
 def test_t1_automatic_exit_keeps_summary_and_all_stored_rows(engine, monkeypatch, at_threshold):
+    """#738: an exit fit drops only covered turns."""
     view = _hidden_backlog(engine, list_users=True)
     overhead = 2000
     observed = engine._survival_measure(view) + overhead
@@ -54,17 +55,12 @@ def test_t1_automatic_exit_keeps_summary_and_all_stored_rows(engine, monkeypatch
     assert observed >= engine.threshold_tokens > 0
     assert cap < engine._survival_measure(pre) + overhead < int(engine.context_length * 0.85)
     assert result[0] is pre[0] and engine._is_verified_replay_scaffold_message(result[0])
-    assert engine._survival_measure(result) + overhead <= cap
     assert seen["budget"] == cap - overhead
-    assert engine._last_survival_fit["reason"].startswith("exit_fit:")
-    assert _counter(engine)["last_reason"].startswith("exit_fit:")
-    dropped = [m for m in pre if all(m is not kept for kept in result)]
-    mapping = engine._get_store_id_map_for_messages(pre)
-    assert dropped and all(id(m) in mapping for m in dropped)
+    # the rows between the summary prefix and the fresh tail are uncovered: the exit fit cuts none of them
+    assert result == pre and engine._last_survival_fit is None
     assert engine._store.get_session_messages("S", limit=100_000) == stored
-    assert all(engine._store.get_batch([mapping[id(m)]]) for m in dropped)
     assert engine.get_status()["last_survival_fit"] == engine._last_survival_fit
-    assert "exit_fit:" in handle_lcm_command("doctor", engine)
+    assert "exit_fit:" not in handle_lcm_command("doctor", engine)
 
 
 def test_t2_recovery_retains_its_existing_caps(engine, monkeypatch):
@@ -100,6 +96,7 @@ def test_t4_fit_off_does_not_trim(engine, monkeypatch):
 
 
 def test_t5_exit_warning_counts_two_covered_three_uncovered_rows(engine, monkeypatch, caplog):
+    """#738: an exit fit drops only covered turns."""
     view = [{"role": "user" if i in (0, 5) else "assistant", "content": f"row {i} " + "alpha " * 100}
             for i in range(7)]
     engine.ingest(view)
@@ -113,11 +110,9 @@ def test_t5_exit_warning_counts_two_covered_three_uncovered_rows(engine, monkeyp
     monkeypatch.setattr(engine, "_compress_impl", lambda messages, **kwargs: messages)
     with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
         result = engine.compress(view, current_tokens=engine._survival_measure(view) + 100)
-    assert result == view[5:]
+    assert result == view  # the only whole-turn cut (rows 0-4) holds three uncovered rows: no cut
     applied = [r.getMessage() for r in caplog.records if "LCM survival fit applied" in r.getMessage()]
-    assert len(applied) == 1 and "uncovered_rows=3" in applied[0]
-    assert engine._last_survival_fit["dropped_rows"] == 5
-    assert engine._last_survival_fit["uncovered_rows"] == 3
+    assert applied == [] and engine._last_survival_fit is None
 
 
 def test_t6_unshortenable_list_warns_and_records_without_user_notice(engine, caplog):
@@ -184,11 +179,11 @@ def test_t8_exception_path_never_gets_exit_cap(engine, monkeypatch, recovery):
 
 
 def test_t9_exit_fit_arms_no_user_warning_but_another_fit_does(engine, monkeypatch):
+    """#738: an exit fit drops only covered turns."""
     view = _hidden_backlog(engine, list_users=True)
     observed = engine._survival_measure(view) + 2000
     engine.compress(view, current_tokens=observed)
-    assert engine._last_survival_fit["reason"].startswith("exit_fit:")
-    assert engine._last_survival_fit["dropped_rows"] > 0
+    assert engine._last_survival_fit is None  # the uncovered rows stay: no exit fit record
     assert engine._survival_fit_pending_warning is None
     assert engine.emit_automatic_compaction_status is False
     # the contrast: the same record for a fit that is not an exit fit still warns the user once
@@ -219,6 +214,7 @@ def test_t10_exit_fit_never_drops_the_summary_prefix(engine, monkeypatch, caplog
 
 
 def test_t11_a_failed_uncovered_count_never_fails_the_fit(engine, monkeypatch, caplog):
+    """#738: an exit fit drops only covered turns. A failed coverage read cuts nothing."""
     import sqlite3
 
     view = _hidden_backlog(engine, list_users=True)
@@ -242,11 +238,10 @@ def test_t11_a_failed_uncovered_count_never_fails_the_fit(engine, monkeypatch, c
     monkeypatch.setattr(engine, "_survival_fit", fit)
     with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
         result = engine.compress(view, current_tokens=observed)
-    assert engine._last_survival_fit["reason"].startswith("exit_fit:")
-    assert engine._last_survival_fit["uncovered_rows"] is None
-    assert engine._survival_measure(result) + 2000 <= int(engine.threshold_tokens * 0.95)
+    assert engine._last_compression_status != "error" and isinstance(result, list)
+    assert engine._last_survival_fit is None
     applied = [r.getMessage() for r in caplog.records if "LCM survival fit applied" in r.getMessage()]
-    assert len(applied) == 1 and "uncovered_rows=unknown" in applied[0]
+    assert applied == []
 
 
 def _stored_turns(engine, turns: int, words: int, *, newest_words: int = 0) -> list[dict]:
@@ -276,9 +271,12 @@ def test_t12_exit_fit_never_projects_the_newest_turn(engine, caplog):
 
 @pytest.mark.parametrize("room", ["tail_fits", "tail_over_cap"])
 def test_t13_exit_fit_keeps_the_fresh_tail(engine, caplog, room):
-    """Only whole turns before the fresh tail leave; when the tail alone is over the cap, nothing leaves."""
+    """Only whole turns before the fresh tail leave; when the tail alone is over the cap, nothing leaves.
+    #738: an exit fit drops only covered turns, so a leaf covers the rows before the tail here."""
     view = _stored_turns(engine, 10, 120)
     tail = engine._fresh_tail_start(view)
+    ids = [r["store_id"] for r in engine._store.get_session_messages("S", limit=100_000)]
+    engine._dag.add_node(SummaryNode(session_id="S", summary="Earlier rows", source_ids=ids[:tail]))
     assert 0 < tail < len(view) - 2
     measure = engine._survival_measure(view)
     tail_measure = engine._survival_measure(view[tail:])

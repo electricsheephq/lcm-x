@@ -133,7 +133,21 @@ def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
     assert completed.returncode == 0, completed.stdout + completed.stderr + receipt
     assert "DEV RUN — identity unbound" in receipt
     assert "Hermes checkout provenance: `Hermes checkout not configured`" in receipt
-    assert "engine=stubbed-context-base (NOT the hermes surface)" in receipt
+    # Probe in the runner's import environment, without pytest's in-process host modules.
+    host_probe = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path[0] = {str(runner.parent)!r}\n"
+         "try:\n"
+         "    from agent.context_engine import ContextEngine\n"
+         "except ModuleNotFoundError as exc:\n"
+         "    if exc.name not in {'agent', 'agent.context_engine'}: raise\n"
+         "    print('engine=stubbed-context-base (NOT the hermes surface)')\n"
+         "else:\n"
+         "    print('engine=hermes-context-engine (')\n"],
+        cwd=worktree, env=env, text=True, capture_output=True, timeout=10,
+    )
+    assert host_probe.returncode == 0, host_probe.stderr
+    assert host_probe.stdout.strip() in receipt
     assert "LCM_DISABLED_TOOLS" in receipt
     assert "Registry coverage: `COMPLETE`" in receipt
     assert "Missing matrix rows: `none`" in receipt

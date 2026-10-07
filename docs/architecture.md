@@ -98,8 +98,8 @@ snippets are read from raw durable rows, so they are passed through the same pro
 transform whenever the embedding-privacy resolution is ON, with ranking indices mapped back
 to the original untransformed hits (#371).
 
-Eva's accepted hosted-vector evidence proves this architecture for one exact
-profile/configuration only. It does not make trajectory embeddings, reranking,
+The reference agent's accepted hosted-vector evidence (v0.23.1) proves this
+architecture for one exact profile/configuration only. It does not make trajectory embeddings, reranking,
 remote Ollama, or fleet/customer paths safe by implication.
 
 ## Development

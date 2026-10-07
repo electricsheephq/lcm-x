@@ -105,6 +105,101 @@ def test_clean_cell_passes_every_bar(tmp_path):
     assert out["applicable_bars"] == ["B1", "B2", "B3", "B4", "B5", "B8"]
 
 
+@pytest.mark.parametrize("composite", [False, True])
+@pytest.mark.parametrize("kind", ["placeholder", "note"])
+def test_recovery_host_echo_never_licenses_stored_surplus(tmp_path, composite, kind):
+    tree = Path(__file__).resolve().parents[1]
+    prefixes = plugin_tree.recovery_prefixes(tree)
+    assert len(prefixes) == 2 and set(prefixes) <= set(plugin_tree.carrier_markers(tree)[1])
+    text = next(p for p in prefixes if ("latest message" in p) == (kind == "note"))
+    text += "123 tokens) is stored." if kind == "note" else ""
+    if composite:
+        text = U.format(1, 1) + "\n\n" + text
+    out = make(tmp_path, rows=clean_rows() + [("user", text)], events=clean_events(),
+               host=[("S0", "user", text, 1)], plugin={"tree": str(tree)})
+    assert out["verdict"] == "FAIL" and "B2" in out["failed_bars"]
+    assert out["numbers"]["B2"]["stored_rows_not_expected"] == 1
+    assert out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 0
+    if composite:
+        assert "B1" in out["failed_bars"]
+
+
+def test_recovery_exclusion_preserves_embedded_objective_licence(tmp_path):
+    tree = Path(__file__).resolve().parents[1]
+    text = "ordinary user text\n\n[Current user objective preserved from compacted history] quoted"
+    out = make(tmp_path, rows=clean_rows() + [("user", text)], events=clean_events(),
+               host=[("S0", "user", text, 1)], plugin={"tree": str(tree)})
+    assert out["verdict"] == "PASS" and out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 1
+
+
+@pytest.mark.parametrize("marked,prior,verdict", [(False, True, "UNSUPPORTED"), (True, False, "UNSUPPORTED"),
+                                                 (True, True, "PASS")])
+def test_forced_recovery_requires_marker_and_prior_compaction(tmp_path, marked, prior, verdict):
+    recovery = {"event": "compaction", "turn": 2, "compression_status": "overflow_recovery",
+                "recovery_marker": marked, "prior_compaction": prior}
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), bars=["B1", "B2"],
+               faults=[{"kind": "forced_recovery", "turn": 2}], extra_events=[recovery])
+    assert out["verdict"] == verdict
+    if verdict == "UNSUPPORTED":
+        assert "recovery" in out["reason"]
+
+
+def test_overflow_cell_restart_and_bars_contract():
+    for c in cells.select("overflow-recovery-restart/*"):
+        assert c["bars"] == ["B1", "B2"] and c["targets"] == [534]
+        assert c["faults"][1] == {"kind": "crash_after_compaction_before_reply", "after_status": "overflow_recovery", "offset": 1}
+        assert c["faults"][2] == {"kind": "clean_exit_before_turn", "after_restart": 1}
+        assert set(c["lcm_env"]) == set(cells.tight(c["window"]))
+    assert cells.ISSUES[534] == (("B1", "B2"), "")
+
+
+@pytest.mark.parametrize("stored_result,verdict", [("real host result", "PASS"), ("wrong result", "FAIL")])
+def test_forced_recovery_scores_durable_result_against_dispatch(tmp_path, stored_result, verdict):
+    ev, rows = tool_turn(1, calls=PLAN[:1], results=[stored_result],
+                         recovery_result_sha256=hashlib.sha256(b"real host result").hexdigest())
+    ev = [e for e in ev if e["event"] != "tool_seen"]
+    events = clean_events()
+    events[1:1] = ev
+    recovery = {"event": "compaction", "turn": 1, "compression_status": "overflow_recovery",
+                "recovery_marker": True, "prior_compaction": True}
+    out = make(tmp_path, rows=clean_rows(1) + rows + clean_rows(3)[2:], events=events,
+               faults=[{"kind": "forced_recovery", "turn": 1}], extra_events=[recovery], bars=["B1", "B2"],
+               tool_plan=[{"turns": [1], "calls": [{"name": n, "args": a} for n, a in PLAN[:1]]}])
+    assert out["verdict"] == verdict
+    assert out["numbers"]["B6"]["tool_execution_failures"] == 1  # result never reached the provider
+
+
+@pytest.mark.parametrize("dispatch_ok,ending,reply,gap", [
+    (False, "complete", True, "recovery tool dispatch failed"),
+    (True, "failed", True, "forced recovery turn did not complete"),
+    (True, "missing", True, "forced recovery turn did not complete"),
+    (True, "cancel", True, "forced recovery turn did not complete"),
+    (True, "complete", False, "scripted reply"),
+    (True, "complete", True, None),
+])
+def test_forced_recovery_requires_successful_dispatch_and_completed_reply(dispatch_ok, ending, reply, gap):
+    events = turn_events(32)
+    ev, _ = tool_turn(32, calls=[("write_file", {"path": "p", "content": "result"})], results=["result"],
+                      ok=dispatch_ok, recovery_result_sha256=hashlib.sha256(b"result").hexdigest())
+    events[1:1] = [e for e in ev if e["event"] != "tool_seen"]
+    if ending == "failed":
+        events[-1]["failed"] = True
+    elif ending == "cancel":
+        events[-1]["kind"] = "cancel"
+    elif ending == "missing":
+        events.pop()
+    if not reply:
+        events = [e for e in events if e["event"] != "emit"]
+    events.append({"event": "compaction", "turn": 32, "compression_status": "overflow_recovery",
+                   "recovery_marker": True, "prior_compaction": True})
+    atts = bars.attempts(events)
+    bound = bars.tool_calls.bind(atts)
+    cell = {"bars": ["B1", "B2"], "faults": [{"kind": "forced_recovery", "turn": 32}],
+            "tool_plan": [{"turns": [32], "calls": [{"name": "write_file"}]}]}
+    gaps = bars.scenario_gaps(cell, events, atts, {"groups": 0}, bound)
+    assert any(gap in g for g in gaps) if gap else not gaps
+
+
 def test_b1_b2_duplicate_user_row_fails(tmp_path):
     out = make(tmp_path, rows=clean_rows() + [("user", U.format(2, 2) + " ")], events=clean_events())
     assert out["failed_bars"]["B1"] == {"T02": {"expected": 1, "stored": 2}}
@@ -534,12 +629,12 @@ def test_r14_a1_final_check_needs_a_fresh_compressed_pass(monkeypatch, host_stat
 
 def test_r14_a2_controls_never_hold_without_runs():
     assert controls.check("PC-2", []) and controls.check("PC-3", [])
-    assert controls.check("PC-3", [], ["eva-0.21.5"])  # a requested host with no row is a problem
+    assert controls.check("PC-3", [], ["ref-0.21.5"])  # a requested host with no row is a problem
     assert controls.CONTROLS["PC-3"]["refs"] == ["508f893517f52a400c2bfe0b37f914e864ff806c"]
-    row = {"plugin_ref": "v0.24.2", "host": "eva-0.21.5", "verdict": "FAIL", "failed_bars": {"B6": {}}}
+    row = {"plugin_ref": "v0.24.2", "host": "ref-0.21.5", "verdict": "FAIL", "failed_bars": {"B6": {}}}
     rows = [dict(row, cell=c) for c in controls.CONTROLS["PC-2"]["cells"]]
-    assert controls.check("PC-2", rows, ["eva-0.21.5"]) == []
-    assert controls.check("PC-2", rows, ["eva-0.21.5", "upstream-main"])  # "all" = requested hosts, not row hosts
+    assert controls.check("PC-2", rows, ["ref-0.21.5"]) == []
+    assert controls.check("PC-2", rows, ["ref-0.21.5", "upstream-main"])  # "all" = requested hosts, not row hosts
 
 
 def git_host(tmp_path):
@@ -607,6 +702,11 @@ def test_r14_safety_refusals(tmp_path):
     for key in ("LCM_DATABASE_PATH", "LCM_EXPORT_DIR", "LCM_EMBEDDING_API_KEY", "LCM_AUTH_TOKEN", "HOME"):
         assert run_matrix.env_refusal({key: "x"}), key
     assert run_matrix.env_refusal({"LCM_CONTEXT_THRESHOLD": "0.5"}) is None
+    # Token COUNT keys are tuning, not credentials (the fleet sets these two).
+    for key in ("LCM_LEAF_CHUNK_TOKENS", "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS", "LCM_RESERVE_TOKENS_FLOOR"):
+        assert run_matrix.env_refusal({key: "8000"}) is None, key
+    for key in ("LCM_API_KEY_TOKENS", "LCM_AUTH_TOKENS_SECRET", "LCM_ACCESS_TOKEN"):
+        assert run_matrix.env_refusal({key: "x"}), key
     src = tmp_path / "src"
     src.mkdir()
     path = tmp_path / "hosts.json"
@@ -765,6 +865,107 @@ def test_r2a4_c_a_deficit_is_never_licensed(tmp_path):
     assert out["numbers"]["B2"]["deficit_rows"] == 1 and {"B1", "B2"} <= set(out["failed_bars"])
 
 
+def _held_composite(tmp_path, *, parts_sid="S0", host_parts=(14, 15), inner=""):
+    """#804 shape: the host held T14 + "\n\n" + T15 as one live composite but stored the parts apart; LCM stored the
+    parts as two rows."""
+    t14, t15 = U.format(14, 14) + inner, U.format(15, 15)
+    host = [(parts_sid, "user", U.format(t, t) + (inner if t == 14 else ""), 1) for t in host_parts]
+    parents = {"S0": None, **({parts_sid: None} if parts_sid != "S0" else {})}
+    return make(tmp_path, rows=[("user", t14), ("user", t15), ("assistant", R.format(15, 15))],
+                sids=[parts_sid, parts_sid, "S0"], events=turn_events(15, held=t14 + "\n\n" + t15),
+                parents=parents, host=host, plugin=TREE, bars=["B2"])
+
+
+def test_b2_held_composite_stored_as_host_parts_is_not_a_deficit(tmp_path):
+    for i, inner in enumerate(("", "\n\nsecond paragraph\n\nthird")):  # a part may hold its own "\n\n"
+        out = _held_composite(tmp_path / str(i), inner=inner)
+        b2 = out["numbers"]["B2"]
+        assert "B2" not in out["failed_bars"], out["failed_bars"]
+        assert b2["missing_keys"] == b2["deficit_rows"] == b2["surplus_rows"] == 0
+        assert b2["host_parity_licensed"]["rows"] == 0  # the licences were spent on the composite
+        [composite] = b2["held_composites_as_parts"]
+        assert composite["preview"].startswith("[T14]") and [p["store_ids"] for p in composite["parts"]] == [[1], [2]]
+
+
+def test_b2_held_composite_needs_host_evidence_for_every_part(tmp_path):
+    out = _held_composite(tmp_path, host_parts=(14,))
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
+def test_b2_held_composite_the_host_stored_durably_stays_a_deficit(tmp_path):
+    """The host holds the composite itself as a durable row (and the parts): LCM should have stored it."""
+    composite = U.format(14, 14) + "\n\n" + U.format(15, 15)
+    out = make(tmp_path, rows=[("user", U.format(14, 14)), ("user", U.format(15, 15)), ("assistant", R.format(15, 15))],
+               events=turn_events(15, held=composite), parents={"S0": None}, plugin=TREE, bars=["B2"],
+               host=[("S0", "user", composite, 1), ("S0", "user", U.format(14, 14), 1), ("S0", "user", U.format(15, 15), 1)])
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
+def test_b2_composite_cover_respects_licence_capacity_while_searching():
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    lic = {("user", multiset.h(x)): {"licensed": 1} for x in (a, a + "\n\n" + a, b)}
+    assert multiset.licensed_parts(a + "\n\n" + a + "\n\n" + b, lic, 1) == {
+        ("user", multiset.h(a + "\n\n" + a)): 1, ("user", multiset.h(b)): 1}
+    assert multiset.licensed_parts(a + "\n\n" + b, {("user", multiset.h(a)): {"licensed": 1}}, 1) is None
+
+
+def test_b2_composite_cover_is_fail_closed_on_a_pathological_input():
+    """70 paragraphs, every single and adjacent pair licensed, and an unlicensed tail: the budget ends the search
+    quickly and the composite stays a deficit."""
+    import time
+    from bench.instruments.reliability.scorers import multiset
+    paras = [f"paragraph {i}" for i in range(70)]
+    lic = {("user", multiset.h(p)): {"licensed": 1} for p in paras}
+    lic.update({("user", multiset.h(a + "\n\n" + b)): {"licensed": 1} for a, b in zip(paras, paras[1:])})
+    started = time.monotonic()
+    assert multiset.licensed_parts("\n\n".join(paras + ["unlicensed tail"]), lic, 1) is None
+    assert time.monotonic() - started < 10
+
+
+def test_b2_composite_cover_cuts_inside_a_longer_newline_run():
+    """A raw part may end or start with whitespace (the probe's trailing_ws turns): R + "\n" + "\n\n" + U + "\n" still
+    splits into the two edge-stripped keys."""
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    lic = {("user", multiset.h(x)): {"licensed": 1} for x in (a, b)}
+    assert multiset.licensed_parts(a + "\n" + "\n\n" + b + "\n", lic, 1) == {
+        ("user", multiset.h(a)): 1, ("user", multiset.h(b)): 1}
+
+
+def test_b2_composite_cover_is_fail_closed_past_its_part_cap():
+    from bench.instruments.reliability.scorers import multiset
+    paras = [f"paragraph {i}" for i in range(multiset.COVER_PARTS + 1)]
+    lic = {("user", multiset.h(p)): {"licensed": 1} for p in paras}
+    assert multiset.licensed_parts("\n\n".join(paras[:-1]), lic, 1)  # exactly COVER_PARTS parts
+    assert multiset.licensed_parts("\n\n".join(paras), lic, 1) is None
+
+
+def test_b2_held_composite_pairs_only_the_occurrences_the_host_did_not_store_whole():
+    """Expected twice, stored whole once: the other occurrence pairs with host-licensed parts unless the host stored
+    both occurrences whole."""
+    from bench.instruments.reliability.scorers import multiset
+    a, b = "alpha part", "beta part"
+    c = a + "\n\n" + b
+    rows = [(1, "S0", "user", c), (2, "S0", "user", a), (3, "S0", "user", b)]
+    def host(n):
+        return {("user", multiset.h(x)): {"n": k, "ids": [x]} for x, k in ((a, 1), (b, 1), (c, n))}
+    for held, verdict in ((0, "PASS"), (1, "PASS"), (2, "FAIL")):
+        out = multiset.score([("user", c), ("user", c)], rows, host(held))
+        assert out["verdict"] == verdict, (held, out)
+        assert len(out["held_composites_as_parts"]) == (verdict == "PASS")
+    [composite] = multiset.score([("user", c), ("user", c)], rows, host(1))["held_composites_as_parts"]
+    assert composite["expected"] == 2 and composite["as_parts"] == 1
+
+
+def test_b2_held_composite_parts_in_another_lineage_do_not_cover_it(tmp_path):
+    out = _held_composite(tmp_path, parts_sid="cron_job_01")
+    b2 = out["numbers"]["B2"]
+    assert "B2" in out["failed_bars"] and b2["missing_keys"] == 1 and not b2["held_composites_as_parts"]
+
+
 def test_r2a4_d_a_licence_is_per_lineage(tmp_path):
     other = ("cron_job_01", "user", U.format(2, 2), 1)  # the second copy is held in another lineage
     out = make(tmp_path, rows=clean_rows() + [("user", U.format(2, 2))], events=clean_events(),
@@ -813,3 +1014,10 @@ def test_r2a4_an_echoed_lcm_carrier_is_never_licensed(tmp_path):
     out = make(tmp_path / "t", rows=clean_rows() + [("user", todo)], events=clean_events(),
                host=held() + [("S0", "user", todo, 1)], plugin=TREE)
     assert out["numbers"]["B2"]["host_parity_licensed"]["rows"] == 0 and "B2" in out["failed_bars"]
+
+
+def test_b9_only_cell_without_the_audit_is_unsupported_never_pass(tmp_path):
+    """A P8 control proves nothing when B9 is UNSUPPORTED (audit off, or a host without the seams)."""
+    out = make(tmp_path, rows=clean_rows(), events=clean_events(), bars=["B9"])
+    assert out["verdict"] == "UNSUPPORTED" and out["applicable_bars"] == [], out
+    assert out["reason"].startswith("B9: ")

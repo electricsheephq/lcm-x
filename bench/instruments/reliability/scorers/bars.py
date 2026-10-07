@@ -1,4 +1,4 @@
-"""Bars B1-B8 over one finished cell: its DB copy (db/lcm.db), transcript.jsonl and phase-*.json.
+"""Bars B1-B8 over one finished cell: its DB copies (lcm.db, state.db), transcript.jsonl and phase-*.json.
 
 The expected transcript is what the host HELD for each attempt (the probe records the user row the host
 kept after its persist override and consecutive-user merge), so the bars compare LCM's store with the
@@ -20,9 +20,9 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from . import chronology, host_parity, multiset, summary, tool_calls, tool_groups
+from . import chronology, drain, host_parity, multiset, summary, tool_calls, tool_groups, host_rewrite
 
-ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8")
+ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 
 
 def _candidate_phases(cell: dict, phases: list[dict]) -> list[dict]:
@@ -89,10 +89,10 @@ def attempts(events: list[dict]) -> list[dict]:
     return out
 
 
-def lineage(cell_dir: Path, root: str = "S0"):
+def lineage(cell_dir: Path, root: str = "S0", db_dir: Path | None = None):
     """store session id -> lineage: "chat" for ``root`` (R1: S0; R2: the ACP session id) and its compression
     descendants, else the root session."""
-    parents, state = {}, cell_dir / "db" / "state.db"
+    parents, state = {}, Path(db_dir or cell_dir / "db") / "state.db"
     if state.exists():
         con = sqlite3.connect(f"file:{state}?mode=ro", uri=True)
         try:
@@ -142,6 +142,20 @@ def scenario_gaps(cell: dict, events: list[dict], atts: list[dict], tg: dict, bo
             sum(1 for e in events if e["event"] == "compaction" and e.get("compression_status") == "host_native")
         if not tried:
             gaps.append("native cell with zero native recovery attempts")
+    if fr := next((f for f in cell.get("faults", []) if f["kind"] == "forced_recovery"), None):
+        forced = [a for a in atts if a["prefix"] == "T" and a["turn"] == fr["turn"]]
+        if not forced or any(not tool_calls.completed(a) or not a["reply"] for a in forced):
+            gaps.append("forced recovery turn did not complete with its scripted reply")
+        for a in forced:
+            for d in a["tool_dispatch"]:
+                if not d.get("ok"):
+                    gaps.append(f"{a['tag']}: recovery tool dispatch failed ({d.get('id')})")
+        marked = [e for e in events if e["event"] == "compaction" and e.get("compression_status") == "overflow_recovery"
+                  and e.get("turn") == fr["turn"] and e.get("recovery_marker")]
+        if not marked:
+            gaps.append("no marked overflow_recovery on the forced recovery turn")
+        elif not any(e.get("prior_compaction") for e in marked):
+            gaps.append("marked recovery had no earlier committed compaction (v4 proof not proven)")
     return gaps
 
 
@@ -182,9 +196,11 @@ def tag_counts(texts, pattern):
     return counts
 
 
-def score(cell: dict, cell_dir: Path) -> dict:
+def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
+    """``db_dir`` holds the cell's lcm.db / state.db copies (run_matrix: the cell's scratch dir); default <cell>/db."""
     events, phases = load(cell_dir)
-    db = cell_dir / "db" / "lcm.db"
+    db_dir = Path(db_dir or cell_dir / "db")
+    db = db_dir / "lcm.db"
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
         full = con.execute("select store_id, session_id, role, content, tool_calls, tool_call_id from messages"
@@ -194,12 +210,12 @@ def score(cell: dict, cell_dir: Path) -> dict:
     finally:
         con.close()
     atts = attempts(events)
-    group = lineage(cell_dir, cell.get("chat_root", "S0"))
+    group = lineage(cell_dir, cell.get("chat_root", "S0"), db_dir)
     groups = sorted({attempt_group(a, group) for a in atts} | {group(sid) for _s, sid, _r, _c in stored})
     notices = {x for p in phases for x in p.get("failed_turn_notices") or []}
     plugin = cell.get("plugin") or (json.loads((cell_dir / "cell.json").read_text()).get("plugin")
                                     if (cell_dir / "cell.json").exists() else None) or {}
-    host, host_why = host_parity.load(cell_dir / "db" / "state.db", group, plugin.get("tree"))
+    host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"))
     per = {g: (expected_items([a for a in atts if attempt_group(a, group) == g], notices),
                [r for r in stored if group(r[1]) == g]) for g in groups}
     applicable = [b for b in cell.get("bars") or ALL_BARS
@@ -242,10 +258,22 @@ def score(cell: dict, cell_dir: Path) -> dict:
     keys = ("expected_items", "missing_keys", "deficit_rows", "duplicated_keys", "surplus_rows",
             "stored_rows_not_expected", "split_keys")
     numbers["B2"] = {k: sum(m[k] for m in b2_parts.values()) for k in keys}
+    numbers["B2"]["held_composites_as_parts"] = [dict(c, session=g) for g, m in b2_parts.items()
+                                                 for c in m["held_composites_as_parts"]][:10]
     numbers["B2"]["per_session"] = {g: m["verdict"] for g, m in b2_parts.items()}
     numbers["B2"]["host_parity_licensed"] = host_parity.summary(
         [dict(r, session=g) for g, m in b2_parts.items() for r in m["host_parity_licensed"]], host_why)
     bound = tool_calls.bind(atts, lambda a: attempt_group(a, group))
+    # This emergency cell deliberately drops the active result before the next provider call. B2 still requires
+    # its durably stored bytes to match the real HOST dispatch; the unseen-result failure remains a B6 diagnostic.
+    recovery_turns = {f["turn"] for f in cell.get("faults", []) if f["kind"] == "forced_recovery"} & {
+        e.get("turn") for e in events if e["event"] == "compaction" and e.get("compression_status") == "overflow_recovery"
+        and e.get("recovery_marker")}
+    for a in atts:
+        for d in a["tool_dispatch"]:
+            if a["turn"] in recovery_turns and tool_calls.completed(a) and d.get("ok") and d.get("recovery_result_sha256") \
+                    and d.get("id") in {c["id"] for c in a["tool_issues"]} - {s["id"] for s in a["tool_seen"]}:
+                bound["expected"][(attempt_group(a, group), "tool", d["id"], d["recovery_result_sha256"])] += 1
     tools = tool_calls.compare(bound["expected"], bound["loose"], tool_calls.stored_keys(full, group))
     numbers["B2"].update(tools)
     if tools["tool_missing_rows"] or tools["tool_surplus_rows"]:
@@ -312,6 +340,18 @@ def score(cell: dict, cell_dir: Path) -> dict:
     numbers["B7"] = native
     if native["native_unusable"] or native["summary_generation_aborted"] or native["max_native_attempts_per_turn"] > 1:
         failed["B7"] = native
+    if cell.get("drain"):  # D1-D3 (scorers/drain.py): the drain/hidden-backlog cells
+        d_failed, d_inconclusive, numbers["drain"] = drain.score(cell, phases, cell_dir)
+        failed.update(d_failed)
+        inconclusive.update(d_inconclusive)
+    numbers["B9"] = host_rewrite.score(cell, cell_dir, phases)
+    if numbers["B9"]["verdict"] == "FAIL":
+        failed["B9"] = numbers["B9"]["failed_invariants"]
+    if numbers["B9"]["verdict"] == "UNSUPPORTED":
+        applicable = [b for b in applicable if b != "B9"]
+        if not applicable:  # a B9-only cell (the P8 controls) proves nothing without the audit: never PASS
+            return {"verdict": "UNSUPPORTED", "reason": "B9: " + numbers["B9"]["reason"], "applicable_bars": [],
+                    "failed_bars": {}, "inconclusive_bars": {}, "numbers": numbers}
     failed = {b: v for b, v in failed.items() if b in applicable}
     numbers["diagnostic"] = {
         "log_counts": {k: sum(p.get("log_counts", {}).get(k, 0) for p in phases)

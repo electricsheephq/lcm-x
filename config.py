@@ -103,6 +103,21 @@ def _parse_str_env(key: str, default):
     return os.environ.get(key, default)
 
 
+_HOST_MESSAGE_UID_MODES = ("off", "shadow", "on")
+_host_message_uid_mode_warned = False
+
+
+def host_message_uid_mode() -> str:
+    """``LCM_HOST_MESSAGE_UID`` (v0.26.0): ``off`` | ``shadow`` (default) | ``on`` (reserved for slice C; runs as
+    ``shadow`` today). An unknown value means ``shadow``, with one WARNING per process."""
+    global _host_message_uid_mode_warned
+    raw = (os.environ.get("LCM_HOST_MESSAGE_UID") or "").strip().lower()
+    if raw and raw not in _HOST_MESSAGE_UID_MODES and not _host_message_uid_mode_warned:
+        _host_message_uid_mode_warned = True
+        logger.warning("invalid env LCM_HOST_MESSAGE_UID=%r ignored; using shadow", raw)
+    return raw if raw in _HOST_MESSAGE_UID_MODES else "shadow"
+
+
 def _parse_int_env_with_source(
     key: str,
     default: int,
@@ -985,7 +1000,7 @@ class LCMConfig:
 
     # Appended for positional-constructor compatibility with every field that
     # predates native recovery. Keyword construction remains preferred.
-    # Opt-in native context recovery; preserves LCM sources and never changes the frontier.
+    # Removed in v0.25.0; parsed and ignored.
     native_recovery: bool = False
     # #582: fit an over-window compress() result by dropping the oldest stored user turns (never a row).
     survival_fit: bool = True

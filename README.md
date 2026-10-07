@@ -26,7 +26,12 @@ Based on the [LCM paper](https://papers.voltropy.com/LCM) by Ehrlich & Blackman
 (Voltropy PBC, Feb 2026). Inspired by
 [lossless-claw](https://github.com/martian-engineering/lossless-claw) for
 OpenClaw. For an interactive visualization of the LCM idea, see
-[losslesscontext.ai](https://losslesscontext.ai/).
+[losslesscontext.ai](https://losslesscontext.ai/). Project site:
+[losslesscontext.com](https://losslesscontext.com/).
+
+What we are building and why: [VISION.md](VISION.md). What ships when:
+[ROADMAP.md](ROADMAP.md) and the tracker
+[#658](https://github.com/electricsheephq/lcm-x/issues/658).
 
 ## Table of contents
 
@@ -116,8 +121,9 @@ copy-paste setups per agent type.
 ## Project status
 
 The latest stable release is
-`v0.24.8@7ed790c84b493395bdc1c929c1ee4d7ea0eaaceb` (plugin `hermes-lcm-x`, engine
-`lcm-x`; the rename shipped in v0.24.0, #471). It carries
+`v0.26.1@5fc3d1c6800066fec917b4c91bb957d6ea5473bc` (plugin `hermes-lcm-x`, engine
+`lcm-x`; the rename shipped in v0.24.0, #471), a patch on v0.26.0 in which a
+delegated child compacts like its parent (#937). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
 is an independent flag that transforms only the provider-bound copy — see
@@ -130,24 +136,21 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line now identifies itself as
-`hermes-lcm-x v0.24.9 (15 tools)` — drain: one foreground time budget, stub-first exit, exit fit,
-scan allowance — on top of the
-`v0.24.8` release tag, which identifies itself as `hermes-lcm-x v0.24.8 (15 tools)`.
-This is the forward bump for the next patch release, never a restamp
-of any past commit's own recorded identity (#385 fixed the earlier drift).
+The `main` line identifies itself as
+`hermes-lcm-x v0.26.0 (15 tools)` until the
+first v0.27.0 release candidate bumps it (patch releases such as v0.26.1 are cut from `release/v0.26.x` and carry their own identity). An identity is never a restamp of any past commit's own recorded identity
+(#385 fixed the earlier drift).
 
-Eva has accepted exact stable v0.23.1 with hosted `voyage-4-large`,
-1024-dimensional float32 summary vectors under one privacy-bound identity.
-That evidence establishes runtime safety for Eva only, not fleet, customer,
-Teams, answer-accuracy, or universal benchmark readiness.
-
-The active finite evaluation is [#341](https://github.com/electricsheephq/lcm-x/issues/341):
-an answer-blind, exact-stable LongMemEval retrieval-provenance audit. It keeps
-product and benchmark-instrument identities separate and cannot change product
-retrieval behavior. See [Current project state](docs/project-status.md), the
-[roadmap](ROADMAP.md), and [Benchmark methodology](benchmarks/METHODOLOGY.md)
-for current identities, gaps, and proof boundaries.
+Every compaction LCM-X starts today runs on the turn thread, so the user waits
+for it. v0.25.0 makes a hidden backlog drain at turn pace (#597); v0.28.0
+removes the wait by preparing summaries in the background and publishing them
+at the threshold (#787). Recall is re-baselined on the shipped default
+configuration.
+See [VISION.md](VISION.md), the [roadmap](ROADMAP.md), the tracker
+[#658](https://github.com/electricsheephq/lcm-x/issues/658),
+[Current project state](docs/project-status.md) and
+[Benchmark methodology](benchmarks/METHODOLOGY.md) for current identities,
+gaps, and proof boundaries.
 
 ## LCM vs built-in compression
 
@@ -257,7 +260,7 @@ On the `main` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.24.9 (15 tools)
+  ✓ hermes-lcm-x v0.26.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -622,7 +625,7 @@ moved back to that assistant even when doing so exceeds a configured bound.
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
 | `LCM_SUMMARY_PROMPT_VERSION` | `1` | 1 = today's prompts; 2 = the frontier prompt with the focus directives in the policy and a 3× output ceiling |
-| `LCM_NATIVE_RECOVERY` | `false` | Opt-in recovery mode: ingest sources normally, then generate a native active-context summary for the Hermes host's archive transaction, without attempting LCM publication. Retains LCM sources/recall and does not advance its frontier. Keeps sanitized user text in active replay even when its durable copy is externalized, so native summarization can read it; already-published references are not automatically expanded. Requires the host cancellation fence; failure retains context without trimming. |
+| `LCM_NATIVE_RECOVERY` | `false` | removed in v0.25.0; ignored if set (`true` logs one WARNING each time the plugin loads) |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |
@@ -1072,7 +1075,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
-- [Current project state](docs/project-status.md) — v0.24.8 stable baseline,
+- [Current project state](docs/project-status.md) — v0.26.1 stable baseline,
   separate main-development identity, active work, and proof boundaries
 - [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
   and judged-QA evaluation contracts, reproduction, and landed result index
@@ -1124,7 +1127,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.24.8` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.26.1` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License

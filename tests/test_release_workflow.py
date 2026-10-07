@@ -4,8 +4,8 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 RELEASE_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "release.yml"
-IDENTITY_VERSION = "0.24.9"
-RC_TAG = "0.24.9-rc1"
+IDENTITY_VERSION = "0.26.0"
+RC_TAG = "0.26.0-rc1"
 RELEASE_NOTES = REPO_ROOT / ".github" / "release-notes" / f"v{RC_TAG}.md"
 
 
@@ -40,7 +40,10 @@ def test_release_candidate_identity_surfaces_are_synchronized():
     assert f"version: {IDENTITY_VERSION}" in manifest
     assert f"hermes-lcm-x v{IDENTITY_VERSION} (15 tools)" in readme
     assert f"hermes-lcm-x v{IDENTITY_VERSION} (15 tools)" in operator_guide
-    assert f"## v{IDENTITY_VERSION} - " in changelog
+    header = next((line for line in changelog.splitlines()
+                   if line.startswith(f"## v{IDENTITY_VERSION} (")), "")
+    assert header
+    assert not re.search(r"unreleased|rc\d", header, re.IGNORECASE)
     assert f"Exact commit SHA for v{IDENTITY_VERSION} or main" in bug_report
 
 
@@ -102,12 +105,12 @@ def test_release_candidate_notes_cover_only_the_merged_release_scope():
     section_headers = [line for line in lines if line.startswith("## ")]
 
     assert notes.startswith(f"# v{RC_TAG} — ")
-    assert any(header.startswith("## Changes since v0.24.8") for header in section_headers)
+    assert any(header.startswith("## Changes since v0.25.1") for header in section_headers)
     assert any(header.startswith("## Qualification") for header in section_headers)
     assert any(header.startswith("## Known follow-ups") for header in section_headers)
     assert "## Benchmark boundary" in section_headers
     assert "## Upgrade" in section_headers
-    assert "**BREAKING.**" not in notes  # a patch release; the v0.24.0 rename stays documented in README
+    assert "**BREAKING.**" not in notes  # the v0.24.0 rename stays documented in README
     # Curated and bounded; the longest rc body so far (v0.24.0-rc4) ran 165 lines.
     assert 45 <= len(lines) <= 170
     # Curated notes, never a pasted commit log: no one-line log entries or full `git log` blocks.

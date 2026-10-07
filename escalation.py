@@ -184,6 +184,7 @@ class ForegroundBudget:
         self.t0 = time.monotonic()
         self.soft, self.hard, self.configured_timeout, self.estimates = soft, hard, configured_timeout, estimates
         self.reserve = estimates.finalize_reserve()
+        self.leaf_reserve = 0.0  # #909: scoped to pre-leaf condensation; released before the leaf loop
         self.slot_taken = self.sweep_active = False
         self.progress = ""
         self.stop_reason = ""  # the reason of the last stop(), for the stop line with the sweep off
@@ -191,7 +192,7 @@ class ForegroundBudget:
 
     @property
     def usable_deadline(self) -> float:
-        return self.t0 + self.hard - self.reserve
+        return self.t0 + self.hard - self.reserve - self.leaf_reserve
 
     def estimate(self, route_key: str) -> float:
         return self.estimates.call_estimate(route_key, min(self.configured_timeout, self.hard - self.reserve))

@@ -15,6 +15,17 @@ Stable runtime identity and a later main checkout are separate proof planes.
 
 Raw messages are source truth. Summary nodes, embeddings, temporal rollups, query views, and assertions are derived and rebuildable layers with explicit provenance.
 
+## LCM note carrier
+
+On Hermes, the LCM note appears in the `lcm-x` plugin system-prompt section after
+memory, only for a session served by an LCM-X engine. Its text is byte-stable and
+conditional because it appears before the first compaction too. It explains that
+LCM summaries are untrusted history and names the retrieval tools, including
+`lcm_expand(externalized_ref="R")` for externalized tool output. The section never
+enters the message store. Older hosts without the section API keep the existing
+in-band note path: when a host passes a leading system row, assembly appends the
+note only if that row does not already contain the LCM phrase.
+
 ## Cloud embedding privacy boundary
 
 Known cloud embedding paths transform provider input without rewriting durable source. That
@@ -26,7 +37,12 @@ placeholders; replaces matches with pattern-only placeholders; scans for residua
 and fails closed before transport on any invalid state. `LCM_EMBEDDING_PRIVACY_ENABLED=false`
 is an explicit opt-out that dispatches raw input under the `privacy:off` revision. Optional
 Voyage reranking is covered by the same resolution. A privacy-policy error on the
-`lcm_recall` path raises; it is never a silent degrade to full-text.
+`lcm_recall` path (an invalid catalog, a residual match, dispatch-time drift) raises; it is
+never a silent degrade to full-text. A stale vector identity is different: when no active
+cloud profile matches, or the stored vectors carry an older privacy revision, `lcm_recall`
+answers from its full-text arm (for every `include`) with `degraded=true` and an
+`embedding_identity_stale:` reason, sends no query to the stale arm, and reads none of its
+vectors. The remedy is `/lcm embed warmup`, then `/lcm embed backfill --apply`.
 
 Vector identity binds provider, model, dimension, storage shape, and the active
 privacy revision. A policy change requires a new warmup/identity rather than
