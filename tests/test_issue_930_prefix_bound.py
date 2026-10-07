@@ -270,3 +270,32 @@ def test_prefix_bound_applies_when_reserve_cap_is_inactive(engine):
     assert tokens.count_messages_tokens(result) <= engine._survival_ceiling()
     assert 0 < len(visible_node_ids(result)) < len(ids)
     assert all(engine._dag.get_node(node_id) is not None for node_id in ids)
+
+
+def test_conversation_only_rebind_clears_gate_observation(tmp_path):
+    instance = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db"),
+                                          max_assembly_tokens=0, reserve_tokens_floor=0))
+    try:
+        instance.on_session_start("issue-954-conv", conversation_id="conv-A", context_length=128_000)
+        instance.should_compress(prompt_tokens=200_000)
+        assert instance._last_gate_tokens == 200_000
+        instance.on_session_start("issue-954-conv", conversation_id="conv-B", context_length=128_000)
+        assert instance.last_prompt_tokens == 0
+        assert instance._last_gate_tokens == 0
+    finally:
+        instance.shutdown()
+
+
+@pytest.mark.parametrize("embeddings,budget", [(False, 1_500), (True, 0), (True, -1_500)])
+def test_prefix_bound_reserves_recall_only_when_it_can_run(engine, embeddings, budget):
+    engine._config.survival_fit = False
+    engine.context_length = 4_000
+    add_nodes(engine, 1, 20, token_count=200)
+    tail = [{"role": "user", "content": "Latest question."}]
+    baseline = visible_node_ids(assemble(engine, tail))
+    engine._config.proactive_recall_enabled = True
+    engine._config.embeddings_enabled = embeddings
+    engine._config.proactive_recall_budget_tokens = budget
+    result = assemble(engine, tail)
+    assert visible_node_ids(result) == baseline
+    assert tokens.count_messages_tokens(result) <= engine._survival_ceiling()
