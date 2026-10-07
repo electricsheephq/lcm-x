@@ -71,7 +71,27 @@ def test_zero_projected_rows_are_byte_identical_to_base(tmp_path):
 
 
 def test_no_fit_has_no_observation(tmp_path):
-    assert _observations(tmp_path, {"count": 0, "projected_count": 3}) == []
+    # #966 item 3: only a consistent zero record stays silent; projection evidence beside a zero count is shown.
+    assert _observations(tmp_path, {"count": 0, "projected_count": 0}) == []
+
+
+def test_zero_count_with_projected_rows_shows_the_floor(tmp_path):
+    observation, = _observations(tmp_path, {
+        "count": 0, "last_reason": "publication_invariant_conflict", "projected_count": 3,
+    })
+    assert observation == FLOOR_OBSERVATION.replace(
+        "applied 2 time(s)", "applied an unknown number of times (the stored count is unreadable)",
+    ).replace("projected_count 0;", "projected_count 3;") + CLAUSE
+
+
+@pytest.mark.parametrize("record", [
+    {"projected_count": 1}, {"count": "", "projected_count": 2}, {"count": None, "projected_count": "3"},
+    {"count": 0, "count_lost": True}, {"count": [], "projected_count": -1},
+], ids=["no-count", "empty-text", "none-damaged-projection", "zero-count-lost", "empty-list-negative"])
+def test_damaged_count_with_projection_evidence_shows_the_floor(tmp_path, record):
+    observation, = _observations(tmp_path, record)
+    assert "applied an unknown number of times (the stored count is unreadable)" in observation
+    assert "the plugin alone to v0.27.0 or later is fine" in observation and observation.endswith(CLAUSE)
 
 
 @pytest.mark.parametrize("projected", ["3", [1], {"a": 1}], ids=["text", "list", "dict"])
@@ -123,3 +143,18 @@ def test_lost_projection_history_is_unknown_and_shows_the_floor(tmp_path, projec
         "count_lost": True,
     })
     assert observation == FLOOR_OBSERVATION.replace("projected_count 0;", "projected_count unknown;") + CLAUSE
+
+
+def test_attempt_only_guidance_keeps_the_floor_after_count_repair():
+    record = {"count": 1, "projected_count": 0, "count_lost": True, "ever_shortened": False}
+    text = _guidance(record)
+    rollback = _guidance({**record, "ever_shortened": True}).split(". Rollback ", 1)[1].split(". To v0.23.3:", 1)[0]
+    assert text.endswith(f". Rollback {rollback}.")
+    assert "the plugin alone to v0.27.0 or later is fine" in text
+
+
+def test_attempt_only_guidance_without_count_loss_is_byte_identical():
+    assert _guidance({"count": 1, "projected_count": 0, "ever_shortened": False}) == (
+        "inspect the 'LCM survival fit could not shorten the list' log lines and the compaction "
+        "reason; these attempts removed no rows from live context"
+    )
