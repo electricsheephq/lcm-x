@@ -11594,7 +11594,7 @@ class TestEngineCompress:
         assert secret not in node_text
         assert trailing_request in node_text
 
-    def test_compress_does_not_reanchor_carried_preserved_objective_scaffold(self, tmp_path, monkeypatch):
+    def test_compress_carries_sanitized_preserved_objective_scaffold(self, tmp_path, monkeypatch):
         config = LCMConfig(
             fresh_tail_count=4,
             leaf_chunk_tokens=1,
@@ -11629,8 +11629,8 @@ class TestEngineCompress:
 
         result_text = "\n".join(str(msg.get("content", "")) for msg in result)
 
-        assert "[Current user objective preserved from compacted history]" not in result_text
-        assert trailing_request not in result_text
+        assert result_text.count("[Current user objective preserved from compacted history]") == 1
+        assert trailing_request in result_text
         assert secret not in result_text
         assert "active_memory" not in result_text
         assert "Untrusted context" not in result_text
@@ -11677,7 +11677,7 @@ class TestEngineCompress:
         assert "active_memory" not in result_text
         assert "Untrusted context" not in result_text
 
-    def test_compress_does_not_reanchor_preserved_user_request_across_repeated_compaction(self, tmp_path, monkeypatch):
+    def test_compress_carries_preserved_user_request_across_repeated_compaction(self, tmp_path, monkeypatch):
         config = LCMConfig(
             fresh_tail_count=4,
             leaf_chunk_tokens=1,
@@ -11714,8 +11714,8 @@ class TestEngineCompress:
             {"role": "tool", "tool_call_id": "call_4", "content": "out4"},
         ])
         second_serialized = "\n".join(str(msg.get("content", "")) for msg in second)
-        assert latest_request not in second_serialized
-        assert "[Current user objective preserved from compacted history]" not in second_serialized
+        assert latest_request in second_serialized
+        assert second_serialized.count("[Current user objective preserved from compacted history]") == 1
 
     def test_compress_preserves_system_and_tail(self, engine):
         """Compression should always keep system prompt and fresh tail."""

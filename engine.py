@@ -391,12 +391,16 @@ _TOTAL_COMPACTIONS_SCOPE = "current_conversation"
 _AUTO_FOCUS_MAX_TURNS = 3
 _AUTO_FOCUS_TURN_MAX_CHARS = 260
 _AUTO_FOCUS_MAX_CHARS = 700
+# escalation._normalized_focus_topic keeps the first 160 chars (its max_chars
+# default); lay out auto-focus so the newest turn fits inside that window (#613).
+_AUTO_FOCUS_PROMPT_MAX_CHARS = 160
 
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 
 # #608: after a sweep that spent its budget before the first leaf, the threshold answer is no for the hold
 # time. The minimum time for a summariser call and SweepBudgetExhausted live in escalation (#666).
 _SWEEP_BUDGET_HOLD_SECONDS = 600.0
+_TURN_END_HOLD_REASONS = frozenset({"host_rejected_progress", "objective_only", "hidden_only"})
 
 
 class SummaryResultRejected(RuntimeError):
@@ -1690,10 +1694,10 @@ class LCMEngine(
         return False
 
     def _start_no_progress_hold(self, reason: str) -> None:
-        """#651: hold automatic threshold passes until its time or a stored leaf; #597 progress refusals
-        and #922 objective-only no-ops also end at turn end."""
+        """#651: hold automatic threshold passes until its time or a stored leaf; turn-paced reasons
+        (#597 progress refusals, #922 objective-only no-ops, #904 hidden-only passes) also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
-        if reason in ("host_rejected_progress", "objective_only"):
+        if reason in _TURN_END_HOLD_REASONS:
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
         else:
@@ -1729,11 +1733,11 @@ class LCMEngine(
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
 
     def note_turn_complete(self) -> None:
-        """#597/#922: end progress-refusal/objective-only holds at the end of a foreground turn of this engine (never a
+        """#597/#922/#904: end turn-paced holds at the end of a foreground turn of this engine (never a
         bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
         try:
             hold = self._no_progress_hold
-            if (hold is not None and hold[1] in ("host_rejected_progress", "objective_only")
+            if (hold is not None and hold[1] in _TURN_END_HOLD_REASONS
                     and not self._bypasses_lcm_context_management()):
                 self._no_progress_hold = None
                 logger.info("LCM automatic compaction hold ended at turn end: %s", hold[1])
@@ -7233,7 +7237,7 @@ class LCMEngine(
         return sum(node.token_count for node in self._summary_frontier_nodes())
 
     def _select_threshold_sweep_condensation_group(self) -> List[SummaryNode]:
-        """Prefer routine fanin/depth, then allow bounded pressure condensation."""
+        """Prefer the heaviest routine depth, then allow bounded pressure condensation."""
         by_depth: dict[int, list[SummaryNode]] = {}
         for node in self._summary_frontier_nodes():
             by_depth.setdefault(node.depth, []).append(node)
@@ -7241,11 +7245,13 @@ class LCMEngine(
             return []
         fanin = max(2, self._config.condensation_fanin)
         preferred_max_depth = self._config.incremental_max_depth
-        for depth in sorted(by_depth):
-            nodes = by_depth[depth]
-            within_preferred_depth = preferred_max_depth < 0 or depth < preferred_max_depth
-            if within_preferred_depth and len(nodes) >= fanin:
-                return nodes[:fanin]
+        eligible_depths = [
+            depth for depth, nodes in by_depth.items()
+            if (preferred_max_depth < 0 or depth < preferred_max_depth) and len(nodes) >= fanin
+        ]
+        if eligible_depths:
+            depth = max(eligible_depths, key=lambda d: (sum(node.token_count for node in by_depth[d]), -d))
+            return by_depth[depth][:fanin]
         # The frontier still exceeds its sweep target but no routine group is
         # available. Permit a same-depth partial group or depth beyond the
         # preferred routine maximum; the outer sweep budget keeps this bounded.
@@ -7423,10 +7429,10 @@ class LCMEngine(
         emitted inside the summary block so restart reconciliation ignores it
         instead of ingesting a duplicate non-contiguous user message.
 
-        Previous preserved-objective scaffolds are derived context, not real
-        user turns, so they are not eligible as the next anchor source. Once a
-        reverse scan reaches one, older user turns are stale relative to that
-        synthetic continuity marker and must not be promoted as current intent.
+        Previous preserved-objective scaffolds carry the same objective across
+        assemblies within a turn. Reuse only their objective part verbatim,
+        without carrying old summaries or promoting older user turns past that
+        synthetic continuity marker as current intent.
         """
         selected_tail_messages = [msg for msg in selected_tail if isinstance(msg, dict)]
         for message in reversed(messages):
@@ -7443,8 +7449,22 @@ class LCMEngine(
                 or self._is_ignored_active_replay_placeholder(message, content_text)
             ):
                 continue
-            if self._preserved_objective_context_content(message):
-                return None
+            preserved_objective = self._preserved_objective_context_content(message)
+            # Only a user row carries an objective: LCM emits its objective as one, and an
+            # assistant-role summary appears only behind a retained sole user kept verbatim.
+            if preserved_objective and message.get("role") == "user":
+                if any(message == selected for selected in selected_tail_messages):
+                    return None
+                cuts: list[tuple[int, bool]] = []
+                for boundary in re.finditer("\n\n---\n\n", preserved_objective):
+                    # Cut only at summary parts verified against this session's DAG; a quoted header is request text.
+                    rest = preserved_objective[boundary.end():]
+                    if (end := self._verified_lcm_summary_prefix_end(rest)) is not None:
+                        cuts.append((boundary.start(), not rest[end:].strip()))
+                # LCM's own parts end the scaffold. Text after the verified parts (a pasted summary, or a row the
+                # host merged onto the scaffold) keeps the whole row: a duplicate summary, never a lost request.
+                whole = next((start for start, ends in cuts if ends), None)
+                return preserved_objective if whole is None else preserved_objective[:whole]
             if message.get("role") != "user":
                 continue
             if self._is_preserved_todo_context_message(message):
@@ -7805,6 +7825,29 @@ class LCMEngine(
         retained_generated_context_parts: list[str] = []
         summary_message: Optional[Dict[str, Any]] = None
         if summary_parts:
+            if (
+                summary_budget is None
+                and self._config.max_assembly_tokens == 0
+                and self._config.reserve_tokens_floor == 0
+                and (ceiling := self._survival_ceiling()) is not None
+            ):
+                # #930: bound only the prefix; keep the tail and every stored node.
+                # Use the pre-compaction input for overhead, not the shortened tail.
+                overhead_source = ([system_msg] if system_msg is not None else [])
+                if retained_user_msg is not None:
+                    overhead_source.append(retained_user_msg)
+                overhead_source.extend(anchor_source)
+                overhead = self._survival_host_overhead(
+                    overhead_source, max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
+                )
+                # The quarter-window floor relies on a later survival fit; without one, use the true remainder.
+                default_budget = max(
+                    ceiling - overhead - count_messages_tokens(result) - count_messages_tokens(tail_selected),
+                    ceiling // 4 if self._config.survival_fit else 0,
+                )
+                full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
+                if count_message_tokens(full_prefix) > default_budget:
+                    summary_budget = default_budget
             kept_indexes = list(range(len(summary_parts)))
             if summary_budget is not None:
                 # #653: within a depth the newest parts are kept first; kept parts render in the order above.
@@ -8371,6 +8414,8 @@ class LCMEngine(
         ``_AUTO_FOCUS_MAX_TURNS`` user messages (skipping context summaries
         and empty turns).  Returns a brief text block suitable for injection
         into the summarizer prompt as ``focus_topic``.
+        The block is emitted newest first, with its newest bullet sized to
+        survive the 160-char prompt window (#613).
 
         IMPORTANT: The ``messages`` parameter must be ``working_messages``
         (output of ``_ingest_messages``), not raw messages.  ``working_messages``
@@ -8426,10 +8471,15 @@ class LCMEngine(
         # ``candidates`` is newest-first here.  Spend the block budget from the
         # newest turn backwards so a tight budget drops stale turns rather than
         # the turn the host is about to answer.
-        header = "Recent user focus:\n"
+        header = "Recent user focus: newest first\n"
+        # The prompt normalizer keeps 159 chars plus "…" when longer. Size the
+        # newest bullet so the whitespace-joined header and bullet fit that head.
+        newest_limit = _AUTO_FOCUS_PROMPT_MAX_CHARS - 1 - len(header.strip()) - len(" - ")
         budget = _AUTO_FOCUS_MAX_CHARS - len(header)
         selected: list[str] = []
         for position, item in enumerate(candidates):
+            if position == 0:
+                item = self._clamp_focus_turn_text(item, newest_limit)
             line = f"- {item}"
             cost = len(line) + (1 if selected else 0)
             if cost > budget:
@@ -8441,7 +8491,7 @@ class LCMEngine(
             budget -= cost
             selected.append(line)
 
-        selected.reverse()
+        # Emit newest-first so the prompt's head window holds the current request (#613).
         return header + "\n".join(selected)
 
     @staticmethod
