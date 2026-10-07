@@ -80,7 +80,8 @@ def _spy(engine, monkeypatch, *, fit=True) -> dict:
 
     def spy_fit(messages, result, *args, **kwargs):
         seen["input"] = list(result) if isinstance(result, list) else result
-        return real_fit(messages, result, *args, **kwargs) if fit else result
+        seen["output"] = real_fit(messages, result, *args, **kwargs) if fit else result
+        return seen["output"]
 
     def spy_budget(*args, **kwargs):
         seen["budget"] = real_budget(*args, **kwargs)
@@ -234,8 +235,9 @@ def _emergency(tmp_path, host, monkeypatch, *, list_users):
     engine = _engine(tmp_path)
     view = _hidden_backlog(engine, list_users=list_users, big_newest=4000)
     seen = _spy(engine, monkeypatch, fit=False)
-    pre = engine.compress(view, current_tokens=host(view))
-    assert pre == seen["input"] and engine._survival_generated(pre[0])
+    result = engine.compress(view, current_tokens=host(view))
+    pre = seen["input"]  # exercise the fit's assembled input, before #904's outgoing no-growth guard
+    assert result is view and engine._survival_generated(pre[0])
     measure = engine._survival_measure
     newest = pre[max(i for i, m in enumerate(pre) if m["role"] == "user"):]
     prefix = measure(pre[:1])
