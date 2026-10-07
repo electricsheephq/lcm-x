@@ -589,7 +589,7 @@ def _check_summary_contract(content: str, nonce: str, max_tokens: int) -> tuple[
     nonempty = [i for i, line in enumerate(lines) if line.strip()]
     controls = 0
     for i in reversed(nonempty):
-        if not re.fullmatch(r"\[?(SILENT|NO_REPLY)\]?", lines[i].strip(), re.IGNORECASE):
+        if not re.fullmatch(r"\[(?:SILENT|NO_REPLY)\]|SILENT|NO_REPLY", lines[i].strip(), re.IGNORECASE):
             break
         controls += 1
     if 1 <= controls <= 2 and len(nonempty) > controls and _normalize_expand_hint(lines[nonempty[-controls - 1]].strip())[0]:

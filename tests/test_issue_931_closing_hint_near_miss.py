@@ -74,6 +74,7 @@ def test_near_miss_before_controls_combines_tags():
 @pytest.mark.parametrize("tail", [
     "content after the hint", "[SILENT] extra",
     "[SILENT]\nNO_REPLY\nSILENT", "content\n[SILENT]", "[SILENT]\ncontent",
+    "[SILENT", "NO_REPLY]",
 ])
 def test_other_trailing_lines_still_reject(tail):
     assert check(f"{BODY}\n{tail}") == ("", "closing_hint", ())
