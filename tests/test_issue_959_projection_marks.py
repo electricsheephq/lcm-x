@@ -170,3 +170,50 @@ def test_exact_marks_in_many_calls_keep_the_lookup_bound(tmp_path, distinct):
         assert len(lookups) <= 8
     finally:
         engine.shutdown()
+
+
+def test_second_projection_of_a_storage_only_projection_keeps_a_mark(tmp_path, monkeypatch):
+    monkeypatch.setattr(survival_fit, "_host_estimate", lambda messages: None)
+    engine = _engine(tmp_path)
+    payload = "data:image/png;base64," + base64.b64encode(b"synthetic image bytes " * 1000).decode("ascii")
+    assistant = {"role": "assistant", "content": "word " * 200, "tool_calls": [_call("image", json.dumps({"image": payload}))]}
+    view = [{"role": "user", "content": "Process the image.", "timestamp": 9.0}, assistant,
+            {"role": "tool", "tool_call_id": "image", "content": "done"}]
+    try:
+        engine.ingest(view)
+        row = engine._store.get_session_messages("S")[1]
+        first = engine._survival_projection([assistant], {id(assistant): row["store_id"]}, 0)[0]
+        assert survival_fit._PROJECTED_PREFIX in first["content"]
+        assert survival_fit.count_message_tokens(first) >= 256
+        second = engine._survival_projection([first], {id(first): row["store_id"]}, 0)[0]
+        source = engine._survival_projection_source(second, "assistant", normalize_content_value(second["content"]) or "")
+        assert source is not None and source["store_id"] == row["store_id"]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("role", ["user", "assistant"])
+def test_marked_form_is_not_accepted_for_a_row_without_calls(tmp_path, role):
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest([{"role": role, "content": "An earlier short message."}])
+        row = engine._store.get_session_messages("S")[0]
+        marker = survival_fit._PROJECTED.format(role=role, tokens=50, store_id=row["store_id"],
+                                                head=survival_fit._HEAD, tail=survival_fit._TAIL)
+        pasted = {"role": role, "content": f"An earlier short message.\n...\n{marker}"}
+        assert engine._survival_projection_source(pasted, role, pasted["content"]) is None
+    finally:
+        engine.shutdown()
+
+
+def test_large_marker_shaped_arguments_are_not_decoded(tmp_path, monkeypatch):
+    engine = _engine(tmp_path)
+    decoded, loads = [], json.loads
+    monkeypatch.setattr(survival_fit.json, "loads", lambda text, *a, **k: decoded.append(len(text)) or loads(text, *a, **k))
+    huge = '{"lcm_survival_fit": "x", "pad": "' + "y" * 200000 + '"}'
+    try:
+        message = {"role": "assistant", "content": "", "tool_calls": [_call(f"c{i}", huge) for i in range(20)]}
+        assert engine._survival_projection_source(message, "assistant", "") is None
+        assert all(size <= 4096 for size in decoded)
+    finally:
+        engine.shutdown()
