@@ -958,13 +958,6 @@ class CompactionMixin:
             if no_write is not None:
                 ingest_payload_writes.reset(no_write)
 
-    def _proactive_recall_reserve_tokens(self) -> int:
-        """Tokens a final assembly may add for proactive recall: none when its builder cannot return a row."""
-        config = self._config
-        if not (config.proactive_recall_enabled and config.embeddings_enabled):
-            return 0
-        return max(0, int(config.proactive_recall_budget_tokens or 0))
-
     @payload_lookup_scope()
     def _stub_first_exit(
         self,
@@ -1004,7 +997,7 @@ class CompactionMixin:
         # once more with the writes and the recall a final assembly makes.
         override = None if cap is None else sys.maxsize
         candidate = self._assemble_committed_compaction_context(rows, anchor_source_messages, override, persist=False)
-        recall = self._proactive_recall_reserve_tokens()
+        recall = int(self._config.proactive_recall_budget_tokens) if self._config.proactive_recall_enabled else 0
         overhead = self._survival_host_overhead(messages, observed_tokens)
         if (
             self._survival_measure(candidate) + overhead + recall > target
@@ -1749,7 +1742,6 @@ class CompactionMixin:
                         count_messages_tokens(working_messages[:leading_anchor_count])
                         + count_message_tokens({"role": "user", "content": anchor})
                         + count_messages_tokens(working_messages[fresh_tail_start:])
-                        + self._proactive_recall_reserve_tokens()
                         <= cap
                     )
                 )
