@@ -7478,10 +7478,11 @@ class LCMEngine(
             if preserved_objective and message.get("role") == "user":
                 if any(message == selected for selected in selected_tail_messages):
                     return []
-                sanitized_objective = self._sanitized_preserved_objective_context_content(message)
                 if any(
                     selected.get("role") == "user"
-                    and self._sanitized_preserved_objective_context_content(selected) == sanitized_objective
+                    and self._preserved_objective_context_content(selected)
+                    and self._sanitized_preserved_objective_context_content(selected)
+                    == self._sanitized_preserved_objective_context_content(message)
                     for selected in selected_tail_messages
                 ):
                     return []
@@ -7517,7 +7518,7 @@ class LCMEngine(
                             if first_new.strip():
                                 candidates.extend([
                                     preserved_objective[:start] + "\n\n" + first_new,
-                                    self._build_preserved_objective_summary_part({"role": "user", "content": first_new}),
+                                    f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n{first_new}",
                                 ])
                             break
                 if last_verified_end is not None:
@@ -7525,7 +7526,7 @@ class LCMEngine(
                         if preserved_objective.startswith(separator, last_verified_end):
                             new = preserved_objective[last_verified_end + len(separator):]
                             if new.strip() and new != first_new:
-                                candidates.append(self._build_preserved_objective_summary_part({"role": "user", "content": new}))
+                                candidates.append(f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n{new}")
                             break
                 return candidates
             if message.get("role") != "user":
@@ -7857,7 +7858,12 @@ class LCMEngine(
             summary_role = "assistant" if last_role != "assistant" else "user"
         # #653: (selection group, node id) per part; the anchor goes first, then each depth, deepest first.
         part_keys: list[tuple[int, Optional[int]]] = []
-        for candidate in anchor_candidates:
+        for candidate_index, candidate in enumerate(anchor_candidates):
+            # Scaffold-only fallbacks are sanitized lazily, only when tried.
+            if candidate_index >= 2:
+                candidate = self._build_preserved_objective_summary_part({
+                    "role": "user", "content": candidate[len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1:],
+                })
             anchor_msg = {"role": summary_role, "content": strip_injected_context_blocks(candidate)}
             if summary_budget is None or count_message_tokens(anchor_msg) <= summary_budget:
                 anchor_part = candidate
@@ -7918,7 +7924,11 @@ class LCMEngine(
                     if part_keys[0] == (-1, None) and count_message_tokens({
                         "role": summary_role, "content": strip_injected_context_blocks(summary_parts[0]),
                     }) > summary_budget:
-                        for candidate in anchor_candidates[1:]:
+                        for candidate_index, candidate in enumerate(anchor_candidates[1:], start=1):
+                            if candidate_index >= 2:
+                                candidate = self._build_preserved_objective_summary_part({
+                                    "role": "user", "content": candidate[len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1:],
+                                })
                             if count_message_tokens({
                                 "role": summary_role, "content": strip_injected_context_blocks(candidate),
                             }) <= summary_budget:
