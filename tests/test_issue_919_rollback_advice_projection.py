@@ -158,3 +158,11 @@ def test_attempt_only_guidance_without_count_loss_is_byte_identical():
         "inspect the 'LCM survival fit could not shorten the list' log lines and the compaction "
         "reason; these attempts removed no rows from live context"
     )
+
+
+@pytest.mark.parametrize("projected", [2, "2", None], ids=["positive", "damaged", "absent"])
+def test_attempt_only_guidance_with_projection_evidence_keeps_the_floor(projected):
+    record = {"count": 1, "ever_shortened": False}
+    if projected is not None:
+        record["projected_count"] = projected
+    assert "the plugin alone to v0.27.0 or later is fine" in _guidance(record)
