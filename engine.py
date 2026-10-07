@@ -7428,10 +7428,10 @@ class LCMEngine(
         emitted inside the summary block so restart reconciliation ignores it
         instead of ingesting a duplicate non-contiguous user message.
 
-        Previous preserved-objective scaffolds are derived context, not real
-        user turns, so they are not eligible as the next anchor source. Once a
-        reverse scan reaches one, older user turns are stale relative to that
-        synthetic continuity marker and must not be promoted as current intent.
+        Previous preserved-objective scaffolds carry the same objective across
+        assemblies within a turn. Reuse only their objective part verbatim,
+        without carrying old summaries or promoting older user turns past that
+        synthetic continuity marker as current intent.
         """
         selected_tail_messages = [msg for msg in selected_tail if isinstance(msg, dict)]
         for message in reversed(messages):
@@ -7448,8 +7448,22 @@ class LCMEngine(
                 or self._is_ignored_active_replay_placeholder(message, content_text)
             ):
                 continue
-            if self._preserved_objective_context_content(message):
-                return None
+            preserved_objective = self._preserved_objective_context_content(message)
+            # Only a user row carries an objective: LCM emits its objective as one, and an
+            # assistant-role summary appears only behind a retained sole user kept verbatim.
+            if preserved_objective and message.get("role") == "user":
+                if any(message == selected for selected in selected_tail_messages):
+                    return None
+                cuts: list[tuple[int, bool]] = []
+                for boundary in re.finditer("\n\n---\n\n", preserved_objective):
+                    # Cut only at summary parts verified against this session's DAG; a quoted header is request text.
+                    rest = preserved_objective[boundary.end():]
+                    if (end := self._verified_lcm_summary_prefix_end(rest)) is not None:
+                        cuts.append((boundary.start(), not rest[end:].strip()))
+                # LCM's own parts end the scaffold. Text after the verified parts (a pasted summary, or a row the
+                # host merged onto the scaffold) keeps the whole row: a duplicate summary, never a lost request.
+                whole = next((start for start, ends in cuts if ends), None)
+                return preserved_objective if whole is None else preserved_objective[:whole]
             if message.get("role") != "user":
                 continue
             if self._is_preserved_todo_context_message(message):
