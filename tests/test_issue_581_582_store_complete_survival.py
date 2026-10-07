@@ -1159,8 +1159,9 @@ def _run_scan_cap_leaves(tmp_path, monkeypatch, caplog, cap, call_pos, parallel=
         monkeypatch.setattr(lcm_store_complete, "_SCAN_LIMIT", cap)
     engine = _engine(tmp_path, leaf_chunk_tokens=500_000)
     serialized: list[list] = []
-    real = engine._serialize_messages
-    monkeypatch.setattr(engine, "_serialize_messages", lambda messages: serialized.append(list(messages)) or real(messages))
+    real = engine._serialize_messages_with_clip
+    monkeypatch.setattr(engine, "_serialize_messages_with_clip",
+                        lambda messages, session_id=None: serialized.append(list(messages)) or real(messages, session_id))
     try:
         tail, call_id = _scan_cap_store(engine, call_pos, parallel, calls)
         if covered_before:  # every row before the call is already covered by a summary (excluded, not in the leaf)
