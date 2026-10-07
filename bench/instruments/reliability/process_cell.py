@@ -465,8 +465,10 @@ def apply_f4(rec: dict, cell: dict, unexpected: list) -> None:
     even when the attempt is otherwise UNSUPPORTED (the scripted reply is never emitted for that request)."""
     if not cell["id"].startswith("continuity/") or rec["verdict"] == "ERROR":
         return
-    if unexpected or (rec["verdict"] != "UNSUPPORTED"
-                      and (rec.get("continuity") or {}).get("scenario_observed") is not False):
+    continuity = rec.get("continuity") or {}
+    measured = any(isinstance(row.get("F4"), bool) for row in continuity.get("rows") or [])  # no request is never a pass
+    if unexpected or (rec["verdict"] != "UNSUPPORTED" and measured
+                      and continuity.get("scenario_observed") is not False):
         rec.setdefault("applicable_bars", []).append("F4")
     if unexpected:
         reason = "current user tag missing from the last user message"

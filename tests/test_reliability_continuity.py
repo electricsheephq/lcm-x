@@ -367,15 +367,17 @@ def test_observer_records_removed_reply_and_preserves_crash_trigger(tmp_path, mo
     assert obs.counters["compacted_turns"] == ([] if fitted else [0])
 
 
-@pytest.mark.parametrize("verdict, observed, unexpected, applicable, final", [
-    ("UNSUPPORTED", True, [{"current_user_missing": True}], True, "FAIL"),  # a real F4 miss is never masked
-    ("PASS", False, [], False, "PASS"),  # the required scenario never happened: F4 not covered
-    ("PASS", True, [], True, "PASS"),
-    ("PASS", None, [], True, "PASS"),  # cells without a scenario requirement keep today's rule
-    ("UNSUPPORTED", True, [], False, "UNSUPPORTED"),
+@pytest.mark.parametrize("verdict, observed, f4, unexpected, applicable, final", [
+    ("UNSUPPORTED", True, None, [{"current_user_missing": True}], True, "FAIL"),  # a real F4 miss is never masked
+    ("PASS", False, True, [], False, "PASS"),  # the required scenario never happened: F4 not covered
+    ("PASS", True, True, [], True, "PASS"),
+    ("PASS", None, True, [], True, "PASS"),  # cells without a scenario requirement keep today's rule
+    ("PASS", True, None, [], False, "PASS"),  # scenario seen but no request after it: no request is never a pass
+    ("UNSUPPORTED", True, True, [], False, "UNSUPPORTED"),
 ])
-def test_f4_applies_only_to_an_observed_scenario_and_never_masks_a_miss(verdict, observed, unexpected, applicable, final):
-    rec = {"verdict": verdict, "continuity": {"scenario_observed": observed}}
+def test_f4_applies_only_to_an_observed_scenario_and_never_masks_a_miss(verdict, observed, f4, unexpected,
+                                                                        applicable, final):
+    rec = {"verdict": verdict, "continuity": {"scenario_observed": observed, "rows": [{"F4": f4, "status": "x"}]}}
     PC.apply_f4(rec, {"id": "continuity/survival-fit/in-place"}, unexpected)
     assert ("F4" in rec.get("applicable_bars", [])) is applicable
     assert rec["verdict"] == final
