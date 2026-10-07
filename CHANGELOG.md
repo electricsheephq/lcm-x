@@ -6,6 +6,16 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.26.1 (delegated-child compaction fix)
+
+- Fix: a delegated child (a `delegate_task` subagent) whose engine is a fresh copy of the parent's now keeps the
+  host's resolved model and context window, including later model updates, so it compacts at the normal threshold
+  instead of growing until the provider rejects the request. An engine already bound to the foreground session
+  still ignores a child's model update. (#937, #938)
+- Fix: the host-fallback compressor and its model sync use the active model or the configured summary model and
+  never send `"unknown"` to a provider. With neither resolved, LCM-X logs
+  `reason=host_fallback_unresolved_model` once and uses the existing deterministic tail fallback. (#937, #938)
+
 ## v0.26.0 (host message identity)
 
 - Feature: host message identity in shadow mode. On a host that stamps `message_uid`, LCM records which stored row each

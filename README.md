@@ -135,9 +135,10 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line identifies itself as
-`hermes-lcm-x v0.26.0 (15 tools)`, the identity of the latest stable release, until the
-first v0.27.0 release candidate bumps it (patch releases are cut from `release/v0.26.x`). An identity is never a restamp of any past commit's own recorded identity
+The `release/v0.26.x` patch line identifies itself as
+`hermes-lcm-x v0.26.1 (15 tools)` — v0.26.0 plus the delegated-child compaction fix (#937) — on top of the
+`v0.26.0` release tag, which identifies itself as `hermes-lcm-x v0.26.0 (15 tools)`. The `main` line keeps
+`0.26.0` until the first v0.27.0 release candidate bumps it. An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
@@ -255,11 +256,11 @@ Expected signals:
 - the normal available-skills index includes `hermes-lcm`; current hosts can
   also resolve the explicit plugin-qualified skill `hermes-lcm-x:hermes-lcm`
 
-On the `main` line, typical output is:
+On the `release/v0.26.x` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.26.0 (15 tools)
+  ✓ hermes-lcm-x v0.26.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
