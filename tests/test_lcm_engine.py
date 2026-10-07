@@ -102,6 +102,43 @@ def test_delegated_child_clone_keeps_host_model_and_window(tmp_path):
         prototype.shutdown()
 
 
+@pytest.mark.parametrize("make_clone", ["clone_for_agent", "deepcopy"])
+def test_delegated_child_clone_of_bound_parent_accepts_child_updates(tmp_path, make_clone):
+    import copy
+
+    parent = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "bound-parent.db")))
+    parent.update_model("gpt-5.5", 272_000, provider="openai-codex", api_mode="responses")
+    parent.on_session_start("parent", platform="cli", model="gpt-5.5", context_length=272_000)
+    assert parent._session_id == "parent"
+    parent_before = (parent.model, parent.context_length, parent.threshold_tokens, parent._session_id)
+
+    clone = parent.clone_for_agent() if make_clone == "clone_for_agent" else copy.deepcopy(parent)
+
+    class ChildAgent:
+        # The update runs inside a delegated child's frame, so the bound-engine guard is armed: a clone that kept
+        # the parent's session binding would ignore this update and keep a zero threshold.
+        session_id = "child"
+        _parent_session_id = "parent"
+        log_prefix = "[subagent-1] "
+
+        def start(self):
+            clone.update_model("child-model", 128_000, provider="openrouter")
+
+    try:
+        assert clone is not parent
+        assert clone._session_id == ""
+        ChildAgent().start()
+        assert clone.model == "child-model"
+        assert clone.context_length == 128_000
+        assert clone.threshold_tokens > 0
+        assert clone.should_compress(clone.threshold_tokens)
+        assert not clone.should_compress(clone.threshold_tokens - 1)
+        assert (parent.model, parent.context_length, parent.threshold_tokens, parent._session_id) == parent_before
+    finally:
+        clone.shutdown()
+        parent.shutdown()
+
+
 def test_subagent_child_model_update_does_not_mutate_foreground_threshold(tmp_path):
     config = LCMConfig(database_path=str(tmp_path / "shared-child.db"))
     instance = LCMEngine(config=config)
