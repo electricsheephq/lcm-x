@@ -106,7 +106,13 @@ self-updater. An install pinned with `--ref <sha>` (outside the catalog) refuses
 `hermes plugins install https://github.com/electricsheephq/lcm-x --force --ref <40-character commit SHA>`
 (the refusal prints that command).
 
-Restart Hermes after updating.
+Restart Hermes after updating — and restart every other long-running process
+that imports Hermes or LCM-X, not only the gateway: for example a separately
+launched web UI, dashboard, or custom runner. This applies after `hermes update`
+as well as after an LCM-X update. A process that keeps running holds the old
+modules in memory and mixes them with the new files on disk the next time it
+imports one lazily. See
+[Troubleshooting](#errors-in-one-process-after-hermes-update-or-an-lcm-x-update).
 
 ### Rollback
 
@@ -339,6 +345,18 @@ after one normal message initializes the session.
 After a fresh Hermes restart, `/lcm status` may show `session_id: (unbound)` or
 `threshold_tokens: (uninitialized)`. Send one normal Hermes message first, then
 run `lcm_status` or `/lcm status` again for live per-session fields.
+
+### Errors in one process after `hermes update` or an LCM-X update
+
+If one process fails after an update while others work, for example with
+`ImportError: cannot import name ...`, `TypeError: ... got an unexpected keyword
+argument ...`, or `Context engine '...' not found — falling back to built-in
+compressor`, check how long that process has been running. A process started
+before the update still holds the old Hermes or LCM-X modules in memory and
+mixes them with the new files on disk. Restart that process (and the Hermes
+gateway). This is separate from the
+config case in the update section, where `Context engine 'lcm' not found` means
+`config.yaml` still names the old engine.
 
 ## Configuration
 
