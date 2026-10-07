@@ -29,7 +29,7 @@ COMMITTED = '"commit_status":"committed"'
 _lock = threading.Lock()
 cur = {"turn": 0, "prefix": "T", "kind": "normal", "native": 0, "final": False, "commits0": 0}
 counters = {"compacted_turns": [], "lcm_tool_calls": 0, "orphan_drops": 0, "native_max": 0, "failed": [], "compactions": []}
-logstate = {"commits": 0, "conflicts": 0}
+logstate = {"commits": 0, "conflicts": 0, "survival_fits": 0}
 _depth = threading.local()
 _r1 = None
 _tap = None
@@ -162,6 +162,7 @@ class _Tap(logging.Handler):
         with _lock:
             logstate["commits"] += line.count(COMMITTED)
             logstate["conflicts"] += line.count("publication_invariant_conflict")
+            logstate["survival_fits"] += line.count("LCM survival fit applied")
             self.fh.write(line + "\n")
             self.fh.flush()
 
@@ -251,6 +252,8 @@ def patch_engine(agent):
         return
     etype._rel_patched = True
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
+    cell_path = DIR / "cell.json"
+    in_place = json.loads(cell_path.read_text()).get("in_place") if cell_path.exists() else None
 
     def observer_failed(where, exc):
         try:  # an observer failure is evidence (the cell ERRORs on it), never a change to the engine call
@@ -263,6 +266,7 @@ def patch_engine(agent):
 
     def traced_compress(self, messages, *args, **kwargs):
         started, given, cover0 = None, messages, (None, None)
+        fits0 = logstate["survival_fits"]
         try:
             started = time.monotonic()
             given, cover0 = list(messages) if isinstance(messages, list) else messages, store_cover()
@@ -287,9 +291,25 @@ def patch_engine(agent):
             counters["compactions"].append({"turn": cur["turn"], **list_counts(given, result), "status": status,
                                             "final": cur["final"], "secs": secs, "leaves": delta[0], "rows_covered": delta[1]})
             self._probe_calls, self._probe_status = getattr(self, "_probe_calls", 0) + 1, status
+            fitted = logstate["survival_fits"] > fits0
             if status in ("compacted", "host_native"):
                 counters["compacted_turns"].append(cur["turn"])
-                note("compaction_committed", turn=cur["turn"], prefix=cur["prefix"], status=status, final=cur["final"])
+            if status in ("compacted", "host_native") or fitted:
+                pool, removed = list(result) if isinstance(result, list) else [], []
+                for row in given if isinstance(given, list) else []:
+                    match = next((i for i, out in enumerate(pool) if row == out), None)
+                    if match is None:
+                        removed.append(row)
+                    else:
+                        pool.pop(match)
+                tags = sorted({t for row in removed if row.get("role") == "assistant"
+                               for t in re.findall(r"reply to ([A-Z]\d{2,3}):", str(row.get("content") or ""))})
+                note("compaction_committed" if status in ("compacted", "host_native") else "survival_fit_committed",
+                     turn=cur["turn"], prefix=cur["prefix"], status=status, final=cur["final"],
+                     compaction_kind="forced" if cur["final"] else "survival fit" if fitted else
+                     "in-place" if in_place else "rotation" if in_place is False else None,
+                     survival_fit=fitted, fit_reason=(getattr(self, "_last_survival_fit", None) or {}).get("reason")
+                     if fitted else None, compacted_reply_tags=tags)
             event(turn=cur["turn"], event="compaction", session=getattr(self, "_session_id", None), final=cur["final"],
                   session_prefix=cur["prefix"], compression_status=status,
                   noop_reason=getattr(self, "_last_compression_noop_reason", None),
@@ -383,7 +403,9 @@ def patch_run_agent(mod):
               reply=tc.get("reply") if reply_held else None, failed=failed, native_attempts=cur["native"],
               interrupted=interrupted, session=self.session_id, user_tags=user_tags, host_notices=own,
               host_commits=logstate["commits"] - cur["commits0"])
-        note("turn_end", tag=tag(), turn_kind=cur["kind"], interrupted=interrupted, failed=failed, session=self.session_id)
+        note("turn_end", tag=tag(), turn_kind=cur["kind"], interrupted=interrupted, failed=failed, session=self.session_id,
+             reply_tag=next(iter(re.findall(r"reply to ([A-Z]\d{2,3}):", tc.get("reply") or "")), None)
+             if not failed and not interrupted else None)
         snapshot(failed_turn_notices=notices, provenance=_r1.provenance(json.loads((DIR / "cell.json").read_text()), []))
         return result
     cls.run_conversation = run_conversation

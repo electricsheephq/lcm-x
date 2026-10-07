@@ -18,6 +18,7 @@ class ResetStateMixin:
         """
         self.compression_count = 0
         self.last_prompt_tokens = 0
+        self._last_gate_tokens = 0  # #954: a rebind never inherits the previous binding's gate observation
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
         self.last_input_tokens = 0
