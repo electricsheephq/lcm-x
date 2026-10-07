@@ -2,6 +2,7 @@
 
 import json
 import re
+import sys
 
 import pytest
 
@@ -186,14 +187,14 @@ def test_default_prefix_budget_subtracts_existing_host_overhead(engine):
 
 def test_sweep_selects_heaviest_eligible_depth(engine):
     add_nodes(engine, 0, 6)
-    depth_one = add_nodes(engine, 1, 38)
+    depth_one = add_nodes(engine, 1, 38, token_count=3_000)
     group = engine._select_threshold_sweep_condensation_group()
     assert [node.depth for node in group] == [1] * 4
     assert [node.node_id for node in group] == depth_one[:4]
 
 
-def test_equal_frontier_tokens_prefer_shallowest_depth(engine):
-    shallow = add_nodes(engine, 0, 6, token_count=2_000)
+def test_equal_candidate_group_tokens_prefer_shallowest_depth(engine):
+    shallow = add_nodes(engine, 0, 6, token_count=3_000)
     add_nodes(engine, 1, 4, token_count=3_000)
     assert [node.node_id for node in engine._select_threshold_sweep_condensation_group()] == shallow[:4]
 
@@ -203,3 +204,69 @@ def test_heavier_ineligible_depth_does_not_change_routine_group(engine, depth, c
     shallow = add_nodes(engine, 0, 4, token_count=200)
     add_nodes(engine, depth, count, token_count=10_000)
     assert [node.node_id for node in engine._select_threshold_sweep_condensation_group()] == shallow
+
+
+def test_rebind_clears_gate_observation_and_matches_fresh_assembly(engine):
+    engine.should_compress(prompt_tokens=200_000)
+    assert engine._last_gate_tokens == 200_000
+    engine.on_session_start("issue-954-B", context_length=128_000)
+    ids = add_nodes(engine, 1, 60)
+    tail = [{"role": "user", "content": "Latest question."}]
+    fresh = LCMEngine(config=LCMConfig(database_path=engine._config.database_path,
+                                     max_assembly_tokens=0, reserve_tokens_floor=0))
+    try:
+        fresh.on_session_start("issue-954-B", context_length=128_000)
+        assert visible_node_ids(assemble(engine, tail)) == visible_node_ids(assemble(fresh, tail))
+        assert engine._last_gate_tokens == 0
+        assert all(engine._dag.get_node(node_id) is not None for node_id in ids)
+    finally:
+        fresh.shutdown()
+
+
+def test_prefix_bound_reserves_missing_tool_result_stub(engine):
+    engine._config.survival_fit = False
+    engine.context_length = 2_000
+    ids = add_nodes(engine, 1, 1, token_count=200)
+    tail = [{"role": "user", "content": "Latest question."},
+            {"role": "assistant", "content": "Running tool.", "tool_calls": [
+                {"id": "missing-result", "type": "function",
+                 "function": {"name": "read_file", "arguments": "{}"}}]}]
+    stub_cost = (tokens.count_messages_tokens(engine._sanitize_active_context_messages(tail))
+                 - tokens.count_messages_tokens(tail))
+    assert stub_cost > 0
+    unbounded = assemble(engine, tail, assembly_cap_override=sys.maxsize)
+    padding = engine._survival_ceiling() - tokens.count_messages_tokens(unbounded) + stub_cost // 2
+    tail[0]["content"] += "abcd" * padding
+    assert tokens.count_messages_tokens(assemble(engine, tail, assembly_cap_override=sys.maxsize)) > engine._survival_ceiling()
+    result = assemble(engine, tail)
+    assert tokens.count_messages_tokens(result) <= engine._survival_ceiling()
+    assert any(row.get("tool_call_id") == "missing-result" for row in result)
+    assert engine._dag.get_node(ids[0]) is not None
+
+
+def test_prefix_bound_reserves_proactive_recall(engine, monkeypatch):
+    engine._config.survival_fit = False
+    engine._config.proactive_recall_enabled = True
+    engine._config.embeddings_enabled = True
+    engine._config.proactive_recall_budget_tokens = 500
+    engine.context_length = 2_000
+    add_nodes(engine, 1, 7, token_count=200)
+    monkeypatch.setattr(engine_module.lcm_tools, "lcm_recall", lambda *args, **kwargs: json.dumps({
+        "hits": [{"score": 1.0, "snippet": "remembered fact " * 80}],
+    }))
+    tail = [{"role": "user", "content": "Latest question."}]
+    result = engine._assemble_context(
+        {"role": "system", "content": "Synthetic system prompt."}, tail, include_lcm_note=False,
+    )
+    assert any("<relevant-memories>" in row["content"] for row in result)
+    assert tokens.count_messages_tokens(result) <= engine._survival_ceiling()
+
+
+def test_prefix_bound_applies_when_reserve_cap_is_inactive(engine):
+    engine._config.reserve_tokens_floor = engine.context_length
+    assert engine._effective_assembly_token_cap() is None
+    ids = add_nodes(engine, 1, 100)
+    result = assemble(engine, [{"role": "user", "content": "Latest question."}])
+    assert tokens.count_messages_tokens(result) <= engine._survival_ceiling()
+    assert 0 < len(visible_node_ids(result)) < len(ids)
+    assert all(engine._dag.get_node(node_id) is not None for node_id in ids)
