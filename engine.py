@@ -7263,7 +7263,7 @@ class LCMEngine(
             if (preferred_max_depth < 0 or depth < preferred_max_depth) and len(nodes) >= fanin
         ]
         if eligible_depths:
-            depth = max(eligible_depths, key=lambda d: (sum(node.token_count for node in by_depth[d]), -d))
+            depth = max(eligible_depths, key=lambda d: (sum(node.token_count for node in by_depth[d][:fanin]), -d))
             return by_depth[depth][:fanin]
         # The frontier still exceeds its sweep target but no routine group is
         # available. Permit a same-depth partial group or depth beyond the
@@ -7900,8 +7900,6 @@ class LCMEngine(
         if summary_parts:
             if (
                 summary_budget is None
-                and self._config.max_assembly_tokens == 0
-                and self._config.reserve_tokens_floor == 0
                 and (ceiling := self._survival_ceiling()) is not None
             ):
                 # #930: bound only the prefix; keep the tail and every stored node.
@@ -7913,9 +7911,17 @@ class LCMEngine(
                 overhead = self._survival_host_overhead(
                     overhead_source, max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
                 )
+                # Measure without externalizing preserved-objective payloads.
+                # Tool-pair repair still reserves any missing-result stubs.
+                measurement_tail = self._sanitize_tool_pairs(list(tail_selected))
                 # The quarter-window floor relies on a later survival fit; without one, use the true remainder.
                 default_budget = max(
-                    ceiling - overhead - count_messages_tokens(result) - count_messages_tokens(tail_selected),
+                    ceiling - overhead - count_messages_tokens(result)
+                    - max(count_messages_tokens(tail_selected),
+                          count_messages_tokens(measurement_tail))
+                    # Reserve recall only when its builder can return a row (recall and embeddings on, budget > 0).
+                    - (max(0, int(self._config.proactive_recall_budget_tokens or 0))
+                       if self._config.proactive_recall_enabled and self._config.embeddings_enabled else 0),
                     ceiling // 4 if self._config.survival_fit else 0,
                 )
                 full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}

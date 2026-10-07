@@ -199,3 +199,28 @@ def test_held_replay_cleanup_is_adopted_without_a_summariser_call(make_engine, m
     assert ref is not None
     recovered = load_externalized_payload(ref, config=engine._config, hermes_home=engine._hermes_home)
     assert recovered is not None and recovered["content"] == payload
+
+
+def test_sweep_ranks_oldest_group_and_avoids_light_group_stall(make_engine, monkeypatch, clock):
+    engine = make_engine()
+    ids = []
+    for index, (depth, token_count) in enumerate([(0, 1), (0, 1), (0, 10_000), (1, 1_000), (1, 1_000)]):
+        ids.append(engine._dag.add_node(SummaryNode(
+            session_id="S", depth=depth,
+            summary="x" if token_count == 1 else f"group {index}{PAD * 4}",
+            token_count=token_count, source_token_count=token_count * 2,
+            source_ids=[], source_type="messages" if depth == 0 else "nodes",
+            created_at=float(index + 1),
+        )))
+    calls = []
+    monkeypatch.setattr(escalation, "_invoke_summary_llm", lambda *args, **kwargs: calls.append(args) or SUMMARY)
+    before = engine._summary_frontier_tokens()
+    passes, reason = engine._run_threshold_sweep_condensation(
+        target_tokens=before - 1_000, pass_budget=1, deadline=clock() + 100,
+    )
+    assert (passes, reason) == (1, "summary_prefix_target_reached")
+    assert engine._summary_frontier_tokens() < before
+    assert len(calls) == 1
+    condensed = [node for node in engine._dag.get_session_nodes("S") if node.source_ids]
+    assert len(condensed) == 1 and condensed[0].source_ids == ids[-2:]
+    assert all(engine._dag.get_node(node_id) is not None for node_id in ids)
