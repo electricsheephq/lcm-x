@@ -1834,10 +1834,11 @@ class CompactionMixin:
                 _level = 0
                 _rescue_attempts = 0
             else:
-                if no_call_only and self._summary_route_stop_applies(
-                        force_overflow, self._serialize_messages(summary_input_chunk)):
-                    sweep_stop_reason = "summary_route_unavailable"
-                    break
+                if no_call_only:
+                    serialized, clipped = self._serialize_messages_with_clip(summary_input_chunk)
+                    if self._summary_route_stop_applies(force_overflow, None if clipped else serialized):
+                        sweep_stop_reason = "summary_route_unavailable"
+                        break
                 # Pre-compaction extraction: best-effort, never blocks compaction.
                 # Use the same dependency-filtered view as summarization so ignored
                 # turns cannot leak through derived assistant/tool replies.

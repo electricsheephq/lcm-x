@@ -20,7 +20,7 @@ import uuid
 from collections import Counter, deque
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.context_engine import ContextEngine
 
@@ -2144,7 +2144,7 @@ class LCMEngine(
         while attempt_chunk and attempt_number < max_attempts:
             attempt_number += 1
             source_tokens = count_messages_tokens(attempt_chunk)
-            serialized = self._serialize_messages(attempt_chunk)
+            serialized, clipped = self._serialize_messages_with_clip(attempt_chunk)
             token_budget = self._leaf_target_tokens(source_tokens)
             logger.info(  # #611 recorder: the serialized summariser input of this leaf call
                 "LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d",
@@ -2180,10 +2180,11 @@ class LCMEngine(
                     provenance=provenance,
                     **({"budget": budget} if budget is not None else
                        {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
-                    verbatim_small_source=True,  # #605 F2
+                    verbatim_small_source=not clipped,  # #605 F2; #947: clipped input is not whole
                 )
                 self._last_leaf_summary_model = provenance.get("model", "")
-                self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
+                # #652: no fragment; #947: a clipped source returned unchanged by the level-3 fallback is a fragment too
+                self._last_leaf_level_3_verbatim = level == 3 and not clipped and summary_text == serialized
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if isinstance(exc, SweepBudgetExhausted):
@@ -6542,6 +6543,11 @@ class LCMEngine(
             )
 
     def _serialize_messages(self, messages: List[Dict[str, Any]], session_id: Optional[str] = None) -> str:
+        return self._serialize_messages_with_clip(messages, session_id)[0]
+
+    def _serialize_messages_with_clip(
+        self, messages: List[Dict[str, Any]], session_id: Optional[str] = None,
+    ) -> Tuple[str, bool]:
         """Serialize messages into labeled text for the summarizer.
 
         *session_id* names the session that owns the rows; it defaults to the
@@ -6622,8 +6628,10 @@ class LCMEngine(
 
             parts.append([f"[{role.upper()}]: ", text(content)])
 
-        texts = clip_to_budget(texts, self._config.leaf_chunk_tokens, kinds)
-        return "\n\n".join("".join(texts[x] if isinstance(x, int) else x for x in part) for part in parts)
+        clipped_texts = clip_to_budget(texts, self._config.leaf_chunk_tokens, kinds)
+        clipped = any(before != after for before, after in zip(texts, clipped_texts))
+        texts = clipped_texts
+        return "\n\n".join("".join(texts[x] if isinstance(x, int) else x for x in part) for part in parts), clipped
 
     # -- Internal: tool-pair sanitization ------------------------------------
 
