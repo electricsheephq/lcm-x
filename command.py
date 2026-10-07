@@ -5524,11 +5524,17 @@ def handle_lcm_command(
             (context_session_id and bound_session_id == context_session_id)
             or (context_conversation_id and bound_conversation_id == context_conversation_id)
         )
+        # Session-first, like the resolver: the conversation key decides only
+        # when the invocation carries no session id.
+        bound_to_invoker_strict = bool(
+            bound_session_id == context_session_id if context_session_id
+            else context_conversation_id and bound_conversation_id == context_conversation_id
+        )
         if (
             path not in READ_LCM_SUBCOMMANDS and not (
                 (session_engine_resolved and (profiles_equal or (not profiles_known and bound_to_invoker)))
                 or (not session_engine_resolved and profiles_equal and (
-                    bound_to_invoker or (
+                    bound_to_invoker_strict or (
                         not bound_session_id and not bound_conversation_id and not has_resident_lcm_engine()
                     )
                 ))

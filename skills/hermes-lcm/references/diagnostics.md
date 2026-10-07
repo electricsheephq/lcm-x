@@ -14,7 +14,7 @@ Use read-only product tools before changing configuration or running an apply pa
 
 If optional slash commands are enabled, `/lcm status` and `/lcm doctor` expose the corresponding operator views.
 
-When no session engine resolves, `/lcm` compares the task-local session profile with the process engine's captured home via the host profile helper. Equal known profiles keep normal output, including cold starts. Different known profiles refuse WRITE commands (including plain `doctor`) and append `store: …` to READ output. If either profile is unknown, commands run and append the store line; inspect it before relying on the result. A resolved session engine keeps normal behavior.
+When `/lcm` runs with session context, it compares the task-local session profile with the serving engine's captured home through the host profile helper. Different known profiles refuse every command, reads included: run it from a process launched for that profile. Equal known profiles keep normal output, including cold starts with no resident engine. If either profile is unknown, read commands (`status`, `help`, `doctor clean`, `doctor clean lifecycle`, `doctor source`, `doctor retention`, `rotate`, `rollups`, `preset show`, `preset suggest`) run, and when no session engine resolved they append `store: …` naming the opened store; inspect it before relying on the result. Write commands, including plain `doctor`, fail closed unless a resolved session engine is bound to the invoking session. Without session context (a local CLI), commands run against the process engine and append the store line.
 
 ## Safe mutation order
 

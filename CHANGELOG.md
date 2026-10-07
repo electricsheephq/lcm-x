@@ -18,7 +18,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: bound the summary prefix by default when the context window is known, retaining the newest summaries without removing DAG nodes, and condense the heaviest eligible depth first. (#930)
 - Fix: `LCM_SQLITE_MMAP_SIZE` configures SQLite mapped reads in bytes (default unchanged at 268435456); use `0` on SD-card hosts, and `/lcm doctor` reports the effective value. (#903)
 - Fix: a second context assembly in the same user turn keeps the preserved objective verbatim instead of dropping the sole user request. (#921)
-- Fix: `/lcm` refuses unresolved cross-profile writes, preserves same-profile cold starts, and names fallback stores when profiles differ or are unknown. (#852)
+- Fix: `/lcm` refuses every subcommand when the session and engine profiles are known and differ, refuses unproven writes when a profile is unknown, preserves same-profile cold starts, and names the opened store when a profile is unknown. (#852)
 
 ## v0.26.1 (delegated-child compaction fix)
 
