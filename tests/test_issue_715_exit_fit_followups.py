@@ -57,7 +57,9 @@ def test_attempt_only_doctor_guidance(engine, prior):
             assert "rollback" not in text.lower() and "restore" not in text.lower()
         else:
             assert "restore the database backup" in text
-            assert "the plugin alone to v0.24.5 or later is fine" in text
+            # #919 review: a legacy record has no projected_count, so the plugin-alone target is v0.27.0
+            target = "v0.27.0" if prior == "legacy" else "v0.24.5"
+            assert f"the plugin alone to {target} or later is fine" in text
 
 
 def test_legacy_record_without_ever_shortened_keeps_doctor_advice(engine):

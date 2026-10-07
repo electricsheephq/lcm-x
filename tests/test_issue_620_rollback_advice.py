@@ -140,16 +140,19 @@ def test_a_projection_adds_only_the_floor_clause_to_the_advice(tmp_path):
         observation, guidance = advice[label]
         # #919: positive or unknown projections append exactly one complete floor clause.
         assert observation.count(PROJECTION_FLOOR) == 1 and observation.endswith(PROJECTION_FLOOR)
-        # #919: removing exactly that clause leaves the zero-projection observation and guidance.
-        assert advice["none"] == (observation.removesuffix(PROJECTION_FLOOR), guidance)
+        # #919 review: the plugin-alone target moves to v0.27.0 in the observation and the guidance alike.
+        assert advice["none"][0] == observation.removesuffix(PROJECTION_FLOOR).replace(
+            "the plugin alone to v0.27.0 or later is fine", "the plugin alone to v0.24.5 or later is fine")
+        for text in (observation, guidance):
+            assert "the plugin alone to v0.27.0 or later is fine" in text and "v0.24.5 or later is fine" not in text
     for observation, guidance in advice.values():
         for text in (observation, guidance):
-            # #919: the older-version backup restore and plugin rollback advice remain present.
-            assert RESTORE in text and "the plugin alone to v0.24.5 or later is fine" in text
-            # #919: the v0.23.3 recovery advice also remains present.
-            assert "v0.23.3" in text
+            # #919: the older-version backup restore and the v0.23.3 recovery advice remain present.
+            assert RESTORE in text and "v0.23.3" in text
         # #919: triage guidance still contains no plugin-only rollback clause.
         assert "plugin-only" not in guidance
+    # #919: zero projections keep the v0.24.5 plugin-alone advice in both.
+    assert all("the plugin alone to v0.24.5 or later is fine" in text for text in advice["none"])
     # #919: zero projections retain the original observation without the floor clause.
     assert "plugin-only" not in advice["none"][0]
 
@@ -192,8 +195,9 @@ def test_an_unreadable_stored_count_is_a_fit_with_an_unknown_count(tmp_path, cou
     """A damaged record whose count is not a number: the doctor does not raise and gives the backup restore."""
     observation, guidance = _survival_lines(_doctor_with_record(tmp_path, {"count": count, "last_reason": "noop"}))
     assert "unknown number of times" in observation and RESTORE in observation
-    # #919: an unknown projection count preserves the older rollback advice.
-    assert "the plugin alone to v0.24.5 or later is fine" in observation and "v0.23.3" in observation
+    # #919 review: an unknown projection count moves the plugin-alone target to v0.27.0 in both texts.
+    assert "the plugin alone to v0.27.0 or later is fine" in observation and "v0.23.3" in observation
+    assert not any("v0.24.5 or later is fine" in text for text in (observation, guidance))
     # #919: unknown projections require the complete v0.27.0 plugin-only rollback floor.
     assert PROJECTION_FLOOR in observation
     # #919: the unchanged triage guidance still names the older restore and recovery paths.
@@ -210,8 +214,9 @@ def test_a_stored_count_too_large_for_a_number_is_a_fit_with_an_unknown_count(tm
         engine.shutdown()
     observation, guidance = _survival_lines(text)
     assert "unknown number of times" in observation and RESTORE in observation
-    # #919: an unknown projection count preserves the older rollback advice.
-    assert "the plugin alone to v0.24.5 or later is fine" in observation and "v0.23.3" in observation
+    # #919 review: an unknown projection count moves the plugin-alone target to v0.27.0 in both texts.
+    assert "the plugin alone to v0.27.0 or later is fine" in observation and "v0.23.3" in observation
+    assert not any("v0.24.5 or later is fine" in text for text in (observation, guidance))
     # #919: unknown projections require the complete v0.27.0 plugin-only rollback floor.
     assert PROJECTION_FLOOR in observation
     # #919: the unchanged triage guidance still names the older restore and recovery paths.
