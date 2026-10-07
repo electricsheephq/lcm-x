@@ -24,6 +24,7 @@ import time
 from pathlib import Path
 
 from bench.instruments.reliability import acp_driver as AD, cells as C, fake_provider as FP, probe as P1, run_matrix as RM
+from bench.instruments.reliability.scorers import continuity
 
 OBSERVER = Path(__file__).with_name("observer")
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
@@ -31,12 +32,13 @@ SANDBOX = ('(version 1)(allow default)(deny network-outbound)(allow network-outb
            '(allow network-outbound (remote unix-socket))')
 FAKE_KEY = "rel-fake-key-not-a-secret"
 PROCESS_FAULTS = {"acp-process": {"crash_after_compaction_before_reply", "cancel_then_retry",
-                                   "crash_after_rotation_before_child_row", "clean_exit_before_turn", "p8_inject"}}
+                                   "crash_after_rotation_before_child_row", "clean_exit_before_turn", "p8_inject",
+                                   "forced_compaction_then_turn"}}
 # R2-only: the main route over the Anthropic Messages API (a ``/anthropic`` base path selects the anthropic_messages
 # transport, hermes_cli/runtime_provider.py _detect_api_mode_for_url); the #550 class.
 R2_CELLS = [{**C.cell("anthropic-route/acp-process", [], in_place=True,
                       doc="baseline/in-place/acp with the main model on the Anthropic Messages API (fake provider)"),
-             "api": "anthropic"}]
+             "api": "anthropic"}] + C.continuity_cells()
 # gateway-process: why no local platform can drive an R1 gateway cell, cited per host at run time.
 GATEWAY_ANCHORS = {
     "turn_runner": ("gateway/run_turn.py", "TurnRunner(self, turn_ctx)"),
@@ -164,17 +166,22 @@ class Scenario:
     def main(self, messages: list[dict]) -> dict:
         st, run = self.st, self.run
         t, text_tag = st["t"], run.text_tag
-        last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
-        if t is None or (f"[{text_tag}]" not in last_user if text_tag else "continue" not in last_user):
-            self.unexpected.append({"turn": t, "last_user": last_user[:120]})
-            return {"content": "ok", "log": {"unexpected": True}}
-        step, st["step"] = st["step"], st["step"] + 1
-        for m in messages:  # a tool result as the model receives it (post host transform)
+        for m in messages:  # record received results even when the scripted reply returns early
             cid = m.get("tool_call_id") if m["role"] == "tool" else None
             if cid in st["issued"] and cid not in st["seen"]:
                 st["seen"].add(cid)
                 body = m.get("content") or ""
                 run.event(turn=t, event="tool_seen", id=cid, sha=hashlib.sha256(body.encode()).hexdigest(), chars=len(body))
+        last_user = next((m["content"] for m in reversed(messages) if m["role"] == "user"), "")
+        if t is None or (f"[{text_tag}]" not in last_user if text_tag else "continue" not in last_user):
+            if self.cell["id"].startswith("continuity/") and t is not None and text_tag:
+                finding = {"turn": t, "current_user_missing": True,
+                           "current_user_projected": last_user.startswith("[LCM survival fit:")}
+                self.unexpected.append(finding)
+                return {"content": "ok", "log": {"unexpected": True, **finding}}
+            self.unexpected.append({"turn": t, "last_user": last_user[:120]})
+            return {"content": "ok", "log": {"unexpected": True}}
+        step, st["step"] = st["step"], st["step"] + 1
         log = {"turn": t, "kind": st["kind"], "step": step}
         if run.crash_due(t):
             return {"hold_until_killed": True, "on_hold": lambda: run.crash(t), "log": log}
@@ -212,7 +219,8 @@ class ProcessCell:
         self.phase, self.log_mark, self.fired, self.backlog_log, self.last_turn = "A", 0, set(), [], 0
         self.scenario = Scenario(self)
         self.provider = FP.FakeProvider(d / "provider-requests.jsonl", main=self.scenario.main,
-                                        usage_scale=float(cell["assistant"].get("usage_scale", 1.0)))
+                                        usage_scale=float(cell["assistant"].get("usage_scale", 1.0)),
+                                        continuity_context=self.continuity_context)
         self.proxy = FP.ProxySink(d / "proxy-attempts.jsonl")
 
     # -- records ---------------------------------------------------------------------------------------------
@@ -225,6 +233,12 @@ class ProcessCell:
 
     def notes(self, kind: str) -> list[dict]:
         return [n for n in read_jsonl(self.d / "observer.jsonl") if n["kind"] == kind]
+
+    def continuity_context(self) -> dict:
+        ends = [n for n in self.notes("turn_end") if n.get("turn_kind") != "final" and not n.get("failed")
+                and not n.get("interrupted")]
+        return {"anchor": "T01" if (self.cell.get("continuity") or {}).get("sole_user") else None,
+                "previous": ends[-1].get("reply_tag") if ends else None, "current": self.text_tag}
 
     def fire(self, kind: str, turn: int, **extra) -> None:
         append(self.d / "faults-fired.jsonl", {"kind": kind, "phase": self.phase, "turn": turn})
@@ -338,6 +352,7 @@ class ProcessCell:
                 self.proc.load_session(self.sid, self.files, self.budget())
             cancel = next((f for f in self.cell["faults"] if f["kind"] == "cancel_then_retry"), None)
             clean = next((f for f in self.cell["faults"] if f["kind"] == "clean_exit_before_turn"), None)
+            forced = next((f for f in self.cell["faults"] if f["kind"] == "forced_compaction_then_turn"), None)
             for t in P1.extend_turns(self.cell, first, self.low_backlog):
                 if clean and t == clean.get("turn") and t != first and "clean_exit_before_turn" not in self.fired:
                     rc = self.proc.close()
@@ -354,6 +369,9 @@ class ProcessCell:
                         self.turn(t, "retry")
                 else:
                     self.turn(t)
+                if forced and t == forced["turn"] and forced["kind"] not in self.fired:
+                    check = self.final_check()
+                    self.fire(forced["kind"], t, published=check["published"], outcome=check["outcome"])
             final = {**self.final_check(), "backlog_checks": self.backlog_log} \
                 if self.cell.get("final_compaction_check", True) else None
             self.budget()  # work after the last request may have crossed the deadline: never a late "done"
@@ -442,6 +460,23 @@ def session_count(home: Path) -> int | None:
         return None
 
 
+def apply_f4(rec: dict, cell: dict, unexpected: list) -> None:
+    """F4 applies once the scenario is observed and every continuity row is measured. A missing current user tag fails it,
+    even when the attempt is otherwise UNSUPPORTED (the scripted reply is never emitted for that request)."""
+    if not cell["id"].startswith("continuity/") or rec["verdict"] == "ERROR":
+        return
+    continuity = rec.get("continuity") or {}
+    rows = continuity.get("rows") or []
+    measured = bool(rows) and all(isinstance(row.get("F4"), bool) for row in rows)  # no request is never a pass
+    if unexpected or (rec["verdict"] != "UNSUPPORTED" and measured
+                      and continuity.get("scenario_observed") is not False):
+        rec.setdefault("applicable_bars", []).append("F4")
+    if unexpected:
+        reason = "current user tag missing from the last user message"
+        rec.setdefault("failed_bars", {})["F4"] = {"reason": reason, "requests": unexpected}
+        rec.update(verdict="FAIL", reason=f"continuity F4: {reason}")
+
+
 def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: Path, timeout: int, keep: bool,
                      keep_dbs: str = "none", lcm_env: dict | None = None, identity: dict | None = None,
                      transport: str = "acp-process", turn_timeout: float = 300.0,
@@ -475,8 +510,7 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         # A fresh, non-empty models.dev disk cache (agent/models_dev.py serves it for 4 h), so model metadata
         # resolution never fetches models.dev; the main model's context_length is pinned in config.yaml.
         (home / "models_dev_cache.json").write_text(json.dumps({"rel": {"id": "rel", "name": "reliability fake", "models": {}}}))
-        (d / "files" / "small.txt").write_text("small deterministic file\n")
-        (d / "files" / "big.txt").write_text("".join(f"line {i:05d}: " + P1.FILLER * 8 + "\n" for i in range(cell.get("big_lines", 400))))
+        P1.write_tool_files(d / "files", cell)
         run = ProcessCell(cell, d, host, transport, turn_timeout, phase_timeout=timeout, scratch=s)
         run.provider.start()
         (home / "config.yaml").write_text(config_yaml(cell, plugin, run.provider.base_url))
@@ -511,19 +545,22 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         observer = [n for r in records for n in r.get("observer_errors", [])]
         rec.update(phases=phases, wall_s=round(time.time() - started, 1), acp_session=run.sid, accounting=acct,
                    citations=records[0]["citations"] if records else {}, sandbox=os.path.exists(SANDBOX_EXEC))
+        rec["continuity"] = continuity.score_dir(cell, d)
         if network:  # stop condition: a host process tried to leave localhost
             return done(verdict="ERROR", reason=f"STOP: host attempted non-localhost network access: {network[:3]}")
         if prov or observer:
             return done(verdict="ERROR", reason=f"import provenance / observer failure: {(prov + observer)[:3]}")
         if acct["unexpected_requests"]:
             return done(verdict="ERROR", reason=f"unexpected provider requests: {acct['unexpected_requests'][:3]}")
-        if run.scenario.unexpected:
+        if run.scenario.unexpected and not (cell["id"].startswith("continuity/") and
+                                           all(n.get("current_user_missing") for n in run.scenario.unexpected)):
             return done(verdict="ERROR", reason=f"unexpected main-model requests: {run.scenario.unexpected[:3]}")
         if last.get("exit") == "done" and not acct["ok"]:
             return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
         run.fired.update(n["kind"] for n in read_jsonl(d / "faults-fired.jsonl"))
         rec.update(RM.verdict_fields({**cell, "chat_root": run.sid, "transport": transport}, d, last, run.fired, rec["citations"], backup_errors,
                                      s / "db"))
+        apply_f4(rec, cell, run.scenario.unexpected)
         return done()
     finally:
         RM.release_scratch(s, d, rec, keep_dbs, keep)

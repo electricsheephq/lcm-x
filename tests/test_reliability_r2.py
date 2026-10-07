@@ -75,6 +75,9 @@ def test_roles_route_by_model_and_usage_is_computed_from_received_messages(provi
     log = [json.loads(x) for x in (provider.log_path).read_text().splitlines()]
     assert [r.get("role", r["route"]) for r in log] == ["main", "lcm-summary", "aux", "nope", "models"]
     assert len({r["rid"] for r in log}) == 5 and all(len(r["messages_sha256"]) == 64 for r in log[:4])
+    assert log[0]["continuity"]["F1"] is False
+    assert log[0]["continuity"]["user_tags"] == ["T01"]
+    assert log[0]["continuity"]["role_counts"] == {"system": 1, "user": 1}
 
 
 def test_every_request_is_logged_and_an_unrouted_request_fails_accounting(provider):
@@ -500,7 +503,7 @@ def test_colliding_suffixes_are_unrouted_and_unexpected(provider):
 def test_ci_gate_requires_a_complete_result_set():
     """Regression (R2a.3, #570 thread): an empty or incomplete result set passed the gate."""
     r1, r2 = full_set(), full_set("acp-process", **{"gateway-second-restart/in-place": {"verdict": "UNSUPPORTED"}})
-    assert ci.gate(r1 + r2, set()) == [] and len(r2) == len(r1) + 1  # UNSUPPORTED counts as present
+    assert ci.gate(r1 + r2, set()) == [] and len(r2) == len(r1) + len(PC.R2_CELLS)  # UNSUPPORTED counts as present
     assert ci.gate([], set()) == ["empty result set"]
     for broken in (r1[1:], r1 + r1[:1], r1 + [dict(r1[0], cell="made-up/cell")], r2[:-1] + r1):
         problems = ci.gate(broken, set())

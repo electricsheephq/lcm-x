@@ -137,6 +137,38 @@ def test_objective_only_writes_leaf_when_anchor_exceeds_recovery_cap(engine):
     assert result[-2:] == messages[-2:]
 
 
+@pytest.mark.parametrize("embeddings_enabled", [True, False])
+def test_objective_only_noop_reserves_no_proactive_recall(engine, monkeypatch, embeddings_enabled):
+    # The no-op returns without assembling, and its tool-only tail has no recall query, so recall needs no room.
+    instance, summarize = engine
+    messages = _cell()
+    fresh_tail_start = instance._fresh_tail_start(messages)
+    leading = instance._leading_anchor_count(messages)
+    anchor = instance._build_preserved_objective_summary_part(messages[0])
+    required = (
+        count_messages_tokens(messages[:leading])
+        + count_message_tokens({"role": "user", "content": anchor})
+        + count_messages_tokens(messages[fresh_tail_start:])
+    )
+    instance._config.proactive_recall_enabled = True
+    instance._config.embeddings_enabled = embeddings_enabled
+    instance._config.proactive_recall_budget_tokens = 500
+    instance._config.max_assembly_tokens = required + 250
+    cap = instance._effective_assembly_token_cap()
+    assert leading == 0 and fresh_tail_start == 1
+    assert required <= cap < required + instance._config.proactive_recall_budget_tokens
+    calls = []
+    monkeypatch.setattr(type(instance), "_build_proactive_recall_message", lambda self, *a, **k: calls.append(a))
+
+    result = instance.compress(messages, current_tokens=count_messages_tokens(messages))
+
+    assert instance._objective_only_noop
+    assert not summarize.called
+    assert not instance._dag.get_session_nodes(instance._session_id)
+    assert not calls
+    assert count_messages_tokens(result) <= cap
+
+
 def test_next_round_compacts_earlier_tool_pair_and_preserves_objective(engine, caplog):
     instance, summarize = engine
     messages = _cell()
