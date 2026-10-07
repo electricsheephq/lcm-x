@@ -292,3 +292,17 @@ def test_codex_interim_reply_is_not_kept_alone(engine, rough_counts, marker):
     view[2].update(marker)
     fitted = _fit(engine, view, 100)
     assert not any(row is view[2] for row in fitted)
+
+
+def test_whole_turn_cut_never_projects_the_reply(engine, rough_counts):
+    """#920 review: a whole-turn cut (exit fits) keeps the reply verbatim or not at all; only the last-cut rung projects."""
+    view = _view("[A1] opening " + "long " * 2000 + " ending")
+    engine.ingest(view)
+    store_ids = {id(message): row["store_id"] for message, row in zip(view[1:], _rows(engine))}
+
+    def replies(whole_turns):
+        cut = engine._survival_cut(view, 1, 600, True, "issue_798", store_ids, whole_turns)
+        return [] if cut is None else [row for row in cut[0] if str(row.get("content", "")).startswith("[A1]")]
+
+    assert replies(False)  # the last-cut rung projects the long reply
+    assert replies(True) == []
