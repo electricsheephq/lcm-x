@@ -10,6 +10,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -51,6 +52,12 @@ def jdump(path: Path, obj) -> None:
 
 
 # ---------------------------------------------------------------- isolated home
+def run_home(run: str) -> Path:
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", run) or run in (".", ".."):
+        raise SystemExit("STOP: invalid run id; no run started")
+    return S4 / "home" / run
+
+
 def codex_bin() -> Path:
     return Path(shutil.which("codex") or "codex").resolve()
 
@@ -68,6 +75,8 @@ def setup_home() -> dict:
     if (HOME / "config.toml").exists():
         raise RuntimeError("isolated CODEX_HOME contains config.toml; refusing to run with non-stock config")
     info = {"codex_home": str(HOME), "config_toml": "absent (stock defaults; ~/.codex/config.toml NOT loaded)"}
+    HOME.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(HOME.parent, 0o700)
     HOME.mkdir(parents=True, exist_ok=True)   # the dry run builds the home too: auth isolation is checked first
     os.chmod(HOME, 0o700)
     dst = HOME / "auth.json"
@@ -399,6 +408,8 @@ def main() -> int:
     ap.add_argument("--readmit", action="store_true", help="recompute admission.json from the run's rollout; no calls")
     ap.add_argument("--dry-run", action="store_true", help="commands, home, workspace layout; no model calls")
     a = ap.parse_args()
+    global HOME
+    HOME = run_home(a.run)
     global USER_AUTH
     USER_AUTH = a.auth_file.resolve()
 
