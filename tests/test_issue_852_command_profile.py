@@ -5,10 +5,11 @@ from pathlib import Path
 import sqlite3
 import sys
 import types
+import weakref
 
 import pytest
 
-from hermes_lcm import command
+from hermes_lcm import command, engine as engine_module, engine_registry
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.vector_store import VectorStore
@@ -17,6 +18,10 @@ from hermes_lcm.vector_store import VectorStore
 REFUSAL = (
     "The command could not resolve this session's LCM engine in this process; "
     "run it from a process launched for this profile."
+)
+OWNERSHIP_REFUSAL = (
+    "The command could not prove ownership of this session's LCM engine; "
+    "retry after the session has started."
 )
 
 
@@ -34,6 +39,10 @@ def plugin(monkeypatch):
 
 @pytest.fixture
 def engines(tmp_path, monkeypatch):
+    for name in ("_ACTIVE_ENGINES_BY_SESSION_ID", "_ACTIVE_ENGINES_BY_CONVERSATION_ID"):
+        registry = weakref.WeakValueDictionary()
+        monkeypatch.setattr(engine_registry, name, registry)
+        monkeypatch.setattr(engine_module, name, registry)
     class OfflineProvider:
         provider_id = "ollama"
         model_id = "test-model"
@@ -131,7 +140,10 @@ def test_no_session_context_write_uses_prototype(plugin, engines, monkeypatch):
 def test_resolved_session_write_uses_session_store(plugin, engines, monkeypatch):
     prototype, session = engines
     before = _snapshot(prototype)
-    context = {"HERMES_SESSION_ID": "session-id", "HERMES_SESSION_KEY": "session-key"}
+    context = {
+        "HERMES_SESSION_ID": "session-id", "HERMES_SESSION_KEY": "session-key",
+        "HERMES_SESSION_PROFILE": "session",
+    }
     handler, calls = _handler(plugin, monkeypatch, prototype, context, session)
 
     assert "status: ready" in handler("embed warmup")
@@ -228,7 +240,7 @@ def test_unresolved_other_bound_session_refuses_write_allows_read(
     before = _snapshot(prototype)
     handler, _ = _handler(plugin, monkeypatch, prototype, context)
 
-    assert handler(raw_args) == REFUSAL
+    assert handler(raw_args) == OWNERSHIP_REFUSAL
     assert handler("status") == expected
     assert prototype._session_id == "bound-session"
     assert _snapshot(prototype) == before
@@ -245,26 +257,30 @@ def test_unresolved_matching_bound_session_allows_write(
         context["HERMES_SESSION_PROFILE"] = "launch"
     expected = command.handle_lcm_command("embed warmup", session)
     if not profile_known:
-        expected += f"\nstore: {prototype._config.database_path}"
+        expected = OWNERSHIP_REFUSAL
+    before = _snapshot(prototype)
     handler, _ = _handler(plugin, monkeypatch, prototype, context)
 
     assert handler("embed warmup") == expected
-    assert _snapshot(prototype)["lcm_embedding_profile"] == 2
+    if profile_known:
+        assert _snapshot(prototype)["lcm_embedding_profile"] == 2
+    else:
+        assert _snapshot(prototype) == before
 
 
-def test_session_profile_unset_write_runs_with_store_line(plugin, engines, monkeypatch):
-    prototype, session = engines
-    expected = command.handle_lcm_command("embed warmup", session)
+def test_session_profile_unset_write_is_refused(plugin, engines, monkeypatch):
+    prototype, _session = engines
+    before = _snapshot(prototype)
     handler, _ = _handler(plugin, monkeypatch, prototype, {"HERMES_SESSION_ID": "fresh"})
 
-    assert handler("embed warmup") == expected + f"\nstore: {prototype._config.database_path}"
-    assert _snapshot(prototype)["lcm_embedding_profile"] == 2
+    assert handler("embed warmup") == OWNERSHIP_REFUSAL
+    assert _snapshot(prototype) == before
 
 
 @pytest.mark.parametrize("failure", ["import", "helper", "home"])
 def test_host_profile_helper_failure_is_unknown(plugin, engines, monkeypatch, failure):
-    prototype, session = engines
-    expected = command.handle_lcm_command("embed warmup", session)
+    prototype, _session = engines
+    before = _snapshot(prototype)
     if failure == "import":
         monkeypatch.setitem(sys.modules, "hermes_constants", None)
     elif failure == "helper":
@@ -277,8 +293,99 @@ def test_host_profile_helper_failure_is_unknown(plugin, engines, monkeypatch, fa
         "HERMES_SESSION_ID": "fresh", "HERMES_SESSION_PROFILE": "session",
     })
 
-    assert handler("embed warmup") == expected + f"\nstore: {prototype._config.database_path}"
-    assert _snapshot(prototype)["lcm_embedding_profile"] == 2
+    assert handler("embed warmup") == OWNERSHIP_REFUSAL
+    assert _snapshot(prototype) == before
+
+
+@pytest.mark.parametrize("resident", [False, True])
+def test_unbound_same_profile_write_requires_no_resident_engine(
+    plugin, engines, monkeypatch, resident,
+):
+    prototype, session = engines
+    if resident:
+        session.on_session_start("resident-session")
+    assert engine_registry.has_resident_lcm_engine() is resident
+    before = _snapshot(prototype)
+    handler, _ = _handler(plugin, monkeypatch, prototype, {
+        "HERMES_SESSION_ID": "fresh", "HERMES_SESSION_PROFILE": "launch",
+    })
+
+    result = handler("embed warmup")
+
+    if resident:
+        assert result == OWNERSHIP_REFUSAL
+        assert _snapshot(prototype) == before
+    else:
+        assert "status: ready" in result
+        assert _snapshot(prototype)["lcm_embedding_profile"] == 2
+
+
+@pytest.mark.parametrize("resident", [False, True])
+@pytest.mark.parametrize("matching", [False, True])
+def test_key_only_context_checks_bound_conversation(
+    plugin, engines, monkeypatch, resident, matching,
+):
+    prototype, _session = engines
+    prototype.on_session_start(
+        "bound-session", conversation_id="invoking-key" if matching else "other-key",
+    )
+    # A conversation binding alone is still bound, never a cold prototype.
+    monkeypatch.setattr(prototype, "_session_id", "")
+    if not resident:
+        engine_registry._ACTIVE_ENGINES_BY_SESSION_ID.clear()
+        engine_registry._ACTIVE_ENGINES_BY_CONVERSATION_ID.clear()
+    assert engine_registry.has_resident_lcm_engine() is resident
+    before = _snapshot(prototype)
+    handler, calls = _handler(plugin, monkeypatch, prototype, {
+        "HERMES_SESSION_KEY": "invoking-key", "HERMES_SESSION_PROFILE": "launch",
+    })
+
+    result = handler("embed warmup")
+
+    if matching:
+        assert "status: ready" in result
+        assert _snapshot(prototype)["lcm_embedding_profile"] == 2
+    else:
+        assert result == OWNERSHIP_REFUSAL
+        assert _snapshot(prototype) == before
+    assert calls == [{"session_id": "", "conversation_id": "invoking-key"}]
+
+
+@pytest.mark.parametrize("unknown_profile", ["session", "engine", "both"])
+@pytest.mark.parametrize("context_key", ["HERMES_SESSION_ID", "HERMES_SESSION_KEY"])
+@pytest.mark.parametrize("matching", [False, True])
+def test_resolved_unknown_profiles_require_invoker_binding(
+    plugin, engines, monkeypatch, unknown_profile, context_key, matching,
+):
+    prototype, _session = engines
+    bound_id = "invoker" if matching else "elsewhere"
+    prototype.on_session_start(bound_id, conversation_id=bound_id)
+    context = {context_key: "invoker"}
+    if unknown_profile == "engine":
+        context["HERMES_SESSION_PROFILE"] = "launch"
+    if unknown_profile in {"engine", "both"}:
+        monkeypatch.setattr(prototype, "_hermes_home", "")
+    before = _snapshot(prototype)
+    handler, _ = _handler(plugin, monkeypatch, prototype, context, prototype)
+
+    result = handler("embed warmup")
+
+    if matching:
+        assert "status: ready" in result
+        assert _snapshot(prototype)["lcm_embedding_profile"] == 2
+    else:
+        assert result == OWNERSHIP_REFUSAL
+        assert _snapshot(prototype) == before
+
+
+@pytest.mark.parametrize("config_path", ["", "not-the-opened.db"])
+def test_store_line_names_opened_database(plugin, engines, monkeypatch, config_path):
+    prototype, _session = engines
+    monkeypatch.setattr(prototype._config, "database_path", config_path)
+    expected = command.handle_lcm_command("status", prototype)
+    handler, _ = _handler(plugin, monkeypatch, prototype, {"HERMES_SESSION_KEY": "fresh"})
+
+    assert handler("status") == expected + f"\nstore: {prototype._store.db_path}"
 
 
 def test_engine_profile_seam_uses_captured_home(plugin, engines, monkeypatch):

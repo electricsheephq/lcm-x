@@ -183,6 +183,7 @@ def _make_command_handler(handle_lcm_command, engine, resolve_active_lcm_engine)
             session_profile=_session_context_value("HERMES_SESSION_PROFILE"),
             engine_profile=_command_engine_profile(active_engine),
             context_session_id=_session_context_value("HERMES_SESSION_ID"),
+            context_conversation_id=_session_context_value("HERMES_SESSION_KEY"),
         )
 
     return _handler
