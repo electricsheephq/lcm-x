@@ -2803,6 +2803,7 @@ class TestEngineABC:
 
         config = LCMConfig(database_path=str(tmp_path / "thread-stateless-no-arg-compress.db"))
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "short"}]
         try:
             instance.on_session_start("foreground:session", platform="cli", context_length=1_000)
@@ -2853,6 +2854,7 @@ class TestEngineABC:
 
         config = LCMConfig(database_path=str(tmp_path / "thread-stateless-no-usage-compress.db"))
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "first auxiliary payload " + ("x " * 200)}]
         try:
             instance.on_session_start("foreground:session", platform="cli", context_length=1_000)
@@ -3118,6 +3120,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         try:
             instance.on_session_start("ignored:sync-failure", platform="cli", context_length=2_000)
             instance.threshold_tokens = 500
@@ -3243,6 +3246,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:native-invalid", platform="cli", context_length=2_000)
@@ -3288,6 +3292,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:first", platform="cli", context_length=2_000)
@@ -3337,6 +3342,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:reused", platform="cli", context_length=2_000)
@@ -3419,6 +3425,7 @@ class TestEngineABC:
             ignore_session_patterns=["cron"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("reused-id", platform="cron", context_length=2_000)
@@ -3466,6 +3473,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:reset", platform="cli", context_length=2_000)
@@ -3514,6 +3522,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:old", platform="cli", context_length=2_000)
@@ -3965,6 +3974,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 2_000}]
         try:
             instance.on_session_start("ignored:zero-tokens", platform="cli", context_length=4_000)
@@ -4007,6 +4017,7 @@ class TestEngineABC:
             max_assembly_tokens=200,
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "older " + "x" * 2_000},
@@ -4052,6 +4063,7 @@ class TestEngineABC:
             max_assembly_tokens=200,
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "older " + "x" * 2_000},
@@ -18240,6 +18252,7 @@ class TestSessionRollover:
         hermes_home.mkdir()
         config = LCMConfig(database_path=str(tmp_path / "lcm_aux_zero_current_tokens.db"))
         engine = LCMEngine(config=config, hermes_home=str(hermes_home))
+        engine.model = "test-model"
         engine.on_session_start(
             "foreground-session",
             hermes_home=str(hermes_home),
