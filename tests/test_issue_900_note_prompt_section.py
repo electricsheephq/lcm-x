@@ -175,6 +175,24 @@ def test_section_omits_rotated_bypass_session(plugin, monkeypatch, setting):
     assert ctx.sections[0][1]({"session_id": "rotated-child"}) == ""
 
 
+@pytest.mark.parametrize("setting", ["LCM_IGNORE_SESSION_PATTERNS", "LCM_STATELESS_SESSION_PATTERNS"])
+def test_section_keeps_note_when_ended_bypass_child_id_is_reused_normally(plugin, monkeypatch, setting):
+    module, register = plugin
+    monkeypatch.setenv(setting, "bypassed-old")
+    ctx = register(SectionContext())
+    ctx.engine.on_session_start("bypassed-old", platform="cli")
+    ctx.engine.on_session_start(
+        "rotated-child", boundary_reason="compression", old_session_id="bypassed-old", platform="cli",
+    )
+    ctx.engine.on_session_end("rotated-child", [{"role": "user", "content": "bypass child end"}])
+    ctx.engine.on_session_start("rotated-child", platform="cli")
+    assert ctx.engine._has_lcm_bypass_lineage_session("rotated-child", platform="cli")
+    assert ctx.engine._lcm_session_last_bypassed["rotated-child"] is False
+    assert not ctx.engine._bypasses_lcm_context_management()
+
+    assert ctx.sections[0][1]({"session_id": "rotated-child"}) == module.LCM_SYSTEM_PROMPT_NOTE
+
+
 def test_section_keeps_foreground_note_while_auxiliary_child_is_active(plugin):
     module, register = plugin
     ctx = register(SectionContext())
