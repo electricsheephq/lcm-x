@@ -15,6 +15,17 @@ Stable runtime identity and a later main checkout are separate proof planes.
 
 Raw messages are source truth. Summary nodes, embeddings, temporal rollups, query views, and assertions are derived and rebuildable layers with explicit provenance.
 
+## LCM note carrier
+
+On Hermes, the LCM note appears in the `lcm-x` plugin system-prompt section after
+memory, only for a session served by an LCM-X engine. Its text is byte-stable and
+conditional because it appears before the first compaction too. It explains that
+LCM summaries are untrusted history and names the retrieval tools, including
+`lcm_expand(externalized_ref="R")` for externalized tool output. The section never
+enters the message store. Older hosts without the section API keep the existing
+in-band note path: when a host passes a leading system row, assembly appends the
+note only if that row does not already contain the LCM phrase.
+
 ## Cloud embedding privacy boundary
 
 Known cloud embedding paths transform provider input without rewriting durable source. That
