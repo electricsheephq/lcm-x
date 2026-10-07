@@ -1,10 +1,14 @@
 """#916: survival projections preserve text and the newest user's opening."""
 
+import json
+from copy import deepcopy
+
 import pytest
 
 import hermes_lcm.survival_fit as survival_fit
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.message_content import normalize_content_value
 
 
 @pytest.fixture
@@ -174,3 +178,96 @@ def test_legacy_form_keeps_exact_tool_call_bounding(length):
     assert legacy["tool_calls"] == current["tool_calls"]
     assert legacy["tool_calls"][0]["function"]["name"] == "tool"
     assert "lcm_survival_fit" in legacy["tool_calls"][0]["function"]["arguments"]
+
+
+def test_short_image_content_stays_structured_after_fit(tmp_path, monkeypatch):
+    monkeypatch.setattr(survival_fit, "_host_estimate", lambda messages: None)
+    engine = _engine(tmp_path)
+    content = [{"type": "text", "text": "Describe this image."},
+               {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}]
+    original_bytes = json.dumps(content).encode()
+    user = {"role": "user", "content": content, "timestamp": 9.0}
+    try:
+        assert len(normalize_content_value(content)) <= survival_fit._HEAD
+        assert survival_fit.count_message_tokens(user) > 256
+        engine.ingest([user])
+        before = engine._store.get_session_messages("S")
+        fitted = engine._survival_fit([user], [user], engine._survival_measure([user]), "issue_917")
+        assert isinstance(fitted[-1]["content"], list)
+        assert fitted[-1]["content"] is content
+        assert json.dumps(fitted[-1]["content"]).encode() == original_bytes
+        assert engine._store.get_session_messages("S") == before
+    finally:
+        engine.shutdown()
+
+
+def test_emitted_marker_after_four_pasted_marks_re_ingests_without_new_row(tmp_path, rough_counts, monkeypatch):
+    engine = _engine(tmp_path)
+    pasted = survival_fit._PROJECTED.format(role="user", tokens=585, store_id=999999, head=1200, tail=600)
+    user = {"role": "user", "content": (pasted + "\n") * 4 + "word " * 400, "timestamp": 9.0}
+    try:
+        assert len((pasted + "\n") * 4) < survival_fit._HEAD
+        engine.ingest([user])
+        before = engine._store.get_session_messages("S")
+        projected = engine._survival_projection([user], {id(user): before[0]["store_id"]}, 0)[0]
+        matches = list(survival_fit._PROJECTED_RE.finditer(projected["content"]))
+        assert matches[4].start() == survival_fit._HEAD + len("\n...\n")
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        lookups = []
+        get = engine._store.get
+
+        def tracked_get(store_id):
+            lookups.append(store_id)
+            return get(store_id)
+
+        monkeypatch.setattr(engine._store, "get", tracked_get)
+        source = engine._survival_projection_source(projected, "user", projected["content"])
+        assert source is not None and source["store_id"] == before[0]["store_id"]
+        assert lookups == [before[0]["store_id"]]
+        engine.ingest([projected])
+        assert engine._store.get_session_messages("S") == before
+    finally:
+        engine.shutdown()
+
+
+def test_growing_projection_is_skipped_and_next_row_is_projected(tmp_path):
+    engine = _engine(tmp_path)
+    dense = {"role": "tool", "content": "界" * (survival_fit._HEAD + 1), "tool_call_id": "call_dense"}
+    long = {"role": "user", "content": "word " * 3000}
+    try:
+        ids = [engine._store.append("S", message, conversation_id="conv") for message in [dense, long]]
+        tokens = survival_fit.count_message_tokens(dense)
+        fields = engine._survival_projected_fields(engine._store.get(ids[0]), tokens,
+                                                    survival_fit._HEAD, survival_fit._TAIL)
+        candidate = {**dense, **{key: value for key, value in fields.items() if value is not None}}
+        assert tokens > 256 and survival_fit.count_message_tokens(candidate) > tokens
+        projected = engine._survival_projection([dense, long], {id(dense): ids[0], id(long): ids[1]}, 0)
+        assert projected[0] is dense
+        assert survival_fit.count_message_tokens(projected[1]) < survival_fit.count_message_tokens(long)
+    finally:
+        engine.shutdown()
+
+
+def test_short_structured_content_with_bounded_calls_is_recognised(tmp_path):
+    engine = _engine(tmp_path)
+    user = {"role": "user", "content": "Run the tool.", "timestamp": 9.0}
+    assistant = {"role": "assistant", "content": [{"type": "text", "text": "Calling the tool."}],
+                 "tool_calls": [{"id": "call", "type": "function",
+                                 "function": {"name": "tool", "arguments": "word " * 3000}}]}
+    original = deepcopy(assistant)
+    try:
+        engine.ingest([user, assistant])
+        before = engine._store.get_session_messages("S")
+        projected = engine._survival_projection([assistant], {id(assistant): before[-1]["store_id"]}, 0)[0]
+        assert projected["content"] is assistant["content"]
+        assert projected["tool_calls"] != assistant["tool_calls"]
+        assert assistant == original
+        source = engine._survival_projection_source(projected, "assistant", normalize_content_value(projected["content"]))
+        assert source is not None and source["store_id"] == before[-1]["store_id"]
+        engine.shutdown()
+        engine = _engine(tmp_path)
+        engine.ingest([user, projected])
+        assert engine._store.get_session_messages("S") == before
+    finally:
+        engine.shutdown()

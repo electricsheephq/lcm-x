@@ -29,6 +29,7 @@ import json
 import logging
 import re
 import time
+from itertools import islice
 from typing import Any, Dict, List, Optional
 
 from .host_uid import _valid_uid
@@ -340,9 +341,11 @@ class SurvivalFitMixin:
             if not row or str(row.get("role") or "") != str(message.get("role") or ""):
                 continue
             fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL)
+            if len(normalize_content_value(row.get("content")) or "") <= _HEAD:
+                fields["content"] = message.get("content")
             projected = {key: value for key, value in {**message, **fields}.items()
                          if key != "tool_calls" or value}
-            if projected != message:
+            if count_message_tokens(projected) < tokens:
                 out[index] = projected
         return out
 
@@ -407,7 +410,11 @@ class SurvivalFitMixin:
         store = getattr(self, "_store", None)
         if _PROJECTED_PREFIX not in haystack or store is None:
             return None
-        for match in list(_PROJECTED_RE.finditer(haystack))[:4]:
+        matches = list(islice(_PROJECTED_RE.finditer(haystack), 4))
+        emitted = _PROJECTED_RE.match(content, _HEAD + len("\n...\n"))
+        if emitted is not None:
+            matches.insert(0, emitted)
+        for match in matches:
             mark_role, tokens, store_id, head, tail = match.groups()
             if mark_role != role:
                 continue
