@@ -18,6 +18,7 @@ class ResetStateMixin:
         """
         self.compression_count = 0
         self.last_prompt_tokens = 0
+        self._last_gate_tokens = 0  # #954: a rebind never inherits the previous binding's gate observation
         self.last_completion_tokens = 0
         self.last_total_tokens = 0
         self.last_input_tokens = 0
@@ -69,7 +70,6 @@ class ResetStateMixin:
         # #651: a hold armed by the previous binding never holds the next one. #618: nor does the #608 hold.
         self._no_progress_hold, self._no_progress_candidate = None, False
         self._objective_only_noop = False
-        self._last_gate_tokens = 0
         self._sweep_budget_hold_until, self._sweep_budget_hold_conversation = 0.0, ""
         # #677: a preflight request of the previous binding never shapes the next one's compress().
         self._preflight_below_threshold_cleanup_only = self._preflight_automatic_request = False

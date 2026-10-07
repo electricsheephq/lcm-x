@@ -7828,7 +7828,9 @@ class LCMEngine(
                     ceiling - overhead - count_messages_tokens(result)
                     - max(count_messages_tokens(tail_selected),
                           count_messages_tokens(self._sanitize_active_context_messages(tail_selected)))
-                    - (int(self._config.proactive_recall_budget_tokens) if self._config.proactive_recall_enabled else 0),
+                    # Reserve recall only when its builder can return a row (recall and embeddings on, budget > 0).
+                    - (max(0, int(self._config.proactive_recall_budget_tokens or 0))
+                       if self._config.proactive_recall_enabled and self._config.embeddings_enabled else 0),
                     ceiling // 4 if self._config.survival_fit else 0,
                 )
                 full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
