@@ -460,6 +460,20 @@ def session_count(home: Path) -> int | None:
         return None
 
 
+def apply_f4(rec: dict, cell: dict, unexpected: list) -> None:
+    """F4 applies to a continuity cell once its scenario is observed. A request missing the current user tag fails it,
+    even when the attempt is otherwise UNSUPPORTED (the scripted reply is never emitted for that request)."""
+    if not cell["id"].startswith("continuity/") or rec["verdict"] == "ERROR":
+        return
+    if unexpected or (rec["verdict"] != "UNSUPPORTED"
+                      and (rec.get("continuity") or {}).get("scenario_observed") is not False):
+        rec.setdefault("applicable_bars", []).append("F4")
+    if unexpected:
+        reason = "current user tag missing from the last user message"
+        rec.setdefault("failed_bars", {})["F4"] = {"reason": reason, "requests": unexpected}
+        rec.update(verdict="FAIL", reason=f"continuity F4: {reason}")
+
+
 def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: Path, timeout: int, keep: bool,
                      keep_dbs: str = "none", lcm_env: dict | None = None, identity: dict | None = None,
                      transport: str = "acp-process", turn_timeout: float = 300.0,
@@ -543,12 +557,7 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         run.fired.update(n["kind"] for n in read_jsonl(d / "faults-fired.jsonl"))
         rec.update(RM.verdict_fields({**cell, "chat_root": run.sid, "transport": transport}, d, last, run.fired, rec["citations"], backup_errors,
                                      s / "db"))
-        if cell["id"].startswith("continuity/") and rec["verdict"] not in ("ERROR", "UNSUPPORTED"):
-            rec.setdefault("applicable_bars", []).append("F4")
-        if run.scenario.unexpected and rec["verdict"] not in ("ERROR", "UNSUPPORTED"):
-            reason = "current user tag missing from the last user message"
-            rec.setdefault("failed_bars", {})["F4"] = {"reason": reason, "requests": run.scenario.unexpected}
-            rec.update(verdict="FAIL", reason=f"continuity F4: {reason}")
+        apply_f4(rec, cell, run.scenario.unexpected)
         return done()
     finally:
         RM.release_scratch(s, d, rec, keep_dbs, keep)
