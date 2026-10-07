@@ -379,8 +379,11 @@ class SurvivalFitMixin:
             if not row or str(row.get("role") or "") != str(message.get("role") or ""):
                 continue
             fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL)
+            if fields["tool_calls"] != (message.get("tool_calls") or None):
+                fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL, mark_calls=True)
             stored_text = normalize_content_value(row.get("content")) or ""
-            if len(stored_text) <= _HEAD and normalize_content_value(message.get("content")) == stored_text:
+            if (fields["content"] == stored_text and len(stored_text) <= _HEAD
+                    and normalize_content_value(message.get("content")) == stored_text):
                 fields["content"] = message.get("content")  # the same content, kept in its structured form
             projected = {key: value for key, value in {**message, **fields}.items()
                          if key != "tool_calls" or value}
@@ -390,10 +393,11 @@ class SurvivalFitMixin:
 
     @staticmethod
     def _survival_projected_fields(row: Dict[str, Any], tokens: int, head: int, tail: int,
-                                  *, legacy: bool = False) -> Dict[str, Any]:
+                                  *, legacy: bool = False, mark_calls: bool = False) -> Dict[str, Any]:
         """The projection of a stored row: its content as head/tail around the mark, head plus mark when
         shorter, or whole when at most ``head``; tool-call arguments over ``head`` replaced by the mark, and
         stored tool linkage. ``legacy`` recomputes old mark-only text for recognition, never emission.
+        ``mark_calls`` marks short content when unbounded stored calls replace the live calls.
         Deterministic in (row bytes, tokens, head, tail) for each form."""
         store_id = int(row["store_id"])
         marker = _PROJECTED.format(role=row.get("role"), tokens=tokens, store_id=store_id, head=head, tail=tail)
@@ -413,6 +417,8 @@ class SurvivalFitMixin:
         fields: Dict[str, Any] = {"content": text,
                                   "tool_calls": [SurvivalFitMixin._survival_bounded_call(call, marker, head)
                                                  for call in calls] if isinstance(calls, list) and calls else None}
+        if mark_calls and not legacy and len(text) <= head and fields["tool_calls"] == (calls or None):
+            fields["content"] = f"{text}\n...\n{marker}" if text else marker
         if row.get("tool_call_id"):
             fields["tool_call_id"] = row["tool_call_id"]
         return fields
@@ -443,18 +449,35 @@ class SurvivalFitMixin:
         calls = message.get("tool_calls")
         haystack = content if _PROJECTED_PREFIX in content else ""
         call_text = ""
+        emitted_matches = []
         if isinstance(calls, list):
-            call_text = "".join(str((call.get("function") or {}).get("arguments") or "") for call in calls
-                                if isinstance(call, dict) and isinstance(call.get("function"), dict)
-                                and "lcm_survival_fit" in str(call["function"].get("arguments") or ""))
+            arguments = [str((call.get("function") or {}).get("arguments") or "") for call in calls
+                         if isinstance(call, dict) and isinstance(call.get("function"), dict)
+                         and "lcm_survival_fit" in str(call["function"].get("arguments") or "")]
+            call_text = "".join(arguments)
+            for argument in arguments:
+                try:
+                    bounded = json.loads(argument)
+                except ValueError:
+                    continue
+                if (isinstance(bounded, dict) and set(bounded) == {"lcm_survival_fit"}
+                        and isinstance(bounded["lcm_survival_fit"], str)):
+                    match = _PROJECTED_RE.match(bounded["lcm_survival_fit"])
+                    if match is not None:
+                        emitted_matches.append(match)
         store = getattr(self, "_store", None)
         if _PROJECTED_PREFIX not in haystack + call_text or store is None:
             return None
-        # Content and bounded tool-call arguments each get their own cap, so marks pasted into one cannot hide the other's.
-        matches = list(islice(_PROJECTED_RE.finditer(haystack), 4)) + list(islice(_PROJECTED_RE.finditer(call_text), 4))
+        # Emitted positions precede the capped scans of pasted content and arguments.
+        matches = emitted_matches + list(islice(_PROJECTED_RE.finditer(haystack), 4)) + list(
+            islice(_PROJECTED_RE.finditer(call_text), 4))
         emitted = _PROJECTED_RE.match(content, _HEAD + len("\n...\n"))
         if emitted is not None:
             matches.insert(0, emitted)
+        separator = content.rfind("\n...\n")
+        ending = _PROJECTED_RE.fullmatch(content, separator + len("\n...\n") if separator >= 0 else 0)
+        if ending is not None:
+            matches.insert(0, ending)
         for match in matches:
             mark_role, tokens, store_id, head, tail = match.groups()
             if mark_role != role:
@@ -469,7 +492,8 @@ class SurvivalFitMixin:
                 continue
             fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail))
             legacy_fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail), legacy=True)
-            if (content in (fields["content"], legacy_fields["content"])
+            marked_fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail), mark_calls=True)
+            if (content in (fields["content"], legacy_fields["content"], marked_fields["content"])
                     and str(message.get("tool_call_id") or "") == str(row.get("tool_call_id") or "")
                     and (calls or None) == fields["tool_calls"]
                     and (role != "tool" or str(message.get("tool_name") or message.get("name") or "")
