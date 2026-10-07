@@ -149,3 +149,24 @@ def test_deeply_nested_live_arguments_do_not_abort_recognition(tmp_path, argumen
         assert engine._survival_projection_source(message, "assistant", "") is None
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("distinct", [True, False])
+def test_exact_marks_in_many_calls_keep_the_lookup_bound(tmp_path, distinct):
+    engine = _engine(tmp_path)
+    lookups, get = [], engine._store.get
+    engine._store.get = lambda store_id: lookups.append(store_id) or get(store_id)
+
+    def notice(store_id):
+        mark = survival_fit._PROJECTED.format(role="assistant", tokens=585, store_id=store_id,
+                                              head=survival_fit._HEAD, tail=survival_fit._TAIL)
+        return json.dumps({"lcm_survival_fit": f"{mark} Its tool-call arguments (9999 characters) are not in live context."})
+
+    calls = [_call(f"c{i}", notice(900000 + (i if distinct else 0))) for i in range(500)]
+    try:
+        message = {"role": "assistant", "content": "", "tool_calls": calls}
+        assert engine._survival_projection_source(message, "assistant", "") is None
+        # Main bounds the candidates at four per scan; exact emitted marks keep the same bound once deduplicated.
+        assert len(lookups) <= 8
+    finally:
+        engine.shutdown()
