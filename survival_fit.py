@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 
 from .host_uid import _valid_uid
 from .host_uid_emit import ADDRESS_KEYS, IDENTITY_KEYS, identity_emit_enabled, record_absorbed_message
+from .message_analysis import _is_codex_interim
 from .message_content import normalize_content_value
 from .store import _normalize_observed_at
 from .tokens import count_message_tokens, count_messages_tokens
@@ -139,7 +140,9 @@ class SurvivalFitMixin:
 
     def _survival_completed_reply(self, message) -> bool:
         """#798: a completed textual reply needs a host stamp for replay on cold resume."""
+        # A Codex Responses interim row replays only with its chain of continuation state.
         return (message.get("role") == "assistant" and not message.get("tool_calls")
+                and not _is_codex_interim(message)
                 and bool((normalize_content_value(message.get("content")) or "").strip())
                 and _normalize_observed_at(message.get("timestamp")) is not None
                 and not self._survival_generated(message))
@@ -293,7 +296,7 @@ class SurvivalFitMixin:
         def keep_reply(cut: int, kept):
             reply = body[cut - 1] if cut else None
             if reply is not None and self._survival_completed_reply(reply):
-                candidate = [reply, *kept]
+                candidate = kept if any(row is reply for row in kept) else [reply, *kept]
                 if self._survival_measure(build(cut, candidate, reply)[0]) <= budget:
                     return candidate, reply
                 # v0.26.x recognises head/tail, but not #917's middle-band head+mark reply.
