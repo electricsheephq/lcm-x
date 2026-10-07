@@ -12,6 +12,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: a clipped long message no longer becomes a verbatim level-3 leaf with the default or fleet input budgets. (#899)
 - Bench: Track S decision scoring uses per-file digest admission, durable revocation, and complete paired metrics while retaining separate prefix timing. (#946, #948)
 - Fix: a leaf whose summariser input was clipped is summarised, never stored verbatim. (#947)
+- Fix: skip a leaf that only repeats the preserved objective; keep the in-turn hold and release it at foreground turn end, avoiding the wasted summary and host growth refusal. (#922)
 
 ## v0.26.1 (delegated-child compaction fix)
 

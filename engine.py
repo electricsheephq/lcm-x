@@ -731,6 +731,7 @@ class LCMEngine(
         # #618: one-shot from compress(): a hold is active at the survival ceiling, so the pass only fits.
         self._hold_fit_only_requested = False
         self._no_progress_candidate = False  # set by _compress_impl for compress()
+        self._objective_only_noop = False
         self._last_gate_tokens = 0  # the latest should_compress/preflight observation
         # #651 one-shot handoff: preflight asked for maintenance below the host
         # threshold, so the automatic compress() that follows is cleanup-only.
@@ -1690,9 +1691,9 @@ class LCMEngine(
 
     def _start_no_progress_hold(self, reason: str) -> None:
         """#651: hold automatic threshold passes until its time or a stored leaf; #597 progress refusals
-        also end at turn end."""
+        and #922 objective-only no-ops also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
-        if reason == "host_rejected_progress":
+        if reason in ("host_rejected_progress", "objective_only"):
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
         else:
@@ -1728,14 +1729,14 @@ class LCMEngine(
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
 
     def note_turn_complete(self) -> None:
-        """#597: end only a progress-refusal hold, and only at the end of a foreground turn of this engine (never a
+        """#597/#922: end progress-refusal/objective-only holds at the end of a foreground turn of this engine (never a
         bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
         try:
             hold = self._no_progress_hold
-            if (hold is not None and hold[1] == "host_rejected_progress"
+            if (hold is not None and hold[1] in ("host_rejected_progress", "objective_only")
                     and not self._bypasses_lcm_context_management()):
                 self._no_progress_hold = None
-                logger.info("LCM automatic compaction hold ended at turn end: host_rejected_progress")
+                logger.info("LCM automatic compaction hold ended at turn end: %s", hold[1])
         except Exception:
             pass  # a notification must never break a completed turn
 
