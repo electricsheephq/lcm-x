@@ -7798,8 +7798,10 @@ class LCMEngine(
                 overhead = self._survival_host_overhead(
                     overhead_source, max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
                 )
+                # The quarter-window floor relies on a later survival fit; without one, use the true remainder.
                 default_budget = max(
-                    ceiling - overhead - count_messages_tokens(result) - count_messages_tokens(tail_selected), ceiling // 4
+                    ceiling - overhead - count_messages_tokens(result) - count_messages_tokens(tail_selected),
+                    ceiling // 4 if self._config.survival_fit else 0,
                 )
                 full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
                 if count_message_tokens(full_prefix) > default_budget:
