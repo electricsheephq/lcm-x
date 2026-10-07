@@ -19,9 +19,18 @@ NOT_IN_S = (("Reliability matrix", "bench/instruments/reliability receipts on th
 PREFIX = {}  # arm -> prefix60k score JSONs (r4 F1 timing population (i)); kept out of every other table
 
 
-def load(d: Path):
+def load(d: Path, metadata=None):
     runs = {}
+    manifest_path = next((p / "manifest.json" for p in (d, d.parent, d.parent.parent)
+                          if (p / "manifest.json").exists()), None)
+    manifest = json.loads(manifest_path.read_text()) if manifest_path else None
+    ignored = []
+    if metadata is not None:
+        metadata.update(manifest=str(manifest_path) if manifest_path else "absent", ignored_unmanifested=ignored)
     for p in sorted(d.glob("*.json")):
+        if manifest is not None and p.stem not in manifest:
+            ignored.append(p.name)
+            continue
         s = json.loads(p.read_text(encoding="utf-8"))
         if s.get("schema") == "score-s-v1" and s.get("population") == "prefix60k":
             PREFIX.setdefault(s["arm"], []).append(s)
@@ -225,7 +234,11 @@ def main(argv=None) -> int:
     ap.add_argument("--seeds-expected", type=int, default=3)
     ap.add_argument("--title", default="Track S results")
     a = ap.parse_args(argv)
-    md, js = render(load(a.scores), a.seeds_expected, a.title)
+    metadata = {}
+    md, js = render(load(a.scores, metadata), a.seeds_expected, a.title)
+    js.update(metadata)
+    if metadata["ignored_unmanifested"]:
+        md += "\nIgnored unmanifested JSON: " + ", ".join(metadata["ignored_unmanifested"]) + "\n"
     a.out.write_text(md, encoding="utf-8")
     if a.json:
         a.json.write_text(json.dumps(js, indent=1, default=str) + "\n", encoding="utf-8")

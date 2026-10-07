@@ -135,7 +135,9 @@ def pair_axes(cp):
             "p": round(mcnemar(b, c), 4),
             "sign_test": {**signs[ax], "p": round(mcnemar(signs[ax]["wins"], signs[ax]["losses"]), 4)},
         }
-    return {"pairs": pairs, "axes": out}
+    missing = [f"seed-{seed}/{run}" for seed in SEEDS for run in ("r1", "r2")
+               if f"seed-{seed}/{run}" not in pairs]
+    return {"status": "INCOMPLETE" if missing else "COMPLETE", "missing_pairs": missing, "pairs": pairs, "axes": out}
 
 
 def loads():
@@ -214,13 +216,16 @@ def losses(cp):
     return out
 
 
+paired = {f"cp-{cp}": {**pair_axes(cp), "loss_classes": losses(cp)} for cp in CPS}
 print(
     json.dumps(
         {
             "arms": ARMS,
             "seeds": SEEDS,
             "checkpoints": CPS,
-            **{f"cp-{cp}": {**pair_axes(cp), "loss_classes": losses(cp)} for cp in CPS},
+            "status": "INCOMPLETE" if any(p["status"] == "INCOMPLETE" for p in paired.values()) else "COMPLETE",
+            "missing_pairs": {cp: p["missing_pairs"] for cp, p in paired.items() if p["missing_pairs"]},
+            **paired,
             "per_arm": per_arm(),
         },
         indent=1,

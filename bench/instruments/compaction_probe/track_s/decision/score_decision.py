@@ -6,12 +6,14 @@ skipped here and show up as INCOMPLETE in the reports. S4 probes only at the end
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
 import sqlite3
 import subprocess
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 
 H = Path(__file__).resolve().parent
@@ -58,12 +60,16 @@ def main():
     args.external_root = args.external_root or args.run_root.parent
     args.logs = args.logs or args.run_root.parent / "decision" / "logs"
     args.out.mkdir(parents=True, exist_ok=True)
+    manifest_path = args.out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
     done = []
     for n in args.seeds:
         for arm, label, rdir, cps in runs(n, args):
             if args.arms and arm not in args.arms:
                 continue
             name = f"{arm}.seed-{n}.{label}.json"
+            stem = Path(name).stem
+            manifest.pop(stem, None)
             for cp in cps:
                 for population in ("scores", "loss"):
                     (args.out / population / f"cp-{cp}" / name).unlink(missing_ok=True)
@@ -95,6 +101,9 @@ def main():
                 (args.out / "scores" / f"cp-{cp}" / name).write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n")
                 (args.out / "loss" / f"cp-{cp}" / name).write_text(json.dumps(classify_loss(out), indent=1) + "\n")
                 done.append(f"cp-{cp} {name}")
+                manifest[stem] = {"receipt_sha256": hashlib.sha256(receipt.read_bytes()).hexdigest(),
+                                  "scored_at": datetime.now(timezone.utc).isoformat()}
+    manifest_path.write_text(json.dumps(manifest, indent=1) + "\n")
     for cp in args.checkpoints:
         if (args.out / "scores" / f"cp-{cp}").exists():
             subprocess.run([sys.executable, str(SCORER / "report_s.py"), "--scores", str(args.out / "scores" / f"cp-{cp}"),

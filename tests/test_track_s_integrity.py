@@ -6,6 +6,7 @@ import runpy
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,15 @@ def functions(path, *names, **namespace):
     tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
     exec(compile(tree, str(path), "exec"), namespace)
     return namespace
+
+
+def main_phase(path, start, **namespace):
+    tree = ast.parse((TRACK / path).read_text())
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    i = next(i for i, n in enumerate(main.body) if ast.unparse(n).startswith(start))
+    main.body = main.body[i:]
+    exec(compile(ast.Module(body=[main], type_ignores=[]), path, "exec"), namespace)
+    return namespace["main"]
 
 
 def test_absolute_requires_two_runs():
@@ -196,3 +206,173 @@ def test_stub2k_aged_off_control_must_not_stub(tmp_path, arm, count, exercise):
     (rdir / "engine.log").write_text(
         f"LCM active replay stubbing: replaced {count} evictable tool result(s), x\n" if count else "no stubbing\n")
     assert ns["run_record"](arm, 1, "r1")[1]["exercise"] == exercise
+
+
+@pytest.mark.parametrize("missing_arm", [None, "first", "second"])
+def test_paired_missing_scores_incomplete(tmp_path, missing_arm):
+    (tmp_path / "seed-1").mkdir()
+    (tmp_path / "seed-1/facts.json").write_text("[]")
+    def score(arm, seed, rep, cp):
+        if arm == missing_arm and rep == "r2":
+            return None
+        return {"probes": {}, "metrics": {"facts_kept": {},
+                "continuation": {"correct_fields": [], "denominator": 0}}}
+    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", MATERIAL=tmp_path,
+        SEEDS=[1], ARMS=["first", "second"], score=score, grid_by_row=lambda *a: {},
+        json=json, math=__import__("math"))
+    result = ns["pair_axes"](304)
+    assert result["status"] == ("INCOMPLETE" if missing_arm else "COMPLETE")
+    assert result.get("missing_pairs", []) == (["seed-1/r2"] if missing_arm else [])
+    # Also check the script-level status across checkpoints, without run/material I/O.
+    tree = ast.parse((TRACK / "decision/analyze_paired.py").read_text())
+    output = []
+    ns.update(CPS=[304], pair_axes=lambda cp: result, losses=lambda cp: {},
+              per_arm=lambda: {}, print=output.append)
+    tail = next(i for i, n in enumerate(tree.body) if
+                (isinstance(n, ast.Assign) and ast.unparse(n.targets[0]) == "paired") or
+                (isinstance(n, ast.Expr) and isinstance(n.value, ast.Call) and ast.unparse(n.value.func) == "print"))
+    exec(compile(ast.Module(body=tree.body[tail:], type_ignores=[]), "paired-output", "exec"), ns)
+    assert json.loads(output[0])["status"] == result["status"]
+
+
+def s2_receipt_phase(tmp_path, *, snapshots=True, changed=False, reader=None):
+    cpdir = tmp_path / "cp-304"
+    cpdir.mkdir()
+    cp = {"dir": cpdir, "db": cpdir / "db", "view": [], "row": 304,
+          "receipts": [], "n_events": 0, "admission": {}}
+    run = SimpleNamespace(snaps=[cp] if snapshots else [], receipts_out=[], reader_calls=[],
+                          events=[], sysmsg={}, system="", db=tmp_path / "db", ntok=lambda view: 0)
+    reader = reader or SimpleNamespace(readback={"model": "glm-5.3"})
+    hashes = iter((["before"] if snapshots else []) + ["after" if changed else "before"])
+    main = main_phase("s2/run_s_lcmx.py", "reader =", run=run, run_dir=tmp_path,
+        args=SimpleNamespace(reader="glm"), R=SimpleNamespace(GLMReader=lambda: reader),
+        is_store=True, probe=lambda *a: [], sha=lambda db: next(hashes), view=[], man={},
+        summary={}, isolation={"db_sha256_before_probes": "before"}, json=json,
+        time=__import__("time"), shutil=__import__("shutil"), continuity=lambda *a: [],
+        db_ro=lambda db: SimpleNamespace(execute=lambda q: SimpleNamespace(fetchone=lambda: [0])))
+    rc = main()
+    return rc, json.loads((tmp_path / "summary.json").read_text()), cpdir
+
+
+@pytest.mark.parametrize("snapshots,changed", [(True, True), (False, True), (True, False)])
+def test_s2_probe_isolation_failure(tmp_path, snapshots, changed):
+    rc, summary, cpdir = s2_receipt_phase(tmp_path, snapshots=snapshots, changed=changed)
+    assert summary["status"] == ("FAILED" if changed else "DONE")
+    assert bool(rc) == changed
+    if snapshots:
+        assert json.loads((cpdir / "summary.json").read_text())["status"] == summary["status"]
+
+
+@pytest.mark.parametrize("model", ["other-model", None])
+def test_reader_model_mismatch_fails_run(tmp_path, monkeypatch, model):
+    import urllib.request
+    tree = ast.parse((TRACK / "s2/s2lib/reader.py").read_text())
+    tree.body = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "GLMReader"]
+    ns = {"json": json, "urllib": __import__("urllib"), "READER_TIMEOUT_S": 1}
+    exec(compile(tree, "reader", "exec"), ns)
+    reader = ns["GLMReader"].__new__(ns["GLMReader"])
+    reader._glm = SimpleNamespace(URL="https://offline.invalid", MODEL="glm-5.3")
+    reader._k, reader.readback = "synthetic", {"model": None}
+    models = iter(["glm-5.3", model, "glm-5.3"])
+    class Response:
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def read(self):
+            return json.dumps({"model": next(models), "choices": [{"message": {"content": "ok"}}]}).encode()
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: Response())
+    reader._post([])
+    with pytest.raises(RuntimeError, match="reader pin mismatch"):
+        reader._post([])
+    assert reader.readback["model"] == model
+    reader._post([])  # a later matching response cannot clear the run failure
+    rc, summary, cpdir = s2_receipt_phase(tmp_path, reader=reader)
+    assert rc != 0 and summary["status"] == "FAILED"
+    assert json.loads((cpdir / "summary.json").read_text())["status"] == "FAILED"
+
+
+@pytest.mark.parametrize("rc,timed_out", [(7, False), (0, True)])
+def test_s4_forced_checkpoint_failure(rc, timed_out):
+    summary = {}
+    tree = ast.parse((TRACK / "s4/run_s_codex.py").read_text())
+    main = next(n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "main")
+    block = next(n for n in main.body if isinstance(n, ast.If)
+                 and ast.unparse(n.test).startswith("a.force_event and"))
+    ns = {"a": SimpleNamespace(force_event=True), "summary": summary, "sid": "synthetic",
+          "HOME": Path("unused"), "rdir": Path("unused"), "ws": Path("unused"), "turn_log": [],
+          "PR": SimpleNamespace(parse_rollout=lambda *a: {"token_series": []}),
+          "base_cmd": lambda *a: [], "run_cli": lambda *a: {"rc": rc, "timed_out": timed_out, "wall_s": 1}}
+    exec(compile(ast.Module(body=[block], type_ignores=[]), "forced-checkpoint", "exec"), ns)
+    assert summary["status"] == "FAILED"
+
+
+def test_s4_auth_refresh_failure():
+    receipts = []
+    rc = main_phase("s4/run_s_codex.py", "summary['finished'] =",
+        summary={"pin_ok": True, "isolation_ok": True, "auth_refreshed_in_run": True},
+        time=__import__("time"), rdir=Path("unused"), json=json,
+        jdump=lambda p, s: receipts.append(dict(s)))()
+    assert receipts[0]["status"] == "FAILED" and rc != 0
+
+
+def test_s4_reused_home_config_rejected(tmp_path):
+    (tmp_path / "config.toml").write_text('model = "synthetic"\n')
+    original_auth = tmp_path / "auth.json"
+    original_auth.write_text("{}")
+    calls = []
+    ns = functions("s4/run_s_codex.py", "setup_home", HOME=tmp_path, USER_AUTH=tmp_path / "missing",
+        os=os, shutil=SimpleNamespace(copy2=lambda *a: calls.append(a)), sha=lambda p: "synthetic",
+        json=json, codex_bin=lambda: "fake", env=lambda: {},
+        subprocess=SimpleNamespace(DEVNULL=-3, run=lambda *a, **k: SimpleNamespace(
+            returncode=0, stdout="logged in chatgpt", stderr="")))
+    with pytest.raises(RuntimeError, match="config.toml"):
+        ns["setup_home"]()
+    assert not calls and original_auth.read_text() == "{}"
+
+
+def test_scoring_manifest_filters_and_removes_runs(tmp_path, monkeypatch):
+    import hashlib
+    from datetime import datetime
+    out, logs = tmp_path / "decision", tmp_path / "logs"
+    logs.mkdir()
+    for seed in (1, 2):
+        rdir = tmp_path / "external/lc-runs" / f"seed-{seed}" / f"d{seed}-r1-default/cp-304"
+        rdir.mkdir(parents=True)
+        (rdir / "summary.json").write_text("{}")
+        (logs / f"s1-lossless-claw-d{seed}-r1.log.wall").write_text("exit 0 end 2\n")
+    ns = runpy.run_path(str(TRACK / "decision/score_decision.py"))
+    ns["main"].__globals__.update(score=lambda *a: {"schema": "score-s-v1", "arm": "lossless-claw",
+        "seed": a[0].name}, classify_loss=lambda s: {})
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
+    argv = ["score_decision", "--run-root", str(tmp_path / "runs"), "--external-root", str(tmp_path / "external"),
+            "--material", str(tmp_path), "--logs", str(logs), "--out", str(out),
+            "--arms", "lossless-claw", "--checkpoints", "304", "--seeds"]
+    for seed in (1, 2):
+        monkeypatch.setattr(sys, "argv", argv + [str(seed)])
+        ns["main"]()
+    manifest_path = out / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    assert set(manifest) == {f"lossless-claw.seed-{s}.d{s}-r1" for s in (1, 2)}
+    for stem, entry in manifest.items():
+        seed = stem.split("seed-")[1][0]
+        assert entry["receipt_sha256"] == hashlib.sha256((logs / f"s1-lossless-claw-d{seed}-r1.log.wall").read_bytes()).hexdigest()
+        datetime.fromisoformat(entry["scored_at"])
+    scores = out / "scores/cp-304"
+    (scores / "stray.json").write_text("not even JSON")
+    report = runpy.run_path(str(TRACK / "scorer/report_s.py"))
+    report["main"].__globals__["render"] = lambda runs, *a: ("report\n", {"seeds": sorted(s for _, s in runs)})
+    report_args = ["--scores", str(scores), "--out", str(out / "report.md"), "--json", str(out / "report.json")]
+    report["main"](report_args)
+    result = json.loads((out / "report.json").read_text())
+    assert result["seeds"] == ["seed-1", "seed-2"]
+    assert result["ignored_unmanifested"] == ["stray.json"]
+    (logs / "s1-lossless-claw-d1-r1.log.wall").write_text("exit 7 end 2\n")
+    monkeypatch.setattr(sys, "argv", argv + ["1"])
+    ns["main"]()
+    assert set(json.loads(manifest_path.read_text())) == {"lossless-claw.seed-2.d2-r1"}
+    assert not (scores / "lossless-claw.seed-1.d1-r1.json").exists()
+    manifest_path.unlink()
+    (scores / "stray.json").write_text("{}")
+    report["main"](report_args)
+    assert json.loads((out / "report.json").read_text())["manifest"] == "absent"

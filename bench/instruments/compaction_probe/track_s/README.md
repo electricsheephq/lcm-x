@@ -82,6 +82,8 @@ of their names. Continuity compares items only at event rows shared by both arms
 excludes the identical system-slot host instruction. Latency reports completed
 compactions and positive-wall noncompacting sweeps separately, with sample counts.
 Level-3 provenance and r1/r2 spread remain separately reported.
+Missing requested pairs mark the analysis `INCOMPLETE`; isolation or reader-pin failures, failed forced S4 checkpoints, auth refreshes, and a reused S4 home with `config.toml` fail the run.
+Incremental scoring maintains `decision/manifest.json` with receipt hashes and scoring times; reports ignore and list unmanifested checkpoint JSONs, while legacy directories without a manifest retain their existing behavior and report `manifest: absent`.
 
 The historical decision runner accepts `glm|s4 <seed> [lossless-checkout] [CLI-auth-file]`;
 `run_seeds_2_3.sh` accepts those last two inputs and retains its existing scheduling.

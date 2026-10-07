@@ -41,6 +41,9 @@ class GLMReader:
         with urllib.request.urlopen(req, timeout=READER_TIMEOUT_S) as r:
             data = json.loads(r.read().decode())
         self.readback["model"] = data.get("model")
+        if self.readback["model"] != self._glm.MODEL:
+            self.readback["pin_ok"] = False  # retained even if a later response matches
+            raise RuntimeError(f"reader pin mismatch: requested {self._glm.MODEL}, read back {self.readback['model']}")
         return (data["choices"][0]["message"].get("content") or ""), data.get("usage")
 
     def ask(self, system, view, turns, replies):
@@ -79,6 +82,7 @@ class AstraLowReader:
             m = re.search(pat, (p.stderr or "") + (p.stdout or ""), re.M)
             self.readback[key] = m.group(1) if m else "UNREAD"
         if (self.readback["model"], self.readback["effort"]) != (self.MODEL, self.EFFORT):
+            self.readback["pin_ok"] = False
             raise RuntimeError(f"reader pin mismatch: read back {self.readback}")
         if p.returncode != 0:
             raise RuntimeError(f"codex reader exit {p.returncode}")

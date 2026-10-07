@@ -65,6 +65,8 @@ def env() -> dict:
 
 def setup_home() -> dict:
     """HOME holds only auth.json (copied, never printed) and whatever the CLI itself writes."""
+    if (HOME / "config.toml").exists():
+        raise RuntimeError("isolated CODEX_HOME contains config.toml; refusing to run with non-stock config")
     info = {"codex_home": str(HOME), "config_toml": "absent (stock defaults; ~/.codex/config.toml NOT loaded)"}
     HOME.mkdir(parents=True, exist_ok=True)   # the dry run builds the home too: auth isolation is checked first
     os.chmod(HOME, 0o700)
@@ -475,6 +477,8 @@ def main() -> int:
         turn_log.append({"turn": "checkpoint", "auto_compact_limit": limit, "timing_label": "WIRING-ONLY",
                          **{k: v for k, v in res.items() if k != "agent_messages"}})
         print(f"checkpoint turn: limit {limit} rc {res['rc']} wall {res['wall_s']}s", flush=True)
+        if res["rc"] != 0 or res["timed_out"]:
+            summary.update(status="FAILED", failed_turn="checkpoint")
     summary["turn_log"] = turn_log
 
     # instrument from the rollout BEFORE any probe (r3 §R5)
@@ -560,7 +564,7 @@ def main() -> int:
     summary["auth_copy_sha256_prefix_after"] = sha(HOME / "auth.json")[:12]
     summary["auth_refreshed_in_run"] = summary["auth_copy_sha256_prefix_after"] != home.get("auth_copy_sha256_prefix")
     summary["finished"] = time.time()
-    if not summary["pin_ok"] or not summary["isolation_ok"]:
+    if not summary["pin_ok"] or not summary["isolation_ok"] or summary.get("auth_refreshed_in_run", False):
         summary["status"] = "FAILED"
     summary.setdefault("status", "COMPLETED")
     jdump(rdir / "summary.json", summary)
