@@ -556,6 +556,13 @@ known-good rolling backup.
 
 Most installs only need `plugins.enabled` and `context.engine: lcm-x`.
 
+`LCM_SQLITE_MMAP_SIZE` sets the SQLite memory-map size in bytes (default
+`268435456`, unchanged). On SD-card or single-board hosts, set
+`LCM_SQLITE_MMAP_SIZE=0`: a storage read error on a mapped page kills the process
+with SIGBUS, while `0` returns a catchable I/O error. Invalid or negative values
+use the default with one WARNING per process. `/lcm doctor` shows the effective
+`sqlite_mmap_bytes` value; SQLite may cap it below the requested size.
+
 ### Common settings
 
 | Variable | Default | Use |

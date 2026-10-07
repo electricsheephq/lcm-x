@@ -391,12 +391,16 @@ _TOTAL_COMPACTIONS_SCOPE = "current_conversation"
 _AUTO_FOCUS_MAX_TURNS = 3
 _AUTO_FOCUS_TURN_MAX_CHARS = 260
 _AUTO_FOCUS_MAX_CHARS = 700
+# escalation._normalized_focus_topic keeps the first 160 chars (its max_chars
+# default); lay out auto-focus so the newest turn fits inside that window (#613).
+_AUTO_FOCUS_PROMPT_MAX_CHARS = 160
 
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 
 # #608: after a sweep that spent its budget before the first leaf, the threshold answer is no for the hold
 # time. The minimum time for a summariser call and SweepBudgetExhausted live in escalation (#666).
 _SWEEP_BUDGET_HOLD_SECONDS = 600.0
+_TURN_END_HOLD_REASONS = frozenset({"host_rejected_progress", "objective_only", "hidden_only"})
 
 
 class SummaryResultRejected(RuntimeError):
@@ -1690,10 +1694,10 @@ class LCMEngine(
         return False
 
     def _start_no_progress_hold(self, reason: str) -> None:
-        """#651: hold automatic threshold passes until its time or a stored leaf; #597 progress refusals
-        and #922 objective-only no-ops also end at turn end."""
+        """#651: hold automatic threshold passes until its time or a stored leaf; turn-paced reasons
+        (#597 progress refusals, #922 objective-only no-ops, #904 hidden-only passes) also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
-        if reason in ("host_rejected_progress", "objective_only"):
+        if reason in _TURN_END_HOLD_REASONS:
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
         else:
@@ -1729,11 +1733,11 @@ class LCMEngine(
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
 
     def note_turn_complete(self) -> None:
-        """#597/#922: end progress-refusal/objective-only holds at the end of a foreground turn of this engine (never a
+        """#597/#922/#904: end turn-paced holds at the end of a foreground turn of this engine (never a
         bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
         try:
             hold = self._no_progress_hold
-            if (hold is not None and hold[1] in ("host_rejected_progress", "objective_only")
+            if (hold is not None and hold[1] in _TURN_END_HOLD_REASONS
                     and not self._bypasses_lcm_context_management()):
                 self._no_progress_hold = None
                 logger.info("LCM automatic compaction hold ended at turn end: %s", hold[1])
@@ -2152,6 +2156,9 @@ class LCMEngine(
                 count_tokens(serialized), source_tokens, len(attempt_chunk),
             )
 
+            # #751: a size refusal is excused only when a smaller chunk can still be tried
+            rescue_chunk = self._next_leaf_rescue_chunk(attempt_chunk, source_tokens) if attempt_number < max_attempts else []
+            can_rescue = bool(rescue_chunk) and len(rescue_chunk) < len(attempt_chunk)
             try:
                 timeout_seconds = self._config.summary_timeout_ms / 1000
                 if budget is not None:  # #605: the chain caps each attempt; refuse here before any work
@@ -2182,7 +2189,17 @@ class LCMEngine(
                     **({"budget": budget} if budget is not None else
                        {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
                     verbatim_small_source=not clipped,  # #605 F2; #947: clipped input is not whole
+                    # #751: a refusal for size reaches the rescue below; without a smaller chunk it counts as before
+                    context_length_rescue=can_rescue,
                 )
+                if level == 3 and provenance.get("context_length_error") and summary_text != serialized and can_rescue:
+                    logger.warning(
+                        "LCM leaf summarization retrying with smaller oldest chunk after a context-length "
+                        "refusal (attempt %d/%d, %d→%d messages)",
+                        attempt_number, max_attempts, len(attempt_chunk), len(rescue_chunk),
+                    )
+                    attempt_chunk = rescue_chunk
+                    continue
                 self._last_leaf_summary_model = provenance.get("model", "")
                 # #652: no fragment; #947: a clipped source returned unchanged by the level-3 fallback is a fragment too
                 self._last_leaf_level_3_verbatim = level == 3 and not clipped and summary_text == serialized
@@ -7425,10 +7442,10 @@ class LCMEngine(
         emitted inside the summary block so restart reconciliation ignores it
         instead of ingesting a duplicate non-contiguous user message.
 
-        Previous preserved-objective scaffolds are derived context, not real
-        user turns, so they are not eligible as the next anchor source. Once a
-        reverse scan reaches one, older user turns are stale relative to that
-        synthetic continuity marker and must not be promoted as current intent.
+        Previous preserved-objective scaffolds carry the same objective across
+        assemblies within a turn. Reuse only their objective part verbatim,
+        without carrying old summaries or promoting older user turns past that
+        synthetic continuity marker as current intent.
         """
         selected_tail_messages = [msg for msg in selected_tail if isinstance(msg, dict)]
         for message in reversed(messages):
@@ -7445,8 +7462,22 @@ class LCMEngine(
                 or self._is_ignored_active_replay_placeholder(message, content_text)
             ):
                 continue
-            if self._preserved_objective_context_content(message):
-                return None
+            preserved_objective = self._preserved_objective_context_content(message)
+            # Only a user row carries an objective: LCM emits its objective as one, and an
+            # assistant-role summary appears only behind a retained sole user kept verbatim.
+            if preserved_objective and message.get("role") == "user":
+                if any(message == selected for selected in selected_tail_messages):
+                    return None
+                cuts: list[tuple[int, bool]] = []
+                for boundary in re.finditer("\n\n---\n\n", preserved_objective):
+                    # Cut only at summary parts verified against this session's DAG; a quoted header is request text.
+                    rest = preserved_objective[boundary.end():]
+                    if (end := self._verified_lcm_summary_prefix_end(rest)) is not None:
+                        cuts.append((boundary.start(), not rest[end:].strip()))
+                # LCM's own parts end the scaffold. Text after the verified parts (a pasted summary, or a row the
+                # host merged onto the scaffold) keeps the whole row: a duplicate summary, never a lost request.
+                whole = next((start for start, ends in cuts if ends), None)
+                return preserved_objective if whole is None else preserved_objective[:whole]
             if message.get("role") != "user":
                 continue
             if self._is_preserved_todo_context_message(message):
@@ -8396,6 +8427,8 @@ class LCMEngine(
         ``_AUTO_FOCUS_MAX_TURNS`` user messages (skipping context summaries
         and empty turns).  Returns a brief text block suitable for injection
         into the summarizer prompt as ``focus_topic``.
+        The block is emitted newest first, with its newest bullet sized to
+        survive the 160-char prompt window (#613).
 
         IMPORTANT: The ``messages`` parameter must be ``working_messages``
         (output of ``_ingest_messages``), not raw messages.  ``working_messages``
@@ -8451,10 +8484,15 @@ class LCMEngine(
         # ``candidates`` is newest-first here.  Spend the block budget from the
         # newest turn backwards so a tight budget drops stale turns rather than
         # the turn the host is about to answer.
-        header = "Recent user focus:\n"
+        header = "Recent user focus: newest first\n"
+        # The prompt normalizer keeps 159 chars plus "…" when longer. Size the
+        # newest bullet so the whitespace-joined header and bullet fit that head.
+        newest_limit = _AUTO_FOCUS_PROMPT_MAX_CHARS - 1 - len(header.strip()) - len(" - ")
         budget = _AUTO_FOCUS_MAX_CHARS - len(header)
         selected: list[str] = []
         for position, item in enumerate(candidates):
+            if position == 0:
+                item = self._clamp_focus_turn_text(item, newest_limit)
             line = f"- {item}"
             cost = len(line) + (1 if selected else 0)
             if cost > budget:
@@ -8466,7 +8504,7 @@ class LCMEngine(
             budget -= cost
             selected.append(line)
 
-        selected.reverse()
+        # Emit newest-first so the prompt's head window holds the current request (#613).
         return header + "\n".join(selected)
 
     @staticmethod

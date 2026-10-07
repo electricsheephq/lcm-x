@@ -19,6 +19,8 @@ import time
 from contextlib import contextmanager
 from typing import Iterable, Sequence
 
+from .config import sqlite_mmap_size
+
 logger = logging.getLogger(__name__)
 
 
@@ -124,15 +126,15 @@ def configure_connection(conn: sqlite3.Connection) -> None:
                                              or cap growth while another
                                              connection holds an old WAL
                                              end mark.
-    - mmap_size=268435456 (256 MiB)        : memory-map reads so concurrent
-                                              readers cache WAL pages in RAM.
+    - mmap_size=LCM_SQLITE_MMAP_SIZE      : main-database mapped reads;
+                                          default 256 MiB, 0 disables mapping.
     """
     conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     _execute_wal_conversion_with_lock_retry(conn)
     conn.execute("PRAGMA synchronous=FULL")
     conn.execute("PRAGMA wal_autocheckpoint=500")
     conn.execute("PRAGMA journal_size_limit=67108864")
-    conn.execute("PRAGMA mmap_size=268435456")
+    conn.execute(f"PRAGMA mmap_size={sqlite_mmap_size()}")
 
 
 def _execute_wal_conversion_with_lock_retry(
