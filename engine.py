@@ -7825,11 +7825,7 @@ class LCMEngine(
                 )
                 # Measure without externalizing preserved-objective payloads.
                 # Tool-pair repair still reserves any missing-result stubs.
-                measurement_tail = self._sanitize_tool_pairs([
-                    {**msg, "content": strip_injected_context_blocks(msg["content"])}
-                    if isinstance(msg.get("content"), str) else msg
-                    for msg in tail_selected
-                ])
+                measurement_tail = self._sanitize_tool_pairs(list(tail_selected))
                 # The quarter-window floor relies on a later survival fit; without one, use the true remainder.
                 default_budget = max(
                     ceiling - overhead - count_messages_tokens(result)
