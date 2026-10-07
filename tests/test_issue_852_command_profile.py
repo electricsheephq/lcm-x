@@ -191,7 +191,7 @@ def test_cold_start_same_profile_matches_resolved_output(
         assert _snapshot(prototype)["lcm_embedding_profile"] == 2
 
 
-def test_different_profile_read_names_store(plugin, engines, monkeypatch):
+def test_different_profile_read_refuses(plugin, engines, monkeypatch):
     prototype, _session = engines
     before = _snapshot(prototype)
     handler, _ = _handler(plugin, monkeypatch, prototype, {
@@ -406,3 +406,27 @@ def test_plugin_import_does_not_require_host(monkeypatch):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert callable(module._command_engine_profile)
+
+
+@pytest.mark.parametrize("raw_args", ["embed warmup", "rotate apply"])
+def test_unresolved_write_refused_when_only_conversation_matches(plugin, engines, monkeypatch, raw_args):
+    prototype, _session = engines
+    prototype.on_session_start("session-B", conversation_id="lane-C")
+    before = _snapshot(prototype)
+    handler, _ = _handler(plugin, monkeypatch, prototype, {
+        "HERMES_SESSION_ID": "session-A", "HERMES_SESSION_KEY": "lane-C",
+        "HERMES_SESSION_PROFILE": "launch",
+    })
+    assert handler(raw_args) == OWNERSHIP_REFUSAL
+    assert _snapshot(prototype) == before
+    assert handler("status") != OWNERSHIP_REFUSAL
+
+
+def test_unresolved_write_allowed_when_session_matches(plugin, engines, monkeypatch):
+    prototype, _session = engines
+    prototype.on_session_start("session-B", conversation_id="lane-C")
+    handler, _ = _handler(plugin, monkeypatch, prototype, {
+        "HERMES_SESSION_ID": "session-B", "HERMES_SESSION_KEY": "lane-C",
+        "HERMES_SESSION_PROFILE": "launch",
+    })
+    assert "status: ready" in handler("embed warmup")
