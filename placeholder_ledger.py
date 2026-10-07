@@ -23,6 +23,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional
 
+from .host_uid_emit import carry_identity
 from .message_content import text_content_for_pattern_matching
 
 logger = logging.getLogger(__name__)
@@ -680,6 +681,9 @@ class PlaceholderLedgerMixin:
                 active_message = {"role": "system", "content": placeholder}
             else:
                 active_message = {"role": "user", "content": placeholder}
+            carry_identity(original_msg, active_message, (
+                "message_uid", "_absorbed_message_uids",
+            ) + (("_tool_call_uid",) if original_role == "tool" else ()))
             digest = hashlib.sha256(original_text.encode("utf-8")).hexdigest()[:16]
             self._remember_generated_ignored_placeholder_hash(digest)
             self._generated_ignored_active_replay_placeholder_message_ids.add(id(active_message))

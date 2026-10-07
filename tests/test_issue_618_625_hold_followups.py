@@ -205,7 +205,7 @@ def test_item2_lcm_status_shows_a_wall_clock_until(tmp_path, clock):
         engine.shutdown()
 
 
-# -- 3. #618 item 3: during a hold at the survival ceiling an automatic pass only fits -------------------------
+# -- 3. #618 item 3: only the sweep hold makes an automatic ceiling pass fit-only ------------------------------
 
 def _ceiling_state(tmp_path, hold: str):
     """Window 6,000 (ceiling 5,100); a list of about 14,000 tokens; one hold of this conversation."""
@@ -227,10 +227,14 @@ def test_item3_a_held_automatic_pass_at_the_ceiling_makes_no_call_and_fits(tmp_p
     try:
         assert engine.should_compress(request) is True and _host_gate(engine) is False  # the ceiling is exempt
         result = engine.compress(large, current_tokens=request)
-        assert summaries == [] and _nodes(engine) == []
-        assert (engine._last_compression_status, engine._last_compression_noop_reason) == ("noop", "held")
-        assert result is not large and engine._survival_measure(result) <= int(6_000 * 0.85)
-        assert engine._last_survival_fit["reason"] == "noop"
+        if hold == "sweep":
+            assert summaries == [] and _nodes(engine) == []
+            assert (engine._last_compression_status, engine._last_compression_noop_reason) == ("noop", "held")
+            assert result is not large and engine._survival_measure(result) <= int(6_000 * 0.85)
+            assert engine._last_survival_fit["reason"] == "noop"
+        else:  # rc4: the #651 hold remains exempt at the ceiling, as in v0.24.8
+            assert summaries and _nodes(engine, 0)
+            assert (engine._last_compression_status, engine._last_compression_noop_reason) != ("noop", "held")
     finally:
         engine.shutdown()
 

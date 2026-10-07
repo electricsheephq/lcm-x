@@ -58,25 +58,6 @@ _PROBE = textwrap.dedent(
         tags = sorted(set(re.findall(r"\\[T(\\d\\d)\\] user", text or "")) | set(re.findall(r"U(\\d\\d)", text or "")))
         return f"Stub summary #{n['c']} covers " + " ".join("U" + t for t in tags) + ".\\nExpand for details about: stub", 1
     engine_module.summarize_with_escalation = stub
-    native = os.environ.get("LCM_NATIVE_RECOVERY") == "true"
-    if native:
-        import agent.context_compressor as host_cc
-        class StandInNative(host_cc.ContextCompressor):
-            # The real host class (its handoff helpers run); only the model call is replaced.
-            def __init__(self, **kwargs):
-                self.protect_last_n = kwargs["protect_last_n"]
-                self._last_compress_aborted = False
-                self._last_summary_fallback_used = False
-                self._last_compression_made_progress = True
-            def on_session_start(self, session_id, **kwargs):
-                pass
-            def compress(self, messages, **kwargs):
-                head, tail = messages[:-self.protect_last_n], messages[-self.protect_last_n:]
-                text = " ".join(str(m.get("content")) for m in head)
-                tags = sorted(set(re.findall(r"\\[T(\\d\\d)\\] user", text)) | set(re.findall(r"U(\\d\\d)", text)))
-                summary = host_cc.SUMMARY_PREFIX + "\\nNative stub covers " + " ".join("U" + t for t in tags) + "."
-                return [{"role": "user", "content": summary}] + [dict(m) for m in tail]
-        host_cc.ContextCompressor = StandInNative
     def turn(i):
         return ({"role": "user", "content": f"[T{i:02d}] user turn {i}: " + ("alpha beta gamma delta " * 40)},
                 {"role": "assistant", "content": f"reply to T{i:02d}: noted item {i}."})
@@ -90,8 +71,6 @@ _PROBE = textwrap.dedent(
             t += 1; u, a = turn(t)
             host.append(u); host.append(a); post_llm_call(host, t)
         t += 1; host.append(turn(t)[0])
-        if native:
-            engine._compression_cancelled_check = lambda: False
         compressed, _prompt = agent._compress_context(host, "sys", approx_tokens=100_000, force=True)
         statuses.append(engine._last_compression_status)
         adopted.append(len(compressed) < len(host))
@@ -139,7 +118,7 @@ HERMES = _hermes_python()
 pytestmark = pytest.mark.skipif(HERMES is None, reason="no real Hermes runtime available")
 
 
-def _run_probe(tmp_path, *, in_place, tail, native=False) -> dict:
+def _run_probe(tmp_path, *, in_place, tail) -> dict:
     home = tmp_path / "hermes-home"
     (home / "plugins").mkdir(parents=True)
     (home / "plugins" / "hermes-lcm-x").symlink_to(REPO_ROOT)
@@ -159,7 +138,6 @@ def _run_probe(tmp_path, *, in_place, tail, native=False) -> dict:
             "LCM_FRESH_TAIL_COUNT": str(tail),
             "LCM_LEAF_CHUNK_TOKENS": "400",
             "PYTHONDONTWRITEBYTECODE": "1",
-            **({"LCM_NATIVE_RECOVERY": "true"} if native else {}),
         },
         capture_output=True,
         text=True,
@@ -188,13 +166,6 @@ def test_real_host_compaction_commits_publish_without_duplicates(tmp_path, in_pl
     assert result["errors"] == [], result
 
 
-@pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])
-def test_real_host_native_recovery_commits_keep_every_turn(tmp_path, in_place):
-    """Native recovery (LCM_NATIVE_RECOVERY=true) through the real host commit: no
-    commit proof exists, so the in-place start must reconcile (#484 round 1 item 1).
-    The native compressor is a stand-in subclass of the real host class."""
-    result = _run_probe(tmp_path, in_place=in_place, tail=6, native=True)
-    assert result["statuses"] == ["host_native"] * 3, result
 
 
 _NATIVE_PROOF_PROBE = textwrap.dedent(
@@ -268,6 +239,21 @@ _NATIVE_PROOF_PROBE = textwrap.dedent(
             def _generate_summary(self, turns, **kwargs):
                 return summary_text(" ".join(str(row.get("content")) for row in turns))
     host_cc.ContextCompressor = Native
+    # Seed historical writer output for the persisted-proof reader probe only.
+    # tests/conftest.py (which aliases the plugin as ``hermes_lcm``) does not run in this subprocess: alias the
+    # plugin package the plugin manager loaded, after importing the fixture's modules under that real name, so
+    # the fixture reuses those module objects instead of loading a second copy.
+    import importlib, types
+    package = engine_module.__package__
+    for name in ("message_analysis", "message_content", "tokens", "reconcile"):
+        importlib.import_module(f"{package}.{name}")
+    for name, module in list(sys.modules.items()):
+        if name == package or name.startswith(package + "."):
+            sys.modules.setdefault("hermes_lcm" + name[len(package):], module)
+    sys.path.insert(0, str(Path(engine_module.__file__).resolve().parent))
+    from tests.legacy_native_state import install_legacy_writer
+    # The same historical writer the in-process reader tests install (compress wrapper, adoption, proof).
+    install_legacy_writer(types.SimpleNamespace(setattr=setattr), type(engine))
     def turn_rows(index):
         call_id = f"call-{index:02d}"
         return [

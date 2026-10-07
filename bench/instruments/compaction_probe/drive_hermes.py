@@ -431,6 +431,9 @@ def run(args: argparse.Namespace) -> int:
     probes_path = Path(args.probes)
     canaries_path = Path(args.canaries) if args.canaries else None
     material_rows = [] if args.probes_only else load_jsonl(material_path, "material")
+    for index, row in enumerate(material_rows, 1):
+        if isinstance(row, dict) and row.get("role", "user") != "user":
+            raise ValueError(f"material turn {index}: non-user row requires role-faithful replay; this driver sends user prompts only")
     probe_rows = load_jsonl(probes_path, "probe")
     if canaries_path is not None:
         load_canary_values(canaries_path)

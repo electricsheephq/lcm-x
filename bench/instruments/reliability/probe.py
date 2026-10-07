@@ -178,7 +178,8 @@ def user_text(cell, prefix, t):
         return "continue"
     n = int(ut.get("identical_turns", {}).get(str(t), t))
     sep = "\n\n" if ut.get("separator_turns") == "all" or n in ut.get("separator_turns", []) else ""
-    body = (FILLER * ut["repeat"]).rstrip()
+    steps = sorted((int(k), v) for k, v in ut.get("repeat_from", {}).items() if int(k) <= t)  # {"151": 800}: from turn 151
+    body = (FILLER * (steps[-1][1] if steps else ut["repeat"])).rstrip()
     if sep:  # >=64 paragraph separators inside the prompt (#545)
         words = body.split(" ")
         step = max(1, len(words) // 70)
@@ -187,6 +188,189 @@ def user_text(cell, prefix, t):
     if t in ut.get("edge_ws_turns", []):
         text = "  " + text + " \n"
     return text + ("\n" if ut.get("trailing_ws") else "")
+
+
+def install_p8(cell_dir, phase, faults, fired, fire, cur, checkpoint=None):
+    """Read-only, fail-open audit of the host's own resolution and commit seams (R1)."""
+    state = {"supported": False, "notes": [], "duplicates": []}
+    pinned, emitted, local = {}, set(), threading.local()
+    enabled = os.environ.get("LCM_RELIABILITY_P8") != "off"
+
+    def safe(fn, *args):
+        try:
+            return fn(*args)
+        except Exception as exc:
+            state["notes"].append(type(exc).__name__)  # never exception text / payload
+
+    def key(msg):
+        uid = msg.get("message_uid")
+        return hashlib.sha256(uid.encode()).hexdigest() if isinstance(uid, str) and uid else None
+
+    def pin(messages):
+        if enabled:
+            pinned.update((id(m), m) for m in messages if isinstance(m, dict))
+
+    def log(ev):
+        with open(cell_dir / "p8-events.jsonl", "a") as fh:
+            fh.write(json.dumps({"phase": phase, **ev}) + "\n")
+
+    def sweep(conn):
+        duplicates = []
+        for sid, role, uid, ids in conn.execute(
+                "SELECT session_id,role,message_uid,group_concat(id) FROM messages WHERE active=1 "
+                "AND message_uid IS NOT NULL AND message_uid != '' GROUP BY session_id,role,message_uid HAVING count(*)>1"):
+            hashed = key({"message_uid": uid})
+            duplicates.append({"session": sid, "role": role, "uid": hashed,
+                               "row_ids": [int(i) for i in ids.split(',')], "lcm": (sid, role, hashed) in emitted})
+        return duplicates
+
+    def end_sweep():
+        if state["supported"]:
+            with sqlite3.connect(f"file:{Path(os.environ['HERMES_HOME']) / 'state.db'}?mode=ro", uri=True) as conn:
+                state["duplicates"] = sweep(conn)
+        return state
+
+    try:
+        import agent.transcript_repair as repair
+        import agent.session_persistence as persistence
+        import agent.conversation_compression as compression
+        resolve, write, commit = repair.resolve_and_repair_transcript_batch, persistence._db_flush_write, compression._commit_compaction
+        physical, logical, digest = repair._active_message_row, repair._active_logical_message_row, repair.transcript_row_snapshot
+    except (ImportError, AttributeError):
+        return state, pin, lambda: state
+    if not enabled and "p8_inject" not in faults:
+        return state, pin, lambda: state
+    state["supported"] = enabled
+    for path in cell_dir.glob("phase-*.json"):
+        try:
+            history = json.loads(path.read_text()).get("p8", {}).get("emitted", [])
+            if not isinstance(history, list) or any(not isinstance(k, list) or len(k) != 3 for k in history):
+                raise ValueError
+            emitted.update(tuple(k) for k in history)
+        except (OSError, ValueError, TypeError, AttributeError):
+            state["notes"].append("phase_history_unreadable")
+
+    def before(conn, sid, rows):
+        records = []
+        for msg in rows:
+            live = getattr(local, "pairs", {}).get(id(msg), msg)
+            rid, expected, role = msg.get("_row_id"), msg.get("_db_row_snapshot"), msg.get("role", "unknown")
+            target = physical(conn, sid, rid, role) if isinstance(rid, int) else (
+                logical(conn, sid, role, repair.message_uid_or_none(msg)) if isinstance(expected, str) else None)
+            target = dict(target) if target is not None else None
+            if target is not None and "session_id" not in target:
+                target["session_id"] = conn.execute("SELECT session_id FROM messages WHERE id=?",
+                                                    (target["id"],)).fetchone()[0]
+            rec = {"event": "flush_resolve", "session": sid, "role": live.get("role"), "uid": key(live),
+                   "lcm": id(live) in pinned or (sid, live.get("role"), key(live)) in emitted,
+                   "path": "row_id" if isinstance(rid, int) else "uid_snapshot", "row_id": rid,
+                   "expected": expected, "target_id": target["id"] if target else None,
+                   "target_session": target["session_id"] if target else None,
+                   "target_role": target["role"] if target else None, "target_uid": key(target or {}),
+                   "active": target["active"] if target else None, "before": digest(target) if target else None,
+                   "active_count": conn.execute("SELECT count(*) FROM messages WHERE session_id=? AND active=1 "
+                                                "AND role=? AND message_uid=?", (sid, role, msg.get("message_uid"))).fetchone()[0]}
+            records.append((msg, rec))
+        return records
+
+    def after(conn, sid, records):
+        for msg, rec in records:
+            row = conn.execute("SELECT * FROM messages WHERE session_id=? AND id=?", (sid, rec["target_id"])).fetchone()
+            rec["after"] = digest(row) if row else None
+            rec["effect"] = rec["after"] != rec["before"] or bool((msg.get("_canonical_row") or {}).get("_content_only"))
+            # Label from the host's own per-dict output: an earlier dict of the same batch can rewrite this
+            # target first, so the pre-batch digest cannot tell ADOPT from REWRITE.
+            canonical = msg.get("_canonical_row")
+            adopted = isinstance(canonical, dict) and not canonical.get("_metadata_only")
+            # A dict that carried an address resolving to nothing (e.g. a parent-session _row_id after rotation:
+            # the resolvers are session-scoped) is reported apart from a plain insert, never failed.
+            addressed = isinstance(rec["row_id"], int) or isinstance(rec["expected"], str)
+            rec["action"] = ("UNRESOLVED" if row is None and addressed else "INSERT" if row is None else
+                             "LEGACY" if not isinstance(rec["expected"], str) else
+                             "ADOPT" if adopted else
+                             "REWRITE" if msg.get("_db_row_snapshot") != rec["expected"] else "MATCH")
+            if hasattr(local, "records"):
+                local.records.append((msg, rec))
+            else:
+                log(rec)
+        log({"event": "sweep", "duplicates": sweep(conn)})
+
+    def resolved(conn, session_id, messages, *args, **kwargs):
+        records = safe(before, conn, session_id, messages) if enabled else None
+        result = resolve(conn, session_id, messages, *args, **kwargs)
+        if records is not None:
+            safe(after, conn, session_id, records)
+        return result
+
+    def flushed(agent, batch_rows, batch_msgs, messages):
+        local.pairs, local.records = dict(zip(map(id, batch_rows), batch_msgs)), []
+        try:
+            result = write(agent, batch_rows, batch_msgs, messages)
+            if enabled:
+                for msg, rec in local.records:
+                    rec["row_id"] = msg.get("_row_id")
+                    safe(log, rec)
+                with agent._session_db._lock:
+                    safe(log, {"event": "sweep", "duplicates": safe(sweep, agent._session_db._conn) or []})
+            if checkpoint:
+                safe(checkpoint)
+            return result
+        finally:
+            del local.pairs, local.records
+
+    def committed(agent, *args, **kwargs):
+        result = commit(agent, *args, **kwargs)
+        if result.session_commit_succeeded:
+            safe(check_commit, agent, result.compressed)
+            if checkpoint:
+                safe(checkpoint)
+        return result
+
+    def check_commit(agent, messages):
+        injection = None
+        with agent._session_db._lock:
+            conn, sid = agent._session_db._conn, agent.session_id
+            for msg in messages:
+                row = conn.execute("SELECT * FROM messages WHERE session_id=? AND id=?", (sid, msg.get("_row_id"))).fetchone()
+                if id(msg) in pinned:
+                    emitted.add((sid, msg.get("role"), key(msg)))
+                if enabled:
+                    log({"event": "commit", "session": sid, "role": msg.get("role"), "uid": key(msg),
+                         "row_id": msg.get("_row_id"), "active": row["active"] if row else None,
+                         "target_role": row["role"] if row else None, "target_uid": key(dict(row)) if row else None,
+                         "expected": msg.get("_db_row_snapshot"), "after": digest(row) if row else None})
+            if enabled:
+                log({"event": "sweep", "duplicates": sweep(conn)})
+            state["commits"] = state.get("commits", 0) + 1
+            fault = faults.get("p8_inject")
+            if fault and "p8_inject" not in fired and state["commits"] == 2:
+                variant = fault["variant"]
+                target = conn.execute("SELECT * FROM messages WHERE session_id=? AND active=? AND role='user' "
+                                      "ORDER BY id LIMIT 1", (sid, 0 if variant == "archived" else 1)).fetchone()
+                live = dict(next(m for m in messages if m.get("role") == "user"))
+                if variant == "archived":
+                    live = {**dict(target), "_row_id": target["id"], "_db_row_snapshot": digest(target), "content": "p8 control"}
+                live.pop("_db_persisted", None)
+                row = persistence._db_flush_row(agent, live, False)
+                if variant == "other-active":
+                    target = conn.execute("SELECT * FROM messages WHERE session_id=? AND active=1 AND role='user' "
+                                          "AND message_uid != ? LIMIT 1", (sid, live.get("message_uid"))).fetchone()
+                    row.pop("_row_id", None)
+                    row.update(message_uid=target["message_uid"], _db_row_snapshot=digest(target))
+                if variant == "random-snapshot":
+                    row["_db_row_snapshot"] = "0" * 32
+                injection = row, live, variant
+        if injection:
+            row, live, variant = injection
+            flushed(agent, [row], [live], messages)
+            fire("p8_inject", cur["turn"], variant=variant)
+        state["emitted"] = sorted(emitted, key=str)
+
+    if enabled:
+        repair.resolve_and_repair_transcript_batch = resolved
+        persistence._db_flush_write = flushed
+    compression._commit_compaction = committed
+    return state, pin, lambda: safe(end_sweep) or state
 
 
 def main():
@@ -218,7 +402,10 @@ def main():
             os.fsync(tfile.fileno())
     cited_modules = []
 
+    p8_finish = {"supported": False}.copy
+
     def finish(exit_kind, **extra):
+        out["p8"] = p8_finish()
         if "host_src" in cell:  # import provenance: fail closed on any host module run from outside the host tree
             out["provenance"] = provenance(cell, cited_modules)
             if out["provenance"]["violations"] and exit_kind not in ("unsupported", "refused"):
@@ -258,6 +445,9 @@ def main():
     needed += ["cron_agent", "cron_close"] if cell.get("cron_every") else []
     needed += ["tool_dispatch", "engine_tool_dispatch"] if cell.get("tool_plan") else []
     cited_modules += sorted({ANCHORS[k][0][:-3].replace("/", ".") for k in needed})
+    if cell.get("drain"):
+        finish("unsupported", reason="drain cells need the R2 observer's per-compaction counters (acp-process only)")
+        return
     if missing := [k for k in needed if not out["citations"][k]]:
         finish("unsupported", reason=f"host shape not citable at this sha: {missing}")
         return
@@ -303,7 +493,8 @@ def main():
         n_summ["c"] += 1
         text = kw.get("text") if "text" in kw else (args[0] if args else "")
         tags = sorted(set(re.findall(r"\[([A-Z]\d{2,3})\] user", text or "")))
-        return f"Stub summary #{n_summ['c']} covers " + " ".join("U" + x for x in tags) + ".\nExpand for details about: stub", 1
+        return (f"Stub summary #{n_summ['c']} covers " + " ".join("U" + x for x in tags)
+                + ".\nExpand for details about: stub" + FILLER * cell.get("summary_repeat", 0)), 1
 
     window = int(cell["window"])
     cur = {"turn": 0, "step": 0, "native": 0, "sess": "S0", "ended": None, "final": False, "commits0": 0,
@@ -364,9 +555,33 @@ def main():
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     orig_start, orig_end = etype.on_session_start, getattr(etype, "on_session_end", None)
 
+    recovery_turns = []
+    fr = faults.get("forced_recovery")
+    recovery_module = sys.modules[cell["plugin"]["module"] + ".engine"]
+    recovery_texts = {k: getattr(recovery_module, n, "") for k, n in (
+        ("placeholder", "_OVERFLOW_RECOVERY_PLACEHOLDER"), ("note", "_OVERFLOW_RECOVERY_OVERCAP_NOTE"))}
+
     def traced_compress(self, messages, *args, **kwargs):
-        result = orig_compress(self, messages, *args, **kwargs)
+        injecting = fr and cur["turn"] == fr["turn"] and cur["step"] > 0
+        if injecting:
+            if fr["kind"] not in fired:
+                fire(fr["kind"], cur["turn"])
+            # Bound the actual assembly budget despite provider overhead; keep the real system anchor.
+            cap = recovery_module.count_messages_tokens(messages[:self._leading_anchor_count(messages)]) + 120
+            with patch.object(etype, "_summary_route_stop_applies", return_value=True), \
+                    patch.object(etype, "_overflow_recovery_assembly_cap", return_value=cap):
+                result = orig_compress(self, messages, *args, **kwargs)
+        else:
+            result = orig_compress(self, messages, *args, **kwargs)
         status = getattr(self, "_last_compression_status", None)
+        recovery = {}
+        if status == "overflow_recovery":
+            paths = [k for k, text in recovery_texts.items() if text and any(
+                text.split("{", 1)[0] in str(m.get("content") or "") for m in result)]
+            recovery = {"recovery_marker": bool(paths), "recovery_paths": paths,
+                        "prior_compaction": any(t < cur["turn"] for t in counters["compacted_turns"])}
+            if paths:
+                recovery_turns.append(cur["turn"])
         self._probe_calls, self._probe_status = getattr(self, "_probe_calls", 0) + 1, status  # per-call evidence
         if status in ("compacted", "host_native"):  # a committed pass: LCM's own or the host-native summary
             counters["compacted_turns"].append(cur["turn"])
@@ -374,9 +589,12 @@ def main():
               session_prefix=cur.get("prefix", "T"),
               compression_status=status, noop_reason=getattr(self, "_last_compression_noop_reason", None),
               depth0_nodes=depth0() if status == "compacted" else None,
-              rejection=rejection(self), native_attempts=cur["native"])
+              rejection=rejection(self), native_attempts=cur["native"], **recovery)
+        p8_pin(result)
         return result
     etype.compress = traced_compress
+
+    _p8, p8_pin, p8_finish = install_p8(cell_dir, phase, faults, fired, fire, cur)
 
     depth = threading.local()
 
@@ -395,7 +613,9 @@ def main():
         if depth.n == 0:
             ok, detail, chars = check_result(name, args, result)
             event(turn=cur["turn"], event="tool_dispatch", tag=f"{cur.get('prefix', 'T')}{cur['turn']:02d}", id=call_id,
-                  name=name, args=args, via=via, ok=ok, detail=detail, chars=chars)
+                  name=name, args=args, via=via, ok=ok, detail=detail, chars=chars,
+                  **({"recovery_result_sha256": hashlib.sha256((result if isinstance(result, str) else json.dumps(result)).encode()).hexdigest()}
+                     if fr and cur["turn"] == fr["turn"] else {}))
         return result
 
     def traced_tool(self, name, args, **kwargs):
@@ -474,6 +694,10 @@ def main():
             return orig_stage(conn, conversation_id, session_id, *args, **kwargs)
         lifecycle.stage_compaction_publication = inject
 
+    if fr and not hasattr(etype, "_summary_route_stop_applies"):
+        finish("unsupported", reason="plugin has no _summary_route_stop_applies recovery injection seam")
+        return
+
     asst = cell["assistant"]
     plan = {}
     for group in cell.get("tool_plan", []):  # "restart": the first turn of every phase after A (the merge turn)
@@ -502,8 +726,11 @@ def main():
 
     def scripted(ag, prefix, t, est, cancel=False):
         def provider(*_a, **kw):
+            crash = faults.get("crash_after_compaction_before_reply", {})
+            crash_turns = ([n + crash.get("offset", 0) for n in recovery_turns]
+                           if crash.get("after_status") == "overflow_recovery" else counters["compacted_turns"])
             if phase == "A" and prefix == "T" and "crash_after_compaction_before_reply" in faults and \
-                    "crash_after_compaction_before_reply" not in fired and t in counters["compacted_turns"]:
+                    "crash_after_compaction_before_reply" not in fired and t in crash_turns:
                 fire("crash_after_compaction_before_reply", t)
                 finish("crash", next_turn=t + 1, turn=t)
             step, cur["step"] = cur["step"], cur["step"] + 1
@@ -522,6 +749,8 @@ def main():
                 time.sleep(float(cell.get("cancel_wait", 2.0)))
             groups = plan.get(t, []) if prefix == "T" else []
             if step < len(groups):
+                if fr and t == fr["turn"]:
+                    engine._config.max_assembly_tokens = fr["cap"]  # after preflight, before the tool-result pass
                 for c in groups[step]:
                     event(turn=t, event="tool_call", name=c["name"], session_prefix=prefix)
                 return response("", usage, groups[step], t, f"{prefix}{t:02d}_{step}")
@@ -567,8 +796,13 @@ def main():
               session_prefix=prefix, content=text, persist=persist if persist != text else None,
               content_sha256=hashlib.sha256(text.encode()).hexdigest())
         scripted(ag, prefix, t, est, cancel=kind == "cancel")
-        result = ag.run_conversation(user_message=text, conversation_history=history, task_id=task_id,
-                                     persist_user_message=persist)
+        cap = engine._config.max_assembly_tokens if fr else None
+        try:
+            result = ag.run_conversation(user_message=text, conversation_history=history, task_id=task_id,
+                                         persist_user_message=persist)
+        finally:
+            if fr:
+                engine._config.max_assembly_tokens = cap
         held, reply_held, tools, user_tags, host_replies = held_after(result, text, prefix, t)
         failed = bool(result.get("failed")) or not result.get("completed", True)
         if failed and kind != "cancel":
@@ -644,6 +878,10 @@ def main():
     if cell.get("final_compaction_check", True):
         cur["final"] = True  # its compaction events are B4 evidence, not B5 passes
         out["final_check"] = {**final_check(agent, history, buf), "backlog_checks": backlog_log}
+    if fr and phase == "A" and not recovery_turns:
+        finish("unsupported", reason="no marked overflow_recovery after the planned tool result; "
+               f"injection fired={fr['kind'] in fired}, prior compactions={counters['compacted_turns']}")
+        return
     finish("done", next_turn=None)
 
 

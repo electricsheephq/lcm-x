@@ -99,6 +99,12 @@ class BypassMixin:
 
     def _get_host_fallback_compressor(self) -> Any:
         """Return Hermes' native compressor for LCM-bypassed sessions if available."""
+        route_model = self.model or self._config.summary_model
+        if not route_model:
+            if not getattr(self, "_host_fallback_unresolved_model_logged", False):
+                logger.info("LCM host fallback skipped: reason=host_fallback_unresolved_model")
+                self._host_fallback_unresolved_model_logged = True
+            return None
         session_id = self._bypass_lcm_session_id()
         if self._host_fallback_compressor is not None:
             if session_id == self._host_fallback_session_id:
@@ -133,7 +139,7 @@ class BypassMixin:
             return None
 
         kwargs = {
-            "model": self.model or "unknown",
+            "model": route_model,
             "threshold_percent": self.context_threshold or self.threshold_percent or 0.50,
             "protect_first_n": self.protect_first_n,
             "protect_last_n": self.protect_last_n,
@@ -153,7 +159,7 @@ class BypassMixin:
             # unbounded ignored/stateless transcript.
             try:
                 compressor = ContextCompressor(
-                    self.model or "unknown",
+                    route_model,
                     threshold_percent=self.context_threshold or self.threshold_percent or 0.50,
                     protect_first_n=self.protect_first_n,
                     protect_last_n=self.protect_last_n,
@@ -178,12 +184,13 @@ class BypassMixin:
 
     def _sync_host_fallback_compressor(self, compressor: Any) -> None:
         """Keep the delegated native compressor aligned with LCM runtime metadata."""
+        route_model = self.model or self._config.summary_model
         update_model = getattr(compressor, "update_model", None)
         context_length = self.context_length or self.raw_context_length
-        if callable(update_model) and context_length > 0:
+        if route_model and callable(update_model) and context_length > 0:
             try:
                 update_model(
-                    model=self.model or "unknown",
+                    model=route_model,
                     context_length=context_length,
                     base_url=self.base_url,
                     api_key=self.api_key,
@@ -192,7 +199,7 @@ class BypassMixin:
                 )
             except TypeError:
                 try:
-                    update_model(self.model or "unknown", context_length, self.base_url, self.api_key)
+                    update_model(route_model, context_length, self.base_url, self.api_key)
                 except TypeError:
                     pass
                 except Exception:
@@ -402,6 +409,7 @@ class BypassMixin:
             return self._trim_bypass_compacted_to_cap(messages, target_tokens)
         head_count = max(1, min(self.protect_first_n, len(messages)))
         tail_count = max(1, min(self.protect_last_n, len(messages) - head_count))
+        head, tail = list(messages[:head_count]), list(messages[-tail_count:])
         marker = {
             "role": "user",
             "content": (
@@ -410,7 +418,9 @@ class BypassMixin:
                 "were dropped to keep the request within the model context window.]"
             ),
         }
-        compacted = list(messages[:head_count]) + [marker] + list(messages[-tail_count:])
+        self._mint_engine_uids([(marker, "omitted_marker", None, "omitted_marker")],
+                               taken=(row.get("message_uid") for row in head + tail))
+        compacted = head + [marker] + tail
         return self._trim_bypass_compacted_to_cap(compacted, target_tokens)
 
     def _compress_lcm_bypassed_session(
