@@ -1465,6 +1465,7 @@ def _doctor_text(engine) -> str:
     if node_fts_failed_flag and "nodes_fts" not in issues:
         issues.append("nodes_fts")
 
+    sqlite_mmap_bytes = _safe_count(store_conn, "PRAGMA mmap_size", "sqlite_mmap_size")
     total_messages = _safe_count(store_conn, "SELECT COUNT(*) FROM messages", "messages_total")
     total_message_sessions = _safe_count(
         store_conn,
@@ -1794,6 +1795,9 @@ def _doctor_text(engine) -> str:
         projected = survival_fit.get("projected_count")  # absent on a record from before the key: unknown
         if type(projected) is not int or projected < 0:
             projected = None  # damaged projection metadata: conservatively unknown
+        uncovered = survival_fit.get("last_uncovered_rows")
+        uncovered_fits = survival_fit.get("uncovered_fit_count")
+        unknown_fits = survival_fit.get("unknown_coverage_fit_count")
         within = ("rollback to a 0.24.x version older than v0.24.5: that plugin cannot compact stored rows that a "
                   "survival fit removed from the live context; stop Hermes, move the configured database file (by "
                   "default lcm.db, with its -wal and -shm companions) aside and keep it, then restore the database "
@@ -1815,7 +1819,10 @@ def _doctor_text(engine) -> str:
                             f"{survival_fit.get('last_reason') or '(unknown)'}; projected_count "
                             f"{'unknown' if projected is None else projected}; unreached_budget_count "
                             f"{survival_fit.get('unreached_budget_count', 0)}; last_reached_budget "
-                            f"{survival_fit.get('last_reached_budget', 'unknown')}{rollback}")
+                            f"{survival_fit.get('last_reached_budget', 'unknown')}; last_uncovered_rows "
+                            f"{'unknown' if uncovered is None else uncovered}; uncovered_fit_count "
+                            f"{'unknown' if uncovered_fits is None else uncovered_fits}; unknown_coverage_fit_count "
+                            f"{'unknown' if unknown_fits is None else unknown_fits}{rollback}")
         triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
     stub_first_exit = getattr(engine, "_last_stub_first_exit", None)
     if stub_first_exit:  # #671: a partial stop; the rows no leaf summarised stay stored as backlog
@@ -1858,7 +1865,7 @@ def _doctor_text(engine) -> str:
         f"schema_core_tables: {schema_core_status}",
         f"schema_missing_tables: {', '.join(schema_missing_tables) or '(none)'}",
         f"schema_existing_tables: {', '.join(schema_existing_tables) or '(none)'}",
-        f"journal_mode: {journal_mode}",
+        f"journal_mode: {journal_mode}; sqlite_mmap_bytes={sqlite_mmap_bytes}",
         f"quick_check: {quick_check}",
         f"sqlite_integrity: {integrity}",
         f"messages_total: {total_messages}",

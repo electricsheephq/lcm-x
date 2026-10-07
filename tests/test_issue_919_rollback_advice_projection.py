@@ -20,7 +20,8 @@ CLAUSE = (
 )
 BASE_OBSERVATION = (
     "- survival_fit: applied 2 time(s); last reason publication_invariant_conflict; projected_count 0; "
-    "unreached_budget_count 0; last_reached_budget unknown; rollback to a 0.24.x version older than "
+    "unreached_budget_count 0; last_reached_budget unknown; last_uncovered_rows unknown; uncovered_fit_count "
+    "unknown; unknown_coverage_fit_count unknown; rollback to a 0.24.x version older than "
     "v0.24.5: that plugin cannot compact stored rows that a survival fit removed from the live context; "
     "stop Hermes, move the configured database file (by default lcm.db, with its -wal and -shm companions) "
     "aside and keep it, then restore the database backup taken before the first v0.24.5 install with "
