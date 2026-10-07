@@ -7421,7 +7421,16 @@ class LCMEngine(
         messages: List[Dict[str, Any]],
         selected_tail: List[Dict[str, Any]],
     ) -> Optional[str]:
-        """Return a scaffolded newest real user objective omitted from the tail.
+        """Keep the first-choice anchor, including for the objective-only guard."""
+        candidates = self._latest_user_context_anchor_candidates(messages, selected_tail)
+        return candidates[0] if candidates else None
+
+    def _latest_user_context_anchor_candidates(
+        self,
+        messages: List[Dict[str, Any]],
+        selected_tail: List[Dict[str, Any]],
+    ) -> List[str]:
+        """Return ordered scaffolded anchors for the newest user objective omitted from the tail.
 
         Tool-heavy turns can push the operative user request outside the fresh
         tail while retaining only assistant/tool traces from that turn.  The
@@ -7432,7 +7441,8 @@ class LCMEngine(
         Previous preserved-objective scaffolds carry the same objective across
         assemblies within a turn. Reuse only their objective part verbatim,
         without carrying old summaries or promoting older user turns past that
-        synthetic continuity marker as current intent.
+        synthetic continuity marker as current intent. A merged newer request
+        gets smaller fallback candidates after the unchanged whole-row choice.
         """
         selected_tail_messages = [msg for msg in selected_tail if isinstance(msg, dict)]
         for message in reversed(messages):
@@ -7454,28 +7464,51 @@ class LCMEngine(
             # assistant-role summary appears only behind a retained sole user kept verbatim.
             if preserved_objective and message.get("role") == "user":
                 if any(message == selected for selected in selected_tail_messages):
-                    return None
-                cuts: list[tuple[int, bool]] = []
+                    return []
+                sanitized_objective = self._sanitized_preserved_objective_context_content(message)
+                if any(
+                    selected.get("role") == "user"
+                    and self._sanitized_preserved_objective_context_content(selected) == sanitized_objective
+                    for selected in selected_tail_messages
+                ):
+                    return []
+                first_verified: Optional[tuple[int, int]] = None
+                verified_until = 0
                 for boundary in re.finditer("\n\n---\n\n", preserved_objective):
+                    # Interior boundaries belong to an already verified run, with the same suffix.
+                    if boundary.start() < verified_until or not preserved_objective.startswith("[", boundary.end()):
+                        continue
                     # Cut only at summary parts verified against this session's DAG; a quoted header is request text.
                     rest = preserved_objective[boundary.end():]
                     if (end := self._verified_lcm_summary_prefix_end(rest)) is not None:
-                        cuts.append((boundary.start(), not rest[end:].strip()))
+                        verified_until = boundary.end() + end
+                        if first_verified is None:
+                            first_verified = (boundary.start(), verified_until)
+                        if not rest[end:].strip():
+                            return [preserved_objective[:boundary.start()]]
                 # LCM's own parts end the scaffold. Text after the verified parts (a pasted summary, or a row the
                 # host merged onto the scaffold) keeps the whole row: a duplicate summary, never a lost request.
-                whole = next((start for start, ends in cuts if ends), None)
-                return preserved_objective if whole is None else preserved_objective[:whole]
+                candidates = [preserved_objective]
+                if first_verified is not None:
+                    start, end = first_verified
+                    # The host appends the newer request with two newlines after its summary run.
+                    if preserved_objective.startswith("\n\n", end) and (new := preserved_objective[end + 2:]).strip():
+                        candidates.extend([
+                            preserved_objective[:start] + "\n\n" + new,
+                            self._build_preserved_objective_summary_part({"role": "user", "content": new}),
+                        ])
+                return candidates
             if message.get("role") != "user":
                 continue
             if self._is_preserved_todo_context_message(message):
                 continue
             if self._is_verified_replay_scaffold_message(message):
                 # LCM's own summary row: never re-label it as the user's objective.
-                return None
+                return []
             if any(message == selected for selected in selected_tail_messages):
-                return None
-            return self._build_preserved_objective_summary_part(message)
-        return None
+                return []
+            return [self._build_preserved_objective_summary_part(message)]
+        return []
 
     @staticmethod
     def _newest_user_message_text(messages: List[Dict[str, Any]]) -> str:
@@ -7692,6 +7725,7 @@ class LCMEngine(
         if anchor_source is None:
             anchor_source = tail_messages
         anchor_part: Optional[str] = None
+        anchor_candidates: List[str] = []
         summary_budget = None
         if assembly_cap is not None:
             used = count_messages_tokens(result)
@@ -7773,7 +7807,8 @@ class LCMEngine(
             tail_selected = list(reversed(kept_tail_reversed))
             summary_budget = max(0, assembly_cap - used - tail_token_total)
         if anchor_source is not None:
-            anchor_part = self._latest_user_context_anchor(anchor_source, tail_selected)
+            anchor_candidates = self._latest_user_context_anchor_candidates(anchor_source, tail_selected)
+            anchor_part = anchor_candidates[0] if anchor_candidates else None
 
         # Collect DAG summaries — highest depth first for context hierarchy
         summary_parts: list[str] = []
@@ -7792,11 +7827,13 @@ class LCMEngine(
             summary_role = "assistant" if last_role != "assistant" else "user"
         # #653: (selection group, node id) per part; the anchor goes first, then each depth, deepest first.
         part_keys: list[tuple[int, Optional[int]]] = []
-        if anchor_part is not None:
-            anchor_msg = {"role": summary_role, "content": anchor_part}
+        for candidate in anchor_candidates:
+            anchor_msg = {"role": summary_role, "content": candidate}
             if summary_budget is None or count_message_tokens(anchor_msg) <= summary_budget:
+                anchor_part = candidate
                 summary_parts.append(anchor_part)
                 part_keys.append((-1, None))
+                break
 
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.

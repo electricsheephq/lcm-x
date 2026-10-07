@@ -8,6 +8,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ### v0.27.0
 
+- Fix: under an assembly cap, a newer request the host merged onto the carried objective survives on its own when the whole row does not fit; a sanitized tail copy of the objective is no longer emitted twice; the objective scan is linear in its parts. (#958)
 - Change: summaries now see the middle of long messages using a shared input budget with a legacy retention floor; measured middle-fact retention rose from 0/72 to 42/72. (#611)
 - Fix: a clipped long message no longer becomes a verbatim level-3 leaf with the default or fleet input budgets. (#899)
 - Bench: Track S decision scoring uses per-file digest admission, durable revocation, and complete paired metrics while retaining separate prefix timing. (#946, #948)
