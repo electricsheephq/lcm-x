@@ -7454,7 +7454,8 @@ class LCMEngine(
                 if any(message == selected for selected in selected_tail_messages):
                     return None
                 for boundary in re.finditer("\n\n---\n\n", preserved_objective):
-                    if self._LCM_SUMMARY_PART_HEADER_RE.match(preserved_objective, boundary.end()):
+                    # Cut only at summary parts verified against this session's DAG; a quoted header is request text.
+                    if self._verified_lcm_summary_prefix_end(preserved_objective[boundary.end():]) is not None:
                         return preserved_objective[:boundary.start()]
                 return preserved_objective
             if message.get("role") != "user":

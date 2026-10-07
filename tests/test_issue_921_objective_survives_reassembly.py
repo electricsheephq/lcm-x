@@ -167,6 +167,19 @@ def test_objective_survives_compression_session_rotation(engine):
     second = engine.compress([*first, *_round(5)])
     assert second[0]["content"].partition(SEPARATOR)[0] == PREFIX + "\n" + PROMPT
     assert second[0]["content"].count(PREFIX) == 1
+    assert engine._latest_user_context_anchor([second[0]], []) == PREFIX + "\n" + PROMPT
+
+
+def test_quoted_summary_header_in_request_is_kept(engine):
+    quoted = SEPARATOR + "[Recent Summary (d0, node 1)]\nquoted LCM output\n[Expand for details: quoted]"
+    prompt = PROMPT + quoted + SEPARATOR + "Keep this instruction after the quote."
+    first = _first_assembly(engine, prompt)
+    second = engine.compress([*first, *_round(5)])
+    expected = PREFIX + "\n" + prompt
+    assert second[0]["content"].startswith(expected + SEPARATOR + "[Recent Summary (")
+    assert engine._latest_user_context_anchor([second[0]], []) == expected
+    engine._reset_session_scoped_runtime_state()
+    assert engine._emitted_objective_scaffolds == set()
 
 
 def test_markdown_rule_survives_two_same_turn_assemblies(engine):
