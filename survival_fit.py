@@ -257,9 +257,13 @@ class SurvivalFitMixin:
 
         def build(cut: int, kept):
             dropped = body[:cut]
-            ids = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
+            mapped = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
+            # coverage reads the counted rows only: a generated carrier's id never stands in for an unmapped row
+            ids = sorted(store_ids[id(message)] for message in dropped
+                         if id(message) in store_ids and not self._survival_generated(message))
             count = sum(1 for message in dropped if not self._survival_generated(message))
-            notice = _NOTICE.format(n=count, first=ids[0] if ids else "-", last=ids[-1] if ids else "-")
+            # the notice names every stored row that left (a carrier's own row too), so the read-back reaches it
+            notice = _NOTICE.format(n=count, first=mapped[0] if mapped else "-", last=mapped[-1] if mapped else "-")
             out = list(head)
             if out and out[0].get("role") == "system":  # the notice never edits a generated summary row
                 out[0] = {**out[0], "content": self._survival_with_notice(out[0].get("content"), notice)}
@@ -479,11 +483,11 @@ class SurvivalFitMixin:
                          warn_user=True) -> None:
         """Log the fit, update the doctor counter and warn the user once per conversation."""
         uncovered = 0
-        if reason.startswith("exit_fit:"):
+        if shortened:
             try:  # a diagnostic: its failure never fails the fit
                 uncovered = None if len(ids) < count else len(set(ids) - self._store_complete_node_covered(ids))
             except Exception:
-                logger.debug("LCM exit fit: the uncovered-row count failed", exc_info=True)
+                logger.debug("LCM survival fit: the uncovered-row count failed", exc_info=True)
                 uncovered = None
         if shortened:
             logger.log(
@@ -505,12 +509,20 @@ class SurvivalFitMixin:
             return {"count": count + 1, "last_reason": reason, "last_at": time.time(),
                     "last_conversation": str(self._conversation_id or self._session_id or ""),
                     "last_reached_budget": after <= budget,
+                    "last_uncovered_rows": uncovered,
                     "last_shortened": shortened,
                     "ever_shortened": shortened or (record.get("ever_shortened", True) if record else False),
                     "unreached_budget_count": int(record.get("unreached_budget_count") or 0) + (after > budget),
                     # fits that projected a row (#601); a record from before the key stays unknown (no key)
                     **({"projected_count": int(record.get("projected_count") or 0) + bool(projected)}
                        if "projected_count" in record or not record.get("count") else {}),
+                    **({"uncovered_fit_count": int(record.get("uncovered_fit_count") or 0)
+                       + bool(shortened and uncovered is not None and uncovered > 0)}
+                       if "uncovered_fit_count" in record or not record.get("count") else {}),
+                    # shortened fits whose coverage could not be read: uncovered_fit_count is a lower bound while > 0
+                    **({"unknown_coverage_fit_count": int(record.get("unknown_coverage_fit_count") or 0)
+                       + bool(shortened and uncovered is None)}
+                       if "unknown_coverage_fit_count" in record or not record.get("count") else {}),
                     **({"count_lost": True} if record.get("count_lost") else {})}  # #618 item 14: kept
 
         try:
