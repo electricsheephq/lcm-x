@@ -83,7 +83,7 @@ def pair_axes(cp):
             "active_constraint_items",
         )
     }  # [b, c, v1 kept, v2 kept] + n below
-    n_items = {k: 0 for k in axes}
+    n_items, excluded = {k: 0 for k in axes}, {k: 0 for k in axes}
     pairs, missing = [], []
     signs = {k: {"wins": 0, "losses": 0, "ties": 0} for k in axes}
     for seed in SEEDS:
@@ -92,7 +92,9 @@ def pair_axes(cp):
             if not (s1 and s2):
                 missing.append(f"seed-{seed}/{run}")
                 continue
-            if not all(s.get("metrics", {}).get(m, {}).get("complete") is True
+            if not all(s.get("metrics", {}).get(m, {}).get("complete") is True or
+                       (m != "continuity" and any(p.get("class") in ("MISSING", "READER_TRUNCATED")
+                                                  for p in s["probes"].values()))
                        for s in (s1, s2) for m in ("facts_kept", "continuation", "continuity")):
                 missing.append(f"seed-{seed}/{run} (incomplete score)")
                 continue
@@ -100,6 +102,9 @@ def pair_axes(cp):
             run_delta = {k: 0 for k in axes}
 
             def add(ax, k1, k2):
+                if k1 is None or k2 is None:
+                    excluded[ax] += 1
+                    return
                 run_delta[ax] += int(k2) - int(k1)
                 axes[ax][0] += k1 and not k2
                 axes[ax][1] += k2 and not k1
@@ -107,22 +112,21 @@ def pair_axes(cp):
                 axes[ax][3] += k2
                 n_items[ax] += 1
 
+            def kept(s, pid):
+                cls = s["probes"].get(pid, {}).get("class", "MISSING")
+                return None if cls in ("MISSING", "READER_TRUNCATED") else cls == "CORRECT"
             lost1 = set(s1["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids", []))
             lost2 = set(s2["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids", []))
             for fid, f in facts[seed].items():
-                k1 = s1["probes"].get(fid, {}).get("class") == "CORRECT" and fid not in lost1
-                k2 = s2["probes"].get(fid, {}).get("class") == "CORRECT" and fid not in lost2
+                k1, k2 = kept(s1, fid), kept(s2, fid)
+                k1, k2 = (None if k1 is None else k1 and fid not in lost1), (None if k2 is None else k2 and fid not in lost2)
                 add("facts_all", k1, k2)
                 add(f"facts_{f['placement']}", k1, k2)
                 if f["class"] == "early_user_constraint":
                     add("constraint_class", k1, k2)
-            c1 = set(s1["metrics"]["continuation"].get("correct_fields") or [])
-            c2 = set(s2["metrics"]["continuation"].get("correct_fields") or [])
-            den = s1["metrics"]["continuation"]["denominator"]
-            fields = sorted(c1 | c2)
-            fields += [f"_miss{i}" for i in range(den - len(fields))]
-            for fld in fields:
-                add("continuation", fld in c1, fld in c2)
+            fields = {pid for s in (s1, s2) for pid in s["probes"] if "." in pid}
+            for pid in fields:
+                add("continuation", kept(s1, pid), kept(s2, pid))
             g1, g2 = grid_by_row(s1, ARMS[0], seed, run, cp), grid_by_row(s2, ARMS[1], seed, run, cp)
             for key in sorted(set(g1) & set(g2)):
                 if key[1].endswith("host_instruction"):
@@ -136,7 +140,7 @@ def pair_axes(cp):
     for ax, (b, c, k1, k2) in axes.items():
         n = n_items[ax]
         out[ax] = {
-            "n": n,
+            "n": n, "excluded": excluded[ax],
             "v1": round(k1 / n, 3) if n else None,
             "v2": round(k2 / n, 3) if n else None,
             "effect_pts": round(100 * (k2 - k1) / n, 1) if n else None,
@@ -145,7 +149,7 @@ def pair_axes(cp):
             "p": round(mcnemar(b, c), 4),
             "sign_test": {**signs[ax], "p": round(mcnemar(signs[ax]["wins"], signs[ax]["losses"]), 4)},
         }
-    return {"status": "INCOMPLETE" if missing else "COMPLETE", "missing_pairs": missing, "pairs": pairs, "axes": out}
+    return {"status": "INCOMPLETE" if missing or any(excluded.values()) else "COMPLETE", "missing_pairs": missing, "pairs": pairs, "axes": out}
 
 
 def loads():
