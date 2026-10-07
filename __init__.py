@@ -604,7 +604,7 @@ def register(ctx):
                 if not session_id:
                     return ""
                 resolved = engine_registry.resolve_active_lcm_engine(session_id=session_id)
-                if resolved is None or resolved._session_id_matches_lcm_bypass_filters(
+                if resolved is None or resolved._session_id_bypasses_lcm(
                     session_id, platform=resolved._lcm_session_last_platform.get(session_id, ""),
                 ):
                     return ""
