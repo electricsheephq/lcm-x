@@ -182,6 +182,15 @@ def test_quoted_summary_header_in_request_is_kept(engine):
     assert engine._emitted_objective_scaffolds == set()
 
 
+def test_pasted_verified_summary_in_request_is_kept(engine):
+    first = _first_assembly(engine, PROMPT)
+    parts = first[0]["content"][len(PREFIX + "\n" + PROMPT + SEPARATOR):]
+    assert engine._verified_lcm_summary_prefix_end(parts) == len(parts)
+    pasted = PROMPT + SEPARATOR + parts + SEPARATOR + "Keep this instruction after the pasted summary."
+    scaffold = {"role": "user", "content": PREFIX + "\n" + pasted + SEPARATOR + parts}
+    assert engine._latest_user_context_anchor([scaffold], []) == PREFIX + "\n" + pasted
+
+
 def test_markdown_rule_survives_two_same_turn_assemblies(engine):
     prompt = PROMPT + SEPARATOR + "Keep all of this text after the Markdown rule.\n日本語 café\t  "
     first = _first_assembly(engine, prompt)
