@@ -75,7 +75,7 @@ def test_no_system_orphan_tool_tail_overflow_recovery_not_empty(engine, head_rol
 def test_newest_non_tool_row_that_fits_is_chosen_over_older_head(engine):
     # #921: normal assembly carries the objective forward, so it no longer
     # needs the singleton fallback and also keeps a fitting assistant status.
-    objective = {"role": "assistant", "content": OBJECTIVE}
+    objective = {"role": "user", "content": "KEEP_OBJECTIVE: continue the active plan."}
     tail = [
         objective,
         {"role": "assistant", "content": OVERSIZED},
