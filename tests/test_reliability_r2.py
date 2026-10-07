@@ -438,8 +438,8 @@ def test_ci_gate_per_bar_exemptions(failed_bars, targets, open_issues, uncovered
 
 
 def test_ci_gate_per_bar_nightly_553_replay(monkeypatch):
-    # Gate-read fields only, copied from nightly aa84e61d's eva acp-process rotation row.
-    row = {"verdict": "FAIL", "host": "eva-0.21.5", "cell": "crash-after-compaction/rotation/acp-history",
+    # Gate-read fields only, copied from nightly aa84e61d's ref acp-process rotation row.
+    row = {"verdict": "FAIL", "host": "ref-0.21.5", "cell": "crash-after-compaction/rotation/acp-history",
            "transport": "acp-process", "targets": [553, 561],
            "failed_bars": {bar: {} for bar in ("B1", "B2", "B3", "B8", "B4", "B5")}}
     rows = [{**r, "host": row["host"]} for r in full_set(row["transport"], **{row["cell"]: row})]
@@ -452,7 +452,7 @@ def test_ci_gate_per_bar_nightly_553_replay(monkeypatch):
 def test_ci_gate_issue_hosts_scope_a_host_specific_exemption():
     """#821 declares its bars on the r34.4 host only: the same rotation FAIL gates on every other host."""
     fail = {"verdict": "FAIL", "targets": [519, 549, 821], "failed_bars": {"B1": {}, "B3": {}}}
-    for host, gated in (("r34.4-0.21.5", False), ("eva-0.21.5", True), ("customer-0.21.2", True)):
+    for host, gated in (("r34.4-0.21.5", False), ("ref-0.21.5", True), ("customer-0.21.2", True)):
         rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
         problems = ci.gate(rows, {821})
         assert bool(problems) == gated, (host, problems)
@@ -888,10 +888,10 @@ def test_drain_fixture_b_keeps_an_errored_call_failing_d2_when_nothing_was_archi
 
 
 def test_ci_gate_issue_transports_scope_an_acp_only_exemption():
-    """#861 declares B1/B2 on eva, customer, r34.4 and upstream-uid for acp-process rows only: the in-process row of the
+    """#861 declares B1/B2 on ref, customer, r34.4 and upstream-uid for acp-process rows only: the in-process row of the
     same cell still gates, and so does an acp-process FAIL on upstream-main, where the race was not seen."""
     fail = {"verdict": "FAIL", "targets": [519, 549, 821, 861], "failed_bars": {"B1": {}, "B2": {}}}
-    for host in ("eva-0.21.5", "customer-0.21.2", "r34.4-0.21.5", "upstream-uid"):
+    for host in ("ref-0.21.5", "customer-0.21.2", "r34.4-0.21.5", "upstream-uid"):
         acp = [{**r, "host": host} for r in full_set("acp-process", **{"crash-after-rotation/rotation": fail})]
         assert ci.gate(acp, {861}) == []
         in_process = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
@@ -910,7 +910,7 @@ def test_ci_gate_issue_hosts_declare_the_held_composite_issue_on_upstream_uid():
     for host in ("r34.4-0.21.5", "upstream-uid"):
         rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
         assert ci.gate(rows, {821}) == []
-    for host in ("upstream-main", "eva-0.21.5"):
+    for host in ("upstream-main", "ref-0.21.5"):
         rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
         assert len(ci.gate(rows, {821})) == 1
 
@@ -919,7 +919,7 @@ def test_p8_controls_must_be_scorable_on_the_uid_host():
     """#866: upstream-uid carries the flush seams, so a missing or UNSUPPORTED P8 control row there gates on both
     transports, while the pre-uid hosts may still report the controls UNSUPPORTED."""
     assert controls.P8_MUST_SUPPORT == {None: ("upstream-uid",), "acp-process": ("upstream-uid",)}
-    for host, gates in (("upstream-uid", True), ("upstream-main", False), ("eva-0.21.5", False)):
+    for host, gates in (("upstream-uid", True), ("upstream-main", False), ("ref-0.21.5", False)):
         for transport in (None, "acp-process"):
             unsupported = {cell: {"verdict": "UNSUPPORTED", "failed_bars": {}} for cell in controls.P8_CONTROLS}
             rows = [{**r, "host": host} for r in full_set(transport, **unsupported)]

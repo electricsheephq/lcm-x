@@ -480,6 +480,9 @@ def test_d_a_tighter_host_deadline_is_kept(monkeypatch, clock):
 
 def test_e_a_121s_finalize_step_shows_in_the_stop_line_and_the_next_reserve_is_20s(
         tmp_path, monkeypatch, clock, caplog):
+    # Count simulated time, with positive bookkeeping ticks independent of serialization CPU time.
+    ticks = iter(i / 100_000 for i in range(100_000))
+    monkeypatch.setattr(clock, "_real", lambda: next(ticks))
     engine = _engine(tmp_path)
     _provider(monkeypatch, clock, default=10.0)
     _advance_on(monkeypatch, engine, "_refresh_raw_backlog_debt", clock, 121.0)
@@ -498,6 +501,9 @@ def test_e_a_121s_finalize_step_shows_in_the_stop_line_and_the_next_reserve_is_2
 # -- the INFO stop line ------------------------------------------------------------------------------------------
 
 def test_one_info_stop_line_per_compaction_whose_seconds_add_up(tmp_path, monkeypatch, clock, caplog):
+    # Count simulated time, with positive bookkeeping ticks independent of serialization CPU time.
+    ticks = iter(i / 100_000 for i in range(100_000))
+    monkeypatch.setattr(clock, "_real", lambda: next(ticks))
     engine = _engine(tmp_path)
     _provider(monkeypatch, clock, default=25.0)
     _advance_on(monkeypatch, engine, "_prepare_retained_user_anchor", clock, 3.0)
