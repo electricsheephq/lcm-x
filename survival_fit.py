@@ -299,8 +299,9 @@ class SurvivalFitMixin:
                 candidate = kept if any(row is reply for row in kept) else [reply, *kept]
                 if self._survival_measure(build(cut, candidate, reply)[0]) <= budget:
                     return candidate, reply
-                # v0.26.x recognises head/tail, but not #917's middle-band head+mark reply.
-                if len(normalize_content_value(reply.get("content")) or "") > 2 * _HEAD:
+                # v0.26.x recognises head/tail, but not #917's middle-band head+mark reply. Whole-turn cuts
+                # (exit fits) promise no projection: the reply stays verbatim or goes.
+                if not whole_turns and len(normalize_content_value(reply.get("content")) or "") > 2 * _HEAD:
                     row = self._store.get(store_ids[id(reply)]) if id(reply) in store_ids else None
                     if row and row.get("role") == "assistant":
                         fields = self._survival_projected_fields(row, count_message_tokens(reply), _HEAD, _TAIL)
