@@ -113,6 +113,48 @@ def test_unknown_non_exit_coverage_stays_unknown(tmp_path, monkeypatch, summarie
         engine.shutdown()
 
 
+@pytest.mark.parametrize("ordinary_mapped", [False, True], ids=["unknown_coverage", "mapped_control"])
+def test_generated_carrier_id_cannot_stand_in_for_dropped_ordinary_row(tmp_path, monkeypatch, ordinary_mapped):
+    engine = _engine(tmp_path, monkeypatch, sweep=True)
+    try:
+        ordinary = {"role": "assistant", "content": "Earlier reply. " * 100}
+        original = {"role": "user", "content": "Earlier question."}
+        newest = {"role": "user", "content": "Keep this turn."}
+        engine.ingest([original, ordinary, newest])
+        mapping = engine._get_store_id_map_for_messages([original, ordinary, newest])
+        node = SummaryNode(session_id="S", summary="Earlier context. " * 200,
+                           source_ids=[mapping[id(original)]])
+        engine._dag.add_node(node)
+        carrier = {"role": "user", "content":
+                   f"[Recent Summary (d0, node {node.node_id})]\n{node.summary}\n"
+                   f"[Expand for details: {node.expand_hint}]\n\n{original['content']}"}
+        assert engine._generated_context_carrier_remainder(carrier) == original["content"]
+        assert engine._survival_generated(carrier) and not engine._survival_generated(ordinary)
+        view = [carrier, ordinary, newest]
+        store_ids = {id(carrier): mapping[id(original)], id(newest): mapping[id(newest)]}
+        if ordinary_mapped:
+            store_ids[id(ordinary)] = mapping[id(ordinary)]
+        monkeypatch.setattr(engine, "_get_store_id_map_for_messages", lambda messages: store_ids)
+        engine._ingest_cursor = len(view)
+        engine._ingest_cursor_needs_reconcile = False
+        result = engine._survival_fit(view, view, 0, "noop",
+                                      request_cap=engine._survival_measure([newest]) + 10)
+        assert result == [newest]
+        assert engine._last_survival_fit["dropped_rows"] == 1
+        expected = 1 if ordinary_mapped else None
+        assert engine._last_survival_fit["uncovered_rows"] == expected
+        record = _counter(engine)
+        assert record["last_uncovered_rows"] == expected
+        assert record["unknown_coverage_fit_count"] == int(not ordinary_mapped)
+        assert record["uncovered_fit_count"] == int(ordinary_mapped)
+        doctor = _doctor_observation(engine)
+        assert f"last_uncovered_rows {expected if ordinary_mapped else 'unknown'}" in doctor
+        assert f"unknown_coverage_fit_count {int(not ordinary_mapped)}" in doctor
+        assert f"uncovered_fit_count {int(ordinary_mapped)}" in doctor
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("reason", ["noop", "exit_fit:compressed"])
 def test_unshortened_fit_has_zero_without_coverage_or_applied_log(tmp_path, monkeypatch, summaries, caplog, reason):
     engine = _engine(tmp_path, monkeypatch, sweep=True)

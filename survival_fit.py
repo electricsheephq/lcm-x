@@ -256,9 +256,13 @@ class SurvivalFitMixin:
 
         def build(cut: int, kept):
             dropped = body[:cut]
-            ids = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
+            mapped = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
+            # coverage reads the counted rows only: a generated carrier's id never stands in for an unmapped row
+            ids = sorted(store_ids[id(message)] for message in dropped
+                         if id(message) in store_ids and not self._survival_generated(message))
             count = sum(1 for message in dropped if not self._survival_generated(message))
-            notice = _NOTICE.format(n=count, first=ids[0] if ids else "-", last=ids[-1] if ids else "-")
+            # the notice names every stored row that left (a carrier's own row too), so the read-back reaches it
+            notice = _NOTICE.format(n=count, first=mapped[0] if mapped else "-", last=mapped[-1] if mapped else "-")
             out = list(head)
             if out and out[0].get("role") == "system":  # the notice never edits a generated summary row
                 out[0] = {**out[0], "content": self._survival_with_notice(out[0].get("content"), notice)}
