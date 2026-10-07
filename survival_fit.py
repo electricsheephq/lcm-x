@@ -449,7 +449,7 @@ class SurvivalFitMixin:
         calls = message.get("tool_calls")
         haystack = content if _PROJECTED_PREFIX in content else ""
         call_text = ""
-        emitted_matches = []
+        emitted_matches, emitted_keys = [], set()
         if isinstance(calls, list):
             arguments = [str((call.get("function") or {}).get("arguments") or "") for call in calls
                          if isinstance(call, dict) and isinstance(call.get("function"), dict)
@@ -465,8 +465,11 @@ class SurvivalFitMixin:
                 if (isinstance(bounded, dict) and set(bounded) == {"lcm_survival_fit"}
                         and isinstance(bounded["lcm_survival_fit"], str)):
                     match = _PROJECTED_RE.match(bounded["lcm_survival_fit"])
-                    if match is not None:
+                    if match is not None and match.groups() not in emitted_keys:
+                        emitted_keys.add(match.groups())
                         emitted_matches.append(match)
+                        if len(emitted_matches) == 4:  # the same candidate bound as the scans below
+                            break
         store = getattr(self, "_store", None)
         if _PROJECTED_PREFIX not in haystack + call_text or store is None:
             return None
