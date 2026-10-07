@@ -456,7 +456,8 @@ A summary call that raises or times out is a failure and counts toward
 follows a line that names the kind (`LCM summary discarded empty output`, `... reasoning-only output` or
 `... output that violated the integrity contract`); `reason=not_shorter` means the result was not shorter than its
 source. A route opens with `LCM summary route circuit opened for <route> after N failure(s)` or
-`... after N rejected result(s)`.
+`... after N rejected result(s)`. Contract rejections append `contract=<check>` to `reason=no_content` and emit
+the content-free INFO line `LCM summary contract shape: check=<check> last_line=<list|heading|bold|trailing|missing|other>`.
 
 When a leaf's own level 1 and level 2 results are rejected and the survival fit can keep the request under the
 window, the compaction writes no leaf and no node for it and keeps its rows for a later pass (#652). A level 3
