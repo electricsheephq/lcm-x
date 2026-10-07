@@ -2,7 +2,7 @@
 
 Ported from the WS3 gauntlet ``drive_hermes_acp_rc4.py`` (StdioJsonRpc: framing, the server-request refusal,
 process-group lifecycle) plus ``--kill-after-rotation`` from ``drive_hermes_acp_519.py`` (``RotationKiller``). All
-live-model and eva coupling is gone: no auth.json, no contamination guard, no session model, no canaries. The
+live-model and reference-agent coupling is gone: no auth.json, no contamination guard, no session model, no canaries. The
 caller supplies argv/env/cwd (an isolated HERMES_HOME/HOME per cell) and owns the process: ``kill()`` SIGKILLs
 the process group this client spawned (``start_new_session``), never anything else.
 """
