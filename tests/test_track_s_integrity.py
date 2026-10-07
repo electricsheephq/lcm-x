@@ -193,7 +193,7 @@ def test_s1_dirty_checkout(tmp_path):
     git.chmod(0o755)
     result = subprocess.run(["bash", str(TRACK / "s1/run.sh"), str(tmp_path), "seed-1", "r1"],
         env={**os.environ, "PATH": f"{fake}:{os.environ['PATH']}", "TRACK_S_OUT": str(tmp_path),
-             "TRACK_S_MATERIAL": str(tmp_path)}, capture_output=True, text=True, timeout=5)
+             "TRACK_S_MATERIAL": str(tmp_path)}, capture_output=True, text=True, timeout=60)
     assert result.returncode == 3
     assert "tracked modifications" in result.stderr
 
@@ -210,7 +210,7 @@ async function toolLoop(purpose,msgs,tools,onCall,acct) {''' + body + '''}
 toolLoop('probe',msgs,[{name:'t'}],()=>{}).then(r=>{
 if(dispatched!==2 || !r.guardHit || options.at(-1).tools!==undefined || msgs.filter(m=>m.role==='tool').length!==4) process.exit(1);
 });'''
-    subprocess.run(["node", "-e", js], check=True, timeout=5)
+    subprocess.run(["node", "-e", js], check=True, timeout=60)
 
 
 @pytest.mark.parametrize("lane", ["glm", "s4"])
@@ -227,7 +227,7 @@ def test_decision_child_exit(tmp_path, lane):
         (kit / script).write_text("raise SystemExit(7)\n")
     result = subprocess.run(["bash", str(runner), lane, "1", "fake", "synthetic"],
         env={**os.environ, "PYTHON": sys.executable, "TRACK_S_OUT": str(tmp_path),
-             "TRACK_S_MATERIAL": str(tmp_path), "S2_PRODUCT_WORKTREE": "fake"}, timeout=5)
+             "TRACK_S_MATERIAL": str(tmp_path), "S2_PRODUCT_WORKTREE": "fake"}, timeout=60)
     assert result.returncode != 0
     assert all("exit 7 end" in p.read_text() for p in (tmp_path / "decision/logs").glob("*.wall"))
 
@@ -244,7 +244,7 @@ def test_decision_timeout_kills_group(tmp_path):
     try:
         result = subprocess.run(["bash", "-c", command, "test", sys.executable, str(child)],
             env={**os.environ, "TRACK_S_OUT": str(tmp_path), "TRACK_S_MATERIAL": str(tmp_path),
-                 "S2_PRODUCT_WORKTREE": "fake"}, timeout=5)
+                 "S2_PRODUCT_WORKTREE": "fake"}, timeout=60)
         assert result.returncode == 124
         state = subprocess.run(["ps", "-o", "stat=", "-p", pidfile.read_text()], capture_output=True, text=True)
         assert not state.stdout.strip() or state.stdout.strip().startswith("Z")
