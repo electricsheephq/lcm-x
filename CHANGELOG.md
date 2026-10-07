@@ -16,6 +16,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: on Hermes, the LCM note now reaches the model as a plugin system-prompt section, only in sessions LCM manages, and it names only the enabled tools (#900).
 - Fix: bound the summary prefix by default when the context window is known, retaining the newest summaries without removing DAG nodes, and condense the heaviest eligible depth first. (#930)
 - Fix: `LCM_SQLITE_MMAP_SIZE` configures SQLite mapped reads in bytes (default unchanged at 268435456); use `0` on SD-card hosts, and `/lcm doctor` reports the effective value. (#903)
+- Fix: reserve proactive recall when checking the objective-only no-op, and withhold the LCM note from active auxiliary and rotated bypass sessions. (#953)
 
 ## v0.26.1 (delegated-child compaction fix)
 

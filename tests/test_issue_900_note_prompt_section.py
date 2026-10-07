@@ -146,6 +146,46 @@ def test_all_enabled_note_is_byte_identical(plugin):
     assert module.lcm_system_prompt_note(set()) == module.LCM_SYSTEM_PROMPT_NOTE
 
 
+def test_section_omits_active_auxiliary_session(plugin):
+    module, register = plugin
+    ctx = register(SectionContext())
+    ctx.engine.on_session_start("auxiliary-child", platform="cli")
+    ctx.engine._mark_thread_context_stateless("auxiliary-child")
+    registry = importlib.import_module(f"{module.__name__}.engine_registry")
+    assert registry.resolve_active_lcm_engine(session_id="auxiliary-child") is ctx.engine
+    assert ctx.engine._thread_context_stateless()
+    assert not ctx.engine._session_id_matches_lcm_bypass_filters("auxiliary-child", platform="cli")
+
+    assert ctx.sections[0][1]({"session_id": "auxiliary-child"}) == ""
+
+
+@pytest.mark.parametrize("setting", ["LCM_IGNORE_SESSION_PATTERNS", "LCM_STATELESS_SESSION_PATTERNS"])
+def test_section_omits_rotated_bypass_session(plugin, monkeypatch, setting):
+    _, register = plugin
+    monkeypatch.setenv(setting, "bypassed-old")
+    ctx = register(SectionContext())
+    ctx.engine.on_session_start("bypassed-old", platform="cli")
+    ctx.engine.on_session_start(
+        "rotated-child", boundary_reason="compression", old_session_id="bypassed-old", platform="cli",
+    )
+    assert ctx.engine._has_lcm_bypass_lineage_session("rotated-child", platform="cli")
+    assert ctx.engine._lcm_session_last_bypassed["rotated-child"]
+    assert not ctx.engine._session_id_matches_lcm_bypass_filters("rotated-child", platform="cli")
+
+    assert ctx.sections[0][1]({"session_id": "rotated-child"}) == ""
+
+
+def test_section_keeps_foreground_note_while_auxiliary_child_is_active(plugin):
+    module, register = plugin
+    ctx = register(SectionContext())
+    ctx.engine.on_session_start("foreground", platform="cli")
+    ctx.engine._mark_thread_context_stateless("auxiliary-child")
+    assert ctx.engine._thread_context_stateless()
+    assert "auxiliary-child" in ctx.engine._active_auxiliary_session_ids()
+
+    assert ctx.sections[0][1]({"session_id": "foreground"}) == module.LCM_SYSTEM_PROMPT_NOTE
+
+
 @pytest.mark.parametrize("disabled", [
     {"lcm_expand"}, {"lcm_grep"}, {"lcm_describe"},
     {"lcm_grep", "lcm_describe", "lcm_expand"},

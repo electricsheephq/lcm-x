@@ -1730,6 +1730,8 @@ class CompactionMixin:
                         count_messages_tokens(working_messages[:leading_anchor_count])
                         + count_message_tokens({"role": "user", "content": anchor})
                         + count_messages_tokens(working_messages[fresh_tail_start:])
+                        + (int(self._config.proactive_recall_budget_tokens)
+                           if self._config.proactive_recall_enabled else 0)
                         <= cap
                     )
                 )
