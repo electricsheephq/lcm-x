@@ -479,6 +479,8 @@ class SurvivalFitMixin:
             )
         self._last_survival_fit = {"reason": reason, "dropped_rows": count, "notice": notice, "at": time.time(),
                                    "uncovered_rows": uncovered, "reached_budget": after <= budget}
+        # None: no lost shortened write; False: lost drop-only fit; True: lost projection.
+        lost = getattr(self, "_survival_counter_write_lost", None)
 
         def counted(record):  # runs inside the store's write transaction: concurrent engines add, never overwrite
             record = record if isinstance(record, dict) else {}
@@ -490,18 +492,22 @@ class SurvivalFitMixin:
                     "last_conversation": str(self._conversation_id or self._session_id or ""),
                     "last_reached_budget": after <= budget,
                     "last_shortened": shortened,
-                    "ever_shortened": shortened or (record.get("ever_shortened", True) if record else False),
+                    "ever_shortened": shortened or lost is not None or (record.get("ever_shortened", True) if record else False),
                     "unreached_budget_count": int(record.get("unreached_budget_count") or 0) + (after > budget),
                     # fits that projected a row (#601); a record from before the key stays unknown (no key)
                     **({"projected_count": int(record.get("projected_count") or 0) + bool(projected)}
-                       if "projected_count" in record or not record.get("count") else {}),
+                       if lost is not True and ("projected_count" in record or not record.get("count")) else {}),
                     **({"count_lost": True} if record.get("count_lost") else {})}  # #618 item 14: kept
 
         try:
             self._store.update_metadata_json(SURVIVAL_FIT_COUNTER_KEY, counted)
         except Exception:
+            if shortened:
+                self._survival_counter_write_lost = bool(projected) or lost is True
             logger.warning("LCM survival-fit counter write failed (projected=%s); /lcm doctor under-counts survival fits "
                            "for this store", projected, exc_info=True)
+        else:
+            self._survival_counter_write_lost = None
         key = str(self._conversation_id or self._session_id or "")
         if shortened and warn_user and key not in self._survival_fit_warned:
             self._survival_fit_warned.add(key)
