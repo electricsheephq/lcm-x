@@ -10,30 +10,12 @@ from hermes_lcm.survival_fit import SURVIVAL_FIT_COUNTER_KEY
 
 from tests.test_issue_668_exit_fit import engine as _engine_fixture, estimators, _counter  # noqa: F401
 from tests.test_issue_650_survival_fit_keeps_summary import _hidden_backlog, _spy
-from tests.test_native_publication_fallback import candidate as _native_fixture, history, install_native
 
 engine = _engine_fixture
-candidate = _native_fixture
-
-
-def test_native_result_keeps_plain_fit(candidate, monkeypatch, caplog):
-    calls = install_native(monkeypatch)
-    messages = history()
-    expected = [{"role": "assistant", "content": "native summary"}] + messages[-5:]
-    candidate.threshold_tokens = candidate._survival_measure(expected)
-    seen = _spy(candidate, monkeypatch)
-    with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
-        result = candidate.compress(messages, current_tokens=candidate._survival_measure(messages))
-    assert calls and candidate._config.native_recovery
-    assert candidate._last_compression_status == "host_native"
-    assert int(candidate.threshold_tokens * 0.95) < candidate._survival_measure(seen["input"])
-    assert candidate._survival_measure(seen["input"]) <= candidate._survival_fit_budget(messages, None)
-    assert result == seen["input"] and candidate._last_survival_fit is None
-    assert not _counter(candidate).get("last_reason", "").startswith("exit_fit:")
-    assert not any("exit_fit:" in row.getMessage() for row in caplog.records)
 
 
 def test_automatic_forced_overflow_keeps_plain_fit(engine, monkeypatch, caplog):
+    """#738: an exit fit drops only covered turns."""
     view = _hidden_backlog(engine, list_users=True)
     observed = engine._survival_measure(view) + 2000
     engine._config.max_assembly_tokens = observed - 1
@@ -47,11 +29,13 @@ def test_automatic_forced_overflow_keeps_plain_fit(engine, monkeypatch, caplog):
     assert result == seen["input"] and engine._last_survival_fit is None
     assert not any("exit_fit:" in row.getMessage() for row in caplog.records)
     assert engine._compress_forced_overflow is False
-    # An unrelated automatic invocation must still get its exit cap.
+    # An unrelated automatic invocation must still get its exit cap (its uncovered rows stay: the exit fit skips).
     engine._config.max_assembly_tokens = 0
     monkeypatch.setattr(engine, "_compress_impl", lambda messages, **kwargs: messages)
-    engine.compress(result, current_tokens=observed)
-    assert _counter(engine)["last_reason"].startswith("exit_fit:")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+        engine.compress(result, current_tokens=observed)
+    assert any("LCM exit fit skipped" in row.getMessage() for row in caplog.records)
 
 
 @pytest.mark.parametrize("prior", ["none", "shortened", "legacy"])
@@ -88,7 +72,7 @@ def test_legacy_record_without_ever_shortened_keeps_doctor_advice(engine):
 
 def test_unmapped_exit_coverage_is_unknown(engine, monkeypatch, caplog):
     monkeypatch.setattr(engine, "_store_complete_node_covered", lambda ids: set(ids))
-    with caplog.at_level(logging.WARNING, logger="hermes_lcm"):
+    with caplog.at_level(logging.INFO, logger="hermes_lcm"):
         engine._survival_record("exit_fit:compressed", 2, [1], 900, 500, 600, False, "", warn_user=False)
     assert engine._last_survival_fit["uncovered_rows"] is None
     assert "uncovered_rows=unknown" in caplog.text

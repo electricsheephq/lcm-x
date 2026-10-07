@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
+import signal
 import socket
 import subprocess
 import sys
@@ -16,7 +18,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from bench.instruments.reliability import acp_driver as AD, cells, ci, fake_provider as FP, hosts, plugin_tree, probe  # noqa: E402
-from bench.instruments.reliability import process_cell as PC, run_matrix as RM  # noqa: E402
+from bench.instruments.reliability import controls, process_cell as PC, run_matrix as RM  # noqa: E402
 from bench.instruments.reliability.scorers import chronology  # noqa: E402
 
 
@@ -369,15 +371,37 @@ def test_extra_turns_only_when_a_pass_just_consumed_the_backlog(tmp_path):
 
 
 def full_set(transport=None, **over):
-    """One PASS row per expected cell of one (host, transport, plugin sha), with ``over`` = {cell: row fields}."""
+    """One row per expected cell, PASS except the red P8 controls; ``over`` = {cell: row fields}."""
     extra = {"transport": transport} if transport else {}
-    return [{"verdict": "PASS", "host": "h", "plugin_sha": "s", "cell": c, "targets": [], **extra, **over.get(c, {})}
+    return [{"verdict": "PASS", "host": "h", "plugin_sha": "s", "cell": c, "targets": [], **extra,
+             **({"verdict": "FAIL", "failed_bars": {"B9": {}}}
+                if c.startswith("p8-control/") and c != "p8-control/none" else {}), **over.get(c, {})}
             for c in ci.expected_cells(transport)]
 
 
+@pytest.mark.parametrize("transport", [None, "acp-process"])
+def test_ci_gate_checks_p8_control_pattern_and_required_support(monkeypatch, transport):
+    monkeypatch.setattr(controls, "P8_MUST_SUPPORT", {transport: ("h",)}, raising=False)
+    rows = full_set(transport)
+    assert ci.gate(rows, set()) == []
+    inverted = [{**r, "verdict": "PASS" if r["verdict"] == "FAIL" else "FAIL"}
+                if r["cell"].startswith("p8-control/") else r for r in rows]
+    assert len(ci.gate(inverted, set())) == 4
+    for wrong in ({"verdict": "UNSUPPORTED"}, {"verdict": "INCONCLUSIVE"}, {"failed_bars": {}},
+                  {"failed_bars": {"B1": {}}}):
+        problems = ci.gate(full_set(transport, **{"p8-control/archived": wrong}), set())
+        assert len(problems) == 1 and "P8 control" in problems[0]
+    missing = [r for r in rows if r["cell"] != "p8-control/none"]
+    assert any("P8 control" in p for p in ci.gate(missing, set()))
+    unsupported = full_set(transport, **{"p8-control/archived": {"verdict": "UNSUPPORTED"}})
+    assert ci.gate([{**r, "host": "another-host"} for r in unsupported], set()) == []
+    assert len(ci.gate([{**r, "host": "another-host"} for r in inverted], set())) == 4
+
+
 def test_ci_gate_fails_on_error_and_on_untracked_g_rel_1_fail():
-    rows = full_set(**{"crash-after-rotation/rotation": {"verdict": "FAIL", "targets": [519, 549]},
-                       "native-long-prefix/in-place": {"verdict": "FAIL"},
+    rows = full_set(**{"crash-after-rotation/rotation": {"verdict": "FAIL", "targets": [519, 549],
+                                                      "failed_bars": {"B1": {}}},
+                       "multi-session-one-process/in-place": {"verdict": "FAIL"},
                        "baseline/in-place/acp": {"verdict": "INCONCLUSIVE"}})
     assert ci.gate(rows, {549}) == []  # an open targeted issue, a cell outside G-REL-1, a non-FAIL
     assert len(ci.gate(rows, {1})) == 1
@@ -385,6 +409,54 @@ def test_ci_gate_fails_on_error_and_on_untracked_g_rel_1_fail():
     assert len(ci.gate(err, {549})) == 1
     assert len(ci.gate(full_set(**{"baseline/rotation/acp": {"verdict": "FAIL"}}), {549})) == 1
     assert all(h["sha"] and h["python_version"] for h in json.loads(ci.CI_HOSTS.read_text())["hosts"].values())
+
+
+@pytest.mark.parametrize("failed_bars,targets,open_issues,uncovered", [
+    ({"B1": {}, "B8": {}}, [7], {7}, ["B8"]),
+    ({"B1": {}, "B2": {}}, [7], {7}, []),
+    ({"B1": {}, "B8": {}}, [7, 582], {7, 582}, []),
+    ({"B1": {}}, [7, 582], {582}, ["B1"]),
+    ({}, [7], {7}, None),
+    (None, [7], {7}, None),
+    ({"B1": {}}, [483], {483}, ["B1"]),
+])
+def test_ci_gate_per_bar_exemptions(failed_bars, targets, open_issues, uncovered):
+    row = {"verdict": "FAIL", "targets": targets}
+    if failed_bars is not None:
+        row["failed_bars"] = failed_bars
+    problems = ci.gate(full_set(**{"baseline/in-place/acp": row}), open_issues)
+    if uncovered == []:
+        assert problems == []
+    else:
+        assert len(problems) == 1 and "G-REL-1" in problems[0]
+        if uncovered is None:
+            assert "empty or missing failed_bars" in problems[0]
+        else:
+            assert f"uncovered bars {uncovered}" in problems[0]
+        assert f"targets {sorted(targets)}" in problems[0]
+        assert f"open targets {sorted(set(targets) & open_issues)}" in problems[0]
+
+
+def test_ci_gate_per_bar_nightly_553_replay(monkeypatch):
+    # Gate-read fields only, copied from nightly aa84e61d's ref acp-process rotation row.
+    row = {"verdict": "FAIL", "host": "ref-0.21.5", "cell": "crash-after-compaction/rotation/acp-history",
+           "transport": "acp-process", "targets": [553, 561],
+           "failed_bars": {bar: {} for bar in ("B1", "B2", "B3", "B8", "B4", "B5")}}
+    rows = [{**r, "host": row["host"]} for r in full_set(row["transport"], **{row["cell"]: row})]
+    assert ci.gate(rows, {553}) == []
+    monkeypatch.setitem(cells.ISSUES, 553, (("B1", "B2", "B3", "B4"), ""))
+    problems = ci.gate(rows, {553})
+    assert len(problems) == 1 and "uncovered bars ['B5', 'B8']" in problems[0]
+
+
+def test_ci_gate_issue_hosts_scope_a_host_specific_exemption():
+    """#821 declares its bars on the r34.4 host only: the same rotation FAIL gates on every other host."""
+    fail = {"verdict": "FAIL", "targets": [519, 549, 821], "failed_bars": {"B1": {}, "B3": {}}}
+    for host, gated in (("r34.4-0.21.5", False), ("ref-0.21.5", True), ("customer-0.21.2", True)):
+        rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
+        problems = ci.gate(rows, {821})
+        assert bool(problems) == gated, (host, problems)
+        assert not gated or "uncovered bars ['B1', 'B3']" in problems[0]
 
 
 def test_unverified_host_never_executes_its_interpreter(tmp_path):
@@ -488,3 +560,368 @@ def test_ci_gate_fails_a_missing_lane_or_host(tmp_path, capsys):
     assert rc == 1 and f"empty result file: {r2}" in out
     rc, out = run(full_set(), [dict(r, host="B") for r in full_set("acp-process")])
     assert rc == 1 and "has no rows for host(s) ['B']" in out and "has no rows for host(s) ['h']" in out
+
+
+def load_observer():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_rel_observer_test", PC.OBSERVER / "rel_observer.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_process_phase_preserves_p8_audit_receipt_and_controls(tmp_path):
+    run = PC.ProcessCell(cells.select("p8-control/random-snapshot")[0], tmp_path,
+                         {"src": str(tmp_path)}, "acp-process", 10)
+    audit = {"supported": True, "notes": [], "duplicates": [], "emitted": [["S0", "user", "hashed"]]}
+    PC.append(tmp_path / "observer.jsonl", {"phase": "A", "kind": "counters", "p8": audit})
+    assert run.phase_record(1, {"exit": "done"})["p8"] == audit
+    assert PC.unsupported(run.cell, "acp-process") is None
+    committed = {**audit, "emitted": [["S0", "user", "new-hash"]], "commits": 2}
+    PC.append(tmp_path / "observer.jsonl", {"phase": "A", "kind": "p8", "p8": committed})
+    assert run.phase_record(1, {"exit": "crash"})["p8"] == committed
+
+
+def test_observer_counts_host_rows_a_leaf_replaced_by_identity(tmp_path, monkeypatch):
+    """#597 drain cell: two summaries replace five input rows -> in 7, out 4, host_rows_summarized 5. LCM returns
+    retained rows as equal copies, so an equal dict is retained too (``copied``); a changed copy is not."""
+    obs = load_observer()
+    monkeypatch.setattr(obs, "DIR", tmp_path)
+    monkeypatch.setattr(obs, "_r1", probe)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    host_cc = types.ModuleType("agent.context_compressor")
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", host_cc)
+    rows = [{"role": "user" if i % 2 else "assistant", "content": f"row {i}"} for i in range(7)]
+
+    class Engine:
+        def compress(self, messages, *a, **k):
+            self._last_compression_status = "compacted"
+            out = [{"role": "user", "content": "summary 1"}, {"role": "user", "content": "summary 2"}, *messages[5:]]
+            messages[:] = out  # an in-place rewrite of the input list must not hide a replaced row
+            return out
+
+        def handle_tool_call(self, name, args, **k):
+            return "{}"
+    obs.patch_engine(types.SimpleNamespace(context_compressor=Engine()))
+    obs.cur.update(turn=42)
+    Engine().compress(list(rows))
+    assert obs.counters["compactions"][-1] == {"turn": 42, "in": 7, "out": 4, "host_rows_summarized": 5, "copied": 0,
+                                               "status": "compacted", "final": False, "leaves": None, "rows_covered": None,
+                                               "secs": obs.counters["compactions"][-1]["secs"]}
+    copies = [{"role": "user", "content": "summary 1"}, *[dict(m) for m in rows[5:]]]
+    assert obs.list_counts(rows, copies) == {"in": 7, "out": 3, "host_rows_summarized": 5, "copied": 2}
+    changed = [{"role": "user", "content": "summary 1"}, dict(rows[5], content="row 5 rewritten"), rows[6]]
+    assert obs.list_counts(rows, changed) == {"in": 7, "out": 3, "host_rows_summarized": 6, "copied": 0}
+    assert obs.list_counts(rows, [{"role": "user", "content": "summary"}, *rows]) == {
+        "in": 7, "out": 8, "host_rows_summarized": 0, "copied": 0}  # a leaf of hidden rows only: the list grows
+    assert obs.counters["compacted_turns"] == [42]
+
+
+def test_drain_bars_fail_a_hidden_only_leaf_and_are_inconclusive_below_two_compactions(tmp_path):
+    from bench.instruments.reliability.scorers import drain
+    cell = {"in_place": True, "drain": {"phase2_turn": 41, "hold_seconds": 10.0}}
+    PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "turn": 41})
+
+    def phase(*calls):
+        return {"phase": "B", "counters": {"compactions": [dict(zip(("turn", "in", "out", "host_rows_summarized",
+                                                                      "status", "secs"), c), final=False) for c in calls]}}
+    stuck = phase((30, 80, 50, 32, "compacted", 0.2), (55, 60, 61, 0, "compacted", 11.0), (57, 62, 63, 0, "compacted", 0.1))
+    failed, unsure, numbers = drain.score(cell, [stuck], tmp_path)
+    assert set(failed) == {"D1", "D2", "D3"} and not unsure
+    assert numbers["D2"]["turns"] == [55, 57] and numbers["D3"]["over_hold"] == [{"turn": 55, "secs": 11.0}]
+    drains = phase((55, 60, 61, 0, "compacted", 0.1), (57, 62, 40, 24, "compacted", 0.1), (58, 42, 42, 0, "noop", 0.0))
+    assert drain.score(cell, [drains], tmp_path)[:2] == ({"D2": {"compactions": 2, "no_host_row_and_no_shrink": 1, "turns": [55]}}, {})
+    failed, unsure, _ = drain.score(cell, [phase((55, 60, 61, 0, "compacted", 0.1))], tmp_path)
+    assert not failed and set(unsure) == {"D1", "D2", "D3"}
+    by = {c["id"]: c for c in cells.select("drain/*")}
+    assert set(by) == {f"drain/{f}/{m}" for f in ("hidden-backlog", "hidden-backlog-large") for m in ("in-place", "rotation")}
+    assert all(not ci.in_gate_set(c) and c in ci.expected_cells("acp-process") for c in by)
+    assert all(PC.unsupported(c, "acp-process") is None for c in by.values())
+
+
+def test_fixture_b_forgets_host_rows_switches_threshold_and_counts_the_plateau(tmp_path):
+    import sqlite3
+    from bench.instruments.reliability.scorers import drain
+    big = cells.select("drain/hidden-backlog-large/in-place")[0]
+    assert probe.user_text(big, "T", 150).count("alpha") == 100 and probe.user_text(big, "T", 151).count("alpha") == 800
+    assert PC.phase_lcm_env(big, "A")["LCM_CONTEXT_THRESHOLD"] == "0.99"
+    assert PC.phase_lcm_env(big, "B")["LCM_CONTEXT_THRESHOLD"] == "0.5"
+    assert "context_threshold: 0.5" in PC.config_yaml({**big, "lcm_env": PC.phase_lcm_env(big, "B")},
+                                                      {"engine": "lcm-x", "enabled": "hermes-lcm-x"}, "http://127.0.0.1:5/v1")
+    db = tmp_path / "state.db"
+    con = sqlite3.connect(db)
+    con.execute("create table messages (id integer primary key, session_id text, active integer not null default 1)")
+    con.executemany("insert into messages (session_id, active) values (?, ?)", [("acp", 1)] * 3 + [("acp", 0), ("other", 1)])
+    con.commit()
+    con.close()
+    assert PC.forget_host_rows(db, "acp") == 3
+    con = sqlite3.connect(db)
+    assert con.execute("select session_id, sum(active) from messages group by session_id").fetchall() == [("acp", 0), ("other", 1)]
+    con.close()
+
+    def call(turn, n_in, n_out, host, covered):
+        return {"turn": turn, "in": n_in, "out": n_out, "host_rows_summarized": host, "status": "compacted",
+                "final": False, "secs": 0.1, "leaves": 1, "rows_covered": covered}
+    phases = [{"phase": "B", "counters": {"compactions": [call(165, 29, 29, 0, 36), call(166, 31, 31, 0, 36),
+                                                          call(167, 33, 21, 14, 30)]}}]
+    PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "turn": 151})
+    unsure = drain.score(big, phases, tmp_path)[1]
+    assert set(unsure) == {"D1", "D2", "D3"} and "archived no row" in unsure["D1"]
+    (tmp_path / "fixture.jsonl").write_text(json.dumps({"kind": "forget_host_rows", "rows": 300}) + "\n")
+    failed, unsure, numbers = drain.score(big, phases, tmp_path)
+    assert set(failed) == {"D1", "D2"} and not unsure
+    assert numbers["D4"] == {"plateau_compactions": 2, "plateau_turns": [165, 166], "first_shrink_pass": 3,
+                             "hidden_rows_covered_per_pass": [36, 36, 16], "hidden_rows_covered_running": [36, 72, 88]}
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])
+@pytest.mark.parametrize("shrinks", [True, False], ids=["would-pass", "would-fail"])
+@pytest.mark.parametrize("boundary_turn", [None, 41, 42], ids=["missing", "on-time", "late"])
+def test_drain_needs_a_boundary_before_phase_two(tmp_path, in_place, shrinks, boundary_turn):
+    from bench.instruments.reliability.scorers import drain
+    cell = {"in_place": in_place, "drain": {"phase2_turn": 41},
+            "faults": [{"kind": "clean_exit_before_turn", "turn": 41}] if in_place else []}
+    calls = [{"turn": t, "in": 10, "out": 5 if shrinks else 10, "host_rows_summarized": 5 if shrinks else 0,
+              "status": "compacted", "final": False, "secs": 0.1} for t in (30, 43, 44)]
+    if boundary_turn:
+        PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "turn": boundary_turn})
+        PC.append(tmp_path / "transcript.jsonl", {"event": "host_prompt", "turn": 1, "session": "parent"})
+        PC.append(tmp_path / "transcript.jsonl", {"event": "turn_end", "turn": boundary_turn,
+                                                 "session_prefix": "T", "session": "child"})
+    failed, unsure, numbers = drain.score(cell, [{"phase": "A", "counters": {"compactions": calls}}], tmp_path)
+    assert len(numbers["phase1_compactions"]) == 1  # a commit alone is not proof of the host boundary
+    if boundary_turn != 41:
+        assert not failed and set(unsure) == {"D1", "D2", "D3"}
+        assert numbers["phase2_compactions"] == [] and numbers["D4"]["plateau_compactions"] == 0
+        assert all("no recorded" in why for why in unsure.values())
+    else:
+        assert not unsure and set(failed) == (set() if shrinks else {"D1", "D2"})
+
+
+@pytest.mark.parametrize("successes", [0, 1, 2])
+def test_observer_records_raised_compaction_and_drain_d2_keeps_the_error(tmp_path, monkeypatch, successes):
+    from bench.instruments.reliability.scorers import drain
+    obs = load_observer()
+    monkeypatch.setattr(obs, "DIR", tmp_path)
+    monkeypatch.setattr(obs, "_r1", probe)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", types.ModuleType("agent.context_compressor"))
+    exc = RuntimeError("compression failed")
+
+    class Engine:
+        _last_compression_status = "compacted"  # stale success must not mark a raised call as committed
+        broken = True
+
+        def compress(self, messages):
+            if self.broken:
+                time.sleep(0.005)
+                raise exc
+            return messages[:1]
+
+        def handle_tool_call(self, *a, **k):
+            return "{}"
+    engine = Engine()
+    obs.patch_engine(types.SimpleNamespace(context_compressor=engine))
+    obs.cur.update(turn=42)
+    with pytest.raises(RuntimeError) as caught:
+        engine.compress([{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}])
+    assert caught.value is exc
+    [error] = obs.counters["compactions"]
+    assert error["status"] == "error" and error["error"] == "RuntimeError: compression failed"
+    assert error["in"] == 2 and error["out"] is None and error["secs"] >= 0.001
+    engine.broken = False
+    for t in range(43, 43 + successes):
+        obs.cur.update(turn=t)
+        engine.compress([{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}])
+    PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "turn": 41})
+    failed, unsure, _ = drain.score({"in_place": True, "drain": {"phase2_turn": 41}},
+                                   [{"phase": "B", "counters": obs.counters}], tmp_path)
+    assert set(failed) == {"D2"} and "D2" not in unsure
+    assert failed["D2"]["errored_calls"] == [{"turn": 42, "error": "RuntimeError: compression failed", "secs": error["secs"]}]
+
+
+@pytest.mark.parametrize("cell_id", [c["id"] for c in cells.select("drain/*")])
+def test_r1_probe_declines_every_drain_cell(tmp_path, monkeypatch, capsys, cell_id):
+    cell = tmp_path / "cell.json"
+    cell.write_text(json.dumps(cells.select(cell_id)[0]))
+    monkeypatch.setattr(probe, "refusal", lambda *a: None)
+    monkeypatch.setattr(probe, "cite", lambda *a: "anchor")
+    monkeypatch.setattr(probe, "session_count", lambda: None)
+    monkeypatch.setattr(probe, "guard_sockets", lambda **k: pytest.fail("R1 started a drain host"))
+    monkeypatch.setattr(sys, "argv", ["probe", "--cell", str(cell), "--phase", "A", "--cell-dir", str(tmp_path)])
+    probe.main()
+    result = json.loads(capsys.readouterr().out)
+    assert result == {"exit": "unsupported",
+                      "reason": "drain cells need the R2 observer's per-compaction counters (acp-process only)"}
+
+
+def test_a_clean_exit_is_eof_or_the_harness_sigterm_never_a_kill_or_an_error_code(tmp_path):
+    """#801 CI: on a slower runner the host had not exited on stdin EOF yet, so close() stopped it with SIGTERM
+    (returncode -15, not killed). That is a clean stop; a SIGKILL escalation or an error code is not."""
+    proc = AD.AcpProcess([sys.executable, "-c", "import time; time.sleep(30)"], {"PATH": "/usr/bin:/bin"}, tmp_path,
+                         tmp_path / "stderr.log")
+    rc = proc.close()
+    assert rc == -signal.SIGTERM and proc.sent_term and not proc.killed and PC.graceful_exit(rc, proc.killed, True)
+    # Delta review round 4: a SIGTERM from elsewhere, before close(), is not the planned clean exit.
+    other = AD.AcpProcess([sys.executable, "-c", "import time; time.sleep(30)"], {"PATH": "/usr/bin:/bin"}, tmp_path,
+                          tmp_path / "stderr2.log")
+    os.kill(other.pid, signal.SIGTERM)
+    other.process.wait(timeout=10)
+    rc = other.close()
+    assert rc == -signal.SIGTERM and not other.sent_term and not other.killed
+    assert not PC.graceful_exit(rc, other.killed, other.sent_term)
+    assert PC.graceful_exit(0, False, False) and PC.graceful_exit(0, False, True)
+    assert not PC.graceful_exit(-signal.SIGKILL, True, True) and not PC.graceful_exit(-signal.SIGTERM, True, True)
+    assert not PC.graceful_exit(1, False, True) and not PC.graceful_exit(None, False, True)
+
+
+def test_drain_fixture_b_rotation_crosses_on_the_clean_exit_not_a_rotation(tmp_path):
+    """drain/hidden-backlog-large/rotation: phase 1 runs at threshold 0.99 (no compaction, so no rotation); its
+    boundary is the clean host exit at phase2_turn, so the fired fault alone opens phase 2."""
+    from bench.instruments.reliability import cells
+    from bench.instruments.reliability.scorers import drain
+    cell = next(c for c in cells.select("all") if c["id"] == "drain/hidden-backlog-large/rotation")
+    first = cell["drain"]["phase2_turn"]
+    assert drain.boundary(cell, tmp_path, first) is None
+    PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "phase": "A", "turn": first})
+    assert drain.boundary(cell, tmp_path, first) == first
+
+
+def test_drain_rotation_boundary_is_the_latest_transition(tmp_path):
+    """Rotation mode rotates on every compaction: phase 2 starts after the LAST transition at or before
+    phase2_turn, so a compaction that rotated at phase2_turn stays out of phase 2."""
+    from bench.instruments.reliability.scorers import drain
+    first = 41
+    cell = {"in_place": False, "drain": {"phase2_turn": first}}
+    for turn, session in ((1, "s1"), (12, "s2"), (30, "s3"), (first, "s4"), (first + 3, "s5")):
+        PC.append(tmp_path / "transcript.jsonl", {"event": "turn_end", "turn": turn, "session": session})
+    assert drain.boundary(cell, tmp_path, first) == first
+
+
+@pytest.mark.parametrize("transition", [40, 41], ids=["before-phase2", "at-phase2"])
+def test_drain_rotation_d1_excludes_transition_call(tmp_path, transition):
+    from bench.instruments.reliability.scorers import drain
+    first = 41
+    cell = {"in_place": False, "drain": {"phase2_turn": first}}
+    PC.append(tmp_path / "transcript.jsonl", {"event": "host_prompt", "turn": 1, "session": "parent"})
+    PC.append(tmp_path / "transcript.jsonl", {"event": "turn_end", "turn": transition, "session": "child"})
+    calls = [{"turn": turn, "in": 10, "out": 5 if turn == transition else 10,
+              "host_rows_summarized": 1, "status": "compacted", "final": False, "secs": 0.1}
+             for turn in (transition, transition + 1, transition + 2)]
+    assert drain.boundary(cell, tmp_path, first) == transition
+    failed, unsure, numbers = drain.score(cell, [{"phase": "B", "counters": {"compactions": calls}}], tmp_path)
+    assert set(failed) == {"D1"} and not unsure
+    assert [c["turn"] for c in numbers["phase2_compactions"]] == [transition + 1, transition + 2]
+    assert numbers["D1"]["first_two"] == [
+        {"turn": turn, "in": 10, "out": 10, "host_rows_summarized": 1}
+        for turn in (transition + 1, transition + 2)]
+
+
+@pytest.mark.parametrize("where", ["before", "after", "error-record", "clock"])
+def test_observer_failures_never_change_the_engine_call(tmp_path, monkeypatch, where):
+    """Review round 2 (#801): an exception inside the observer's own bookkeeping is recorded as an observer_error
+    (the cell ERRORs on it) and never blocks the engine call, replaces its result or replaces its exception.
+    'clock' (delta review): the monotonic clock itself fails; the call still runs once, with no timing recorded."""
+    obs = load_observer()
+    if where == "clock":
+        def no_clock():
+            raise OSError("clock unavailable")
+        monkeypatch.setattr(obs, "time", types.SimpleNamespace(time=time.time, monotonic=no_clock))
+    monkeypatch.setattr(obs, "DIR", tmp_path)
+    monkeypatch.setattr(obs, "_r1", probe)
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setitem(sys.modules, "agent", types.ModuleType("agent"))
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", types.ModuleType("agent.context_compressor"))
+    engine_exc, calls = RuntimeError("engine failed"), []
+    covers = iter([RuntimeError("before")] if where == "before" else [(1, 1), RuntimeError("after")])
+
+    def store_cover():
+        value = next(covers, (1, 1))
+        if isinstance(value, Exception):
+            raise value
+        return value
+    monkeypatch.setattr(obs, "store_cover", store_cover)
+
+    class Engine:
+        _last_compression_status = "compacted"
+
+        def compress(self, messages):
+            calls.append(len(messages))
+            if where == "error-record":
+                raise engine_exc
+            return messages[:1]
+
+        def handle_tool_call(self, *a, **k):
+            return "{}"
+    engine = Engine()
+    obs.patch_engine(types.SimpleNamespace(context_compressor=engine))
+    obs.cur.update(turn=7)
+    given = [{"role": "user", "content": "one"}, {"role": "assistant", "content": "two"}]
+    if where == "error-record":
+        monkeypatch.setattr(obs, "counters", {"compactions": None, "compacted_turns": []})  # .append raises
+        with pytest.raises(RuntimeError) as caught:
+            engine.compress(given)
+        assert caught.value is engine_exc
+    else:
+        assert engine.compress(given) == given[:1]
+    assert calls == [2]
+    errors = [n for n in PC.read_jsonl(tmp_path / "observer.jsonl") if n["kind"] == "observer_error"]
+    assert [e["where"] for e in errors] == [f"traced_compress:{'before' if where == 'clock' else where}"]
+    if where == "clock":
+        assert [c["secs"] for c in obs.counters["compactions"]] == [None]
+
+
+def test_drain_fixture_b_keeps_an_errored_call_failing_d2_when_nothing_was_archived(tmp_path):
+    """Review round 2 (#801): Fixture B's 'archived no row' INCONCLUSIVE must not hide an errored phase-2 call."""
+    from bench.instruments.reliability.scorers import drain
+    cell = next(c for c in cells.select("all") if c["id"] == "drain/hidden-backlog-large/in-place")
+    first = cell["drain"]["phase2_turn"]
+    PC.append(tmp_path / "faults-fired.jsonl", {"kind": "clean_exit_before_turn", "phase": "A", "turn": first})
+    PC.append(tmp_path / "fixture.jsonl", {"kind": "forget_host_rows", "after_phase": "A", "before_turn": first, "rows": 0})
+    calls = [{"turn": first + 1, "in": 10, "out": None, "host_rows_summarized": None, "status": "error", "final": False,
+              "secs": 0.2, "error": "RuntimeError: x"}]
+    failed, unsure, _ = drain.score(cell, [{"phase": "B", "counters": {"compactions": calls}}], tmp_path)
+    assert failed["D2"]["errored_calls"] == [{"turn": first + 1, "error": "RuntimeError: x", "secs": 0.2}]
+    assert set(unsure) == {"D1", "D3"} and all("archived no row" in why for why in unsure.values())
+
+
+def test_ci_gate_issue_transports_scope_an_acp_only_exemption():
+    """#861 declares B1/B2 on ref, customer, r34.4 and upstream-uid for acp-process rows only: the in-process row of the
+    same cell still gates, and so does an acp-process FAIL on upstream-main, where the race was not seen."""
+    fail = {"verdict": "FAIL", "targets": [519, 549, 821, 861], "failed_bars": {"B1": {}, "B2": {}}}
+    for host in ("ref-0.21.5", "customer-0.21.2", "r34.4-0.21.5", "upstream-uid"):
+        acp = [{**r, "host": host} for r in full_set("acp-process", **{"crash-after-rotation/rotation": fail})]
+        assert ci.gate(acp, {861}) == []
+        in_process = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
+        problems = ci.gate(in_process, {861})
+        assert len(problems) == 1 and "uncovered bars ['B1', 'B2']" in problems[0]
+    upstream = [{**r, "host": "upstream-main"} for r in full_set("acp-process", **{"crash-after-rotation/rotation": fail})]
+    assert len(ci.gate(upstream, {861})) == 1
+
+
+
+def test_ci_gate_issue_hosts_declare_the_held_composite_issue_on_upstream_uid():
+    """#821 (a held composite vs its durable parts after a crash on rotation) is reproduced on r34.4 and on upstream
+    from 2667c960 (upstream-uid), so its bars are declared there. upstream-main (6f7a7991) and the other release hosts
+    do not show it, so a FAIL there still gates."""
+    fail = {"verdict": "FAIL", "targets": [519, 549, 821, 861], "failed_bars": {"B1": {}, "B3": {}, "B4": {}, "B5": {}, "B8": {}}}
+    for host in ("r34.4-0.21.5", "upstream-uid"):
+        rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
+        assert ci.gate(rows, {821}) == []
+    for host in ("upstream-main", "ref-0.21.5"):
+        rows = [{**r, "host": host} for r in full_set(**{"crash-after-rotation/rotation": fail})]
+        assert len(ci.gate(rows, {821})) == 1
+
+
+def test_p8_controls_must_be_scorable_on_the_uid_host():
+    """#866: upstream-uid carries the flush seams, so a missing or UNSUPPORTED P8 control row there gates on both
+    transports, while the pre-uid hosts may still report the controls UNSUPPORTED."""
+    assert controls.P8_MUST_SUPPORT == {None: ("upstream-uid",), "acp-process": ("upstream-uid",)}
+    for host, gates in (("upstream-uid", True), ("upstream-main", False), ("ref-0.21.5", False)):
+        for transport in (None, "acp-process"):
+            unsupported = {cell: {"verdict": "UNSUPPORTED", "failed_bars": {}} for cell in controls.P8_CONTROLS}
+            rows = [{**r, "host": host} for r in full_set(transport, **unsupported)]
+            problems = ci.gate(rows, set())
+            assert bool(problems) is gates, (host, transport, problems)

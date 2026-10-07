@@ -4,6 +4,8 @@ This page holds the detailed install, activation, configuration, diagnostics,
 and slash-command reference for LCM-X. The README stays focused on first-run
 adoption; this file is the operator reference.
 
+`LCM_NATIVE_RECOVERY`: removed in v0.25.0; ignored if set (`true` logs one WARNING each time the plugin loads)
+
 ## Requirements
 
 - Hermes Agent with the pluggable context engine slot ([PR #7464](https://github.com/NousResearch/hermes-agent/pull/7464))
@@ -121,7 +123,7 @@ also drops rows stored since the backup. v0.23.3's native recovery needs a
 Hermes build that installs the compression cancellation check
 (`_compression_cancelled_check`); without it v0.23.3's native path returns the
 list unchanged. The Hermes builds LCM-X is tested against install it: 0.21.5
-(`f97608f1`), 0.21.2 (`2d10969e`) and upstream main (`6f7a7991`). Rolling back
+(`f97608f1`), 0.21.2 (`2d10969e`) and upstream main (`6f7a7991`, `2667c960`). Rolling back
 to v0.23.3 (`hermes-lcm`) also reverts the v0.24.0 config migration before
 Hermes restarts: `plugins.enabled` back to `hermes-lcm` and `context.engine:
 lcm` (restore the `config.yaml` backup taken before the migration); otherwise
@@ -133,10 +135,13 @@ for a store that no survival fit has touched. Two
 checks establish that, and both must hold: `/lcm doctor` reports no
 `survival_fit` entry, and the logs hold no `LCM survival fit applied` line for
 that store. The doctor's entry alone can miss a fit, because the counter write
-behind it can fail; the `LCM survival fit applied` WARNING is logged before
-that write. The log check counts only when the logs cover the whole time since
-the store's first v0.24.5 start: if log files were rotated away or are missing
-for part of that time, treat the check as not established. From v0.24.6 a
+behind it can fail; the `LCM survival fit applied` line is logged before that
+write, at WARNING, except that since v0.25.0 a routine exit fit
+(`reason=exit_fit:`) logs it at INFO (#735), so search every level. The log check counts only when the logs cover the whole time since
+the store's first v0.24.5 start and kept INFO records for every part of that
+time that ran v0.25.0 or later: if log files were rotated away or are missing
+for part of that time, or the logging level dropped INFO while v0.25.0 or later
+ran, treat the check as not established. From v0.24.6 a
 failed write also logs a WARNING that starts
 `LCM survival-fit counter write failed`; v0.24.5 logs it at DEBUG. If you
 cannot establish both checks, use the backup restore. Once a fit was applied,
@@ -283,7 +288,7 @@ On the `main` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.24.9 (15 tools)
+  ✓ hermes-lcm-x v0.26.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -291,9 +296,9 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.24.9` is the identity the next patch release carries: the `v0.24.9-rc1`
-tag carries it first, the gauntlet runs at that tag, and the GA tree is the rc
-tree plus the GA release-notes file (`v0.24.8` at `7ed790c8` shipped the same way).
+and tag. `0.26.0` is the identity of the latest stable release: `v0.26.0` at `867eb587` is
+the `v0.26.0-rc1` tree plus the GA release-notes file, and the next minor
+follows the same path (rc tags first, the gauntlet at the last rc tag).
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
@@ -337,8 +342,15 @@ run `lcm_status` or `/lcm status` again for live per-session fields.
 
 ## Configuration
 
-Most installs only need `plugins.enabled` and `context.engine: lcm-x`. Useful
-environment variables:
+Most installs only need `plugins.enabled` and `context.engine: lcm-x`.
+
+`compression.target_ratio` and the host's other built-in-compressor ratios belong
+to the host's built-in compressor and are not read by LCM-X. How much one LCM-X
+compaction summarises is set by `LCM_LEAF_CHUNK_TOKENS`, and how long it may take by
+`LCM_FOREGROUND_SOFT_SECONDS` / `LCM_FOREGROUND_HARD_SECONDS`; the summary DAG depth
+is `LCM_INCREMENTAL_MAX_DEPTH` (table below).
+
+Useful environment variables:
 
 | Variable | Default | Use |
 |----------|---------|-----|
@@ -376,6 +388,7 @@ environment variables:
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up and cache-friendly follow-on condensation only |
 | `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
+| `LCM_HOST_MESSAGE_UID` | `shadow` | `shadow`: on a host that sends `message_uid`, records the row each uid was bound to in the droppable `host_uid_bindings` table and counts agreement with the existing identity matching; ingest, replay and emission are unchanged, and `/lcm doctor` reports `host_uid_*` counts only. `off`: no capture, no table writes, no counts and no log line. `on` (reserved) and any unknown value behave as `shadow`; an unknown value also logs one warning. Bindings are deleted with their messages, and lineage keys are namespaced by Hermes home, so one database shared by several homes keeps them apart |
 | `LCM_SUMMARY_MODEL` | auxiliary | Override summarization model |
 | `LCM_SUMMARY_FALLBACK_MODELS` | empty | Comma-separated summarization models tried after `LCM_SUMMARY_MODEL` or the auxiliary task default fails |
 | `LCM_SUMMARY_CIRCUIT_BREAKER_FAILURE_THRESHOLD` | `2` | Consecutive failed summarization calls before a route is skipped temporarily |
@@ -392,6 +405,7 @@ environment variables:
 | `LCM_ROLLUP_BUILDS_PER_PASS` | `2` | Maximum rollups built by one automatic pass or `/lcm rollups rebuild` command |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |
 | `LCM_DATABASE_PATH` | auto | SQLite database path. Empty config resolves to `HERMES_HOME/lcm.db`; plugin installs or operators may set this env var to another profile-scoped path such as `~/.hermes/hermes-lcm.db`. |
+| `LCM_SQLITE_MMAP_SIZE` | `268435456` | SQLite mapped-read size in bytes; `0` disables mapping. Invalid or negative values fall back with one WARNING per process. |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup (previous behavior); a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
 | `LCM_EMBEDDINGS_ENABLED` | `false` | Opt in to embedding warmup, backfill, and semantic retrieval storage |
@@ -421,7 +435,8 @@ environment variables:
 `privacy_policy_errors`. A nonzero `privacy_policy_errors` is a deterministic configuration
 fault, not load shedding: proactive injection is disabled until the embedding-privacy policy
 is fixed, one WARNING is logged per engine instance, and `lcm_recall` raises rather than degrading to
-full-text on the same fault (#370).
+full-text on the same fault (#370). A stale embedding identity instead returns degraded
+full-text hits and does not increment this counter (#387).
 
 ### Summary prompt version
 
@@ -442,7 +457,8 @@ A summary call that raises or times out is a failure and counts toward
 follows a line that names the kind (`LCM summary discarded empty output`, `... reasoning-only output` or
 `... output that violated the integrity contract`); `reason=not_shorter` means the result was not shorter than its
 source. A route opens with `LCM summary route circuit opened for <route> after N failure(s)` or
-`... after N rejected result(s)`.
+`... after N rejected result(s)`. Contract rejections append `contract=<check>` to `reason=no_content` and emit
+the content-free INFO line `LCM summary contract shape: check=<check> last_line=<list|heading|bold|trailing|missing|other>`.
 
 When a leaf's own level 1 and level 2 results are rejected and the survival fit can keep the request under the
 window, the compaction writes no leaf and no node for it and keeps its rows for a later pass (#652). A level 3
@@ -621,8 +637,10 @@ The transform version and a digest of sorted active pattern names are stored in 
 profile revision; the explicit opt-out stores the distinguished `privacy:off` revision
 instead. While the transform is on, changing the pattern policy changes that identity, as
 does flipping `LCM_EMBEDDING_PRIVACY_ENABLED` in either direction after warmup; either
-change causes query and backfill dispatch to refuse until a new warmup registers it —
-existing vectors under the old revision stay ineligible until re-embedded (run
+change keeps existing vectors ineligible until re-embedded. `lcm_recall` serves full-text
+hits with `degraded=true` and an `embedding_identity_stale:` reason; `lcm_grep` semantic
+mode falls back to full-text, and `lcm_doctor` warns. Backfill still refuses until a new
+warmup registers the profile (run
 `/lcm embed warmup` then `/lcm embed backfill --apply`; LCM never re-embeds
 automatically). Under the explicit opt-out the pattern catalog is not part of the
 `privacy:off` identity, so catalog edits alone change nothing until you opt back in. Durable messages, summaries, FTS rows, and payloads are not

@@ -54,12 +54,20 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 - `LCM_LEAF_CHUNK_TOKENS`: maximum raw material per leaf compaction group;
 - `LCM_LEAF_TARGET_RATIO` (default `0.20`), `LCM_LEAF_TARGET_MIN_TOKENS` (default `2000`) and `LCM_LEAF_TARGET_MAX_TOKENS` (default `12000`): leaf summary target `min(MAX, max(MIN, int(source_tokens * RATIO)))`; the first summary call gets twice the target as `max_tokens`. Defaults are unchanged; change them only after measuring what a different ratio keeps (#614);
 - `LCM_DATABASE_PATH`: profile-local SQLite path when the default is unsuitable;
-- `LCM_NATIVE_RECOVERY` (default `false`): ingest sources normally, then allow a cancellation-fenced Hermes host to summarize the active context through its native compressor and archive transaction. LCM history and recall stay available; its frontier is not advanced and LCM publication is not attempted. Sanitized user text remains in active replay even when its durable copy is externalized, allowing the native summarizer to read it. This increases active token usage; previously published references are not automatically expanded. Failed, cancelled, placeholder or non-shrinking summaries retain the active context. This is recovery, not repair of the underlying coverage mismatch;
+- `LCM_NATIVE_RECOVERY` (default `false`): removed in v0.25.0; ignored if set
 - `LCM_SURVIVAL_FIT` (default `true`) and `LCM_SURVIVAL_RESERVE` (default `0.15`): when compaction cannot bring the list under the model window, the oldest whole user turns leave live context (an oversized newest turn is projected) so the session survives; rows stay stored and searchable, a WARNING `LCM survival fit applied` is logged, the user is warned once and `/lcm doctor` reports `survival_fit`. The reserve is the share of the window kept free;
+- `LCM_HOST_MESSAGE_UID` (default `shadow`; `off`, `shadow`, `on`; env only): on a host whose messages carry `message_uid`, record which stored row each uid was bound to in the droppable `host_uid_bindings` table and count agreement with the existing identity matching; ingest decisions are unchanged. `/lcm doctor` reports `host_uid_*` counts. `off`: no capture, no table writes, no counts, no log line. `on` (reserved) and unknown values behave as `shadow` (an unknown value warns once). No-op on hosts without uids;
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
 - summary/embedding provider settings only after confirming credentials, cost, and data handling; see `docs/embeddings-setup.md`, section "A host update can remove fastembed", for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
 
 Optional slash commands are disabled by default with `LCM_ENABLE_SLASH_COMMAND=false`. Destructive cleanup apply is separately guarded. Do not enable mutation surfaces merely to diagnose a problem.
+
+`LCM_SQLITE_MMAP_SIZE` sets SQLite mapped-read bytes (default `268435456`,
+unchanged). Set `LCM_SQLITE_MMAP_SIZE=0` on SD-card or single-board hosts: a
+storage read error on a mapped page kills the process with SIGBUS, while `0`
+returns a catchable I/O error. Invalid or negative values use the default with
+one WARNING per process. `/lcm doctor` reports effective `sqlite_mmap_bytes`,
+including SQLite's cap. Example: `LCM_SQLITE_MMAP_SIZE=0 hermes` after restarting.
 
 Change one tuning variable at a time, then re-check `lcm_status`, context pressure, summary health, latency, and actual answer quality.
 

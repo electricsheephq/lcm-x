@@ -63,8 +63,9 @@ from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
-from .store import build_message_fts_spec, delete_message_relations
+from .store import build_message_fts_spec, delete_host_uid_bindings, delete_message_relations
 from .survival_fit import SURVIVAL_FIT_COUNTER_KEY
+from .host_uid import host_uid_doctor_lines
 from .chunking import (
     VALID_CONTENT_POLICIES,
     chunk_message,
@@ -1464,6 +1465,7 @@ def _doctor_text(engine) -> str:
     if node_fts_failed_flag and "nodes_fts" not in issues:
         issues.append("nodes_fts")
 
+    sqlite_mmap_bytes = _safe_count(store_conn, "PRAGMA mmap_size", "sqlite_mmap_size")
     total_messages = _safe_count(store_conn, "SELECT COUNT(*) FROM messages", "messages_total")
     total_message_sessions = _safe_count(
         store_conn,
@@ -1791,6 +1793,9 @@ def _doctor_text(engine) -> str:
         fit_count = None
     if fit_count != 0:
         projected = survival_fit.get("projected_count")  # absent on a record from before the key: unknown
+        uncovered = survival_fit.get("last_uncovered_rows")
+        uncovered_fits = survival_fit.get("uncovered_fit_count")
+        unknown_fits = survival_fit.get("unknown_coverage_fit_count")
         within = ("rollback to a 0.24.x version older than v0.24.5: that plugin cannot compact stored rows that a "
                   "survival fit removed from the live context; stop Hermes, move the configured database file (by "
                   "default lcm.db, with its -wal and -shm companions) aside and keep it, then restore the database "
@@ -1806,7 +1811,10 @@ def _doctor_text(engine) -> str:
                             f"{survival_fit.get('last_reason') or '(unknown)'}; projected_count "
                             f"{'unknown' if projected is None else projected}; unreached_budget_count "
                             f"{survival_fit.get('unreached_budget_count', 0)}; last_reached_budget "
-                            f"{survival_fit.get('last_reached_budget', 'unknown')}{rollback}")
+                            f"{survival_fit.get('last_reached_budget', 'unknown')}; last_uncovered_rows "
+                            f"{'unknown' if uncovered is None else uncovered}; uncovered_fit_count "
+                            f"{'unknown' if uncovered_fits is None else uncovered_fits}; unknown_coverage_fit_count "
+                            f"{'unknown' if unknown_fits is None else unknown_fits}{rollback}")
         triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
     stub_first_exit = getattr(engine, "_last_stub_first_exit", None)
     if stub_first_exit:  # #671: a partial stop; the rows no leaf summarised stay stored as backlog
@@ -1818,6 +1826,15 @@ def _doctor_text(engine) -> str:
         inactive_check = {"check": "inactive_process", "status": "warn", "detail": inactive_process}
         triage_checks.append(inactive_check)
         recommended_actions.append(doctor_guidance_for_check(inactive_check)["operator_action"])
+    try:
+        from .tools import _embedding_provider_health_check
+        embedding_check = _embedding_provider_health_check(engine)
+    except Exception as exc:  # as the lcm_doctor tool does: a check that raises reports fail, never a silent ok
+        embedding_check = {"check": "embedding_provider_health", "status": "fail", "detail": str(exc)}
+    if embedding_check and embedding_check["status"] in {"warn", "fail"}:
+        issues.append("embedding_provider_health")
+        triage_checks.append(embedding_check)
+        recommended_actions.append(doctor_guidance_for_check(embedding_check)["operator_action"])
     triage_guidance = doctor_guidance_for_checks(triage_checks)
 
     doctor_status = "issues-found" if integrity != "ok" or issues else (
@@ -1840,7 +1857,7 @@ def _doctor_text(engine) -> str:
         f"schema_core_tables: {schema_core_status}",
         f"schema_missing_tables: {', '.join(schema_missing_tables) or '(none)'}",
         f"schema_existing_tables: {', '.join(schema_existing_tables) or '(none)'}",
-        f"journal_mode: {journal_mode}",
+        f"journal_mode: {journal_mode}; sqlite_mmap_bytes={sqlite_mmap_bytes}",
         f"quick_check: {quick_check}",
         f"sqlite_integrity: {integrity}",
         f"messages_total: {total_messages}",
@@ -1875,9 +1892,17 @@ def _doctor_text(engine) -> str:
         f"missing_externalized_payload_refs: {externalized_integrity['missing_externalized_payload_refs']}",
         f"unreferenced_externalized_payload_files: {externalized_integrity['unreferenced_externalized_payload_files']}",
         f"survival_fit_count: {'unknown' if fit_count is None else fit_count}",
+        *host_uid_doctor_lines(engine),
     ]
     if inactive_process:
         lines.append(f"inactive_process: {inactive_process}")
+    if embedding_check is not None:
+        detail = embedding_check.get("detail")
+        reason = detail.get("reason") if isinstance(detail, dict) else None
+        suffix = f" ({reason})" if reason else ""
+        if isinstance(detail, str):
+            suffix = f" {detail}"
+        lines.append(f"embedding_provider_health: {embedding_check['status']}{suffix}")
     if issues:
         lines.append(f"issues: {', '.join(issues)}")
     else:
@@ -2031,6 +2056,11 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
             ).fetchall()
         ]
         delete_message_relations(conn, (
+            f"SELECT store_id FROM messages WHERE EXISTS ("
+            f"SELECT 1 FROM {scope_table} AS scope "
+            "WHERE scope.session_id = messages.session_id)"
+        ))
+        delete_host_uid_bindings(conn, (
             f"SELECT store_id FROM messages WHERE EXISTS ("
             f"SELECT 1 FROM {scope_table} AS scope "
             "WHERE scope.session_id = messages.session_id)"
@@ -3832,6 +3862,7 @@ def _embedding_backfill_report(
     privacy_revision: str | None = None,
     privacy_transformed: int = 0,
     privacy_blocked: int = 0,
+    privacy_withheld: int = 0,
 ) -> str:
     header = "LCM embedding backfill" if corpus is None else f"LCM {corpus} backfill"
     lines = [header, f"mode: {mode}"]
@@ -3865,6 +3896,12 @@ def _embedding_backfill_report(
         ])
     if stop_reason:
         lines.append(f"stop_reason: {stop_reason}")
+    if privacy_withheld:
+        lines.append(
+            f"privacy_withheld: {privacy_withheld} document(s) refused by the "
+            "privacy policy; not sent, they stay pending (an uncertain row "
+            "retried with --retry-uncertain keeps its in-flight marker)"
+        )
     if error:
         lines.append(f"error: {error}")
     if uncertain:
@@ -4130,6 +4167,13 @@ def _embedding_backfill_summary_text(
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == profile_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
         estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
         return _embedding_backfill_report(
             mode=mode,
@@ -4152,6 +4196,7 @@ def _embedding_backfill_summary_text(
             privacy_revision=privacy_revision,
             privacy_transformed=privacy_transformed,
             privacy_blocked=privacy_blocked,
+            privacy_withheld=privacy_withheld,
         )
 
     ttl_s = _embedding_backfill_lease_ttl_s()
@@ -4174,6 +4219,7 @@ def _embedding_backfill_summary_text(
     privacy_revision: str | None = None
     privacy_transformed = 0
     privacy_blocked = 0
+    privacy_withheld = 0
     try:
         store = VectorStore(db_path, config=engine._config)
         conn = store.connection
@@ -4228,6 +4274,13 @@ def _embedding_backfill_summary_text(
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == profile_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
         if privacy_error is not None:
             error = privacy_error
             stop_reason = "privacy_refused"
@@ -4237,10 +4290,10 @@ def _embedding_backfill_summary_text(
         # 60/min guard mid-way and stalls.
         provider = (
             None
-            if privacy_error is not None
+            if privacy_error is not None or (privacy_withheld and not documents)
             else resolve_provider(engine._config, for_backfill=True)
         )
-        if privacy_error is not None:
+        if privacy_error is not None or (privacy_withheld and not documents):
             pass
         elif provider is None:
             error = "embedding provider is not configured; run `/lcm embed warmup`"
@@ -4554,6 +4607,7 @@ def _embedding_backfill_summary_text(
         failed=failed,
         uncertain=uncertain_count,
         skipped=len(skipped),
+        privacy_withheld=privacy_withheld,
     )
     estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
     return _embedding_backfill_report(
@@ -4562,7 +4616,7 @@ def _embedding_backfill_summary_text(
         provider=provider_name,
         model=model,
         pending=pending,
-        selected=len(documents),
+        selected=len(documents) + privacy_withheld,
         estimated_tokens=estimated_tokens,
         estimated_cost_tokens=estimated_cost_tokens,
         estimated_batches=estimated_batches,
@@ -4579,6 +4633,7 @@ def _embedding_backfill_summary_text(
         privacy_revision=privacy_revision,
         privacy_transformed=privacy_transformed,
         privacy_blocked=privacy_blocked,
+        privacy_withheld=privacy_withheld,
     )
 
 
@@ -4964,6 +5019,13 @@ def _chunk_backfill_text(
             provider_name=provider_name,
             expected_revision=expected_privacy_revision,
         )
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == expected_privacy_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
         estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(
             documents
         )
@@ -4990,6 +5052,7 @@ def _chunk_backfill_text(
             privacy_revision=privacy_revision,
             privacy_transformed=privacy_transformed,
             privacy_blocked=privacy_blocked,
+            privacy_withheld=privacy_withheld,
         )
 
     # -- apply --
@@ -5037,6 +5100,7 @@ def _chunk_backfill_text(
     privacy_revision: str | None = None
     privacy_transformed = 0
     privacy_blocked = 0
+    privacy_withheld = 0
     try:
         store = VectorStore(db_path, config=engine._config)
         store.ensure_chunk_schema()
@@ -5087,6 +5151,13 @@ def _chunk_backfill_text(
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
+        privacy_withheld = (
+            privacy_blocked
+            if privacy_revision is not None and privacy_revision == profile_revision
+            else 0
+        )
+        if privacy_withheld:
+            privacy_error = None
         if privacy_error is not None:
             error = privacy_error
             stop_reason = "privacy_refused"
@@ -5096,10 +5167,10 @@ def _chunk_backfill_text(
         )
         provider = (
             None
-            if privacy_error is not None
+            if privacy_error is not None or (privacy_withheld and not documents)
             else resolve_provider(chunk_provider_config, for_backfill=True)
         )
-        if privacy_error is not None:
+        if privacy_error is not None or (privacy_withheld and not documents):
             pass
         elif provider is None:
             error = "embedding provider is not configured; run `/lcm embed warmup`"
@@ -5366,11 +5437,12 @@ def _chunk_backfill_text(
         error=error, lease_lost=lease_lost, budget_exhausted=budget_exhausted,
         embedded=embedded, selected_embeddable=selected_embeddable,
         failed=failed, uncertain=uncertain_count, skipped=len(skipped),
+        privacy_withheld=privacy_withheld,
     )
     estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
     return _embedding_backfill_report(
         mode=mode, status=status, provider=provider_name, model=model,
-        pending=pending, selected=len(documents),
+        pending=pending, selected=len(documents) + privacy_withheld,
         estimated_tokens=estimated_tokens, estimated_cost_tokens=estimated_cost_tokens,
         estimated_batches=estimated_batches, embedded=embedded, skipped=skipped,
         failed=failed, remaining=remaining, duration=time.monotonic() - started,
@@ -5380,6 +5452,7 @@ def _chunk_backfill_text(
         privacy_revision=privacy_revision,
         privacy_transformed=privacy_transformed,
         privacy_blocked=privacy_blocked,
+        privacy_withheld=privacy_withheld,
     )
 
 
@@ -5393,6 +5466,7 @@ def _embedding_backfill_status(
     failed: list[tuple[str, str]],
     uncertain: int = 0,
     skipped: int = 0,
+    privacy_withheld: int = 0,
 ) -> str:
     """Report the truthful terminal status — never a premature ``complete``."""
     if error:
@@ -5403,6 +5477,8 @@ def _embedding_backfill_status(
         return "partial"
     if failed:
         return "failed" if embedded == 0 else "partial"
+    if privacy_withheld:
+        return "partial"
     if embedded >= selected_embeddable:
         return "complete"
     return "partial"

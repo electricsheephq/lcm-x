@@ -25,10 +25,9 @@ from typing import Any, Dict, List, Optional
 
 from .dag import SummaryNode
 from .escalation import ForegroundBudget, ForegroundEstimates, SweepBudgetExhausted
-from .externalize import ingest_payload_writes
+from .externalize import ingest_payload_writes, payload_lookup_scope
 from .fresh_tail import tool_group_safe_end
 from .lifecycle_state import LifecycleBindingChangedError, LifecyclePublicationConflictError
-from .message_analysis import _matched_tool_call_ids
 from .message_content import text_content_for_pattern_matching
 from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
@@ -37,7 +36,6 @@ from .reconcile import (
     _commit_proof_identity_digest,
     _emission_identity,
     _finalize_emission_descriptors,
-    _has_lossy_redacted_identity,
     _project_emitted_occurrences,
     _proof_user_identity,
 )
@@ -110,7 +108,6 @@ class CompactionMixin:
 
     def _should_compress_preflight_impl(self, messages):
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
-        self._native_recovery_preflight_cleanup_only = False
         self._preflight_below_threshold_cleanup_only = False
         self._preflight_automatic_request = False
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
@@ -191,14 +188,6 @@ class CompactionMixin:
                 messages=replay_messages,
             )
             if cleanup_requested:
-                self._native_recovery_preflight_cleanup_only = bool(
-                    self._config.native_recovery
-                    and not force_overflow_requested
-                    and (
-                        self.threshold_tokens <= 0
-                        or max(rough, replay_rough) < self.threshold_tokens
-                    )
-                )
                 if (
                     not force_overflow_requested
                     and self._compression_boundary_cooldown_active()
@@ -222,14 +211,6 @@ class CompactionMixin:
                 and self._sweep_budget_hold_applies(max(rough, replay_rough, self.last_prompt_tokens or 0))
             ):
                 return False
-            if (
-                self._config.native_recovery
-                and self.threshold_tokens > 0
-                and replay_rough >= self.threshold_tokens
-            ):
-                return self._mark_preflight_compression_requested(
-                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
-                )
             if pre_ingest_placeholder_cleanup_requested:
                 return self._mark_preflight_compression_requested(
                     depends_on_pressure_yield=True,
@@ -296,10 +277,6 @@ class CompactionMixin:
         if self.threshold_tokens > 0 and rough >= self.threshold_tokens:
             if self._sweep_budget_hold_applies(max(rough, self.last_prompt_tokens or 0)):
                 return False
-            if self._config.native_recovery:
-                return self._mark_preflight_compression_requested(
-                    depends_on_pressure_yield=self._pressure_yield_preflight_candidate,
-                )
             if pre_ingest_placeholder_cleanup_requested:
                 return self._mark_preflight_compression_requested(
                     depends_on_pressure_yield=True,
@@ -579,6 +556,8 @@ class CompactionMixin:
                  bypass_cooldown: bool = False) -> List[Dict[str, Any]]:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
+        self._last_compress_leaves = None
+        self._last_hidden_backlog = None
         self._compress_forced_overflow = False
         budget = self._foreground_budget = self._new_foreground_budget()  # #605 K1: the clock starts here
         returned = None
@@ -590,7 +569,7 @@ class CompactionMixin:
             self._stub_first_exit_now = self._last_stub_first_exit = None  # #671: the latest compaction only
             if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
                 self._preflight_below_threshold_cleanup_only = self._preflight_automatic_request = False
-                # #684: nor held by a boundary cooldown; native recovery keeps its own handoff (#463/#464).
+                # #684: nor held by a boundary cooldown.
                 self._preflight_cleanup_only_due_to_boundary_cooldown = False
             elif not force and self._no_progress_hold_active() and self._no_progress_hold_blocks(
                     current_tokens if current_tokens is not None else count_messages_tokens(messages)):
@@ -626,17 +605,16 @@ class CompactionMixin:
             result = self._survival_fit(messages, result, current_tokens,
                                         **self._survival_fit_args(messages, current_tokens, reason, bypass_cooldown,
                                                                   automatic=not force and not self._compress_forced_overflow
-                                                                  and self._last_compression_status not in ("error", "host_native")))
+                                                                  and self._last_compression_status != "error"))
             if self._no_progress_candidate and not bypass_cooldown and len(result) >= len(messages) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages)):
-                self._start_no_progress_hold("no_progress")  # #651: no leaf, and neither rows nor tokens fell
+                # #651: no leaf, and neither rows nor tokens fell; #922 keeps the turn-paced hold.
+                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
             self._record_compress_commit_proof(messages, result)
+            self._host_uid_record_engine(result)
+            self._host_uid_log_compaction_summary()
             logger.debug("LCM compaction emission descriptor count=%d",
                          len((self._compress_commit_proof or {}).get("emissions") or ()))
-            proof_missing = self._last_compression_status == "host_native" and self._compress_commit_proof is None
-            if proof_missing:
-                self._ingest_cursor = 0
-                self._ingest_cursor_needs_reconcile = True
             self._rekey_host_rewrite_watch(messages, result)
             returned = result
             return result
@@ -655,12 +633,14 @@ class CompactionMixin:
                     logger.debug("LCM survival fit after a compress exception failed", exc_info=True)
                     fitted = messages
                 if fitted is not messages:
+                    self._host_uid_record_engine(fitted)
                     logger.warning("LCM compress failed (%s); returning the survival-fitted list",
                                    type(exc).__name__, exc_info=True)
                     returned = fitted
                     return fitted
             raise
         finally:
+            self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
             self._compress_forced_overflow = False
             self._foreground_budget = None
             self._finish_foreground_budget(budget, returned)
@@ -797,32 +777,16 @@ class CompactionMixin:
                 digest for m, digest in zip(result, proof["output_sha256_v3"])
                 if not self._is_replayed_context_scaffold_message(m)
             ]
-            proof["native"] = self._last_compression_status == "host_native"
-            if proof["native"]:
-                matched_tool_ids = _matched_tool_call_ids(result)
-                proof["droppable"] = []
-                proof["skip_landing"] = []
-                for identity in proof["output_effective"]:
-                    is_tool_result = identity[0] == "tool"
-                    has_tool_id = bool(identity[2])
-                    is_orphan = identity[2] not in matched_tool_ids
-                    is_lossless = not _has_lossy_redacted_identity(identity)
-                    proof["droppable"].append(
-                        is_tool_result and has_tool_id and is_orphan and is_lossless
-                    )
-                    proof["skip_landing"].append(not identity[2] and not identity[3])
-                summary_index = getattr(self, "_last_native_summary_index", None)
-                proof["native_summary_index"] = sum(
-                    identity is not None for identity in output_identities[:summary_index]
-                ) if summary_index is not None else None
+            proof["native"] = False
             proof["published"] = self._last_compression_status == "compacted"
+            proof["recovery"] = self._last_compression_status == "overflow_recovery"
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "emissions": copy.deepcopy(emissions),
             }
             self._compress_commit_proof = proof
-            if proof["published"] or proof["native"]:
+            if proof["published"] or proof["native"] or proof["recovery"]:
                 self._persist_compress_commit_proof(proof)
         except Exception:
             self._compress_commit_proof = None
@@ -954,186 +918,6 @@ class CompactionMixin:
         )
         return fallback
 
-    def _compress_native_recovery(
-        self,
-        messages: List[Dict[str, Any]],
-        *,
-        current_tokens: int | None = None,
-    ) -> List[Dict[str, Any]]:
-        """Let the host archive a native summary without claiming LCM coverage.
-
-        Only an opted-in, cancellation-fenced Hermes invocation may use this
-        recovery. Its existing transaction owns archive/publish; this helper
-        writes no DAG, lifecycle, frontier, or host-session state. In particular
-        it must not use the bypass helper's deterministic tail-trimming path.
-        """
-        if not self._config.native_recovery:
-            return messages
-        self._last_compress_aborted = True
-        self._last_compression_status = "error"
-        self._last_compression_noop_reason = "native recovery did not produce a usable summary"
-        self._last_summary_error = self._last_compression_noop_reason
-        self._last_native_recovery_rejection = ""
-
-        def _reject(reason: str, **details: Any) -> List[Dict[str, Any]]:
-            self._last_native_recovery_rejection = reason
-            self._last_compression_noop_reason = reason
-            logger.warning(
-                "Native recovery rejected; retaining context "
-                "(reason=%s, input_rows=%d, recovered_rows=%d, protected_rows=%d, details=%s)",
-                reason, len(messages), int(details.pop("recovered_rows", 0)),
-                int(details.pop("protected_rows", 0)), details or None,
-            )
-            return messages
-
-        cancelled = getattr(self, "_compression_cancelled_check", None)
-        if not callable(cancelled):
-            return _reject("binding_changed")
-        if cancelled():
-            return _reject("cancelled")
-        try:
-            import agent.context_compressor as context_compressor
-
-            ContextCompressor = context_compressor.ContextCompressor
-
-            fresh_tail = self._fresh_tail_boundary(messages)
-            protected_tail = messages[fresh_tail.start:]
-            prefix = messages[:fresh_tail.start]
-            tail_key = getattr(context_compressor, "_COMPACTION_TAIL_MARKER", None)
-            persisted_key = getattr(context_compressor, "_DB_PERSISTED_MARKER", None)
-            split = bool(tail_key and persisted_key and protected_tail)
-            if split and len(prefix) <= self.protect_first_n + 4:
-                return _reject("prefix_too_short", protected_rows=len(protected_tail), prefix_rows=len(prefix))
-
-            # Fresh per attempt: a timed-out predecessor must never share its
-            # native compressor's mutable summary/cooldown state with a retry.
-            native = ContextCompressor(
-                model=self.model,
-                provider=self.provider,
-                api_mode=self.api_mode,
-                base_url=self.base_url,
-                api_key=self.api_key,
-                config_context_length=self.context_length,
-                threshold_percent=self.threshold_percent,
-                protect_first_n=self.protect_first_n,
-                protect_last_n=3 if split else fresh_tail.count,
-                summary_model_override=self._config.summary_model or None,
-                abort_on_summary_failure=True,
-                quiet_mode=True,
-            )
-            if split or fresh_tail.tokens > 0:
-                native.tail_token_budget = 1 if split else fresh_tail.tokens
-            native.on_session_start(self._session_id)
-            native._compression_cancelled_check = cancelled
-            derive_focus = getattr(ContextCompressor, "_derive_auto_focus_topic", None)
-            focus_topic = derive_focus(messages) if callable(derive_focus) else None
-            synthetic_user = getattr(
-                ContextCompressor, "_is_synthetic_compression_user_turn", None
-            )
-            suffix_has_real_user = False
-            for message in protected_tail:
-                is_user = message.get("role") == "user"
-                has_text = bool(
-                    (text_content_for_pattern_matching(message.get("content")) or "").strip()
-                )
-                is_synthetic = callable(synthetic_user) and synthetic_user(message)
-                if is_user and has_text and not is_synthetic:
-                    suffix_has_real_user = True
-                    break
-            if split and suffix_has_real_user and hasattr(native, "_find_inflight_user_task"):
-                native._find_inflight_user_task = lambda _messages: None
-            native_kwargs = {
-                "current_tokens": (
-                    current_tokens
-                    if current_tokens is not None and current_tokens > 0
-                    else count_messages_tokens(messages)
-                ),
-                "force": True,
-            }
-            if split:
-                native_kwargs["focus_topic"] = focus_topic
-            recovered_head = native.compress(
-                copy.deepcopy(prefix if split else messages),
-                **native_kwargs,
-            )
-            if split:
-                def _carry(message):
-                    carried = copy.deepcopy(message)
-                    carried.pop(persisted_key, None)
-                    carried[tail_key] = True
-                    return carried
-                recovered = recovered_head + [_carry(message) for message in protected_tail]
-            else:
-                recovered = recovered_head
-
-            def _native_source_rows(rows):
-                return [
-                    projected for row in rows
-                    if (projected := ContextCompressor._strip_context_summary_handoff_message(row)) is not None
-                ]
-
-            recovered_source_rows = _native_source_rows(recovered)
-            protected_source_rows = _native_source_rows(protected_tail)
-            recovered_tail = (
-                recovered_source_rows[-len(protected_source_rows):]
-                if protected_source_rows
-                else []
-            )
-            recovered_tokens = count_messages_tokens(recovered)
-            input_tokens = count_messages_tokens(messages)
-            recovered_identities = [
-                self._message_replay_identity(message) for message in recovered_tail
-            ]
-            protected_identities = [
-                self._message_replay_identity(message) for message in protected_source_rows
-            ]
-            reason = next((name for name, failed in (
-                ("cancelled", cancelled()),
-                ("binding_changed", getattr(self, "_compression_cancelled_check", None) is not cancelled),
-                ("native_aborted", native._last_compress_aborted),
-                ("no_progress", not getattr(native, "_last_compression_made_progress", False)),
-                ("digest_unavailable", any("[digest unavailable for segment " in str(m.get("content", "")) for m in recovered)),
-                ("fallback_used", getattr(native, "_last_summary_fallback_used", False)),
-                ("empty", not recovered_head),
-                ("not_smaller", recovered_tokens >= input_tokens),
-                ("suffix_changed", recovered_identities != protected_identities),
-            ) if failed), "")
-            if reason:
-                details = {"recovered_rows": len(recovered), "protected_rows": len(protected_source_rows)}
-                if reason == "native_aborted":
-                    details["failure_class"] = (getattr(native, "_last_compression_telemetry", {}) or {}).get("failure_class")
-                elif reason == "not_smaller":
-                    details.update(input_tokens=input_tokens, recovered_tokens=recovered_tokens)
-                elif reason == "suffix_changed":
-                    changed_offsets = [index for index, pair in enumerate(zip(recovered_identities, protected_identities)) if pair[0] != pair[1]]
-                    details["changed_rows"] = len(changed_offsets) + abs(len(recovered_identities) - len(protected_identities))
-                    details["first_changed_offset"] = changed_offsets[0] if changed_offsets else min(len(recovered_identities), len(protected_identities))
-                return _reject(reason, **details)
-        except Exception as exc:
-            self._last_native_recovery_rejection = "exception"
-            self._last_compression_noop_reason = "exception"
-            logger.warning(
-                "Native recovery failed; retaining context (exception_type=%s)",
-                type(exc).__name__,
-            )
-            return messages
-        self._last_compression_status = "host_native"
-        self._last_summary_error = None
-        self._last_compression_noop_reason = ""
-        self.compression_count += 1
-        self._last_compress_aborted = False
-        # The helper returns before the host's archive transaction commits.
-        self._remember_native_recovery_replay_snapshot(recovered)
-        self._ingest_cursor = len(recovered)
-        self._ingest_cursor_needs_reconcile = False
-        self._last_native_summary_index = next((i for i, row in enumerate(recovered) if ContextCompressor._strip_context_summary_handoff_message(row) != row), None)
-        logger.info(
-            "Native recovery returned a summary for the host archive transaction "
-            "(input_rows=%d, recovered_rows=%d, cursor=%d); LCM source history and frontier are unchanged.",
-            len(messages), len(recovered), self._ingest_cursor,
-        )
-        return recovered
-
     def _assemble_committed_compaction_context(
         self,
         working_messages: List[Dict[str, Any]],
@@ -1163,6 +947,7 @@ class CompactionMixin:
             if no_write is not None:
                 ingest_payload_writes.reset(no_write)
 
+    @payload_lookup_scope()
     def _stub_first_exit(
         self,
         messages: List[Dict[str, Any]],
@@ -1363,12 +1148,10 @@ class CompactionMixin:
         4. Check if condensation is needed
         5. Assemble new active context: summaries + fresh tail
         """
+        self._objective_only_noop = False
         # Preflight handoffs are one-shot instructions for this invocation.
         # Consume them before every early return so a later unrelated turn can
         # never inherit stale cleanup-only state.
-        native_cleanup_only_requested = bool(
-            self._native_recovery_preflight_cleanup_only
-        )
         boundary_cleanup_only_requested = bool(
             self._preflight_cleanup_only_due_to_boundary_cooldown
         )
@@ -1377,7 +1160,6 @@ class CompactionMixin:
         )
         automatic_preflight_requested = bool(self._preflight_automatic_request)
         hold_fit_only_requested = bool(self._hold_fit_only_requested)
-        self._native_recovery_preflight_cleanup_only = False
         self._preflight_cleanup_only_due_to_boundary_cooldown = False
         self._preflight_below_threshold_cleanup_only = False
         self._preflight_automatic_request = False
@@ -1456,16 +1238,6 @@ class CompactionMixin:
             id(m): occurrence for m, occurrence in zip(working_messages, occurrences) if positions[id(m)] == 1
         } if v4 else None
         self._prepare_retained_user_anchor(working_messages)
-        native_cleanup_only = bool(
-            self._config.native_recovery
-            and native_cleanup_only_requested
-            and not force
-            and not force_overflow
-            and (
-                self.threshold_tokens <= 0
-                or observed_prompt_tokens < self.threshold_tokens
-            )
-        )
         ingest_cleanup_changed_active_context = working_messages != messages
         # #651: below the host threshold, the automatic compress() a preflight
         # maintenance request asked for runs no summariser leaf pass.
@@ -1488,8 +1260,11 @@ class CompactionMixin:
         cleanup_only_requested = bool(
             (
                 boundary_cleanup_only_requested
-                or native_cleanup_only
                 or below_threshold_cleanup_only
+                # #909: replay cleanup may request compress() through an armed hold. Adopt the
+                # durable cleanup, but do no summary work while that automatic hold applies.
+                or (automatic_preflight_requested and not force and not recovery_attempt
+                    and self._sweep_budget_hold_applies(observed_prompt_tokens))
             )
             and not force_overflow
         )
@@ -1505,8 +1280,6 @@ class CompactionMixin:
             self._ingest_cursor = len(sanitized_messages)
             self._last_compression_status = "sanitized"
             self._last_compression_noop_reason = ""
-            if native_cleanup_only:
-                self._last_compress_aborted = False
             self._note_fresh_tail_pressure_relieved()
             self._write_generated_ignored_placeholder_hash_counts(
                 self._generated_placeholder_digest_budget_for_active_replay(
@@ -1519,6 +1292,12 @@ class CompactionMixin:
                 )
             )
             return sanitized_messages
+        # #738: an automatic threshold pass with the full sweep off that would end in the #668 exit fit summarises
+        # the raw backlog outside the fresh tail it has: the leaf-chunk minimum does not block that leaf.
+        fit_would_strand = bool(
+            not force and not force_overflow and not recovery_attempt and not self._config.threshold_full_sweep_enabled
+            and 0 < self.threshold_tokens <= observed_prompt_tokens
+            and self._config.survival_fit and int(self.context_length or 0) > 0)
         if hold_fit_only_requested and not force and not force_overflow:
             # #618 item 3: a hold of this conversation is active at the survival ceiling: no sweep and no
             # summariser call; compress() fits the sanitized list.
@@ -1537,14 +1316,6 @@ class CompactionMixin:
                 self._generated_placeholder_digest_ordinals_for_active_replay(sanitized_messages)
             )
             return sanitized_messages
-        if self._config.native_recovery:
-            # Even a rejected summary must retain ingest's replay protections.
-            # The helper preserves its error/aborted status and returns the
-            # sanitized working input when native recovery cannot finish.
-            return self._compress_native_recovery(
-                working_messages,
-                current_tokens=observed_prompt_tokens,
-            )
         # #651: an automatic threshold pass that stores no leaf is a no-progress
         # candidate; compress() arms the hold if neither rows nor tokens fell.
         self._no_progress_candidate = bool(
@@ -1674,6 +1445,7 @@ class CompactionMixin:
             and sweep_summary_prefix_before > sweep_target_tokens
             and self._summary_route_available()
         ):
+            budget.leaf_reserve = budget.estimate(self._primary_summary_route())
             try:
                 pre_leaf_condensation_passes, pre_leaf_condensation_reason = (
                     self._run_threshold_sweep_condensation(
@@ -1695,6 +1467,8 @@ class CompactionMixin:
                     leaf_passes=0,
                     condensation_passes=int(getattr(exc, "lcm_completed_condensation_passes", 0)),
                 )
+            finally:
+                budget.leaf_reserve = 0.0
             max_leaf_passes -= pre_leaf_condensation_passes
         if threshold_full_sweep_active:
             self._last_threshold_full_sweep.update(
@@ -1936,6 +1710,36 @@ class CompactionMixin:
                 focus_topic = self._derive_auto_focus_topic(working_messages)
 
             candidate_raw = working_messages[leading_anchor_count:fresh_tail_start]
+            # #922: when assembly can repeat the current objective verbatim, a leaf
+            # containing only that prompt cannot reduce the active context.
+            # Keep filtering/publication and assistant-tail bookkeeping on their existing paths.
+            if (
+                len(candidate_raw) == 1
+                and not hidden_backlog
+                and not dropped_replayed_scaffold_messages
+                and any(msg.get("role") == "tool" for msg in working_messages[fresh_tail_start:])
+                and candidate_raw[0].get("role") == "user"
+                and self._latest_user_context_anchor(
+                    anchor_source_messages, working_messages[fresh_tail_start:]
+                ) == (anchor := self._build_preserved_objective_summary_part(candidate_raw[0]))
+                and (
+                    # Forced-overflow recovery assembles under the smaller recovery cap.
+                    (cap := recovery_assembly_cap if recovery_assembly_cap is not None
+                     else self._effective_assembly_token_cap()) is None
+                    or (
+                        count_messages_tokens(working_messages[:leading_anchor_count])
+                        + count_message_tokens({"role": "user", "content": anchor})
+                        + count_messages_tokens(working_messages[fresh_tail_start:])
+                        <= cap
+                    )
+                )
+            ):
+                self._objective_only_noop = True
+                noop_reason = "no eligible raw backlog outside fresh tail"
+                if threshold_full_sweep_active:
+                    sweep_raw_drained = True
+                    sweep_stop_reason = "raw_prefix_drained"
+                break
             if not candidate_raw and not hidden_backlog:  # #581: owned hidden backlog is scheduled, not a no-op
                 hidden_backlog = self._store_complete_backlog(working_messages, leading_anchor_count)
             if not candidate_raw and not hidden_backlog:
@@ -1972,6 +1776,7 @@ class CompactionMixin:
                     raw_tokens_outside_tail < working_leaf_chunk_tokens
                     and not force_overflow
                     and self._pressure_yield_tail_token_limit <= 0
+                    and not fit_would_strand
                 ):
                     if not (deferred_maintenance_active and critical_budget_pressure):
                         if self._maybe_engage_fresh_tail_pressure_yield(
@@ -1993,6 +1798,7 @@ class CompactionMixin:
                     raw_tokens_outside_tail < self._config.leaf_chunk_tokens
                     and not force_overflow
                     and self._pressure_yield_tail_token_limit <= 0
+                    and not fit_would_strand
                 ):
                     if not (deferred_maintenance_active and critical_budget_pressure):
                         if self._maybe_engage_fresh_tail_pressure_yield(
@@ -2060,10 +1866,11 @@ class CompactionMixin:
                 _level = 0
                 _rescue_attempts = 0
             else:
-                if no_call_only and self._summary_route_stop_applies(
-                        force_overflow, self._serialize_messages(summary_input_chunk)):
-                    sweep_stop_reason = "summary_route_unavailable"
-                    break
+                if no_call_only:
+                    serialized, clipped = self._serialize_messages_with_clip(summary_input_chunk)
+                    if self._summary_route_stop_applies(force_overflow, None if clipped else serialized):
+                        sweep_stop_reason = "summary_route_unavailable"
+                        break
                 # Pre-compaction extraction: best-effort, never blocks compaction.
                 # Use the same dependency-filtered view as summarization so ignored
                 # turns cannot leak through derived assistant/tool replies.
@@ -2362,7 +2169,7 @@ class CompactionMixin:
                     budget.hard,
                     ", ".join(f"{step}={seconds:.1f}s" for step, seconds in sweep_step_seconds.items()),
                 )
-                if not force_overflow:  # #605: forced overflow fits to its cap below and is never held, as before
+                if not force_overflow and pre_leaf_condensation_passes == 0:  # #909: stored condensation is progress
                     self._start_sweep_budget_hold()
             self._refresh_raw_backlog_debt(
                 working_messages,
@@ -2433,7 +2240,9 @@ class CompactionMixin:
                     self._ingest_cursor = len(sanitized_messages)
                 self._last_compression_status = "noop"
                 self._last_compression_noop_reason = noop_reason
-                logger.info("LCM compression no-op: %s", noop_reason)
+                hidden_label = self._hidden_backlog_label()
+                logger.info("LCM compression no-op: %s%s", noop_reason,
+                            f", hidden_rows={hidden_label}" if hidden_label is not None else "")
             if threshold_full_sweep_active:
                 duration_ms = (time.perf_counter() - _compress_started) * 1000.0
                 # #605: a stored pre-leaf condensation is progress, so its stop is a partial one, not a no-op.
@@ -2448,6 +2257,7 @@ class CompactionMixin:
                     "stop_reason": sweep_stop_reason or noop_reason,
                     "budget_exhausted": sweep_stop_reason
                     in {"pass_budget_exhausted", "time_budget_exhausted"},
+                    **self._hidden_backlog_status(),
                 }
             self._write_generated_ignored_placeholder_hash_counts(
                 self._generated_placeholder_digest_budget_for_active_replay(sanitized_messages)
@@ -2552,7 +2362,7 @@ class CompactionMixin:
         self._ingest_cursor_needs_reconcile = False
 
         logger.info(
-            "LCM compaction #%d: %d messages → %d (%d leaf pass%s, %d→%d tokens%s, %d DAG nodes%s%s)",
+            "LCM compaction #%d: %d messages → %d (%d leaf pass%s, %d→%d tokens%s, %d DAG nodes%s%s)%s",
             self.compression_count,
             len(messages),
             len(compressed),
@@ -2564,6 +2374,7 @@ class CompactionMixin:
             len(self._dag.get_session_nodes(self._session_id)),
             f", {level3_leaves} level 3 leaves" if level3_leaves else "",
             ", forced overflow recovery" if force_overflow else "",
+            f", hidden_rows={self._hidden_backlog_label()}" if self._last_hidden_backlog is not None else "",
         )
 
         # ── Active-context cleanup / tool-pair guardrail (same as _assemble_context) ──
@@ -2593,6 +2404,7 @@ class CompactionMixin:
                 "stop_reason": final_stop_reason,
                 "budget_exhausted": final_stop_reason
                 in {"pass_budget_exhausted", "time_budget_exhausted"},
+                **self._hidden_backlog_status(),
             }
         self._write_generated_ignored_placeholder_hash_counts(
             self._generated_placeholder_digest_budget_for_active_replay(compressed)

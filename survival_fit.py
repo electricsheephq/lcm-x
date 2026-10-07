@@ -24,12 +24,15 @@ through the host's automatic-compaction status hook. LCM_SURVIVAL_FIT=false turn
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import time
 from typing import Any, Dict, List, Optional
 
+from .host_uid import _valid_uid
+from .host_uid_emit import ADDRESS_KEYS, IDENTITY_KEYS, identity_emit_enabled, record_absorbed_message
 from .message_content import normalize_content_value
 from .store import _normalize_observed_at
 from .tokens import count_message_tokens, count_messages_tokens
@@ -205,6 +208,20 @@ class SurvivalFitMixin:
         self._survival_record(reason, count, ids, before, after, budget, projected, notice, warn_user=not exit_fit)
         return fitted
 
+    def _survival_summary_identity(self, row: dict, summary: str, uid, proof_kind: str, absorbed_from=None, taken=()) -> dict:
+        """The survival summary part (B1's gate): the carrier's engine uid, else a minted ``survival_summary``
+        one; a re-formed carrier absorbs its user row's identity as the host's consecutive-user merge would."""
+        if identity_emit_enabled():
+            if isinstance(uid, str) and uid:
+                row["message_uid"] = uid
+            else:
+                basis = hashlib.sha256(summary.encode("utf-8")).hexdigest()
+                self._mint_engine_uids([(row, "survival_summary", basis, proof_kind)],
+                                       taken=(message.get("message_uid") for message in taken))
+            if absorbed_from is not None:
+                record_absorbed_message(row, absorbed_from)
+        return row
+
     def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, store_ids,
                       whole_turns: bool, keep_from: Optional[int] = None):
         """``(fitted, count, ids, projected, notice)`` with ``result[:lead]`` kept, else None. The cut is the
@@ -213,12 +230,24 @@ class SurvivalFitMixin:
         summary is re-formed around the first kept user row as assembly forms it. ``keep_from``: no cut drops
         ``result[keep_from:]`` (#668: an exit fit keeps the fresh tail)."""
         head, body = list(result[:lead]), list(result[lead:])
-        summary = None
+        summary = summary_uid = None
         remainder = self._generated_context_carrier_remainder(head[-1]) if whole_turns and head else None
         if remainder is not None:
             carrier = head.pop()
             summary = carrier["content"][:self._verified_lcm_summary_prefix_end(carrier["content"])]
             body.insert(0, {**carrier, "content": remainder})
+            if identity_emit_enabled():  # site 18 (R3-5): the summary part keeps the engine uid; the user-only
+                # remainder copies no identity or address, and gets back a single proven host uid
+                absorbed = carrier.get("_absorbed_message_uids")
+                absorbed = absorbed if isinstance(absorbed, list) else []
+                candidates = list(dict.fromkeys(u for u in [carrier.get("message_uid"), *absorbed] if _valid_uid(u)))
+                engine = self._host_uid_engine_uids(candidates)
+                summary_uid = next((u for u in candidates if u in engine), None)
+                for key in IDENTITY_KEYS + ADDRESS_KEYS:
+                    body[0].pop(key, None)
+                hosts = self._host_uid_host_uids(candidates) - engine  # never an engine uid (F3)
+                if len(hosts) == 1:
+                    body[0]["message_uid"] = next(iter(hosts))
             if id(carrier) in store_ids:
                 store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
 
@@ -227,9 +256,13 @@ class SurvivalFitMixin:
 
         def build(cut: int, kept):
             dropped = body[:cut]
-            ids = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
+            mapped = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
+            # coverage reads the counted rows only: a generated carrier's id never stands in for an unmapped row
+            ids = sorted(store_ids[id(message)] for message in dropped
+                         if id(message) in store_ids and not self._survival_generated(message))
             count = sum(1 for message in dropped if not self._survival_generated(message))
-            notice = _NOTICE.format(n=count, first=ids[0] if ids else "-", last=ids[-1] if ids else "-")
+            # the notice names every stored row that left (a carrier's own row too), so the read-back reaches it
+            notice = _NOTICE.format(n=count, first=mapped[0] if mapped else "-", last=mapped[-1] if mapped else "-")
             out = list(head)
             if out and out[0].get("role") == "system":  # the notice never edits a generated summary row
                 out[0] = {**out[0], "content": self._survival_with_notice(out[0].get("content"), notice)}
@@ -238,17 +271,34 @@ class SurvivalFitMixin:
                 if (merged and kept[0].get("role") == "user" and isinstance(kept[0].get("content"), str)
                         and any(message.get("role") == "user" for message in kept[1:])
                         and self._generated_context_carrier_remainder(merged) == kept[0]["content"]):
+                    self._survival_summary_identity(merged, summary, summary_uid, "carrier", kept[0],
+                                                    taken=out + kept[1:])  # site 19
                     kept = [merged, *kept[1:]]
                 else:
-                    out.append({"role": "user", "content": summary})
+                    out.append(self._survival_summary_identity({"role": "user", "content": summary}, summary,
+                                                               summary_uid, "survival_summary", taken=out + kept))
             return out + kept or result[-1:], count, ids, notice
 
         users = [i for i, message in enumerate(body) if isinstance(message, dict) and message.get("role") == "user"]
+        covered = None
+        if reason.startswith("exit_fit:"):  # #738: an exit fit drops only rows a summary node covers
+            droppable = body if keep_from is None else body[:max(0, keep_from - len(head))]
+            try:
+                covered = self._store_complete_node_covered([store_ids[id(m)] for m in droppable if id(m) in store_ids])
+            except Exception:  # unknown coverage drops nothing
+                logger.debug("LCM exit fit: the coverage read failed; no cut", exc_info=True)
+                covered = set()
         for index in users:
             if keep_from is not None and len(head) + index > keep_from:
                 break  # the cut would drop a protected row
             if index and not all(durable(message) for message in body[:index]):
                 break  # never omit a row that is not durably stored
+            if index and covered is not None:  # #738: every dropped row is a covered stored row or verified scaffold
+                if not all(store_ids.get(id(m)) in covered or self._is_verified_replay_scaffold_message(m)
+                           for m in body[:index]):
+                    break  # an unmapped, merged, stubbed or uncovered row stays, and so does every longer region
+                if not any(id(m) in store_ids for m in body[:index]):
+                    continue  # scaffold alone is not cut; a longer region may add covered stored rows
             if index:
                 fitted, count, ids, notice = build(index, body[index:])
                 if self._survival_measure(fitted) <= budget:
@@ -415,16 +465,17 @@ class SurvivalFitMixin:
 
     def _survival_record(self, reason, count, ids, before, after, budget, projected, notice, *, shortened=True,
                          warn_user=True) -> None:
-        """Loud: a WARNING line, the doctor counter (metadata only) and one user warning per conversation."""
+        """Log the fit, update the doctor counter and warn the user once per conversation."""
         uncovered = 0
-        if reason.startswith("exit_fit:"):
+        if shortened:
             try:  # a diagnostic: its failure never fails the fit
                 uncovered = None if len(ids) < count else len(set(ids) - self._store_complete_node_covered(ids))
             except Exception:
-                logger.debug("LCM exit fit: the uncovered-row count failed", exc_info=True)
+                logger.debug("LCM survival fit: the uncovered-row count failed", exc_info=True)
                 uncovered = None
         if shortened:
-            logger.warning(
+            logger.log(
+                logging.INFO if reason.startswith("exit_fit:") else logging.WARNING,
                 "LCM survival fit applied (reason=%s, conversation=%s, dropped_rows=%d, store_ids=%s..%s, "
                 "uncovered_rows=%s, projected=%s, tokens=%d->%d, budget=%d)",
                 reason, self._conversation_id or self._session_id, count, ids[0] if ids else "-", ids[-1] if ids else "-",
@@ -442,12 +493,20 @@ class SurvivalFitMixin:
             return {"count": count + 1, "last_reason": reason, "last_at": time.time(),
                     "last_conversation": str(self._conversation_id or self._session_id or ""),
                     "last_reached_budget": after <= budget,
+                    "last_uncovered_rows": uncovered,
                     "last_shortened": shortened,
                     "ever_shortened": shortened or (record.get("ever_shortened", True) if record else False),
                     "unreached_budget_count": int(record.get("unreached_budget_count") or 0) + (after > budget),
                     # fits that projected a row (#601); a record from before the key stays unknown (no key)
                     **({"projected_count": int(record.get("projected_count") or 0) + bool(projected)}
                        if "projected_count" in record or not record.get("count") else {}),
+                    **({"uncovered_fit_count": int(record.get("uncovered_fit_count") or 0)
+                       + bool(shortened and uncovered is not None and uncovered > 0)}
+                       if "uncovered_fit_count" in record or not record.get("count") else {}),
+                    # shortened fits whose coverage could not be read: uncovered_fit_count is a lower bound while > 0
+                    **({"unknown_coverage_fit_count": int(record.get("unknown_coverage_fit_count") or 0)
+                       + bool(shortened and uncovered is None)}
+                       if "unknown_coverage_fit_count" in record or not record.get("count") else {}),
                     **({"count_lost": True} if record.get("count_lost") else {})}  # #618 item 14: kept
 
         try:

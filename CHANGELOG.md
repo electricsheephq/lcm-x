@@ -6,7 +6,102 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
-## v0.24.9 - (unreleased; rc1) (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
+### v0.27.0
+
+- Change: summaries now see the middle of long messages using a shared input budget with a legacy retention floor; measured middle-fact retention rose from 0/72 to 42/72. (#611)
+- Fix: a clipped long message no longer becomes a verbatim level-3 leaf with the default or fleet input budgets. (#899)
+- Bench: Track S decision scoring uses per-file digest admission, durable revocation, and complete paired metrics while retaining separate prefix timing. (#946, #948)
+- Fix: a leaf whose summariser input was clipped is summarised, never stored verbatim. (#947)
+- Fix: skip a leaf that only repeats the preserved objective; keep the in-turn hold and release it at foreground turn end, avoiding the wasted summary and host growth refusal. (#922)
+- Fix: on Hermes, the LCM note now reaches the model as a plugin system-prompt section, only in sessions LCM manages, and it names only the enabled tools (#900).
+- Fix: bound the summary prefix by default when the context window is known, retaining the newest summaries without removing DAG nodes, and condense the heaviest eligible depth first. (#930)
+- Fix: `LCM_SQLITE_MMAP_SIZE` configures SQLite mapped reads in bytes (default unchanged at 268435456); use `0` on SD-card hosts, and `/lcm doctor` reports the effective value. (#903)
+
+## v0.26.1 (delegated-child compaction fix)
+
+- Fix: a delegated child (a `delegate_task` subagent) whose engine is a fresh copy of the parent's now keeps the
+  host's resolved model and context window, including later model updates, so it compacts at the normal threshold
+  instead of growing until the provider rejects the request. An engine already bound to the foreground session
+  still ignores a child's model update. (#937, #938)
+- Fix: the host-fallback compressor and its model sync use the active model or the configured summary model and
+  never send `"unknown"` to a provider. With neither resolved, LCM-X logs
+  `reason=host_fallback_unresolved_model` once and uses the existing deterministic tail fallback. (#937, #938)
+
+## v0.26.0 (host message identity)
+
+- Feature: host message identity in shadow mode. On a host that stamps `message_uid`, LCM records which stored row each
+  uid belongs to in a droppable `host_uid_bindings` side table and counts agreement with its existing identity matching;
+  `/lcm doctor` reports the `host_uid_*` counts. Ingest, replay and emission decisions are unchanged, and hosts without
+  the uid feature see no new key. New setting `LCM_HOST_MESSAGE_UID=off|shadow|on` (default `shadow`; `on` is reserved and behaves
+  as `shadow`). No schema version change. (#643)
+- Change: LCM's emit path keeps the host's uid on rows it reshapes (adjacent-assistant merges, ignored-message
+  placeholders, over-cap tool stubs, the cached replay prefix), and rows LCM generates carry a deterministic engine uid
+  when the host declares `message_uid` persistence-only. Provider-visible bytes are unchanged. (#643)
+- Fix: deleting messages also deletes their host-uid bindings, and the lineage key is namespaced by Hermes home. (#836)
+- Fix: a forced-overflow recovery note, echoed alone or merged onto the previous user turn by the host, binds back to
+  the recovery emission when the proof covers it, instead of being stored as a user turn. (#534, partial)
+- Fix: after a crash on rotation, a held composite user row whose parts the host also keeps is no longer stored twice;
+  older re-sequenced rows are readmitted only as one whole composite LCM recorded. (#821)
+- Fix: an older unstamped stored row can serve as a composite constituent only inside its donor's run of back-to-back
+  user rows (within 256 store ids), so a new turn is not consumed by an older identical row. (#851)
+- Fix: on a host that rotates sessions, a branch of a session that ended by compression no longer treats that
+  session as its ancestor, so its copied rows are stored as its own instead of matched to the parent's. (#891)
+- Fix: one privacy-refused document no longer stops a cloud embedding backfill; refused documents are withheld and never sent,
+  and an apply run that withheld documents and had no failure reports `partial` with a `privacy_withheld` count. (#759)
+- Fix: stored vectors with an older privacy revision no longer make `lcm_recall` raise; recall answers from full text,
+  for every `include`, marked degraded with an `embedding_identity_stale:` reason, and `lcm_doctor` warns with the
+  remedy (`/lcm embed warmup`, then `/lcm embed backfill --apply`). An invalid privacy policy still raises. (#387, #882)
+- Fix: `lcm_doctor` also checks the chunk identity once the store holds chunk vectors that recall can use, and
+  `stale_tasks` names each stale corpus; a summaries-only `lcm_recall` falls back to full text when the summary
+  identity goes stale during the scan. (#888)
+- Perf: the payload lookup index uses set buckets, globs once per digest per scope, and shares one listing between the
+  stub-first trial and its final assembly. (#827)
+- Perf: when NumPy is available, float32 chunk vectors load straight into the search matrix instead of through Python
+  floats; NumPy stays optional. Both chunk loaders reject a malformed stored value instead of decoding it. (#834)
+- Docs: `docs/identity-ledger.md` records, for each of the 460 identity rules, what happens once a host uid decides
+  identity, which rules are dead, and the entry conditions for `on` mode. (#643)
+- Bench: an upstream host with message uids joins reliability CI with the P8 controls required (#866); the flush audit
+  (B9) on in-process and acp-process transports (#859); the #534 recovery restart cell; B2 composite pairing through the
+  host's merge record (#823); per-question `lcm_recall` health and FTS relevance ranking in the recall harnesses (#817);
+  the Phase C scorer's multiset-v2 split rule (#710); the rollback-reader tests run in CI and cover `v0.25.1` (#841).
+
+## v0.25.1 - 2026-10-05 (recall: natural-language queries with embeddings off)
+
+- Fix: with embeddings off (the default), `lcm_recall` on a natural-language question returned only rows containing
+  every word, newest first, so it mostly surfaced large tool outputs or nothing. The full-text arm now ORs the
+  question's content words and ranks by relevance. `lcm_grep` and explicit full-text queries are unchanged. (#864, #870)
+- Fix: the OR query keeps quoted phrases that contain stop words, routes emoji-only questions, centres answer-ready
+  windows on a phrase matched across separators, folds case duplicates, and treats NOT/NEAR as literal words. (#873, #874)
+
+## v0.25.0 - 2026-10-04 (long sessions: drain speed + correctness)
+
+- Fix: a host refusal after a compaction stored leaves holds automatic compaction until turn end, with a
+  600 s backstop; refusals without a stored leaf keep the existing hold. (#597)
+- Change: hidden-backlog checks report `hidden_rows` as a count, a bounded count (`N+`), or `unknown` in
+  sweep status and compaction logs; a capped empty scan warns once per conversation. (#597)
+- Bench: the drain rotation scorer excludes the session-transition call from phase 2, so D1 measures
+  only post-rotation compactions; clean-exit cells are unchanged. (#597)
+- Removed native recovery (`LCM_NATIVE_RECOVERY`), which was off by default and off on every managed profile; the key is ignored if set (#777, #509). Stores written while it was on keep their adoption proofs and snapshot digests, which LCM still reads.
+- Fix: the objective anchor no longer picks LCM's own summary row. When the reverse scan for the latest user
+  request reaches a verified LCM summary row before any real user row, it returns no objective anchor, so a long tool
+  run across several compactions no longer re-renders a summary as the preserved objective. The host-carrier half
+  stays open (#576). (#84)
+- Fix: assembly and condensation see every summary depth in deep sessions. The depths came from a node query capped
+  at 1,000 rows, depth 0 first, so from about 760 leaves the oldest condensed levels dropped out of the model's
+  context. No stored row was lost. (#750)
+- Perf: replay assembly lists the large-output payload directory once per assembly instead of once per aged-tier
+  stub; a miss falls back to the original glob. (#808)
+- Change: a routine exit fit (`reason=exit_fit:`) logs "LCM survival fit applied" at INFO; every other survival-fit
+  line stays WARNING and the text is unchanged. (#735)
+- Fix: a SQLite lock on the frontier read right after a committed threshold-sweep condensation reports the completed
+  pass count in the fail-open telemetry instead of 0. (#24)
+- Docs: `compression.target_ratio` belongs to the host's built-in compressor; LCM-X does not read it. (#605)
+- Bench: drain and hidden-backlog cells (#801); gate exemptions limited to each open target's declared bars (#813)
+  and, where declared, to one host (#822); the managed-profile runtime joins the nightly matrix; the B2 scorer pairs a
+  held user composite with the parts the host stored apart (#804); an explicit `--embeddings on|off` LongMemEval arm
+  (#811).
+
+## v0.24.9 - 2026-10-01 (drain: one foreground time budget, stub-first exit, exit fit, scan allowance)
 
 - Fix: with semantic embeddings enabled and the provider package missing or misconfigured, `lcm_doctor` and
   `/lcm doctor` report an `embedding_provider_health` warning (provider, model, reason, fix); it also warns when
@@ -38,7 +133,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: the 10-minute sweep hold after a sweep spent its budget before the first leaf (#608) holds only the
   conversation it was armed for, and a session reset or a profile re-bind clears it. Both holds and the 60 s boundary
   cooldown read the monotonic clock, so a wall clock set back or forward neither extends nor ends them (`lcm_status`
-  still shows a wall-clock `until`). While either hold is active and the request is at or over the survival ceiling,
+  still shows a wall-clock `until`). While the #608 hold is active and the request is at or over the survival ceiling,
   an automatic compaction runs no sweep and no summariser call: it returns the list through the survival fit (status
   `noop`, reason `held`); a manual `/compress`, forced overflow and the host's recovery attempt are unchanged. A stored
   survival-fit count that is not a number no longer makes every later count write fail: the record restarts at 1 with
@@ -115,6 +210,14 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   Phase B hands-on lane, recall-probe scoring (`exact` / `recoverable` / `LOSS`; only LOSS fails), provider failures
   the engine handles as designed, and receipts published as GA release assets. (#427)
 - Docs: the embedding-dependency recovery note is linked from the README, the operator guide and the bundled skill, and two doctor messages say that a hand-installed dependency (not every optional dependency) can be dropped by a Hermes update. (#702)
+- Fix (rc2): `/lcm doctor` now runs the `embedding_provider_health` check; in v0.24.9-rc1 only the `lcm_doctor` tool ran it, while the docs and the check's own fix text pointed users to `/lcm doctor`. (#734)
+- Fix (rc2): with the full threshold sweep off (the default), an automatic compaction forms a leaf even when the backlog outside the fresh tail is under `leaf_chunk_tokens`, and an automatic exit fit drops only older turns a summary covers; before, the exit fit could drop uncovered turns at every compaction. (#738)
+- Fix (rc3): after a stub-first exit, the next turn keeps the tool-output stubs the agent already holds, so a cleanup-only pass never returns a larger list and no tool output is stored twice. (#772)
+- Fix (rc4): after the host refuses a compaction, or a pass stores nothing and shortens nothing (as after a failed
+  summary publication; the 10-minute no-progress hold, #651),
+  an automatic compaction at or over the survival ceiling summarises again, as in v0.24.8. In v0.24.9-rc3 it only fitted
+  the list: a rotation session could stop compacting, and an in-place hidden-backlog drain waited up to 10 minutes
+  (#802). Only the #608 sweep hold still makes that pass fit-only. (#541)
 
 ## v0.24.8 - 2026-09-30 (repairs: level 3 fragment repair, tool-output stubs that name the read-back call, rollup stop, no silent fallback on a slow load)
 

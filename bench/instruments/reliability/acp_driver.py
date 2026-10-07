@@ -2,7 +2,7 @@
 
 Ported from the WS3 gauntlet ``drive_hermes_acp_rc4.py`` (StdioJsonRpc: framing, the server-request refusal,
 process-group lifecycle) plus ``--kill-after-rotation`` from ``drive_hermes_acp_519.py`` (``RotationKiller``). All
-live-model and eva coupling is gone: no auth.json, no contamination guard, no session model, no canaries. The
+live-model and reference-agent coupling is gone: no auth.json, no contamination guard, no session model, no canaries. The
 caller supplies argv/env/cwd (an isolated HERMES_HOME/HOME per cell) and owns the process: ``kill()`` SIGKILLs
 the process group this client spawned (``start_new_session``), never anything else.
 """
@@ -80,6 +80,7 @@ class AcpProcess:
         self.selector.register(self.process.stdout, selectors.EVENT_READ)
         self.buffer, self.pending = bytearray(), []
         self.next_id, self.write_lock, self.killed = 1, threading.Lock(), False
+        self.sent_term = False  # close() sent SIGTERM to a still-running host (a -SIGTERM exit is then ours)
 
     def _write(self, payload: dict) -> None:
         data = frame(payload)
@@ -156,6 +157,7 @@ class AcpProcess:
         if self.process.poll() is None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(self.pid, signal.SIGTERM)
+                self.sent_term = True
             try:
                 self.process.wait(timeout=SHUTDOWN_SECONDS)
             except subprocess.TimeoutExpired:

@@ -85,6 +85,11 @@ jobs:
                   return {}
           STUB
 
+      - name: Fetch the rollback-reader commits
+        # The old-reader tests run these releases' code against a store the
+        # current code wrote; under CI a missing commit fails them (#841).
+        run: git fetch --no-tags --depth=1 origin c36b46e3a7b1bff23cfa45fa117565ab8624441d f47b55e031b507b424ff5f480d8f2a80d358f1f0
+
       - name: Run pytest under low file descriptor limit
         run: |
           ulimit -n 1024

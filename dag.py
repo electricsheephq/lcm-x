@@ -544,6 +544,22 @@ class SummaryDAG:
             for row in rows
         }
 
+    def get_session_depths(self, session_id: str) -> List[int]:
+        """Every depth that has a node in the session, ascending, without a row cap (#750).
+
+        Depth discovery must not use :meth:`get_session_nodes`: its default
+        ``ORDER BY depth, created_at LIMIT 1000`` fills with depth-0 rows first,
+        so the deeper levels of a long session are never seen.
+        """
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT DISTINCT depth FROM summary_nodes
+                   WHERE session_id = ?
+                   ORDER BY depth""",
+                (session_id,),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
     def get_node_provenance(self, node_id: int) -> Optional[Dict[str, Any]]:
         """Return the recorded escalation level and model for a node, or ``None`` (#441)."""
         with self._db_lock:

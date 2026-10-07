@@ -113,8 +113,9 @@ Safety posture: `mode='full_text'` remains the byte-compatible default;
 semantic timeouts degrade to full-text with an explicit `degraded_to_fts`
 marker; filters that the semantic arm cannot honor exactly cause a degrade
 rather than approximate results; source-lineage checks fail closed.
-Degrading is for transient or capability failures only: an embedding-privacy policy error is
-a deterministic configuration fault, so `lcm_recall` raises it instead of degrading, and
+A stale or missing cloud embedding identity also degrades to full-text, with an
+`embedding_identity_stale:` reason and a doctor warning. Invalid embedding-privacy
+policies remain deterministic configuration faults, so `lcm_recall` raises instead of degrading, and
 proactive recall counts it in `privacy_policy_errors` rather than injecting nothing quietly (#370).
 
 Known cloud providers protect provider-bound input by default

@@ -81,6 +81,9 @@ HOST_ONLY = {
     # The host breaker's refusal notification (#651): it starts the in-memory
     # no-progress hold of this engine; it reads no store and grants nothing.
     "record_rejected_compaction",
+    # #597: turn-end notification clears only this engine's in-memory progress
+    # refusal hold; it reads no store and grants no access.
+    "note_turn_complete",
 }
 
 
