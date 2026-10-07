@@ -20,7 +20,7 @@ import uuid
 from collections import Counter, deque
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.context_engine import ContextEngine
 
@@ -70,6 +70,10 @@ from .extraction import (
     sanitize_pre_compaction_content,
     sanitize_pre_compaction_tool_arguments,
     strip_injected_context_blocks,
+)
+from .summary_input_clip import (
+    clip_to_budget,
+    externalized_preview,
 )
 from .ingest_protection import (
     EmbeddingPrivacyPolicyError,
@@ -727,6 +731,7 @@ class LCMEngine(
         # #618: one-shot from compress(): a hold is active at the survival ceiling, so the pass only fits.
         self._hold_fit_only_requested = False
         self._no_progress_candidate = False  # set by _compress_impl for compress()
+        self._objective_only_noop = False
         self._last_gate_tokens = 0  # the latest should_compress/preflight observation
         # #651 one-shot handoff: preflight asked for maintenance below the host
         # threshold, so the automatic compress() that follows is cleanup-only.
@@ -1686,9 +1691,9 @@ class LCMEngine(
 
     def _start_no_progress_hold(self, reason: str) -> None:
         """#651: hold automatic threshold passes until its time or a stored leaf; #597 progress refusals
-        also end at turn end."""
+        and #922 objective-only no-ops also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
-        if reason == "host_rejected_progress":
+        if reason in ("host_rejected_progress", "objective_only"):
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
         else:
@@ -1724,14 +1729,14 @@ class LCMEngine(
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
 
     def note_turn_complete(self) -> None:
-        """#597: end only a progress-refusal hold, and only at the end of a foreground turn of this engine (never a
+        """#597/#922: end progress-refusal/objective-only holds at the end of a foreground turn of this engine (never a
         bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
         try:
             hold = self._no_progress_hold
-            if (hold is not None and hold[1] == "host_rejected_progress"
+            if (hold is not None and hold[1] in ("host_rejected_progress", "objective_only")
                     and not self._bypasses_lcm_context_management()):
                 self._no_progress_hold = None
-                logger.info("LCM automatic compaction hold ended at turn end: host_rejected_progress")
+                logger.info("LCM automatic compaction hold ended at turn end: %s", hold[1])
         except Exception:
             pass  # a notification must never break a completed turn
 
@@ -2140,8 +2145,12 @@ class LCMEngine(
         while attempt_chunk and attempt_number < max_attempts:
             attempt_number += 1
             source_tokens = count_messages_tokens(attempt_chunk)
-            serialized = self._serialize_messages(attempt_chunk)
+            serialized, clipped = self._serialize_messages_with_clip(attempt_chunk)
             token_budget = self._leaf_target_tokens(source_tokens)
+            logger.info(  # #611 recorder: the serialized summariser input of this leaf call
+                "LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d",
+                count_tokens(serialized), source_tokens, len(attempt_chunk),
+            )
 
             try:
                 timeout_seconds = self._config.summary_timeout_ms / 1000
@@ -2172,10 +2181,11 @@ class LCMEngine(
                     provenance=provenance,
                     **({"budget": budget} if budget is not None else
                        {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
-                    verbatim_small_source=True,  # #605 F2
+                    verbatim_small_source=not clipped,  # #605 F2; #947: clipped input is not whole
                 )
                 self._last_leaf_summary_model = provenance.get("model", "")
-                self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
+                # #652: no fragment; #947: a clipped source returned unchanged by the level-3 fallback is a fragment too
+                self._last_leaf_level_3_verbatim = level == 3 and not clipped and summary_text == serialized
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if isinstance(exc, SweepBudgetExhausted):
@@ -4994,7 +5004,7 @@ class LCMEngine(
                      provider: str = "",
                      api_mode: str = "") -> None:
         parent_session_id = self._in_process_parent_session_id({})
-        if parent_session_id:
+        if parent_session_id and self._session_id:
             logger.debug(
                 "LCM model update ignored for auxiliary child of %s",
                 parent_session_id,
@@ -6534,12 +6544,26 @@ class LCMEngine(
             )
 
     def _serialize_messages(self, messages: List[Dict[str, Any]], session_id: Optional[str] = None) -> str:
+        return self._serialize_messages_with_clip(messages, session_id)[0]
+
+    def _serialize_messages_with_clip(
+        self, messages: List[Dict[str, Any]], session_id: Optional[str] = None,
+    ) -> Tuple[str, bool]:
         """Serialize messages into labeled text for the summarizer.
 
         *session_id* names the session that owns the rows; it defaults to the
         bound session. A large tool result is externalized under that session.
+        Message texts, tool arguments and previews share leaf_chunk_tokens (#611).
         """
-        parts = []
+        parts: List[List[Any]] = []  # per message: literal strings and indexes into texts
+        texts: List[str] = []
+        kinds: List[str] = []
+
+        def text(value: str, kind: str = "message") -> int:
+            texts.append(value)
+            kinds.append(kind)
+            return len(texts) - 1
+
         matched_tool_ids = _matched_tool_call_ids(messages)
         tool_result_names = _tool_result_names(messages)
         for index, msg in enumerate(messages):
@@ -6560,12 +6584,10 @@ class LCMEngine(
                     tool_name=str(msg.get("tool_name") or tool_result_names.get(index, "")),
                 )
                 if externalized:
-                    content = externalized["placeholder"]
+                    preview = externalized_preview(sanitize_pre_compaction_content(content))
+                    parts.append([f"[TOOL RESULT {tool_id}]: " + externalized["placeholder"], text(preview, "preview")])
                 else:
-                    content = sanitize_pre_compaction_content(content)
-                    if len(content) > 3000:
-                        content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
-                parts.append(f"[TOOL RESULT {tool_id}]: {content}")
+                    parts.append([f"[TOOL RESULT {tool_id}]: ", text(sanitize_pre_compaction_content(content))])
                 continue
 
             content = sanitize_pre_compaction_content(content)
@@ -6584,10 +6606,10 @@ class LCMEngine(
                     if not matched_tool_calls:
                         continue
                     content = ""
-                if len(content) > 3000:
-                    content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
+                part: List[Any] = ["[ASSISTANT]: ", text(content)]
                 if matched_tool_calls:
-                    tc_parts = []
+                    part.append("\n[Tool calls:\n")
+                    first = True
                     for tc in matched_tool_calls:
                         if isinstance(tc, dict):
                             fn = tc.get("function", {})
@@ -6599,18 +6621,18 @@ class LCMEngine(
                                 parse_json_strings=True,
                             )
                             args = sanitize_pre_compaction_tool_arguments(args)
-                            if len(args) > 500:
-                                args = args[:400] + "..."
-                            tc_parts.append(f"  {name}({args})")
-                    content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
-                parts.append(f"[ASSISTANT]: {content}")
+                            part += [("" if first else "\n") + f"  {name}(", text(args, "arguments"), ")"]
+                            first = False
+                    part.append("\n]")
+                parts.append(part)
                 continue
 
-            if len(content) > 3000:
-                content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
-            parts.append(f"[{role.upper()}]: {content}")
+            parts.append([f"[{role.upper()}]: ", text(content)])
 
-        return "\n\n".join(parts)
+        clipped_texts = clip_to_budget(texts, self._config.leaf_chunk_tokens, kinds)
+        clipped = any(before != after for before, after in zip(texts, clipped_texts))
+        texts = clipped_texts
+        return "\n\n".join("".join(texts[x] if isinstance(x, int) else x for x in part) for part in parts), clipped
 
     # -- Internal: tool-pair sanitization ------------------------------------
 
@@ -7278,6 +7300,7 @@ class LCMEngine(
                 )
                 return passes, "condensation_error"
             passes += 1
+            self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
             if (budget := self._foreground_call_budget()) is not None:
                 budget.progress = budget.progress or "condensation"
             try:
@@ -7286,8 +7309,6 @@ class LCMEngine(
                 if _is_sqlite_locked_error(exc):
                     setattr(exc, "lcm_completed_condensation_passes", passes)
                 raise
-            if after < before:
-                self._no_progress_candidate = False  # #651: a condensation that shrank the summary prefix is progress
             if after >= before:
                 return passes, "condensation_no_progress"
         return passes, "summary_prefix_target_reached"
@@ -7632,6 +7653,9 @@ class LCMEngine(
                 leading_msg.get("role") == "system"
                 and self.compression_count == 0
                 and include_lcm_note
+                and "This conversation uses Lossless Context Management (LCM)" not in (
+                    normalize_content_value(leading_msg.get("content")) or ""
+                )
             ):
                 leading_msg["content"] = self._append_lcm_note_to_content(
                     leading_msg.get("content", "")

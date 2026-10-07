@@ -608,7 +608,8 @@ class CompactionMixin:
                                                                   and self._last_compression_status != "error"))
             if self._no_progress_candidate and not bypass_cooldown and len(result) >= len(messages) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages)):
-                self._start_no_progress_hold("no_progress")  # #651: no leaf, and neither rows nor tokens fell
+                # #651: no leaf, and neither rows nor tokens fell; #922 keeps the turn-paced hold.
+                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
             self._record_compress_commit_proof(messages, result)
             self._host_uid_record_engine(result)
             self._host_uid_log_compaction_summary()
@@ -1147,6 +1148,7 @@ class CompactionMixin:
         4. Check if condensation is needed
         5. Assemble new active context: summaries + fresh tail
         """
+        self._objective_only_noop = False
         # Preflight handoffs are one-shot instructions for this invocation.
         # Consume them before every early return so a later unrelated turn can
         # never inherit stale cleanup-only state.
@@ -1259,6 +1261,10 @@ class CompactionMixin:
             (
                 boundary_cleanup_only_requested
                 or below_threshold_cleanup_only
+                # #909: replay cleanup may request compress() through an armed hold. Adopt the
+                # durable cleanup, but do no summary work while that automatic hold applies.
+                or (automatic_preflight_requested and not force and not recovery_attempt
+                    and self._sweep_budget_hold_applies(observed_prompt_tokens))
             )
             and not force_overflow
         )
@@ -1439,6 +1445,7 @@ class CompactionMixin:
             and sweep_summary_prefix_before > sweep_target_tokens
             and self._summary_route_available()
         ):
+            budget.leaf_reserve = budget.estimate(self._primary_summary_route())
             try:
                 pre_leaf_condensation_passes, pre_leaf_condensation_reason = (
                     self._run_threshold_sweep_condensation(
@@ -1460,6 +1467,8 @@ class CompactionMixin:
                     leaf_passes=0,
                     condensation_passes=int(getattr(exc, "lcm_completed_condensation_passes", 0)),
                 )
+            finally:
+                budget.leaf_reserve = 0.0
             max_leaf_passes -= pre_leaf_condensation_passes
         if threshold_full_sweep_active:
             self._last_threshold_full_sweep.update(
@@ -1701,6 +1710,36 @@ class CompactionMixin:
                 focus_topic = self._derive_auto_focus_topic(working_messages)
 
             candidate_raw = working_messages[leading_anchor_count:fresh_tail_start]
+            # #922: when assembly can repeat the current objective verbatim, a leaf
+            # containing only that prompt cannot reduce the active context.
+            # Keep filtering/publication and assistant-tail bookkeeping on their existing paths.
+            if (
+                len(candidate_raw) == 1
+                and not hidden_backlog
+                and not dropped_replayed_scaffold_messages
+                and any(msg.get("role") == "tool" for msg in working_messages[fresh_tail_start:])
+                and candidate_raw[0].get("role") == "user"
+                and self._latest_user_context_anchor(
+                    anchor_source_messages, working_messages[fresh_tail_start:]
+                ) == (anchor := self._build_preserved_objective_summary_part(candidate_raw[0]))
+                and (
+                    # Forced-overflow recovery assembles under the smaller recovery cap.
+                    (cap := recovery_assembly_cap if recovery_assembly_cap is not None
+                     else self._effective_assembly_token_cap()) is None
+                    or (
+                        count_messages_tokens(working_messages[:leading_anchor_count])
+                        + count_message_tokens({"role": "user", "content": anchor})
+                        + count_messages_tokens(working_messages[fresh_tail_start:])
+                        <= cap
+                    )
+                )
+            ):
+                self._objective_only_noop = True
+                noop_reason = "no eligible raw backlog outside fresh tail"
+                if threshold_full_sweep_active:
+                    sweep_raw_drained = True
+                    sweep_stop_reason = "raw_prefix_drained"
+                break
             if not candidate_raw and not hidden_backlog:  # #581: owned hidden backlog is scheduled, not a no-op
                 hidden_backlog = self._store_complete_backlog(working_messages, leading_anchor_count)
             if not candidate_raw and not hidden_backlog:
@@ -1827,10 +1866,11 @@ class CompactionMixin:
                 _level = 0
                 _rescue_attempts = 0
             else:
-                if no_call_only and self._summary_route_stop_applies(
-                        force_overflow, self._serialize_messages(summary_input_chunk)):
-                    sweep_stop_reason = "summary_route_unavailable"
-                    break
+                if no_call_only:
+                    serialized, clipped = self._serialize_messages_with_clip(summary_input_chunk)
+                    if self._summary_route_stop_applies(force_overflow, None if clipped else serialized):
+                        sweep_stop_reason = "summary_route_unavailable"
+                        break
                 # Pre-compaction extraction: best-effort, never blocks compaction.
                 # Use the same dependency-filtered view as summarization so ignored
                 # turns cannot leak through derived assistant/tool replies.
@@ -2129,7 +2169,7 @@ class CompactionMixin:
                     budget.hard,
                     ", ".join(f"{step}={seconds:.1f}s" for step, seconds in sweep_step_seconds.items()),
                 )
-                if not force_overflow:  # #605: forced overflow fits to its cap below and is never held, as before
+                if not force_overflow and pre_leaf_condensation_passes == 0:  # #909: stored condensation is progress
                     self._start_sweep_budget_hold()
             self._refresh_raw_backlog_debt(
                 working_messages,
