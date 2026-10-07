@@ -296,7 +296,7 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.26.0` is the identity of the latest stable release: `v0.26.0` at `⟦GA_SHA8⟧` is
+and tag. `0.26.0` is the identity of the latest stable release: `v0.26.0` at `867eb587` is
 the `v0.26.0-rc1` tree plus the GA release-notes file, and the next minor
 follows the same path (rc tags first, the gauntlet at the last rc tag).
 

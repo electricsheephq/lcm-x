@@ -121,7 +121,7 @@ copy-paste setups per agent type.
 ## Project status
 
 The latest stable release is
-`v0.26.0@⟦GA_SHA⟧` (plugin `hermes-lcm-x`, engine
+`v0.26.0@867eb5872207c1c9ae5fb72df95eae1c57bc2f92` (plugin `hermes-lcm-x`, engine
 `lcm-x`; the rename shipped in v0.24.0, #471). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
