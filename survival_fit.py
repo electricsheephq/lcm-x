@@ -345,8 +345,9 @@ class SurvivalFitMixin:
             if not row or str(row.get("role") or "") != str(message.get("role") or ""):
                 continue
             fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL)
-            if len(normalize_content_value(row.get("content")) or "") <= _HEAD:
-                fields["content"] = message.get("content")
+            stored_text = normalize_content_value(row.get("content")) or ""
+            if len(stored_text) <= _HEAD and normalize_content_value(message.get("content")) == stored_text:
+                fields["content"] = message.get("content")  # the same content, kept in its structured form
             projected = {key: value for key, value in {**message, **fields}.items()
                          if key != "tool_calls" or value}
             if count_message_tokens(projected) < tokens:
@@ -407,14 +408,16 @@ class SurvivalFitMixin:
         under that row's own stamp."""
         calls = message.get("tool_calls")
         haystack = content if _PROJECTED_PREFIX in content else ""
+        call_text = ""
         if isinstance(calls, list):
-            haystack += "".join(str((call.get("function") or {}).get("arguments") or "") for call in calls
+            call_text = "".join(str((call.get("function") or {}).get("arguments") or "") for call in calls
                                 if isinstance(call, dict) and isinstance(call.get("function"), dict)
                                 and "lcm_survival_fit" in str(call["function"].get("arguments") or ""))
         store = getattr(self, "_store", None)
-        if _PROJECTED_PREFIX not in haystack or store is None:
+        if _PROJECTED_PREFIX not in haystack + call_text or store is None:
             return None
-        matches = list(islice(_PROJECTED_RE.finditer(haystack), 4))
+        # Content and bounded tool-call arguments each get their own cap, so marks pasted into one cannot hide the other's.
+        matches = list(islice(_PROJECTED_RE.finditer(haystack), 4)) + list(islice(_PROJECTED_RE.finditer(call_text), 4))
         emitted = _PROJECTED_RE.match(content, _HEAD + len("\n...\n"))
         if emitted is not None:
             matches.insert(0, emitted)

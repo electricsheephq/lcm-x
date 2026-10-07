@@ -271,3 +271,37 @@ def test_short_structured_content_with_bounded_calls_is_recognised(tmp_path):
         assert engine._store.get_session_messages("S") == before
     finally:
         engine.shutdown()
+
+
+def test_externalized_assistant_projects_to_its_stored_placeholder(tmp_path):
+    engine = _engine(tmp_path)
+    placeholder = "[Externalized payload: kind=raw_payload; synthetic placeholder]"
+    live = {"role": "assistant", "content": "payload " * 2000}
+    try:
+        store_id = engine._store.append("S", {"role": "assistant", "content": placeholder}, conversation_id="conv")
+        assert len(placeholder) <= survival_fit._HEAD
+        projected = engine._survival_projection([live], {id(live): store_id}, 0)[0]
+        assert projected["content"] == placeholder
+        assert survival_fit.count_message_tokens(projected) < survival_fit.count_message_tokens(live)
+    finally:
+        engine.shutdown()
+
+
+def test_bounded_call_marker_is_found_after_four_pasted_marks(tmp_path):
+    engine = _engine(tmp_path)
+    pasted = survival_fit._PROJECTED.format(role="assistant", tokens=585, store_id=999999, head=1200, tail=600)
+    user = {"role": "user", "content": "Run the tool.", "timestamp": 9.0}
+    assistant = {"role": "assistant", "content": (pasted + "\n") * 4,
+                 "tool_calls": [{"id": "call", "type": "function",
+                                 "function": {"name": "tool", "arguments": "word " * 3000}}]}
+    try:
+        engine.ingest([user, assistant])
+        before = engine._store.get_session_messages("S")
+        projected = engine._survival_projection([assistant], {id(assistant): before[-1]["store_id"]}, 0)[0]
+        assert projected["tool_calls"] != assistant["tool_calls"]
+        content = normalize_content_value(projected["content"])
+        assert len(list(survival_fit._PROJECTED_RE.finditer(content))) == 4
+        source = engine._survival_projection_source(projected, "assistant", content)
+        assert source is not None and source["store_id"] == before[-1]["store_id"]
+    finally:
+        engine.shutdown()
