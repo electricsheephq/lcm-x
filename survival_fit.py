@@ -456,9 +456,11 @@ class SurvivalFitMixin:
                          and "lcm_survival_fit" in str(call["function"].get("arguments") or "")]
             call_text = "".join(arguments)
             for argument in arguments:
+                if not argument.startswith('{"lcm_survival_fit": "'):  # only the emitted bounded form is parsed
+                    continue
                 try:
                     bounded = json.loads(argument)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if (isinstance(bounded, dict) and set(bounded) == {"lcm_survival_fit"}
                         and isinstance(bounded["lcm_survival_fit"], str)):
