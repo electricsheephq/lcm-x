@@ -379,7 +379,9 @@ class SurvivalFitMixin:
             if not row or str(row.get("role") or "") != str(message.get("role") or ""):
                 continue
             fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL)
-            if fields["tool_calls"] != (message.get("tool_calls") or None):
+            marked = _PROJECTED_PREFIX in (normalize_content_value(message.get("content")) or "")
+            if fields["tool_calls"] != (message.get("tool_calls") or None) or (fields["tool_calls"] and marked):
+                # A storage-only call projection keeps a mark when it is projected again.
                 fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL, mark_calls=True)
             stored_text = normalize_content_value(row.get("content")) or ""
             if (fields["content"] == stored_text and len(stored_text) <= _HEAD
@@ -456,7 +458,8 @@ class SurvivalFitMixin:
                          and "lcm_survival_fit" in str(call["function"].get("arguments") or "")]
             call_text = "".join(arguments)
             for argument in arguments:
-                if not argument.startswith('{"lcm_survival_fit": "'):  # only the emitted bounded form is parsed
+                if len(argument) > 1024 or not argument.startswith('{"lcm_survival_fit": "'):
+                    # Only the emitted bounded form is parsed; it is a short notice.
                     continue
                 try:
                     bounded = json.loads(argument)
@@ -497,7 +500,9 @@ class SurvivalFitMixin:
                 continue
             fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail))
             legacy_fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail), legacy=True)
-            marked_fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail), mark_calls=True)
+            # The marked form exists only for rows with stored calls (a storage-only call projection).
+            marked_fields = self._survival_projected_fields(row, int(tokens), int(head), int(tail), mark_calls=True) \
+                if fields["tool_calls"] else fields
             if (content in (fields["content"], legacy_fields["content"], marked_fields["content"])
                     and str(message.get("tool_call_id") or "") == str(row.get("tool_call_id") or "")
                     and (calls or None) == fields["tool_calls"]
