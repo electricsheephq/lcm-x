@@ -7641,6 +7641,9 @@ class LCMEngine(
                 leading_msg.get("role") == "system"
                 and self.compression_count == 0
                 and include_lcm_note
+                and "This conversation uses Lossless Context Management (LCM)" not in (
+                    normalize_content_value(leading_msg.get("content")) or ""
+                )
             ):
                 leading_msg["content"] = self._append_lcm_note_to_content(
                     leading_msg.get("content", "")

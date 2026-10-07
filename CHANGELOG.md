@@ -13,6 +13,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Bench: Track S decision scoring uses per-file digest admission, durable revocation, and complete paired metrics while retaining separate prefix timing. (#946, #948)
 - Fix: a leaf whose summariser input was clipped is summarised, never stored verbatim. (#947)
 - Fix: skip a leaf that only repeats the preserved objective; keep the in-turn hold and release it at foreground turn end, avoiding the wasted summary and host growth refusal. (#922)
+- Fix: on Hermes, the LCM note now reaches the model as a plugin system-prompt section, only in sessions LCM manages, and it names only the enabled tools (#900).
 
 ## v0.26.1 (delegated-child compaction fix)
 
