@@ -2152,6 +2152,9 @@ class LCMEngine(
                 count_tokens(serialized), source_tokens, len(attempt_chunk),
             )
 
+            # #751: a size refusal is excused only when a smaller chunk can still be tried
+            rescue_chunk = self._next_leaf_rescue_chunk(attempt_chunk, source_tokens) if attempt_number < max_attempts else []
+            can_rescue = bool(rescue_chunk) and len(rescue_chunk) < len(attempt_chunk)
             try:
                 timeout_seconds = self._config.summary_timeout_ms / 1000
                 if budget is not None:  # #605: the chain caps each attempt; refuse here before any work
@@ -2182,20 +2185,17 @@ class LCMEngine(
                     **({"budget": budget} if budget is not None else
                        {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
                     verbatim_small_source=not clipped,  # #605 F2; #947: clipped input is not whole
-                    # #751: a refusal for size reaches the rescue below; the last attempt counts as before
-                    context_length_rescue=attempt_number < max_attempts,
+                    # #751: a refusal for size reaches the rescue below; without a smaller chunk it counts as before
+                    context_length_rescue=can_rescue,
                 )
-                if (level == 3 and provenance.get("context_length_error") and summary_text != serialized
-                        and attempt_number < max_attempts):
-                    smaller_chunk = self._next_leaf_rescue_chunk(attempt_chunk, source_tokens)
-                    if smaller_chunk and len(smaller_chunk) < len(attempt_chunk):
-                        logger.warning(
-                            "LCM leaf summarization retrying with smaller oldest chunk after a context-length "
-                            "refusal (attempt %d/%d, %d→%d messages)",
-                            attempt_number, max_attempts, len(attempt_chunk), len(smaller_chunk),
-                        )
-                        attempt_chunk = smaller_chunk
-                        continue
+                if level == 3 and provenance.get("context_length_error") and summary_text != serialized and can_rescue:
+                    logger.warning(
+                        "LCM leaf summarization retrying with smaller oldest chunk after a context-length "
+                        "refusal (attempt %d/%d, %d→%d messages)",
+                        attempt_number, max_attempts, len(attempt_chunk), len(rescue_chunk),
+                    )
+                    attempt_chunk = rescue_chunk
+                    continue
                 self._last_leaf_summary_model = provenance.get("model", "")
                 # #652: no fragment; #947: a clipped source returned unchanged by the level-3 fallback is a fragment too
                 self._last_leaf_level_3_verbatim = level == 3 and not clipped and summary_text == serialized

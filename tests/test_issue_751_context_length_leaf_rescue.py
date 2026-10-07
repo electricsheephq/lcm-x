@@ -116,6 +116,23 @@ def test_t2_a_chunk_no_attempt_fits_keeps_level_3_and_the_652_stop(tmp_path, mon
         engine.shutdown()
 
 
+def test_t2b_an_indivisible_chunk_counts_its_refusals(tmp_path, monkeypatch, caplog):
+    calls = _install_provider(monkeypatch, window=0.0)  # every call refused for size
+    engine = _engine(tmp_path)
+    view = [{"role": "system", "content": "system prompt"},
+            {"role": "user", "content": f"[T0] user turn{PAD * 8}", "timestamp": 10.0},
+            {"role": "assistant", "content": f"reply to T0{PAD}"},
+            {"role": "user", "content": f"[T1] user turn{PAD}", "timestamp": 20.0}]
+    try:
+        _compress(engine, view, caplog)
+        assert len(calls) == 2, calls  # one attempt: no smaller chunk exists, so no rescue
+        assert RETRY_LINE not in caplog.text
+        # nothing smaller can be tried, so the refusals count and the circuit opens as before #751
+        assert CIRCUIT_LINE in caplog.text and not engine._summary_route_available()
+    finally:
+        engine.shutdown()
+
+
 def test_t3_other_provider_errors_still_count_and_get_no_rescue(tmp_path, monkeypatch, caplog):
     calls = _install_provider(monkeypatch, window=0.0, error=SERVER_ERROR)
     engine = _engine(tmp_path)
