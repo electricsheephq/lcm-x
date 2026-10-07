@@ -68,6 +68,7 @@ class ResetStateMixin:
         self._compression_boundary_stored_placeholder_digest_counts = {}
         # #651: a hold armed by the previous binding never holds the next one. #618: nor does the #608 hold.
         self._no_progress_hold, self._no_progress_candidate = None, False
+        self._objective_only_noop = False
         self._sweep_budget_hold_until, self._sweep_budget_hold_conversation = 0.0, ""
         # #677: a preflight request of the previous binding never shapes the next one's compress().
         self._preflight_below_threshold_cleanup_only = self._preflight_automatic_request = False
