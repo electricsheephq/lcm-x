@@ -65,10 +65,12 @@ the per-session summary-node maximum of every R1-S / R1-L store is recorded (§2
 - Reader and judge (R1-S, R1-L): model id, reasoning effort, codex CLI version + binary sha256. Reader = the current
   Sol generation at medium; judge = Sol at low with the strict rubric. The reader differs from the 07-29 row
   (gpt-5.6-sol), which is one more reason R1-S is a new baseline.
-- Reader and judge launches: the memorybench CLI transport reads one process-wide reasoning-effort setting for both the
-  answerer and the judge. So the answer phase and the judge phase are separate launches, each with its own pinned
-  environment (reader: Sol at medium; judge: Sol at low) and its own receipt (model id, effort, CLI version, binary
-  sha256, served model).
+- Reader and judge launches: when the memorybench CLI transport reads one process-wide reasoning-effort setting, the
+  answer phase and the judge phase are separate launches, each with its own pinned environment (reader: Sol at medium;
+  judge: Sol at low) and its own receipt (model id, effort, CLI version, binary sha256, and the served model, or for
+  the Codex CLI transport the configured model labelled as configured). A harness commit with separate reader and
+  judge settings (`HERMES_MB_CODEX_MODEL` / `HERMES_MB_CODEX_JUDGE_MODEL` and their effort variables) may run both
+  phases in one launch; the receipt then records both settings.
 - Reader and judge tool use: the reader answers from the delivered recall context only, and the judge grades from
   the question, gold answer and reader answer only. Every reader call and every judge call keeps a durable per-call
   tool-event record, and any tool call by either (filesystem, shell, search, web) stops the sub-row: the F59
@@ -78,7 +80,24 @@ the per-session summary-node maximum of every R1-S / R1-L store is recorded (§2
 - Served model: every reader answer and judge verdict, watchdog-resumed work included, carries the model that
   actually served it (from the transport log), and it must equal the pinned id (the F59 lesson: a requested model
   was silently served by another). If the transport does not expose the served model, that sub-row is blocked
-  until it does.
+  until it does, except for the Codex CLI transport, which is handled as follows.
+  The Codex CLI transport (`codex exec`) does not report the model that served a call: its `--json` events carry no
+  model field, and its session record holds only the configured model. It reports only a mismatch: when the server's
+  response names a model other than the requested one, the CLI emits an `item.completed` event whose item has type
+  `error` and a message starting `model rerouted:`, and the process still exits 0. For that transport the model
+  evidence is the harness's per-call telemetry record (requested model and its pin source, provider, effort, CLI
+  version, and every attempt's status), which must name the pinned id and the pinned provider. The calls use the
+  pinned `-m` argument and a pinned `model_provider`, with the user configuration ignored and no endpoint variables in
+  the child environment, so neither a user profile nor an endpoint variable can change the model or the backend. The
+  receipt records that no system or managed Codex configuration is present on the run host. Any `--json` error event
+  or error item, a `model rerouted` item included, fails that attempt closed: the attempt is recorded as failed,
+  its answer is never scored, and it is counted in the run log. The Codex CLI sub-row is blocked until the harness
+  commit under test enforces this. The run receipt records the CLI binary sha256, and every transport error fails
+  closed (a failed call is never answered by another model). Calls stay `--ephemeral`: a session record would repeat
+  only the configured model, and persisting it would store benchmark content in the operator's agent history. This is
+  configured-model evidence, not served-model evidence: a Codex CLI sub-row never satisfies a served-model claim, and
+  the row's `caveats` states that the model is the configured one as recorded by the client and that the server's
+  model is checked only through the mismatch the CLI reports, never confirmed per call.
 - Recorded configuration: `retrieval_config` from every R1-M report; `embeddings_enabled` from every bridge
   `initialize` reply; an allowlisted inventory of the non-secret `LCM_*` / `HERMES_MB_*` configuration values.
   Credential variables (for example `LCM_EMBEDDING_API_KEY`) are recorded as present or absent only, never by value;
@@ -138,7 +157,8 @@ the per-session summary-node maximum of every R1-S / R1-L store is recorded (§2
 - The GA tag does not resolve to the `docs/project-status.md` pin, the R1-M worktree shows a change outside the
   instrument files or an overlay file that differs from the instrument commit, a bridge checkout is not clean,
   sub-row product shas differ without separate labels, the R1-S dataset or question-list sha differs from its pin, a
-  reader or judge tool call appears, or a served model differs from its pin → stop.
+  reader or judge tool call appears, a served model differs from its pin, or a Codex CLI call reports
+  `model rerouted` → stop.
 
 ## 7. Procedure
 1. Merge the kit PRs; merge this sheet (fact-check of every pin source). R1-M also waits for #817 (per-question
@@ -155,3 +175,5 @@ the per-session summary-node maximum of every R1-S / R1-L store is recorded (§2
 ## 8. What this row does not prove
 - Nothing about the embeddings-on configuration (row 2) or production privacy with embeddings (row 3, INCOMPLETE).
 - Nothing about recall inside live sessions on customer profiles; it measures the plugin's recall path on public data.
+- For a Codex CLI sub-row, that the server's model equalled the pin on every call: the CLI reports the server's model
+  only when it differs from the requested one, and only when the server names it.
