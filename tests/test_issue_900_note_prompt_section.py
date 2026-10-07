@@ -56,6 +56,7 @@ def plugin(tmp_path, monkeypatch):
     monkeypatch.delenv("LCM_DATABASE_PATH", raising=False)
     monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
     monkeypatch.setenv("LCM_ENABLE_SLASH_COMMAND", "true")
+    monkeypatch.delenv("LCM_DISABLED_TOOLS", raising=False)
     module = _load_plugin_entrypoint_module("hermes_lcm_issue_900")
     contexts = []
 
@@ -115,6 +116,53 @@ def test_u2_resolves_only_lcm_sessions_and_fails_empty(plugin, monkeypatch):
 
     monkeypatch.setattr(registry, "resolve_active_lcm_engine", broken_resolution)
     assert content({"session_id": "bound"}) == ""
+
+
+@pytest.mark.parametrize("setting,pattern,session_id", [
+    ("LCM_IGNORE_SESSION_PATTERNS", "ignored", "ignored"),
+    ("LCM_STATELESS_SESSION_PATTERNS", "stateless", "stateless"),
+    ("LCM_IGNORE_SESSION_PATTERNS", "cli:ignored", "ignored"),
+    ("LCM_STATELESS_SESSION_PATTERNS", "cli:stateless", "stateless"),
+])
+def test_section_omits_bypassed_session_by_requested_id(plugin, monkeypatch, setting, pattern, session_id):
+    module, register = plugin
+    monkeypatch.setenv(setting, pattern)
+    ctx = register(SectionContext())
+    content = ctx.sections[0][1]
+    registry = importlib.import_module(f"{module.__name__}.engine_registry")
+    ctx.engine.on_session_start("ordinary", platform="cli")
+    assert content({"session_id": "ordinary"}) == module.LCM_SYSTEM_PROMPT_NOTE
+    ctx.engine.on_session_start(session_id, platform="cli")
+    assert registry.resolve_active_lcm_engine(session_id=session_id) is ctx.engine
+    assert ctx.engine.side_channel_active
+    assert not ctx.engine.current_session_ignored
+    assert not ctx.engine.current_session_stateless
+    assert content({"session_id": session_id}) == ""
+    assert content({"session_id": "ordinary"}) == module.LCM_SYSTEM_PROMPT_NOTE
+
+
+def test_all_enabled_note_is_byte_identical(plugin):
+    module, _ = plugin
+    assert module.lcm_system_prompt_note(set()) == module.LCM_SYSTEM_PROMPT_NOTE
+
+
+@pytest.mark.parametrize("disabled", [
+    {"lcm_expand"}, {"lcm_grep"}, {"lcm_describe"},
+    {"lcm_grep", "lcm_describe", "lcm_expand"},
+])
+def test_section_names_only_enabled_tools(plugin, monkeypatch, disabled):
+    module, register = plugin
+    monkeypatch.setenv("LCM_DISABLED_TOOLS", ",".join(sorted(disabled)))
+    ctx = register(SectionContext())
+    ctx.engine.on_session_start("ordinary", platform="cli")
+    text = ctx.sections[0][1]({"session_id": "ordinary"})
+    assert PHRASE in text
+    assert text == module.lcm_system_prompt_note(disabled)
+    for name in {"lcm_grep", "lcm_describe", "lcm_expand"}:
+        assert (name in text) == (name not in disabled)
+    assert ('An "Externalized tool output"' in text) == ("lcm_expand" not in disabled)
+    assert ("externalized_ref=" in text) == ("lcm_expand" not in disabled)
+    assert ("Tools: " in text) == (len(disabled) < 3)
 
 
 def test_prompt_section_does_not_wait_for_stable_use_lock(plugin):

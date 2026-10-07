@@ -8,7 +8,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ### v0.27.0
 
-- Fix: on Hermes, the LCM note now reaches the model as a plugin system-prompt section (#900).
+- Fix: on Hermes, the LCM note now reaches the model as a plugin system-prompt section, only in sessions LCM manages, and it names only the enabled tools (#900).
 
 ## v0.26.0 (host message identity)
 

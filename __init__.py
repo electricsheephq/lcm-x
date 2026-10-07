@@ -24,6 +24,22 @@ LCM_SYSTEM_PROMPT_NOTE = (
     'lcm_expand(externalized_ref="R") returns it.'
 )
 
+
+def lcm_system_prompt_note(disabled: set[str]) -> str:
+    """Describe only retrieval tools available to this session."""
+    intro, rest = LCM_SYSTEM_PROMPT_NOTE.split("Tools: ", 1)
+    _, recovery = rest.split(". ", 1)
+    tools = [description for name, description in (
+        ("lcm_grep", "lcm_grep searches"),
+        ("lcm_describe", "lcm_describe inspects the summary DAG"),
+        ("lcm_expand", "lcm_expand recovers details"),
+    ) if name not in disabled]
+    note = intro + ("Tools: " + ", ".join(tools) + ". " if tools else "")
+    if "lcm_expand" not in disabled:
+        note += recovery
+    return note.rstrip()
+
+
 # Hermes' plugin load deadline (plugins.load_timeout_seconds) covers import plus
 # register(); measure the load from here (#622).
 _MODULE_IMPORTED_AT = time.monotonic()
@@ -573,11 +589,12 @@ def register(ctx):
                 session_id = str(info.get("session_id") or "")
                 if not session_id:
                     return ""
-                return (
-                    LCM_SYSTEM_PROMPT_NOTE
-                    if engine_registry.resolve_active_lcm_engine(session_id=session_id) is not None
-                    else ""
-                )
+                resolved = engine_registry.resolve_active_lcm_engine(session_id=session_id)
+                if resolved is None or resolved._session_id_matches_lcm_bypass_filters(
+                    session_id, platform=resolved._lcm_session_last_platform.get(session_id, ""),
+                ):
+                    return ""
+                return lcm_system_prompt_note(_disabled_tool_names())
             except Exception:
                 return ""
 
