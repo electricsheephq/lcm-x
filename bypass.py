@@ -62,10 +62,12 @@ class BypassMixin:
 
     def _session_id_bypasses_lcm(self, session_id: str, *, platform: str = "") -> bool:
         """Classify the requested id without borrowing the foreground's state."""
+        last_bypassed = self._lcm_session_last_bypassed.get(session_id)
         return bool(
             self._session_id_matches_lcm_bypass_filters(session_id, platform=platform)
-            or self._lcm_session_last_bypassed.get(session_id)
-            or self._has_lcm_bypass_lineage_session(session_id, platform=platform or None)
+            or last_bypassed
+            # Lineage decides only until the id has its own binding; a normal rebind records False.
+            or (last_bypassed is None and self._has_lcm_bypass_lineage_session(session_id, platform=platform or None))
             or session_id in self._active_auxiliary_session_ids()
             or self._thread_context_has_auxiliary_session(session_id)
             or (session_id == self._session_id and (self._session_ignored or self._session_stateless))
