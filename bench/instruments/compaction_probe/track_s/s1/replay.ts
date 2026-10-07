@@ -166,6 +166,9 @@ async function toolLoop(purpose: string, msgs: ChatMessage[], tools: any[], onCa
     if (!r.toolCalls.length || guardHit) return { text: r.text, guardHit };
     msgs.push({ role: "assistant", content: r.text || null, tool_calls: r.toolCalls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: c.args } })) });
     for (const c of r.toolCalls) {
+      if (calls >= GUARD) {
+        msgs.push({ role: "tool", tool_call_id: c.id, content: `Tool budget exhausted (${GUARD} calls).` }); continue;
+      }
       const t0 = performance.now(), tool = tools.find((t) => t.name === c.name);
       const out = tool ? await runTool(tool, c.id, c.args) : JSON.stringify({ error: `unknown tool ${c.name}` });
       calls++; onCall(c.name, out, Math.round(performance.now() - t0), c.args);

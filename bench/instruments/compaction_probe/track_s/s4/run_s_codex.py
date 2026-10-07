@@ -69,10 +69,8 @@ def setup_home() -> dict:
     HOME.mkdir(parents=True, exist_ok=True)   # the dry run builds the home too: auth isolation is checked first
     os.chmod(HOME, 0o700)
     dst = HOME / "auth.json"
-    if not dst.exists():
-        shutil.copy2(USER_AUTH, dst)
-        os.chmod(dst, 0o600)
-    dst = HOME / "auth.json"
+    shutil.copy2(USER_AUTH, dst)
+    os.chmod(dst, 0o600)
     info["auth_copied"] = dst.exists()
     if dst.exists():
         info["auth_copy_sha256_prefix"] = sha(dst)[:12]   # identity of the copy only, not its content
@@ -562,11 +560,13 @@ def main() -> int:
     summary["auth_copy_sha256_prefix_after"] = sha(HOME / "auth.json")[:12]
     summary["auth_refreshed_in_run"] = summary["auth_copy_sha256_prefix_after"] != home.get("auth_copy_sha256_prefix")
     summary["finished"] = time.time()
+    if not summary["pin_ok"] or not summary["isolation_ok"]:
+        summary["status"] = "FAILED"
     summary.setdefault("status", "COMPLETED")
     jdump(rdir / "summary.json", summary)
     print(json.dumps({k: summary.get(k) for k in ("status", "thread_id", "pin_ok", "isolation_ok",
                                                   "model_context_window", "history_mode")}, indent=1))
-    return 0
+    return 0 if summary["status"] == "COMPLETED" else 1
 
 
 if __name__ == "__main__":

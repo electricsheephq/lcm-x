@@ -63,6 +63,10 @@ def main():
         for arm, label, rdir, cps in runs(n, args):
             if args.arms and arm not in args.arms:
                 continue
+            name = f"{arm}.seed-{n}.{label}.json"
+            for cp in cps:
+                for population in ("scores", "loss"):
+                    (args.out / population / f"cp-{cp}" / name).unlink(missing_ok=True)
             lane = "s2" if arm.startswith("LCMX") else "s4" if arm == "codex-native" else "s1"
             receipt = args.logs / f"{lane}-{arm}-{label}.log.wall"
             if not receipt.exists() or re.findall(r"^exit (\d+) end", receipt.read_text(), re.M) != ["0"]:
@@ -88,7 +92,6 @@ def main():
                 out["run"] = label  # the decision run id (writers record their own run field)
                 (args.out / "scores" / f"cp-{cp}").mkdir(parents=True, exist_ok=True)
                 (args.out / "loss" / f"cp-{cp}").mkdir(parents=True, exist_ok=True)
-                name = f"{arm}.seed-{n}.{label}.json"
                 (args.out / "scores" / f"cp-{cp}" / name).write_text(json.dumps(out, indent=1, ensure_ascii=False) + "\n")
                 (args.out / "loss" / f"cp-{cp}" / name).write_text(json.dumps(classify_loss(out), indent=1) + "\n")
                 done.append(f"cp-{cp} {name}")

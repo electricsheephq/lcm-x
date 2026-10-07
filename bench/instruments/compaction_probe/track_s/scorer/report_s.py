@@ -93,7 +93,9 @@ def absolute(runs, arm, seeds, metric, expected):
     fails = [s for s in sts if s[2].startswith("FAIL")]
     if fails:
         return "FAIL", sts
-    if not sts or len({s for s, _, _ in sts}) < expected or any(not s[2].startswith("OK") for s in sts):
+    if (not sts or len({s for s, _, _ in sts}) < expected
+            or any(len(runs.get((arm, seed), [])) < 2 for seed in seeds)
+            or any(not s[2].startswith("OK") for s in sts)):
         return "INCOMPLETE", sts
     return "PASS", sts
 

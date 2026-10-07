@@ -97,9 +97,11 @@ def pair_axes(cp):
                 axes[ax][3] += k2
                 n_items[ax] += 1
 
+            lost1 = set(s1["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids", []))
+            lost2 = set(s2["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids", []))
             for fid, f in facts[seed].items():
-                k1 = s1["probes"].get(fid, {}).get("class") == "CORRECT"
-                k2 = s2["probes"].get(fid, {}).get("class") == "CORRECT"
+                k1 = s1["probes"].get(fid, {}).get("class") == "CORRECT" and fid not in lost1
+                k2 = s2["probes"].get(fid, {}).get("class") == "CORRECT" and fid not in lost2
                 add("facts_all", k1, k2)
                 add(f"facts_{f['placement']}", k1, k2)
                 if f["class"] == "early_user_constraint":
