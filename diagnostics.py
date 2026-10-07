@@ -230,7 +230,7 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         if detail.get("ever_shortened") is False:
             command = ("inspect the 'LCM survival fit could not shorten the list' log lines and the compaction "
                        "reason; these attempts removed no rows from live context")
-            if detail.get("count_lost"):
+            if survival_fit_projection_floor_applies(detail):  # #966: the same predicate as the observation
                 command += f". Rollback (#601, #603): {within}."
         warning_only = True
         rationale = ("a survival fit could not shorten the list; the request still exceeds its budget"
