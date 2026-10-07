@@ -14,6 +14,77 @@ import pytest
 TRACK = Path(__file__).resolve().parents[1] / "bench/instruments/compaction_probe/track_s"
 
 
+@pytest.mark.parametrize("replies,expected_calls,error", [
+    ([({}, [8192]), ({}, [8192])], 2, True),
+    ([({}, [8192]), ({"f": "kept"}, [10])], 2, False),
+    ([({"f": "kept"}, [8192])], 1, False),
+    ([({}, [8192, 10])], 1, False),
+    ([({}, [8191])], 1, False),
+])
+def test_reader_truncation_batch_retry(tmp_path, replies, expected_calls, error):
+    import re
+
+    for name in ("facts", "traps"):
+        (tmp_path / f"{name}.json").write_text("[]")
+    calls = []
+
+    def answer(*args):
+        calls.append(args)
+        answers, tokens = replies[len(calls) - 1]
+        usage = [{"completion_tokens": n} for n in tokens]
+        return answers, {"reader_calls": usage, "usage": usage[-1]}
+
+    reader = SimpleNamespace(readback={"model": "synthetic"})
+    run = SimpleNamespace(db=None, home=None, dir=tmp_path, sdir=tmp_path,
+        arm={"name": "LCMX-fleet", "kind": "plain", "open": False}, receipts_out=[],
+        args=SimpleNamespace(reader="glm", batches=0, run="r1", lane="glm"),
+        ntok=lambda _: 0, sysmsg={}, system="synthetic", seed=1, run_id="synthetic",
+        timing_label="decision", reader_calls=[], m=SimpleNamespace(tokens=SimpleNamespace(count_tokens=len)))
+    ns = functions("s2/run_s_lcmx.py", "probe", Run=SimpleNamespace,
+        R=SimpleNamespace(answer=answer, ANSWER_RESERVE=1, READER_WINDOW={"glm": 100}),
+        SUMMARY_RE=re.compile("never"), json=json, jload=lambda p: json.loads(p.read_text()),
+        batches_for=lambda _: [{"id": "batch", "text": "Reply as JSON", "probes": [
+            {"id": "f", "text": "q", "kind": "canary", "expect": "value"}]}])
+    rows = ns["probe"](run, [], reader, False)
+    assert len(calls) == expected_calls
+    assert all(call == calls[0] for call in calls)
+    assert rows[0]["status"] == ("ERROR" if error else "OK")
+    assert bool(rows[0]["error"]) == error
+    if error:
+        assert rows[0]["error"] == "READER_TRUNCATED: completion cap 8192 reached"
+        assert rows[0]["answered"] is False and rows[0]["timed_out"] is False
+    saved = json.loads((tmp_path / "answers/batch.json").read_text())
+    if expected_calls == 2:
+        assert [a["usage"]["completion_tokens"] for a in saved["attempts"]] == [8192, replies[-1][1][-1]]
+        assert len(run.reader_calls[0]["calls"]) == 2
+
+
+@pytest.mark.parametrize("excluded_class", ["READER_TRUNCATED", "MISSING"])
+def test_paired_reader_truncation_excludes_either_side(tmp_path, excluded_class):
+    material = tmp_path / "seed-1"
+    material.mkdir()
+    (material / "facts.json").write_text(json.dumps([
+        {"id": f, "placement": "head", "class": "early_user_constraint"} for f in ("a", "b", "c")]))
+
+    def score(arm, *args):
+        probes = {f: {"class": "CORRECT"} for f in ("a", "b", "c", "state.next", "state.status")}
+        for pid in (("a", "state.next") if arm == "first" else ("b",)):
+            probes[pid]["class"] = excluded_class
+        return {"probes": probes, "metrics": {"facts_kept": {"complete": False},
+            "continuation": {"complete": False, "correct_fields": ["status"], "denominator": 1},
+            "continuity": {"complete": True}}}
+
+    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", MATERIAL=tmp_path,
+        SEEDS=[1], ARMS=["first", "second"], score=score, grid_by_row=lambda *a: {}, json=json,
+        math=__import__("math"))
+    axes = ns["pair_axes"](304)["axes"]
+    for axis in ("facts_all", "facts_head", "constraint_class"):
+        assert axes[axis]["n"] == 2 and axes[axis]["excluded"] == 4
+        assert axes[axis]["v1"] == axes[axis]["v2"] == 1.0
+        assert axes[axis]["b_v1_only"] == axes[axis]["c_v2_only"] == 0
+    assert axes["continuation"]["n"] == axes["continuation"]["excluded"] == 2
+
+
 def functions(path, *names, **namespace):
     namespace.setdefault("Path", Path)
     tree = ast.parse((TRACK / path).read_text())
