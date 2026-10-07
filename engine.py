@@ -7823,11 +7823,18 @@ class LCMEngine(
                 overhead = self._survival_host_overhead(
                     overhead_source, max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
                 )
+                # Measure without externalizing preserved-objective payloads.
+                # Tool-pair repair still reserves any missing-result stubs.
+                measurement_tail = self._sanitize_tool_pairs([
+                    {**msg, "content": strip_injected_context_blocks(msg["content"])}
+                    if isinstance(msg.get("content"), str) else msg
+                    for msg in tail_selected
+                ])
                 # The quarter-window floor relies on a later survival fit; without one, use the true remainder.
                 default_budget = max(
                     ceiling - overhead - count_messages_tokens(result)
                     - max(count_messages_tokens(tail_selected),
-                          count_messages_tokens(self._sanitize_active_context_messages(tail_selected)))
+                          count_messages_tokens(measurement_tail))
                     # Reserve recall only when its builder can return a row (recall and embeddings on, budget > 0).
                     - (max(0, int(self._config.proactive_recall_budget_tokens or 0))
                        if self._config.proactive_recall_enabled and self._config.embeddings_enabled else 0),
