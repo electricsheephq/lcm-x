@@ -115,6 +115,7 @@ def test_a_eva_shape_publishes_and_the_frontier_advances_over_passes(tmp_path, s
             live = engine.compress(live)
             statuses.append(engine._last_compression_status)
             frontiers.append(_frontier(engine))
+            engine.note_turn_complete()  # #904: each hidden drain pass belongs to a new foreground turn
             engine.on_session_start("S", boundary_reason="compression", old_session_id="S",
                                     platform="telegram", conversation_id="conv")
         after = [(int(r["store_id"]), r["role"], r["content"]) for r in _rows(engine)]
@@ -1171,6 +1172,7 @@ def _run_scan_cap_leaves(tmp_path, monkeypatch, caplog, cap, call_pos, parallel=
             view = engine.compress(list(tail))
             assert engine._last_compression_status == "compacted", engine._last_compression_noop_reason
             first = set(_covered(engine))
+            engine.note_turn_complete()  # #904: the following user turns release the hidden-only hold
             engine.on_session_start("S", boundary_reason="compression", old_session_id="S",
                                     platform="telegram", conversation_id="conv")
             view = [*view, *[m for j in range(6) for m in (  # the host continues past the retained tail
