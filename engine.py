@@ -400,6 +400,7 @@ _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across co
 # #608: after a sweep that spent its budget before the first leaf, the threshold answer is no for the hold
 # time. The minimum time for a summariser call and SweepBudgetExhausted live in escalation (#666).
 _SWEEP_BUDGET_HOLD_SECONDS = 600.0
+_TURN_END_HOLD_REASONS = frozenset({"host_rejected_progress", "objective_only", "hidden_only"})
 
 
 class SummaryResultRejected(RuntimeError):
@@ -1693,10 +1694,10 @@ class LCMEngine(
         return False
 
     def _start_no_progress_hold(self, reason: str) -> None:
-        """#651: hold automatic threshold passes until its time or a stored leaf; #597 progress refusals
-        and #922 objective-only no-ops also end at turn end."""
+        """#651: hold automatic threshold passes until its time or a stored leaf; turn-paced reasons
+        (#597 progress refusals, #922 objective-only no-ops, #904 hidden-only passes) also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
-        if reason in ("host_rejected_progress", "objective_only"):
+        if reason in _TURN_END_HOLD_REASONS:
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
                         _SWEEP_BUDGET_HOLD_SECONDS, reason)
         else:
@@ -1732,11 +1733,11 @@ class LCMEngine(
         self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
 
     def note_turn_complete(self) -> None:
-        """#597/#922: end progress-refusal/objective-only holds at the end of a foreground turn of this engine (never a
+        """#597/#922/#904: end turn-paced holds at the end of a foreground turn of this engine (never a
         bypassed auxiliary/stateless call); cheap, fail-soft host notification."""
         try:
             hold = self._no_progress_hold
-            if (hold is not None and hold[1] in ("host_rejected_progress", "objective_only")
+            if (hold is not None and hold[1] in _TURN_END_HOLD_REASONS
                     and not self._bypasses_lcm_context_management()):
                 self._no_progress_hold = None
                 logger.info("LCM automatic compaction hold ended at turn end: %s", hold[1])
@@ -2155,6 +2156,9 @@ class LCMEngine(
                 count_tokens(serialized), source_tokens, len(attempt_chunk),
             )
 
+            # #751: a size refusal is excused only when a smaller chunk can still be tried
+            rescue_chunk = self._next_leaf_rescue_chunk(attempt_chunk, source_tokens) if attempt_number < max_attempts else []
+            can_rescue = bool(rescue_chunk) and len(rescue_chunk) < len(attempt_chunk)
             try:
                 timeout_seconds = self._config.summary_timeout_ms / 1000
                 if budget is not None:  # #605: the chain caps each attempt; refuse here before any work
@@ -2185,7 +2189,17 @@ class LCMEngine(
                     **({"budget": budget} if budget is not None else
                        {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
                     verbatim_small_source=not clipped,  # #605 F2; #947: clipped input is not whole
+                    # #751: a refusal for size reaches the rescue below; without a smaller chunk it counts as before
+                    context_length_rescue=can_rescue,
                 )
+                if level == 3 and provenance.get("context_length_error") and summary_text != serialized and can_rescue:
+                    logger.warning(
+                        "LCM leaf summarization retrying with smaller oldest chunk after a context-length "
+                        "refusal (attempt %d/%d, %d→%d messages)",
+                        attempt_number, max_attempts, len(attempt_chunk), len(rescue_chunk),
+                    )
+                    attempt_chunk = rescue_chunk
+                    continue
                 self._last_leaf_summary_model = provenance.get("model", "")
                 # #652: no fragment; #947: a clipped source returned unchanged by the level-3 fallback is a fragment too
                 self._last_leaf_level_3_verbatim = level == 3 and not clipped and summary_text == serialized
@@ -7420,7 +7434,16 @@ class LCMEngine(
         messages: List[Dict[str, Any]],
         selected_tail: List[Dict[str, Any]],
     ) -> Optional[str]:
-        """Return a scaffolded newest real user objective omitted from the tail.
+        """Keep the first-choice anchor, including for the objective-only guard."""
+        candidates = self._latest_user_context_anchor_candidates(messages, selected_tail)
+        return candidates[0] if candidates else None
+
+    def _latest_user_context_anchor_candidates(
+        self,
+        messages: List[Dict[str, Any]],
+        selected_tail: List[Dict[str, Any]],
+    ) -> List[str]:
+        """Return ordered scaffolded anchors for the newest user objective omitted from the tail.
 
         Tool-heavy turns can push the operative user request outside the fresh
         tail while retaining only assistant/tool traces from that turn.  The
@@ -7428,10 +7451,11 @@ class LCMEngine(
         emitted inside the summary block so restart reconciliation ignores it
         instead of ingesting a duplicate non-contiguous user message.
 
-        Previous preserved-objective scaffolds are derived context, not real
-        user turns, so they are not eligible as the next anchor source. Once a
-        reverse scan reaches one, older user turns are stale relative to that
-        synthetic continuity marker and must not be promoted as current intent.
+        Previous preserved-objective scaffolds carry the same objective across
+        assemblies within a turn. Reuse only their objective part verbatim,
+        without carrying old summaries or promoting older user turns past that
+        synthetic continuity marker as current intent. A merged newer request
+        gets smaller fallback candidates after the unchanged whole-row choice.
         """
         selected_tail_messages = [msg for msg in selected_tail if isinstance(msg, dict)]
         for message in reversed(messages):
@@ -7448,19 +7472,74 @@ class LCMEngine(
                 or self._is_ignored_active_replay_placeholder(message, content_text)
             ):
                 continue
-            if self._preserved_objective_context_content(message):
-                return None
+            preserved_objective = self._preserved_objective_context_content(message)
+            # Only a user row carries an objective: LCM emits its objective as one, and an
+            # assistant-role summary appears only behind a retained sole user kept verbatim.
+            if preserved_objective and message.get("role") == "user":
+                if any(message == selected for selected in selected_tail_messages):
+                    return []
+                if any(
+                    selected.get("role") == "user"
+                    and self._preserved_objective_context_content(selected)
+                    and self._sanitized_preserved_objective_context_content(selected)
+                    == self._sanitized_preserved_objective_context_content(message)
+                    for selected in selected_tail_messages
+                ):
+                    return []
+                first_verified: Optional[tuple[int, int]] = None
+                last_verified_end: Optional[int] = None
+                verified_until = 0
+                for boundary in re.finditer("\n\n---\n\n", preserved_objective):
+                    # Skip boundaries inside a verified run; a nested run straddling its end keeps
+                    # the row whole (duplicate over loss).
+                    if boundary.start() < verified_until or not self._LCM_SUMMARY_PART_HEADER_RE.match(
+                        preserved_objective, boundary.end()
+                    ):
+                        continue
+                    # Cut only at summary parts verified against this session's DAG; a quoted header is request text.
+                    rest = preserved_objective[boundary.end():]
+                    if (end := self._verified_lcm_summary_prefix_end(rest)) is not None:
+                        verified_until = boundary.end() + end
+                        if first_verified is None:
+                            first_verified = (boundary.start(), verified_until)
+                        if not rest[end:].strip():
+                            preserved_objective = preserved_objective[:boundary.start()]
+                            break
+                        last_verified_end = verified_until
+                # LCM's own parts end the scaffold. Text after the verified parts (a pasted summary, or a row the
+                # host merged onto the scaffold) keeps the whole row: a duplicate summary, never a lost request.
+                candidates = [preserved_objective]
+                first_new = None
+                if first_verified is not None:
+                    start, end = first_verified
+                    for separator in ("\n\n---\n\n", "\n\n"):
+                        if preserved_objective.startswith(separator, end):
+                            first_new = preserved_objective[end + len(separator):]
+                            if first_new.strip():
+                                candidates.extend([
+                                    preserved_objective[:start] + "\n\n" + first_new,
+                                    f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n{first_new}",
+                                ])
+                            break
+                if last_verified_end is not None:
+                    for separator in ("\n\n---\n\n", "\n\n"):
+                        if preserved_objective.startswith(separator, last_verified_end):
+                            new = preserved_objective[last_verified_end + len(separator):]
+                            if new.strip() and new != first_new:
+                                candidates.append(f"{_PRESERVED_OBJECTIVE_CONTEXT_PREFIX}\n{new}")
+                            break
+                return candidates
             if message.get("role") != "user":
                 continue
             if self._is_preserved_todo_context_message(message):
                 continue
             if self._is_verified_replay_scaffold_message(message):
                 # LCM's own summary row: never re-label it as the user's objective.
-                return None
+                return []
             if any(message == selected for selected in selected_tail_messages):
-                return None
-            return self._build_preserved_objective_summary_part(message)
-        return None
+                return []
+            return [self._build_preserved_objective_summary_part(message)]
+        return []
 
     @staticmethod
     def _newest_user_message_text(messages: List[Dict[str, Any]]) -> str:
@@ -7677,6 +7756,7 @@ class LCMEngine(
         if anchor_source is None:
             anchor_source = tail_messages
         anchor_part: Optional[str] = None
+        anchor_candidates: List[str] = []
         summary_budget = None
         if assembly_cap is not None:
             used = count_messages_tokens(result)
@@ -7758,7 +7838,8 @@ class LCMEngine(
             tail_selected = list(reversed(kept_tail_reversed))
             summary_budget = max(0, assembly_cap - used - tail_token_total)
         if anchor_source is not None:
-            anchor_part = self._latest_user_context_anchor(anchor_source, tail_selected)
+            anchor_candidates = self._latest_user_context_anchor_candidates(anchor_source, tail_selected)
+            anchor_part = anchor_candidates[0] if anchor_candidates else None
 
         # Collect DAG summaries — highest depth first for context hierarchy
         summary_parts: list[str] = []
@@ -7777,11 +7858,18 @@ class LCMEngine(
             summary_role = "assistant" if last_role != "assistant" else "user"
         # #653: (selection group, node id) per part; the anchor goes first, then each depth, deepest first.
         part_keys: list[tuple[int, Optional[int]]] = []
-        if anchor_part is not None:
-            anchor_msg = {"role": summary_role, "content": anchor_part}
+        for candidate_index, candidate in enumerate(anchor_candidates):
+            # Scaffold-only fallbacks are sanitized lazily, only when tried.
+            if candidate_index >= 2:
+                candidate = self._build_preserved_objective_summary_part({
+                    "role": "user", "content": candidate[len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1:],
+                })
+            anchor_msg = {"role": summary_role, "content": strip_injected_context_blocks(candidate)}
             if summary_budget is None or count_message_tokens(anchor_msg) <= summary_budget:
+                anchor_part = candidate
                 summary_parts.append(anchor_part)
                 part_keys.append((-1, None))
+                break
 
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
@@ -7839,12 +7927,30 @@ class LCMEngine(
                 full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
                 if count_message_tokens(full_prefix) > default_budget:
                     summary_budget = default_budget
+                    if part_keys[0] == (-1, None) and count_message_tokens({
+                        "role": summary_role, "content": strip_injected_context_blocks(summary_parts[0]),
+                    }) > summary_budget:
+                        for candidate_index, candidate in enumerate(anchor_candidates[1:], start=1):
+                            if candidate_index >= 2:
+                                candidate = self._build_preserved_objective_summary_part({
+                                    "role": "user", "content": candidate[len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1:],
+                                })
+                            if count_message_tokens({
+                                "role": summary_role, "content": strip_injected_context_blocks(candidate),
+                            }) <= summary_budget:
+                                summary_parts[0] = anchor_part = candidate
+                                break
             kept_indexes = list(range(len(summary_parts)))
             if summary_budget is not None:
                 # #653: within a depth the newest parts are kept first; kept parts render in the order above.
                 kept_indexes = []
                 for index in sorted(range(len(summary_parts)), key=lambda i: (part_keys[i][0], -i)):
-                    candidate = "\n\n---\n\n".join(summary_parts[i] for i in sorted(kept_indexes + [index]))
+                    candidate = "\n\n---\n\n".join(
+                        strip_injected_context_blocks(summary_parts[i])
+                        if part_keys[i] == (-1, None) and count_message_tokens({
+                            "role": summary_role, "content": summary_parts[i],
+                        }) > summary_budget else summary_parts[i]
+                        for i in sorted(kept_indexes + [index]))
                     candidate_msg = {"role": summary_role, "content": candidate}
                     if count_message_tokens(candidate_msg) > summary_budget:
                         continue
