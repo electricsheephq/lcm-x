@@ -37,7 +37,7 @@ GUIDANCE_FLOOR = (
     "a rollback of the plugin alone to v0.27.0 or later is fine; a survival fit projected rows (or the projection "
     "count is unknown) and v0.26.x or earlier cannot recognise a short projected row (head + mark) and stores it "
     "again on a cold resume (#601 duplicates), so to v0.24.5 through v0.26.x stop Hermes, move the configured "
-    "database file aside and keep it. To v0.23.3:"
+    "database file (by default lcm.db, with its -wal and -shm companions) aside and keep it. To v0.23.3:"
 )
 
 
