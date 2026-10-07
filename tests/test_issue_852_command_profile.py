@@ -1,4 +1,4 @@
-"""Slash-command fallback must not mutate another profile's store (#852)."""
+"""Slash commands must respect profile and bound-session ownership (#852)."""
 
 import importlib.util
 from pathlib import Path
@@ -181,14 +181,75 @@ def test_cold_start_same_profile_matches_resolved_output(
 
 def test_different_profile_read_names_store(plugin, engines, monkeypatch):
     prototype, _session = engines
-    expected = command.handle_lcm_command("status", prototype)
     before = _snapshot(prototype)
     handler, _ = _handler(plugin, monkeypatch, prototype, {
         "HERMES_SESSION_ID": "fresh-session", "HERMES_SESSION_PROFILE": "session",
     })
 
-    assert handler("status") == expected + f"\nstore: {prototype._config.database_path}"
+    assert handler("status") == REFUSAL
     assert _snapshot(prototype) == before
+
+
+@pytest.mark.parametrize("raw_args", ["status", "embed warmup"])
+def test_resolved_engine_profile_mismatch_refuses(plugin, engines, monkeypatch, raw_args):
+    prototype, session = engines
+    before = [_snapshot(engine) for engine in engines]
+    handler, calls = _handler(plugin, monkeypatch, prototype, {
+        "HERMES_SESSION_KEY": "shared-lane", "HERMES_SESSION_PROFILE": "launch",
+    }, session)
+
+    assert handler(raw_args) == REFUSAL
+    assert [_snapshot(engine) for engine in engines] == before
+    assert calls == [{"session_id": "", "conversation_id": "shared-lane"}]
+
+
+@pytest.mark.parametrize("profile_state", ["same", "unset", "import", "helper", "home"])
+@pytest.mark.parametrize("context_key", ["HERMES_SESSION_ID", "HERMES_SESSION_KEY"])
+@pytest.mark.parametrize("raw_args", ["embed warmup", "rotate apply"])
+def test_unresolved_other_bound_session_refuses_write_allows_read(
+    plugin, engines, monkeypatch, profile_state, context_key, raw_args,
+):
+    prototype, _session = engines
+    prototype.on_session_start("bound-session")
+    context = {context_key: "invoking-session", "HERMES_SESSION_PROFILE": "launch"}
+    if profile_state == "unset":
+        context.pop("HERMES_SESSION_PROFILE")
+    elif profile_state == "import":
+        monkeypatch.setitem(sys.modules, "hermes_constants", None)
+    elif profile_state == "helper":
+        def broken(_home):
+            raise RuntimeError("profile lookup unavailable")
+        monkeypatch.setattr(sys.modules["hermes_constants"], "profile_name_for_home", broken)
+    elif profile_state == "home":
+        monkeypatch.setattr(prototype, "_hermes_home", "")
+    expected = command.handle_lcm_command("status", prototype)
+    if profile_state != "same":
+        expected += f"\nstore: {prototype._config.database_path}"
+    before = _snapshot(prototype)
+    handler, _ = _handler(plugin, monkeypatch, prototype, context)
+
+    assert handler(raw_args) == REFUSAL
+    assert handler("status") == expected
+    assert prototype._session_id == "bound-session"
+    assert _snapshot(prototype) == before
+
+
+@pytest.mark.parametrize("profile_known", [True, False])
+def test_unresolved_matching_bound_session_allows_write(
+    plugin, engines, monkeypatch, profile_known,
+):
+    prototype, session = engines
+    prototype.on_session_start("invoking-session")
+    context = {"HERMES_SESSION_ID": "invoking-session"}
+    if profile_known:
+        context["HERMES_SESSION_PROFILE"] = "launch"
+    expected = command.handle_lcm_command("embed warmup", session)
+    if not profile_known:
+        expected += f"\nstore: {prototype._config.database_path}"
+    handler, _ = _handler(plugin, monkeypatch, prototype, context)
+
+    assert handler("embed warmup") == expected
+    assert _snapshot(prototype)["lcm_embedding_profile"] == 2
 
 
 def test_session_profile_unset_write_runs_with_store_line(plugin, engines, monkeypatch):

@@ -155,8 +155,9 @@ def _make_command_handler(handle_lcm_command, engine, resolve_active_lcm_engine)
         return handle_lcm_command(
             raw_args, active_engine,
             session_engine_resolved=resolved, session_context_present=context_present,
-            session_profile=_session_context_value("HERMES_SESSION_PROFILE") if not resolved else "",
-            engine_profile=_command_engine_profile(active_engine) if not resolved else "",
+            session_profile=_session_context_value("HERMES_SESSION_PROFILE"),
+            engine_profile=_command_engine_profile(active_engine),
+            context_session_id=_session_context_value("HERMES_SESSION_ID"),
         )
 
     return _handler
