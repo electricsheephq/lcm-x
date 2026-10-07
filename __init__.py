@@ -142,13 +142,13 @@ def _session_context_value(name: str) -> str:
         return ""
 
 
-def _command_engine_for_current_session(engine, resolve_active_lcm_engine):
+def _command_engine_for_current_session(engine, resolve_active_lcm_engine, *, with_resolution=False):
     """Resolve the runtime serving the current plugin-command invocation.
 
     Gateway hosts bind task-local session/lane metadata before dispatching a
     plugin slash command. Prefer the already-active AIAgent clone registered for
-    that lane. If no clone exists yet, keep the process-wide prototype's genuine
-    ``(unbound)`` cold-start status rather than mutating shared runtime state.
+    that lane. Optionally report resolution and context presence so slash
+    commands can refuse writes through a cross-profile prototype fallback.
     """
     session_id = _session_context_value("HERMES_SESSION_ID")
     conversation_id = _session_context_value("HERMES_SESSION_KEY")
@@ -158,18 +158,32 @@ def _command_engine_for_current_session(engine, resolve_active_lcm_engine):
             conversation_id=conversation_id,
         )
         if active_engine is not None:
-            return active_engine
-    return engine
+            return (active_engine, True, True) if with_resolution else active_engine
+    return (engine, False, bool(session_id or conversation_id)) if with_resolution else engine
+
+
+def _command_engine_profile(engine) -> str:
+    """Resolve the captured engine home through the optional host helper."""
+    try:
+        from hermes_constants import profile_name_for_home
+        home = getattr(engine, "_hermes_home", "")
+        return str(profile_name_for_home(home) or "") if home else ""
+    except Exception:
+        return ""
 
 
 def _make_command_handler(handle_lcm_command, engine, resolve_active_lcm_engine):
     def _handler(raw_args: str):
+        active_engine, resolved, context_present = _command_engine_for_current_session(
+            engine, resolve_active_lcm_engine, with_resolution=True,
+        )
         return handle_lcm_command(
-            raw_args,
-            _command_engine_for_current_session(
-                engine,
-                resolve_active_lcm_engine,
-            ),
+            raw_args, active_engine,
+            session_engine_resolved=resolved, session_context_present=context_present,
+            session_profile=_session_context_value("HERMES_SESSION_PROFILE"),
+            engine_profile=_command_engine_profile(active_engine),
+            context_session_id=_session_context_value("HERMES_SESSION_ID"),
+            context_conversation_id=_session_context_value("HERMES_SESSION_KEY"),
         )
 
     return _handler
