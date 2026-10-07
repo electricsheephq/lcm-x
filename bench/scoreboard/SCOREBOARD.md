@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `1c208c8506850f0838dde19ec8c28bd56a328699c88a7dd039a928606a17561a`, rows: 11)
+Generated from `results.jsonl` (sha256: `f47a1b702fa821b04fdbc93ddaba0b55725b8846b101bf69afb6d36b1d868045`, rows: 14)
 
 ## Summary
 
@@ -15,7 +15,10 @@ Generated from `results.jsonl` (sha256: `1c208c8506850f0838dde19ec8c28bd56a32869
 | ~~LoCoMo (locomo10, 1,986q)~~ | ~~accuracy~~ | ~~47.0% (MemScore)~~ | ~~F~~ | ~~2026-07-30~~ | ~~[details](#locomo10-1986-arm-a-2026-07-30)~~ → [successor](#locomo10-1986-declared-2026-08-02) |
 | LongMemEval-V1 (S, 500q) | accuracy | 455/500 (91.0%) | P | 2026-07-29 | [details](#longmemeval-v1-s500-accuracy-2026-07-29) |
 | LongMemEval-V1 (S, 500q) | latency_delta_s_per_q | −56.3 s/question vs vanilla (22% faster) | P | 2026-07-29 | [details](#longmemeval-v1-s500-latency-2026-07-29) |
+| LongMemEval-V1 MEDIUM (483q privacy-filtered set, retrieval row) | lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed | recall@10 95.0% \| ndcg@10 0.860 \| recall@1 51.6% (456 scored + 27 abstention-excluded; 17 withheld by the production privacy filter; embeddings off on the same 456: 84.7%) | P | 2026-10-06 | [details](#longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06) |
+| LongMemEval-V1 MEDIUM (500q, retrieval row) | lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed | recall@10 84.7% \| ndcg@10 0.764 \| recall@1 45.8% (470 scored + 30 abstention-excluded; 0 instrument failures) | P | 2026-10-05 | [details](#longmemeval-v1-m500-retrieval-default-v0260-2026-10-05) |
 | LongMemEval-V1 MEDIUM (500q, retrieval row) | lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed | recall@10 95.6% \| ndcg@10 0.861 \| recall@1 50.0% (470 scored + 30 abstention-excluded; 0 instrument failures) | P | 2026-08-19 | [details](#longmemeval-v1-m500-retrieval-2026-08-19) |
+| LongMemEval-V1 MEDIUM (500q, retrieval row, R1-M) | lcm_recall (product arm): recall@10 / ndcg@10 / recall@1, session level, fail-closed | recall@10 84.7% \| ndcg@10 0.764 \| recall@1 45.8% (470 scored + 30 abstention-excluded; 0 failed) | P | 2026-10-05 | [details](#longmemeval-v1-m500-retrieval-fulltext-2026-10-05) |
 | LongMemEval-V2 (451q, agentic) | accuracy | 298/451 (66.1%) | P | 2026-07-27 | [details](#longmemeval-v2-451-agentic-2026-07-27) |
 | LongMemEval-V2 (451q, static) | accuracy | 123/451 (27.3%) — official static protocol, fixed weak reader | P | 2026-07-31 | [details](#longmemeval-v2-451-static-2026-07-31) |
 | LongMemEval-V2 static (451q) | judged accuracy, full set | 143/451 = 31.7% (web 97/240 = 40.4%, enterprise 46/211 = 21.8%) | F | 2026-08-03 | [details](#v2-static-451-sota-luna-2026-08-03) |
@@ -265,6 +268,63 @@ pre-registered A/A′ pair on fresh stores: 69/1,986 discordant (3.47%), aggrega
 - initial publication claimed a single-hop regression from a label-scramble — corrected within hours (F48 §3-CORRECTION); the REAL new finding: the FTS arm is near-inert in delivery on this dataset in BOTH configs (3/49,650 vs 2/49,650) despite prose mode — under investigation
 - adversarial 32.7 is the measured-honest number against canonical abstention gold with the known B3 product weakness unfixed; Tier-F config; Voyage variant queues separately
 
+### <a id="longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06"></a>longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06
+
+**id:**
+longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06
+
+**benchmark:**
+LongMemEval-V1 MEDIUM (483q privacy-filtered set, retrieval row)
+
+**metric:**
+lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed
+
+**value:**
+0.9498
+
+**display:**
+recall@10 95.0% \| ndcg@10 0.860 \| recall@1 51.6% (456 scored + 27 abstention-excluded; 17 withheld by the production privacy filter; embeddings off on the same 456: 84.7%)
+
+**tier:**
+P
+
+**date:**
+2026-10-06
+
+**system_commit:**
+lcm-x v0.26.0-rc1 (8396706d); the v0.26.0 GA (867eb587) adds only the release notes, so the measured product tree is the GA's
+
+**harness_commit:**
+in-repo instrument (benchmarking/longmemeval.py) + Voyage runner bench/tools/v1m-rebank @ 8396706d
+
+**judge:**
+deterministic retrieval metrics (no LLM)
+
+**reader:**
+NONE: pure retrieval row
+
+**retrieval_config:**
+Voyage tracker: voyage-context-3, flat chunks, content-hash cache, production privacy filter. A cross-release tracker, not the production contextual Voyage path a customer enabling Voyage gets
+
+**dataset_exposure:**
+none documented
+
+**breakdown:**
+per-category table in https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6008203590
+
+**variance:**
+A/A' repeat: 0 discordant questions (1 ranking swap at rank 10, no recall change); recorded, not gating
+
+**failclose:**
+accounting closes to 500: 456 scored + 27 abstention + 17 privacy-excluded; failed 0
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6008203590
+
+**caveats:**
+- Compare with the 2026-08-19 voyage row (95.6% on 470) only with its confounds: the 17 privacy exclusions, the privacy:v3 reshaping, code changes since v0.22.0, and the full-text arm now live.
+- Voyage spend for the run: about $0.11 (1452 request units; the content-hash cache served the rest)
+
 ### <a id="longmemeval-v1-m500-retrieval-2026-08-19"></a>longmemeval-v1-m500-retrieval-2026-08-19
 
 **id:**
@@ -326,6 +386,123 @@ A/A' 100q fixed-seed subset (seed 20260802): 95/95 scored questions per-question
 - FTS arm dark (prose flag unset) — disclosed; V1-M FTS-ON variant decided after LoCoMo C1
 - FROZEN vs current main (caveat appended 2026-08-26 per PR #368 review): row measured pre-v0.23.1 privacy trio (#332/#333/#338); the production lcm_recall arm may not be compared against post-v0.23.1 production-path rows until the registered re-bank (BASELINE-LEDGER privacy-trio boundary; FINDING-F53 reproducibility note). Reproducibility on current main is UNVERIFIED, not proven broken.
 - Re-bank status (caveat appended 2026-09-05 per FINDING-F62): the registered re-bank on the shipped posture (RUN-SHEET-V1M-REBANK, 22c12b21) PARKED at the pre-spend gate — the production provider-copy transform re-shapes 599 unit occurrences (248/500 questions) of this corpus and the residual validator refuses 3 distinct units (17 questions; §4.2 transform-change count 617 occurrences = 93 unique units, 258 questions), so the production lcm_recall arm is NOT EXECUTABLE over LongMemEval-M at 22c12b21; the raw path this row was measured on has not been re-run; the freeze above stands; next step is an owner decision (#380).
+
+### <a id="longmemeval-v1-m500-retrieval-default-v0260-2026-10-05"></a>longmemeval-v1-m500-retrieval-default-v0260-2026-10-05
+
+**id:**
+longmemeval-v1-m500-retrieval-default-v0260-2026-10-05
+
+**benchmark:**
+LongMemEval-V1 MEDIUM (500q, retrieval row)
+
+**metric:**
+lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed
+
+**value:**
+0.8473
+
+**display:**
+recall@10 84.7% \| ndcg@10 0.764 \| recall@1 45.8% (470 scored + 30 abstention-excluded; 0 instrument failures)
+
+**tier:**
+P
+
+**date:**
+2026-10-05
+
+**system_commit:**
+lcm-x v0.26.0-rc1 (8396706d); the v0.26.0 GA (867eb587) adds only the release notes, so the measured product tree is the GA's
+
+**harness_commit:**
+in-repo instrument (benchmarking/longmemeval.py @ 8396706d)
+
+**judge:**
+deterministic retrieval metrics (no LLM)
+
+**reader:**
+NONE: pure retrieval row
+
+**retrieval_config:**
+product defaults: embeddings OFF (full-text recall only), no fleet overlay; this is the per-release gate configuration of the recall scorecard (#898)
+
+**dataset_exposure:**
+none documented
+
+**breakdown:**
+per-category table in https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6000141063
+
+**variance:**
+A/A' repeat: 0 discordant questions; gate = 0 per-question lcm_recall changes vs v0.25.1 (observed 0; net +0.000; no category moved)
+
+**failclose:**
+accounting closes to 500: 470 scored + 30 abstention; failed 0
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6000141063
+
+**caveats:**
+- Not comparable with the 2026-08-19 row (95.6%): that row ran with voyage-context-3 embeddings on; this row is the embeddings-off default.
+
+### <a id="longmemeval-v1-m500-retrieval-fulltext-2026-10-05"></a>longmemeval-v1-m500-retrieval-fulltext-2026-10-05
+
+**id:**
+longmemeval-v1-m500-retrieval-fulltext-2026-10-05
+
+**benchmark:**
+LongMemEval-V1 MEDIUM (500q, retrieval row, R1-M)
+
+**metric:**
+lcm_recall (product arm): recall@10 / ndcg@10 / recall@1, session level, fail-closed
+
+**value:**
+0.8473
+
+**display:**
+recall@10 84.7% \| ndcg@10 0.764 \| recall@1 45.8% (470 scored + 30 abstention-excluded; 0 failed)
+
+**tier:**
+P
+
+**date:**
+2026-10-05
+
+**system_commit:**
+lcm-x v0.25.1 (f47b55e031b507b424ff5f480d8f2a80d358f1f0), detached GA tree; no post-run delta
+
+**harness_commit:**
+instrument files (benchmarking/, scripts/lcm_longmemeval.py) from main 8396706d876720e52e7254407f8ee07fff54f555, overlay byte-equal to that commit
+
+**judge:**
+deterministic retrieval metrics (no LLM)
+
+**reader:**
+NONE (pure retrieval row)
+
+**retrieval_config:**
+full-text, embeddings off: embeddings_enabled=false, lcm_recall_mode=full_text, fts_order=relevance, provider=stub; vector arms run:false; no LCM_*/HERMES_MB_* overrides; 6 shards qid[i::6]
+
+**dataset_exposure:**
+longmemeval_m sha fb5413e3, prepared manifest 300cf936 (F53 lineage); no tuning on it
+
+**breakdown:**
+lcm_recall r@1 .458 / r@5 .786 / r@10 .847 / ndcg .764, turn r@10 .677 \| fts r@1 .451 / r@5 .779 / r@10 .842 / ndcg .756, turn r@10 .673 \| per-category r@10 lcm/fts: knowledge-update .965/.965, multi-session .754/.744, single-session-assistant 1.000/1.000, single-session-preference .533/.500, single-session-user .984/.984, temporal .807/.803
+
+**variance:**
+A/A' on the 100q F53 subset: 0/100 discordant rows and 0/100 discordant top-10 rankings; aggregate spread 0.00pt
+
+**failclose:**
+470 scored + 30 abstention (_abs) excluded + 0 failed = 500; coverage.fts none (failed search) = 0; degraded:true on all 470 (expected label for embeddings off)
+
+**evidence:**
+- bench/specs/RUN-SHEET-ROW1-FULLTEXT.md
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6000141063 (the v0.26.0-rc1 recall gate measured against this row: 0 per-question flips)
+
+**caveats:**
+- New baseline for the shipped default (full-text recall). Not comparable to the embeddings-on V1-M row (r@10 95.6%, v0.22.0): configuration difference, not a regression
+- Latency p50/p90 lcm_recall 49.4/141.8 ms, fts 12.7/24.9 ms, measured with 3 shards concurrent on a shared machine
+- Delivered context size per question UNMEASURED (harness records ids and metrics only)
+- The fts arm ranks by relevance in this instrument; earlier rows' fts arm is not comparable
+- Says nothing about live customer sessions, the embeddings-on configuration, or answer quality
 
 ### <a id="longmemeval-v1-s500-accuracy-2026-07-29"></a>longmemeval-v1-s500-accuracy-2026-07-29
 
