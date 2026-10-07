@@ -629,12 +629,12 @@ def test_r14_a1_final_check_needs_a_fresh_compressed_pass(monkeypatch, host_stat
 
 def test_r14_a2_controls_never_hold_without_runs():
     assert controls.check("PC-2", []) and controls.check("PC-3", [])
-    assert controls.check("PC-3", [], ["eva-0.21.5"])  # a requested host with no row is a problem
+    assert controls.check("PC-3", [], ["ref-0.21.5"])  # a requested host with no row is a problem
     assert controls.CONTROLS["PC-3"]["refs"] == ["508f893517f52a400c2bfe0b37f914e864ff806c"]
-    row = {"plugin_ref": "v0.24.2", "host": "eva-0.21.5", "verdict": "FAIL", "failed_bars": {"B6": {}}}
+    row = {"plugin_ref": "v0.24.2", "host": "ref-0.21.5", "verdict": "FAIL", "failed_bars": {"B6": {}}}
     rows = [dict(row, cell=c) for c in controls.CONTROLS["PC-2"]["cells"]]
-    assert controls.check("PC-2", rows, ["eva-0.21.5"]) == []
-    assert controls.check("PC-2", rows, ["eva-0.21.5", "upstream-main"])  # "all" = requested hosts, not row hosts
+    assert controls.check("PC-2", rows, ["ref-0.21.5"]) == []
+    assert controls.check("PC-2", rows, ["ref-0.21.5", "upstream-main"])  # "all" = requested hosts, not row hosts
 
 
 def git_host(tmp_path):

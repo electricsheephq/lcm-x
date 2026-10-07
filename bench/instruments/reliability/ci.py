@@ -1,6 +1,6 @@
 """Nightly CI helpers for .github/workflows/reliability-nightly.yml: host prep from hosts.ci.json, and the gate.
 
-    python -m bench.instruments.reliability.ci prep --host eva-0.21.5 --root "$RUNNER_TEMP/hosts" --out hosts.json
+    python -m bench.instruments.reliability.ci prep --host ref-0.21.5 --root "$RUNNER_TEMP/hosts" --out hosts.json
     python -m bench.instruments.reliability.ci gate r1/results.jsonl r2/results.jsonl --open-issues open-issues.txt
 
 The gate fails on any ERROR, and on a FAIL in the G-REL-1 cell set unless every failed bar is declared by an
