@@ -1703,7 +1703,7 @@ class CompactionMixin:
                 focus_topic = self._derive_auto_focus_topic(working_messages)
 
             candidate_raw = working_messages[leading_anchor_count:fresh_tail_start]
-            # #922: assembly repeats the current objective verbatim, so a leaf
+            # #922: when assembly can repeat the current objective verbatim, a leaf
             # containing only that prompt cannot reduce the active context.
             # Keep filtering/publication and assistant-tail bookkeeping on their existing paths.
             if (
@@ -1714,7 +1714,16 @@ class CompactionMixin:
                 and candidate_raw[0].get("role") == "user"
                 and self._latest_user_context_anchor(
                     anchor_source_messages, working_messages[fresh_tail_start:]
-                ) == self._build_preserved_objective_summary_part(candidate_raw[0])
+                ) == (anchor := self._build_preserved_objective_summary_part(candidate_raw[0]))
+                and (
+                    (cap := self._effective_assembly_token_cap()) is None
+                    or (
+                        count_messages_tokens(working_messages[:leading_anchor_count])
+                        + count_message_tokens({"role": "user", "content": anchor})
+                        + count_messages_tokens(working_messages[fresh_tail_start:])
+                        <= cap
+                    )
+                )
             ):
                 self._objective_only_noop = True
                 noop_reason = "no eligible raw backlog outside fresh tail"
