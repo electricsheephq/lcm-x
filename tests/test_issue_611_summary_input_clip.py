@@ -8,6 +8,8 @@ import pytest
 
 import hermes_lcm.engine as lcm_engine
 import hermes_lcm.level3_repair as level3_repair
+import hermes_lcm.summary_input_clip as summary_input_clip
+import hermes_lcm.tokens as tokens_mod
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -35,6 +37,74 @@ def _legacy(text, kind="message"):
     if kind == "preview" or len(text) <= (500 if kind == "arguments" else 3_000):
         return text
     return text[:400] + "..." if kind == "arguments" else text[:2_000] + CLIP_MARKER + text[-800:]
+
+
+@pytest.fixture(params=["fallback", "tiktoken"])
+def clip_counter(request, monkeypatch):
+    if request.param == "fallback":
+        def loader():
+            raise ImportError("tiktoken unavailable")
+    else:
+        tiktoken = pytest.importorskip("tiktoken")
+        from tiktoken import load as tiktoken_load
+
+        def offline_only(*args, **kwargs):
+            raise OSError("encoder is not cached offline")
+
+        monkeypatch.setattr(tiktoken_load, "read_file", offline_only)
+        try:
+            encoder = tiktoken.get_encoding("cl100k_base")
+        except Exception as exc:
+            pytest.skip(f"tiktoken encoder unavailable offline: {exc}")
+
+        def loader():
+            return encoder
+
+    monkeypatch.setattr(tokens_mod, "_load_encoder", loader)
+    monkeypatch.setattr(tokens_mod, "_encoder", None)
+    monkeypatch.setattr(tokens_mod, "_encoder_ready", False)
+    monkeypatch.setattr(tokens_mod, "_encoder_thread", None)
+    monkeypatch.setattr(tokens_mod, "_encoder_generation", 0)
+    tokens_mod._count_tokens_cached.cache_clear()
+    tokens_mod._encoder_loader()
+    yield
+    tokens_mod._count_tokens_cached.cache_clear()
+
+
+def test_uneven_density_clip_honors_token_share(clip_counter):
+    text = "漢" * 9_500 + "a" * 81_000 + "漢" * 9_500
+    budget = 20_000
+    assert count_tokens(text) > budget
+    kept, = clip_to_budget([text], budget)
+    retained = kept.replace(CLIP_MARKER, "")
+    assert count_tokens(retained) <= budget * 1.02
+    assert len(retained) > 2_800
+
+
+def test_uniform_clip_preserves_first_clip_with_one_recount(clip_counter, monkeypatch):
+    text, budget = "abc " * 25_000, 20_000
+    keep = len(text) * budget // count_tokens(text)
+    assert 2_800 < keep < len(text)
+    head = keep * 5 // 7
+    retained = text[:head] + text[-(keep - head):]
+    expected = text[:head] + CLIP_MARKER + text[-(keep - head):]
+    calls = []
+
+    def recount(value):
+        calls.append(value)
+        return count_tokens(value)
+
+    monkeypatch.setattr(summary_input_clip, "count_tokens", recount)
+    assert clip_to_budget([text], budget) == [expected]
+    assert calls == [text, retained]
+
+
+def test_overshooting_proportional_clip_returns_legacy_floor(clip_counter):
+    text, budget = "漢" * 9_500 + "a" * 81_000 + "漢" * 9_500, 1_500
+    assert len(text) * budget // count_tokens(text) > 2_800
+    floor = _legacy(text)
+    assert count_tokens(floor.replace(CLIP_MARKER, "")) > budget * 1.02
+    assert clip_to_budget([text], budget) == [floor]
 
 
 @pytest.mark.parametrize("budget", [1, 20, 100, 8_000, 20_000])

@@ -14,14 +14,14 @@ def externalized_preview(content: str) -> str:
 
 
 def clip_to_budget(texts: List[str], budget_tokens: int, kinds: Optional[List[str]] = None) -> List[str]:
-    """Keep the larger of each text's legacy clip and its proportional character share.
+    """Keep each text's legacy floor or a token-bounded proportional clip.
 
     ``kinds`` distinguishes message contents, arguments and externalized previews.
     Labels, placeholders and share clip markers sit outside the text budget.
     """
     # No text keeps fewer characters than v0.26.0. Text tokens are bounded by
-    # the legacy total plus leaf_chunk_tokens (2% character/token allowance).
-    # #899: a single clipped text fills leaf_chunk_tokens, outside the #722
+    # the legacy total plus leaf_chunk_tokens (2% token-share allowance).
+    # #899: a single proportional clip targets leaf_chunk_tokens, outside the #722
     # verbatim window while leaf_chunk_tokens > 2 * l3_truncate_tokens
     # (defaults: 20,000 > 1,024; fleet: 8,000 > 1,024).
     counts = [count_tokens(text) if text else 0 for text in texts]
@@ -46,5 +46,26 @@ def clip_to_budget(texts: List[str], budget_tokens: int, kinds: Optional[List[st
             continue
         head = keep * 5 // 7
         tail = keep - head
+        share = (tokens * budget + total - 1) // total
+        target = share * 102 // 100
+        if count_tokens(text[:head] + (text[-tail:] if tail else "")) > target:
+            floor_text = floor if kind == "arguments" else text[:2_000] + text[-800:]
+            if count_tokens(floor_text) > target:
+                out.append(floor)
+                continue
+            low, high = floor_chars, keep
+            while high - low > 1:
+                keep = (low + high) // 2
+                head = keep * 5 // 7
+                tail = keep - head
+                if count_tokens(text[:head] + (text[-tail:] if tail else "")) <= target:
+                    low = keep
+                else:
+                    high = keep
+            if low == floor_chars:
+                out.append(floor)
+                continue
+            head = low * 5 // 7
+            tail = low - head
         out.append(text[:head] + CLIP_MARKER + (text[-tail:] if tail else ""))
     return out
