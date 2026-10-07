@@ -963,10 +963,15 @@ class MessageStore:
     # -- v0.26.0 host uid shadow bindings: a droppable side table, never read for a decision ----------
 
     def _host_uid_table_exists(self) -> bool:
-        if not getattr(self, "_host_uid_schema_ready", False):
-            self._host_uid_schema_ready = bool(self._conn.execute(
+        with self._write_lock:
+            if getattr(self, "_host_uid_schema_ready", False):
+                return True
+            exists = bool(self._conn.execute(
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='host_uid_bindings'").fetchone())
-        return self._host_uid_schema_ready
+            # A re-entrant read can see DDL that a failed commit will roll back.
+            if not self._conn.in_transaction:
+                self._host_uid_schema_ready = exists
+            return exists
 
     def _ensure_host_uid_schema(self) -> None:
         """On the first binding, NAMED step ``host_uid_bindings_v1``: no SCHEMA_VERSION bump, ``messages`` untouched."""
