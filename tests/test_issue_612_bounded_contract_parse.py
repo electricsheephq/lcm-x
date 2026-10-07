@@ -146,7 +146,8 @@ def test_t3_tolerated_reply_is_returned_and_logs_one_info_line(monkeypatch, capl
 def test_t3_violating_reply_logs_the_warning_with_the_check(monkeypatch, caplog):
     _install_call_llm(monkeypatch, lambda opening: f"{opening}\n{LINES} {SECRET}\n</lcm>")
     assert _summarize(caplog) == ""
-    messages = [r.getMessage() for r in caplog.records]
+    # #931: the shape line is a separate INFO record
+    messages = [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING]
     assert messages == ["LCM summary discarded output that violated the integrity contract "
                         "(model=tier-x, check=envelope); escalating"]
     assert all(SECRET not in m and "Decision" not in m for m in messages)
@@ -155,6 +156,7 @@ def test_t3_violating_reply_logs_the_warning_with_the_check(monkeypatch, caplog)
 def test_t3_short_and_hintless_replies_name_their_checks(monkeypatch, caplog):
     _install_call_llm(monkeypatch, lambda opening: f"{opening}\n{LINES} {SECRET}\n{CLOSE}")
     assert _summarize(caplog) == ""
-    assert [r.getMessage() for r in caplog.records] == [
+    # #931: the shape line is a separate INFO record
+    assert [r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING] == [
         "LCM summary discarded output that violated the integrity contract (model=tier-x, check=closing_hint); "
         "escalating"]

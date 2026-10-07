@@ -296,9 +296,9 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.26.0` is the identity the next minor release carries: the `v0.26.0-rc1`
-tag carries it first, the gauntlet runs at the last rc tag, and the GA tree is
-that rc tree plus the GA release-notes file (`v0.25.0` at `67de214f` shipped the same way).
+and tag. `0.26.0` is the identity of the latest stable release: `v0.26.0` at `867eb587` is
+the `v0.26.0-rc1` tree plus the GA release-notes file, and the next minor
+follows the same path (rc tags first, the gauntlet at the last rc tag).
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
@@ -405,6 +405,7 @@ Useful environment variables:
 | `LCM_ROLLUP_BUILDS_PER_PASS` | `2` | Maximum rollups built by one automatic pass or `/lcm rollups rebuild` command |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |
 | `LCM_DATABASE_PATH` | auto | SQLite database path. Empty config resolves to `HERMES_HOME/lcm.db`; plugin installs or operators may set this env var to another profile-scoped path such as `~/.hermes/hermes-lcm.db`. |
+| `LCM_SQLITE_MMAP_SIZE` | `268435456` | SQLite mapped-read size in bytes; `0` disables mapping. Invalid or negative values fall back with one WARNING per process. |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup (previous behavior); a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
 | `LCM_EMBEDDINGS_ENABLED` | `false` | Opt in to embedding warmup, backfill, and semantic retrieval storage |
@@ -456,7 +457,8 @@ A summary call that raises or times out is a failure and counts toward
 follows a line that names the kind (`LCM summary discarded empty output`, `... reasoning-only output` or
 `... output that violated the integrity contract`); `reason=not_shorter` means the result was not shorter than its
 source. A route opens with `LCM summary route circuit opened for <route> after N failure(s)` or
-`... after N rejected result(s)`.
+`... after N rejected result(s)`. Contract rejections append `contract=<check>` to `reason=no_content` and emit
+the content-free INFO line `LCM summary contract shape: check=<check> last_line=<list|heading|bold|trailing|missing|other>`.
 
 When a leaf's own level 1 and level 2 results are rejected and the survival fit can keep the request under the
 window, the compaction writes no leaf and no node for it and keeps its rows for a later pass (#652). A level 3

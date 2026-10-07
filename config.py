@@ -133,6 +133,22 @@ def _parse_int_env_with_source(
         return default, default_source, f"invalid env {key}={raw!r} ignored"
 
 
+_sqlite_mmap_size_warned = False
+
+
+def sqlite_mmap_size() -> int:
+    """Memory-map read budget in bytes; invalid overrides warn once per process."""
+    global _sqlite_mmap_size_warned
+    default = 268_435_456
+    value, _, warning = _parse_int_env_with_source("LCM_SQLITE_MMAP_SIZE", default)
+    if warning or value < 0:
+        if not _sqlite_mmap_size_warned:
+            _sqlite_mmap_size_warned = True
+            logger.warning("invalid env LCM_SQLITE_MMAP_SIZE ignored; using %s", default)
+        return default
+    return value
+
+
 def _parse_float_env_with_source(
     key: str,
     default: float,

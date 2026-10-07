@@ -62,6 +62,13 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 
 Optional slash commands are disabled by default with `LCM_ENABLE_SLASH_COMMAND=false`. Destructive cleanup apply is separately guarded. Do not enable mutation surfaces merely to diagnose a problem.
 
+`LCM_SQLITE_MMAP_SIZE` sets SQLite mapped-read bytes (default `268435456`,
+unchanged). Set `LCM_SQLITE_MMAP_SIZE=0` on SD-card or single-board hosts: a
+storage read error on a mapped page kills the process with SIGBUS, while `0`
+returns a catchable I/O error. Invalid or negative values use the default with
+one WARNING per process. `/lcm doctor` reports effective `sqlite_mmap_bytes`,
+including SQLite's cap. Example: `LCM_SQLITE_MMAP_SIZE=0 hermes` after restarting.
+
 Change one tuning variable at a time, then re-check `lcm_status`, context pressure, summary health, latency, and actual answer quality.
 
 ### Summary circuit

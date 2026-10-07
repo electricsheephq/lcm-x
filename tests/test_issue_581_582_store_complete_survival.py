@@ -115,6 +115,7 @@ def test_a_eva_shape_publishes_and_the_frontier_advances_over_passes(tmp_path, s
             live = engine.compress(live)
             statuses.append(engine._last_compression_status)
             frontiers.append(_frontier(engine))
+            engine.note_turn_complete()  # #904: each hidden drain pass belongs to a new foreground turn
             engine.on_session_start("S", boundary_reason="compression", old_session_id="S",
                                     platform="telegram", conversation_id="conv")
         after = [(int(r["store_id"]), r["role"], r["content"]) for r in _rows(engine)]
@@ -1159,8 +1160,9 @@ def _run_scan_cap_leaves(tmp_path, monkeypatch, caplog, cap, call_pos, parallel=
         monkeypatch.setattr(lcm_store_complete, "_SCAN_LIMIT", cap)
     engine = _engine(tmp_path, leaf_chunk_tokens=500_000)
     serialized: list[list] = []
-    real = engine._serialize_messages
-    monkeypatch.setattr(engine, "_serialize_messages", lambda messages: serialized.append(list(messages)) or real(messages))
+    real = engine._serialize_messages_with_clip
+    monkeypatch.setattr(engine, "_serialize_messages_with_clip",
+                        lambda messages, session_id=None: serialized.append(list(messages)) or real(messages, session_id))
     try:
         tail, call_id = _scan_cap_store(engine, call_pos, parallel, calls)
         if covered_before:  # every row before the call is already covered by a summary (excluded, not in the leaf)
@@ -1170,6 +1172,7 @@ def _run_scan_cap_leaves(tmp_path, monkeypatch, caplog, cap, call_pos, parallel=
             view = engine.compress(list(tail))
             assert engine._last_compression_status == "compacted", engine._last_compression_noop_reason
             first = set(_covered(engine))
+            engine.note_turn_complete()  # #904: the following user turns release the hidden-only hold
             engine.on_session_start("S", boundary_reason="compression", old_session_id="S",
                                     platform="telegram", conversation_id="conv")
             view = [*view, *[m for j in range(6) for m in (  # the host continues past the retained tail
