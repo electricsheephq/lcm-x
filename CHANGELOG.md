@@ -10,6 +10,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 - Change: summaries now see the middle of long messages using a shared input budget with a legacy retention floor; measured middle-fact retention rose from 0/72 to 42/72. (#611)
 - Fix: a clipped long message no longer becomes a verbatim level-3 leaf with the default or fleet input budgets. (#899)
+- Fix: a leaf whose summariser input was clipped is summarised, never stored verbatim. (#947)
 
 ## v0.26.1 (delegated-child compaction fix)
 
