@@ -3200,6 +3200,7 @@ class TestEngineABC:
         config.sensitive_patterns_enabled = True
         config.sensitive_patterns = ["password_assignment"]
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "password: supersecret1234 " + "x" * 400},
@@ -3211,6 +3212,7 @@ class TestEngineABC:
 
             instance.compress(messages, current_tokens=200)
 
+            assert captured_messages
             serialized = json.dumps(captured_messages)
             assert "supersecret1234" not in serialized
         finally:
