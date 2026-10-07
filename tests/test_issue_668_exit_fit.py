@@ -54,10 +54,11 @@ def test_t1_automatic_exit_keeps_summary_and_all_stored_rows(engine, monkeypatch
     cap = int(engine.threshold_tokens * 0.95)
     assert observed >= engine.threshold_tokens > 0
     assert cap < engine._survival_measure(pre) + overhead < int(engine.context_length * 0.85)
-    assert result[0] is pre[0] and engine._is_verified_replay_scaffold_message(result[0])
+    assert seen["output"][0] is pre[0] and engine._is_verified_replay_scaffold_message(pre[0])
     assert seen["budget"] == cap - overhead
     # the rows between the summary prefix and the fresh tail are uncovered: the exit fit cuts none of them
-    assert result == pre and engine._last_survival_fit is None
+    assert seen["output"] == pre and engine._last_survival_fit is None
+    assert result is view  # #904: a skipped fit cannot send a grown hidden-only result
     assert engine._store.get_session_messages("S", limit=100_000) == stored
     assert engine.get_status()["last_survival_fit"] == engine._last_survival_fit
     assert "exit_fit:" not in handle_lcm_command("doctor", engine)
@@ -83,7 +84,8 @@ def test_t3_cleanup_and_other_nonautomatic_calls_have_no_exit_cap(engine, monkey
     seen = _spy(engine, monkeypatch)
     result = engine.compress(view, current_tokens=observed, force=mode == "manual")
     assert seen["budget"] == engine._survival_fit_budget(view, observed)
-    assert result == seen["input"] and engine._last_survival_fit is None
+    assert seen["output"] == seen["input"] and engine._last_survival_fit is None
+    assert result == (view if mode in {"manual", "unknown"} else seen["input"])
 
 
 def test_t4_fit_off_does_not_trim(engine, monkeypatch):
@@ -91,7 +93,8 @@ def test_t4_fit_off_does_not_trim(engine, monkeypatch):
     view = _hidden_backlog(engine, list_users=True)
     seen = _spy(engine, monkeypatch)
     result = engine.compress(view, current_tokens=engine._survival_measure(view) + 2000)
-    assert seen["budget"] is None and result == seen["input"]
+    assert seen["budget"] is None and seen["output"] == seen["input"]
+    assert result is view  # #904's host no-growth guard also applies when survival fitting is off
     assert engine._last_survival_fit is None and _counter(engine) == {}
 
 
@@ -207,7 +210,8 @@ def test_t10_exit_fit_never_drops_the_summary_prefix(engine, monkeypatch, caplog
     assert engine._is_verified_replay_scaffold_message(pre[0])
     assert engine._survival_measure([pre[0]] + newest) + overhead > int(engine.threshold_tokens * 0.95)
     assert engine._survival_measure(pre) + overhead <= int(engine.context_length * 0.85)
-    assert result[0] is pre[0] and result == pre
+    assert seen["output"][0] is pre[0] and seen["output"] == pre
+    assert result is view  # the fit kept the prefix; #904 keeps the original host list instead
     assert not any("dropped the summary prefix" in r.getMessage() for r in caplog.records)
     assert any("LCM exit fit skipped" in r.getMessage() for r in caplog.records)
     assert engine._last_survival_fit is None
