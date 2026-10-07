@@ -7233,7 +7233,7 @@ class LCMEngine(
         return sum(node.token_count for node in self._summary_frontier_nodes())
 
     def _select_threshold_sweep_condensation_group(self) -> List[SummaryNode]:
-        """Prefer routine fanin/depth, then allow bounded pressure condensation."""
+        """Prefer the heaviest routine depth, then allow bounded pressure condensation."""
         by_depth: dict[int, list[SummaryNode]] = {}
         for node in self._summary_frontier_nodes():
             by_depth.setdefault(node.depth, []).append(node)
@@ -7241,11 +7241,13 @@ class LCMEngine(
             return []
         fanin = max(2, self._config.condensation_fanin)
         preferred_max_depth = self._config.incremental_max_depth
-        for depth in sorted(by_depth):
-            nodes = by_depth[depth]
-            within_preferred_depth = preferred_max_depth < 0 or depth < preferred_max_depth
-            if within_preferred_depth and len(nodes) >= fanin:
-                return nodes[:fanin]
+        eligible_depths = [
+            depth for depth, nodes in by_depth.items()
+            if (preferred_max_depth < 0 or depth < preferred_max_depth) and len(nodes) >= fanin
+        ]
+        if eligible_depths:
+            depth = max(eligible_depths, key=lambda d: (sum(node.token_count for node in by_depth[d]), -d))
+            return by_depth[depth][:fanin]
         # The frontier still exceeds its sweep target but no routine group is
         # available. Permit a same-depth partial group or depth beyond the
         # preferred routine maximum; the outer sweep budget keeps this bounded.
@@ -7805,6 +7807,29 @@ class LCMEngine(
         retained_generated_context_parts: list[str] = []
         summary_message: Optional[Dict[str, Any]] = None
         if summary_parts:
+            if (
+                summary_budget is None
+                and self._config.max_assembly_tokens == 0
+                and self._config.reserve_tokens_floor == 0
+                and (ceiling := self._survival_ceiling()) is not None
+            ):
+                # #930: bound only the prefix; keep the tail and every stored node.
+                # Use the pre-compaction input for overhead, not the shortened tail.
+                overhead_source = ([system_msg] if system_msg is not None else [])
+                if retained_user_msg is not None:
+                    overhead_source.append(retained_user_msg)
+                overhead_source.extend(anchor_source)
+                overhead = self._survival_host_overhead(
+                    overhead_source, max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
+                )
+                # The quarter-window floor relies on a later survival fit; without one, use the true remainder.
+                default_budget = max(
+                    ceiling - overhead - count_messages_tokens(result) - count_messages_tokens(tail_selected),
+                    ceiling // 4 if self._config.survival_fit else 0,
+                )
+                full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
+                if count_message_tokens(full_prefix) > default_budget:
+                    summary_budget = default_budget
             kept_indexes = list(range(len(summary_parts)))
             if summary_budget is not None:
                 # #653: within a depth the newest parts are kept first; kept parts render in the order above.
