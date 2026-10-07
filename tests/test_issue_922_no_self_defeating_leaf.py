@@ -12,7 +12,7 @@ import hermes_lcm.survival_fit as survival_fit
 import hermes_lcm.tokens as tokens
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-from hermes_lcm.tokens import count_messages_tokens
+from hermes_lcm.tokens import count_message_tokens, count_messages_tokens
 
 
 @pytest.fixture
@@ -69,12 +69,14 @@ def test_cell_no_leaf_no_growth_no_rejection(engine, monkeypatch):
     assert 20_000 <= count_messages_tokens(messages[-1:]) < 20_100
     assert instance.threshold_tokens == 15_360
     assert instance._fresh_tail_start(messages) == 1
+    assert instance._effective_assembly_token_cap() is None
     rejected = Mock(wraps=instance.record_rejected_compaction)
     monkeypatch.setattr(instance, "record_rejected_compaction", rejected)
 
     result = _host_anti_growth(instance, messages)
 
     assert instance._dag.get_session_nodes(instance._session_id) == []
+    assert instance._objective_only_noop
     summarize.assert_not_called()
     assert result == original
     assert count_messages_tokens(result) <= count_messages_tokens(original)
@@ -83,6 +85,56 @@ def test_cell_no_leaf_no_growth_no_rejection(engine, monkeypatch):
     assert instance._compression_block_reason() == "cooldown:lcm_objective_only"
     assert not instance.should_compress(count_messages_tokens(result))
     assert instance._store.get_session_count(instance._session_id) == 3
+
+
+def test_objective_only_writes_leaf_when_anchor_exceeds_assembly_cap(engine):
+    instance, summarize = engine
+    messages = _cell()
+    summary = "SOLE-OBJECTIVE: continue the requested work.\nExpand for details about: user's request"
+    summarize.return_value = (summary, 1)
+    fresh_tail_start = instance._fresh_tail_start(messages)
+    assert fresh_tail_start == 1
+    tail_tokens = count_messages_tokens(messages[fresh_tail_start:])
+    instance._config.max_assembly_tokens = tail_tokens + 1000
+    cap = instance._effective_assembly_token_cap()
+    anchor = instance._build_preserved_objective_summary_part(messages[0])
+    assert tail_tokens + count_message_tokens({"role": "user", "content": summary}) <= cap
+    assert tail_tokens + count_message_tokens({"role": "user", "content": anchor}) > cap
+
+    result = instance.compress(messages, current_tokens=count_messages_tokens(messages))
+
+    assert not instance._objective_only_noop
+    nodes = instance._dag.get_session_nodes(instance._session_id)
+    assert nodes and summarize.called
+    assert 1 in {store_id for node in nodes for store_id in node.source_ids}
+    assert any(summary in (message.get("content") or "") for message in result)
+    assert result[-2:] == messages[-2:]
+
+
+def test_objective_only_writes_leaf_when_anchor_exceeds_recovery_cap(engine):
+    instance, summarize = engine
+    messages = _cell()
+    summary = "SOLE-OBJECTIVE: continue the requested work.\nExpand for details about: user's request"
+    summarize.return_value = (summary, 1)
+    fresh_tail_start = instance._fresh_tail_start(messages)
+    tail_tokens = count_messages_tokens(messages[fresh_tail_start:])
+    anchor = instance._build_preserved_objective_summary_part(messages[0])
+    anchor_tokens = count_message_tokens({"role": "user", "content": anchor})
+    instance._config.max_assembly_tokens = tail_tokens + anchor_tokens + 500
+    observed = count_messages_tokens(messages) + 2000  # host overhead outside the messages
+    assert instance._should_force_overflow_recovery(observed_tokens=observed, messages=messages)
+    recovery_cap = instance._overflow_recovery_assembly_cap(observed_tokens=observed, messages=messages)
+    assert tail_tokens + anchor_tokens <= instance._effective_assembly_token_cap()
+    assert tail_tokens + anchor_tokens > recovery_cap
+    assert tail_tokens + count_message_tokens({"role": "user", "content": summary}) <= recovery_cap
+
+    result = instance.compress(messages, current_tokens=observed)
+
+    assert not instance._objective_only_noop
+    nodes = instance._dag.get_session_nodes(instance._session_id)
+    assert nodes and summarize.called
+    assert any(summary in (message.get("content") or "") for message in result)
+    assert result[-2:] == messages[-2:]
 
 
 def test_next_round_compacts_earlier_tool_pair_and_preserves_objective(engine, caplog):

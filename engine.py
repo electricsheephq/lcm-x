@@ -20,7 +20,7 @@ import uuid
 from collections import Counter, deque
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from agent.context_engine import ContextEngine
 
@@ -70,6 +70,10 @@ from .extraction import (
     sanitize_pre_compaction_content,
     sanitize_pre_compaction_tool_arguments,
     strip_injected_context_blocks,
+)
+from .summary_input_clip import (
+    clip_to_budget,
+    externalized_preview,
 )
 from .ingest_protection import (
     EmbeddingPrivacyPolicyError,
@@ -387,6 +391,9 @@ _TOTAL_COMPACTIONS_SCOPE = "current_conversation"
 _AUTO_FOCUS_MAX_TURNS = 3
 _AUTO_FOCUS_TURN_MAX_CHARS = 260
 _AUTO_FOCUS_MAX_CHARS = 700
+# escalation._normalized_focus_topic keeps the first 160 chars (its max_chars
+# default); lay out auto-focus so the newest turn fits inside that window (#613).
+_AUTO_FOCUS_PROMPT_MAX_CHARS = 160
 
 _PRESERVED_TODO_CONTEXT_PREFIX = "[Your active task list was preserved across context compression]"
 
@@ -2142,8 +2149,12 @@ class LCMEngine(
         while attempt_chunk and attempt_number < max_attempts:
             attempt_number += 1
             source_tokens = count_messages_tokens(attempt_chunk)
-            serialized = self._serialize_messages(attempt_chunk)
+            serialized, clipped = self._serialize_messages_with_clip(attempt_chunk)
             token_budget = self._leaf_target_tokens(source_tokens)
+            logger.info(  # #611 recorder: the serialized summariser input of this leaf call
+                "LCM leaf summary input: input_tokens=%d source_tokens=%d messages=%d",
+                count_tokens(serialized), source_tokens, len(attempt_chunk),
+            )
 
             try:
                 timeout_seconds = self._config.summary_timeout_ms / 1000
@@ -2174,10 +2185,11 @@ class LCMEngine(
                     provenance=provenance,
                     **({"budget": budget} if budget is not None else
                        {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
-                    verbatim_small_source=True,  # #605 F2
+                    verbatim_small_source=not clipped,  # #605 F2; #947: clipped input is not whole
                 )
                 self._last_leaf_summary_model = provenance.get("model", "")
-                self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
+                # #652: no fragment; #947: a clipped source returned unchanged by the level-3 fallback is a fragment too
+                self._last_leaf_level_3_verbatim = level == 3 and not clipped and summary_text == serialized
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if isinstance(exc, SweepBudgetExhausted):
@@ -4996,7 +5008,7 @@ class LCMEngine(
                      provider: str = "",
                      api_mode: str = "") -> None:
         parent_session_id = self._in_process_parent_session_id({})
-        if parent_session_id:
+        if parent_session_id and self._session_id:
             logger.debug(
                 "LCM model update ignored for auxiliary child of %s",
                 parent_session_id,
@@ -6536,12 +6548,26 @@ class LCMEngine(
             )
 
     def _serialize_messages(self, messages: List[Dict[str, Any]], session_id: Optional[str] = None) -> str:
+        return self._serialize_messages_with_clip(messages, session_id)[0]
+
+    def _serialize_messages_with_clip(
+        self, messages: List[Dict[str, Any]], session_id: Optional[str] = None,
+    ) -> Tuple[str, bool]:
         """Serialize messages into labeled text for the summarizer.
 
         *session_id* names the session that owns the rows; it defaults to the
         bound session. A large tool result is externalized under that session.
+        Message texts, tool arguments and previews share leaf_chunk_tokens (#611).
         """
-        parts = []
+        parts: List[List[Any]] = []  # per message: literal strings and indexes into texts
+        texts: List[str] = []
+        kinds: List[str] = []
+
+        def text(value: str, kind: str = "message") -> int:
+            texts.append(value)
+            kinds.append(kind)
+            return len(texts) - 1
+
         matched_tool_ids = _matched_tool_call_ids(messages)
         tool_result_names = _tool_result_names(messages)
         for index, msg in enumerate(messages):
@@ -6562,12 +6588,10 @@ class LCMEngine(
                     tool_name=str(msg.get("tool_name") or tool_result_names.get(index, "")),
                 )
                 if externalized:
-                    content = externalized["placeholder"]
+                    preview = externalized_preview(sanitize_pre_compaction_content(content))
+                    parts.append([f"[TOOL RESULT {tool_id}]: " + externalized["placeholder"], text(preview, "preview")])
                 else:
-                    content = sanitize_pre_compaction_content(content)
-                    if len(content) > 3000:
-                        content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
-                parts.append(f"[TOOL RESULT {tool_id}]: {content}")
+                    parts.append([f"[TOOL RESULT {tool_id}]: ", text(sanitize_pre_compaction_content(content))])
                 continue
 
             content = sanitize_pre_compaction_content(content)
@@ -6586,10 +6610,10 @@ class LCMEngine(
                     if not matched_tool_calls:
                         continue
                     content = ""
-                if len(content) > 3000:
-                    content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
+                part: List[Any] = ["[ASSISTANT]: ", text(content)]
                 if matched_tool_calls:
-                    tc_parts = []
+                    part.append("\n[Tool calls:\n")
+                    first = True
                     for tc in matched_tool_calls:
                         if isinstance(tc, dict):
                             fn = tc.get("function", {})
@@ -6601,18 +6625,18 @@ class LCMEngine(
                                 parse_json_strings=True,
                             )
                             args = sanitize_pre_compaction_tool_arguments(args)
-                            if len(args) > 500:
-                                args = args[:400] + "..."
-                            tc_parts.append(f"  {name}({args})")
-                    content += "\n[Tool calls:\n" + "\n".join(tc_parts) + "\n]"
-                parts.append(f"[ASSISTANT]: {content}")
+                            part += [("" if first else "\n") + f"  {name}(", text(args, "arguments"), ")"]
+                            first = False
+                    part.append("\n]")
+                parts.append(part)
                 continue
 
-            if len(content) > 3000:
-                content = content[:2000] + "\n...[truncated]...\n" + content[-800:]
-            parts.append(f"[{role.upper()}]: {content}")
+            parts.append([f"[{role.upper()}]: ", text(content)])
 
-        return "\n\n".join(parts)
+        clipped_texts = clip_to_budget(texts, self._config.leaf_chunk_tokens, kinds)
+        clipped = any(before != after for before, after in zip(texts, clipped_texts))
+        texts = clipped_texts
+        return "\n\n".join("".join(texts[x] if isinstance(x, int) else x for x in part) for part in parts), clipped
 
     # -- Internal: tool-pair sanitization ------------------------------------
 
@@ -7213,7 +7237,7 @@ class LCMEngine(
         return sum(node.token_count for node in self._summary_frontier_nodes())
 
     def _select_threshold_sweep_condensation_group(self) -> List[SummaryNode]:
-        """Prefer routine fanin/depth, then allow bounded pressure condensation."""
+        """Prefer the heaviest routine depth, then allow bounded pressure condensation."""
         by_depth: dict[int, list[SummaryNode]] = {}
         for node in self._summary_frontier_nodes():
             by_depth.setdefault(node.depth, []).append(node)
@@ -7221,11 +7245,13 @@ class LCMEngine(
             return []
         fanin = max(2, self._config.condensation_fanin)
         preferred_max_depth = self._config.incremental_max_depth
-        for depth in sorted(by_depth):
-            nodes = by_depth[depth]
-            within_preferred_depth = preferred_max_depth < 0 or depth < preferred_max_depth
-            if within_preferred_depth and len(nodes) >= fanin:
-                return nodes[:fanin]
+        eligible_depths = [
+            depth for depth, nodes in by_depth.items()
+            if (preferred_max_depth < 0 or depth < preferred_max_depth) and len(nodes) >= fanin
+        ]
+        if eligible_depths:
+            depth = max(eligible_depths, key=lambda d: (sum(node.token_count for node in by_depth[d]), -d))
+            return by_depth[depth][:fanin]
         # The frontier still exceeds its sweep target but no routine group is
         # available. Permit a same-depth partial group or depth beyond the
         # preferred routine maximum; the outer sweep budget keeps this bounded.
@@ -7280,6 +7306,7 @@ class LCMEngine(
                 )
                 return passes, "condensation_error"
             passes += 1
+            self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
             if (budget := self._foreground_call_budget()) is not None:
                 budget.progress = budget.progress or "condensation"
             try:
@@ -7288,8 +7315,6 @@ class LCMEngine(
                 if _is_sqlite_locked_error(exc):
                     setattr(exc, "lcm_completed_condensation_passes", passes)
                 raise
-            if after < before:
-                self._no_progress_candidate = False  # #651: a condensation that shrank the summary prefix is progress
             if after >= before:
                 return passes, "condensation_no_progress"
         return passes, "summary_prefix_target_reached"
@@ -7404,10 +7429,10 @@ class LCMEngine(
         emitted inside the summary block so restart reconciliation ignores it
         instead of ingesting a duplicate non-contiguous user message.
 
-        Previous preserved-objective scaffolds are derived context, not real
-        user turns, so they are not eligible as the next anchor source. Once a
-        reverse scan reaches one, older user turns are stale relative to that
-        synthetic continuity marker and must not be promoted as current intent.
+        Previous preserved-objective scaffolds carry the same objective across
+        assemblies within a turn. Reuse only their objective part verbatim,
+        without carrying old summaries or promoting older user turns past that
+        synthetic continuity marker as current intent.
         """
         selected_tail_messages = [msg for msg in selected_tail if isinstance(msg, dict)]
         for message in reversed(messages):
@@ -7424,8 +7449,22 @@ class LCMEngine(
                 or self._is_ignored_active_replay_placeholder(message, content_text)
             ):
                 continue
-            if self._preserved_objective_context_content(message):
-                return None
+            preserved_objective = self._preserved_objective_context_content(message)
+            # Only a user row carries an objective: LCM emits its objective as one, and an
+            # assistant-role summary appears only behind a retained sole user kept verbatim.
+            if preserved_objective and message.get("role") == "user":
+                if any(message == selected for selected in selected_tail_messages):
+                    return None
+                cuts: list[tuple[int, bool]] = []
+                for boundary in re.finditer("\n\n---\n\n", preserved_objective):
+                    # Cut only at summary parts verified against this session's DAG; a quoted header is request text.
+                    rest = preserved_objective[boundary.end():]
+                    if (end := self._verified_lcm_summary_prefix_end(rest)) is not None:
+                        cuts.append((boundary.start(), not rest[end:].strip()))
+                # LCM's own parts end the scaffold. Text after the verified parts (a pasted summary, or a row the
+                # host merged onto the scaffold) keeps the whole row: a duplicate summary, never a lost request.
+                whole = next((start for start, ends in cuts if ends), None)
+                return preserved_objective if whole is None else preserved_objective[:whole]
             if message.get("role") != "user":
                 continue
             if self._is_preserved_todo_context_message(message):
@@ -7622,6 +7661,9 @@ class LCMEngine(
                 leading_msg.get("role") == "system"
                 and self.compression_count == 0
                 and include_lcm_note
+                and "This conversation uses Lossless Context Management (LCM)" not in (
+                    normalize_content_value(leading_msg.get("content")) or ""
+                )
             ):
                 leading_msg["content"] = self._append_lcm_note_to_content(
                     leading_msg.get("content", "")
@@ -7783,6 +7825,29 @@ class LCMEngine(
         retained_generated_context_parts: list[str] = []
         summary_message: Optional[Dict[str, Any]] = None
         if summary_parts:
+            if (
+                summary_budget is None
+                and self._config.max_assembly_tokens == 0
+                and self._config.reserve_tokens_floor == 0
+                and (ceiling := self._survival_ceiling()) is not None
+            ):
+                # #930: bound only the prefix; keep the tail and every stored node.
+                # Use the pre-compaction input for overhead, not the shortened tail.
+                overhead_source = ([system_msg] if system_msg is not None else [])
+                if retained_user_msg is not None:
+                    overhead_source.append(retained_user_msg)
+                overhead_source.extend(anchor_source)
+                overhead = self._survival_host_overhead(
+                    overhead_source, max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
+                )
+                # The quarter-window floor relies on a later survival fit; without one, use the true remainder.
+                default_budget = max(
+                    ceiling - overhead - count_messages_tokens(result) - count_messages_tokens(tail_selected),
+                    ceiling // 4 if self._config.survival_fit else 0,
+                )
+                full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
+                if count_message_tokens(full_prefix) > default_budget:
+                    summary_budget = default_budget
             kept_indexes = list(range(len(summary_parts)))
             if summary_budget is not None:
                 # #653: within a depth the newest parts are kept first; kept parts render in the order above.
@@ -8349,6 +8414,8 @@ class LCMEngine(
         ``_AUTO_FOCUS_MAX_TURNS`` user messages (skipping context summaries
         and empty turns).  Returns a brief text block suitable for injection
         into the summarizer prompt as ``focus_topic``.
+        The block is emitted newest first, with its newest bullet sized to
+        survive the 160-char prompt window (#613).
 
         IMPORTANT: The ``messages`` parameter must be ``working_messages``
         (output of ``_ingest_messages``), not raw messages.  ``working_messages``
@@ -8404,10 +8471,15 @@ class LCMEngine(
         # ``candidates`` is newest-first here.  Spend the block budget from the
         # newest turn backwards so a tight budget drops stale turns rather than
         # the turn the host is about to answer.
-        header = "Recent user focus:\n"
+        header = "Recent user focus: newest first\n"
+        # The prompt normalizer keeps 159 chars plus "…" when longer. Size the
+        # newest bullet so the whitespace-joined header and bullet fit that head.
+        newest_limit = _AUTO_FOCUS_PROMPT_MAX_CHARS - 1 - len(header.strip()) - len(" - ")
         budget = _AUTO_FOCUS_MAX_CHARS - len(header)
         selected: list[str] = []
         for position, item in enumerate(candidates):
+            if position == 0:
+                item = self._clamp_focus_turn_text(item, newest_limit)
             line = f"- {item}"
             cost = len(line) + (1 if selected else 0)
             if cost > budget:
@@ -8419,7 +8491,7 @@ class LCMEngine(
             budget -= cost
             selected.append(line)
 
-        selected.reverse()
+        # Emit newest-first so the prompt's head window holds the current request (#613).
         return header + "\n".join(selected)
 
     @staticmethod

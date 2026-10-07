@@ -8,8 +8,26 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ### v0.27.0
 
+- Change: summaries now see the middle of long messages using a shared input budget with a legacy retention floor; measured middle-fact retention rose from 0/72 to 42/72. (#611)
+- Fix: a clipped long message no longer becomes a verbatim level-3 leaf with the default or fleet input budgets. (#899)
+- Bench: Track S decision scoring uses per-file digest admission, durable revocation, and complete paired metrics while retaining separate prefix timing. (#946, #948)
+- Fix: a leaf whose summariser input was clipped is summarised, never stored verbatim. (#947)
 - Fix: hidden-only compaction keeps the host list unchanged when neither rows nor tokens shrink, while publishing the leaves and draining once per foreground turn. (#904)
 - Fix: skip a leaf that only repeats the preserved objective; keep the in-turn hold and release it at foreground turn end, avoiding the wasted summary and host growth refusal. (#922)
+- Fix: on Hermes, the LCM note now reaches the model as a plugin system-prompt section, only in sessions LCM manages, and it names only the enabled tools (#900).
+- Fix: bound the summary prefix by default when the context window is known, retaining the newest summaries without removing DAG nodes, and condense the heaviest eligible depth first. (#930)
+- Fix: `LCM_SQLITE_MMAP_SIZE` configures SQLite mapped reads in bytes (default unchanged at 268435456); use `0` on SD-card hosts, and `/lcm doctor` reports the effective value. (#903)
+- Fix: a second context assembly in the same user turn keeps the preserved objective verbatim instead of dropping the sole user request. (#921)
+
+## v0.26.1 (delegated-child compaction fix)
+
+- Fix: a delegated child (a `delegate_task` subagent) whose engine is a fresh copy of the parent's now keeps the
+  host's resolved model and context window, including later model updates, so it compacts at the normal threshold
+  instead of growing until the provider rejects the request. An engine already bound to the foreground session
+  still ignores a child's model update. (#937, #938)
+- Fix: the host-fallback compressor and its model sync use the active model or the configured summary model and
+  never send `"unknown"` to a provider. With neither resolved, LCM-X logs
+  `reason=host_fallback_unresolved_model` once and uses the existing deterministic tail fallback. (#937, #938)
 
 ## v0.26.0 (host message identity)
 
