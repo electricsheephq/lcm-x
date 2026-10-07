@@ -573,7 +573,21 @@ def test_lcm_doctor_survival_fit_guidance_names_the_backup_restore_rollback(engi
         assert phrase in line, phrase
     restore = "restore the database backup taken before the first v0.24.5 install together with the plugin"
     assert not any("remain in the host session" in text for text in (observation, line))
-    assert not any("plugin-only" in text for text in (observation, line))
+    if projected is None or projected > 0:
+        # #919 review: positive or unknown projections move the plugin-alone target to v0.27.0 in both texts.
+        assert "the plugin alone to v0.27.0 or later is fine" in observation and "v0.27.0 or later is fine" in line
+        assert not any("v0.24.5 or later is fine" in text for text in (observation, line))
+        # #919: positive or unknown projections add the v0.27.0 plugin-only rollback floor.
+        assert "a plugin-only rollback must target v0.27.0 or later" in observation
+        # #919 F2: the floor explains the cold-resume risk and a self-contained older-target procedure.
+        assert ("v0.26.x or earlier cannot recognise a short projected row (head + mark) and stores it again "
+                "on a cold resume (#601 duplicates); to roll back further, stop Hermes and move the configured "
+                "database file (by default lcm.db, with its -wal and -shm companions) aside and keep it") in observation
+        # #919: triage guidance retains its existing advice without the projection clause.
+        assert "plugin-only" not in line
+    else:
+        # #919: zero projections preserve the original absence of plugin-only advice.
+        assert not any("plugin-only" in text for text in (observation, line))
     assert ("stop Hermes, move the configured database file (by default lcm.db, with its -wal and -shm companions) "
             "aside and keep it") in line
     assert restore in line and "stay in the file you moved aside" in line
@@ -827,7 +841,8 @@ def test_lcm_doctor_tool_guidance_maps_warning_classes_to_operator_actions(engin
 def test_lcm_doctor_survival_fit_guidance_scopes_the_restore_to_versions_older_than_v0245():
     """#620: the diagnostics advice restores the backup only for a rollback to a version older than v0.24.5,
     and names the configured database file rather than lcm.db alone."""
-    guidance = doctor_guidance_for_check({"check": "survival_fit", "status": "warn", "detail": {"count": 1}})
+    guidance = doctor_guidance_for_check({"check": "survival_fit", "status": "warn",
+                                          "detail": {"count": 1, "projected_count": 0}})  # #919: no projection
 
     assert guidance is not None
     text = guidance["operator_action"]

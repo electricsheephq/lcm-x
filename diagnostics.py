@@ -60,6 +60,18 @@ def has_lifecycle_fragmentation(stats: dict[str, Any]) -> bool:
     )
 
 
+def survival_fit_projection_floor_applies(record: Any) -> bool:
+    """#919: True unless the survival-fit record proves that no fit projected a row.
+
+    v0.26.x or earlier cannot recognise a short projected row (head + mark), so a plugin-only rollback must target
+    v0.27.0 or later. Only a readable projected_count of 0 with intact history rules that out: a positive, absent or
+    damaged count, or a record rebuilt after a lost count (count_lost, which restarts projected_count), is unknown.
+    """
+    record = record if isinstance(record, dict) else {}
+    projected = record.get("projected_count")
+    return bool(record.get("count_lost")) or not (type(projected) is int and projected == 0)
+
+
 def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
     """Return operator triage guidance for one lcm_doctor check.
 
@@ -200,7 +212,13 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
                   "database file (by default lcm.db, with its -wal and -shm companions) aside and keep it, then "
                   "restore the database backup taken before the first v0.24.5 install together with the plugin (rows "
                   "stored after that backup leave the LCM store and stay in the file you moved aside); a rollback of "
-                  "the plugin alone to v0.24.5 or later is fine")
+                  + ("the plugin alone to v0.27.0 or later is fine; a survival fit projected rows (or the projection "
+                     "count is unknown) and v0.26.x or earlier cannot recognise a short projected row (head + mark) "
+                     "and stores it again on a cold resume (#601 duplicates), so to v0.24.5 through v0.26.x stop "
+                     "Hermes, move the configured database file (by default lcm.db, with its -wal and -shm "
+                     "companions) aside and keep it"
+                     if survival_fit_projection_floor_applies(detail) else
+                     "the plugin alone to v0.24.5 or later is fine"))
         command = ("inspect the 'LCM survival fit applied' or 'LCM survival fit could not shorten the list' log lines "
                    "and the compaction reason; the dropped "
                    "turns stay stored verbatim (lcm_grep / lcm_load_session); nothing needs deleting. Rollback "

@@ -31,6 +31,7 @@ from .diagnostics import (
     _state_db_path_for_engine,
     doctor_guidance_for_check,
     doctor_guidance_for_checks,
+    survival_fit_projection_floor_applies,
 )
 from .ingest_protection import (
     EmbeddingPrivacyPolicyError,
@@ -1809,6 +1810,9 @@ def _doctor_text(engine) -> str:
         fit_count = None
     if fit_count != 0:
         projected = survival_fit.get("projected_count")  # absent on a record from before the key: unknown
+        if type(projected) is not int or projected < 0 or survival_fit.get("count_lost"):
+            projected = None  # damaged metadata, or history lost with the count: conservatively unknown
+        projection_floor = survival_fit_projection_floor_applies(survival_fit)  # #919: same predicate as triage
         uncovered = survival_fit.get("last_uncovered_rows")
         uncovered_fits = survival_fit.get("uncovered_fit_count")
         unknown_fits = survival_fit.get("unknown_coverage_fit_count")
@@ -1816,13 +1820,19 @@ def _doctor_text(engine) -> str:
                   "survival fit removed from the live context; stop Hermes, move the configured database file (by "
                   "default lcm.db, with its -wal and -shm companions) aside and keep it, then restore the database "
                   "backup taken before the first v0.24.5 install with the plugin; a rollback of the plugin alone to "
-                  "v0.24.5 or later is fine")
+                  f"{'v0.27.0' if projection_floor else 'v0.24.5'} or later is fine")
         applied = ("applied an unknown number of times (the stored count is unreadable)" if fit_count is None
                    else f"applied {fit_count} time(s)")
         if survival_fit.get("last_shortened") is False:
             applied = applied.replace("applied", "attempted", 1) + "; could not shorten the list on the last attempt"
         rollback = (f"; {within}; a rollback to v0.23.3 keeps the database file and needs native recovery ON "
                     "(see triage_guidance)" if survival_fit.get("ever_shortened", True) else "")
+        if projection_floor:
+            rollback += ("; a survival fit projected rows (or the projection count is unknown): from v0.27.0 on, "
+                         "a plugin-only rollback must target v0.27.0 or later; v0.26.x or earlier cannot recognise "
+                         "a short projected row (head + mark) and stores it again on a cold resume (#601 duplicates); "
+                         "to roll back further, stop Hermes and move the configured database file (by default lcm.db, "
+                         "with its -wal and -shm companions) aside and keep it")
         observations.append(f"survival_fit: {applied}; last reason "
                             f"{survival_fit.get('last_reason') or '(unknown)'}; projected_count "
                             f"{'unknown' if projected is None else projected}; unreached_budget_count "

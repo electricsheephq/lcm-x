@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional
 
 from .host_uid import _valid_uid
 from .host_uid_emit import ADDRESS_KEYS, IDENTITY_KEYS, identity_emit_enabled, record_absorbed_message
+from .message_analysis import _is_codex_interim
 from .message_content import normalize_content_value
 from .store import _normalize_observed_at
 from .tokens import count_message_tokens, count_messages_tokens
@@ -136,6 +137,15 @@ class SurvivalFitMixin:
         return (self._is_replayed_context_scaffold_message(message)
                 or self._generated_context_carrier_remainder(message) is not None
                 or self._is_context_summary_content(message.get("content")))  # a host summary of stored rows
+
+    def _survival_completed_reply(self, message) -> bool:
+        """#798: a completed textual reply needs a host stamp for replay on cold resume."""
+        # A Codex Responses interim row replays only with its chain of continuation state.
+        return (message.get("role") == "assistant" and not message.get("tool_calls")
+                and not _is_codex_interim(message)
+                and bool((normalize_content_value(message.get("content")) or "").strip())
+                and _normalize_observed_at(message.get("timestamp")) is not None
+                and not self._survival_generated(message))
 
     def _survival_fit(self, messages, result, observed_tokens, reason: str, *, after_exception: bool = False,
                       window_cap: Optional[int] = None, request_cap: Optional[int] = None):
@@ -252,11 +262,14 @@ class SurvivalFitMixin:
             if id(carrier) in store_ids:
                 store_ids = {**store_ids, id(body[0]): store_ids[id(carrier)]}
 
+        body_ids = {id(m) for m in body}
+
         def durable(message) -> bool:  # unproven rows: only DAG-verified scaffold, never a phrase match
             return persisted or id(message) in store_ids or self._is_verified_replay_scaffold_message(message)
 
-        def build(cut: int, kept):
-            dropped = body[:cut]
+        def build(cut: int, kept, reply=None):
+            kept_ids = {id(row) for row in kept}  # live rows: identity, one pass (not kept x dropped)
+            dropped = [m for m in body[:cut] if m is not reply and id(m) not in kept_ids]
             mapped = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
             # coverage reads the counted rows only: a generated carrier's id never stands in for an unmapped row
             ids = sorted(store_ids[id(message)] for message in dropped
@@ -280,6 +293,24 @@ class SurvivalFitMixin:
                                                                summary_uid, "survival_summary", taken=out + kept))
             return out + kept or result[-1:], count, ids, notice
 
+        def keep_reply(cut: int, kept):
+            reply = body[cut - 1] if cut else None
+            if reply is not None and self._survival_completed_reply(reply):
+                candidate = kept if any(row is reply for row in kept) else [reply, *kept]
+                if self._survival_measure(build(cut, candidate, reply)[0]) <= budget:
+                    return candidate, reply
+                # v0.26.x recognises head/tail, but not #917's middle-band head+mark reply. Whole-turn cuts
+                # (exit fits) promise no projection: the reply stays verbatim or goes.
+                if not whole_turns and len(normalize_content_value(reply.get("content")) or "") > 2 * _HEAD:
+                    row = self._store.get(store_ids[id(reply)]) if id(reply) in store_ids else None
+                    if row and row.get("role") == "assistant":
+                        fields = self._survival_projected_fields(row, count_message_tokens(reply), _HEAD, _TAIL)
+                        view = {k: v for k, v in {**reply, **fields}.items() if k != "tool_calls" or v}
+                        candidate = [view, *kept]
+                        if self._survival_measure(build(cut, candidate, reply)[0]) <= budget:
+                            return candidate, reply
+            return kept, None
+
         users = [i for i, message in enumerate(body) if isinstance(message, dict) and message.get("role") == "user"]
         covered = None
         if reason.startswith("exit_fit:"):  # #738: an exit fit drops only rows a summary node covers
@@ -292,18 +323,20 @@ class SurvivalFitMixin:
         for index in users:
             if keep_from is not None and len(head) + index > keep_from:
                 break  # the cut would drop a protected row
-            if index and not all(durable(message) for message in body[:index]):
+            kept, reply = keep_reply(index, body[index:]) if index == users[-1] else (body[index:], None)
+            dropped = [m for m in body[:index] if m is not reply]
+            if index and not all(durable(message) for message in dropped):
                 break  # never omit a row that is not durably stored
             if index and covered is not None:  # #738: every dropped row is a covered stored row or verified scaffold
                 if not all(store_ids.get(id(m)) in covered or self._is_verified_replay_scaffold_message(m)
-                           for m in body[:index]):
+                           for m in dropped):
                     break  # an unmapped, merged, stubbed or uncovered row stays, and so does every longer region
-                if not any(id(m) in store_ids for m in body[:index]):
+                if not any(id(m) in store_ids for m in dropped):
                     continue  # scaffold alone is not cut; a longer region may add covered stored rows
             if index:
-                fitted, count, ids, notice = build(index, body[index:])
+                fitted, count, ids, notice = build(index, kept, reply)
                 if self._survival_measure(fitted) <= budget:
-                    return fitted, count, ids, False, notice
+                    return fitted, count, ids, any(id(m) not in body_ids for m in kept), notice
         if whole_turns:
             return None
         # the newest user turn alone is over budget: a bounded projection of it
@@ -313,8 +346,9 @@ class SurvivalFitMixin:
             return None
         noticed = build(cut, body[cut:])[0][:len(head)]  # the head as returned: its notice counts too
         kept = self._survival_projection(body[cut:], store_ids, budget - self._survival_measure(noticed))
-        fitted, count, ids, notice = build(cut, kept)
-        return fitted, count, ids, any(new is not old for new, old in zip(kept, body[cut:])), notice
+        kept, reply = keep_reply(cut, kept)
+        fitted, count, ids, notice = build(cut, kept, reply)
+        return fitted, count, ids, any(id(m) not in body_ids for m in kept), notice
 
     @staticmethod
     def _survival_with_notice(content: Any, notice: str) -> Any:
