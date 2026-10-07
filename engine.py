@@ -2177,6 +2177,8 @@ class LCMEngine(
                     focus_topic=focus_topic or "",
                     custom_instructions=self._config.custom_instructions,
                     prompt_version=getattr(self._config, "summary_prompt_version", 1),
+                    min_output_cap_tokens=3 * getattr(
+                        self._config, "leaf_target_min_tokens", LCMConfig.leaf_target_min_tokens),
                     provenance=provenance,
                     **({"budget": budget} if budget is not None else
                        {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
@@ -7179,6 +7181,8 @@ class LCMEngine(
             focus_topic=focus_topic or "",
             custom_instructions=self._config.custom_instructions,
             prompt_version=getattr(self._config, "summary_prompt_version", 1),
+            min_output_cap_tokens=3 * getattr(
+                self._config, "leaf_target_min_tokens", LCMConfig.leaf_target_min_tokens),
             provenance=provenance,
             **({"budget": budget} if budget is not None else
                {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt

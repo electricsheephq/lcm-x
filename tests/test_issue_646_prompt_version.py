@@ -169,8 +169,8 @@ def test_output_ceiling_per_version(monkeypatch, version, factor):
 # -- T5: depth guidance ----------------------------------------------------------------------------------
 
 def test_v2_depth_guidance():
-    depth1 = "The segment is a sequence of earlier summaries. Merge them into one account under the same six headings"
-    deep = "Write the durable narrative under the same six headings"
+    depth1 = "The segment is a sequence of earlier summaries. Merge them into one account that uses the same six headings"
+    deep = "The segment is a sequence of earlier summaries. Write the durable record that uses the same six headings"
     assert depth1 in _build_l1_prompt(TEXT, 2000, 1, prompt_version=2)
     assert deep in _build_l1_prompt(TEXT, 2000, 2, prompt_version=2)
     assert deep in _build_l1_prompt(TEXT, 2000, 5, prompt_version=2)
