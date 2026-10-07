@@ -22,6 +22,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: `/lcm` refuses every subcommand when the session and engine profiles are known and differ, refuses unproven writes when a profile is unknown, preserves same-profile cold starts, and names the opened store when a profile is unknown. (#852)
 - Fix: withhold the LCM note from active auxiliary and rotated bypass sessions. (#953)
 - Fix: reset session gate observations, rank the oldest condensation group, and reserve tool-result stubs and proactive recall when bounding summaries, including inactive explicit caps. (#954)
+- Fix: after a survival fit with projected rows or an unknown projection count, the doctor advises a plugin-only rollback to v0.27.0 or later; older targets require stopping Hermes and moving the database aside to avoid cold-resume duplicates. (#919)
 
 ## v0.26.1 (delegated-child compaction fix)
 
