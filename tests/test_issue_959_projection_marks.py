@@ -136,3 +136,16 @@ def test_projection_with_unchanged_calls_keeps_main_bytes(tmp_path, content):
         assert assistant == original
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("arguments", [
+    '{"lcm_survival_fit": "x", "y": ' + "[" * 100000 + "]" * 100000 + "}",
+    "[" * 100000 + '"lcm_survival_fit"' + "]" * 100000,
+], ids=["prefixed", "unprefixed"])
+def test_deeply_nested_live_arguments_do_not_abort_recognition(tmp_path, arguments):
+    engine = _engine(tmp_path)
+    try:
+        message = {"role": "assistant", "content": "", "tool_calls": [_call("deep", arguments)]}
+        assert engine._survival_projection_source(message, "assistant", "") is None
+    finally:
+        engine.shutdown()
