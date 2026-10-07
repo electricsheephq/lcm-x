@@ -61,6 +61,114 @@ def externalized_search_engine(tmp_path):
         instance.shutdown()
 
 
+def test_delegated_child_clone_keeps_host_model_and_window(tmp_path):
+    prototype = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "child-clone.db")))
+    clone = prototype.clone_for_agent()
+
+    class ChildAgent:
+        session_id = "child"
+        _parent_session_id = "parent"
+        log_prefix = "[subagent-1] "
+
+        def start(self):
+            clone.update_model("gpt-5.5", 272_000, provider="openai-codex", api_mode="responses")
+            clone.on_session_start(
+                self.session_id, platform="subagent", model="gpt-5.5",
+                context_length=clone.context_length,
+            )
+            assert clone.model == "gpt-5.5"
+            assert clone.context_length == 272_000
+            assert clone.provider == "openai-codex"
+            assert clone.api_mode == "responses"
+            assert clone._session_id == ""
+            self.check_threshold()
+            clone.update_model("fallback-model", 128_000, provider="openrouter")
+            assert clone.model == "fallback-model"
+            assert clone.context_length == 128_000
+            assert clone.provider == "openrouter"
+            assert clone._session_id == ""
+            self.check_threshold()
+
+        def check_threshold(self):
+            assert clone.threshold_tokens > 0
+            assert clone._bypasses_lcm_context_management()
+            assert clone.should_compress(clone.threshold_tokens)
+            assert not clone.should_compress(clone.threshold_tokens - 1)
+
+    try:
+        ChildAgent().start()
+    finally:
+        clone.shutdown()
+        prototype.shutdown()
+
+
+def test_subagent_child_model_update_does_not_mutate_foreground_threshold(tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "shared-child.db"))
+    instance = LCMEngine(config=config)
+
+    class ChildAgent:
+        session_id = "child"
+        _parent_session_id = "foreground-session"
+        log_prefix = "[subagent-1] "
+
+        def update_context_engine(self):
+            instance.update_model("tiny-child-model", 1_000)
+
+    try:
+        instance.on_session_start("foreground-session", platform="telegram", context_length=200_000)
+        instance.update_model("foreground-model", 200_000)
+        ChildAgent().update_context_engine()
+        assert instance._session_id == "foreground-session"
+        assert instance.model == "foreground-model"
+        assert instance.context_length == 200_000
+        assert instance.threshold_tokens == int(200_000 * config.context_threshold)
+    finally:
+        instance.shutdown()
+
+
+@pytest.mark.parametrize("summary_model", ["", "aux-summary"])
+def test_bypass_host_fallback_never_sends_unknown_model(tmp_path, monkeypatch, caplog, summary_model):
+    constructors = []
+    updates = []
+
+    class FakeContextCompressor:
+        def __init__(self, **kwargs):
+            constructors.append(kwargs)
+            self.compression_count = 0
+
+        def update_model(self, **kwargs):
+            updates.append(kwargs)
+
+        def compress(self, messages, **kwargs):
+            self.compression_count += 1
+            return [{"role": "system", "content": "native compacted"}]
+
+    compressor_module = ModuleType("agent.context_compressor")
+    compressor_module.ContextCompressor = FakeContextCompressor
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", compressor_module)
+    config = LCMConfig(database_path=str(tmp_path / "unresolved-model.db"), summary_model=summary_model)
+    instance = LCMEngine(config=config)
+    messages = [{"role": "user", "content": f"message {i}"} for i in range(10)]
+    try:
+        instance._set_context_length(1_000, source="test")
+        instance._mark_thread_context_stateless("aux:sid")
+        with caplog.at_level(logging.INFO):
+            result = instance.compress(messages, force=True)
+            instance.compress(messages, force=True)
+        if not summary_model:
+            assert constructors == []
+            assert updates == []
+            assert any("[Context omitted:" in row.get("content", "") for row in result)
+            assert caplog.text.count("host_fallback_unresolved_model") == 1
+        else:
+            assert [call["model"] for call in constructors] == ["aux-summary"]
+            assert updates and all(call["model"] == "aux-summary" for call in updates)
+            assert result == [{"role": "system", "content": "native compacted"}]
+        assert all(call["model"] != "unknown" for call in constructors + updates)
+    finally:
+        instance.shutdown()
+
+
 def test_shutdown_closes_lifecycle_store(tmp_path):
     config = LCMConfig(database_path=str(tmp_path / "shutdown-lifecycle.db"))
     engine = LCMEngine(config=config)
@@ -2695,6 +2803,7 @@ class TestEngineABC:
 
         config = LCMConfig(database_path=str(tmp_path / "thread-stateless-no-arg-compress.db"))
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "short"}]
         try:
             instance.on_session_start("foreground:session", platform="cli", context_length=1_000)
@@ -2745,6 +2854,7 @@ class TestEngineABC:
 
         config = LCMConfig(database_path=str(tmp_path / "thread-stateless-no-usage-compress.db"))
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "first auxiliary payload " + ("x " * 200)}]
         try:
             instance.on_session_start("foreground:session", platform="cli", context_length=1_000)
@@ -3010,6 +3120,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         try:
             instance.on_session_start("ignored:sync-failure", platform="cli", context_length=2_000)
             instance.threshold_tokens = 500
@@ -3089,6 +3200,7 @@ class TestEngineABC:
         config.sensitive_patterns_enabled = True
         config.sensitive_patterns = ["password_assignment"]
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "password: supersecret1234 " + "x" * 400},
@@ -3100,6 +3212,7 @@ class TestEngineABC:
 
             instance.compress(messages, current_tokens=200)
 
+            assert captured_messages
             serialized = json.dumps(captured_messages)
             assert "supersecret1234" not in serialized
         finally:
@@ -3135,6 +3248,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:native-invalid", platform="cli", context_length=2_000)
@@ -3180,6 +3294,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:first", platform="cli", context_length=2_000)
@@ -3229,6 +3344,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:reused", platform="cli", context_length=2_000)
@@ -3311,6 +3427,7 @@ class TestEngineABC:
             ignore_session_patterns=["cron"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("reused-id", platform="cron", context_length=2_000)
@@ -3358,6 +3475,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:reset", platform="cli", context_length=2_000)
@@ -3406,6 +3524,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:old", platform="cli", context_length=2_000)
@@ -3857,6 +3976,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 2_000}]
         try:
             instance.on_session_start("ignored:zero-tokens", platform="cli", context_length=4_000)
@@ -3899,6 +4019,7 @@ class TestEngineABC:
             max_assembly_tokens=200,
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "older " + "x" * 2_000},
@@ -3944,6 +4065,7 @@ class TestEngineABC:
             max_assembly_tokens=200,
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "older " + "x" * 2_000},
@@ -18132,6 +18254,7 @@ class TestSessionRollover:
         hermes_home.mkdir()
         config = LCMConfig(database_path=str(tmp_path / "lcm_aux_zero_current_tokens.db"))
         engine = LCMEngine(config=config, hermes_home=str(hermes_home))
+        engine.model = "test-model"
         engine.on_session_start(
             "foreground-session",
             hermes_home=str(hermes_home),

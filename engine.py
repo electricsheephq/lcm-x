@@ -4994,7 +4994,7 @@ class LCMEngine(
                      provider: str = "",
                      api_mode: str = "") -> None:
         parent_session_id = self._in_process_parent_session_id({})
-        if parent_session_id:
+        if parent_session_id and self._session_id:
             logger.debug(
                 "LCM model update ignored for auxiliary child of %s",
                 parent_session_id,
