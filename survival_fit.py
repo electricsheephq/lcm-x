@@ -265,7 +265,8 @@ class SurvivalFitMixin:
             return persisted or id(message) in store_ids or self._is_verified_replay_scaffold_message(message)
 
         def build(cut: int, kept, reply=None):
-            dropped = [m for m in body[:cut] if m is not reply and all(m is not row for row in kept)]
+            kept_ids = {id(row) for row in kept}  # live rows: identity, one pass (not kept x dropped)
+            dropped = [m for m in body[:cut] if m is not reply and id(m) not in kept_ids]
             mapped = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
             # coverage reads the counted rows only: a generated carrier's id never stands in for an unmapped row
             ids = sorted(store_ids[id(message)] for message in dropped

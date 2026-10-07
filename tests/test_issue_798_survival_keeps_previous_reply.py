@@ -265,3 +265,14 @@ def test_11_stamped_short_verbatim_reply_survives_cold_resume(tmp_path, rough_co
         assert sum(row["content"] == view[2]["content"] for row in _rows(cold)) == 1
     finally:
         cold.shutdown()
+
+
+def test_dropped_filter_keeps_identity_semantics_for_a_row_object_seen_twice(engine, rough_counts):
+    """A row object also present in the kept suffix is never counted as dropped (same output as before)."""
+    shared = {"role": "assistant", "content": "shared row"}
+    view = [{"role": "user", "content": "[U1] " + "old " * 2000}, shared,
+            {"role": "user", "content": "[U2] newest"}, shared]
+    cut = engine._survival_cut(view, 0, rough_counts(view[2:]), True, "issue_798", {}, True)
+    assert cut is not None
+    assert cut[0][0] is view[2] and cut[0][1] is shared
+    assert cut[1] == 1  # only [U1] left; the shared object stays in the kept suffix
