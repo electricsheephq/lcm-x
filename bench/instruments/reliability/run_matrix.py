@@ -1,6 +1,6 @@
 """Run a named cell set against named Hermes hosts and lcm-x refs; write results.jsonl, MATRIX.md, ISSUE-MAP.md.
 
-    python bench/instruments/reliability/run_matrix.py --hosts eva-0.21.5,customer-0.21.2 \\
+    python bench/instruments/reliability/run_matrix.py --hosts ref-0.21.5,customer-0.21.2 \\
         --plugin-ref origin/main --cells 'baseline/*' --jobs 8 --out <dir>
 
 Stdlib only. Claim class: advisory / code_green_local (see README.md).

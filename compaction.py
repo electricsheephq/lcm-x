@@ -1261,6 +1261,10 @@ class CompactionMixin:
             (
                 boundary_cleanup_only_requested
                 or below_threshold_cleanup_only
+                # #909: replay cleanup may request compress() through an armed hold. Adopt the
+                # durable cleanup, but do no summary work while that automatic hold applies.
+                or (automatic_preflight_requested and not force and not recovery_attempt
+                    and self._sweep_budget_hold_applies(observed_prompt_tokens))
             )
             and not force_overflow
         )
@@ -1441,6 +1445,7 @@ class CompactionMixin:
             and sweep_summary_prefix_before > sweep_target_tokens
             and self._summary_route_available()
         ):
+            budget.leaf_reserve = budget.estimate(self._primary_summary_route())
             try:
                 pre_leaf_condensation_passes, pre_leaf_condensation_reason = (
                     self._run_threshold_sweep_condensation(
@@ -1462,6 +1467,8 @@ class CompactionMixin:
                     leaf_passes=0,
                     condensation_passes=int(getattr(exc, "lcm_completed_condensation_passes", 0)),
                 )
+            finally:
+                budget.leaf_reserve = 0.0
             max_leaf_passes -= pre_leaf_condensation_passes
         if threshold_full_sweep_active:
             self._last_threshold_full_sweep.update(
@@ -1857,10 +1864,11 @@ class CompactionMixin:
                 _level = 0
                 _rescue_attempts = 0
             else:
-                if no_call_only and self._summary_route_stop_applies(
-                        force_overflow, self._serialize_messages(summary_input_chunk)):
-                    sweep_stop_reason = "summary_route_unavailable"
-                    break
+                if no_call_only:
+                    serialized, clipped = self._serialize_messages_with_clip(summary_input_chunk)
+                    if self._summary_route_stop_applies(force_overflow, None if clipped else serialized):
+                        sweep_stop_reason = "summary_route_unavailable"
+                        break
                 # Pre-compaction extraction: best-effort, never blocks compaction.
                 # Use the same dependency-filtered view as summarization so ignored
                 # turns cannot leak through derived assistant/tool replies.
@@ -2159,7 +2167,7 @@ class CompactionMixin:
                     budget.hard,
                     ", ".join(f"{step}={seconds:.1f}s" for step, seconds in sweep_step_seconds.items()),
                 )
-                if not force_overflow:  # #605: forced overflow fits to its cap below and is never held, as before
+                if not force_overflow and pre_leaf_condensation_passes == 0:  # #909: stored condensation is progress
                     self._start_sweep_budget_hold()
             self._refresh_raw_backlog_debt(
                 working_messages,
