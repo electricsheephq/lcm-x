@@ -88,6 +88,36 @@ def test_hidden_only_returns_identical_list_and_holds_attempts(engine, caplog):
         assert not instance.should_compress(observed)
 
 
+def test_hidden_only_repairs_missing_tool_result_without_changing_stored_rows(engine):
+    instance, summarize = engine
+    history = _history()
+    history[-3]["tool_calls"] = [{
+        "id": "hidden-only-missing-result", "type": "function",
+        "function": {"name": "lookup", "arguments": "{}"},
+    }]
+    instance._ingest_messages(history)
+    host = history[-8:]
+    original = deepcopy(host)
+    assert instance._fresh_tail_start(host) == 0
+    assert instance._store_complete_backlog(host, 0)
+    stored_before = instance._store.get_session_messages(instance._session_id)
+
+    result = _compress(instance, host)
+
+    nodes = instance._dag.get_session_nodes(instance._session_id)
+    assert len(nodes) == 1 and nodes[0].depth == 0
+    assert summarize.call_count == 1
+    assert instance._compress_host_rows_consumed == 0
+    assert instance._compress_hidden_rows_consumed == len(nodes[0].source_ids) > 0
+    assert instance.get_status()["no_progress_hold"]["reason"] == "hidden_only"
+    stub = instance._missing_tool_result_stub("hidden-only-missing-result")
+    assert result == original[:6] + [stub] + original[6:]
+    assert result[5]["tool_calls"] == original[5]["tool_calls"]
+    assert instance._ingest_cursor == len(result)
+    assert host == original
+    assert instance._store.get_session_messages(instance._session_id) == stored_before
+
+
 @pytest.mark.parametrize("options", [{"force": True}, {"bypass_cooldown": True}], ids=["forced", "bypass"])
 def test_hidden_only_nonautomatic_pass_returns_input_without_hold(engine, options):
     instance, summarize = engine

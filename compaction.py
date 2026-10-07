@@ -610,8 +610,9 @@ class CompactionMixin:
                     and len(result) >= len(messages)
                     and count_messages_tokens(result) >= count_messages_tokens(messages)):
                 # #904: published hidden leaves advance the frontier, not the host-visible list.
-                result = messages
-                self._ingest_cursor = len(messages)
+                sanitized = self._sanitize_active_context_messages(messages)
+                result = messages if sanitized == messages else sanitized
+                self._ingest_cursor = len(result)
                 if not force and not bypass_cooldown and not self._compress_forced_overflow:
                     self._start_no_progress_hold("hidden_only")
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
