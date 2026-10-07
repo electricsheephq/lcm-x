@@ -215,7 +215,8 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
                   + ("the plugin alone to v0.27.0 or later is fine; a survival fit projected rows (or the projection "
                      "count is unknown) and v0.26.x or earlier cannot recognise a short projected row (head + mark) "
                      "and stores it again on a cold resume (#601 duplicates), so to v0.24.5 through v0.26.x stop "
-                     "Hermes, move the configured database file aside and keep it"
+                     "Hermes, move the configured database file (by default lcm.db, with its -wal and -shm "
+                     "companions) aside and keep it"
                      if survival_fit_projection_floor_applies(detail) else
                      "the plugin alone to v0.24.5 or later is fine"))
         command = ("inspect the 'LCM survival fit applied' or 'LCM survival fit could not shorten the list' log lines "
