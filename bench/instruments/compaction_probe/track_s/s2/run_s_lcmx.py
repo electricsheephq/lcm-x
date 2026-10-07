@@ -374,6 +374,10 @@ def main():
     for cp in run.snaps if is_store else ():  # S7 D1: one scorer-shaped directory per checkpoint
         run.receipts_out, run.reader_calls = cp["receipts"], []
         sha0, res = sha(cp["db"]), probe(run, cp["view"], reader, is_store, cp)
+        sha1 = sha(cp["db"])
+        cp_status = "DONE" if sha0 == sha1 and reader.readback.get("pin_ok", True) else "FAILED"
+        if cp_status == "FAILED":
+            summary["status"] = "FAILED"
         evs = run.events[: cp["n_events"]]
         (cp["dir"] / "continuity").mkdir(exist_ok=True)
         for e in evs:
@@ -384,19 +388,24 @@ def main():
             "events": evs, "receipts": cp["receipts"], "admission": cp["admission"], "reader_calls": run.reader_calls,
             "final_context": {"rows": len(cp["view"]), "tokens": run.ntok([run.sysmsg] + cp["view"])}, "summary_blocks": res[0]["summary_blocks"] if res else None,
             "store_summaries": db_ro(cp["db"]).execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0],
-            "final_continuity": continuity(man, run.system, cp["view"]), "reader_readback": reader.readback, "status": "DONE",
-            "isolation": {"snapshot_sha256_before_probes": sha0, "snapshot_sha256_after_probes": sha(cp["db"])}, "finished": time.time()}, indent=1, default=str))
+            "final_continuity": continuity(man, run.system, cp["view"]), "reader_readback": reader.readback, "status": cp_status,
+            "isolation": {"snapshot_sha256_before_probes": sha0, "snapshot_sha256_after_probes": sha1}, "finished": time.time()}, indent=1, default=str))
         print(f"wrote {cp['dir']} ({len(res)} rows)", flush=True)
     if run.snaps:
-        summary.update(status="DONE", finished=time.time(), checkpoints=[c["row"] for c in run.snaps])
+        summary.setdefault("status", "DONE")
+        summary.update(finished=time.time(), checkpoints=[c["row"] for c in run.snaps])
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
-        return
+        return 1 if summary["status"] == "FAILED" else 0
     results = probe(run, view, reader, is_store)
     isolation["db_sha256_after_probes"] = sha(run.db)
     summary.update(reader_readback=reader.readback, isolation=isolation, status="DONE", finished=time.time())
+    if (is_store and isolation["db_sha256_before_probes"] != isolation["db_sha256_after_probes"]
+            or not reader.readback.get("pin_ok", True)):
+        summary["status"] = "FAILED"
     (run_dir / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in results))
     (run_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
     print(f"wrote {run_dir}/results.jsonl ({len(results)} rows), summary.json, config.json")
+    return 1 if summary["status"] == "FAILED" else 0
 
 def dry_run(m, args, rows, stop):
     out_dir = TS / "s2" / "dry-run"
@@ -435,4 +444,4 @@ def dry_run(m, args, rows, stop):
     print(f"fleet keys excluded: {json.dumps(A.FLEET_EXCLUDED)}")
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
