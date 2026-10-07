@@ -7473,10 +7473,14 @@ class LCMEngine(
                 ):
                     return []
                 first_verified: Optional[tuple[int, int]] = None
+                last_verified_end: Optional[int] = None
                 verified_until = 0
                 for boundary in re.finditer("\n\n---\n\n", preserved_objective):
-                    # Interior boundaries belong to an already verified run, with the same suffix.
-                    if boundary.start() < verified_until or not preserved_objective.startswith("[", boundary.end()):
+                    # Skip boundaries inside a verified run; a nested run straddling its end keeps
+                    # the row whole (duplicate over loss).
+                    if boundary.start() < verified_until or not self._LCM_SUMMARY_PART_HEADER_RE.match(
+                        preserved_objective, boundary.end()
+                    ):
                         continue
                     # Cut only at summary parts verified against this session's DAG; a quoted header is request text.
                     rest = preserved_objective[boundary.end():]
@@ -7485,18 +7489,31 @@ class LCMEngine(
                         if first_verified is None:
                             first_verified = (boundary.start(), verified_until)
                         if not rest[end:].strip():
-                            return [preserved_objective[:boundary.start()]]
+                            preserved_objective = preserved_objective[:boundary.start()]
+                            break
+                        last_verified_end = verified_until
                 # LCM's own parts end the scaffold. Text after the verified parts (a pasted summary, or a row the
                 # host merged onto the scaffold) keeps the whole row: a duplicate summary, never a lost request.
                 candidates = [preserved_objective]
+                first_new = None
                 if first_verified is not None:
                     start, end = first_verified
-                    # The host appends the newer request with two newlines after its summary run.
-                    if preserved_objective.startswith("\n\n", end) and (new := preserved_objective[end + 2:]).strip():
-                        candidates.extend([
-                            preserved_objective[:start] + "\n\n" + new,
-                            self._build_preserved_objective_summary_part({"role": "user", "content": new}),
-                        ])
+                    for separator in ("\n\n---\n\n", "\n\n"):
+                        if preserved_objective.startswith(separator, end):
+                            first_new = preserved_objective[end + len(separator):]
+                            if first_new.strip():
+                                candidates.extend([
+                                    preserved_objective[:start] + "\n\n" + first_new,
+                                    self._build_preserved_objective_summary_part({"role": "user", "content": first_new}),
+                                ])
+                            break
+                if last_verified_end is not None:
+                    for separator in ("\n\n---\n\n", "\n\n"):
+                        if preserved_objective.startswith(separator, last_verified_end):
+                            new = preserved_objective[last_verified_end + len(separator):]
+                            if new.strip() and new != first_new:
+                                candidates.append(self._build_preserved_objective_summary_part({"role": "user", "content": new}))
+                            break
                 return candidates
             if message.get("role") != "user":
                 continue
@@ -7828,7 +7845,7 @@ class LCMEngine(
         # #653: (selection group, node id) per part; the anchor goes first, then each depth, deepest first.
         part_keys: list[tuple[int, Optional[int]]] = []
         for candidate in anchor_candidates:
-            anchor_msg = {"role": summary_role, "content": candidate}
+            anchor_msg = {"role": summary_role, "content": strip_injected_context_blocks(candidate)}
             if summary_budget is None or count_message_tokens(anchor_msg) <= summary_budget:
                 anchor_part = candidate
                 summary_parts.append(anchor_part)
@@ -7885,12 +7902,26 @@ class LCMEngine(
                 full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
                 if count_message_tokens(full_prefix) > default_budget:
                     summary_budget = default_budget
+                    if part_keys[0] == (-1, None) and count_message_tokens({
+                        "role": summary_role, "content": strip_injected_context_blocks(summary_parts[0]),
+                    }) > summary_budget:
+                        for candidate in anchor_candidates[1:]:
+                            if count_message_tokens({
+                                "role": summary_role, "content": strip_injected_context_blocks(candidate),
+                            }) <= summary_budget:
+                                summary_parts[0] = anchor_part = candidate
+                                break
             kept_indexes = list(range(len(summary_parts)))
             if summary_budget is not None:
                 # #653: within a depth the newest parts are kept first; kept parts render in the order above.
                 kept_indexes = []
                 for index in sorted(range(len(summary_parts)), key=lambda i: (part_keys[i][0], -i)):
-                    candidate = "\n\n---\n\n".join(summary_parts[i] for i in sorted(kept_indexes + [index]))
+                    candidate = "\n\n---\n\n".join(
+                        strip_injected_context_blocks(summary_parts[i])
+                        if part_keys[i] == (-1, None) and count_message_tokens({
+                            "role": summary_role, "content": summary_parts[i],
+                        }) > summary_budget else summary_parts[i]
+                        for i in sorted(kept_indexes + [index]))
                     candidate_msg = {"role": summary_role, "content": candidate}
                     if count_message_tokens(candidate_msg) > summary_budget:
                         continue
