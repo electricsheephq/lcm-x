@@ -191,6 +191,19 @@ def test_pasted_verified_summary_in_request_is_kept(engine):
     assert engine._latest_user_context_anchor([scaffold], []) == PREFIX + "\n" + pasted
 
 
+def test_row_merged_onto_scaffold_keeps_newer_text(engine):
+    scaffold = _first_assembly(engine)[0]
+    merged = {"role": "user", "content": scaffold["content"] + "\n\nNEW row typed after the compaction."}
+    assert engine._latest_user_context_anchor([merged], []) == merged["content"]
+
+
+def test_literal_marker_row_with_verified_summary_is_kept_whole(engine):
+    first = _first_assembly(engine, PROMPT)
+    parts = first[0]["content"][len(PREFIX + "\n" + PROMPT + SEPARATOR):]
+    literal = {"role": "user", "content": PREFIX + "\nMy request." + SEPARATOR + parts + "\n\nTrailing instruction."}
+    assert engine._latest_user_context_anchor([literal], []) == literal["content"]
+
+
 def test_markdown_rule_survives_two_same_turn_assemblies(engine):
     prompt = PROMPT + SEPARATOR + "Keep all of this text after the Markdown rule.\n日本語 café\t  "
     first = _first_assembly(engine, prompt)

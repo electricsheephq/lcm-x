@@ -7460,10 +7460,10 @@ class LCMEngine(
                     rest = preserved_objective[boundary.end():]
                     if (end := self._verified_lcm_summary_prefix_end(rest)) is not None:
                         cuts.append((boundary.start(), not rest[end:].strip()))
-                if cuts:
-                    # LCM's own parts end the scaffold; a real summary pasted into the request is followed by request text.
-                    return preserved_objective[:next((start for start, whole in cuts if whole), cuts[0][0])]
-                return preserved_objective
+                # LCM's own parts end the scaffold. Text after the verified parts (a pasted summary, or a row the
+                # host merged onto the scaffold) keeps the whole row: a duplicate summary, never a lost request.
+                whole = next((start for start, ends in cuts if ends), None)
+                return preserved_objective if whole is None else preserved_objective[:whole]
             if message.get("role") != "user":
                 continue
             if self._is_preserved_todo_context_message(message):
