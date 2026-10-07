@@ -52,10 +52,11 @@ def jdump(path: Path, obj) -> None:
 
 
 # ---------------------------------------------------------------- isolated home
-def run_home(run: str) -> Path:
-    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", run) or run in (".", ".."):
-        raise SystemExit("STOP: invalid run id; no run started")
-    return S4 / "home" / run
+def run_home(seed: str, run: str) -> Path:
+    """One isolated home per (seed, run), as the artifacts are keyed RUNS/<seed>/<run>."""
+    if not all(re.fullmatch(r"[A-Za-z0-9._-]{1,64}", part) and part not in (".", "..") for part in (seed, run)):
+        raise SystemExit("STOP: invalid seed or run id; no run started")
+    return S4 / "home" / seed / run
 
 
 def codex_bin() -> Path:
@@ -75,6 +76,8 @@ def setup_home() -> dict:
     if (HOME / "config.toml").exists():
         raise RuntimeError("isolated CODEX_HOME contains config.toml; refusing to run with non-stock config")
     info = {"codex_home": str(HOME), "config_toml": "absent (stock defaults; ~/.codex/config.toml NOT loaded)"}
+    if any(path.is_symlink() for path in (HOME.parent.parent, HOME.parent, HOME, HOME / "auth.json")):
+        raise RuntimeError("isolated CODEX_HOME path contains a symlink; refusing to copy auth")
     HOME.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(HOME.parent, 0o700)
     HOME.mkdir(parents=True, exist_ok=True)   # the dry run builds the home too: auth isolation is checked first
@@ -409,7 +412,7 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="commands, home, workspace layout; no model calls")
     a = ap.parse_args()
     global HOME
-    HOME = run_home(a.run)
+    HOME = run_home(a.seed, a.run)
     global USER_AUTH
     USER_AUTH = a.auth_file.resolve()
 
