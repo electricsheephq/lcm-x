@@ -606,6 +606,17 @@ class CompactionMixin:
                                         **self._survival_fit_args(messages, current_tokens, reason, bypass_cooldown,
                                                                   automatic=not force and not self._compress_forced_overflow
                                                                   and self._last_compression_status != "error"))
+            if (budget.leaves >= 1 and self._compress_host_rows_consumed == 0
+                    and len(result) >= len(messages)
+                    and count_messages_tokens(result) >= count_messages_tokens(messages)):
+                # #904: published hidden leaves advance the frontier, not the host-visible list.
+                sanitized = self._sanitize_active_context_messages(messages)
+                result = messages if sanitized == messages else sanitized
+                self._ingest_cursor = len(result)
+                if not force and not bypass_cooldown and not self._compress_forced_overflow:
+                    self._start_no_progress_hold("hidden_only")
+                logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
+                            budget.leaves, self._compress_hidden_rows_consumed)
             if self._no_progress_candidate and not bypass_cooldown and len(result) >= len(messages) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages)):
                 # #651: no leaf, and neither rows nor tokens fell; #922 keeps the turn-paced hold.
@@ -1149,6 +1160,7 @@ class CompactionMixin:
         5. Assemble new active context: summaries + fresh tail
         """
         self._objective_only_noop = False
+        self._compress_host_rows_consumed = self._compress_hidden_rows_consumed = 0
         # Preflight handoffs are one-shot instructions for this invocation.
         # Consume them before every early return so a later unrelated turn can
         # never inherit stale cleanup-only state.
@@ -2051,6 +2063,8 @@ class CompactionMixin:
                     context_is_assembled=context_is_assembled,
                 )
             self._last_compacted_store_id = published_frontier
+            self._compress_host_rows_consumed += selected_raw_len
+            self._compress_hidden_rows_consumed += len(compacted_chunk) - len(compacted_positions)
             self._invalidate_rollups_for_published_node(node)
 
             pressure_remaining_messages = pressure_messages[leading_anchor_count + selected_raw_len:]
