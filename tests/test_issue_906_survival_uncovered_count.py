@@ -75,6 +75,7 @@ def test_held_ceiling_plain_fit_counts_actual_dropped_rows(tmp_path, monkeypatch
         record = _counter(engine)
         assert record["last_uncovered_rows"] == expected
         assert record["uncovered_fit_count"] == int(not covered)
+        assert record["unknown_coverage_fit_count"] == 0
         doctor = _doctor_observation(engine)
         assert f"last_uncovered_rows {expected}" in doctor
         assert f"uncovered_fit_count {int(not covered)}" in doctor
@@ -105,7 +106,9 @@ def test_unknown_non_exit_coverage_stays_unknown(tmp_path, monkeypatch, summarie
         assert "uncovered_rows=0" not in caplog.text
         record = _counter(engine)
         assert record["last_uncovered_rows"] is None and record["uncovered_fit_count"] == 0
+        assert record["unknown_coverage_fit_count"] == 1
         assert "last_uncovered_rows unknown" in _doctor_observation(engine)
+        assert "unknown_coverage_fit_count 1" in _doctor_observation(engine)
     finally:
         engine.shutdown()
 
@@ -124,6 +127,7 @@ def test_unshortened_fit_has_zero_without_coverage_or_applied_log(tmp_path, monk
         assert "LCM survival fit applied" not in caplog.text
         record = _counter(engine)
         assert record["last_uncovered_rows"] == 0 and record["uncovered_fit_count"] == 0
+        assert record["unknown_coverage_fit_count"] == 0
         assert engine.get_automatic_compaction_status_message(phase="after", default_message="") is None
     finally:
         engine.shutdown()
@@ -144,10 +148,35 @@ def test_counter_update_keeps_legacy_aggregate_unknown_and_counts_fits(tmp_path,
         assert record["last_uncovered_rows"] == 1
         if legacy:
             assert "uncovered_fit_count" not in record and "projected_count" not in record
+            assert "unknown_coverage_fit_count" not in record
             assert "uncovered_fit_count unknown" in _doctor_observation(engine)
+            assert "unknown_coverage_fit_count unknown" in _doctor_observation(engine)
         else:
             assert record["uncovered_fit_count"] == 2  # fits, not three uncovered rows
             assert "uncovered_fit_count 2" in _doctor_observation(engine)
         assert "last_uncovered_rows 1" in _doctor_observation(engine)
+    finally:
+        engine.shutdown()
+
+
+def test_unknown_coverage_survives_a_later_clean_fit(tmp_path, monkeypatch, summaries):
+    """An unknown-coverage fit stays visible after a later fit whose coverage is known and clean."""
+    engine = _engine(tmp_path, monkeypatch, sweep=True)
+    try:
+        def failing(ids):
+            raise RuntimeError("synthetic coverage read failure")
+
+        monkeypatch.setattr(engine, "_store_complete_node_covered", failing)
+        engine._survival_record("noop", 2, [1, 2], 900, 500, 600, False, "", warn_user=False)
+        monkeypatch.setattr(engine, "_store_complete_node_covered", lambda ids: set(ids))  # every row covered
+        engine._survival_record("noop", 1, [3], 900, 500, 600, False, "", warn_user=False)
+        record = _counter(engine)
+        assert record["last_uncovered_rows"] == 0
+        assert record["uncovered_fit_count"] == 0
+        assert record["unknown_coverage_fit_count"] == 1
+        doctor = _doctor_observation(engine)
+        assert "uncovered_fit_count 0" in doctor and "unknown_coverage_fit_count 1" in doctor
+        guidance = doctor_guidance_for_check({"check": "survival_fit", "status": "warn", "detail": record})
+        assert "lower bound" in guidance["rationale"]
     finally:
         engine.shutdown()

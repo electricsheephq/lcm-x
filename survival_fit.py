@@ -499,6 +499,10 @@ class SurvivalFitMixin:
                     **({"uncovered_fit_count": int(record.get("uncovered_fit_count") or 0)
                        + bool(shortened and uncovered is not None and uncovered > 0)}
                        if "uncovered_fit_count" in record or not record.get("count") else {}),
+                    # shortened fits whose coverage could not be read: uncovered_fit_count is a lower bound while > 0
+                    **({"unknown_coverage_fit_count": int(record.get("unknown_coverage_fit_count") or 0)
+                       + bool(shortened and uncovered is None)}
+                       if "unknown_coverage_fit_count" in record or not record.get("count") else {}),
                     **({"count_lost": True} if record.get("count_lost") else {})}  # #618 item 14: kept
 
         try:
