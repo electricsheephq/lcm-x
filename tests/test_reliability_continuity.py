@@ -382,3 +382,39 @@ def test_f4_applies_only_to_an_observed_scenario_and_never_masks_a_miss(verdict,
     assert ("F4" in rec.get("applicable_bars", [])) is applicable
     assert rec["verdict"] == final
     assert ("F4" in rec.get("failed_bars", {})) is bool(unexpected)
+
+
+@pytest.mark.parametrize("values,missing,status", [
+    ([], False, "NOT COVERED on F4"),
+    ([True, None], False, "NOT COVERED on F4"),
+    ([None, True], False, "NOT COVERED on F4"),
+    ([True, True], False, "target cells PASS on this bar"),
+    ([True, None], True, "target cell FAILS"),
+])
+def test_f4_requires_every_continuity_row_measured(values, missing, status):
+    cell = cells.select("continuity/survival-fit/in-place", extra=PC.R2_CELLS)[0]
+    rec = {"cell": cell["id"], "verdict": "PASS", "continuity": {
+        "scenario_observed": True, "rows": [{"F4": value} for value in values]}}
+    unexpected = [{"current_user_missing": True}] if missing else []
+    PC.apply_f4(rec, cell, unexpected)
+    assert ("F4" in rec.get("applicable_bars", [])) is (bool(values) and None not in values or missing)
+    assert rec["verdict"] == ("FAIL" if missing else "PASS")
+    assert ("F4" in rec.get("failed_bars", {})) is missing
+    assert report.issue_status([rec], "", cells.ISSUES[916][0])[0].startswith(status)
+
+
+@pytest.mark.parametrize("after_fit", [False, True])
+def test_f4_ordinary_compaction_cannot_cover_unmeasured_survival_fit(after_fit):
+    cell = cells.select("continuity/survival-fit/in-place", extra=PC.R2_CELLS)[0]
+    obs = observations() + [{"kind": "survival_fit_committed", "ts": 5, "phase": "A", "turn": 2,
+                             "compaction_kind": "survival fit", "survival_fit": True}]
+    reqs = [request()] + ([request(2, 6)] if after_fit else [])
+    scored = CT.score(cell, reqs, obs)
+    assert scored["scenario_observed"] is True
+    assert [row["F4"] for row in scored["rows"]] == [True, True if after_fit else None]
+    assert scored["no_request"] == (0 if after_fit else 1)
+    rec = {"cell": cell["id"], "verdict": "PASS", "continuity": scored}
+    PC.apply_f4(rec, cell, [])
+    assert ("F4" in rec.get("applicable_bars", [])) is after_fit
+    expected = "target cells PASS on this bar" if after_fit else "NOT COVERED on F4"
+    assert report.issue_status([rec], "", cells.ISSUES[916][0])[0].startswith(expected)

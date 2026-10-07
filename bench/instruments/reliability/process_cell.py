@@ -461,12 +461,13 @@ def session_count(home: Path) -> int | None:
 
 
 def apply_f4(rec: dict, cell: dict, unexpected: list) -> None:
-    """F4 applies to a continuity cell once its scenario is observed. A request missing the current user tag fails it,
+    """F4 applies once the scenario is observed and every continuity row is measured. A missing current user tag fails it,
     even when the attempt is otherwise UNSUPPORTED (the scripted reply is never emitted for that request)."""
     if not cell["id"].startswith("continuity/") or rec["verdict"] == "ERROR":
         return
     continuity = rec.get("continuity") or {}
-    measured = any(isinstance(row.get("F4"), bool) for row in continuity.get("rows") or [])  # no request is never a pass
+    rows = continuity.get("rows") or []
+    measured = bool(rows) and all(isinstance(row.get("F4"), bool) for row in rows)  # no request is never a pass
     if unexpected or (rec["verdict"] != "UNSUPPORTED" and measured
                       and continuity.get("scenario_observed") is not False):
         rec.setdefault("applicable_bars", []).append("F4")
