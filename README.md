@@ -137,7 +137,7 @@ installed stable product.
 
 The `main` line identifies itself as
 `hermes-lcm-x v0.26.0 (15 tools)`, the identity of the latest stable release, until the
-first v0.27.0 release candidate bumps it. An identity is never a restamp of any past commit's own recorded identity
+first v0.27.0 release candidate bumps it (patch releases are cut from `release/v0.26.x`). An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits

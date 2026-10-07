@@ -22,11 +22,11 @@ The latest stable release is `v0.26.0` at `867eb5872207c1c9ae5fb72df95eae1c57bc2
 
 The source snapshot used for this reconciliation is `main@867eb5872207c1c9ae5fb72df95eae1c57bc2f92` (the v0.26.0 GA merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
-Main keeps the identity `0.26.0` (`hermes-lcm-x`) until the first v0.27.0 release candidate bumps it (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
+Main keeps the identity `0.26.0` (`hermes-lcm-x`) until the first v0.27.0 release candidate bumps it; patch releases are cut from `release/v0.26.x` (rc-first under `bench/specs/RELEASE-READINESS-V1.md`); the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 ## Reference-agent acceptance state
 
-The reference agent is a long-running Hermes agent the project operates itself. From v0.25.0, each minor's release candidate runs on it for at least 24 hours before GA. For v0.26.0, host-message-identity shadow mode agreed with LCM-X's content matching on 363 of 363 counted rows over 24.0 h, with no disagreement. The 200-row minimum was met by a disclosed synthetic session on the same agent and candidate; 61 of the counted rows came from organic traffic. The release notes and the shadow-window receipt give the details. No compaction ran in the agent's own traffic during that window, so there is no latency sample; latency is not gated for v0.26.0.
+The reference agent is a long-running Hermes agent the project operates itself. From v0.25.0, each minor's release candidate runs on it for at least 24 hours before GA. For v0.26.0, host-message-identity shadow mode agreed with LCM-X's content matching on 363 of 363 counted rows over 24.0 h, with no disagreement. The 200-row minimum was met by a disclosed synthetic session on the same agent and candidate; 61 of the counted rows came from organic traffic. The release notes and the shadow-window receipt give the details. No compaction ran in the agent's own traffic during that window, so there is no latency sample; reference-agent soak latency is recorded, not gated for v0.26.0; gauntlet latency gates still apply.
 
 The full acceptance packet dates from v0.23.1. It covers the reference agent on exact stable v0.23.1 with hosted `voyage-4-large`, 1024-dimensional float32 summary vectors under the privacy-bound vector identity. The packet covers:
 
@@ -40,7 +40,7 @@ The full acceptance packet dates from v0.23.1. It covers the reference agent on 
 
 That result establishes `runtime_safe` for the reference agent's hosted privacy-safe configuration only. It does not prove fleet, customer, Teams, local-model production, or universal benchmark readiness.
 
-Reranking, binary prescreen/int8, proactive recall, V4 assertion/adaptive/pre-answer features, raw-chunk embeddings, and local-model switching remain off for the reference agent.
+At v0.23.1 acceptance, reranking, binary prescreen/int8, proactive recall, V4 assertion/adaptive/pre-answer features, raw-chunk embeddings, and local-model switching were off for the reference agent.
 
 ## Current program
 
