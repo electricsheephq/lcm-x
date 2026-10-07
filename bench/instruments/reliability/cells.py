@@ -18,7 +18,7 @@ FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "cras
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
     7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
-    # B5/B8 are downstream of #553 duplication in acp-history rotation (eva-0.21.5 vs customer-0.21.2,
+    # B5/B8 are downstream of #553 duplication in acp-history rotation (ref-0.21.5 vs customer-0.21.2,
     # nightly aa84e61d); re-check when #553 is fixed.
     553: (("B1", "B2", "B3", "B4", "B5", "B8"), ""), 561: (("B1", "B2"), ""), 563: (("B4",), ""),
     463: (("B7",), "Desktop/tui_gateway transport, >12k externalised user rows"),
@@ -39,12 +39,12 @@ ISSUES = {
     821: (("B1", "B2", "B3", "B4", "B5", "B8"), "r34.4/upstream-uid host: held composite vs durable parts after a crash on rotation"),
     871: (("B2",), "r34.4 rotation: crash between parent end and child start, the crash turn's user row unstored"),
     # acp-process only in practice: the crash point races reply persistence (3 of 12 runs fail on either plugin ref);
-    # the same two shapes occur on eva, customer, r34.4 and upstream-uid (not seen on upstream-main)
+    # the same two shapes occur on ref, customer, r34.4 and upstream-uid (not seen on upstream-main)
     861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
     916: (("F4",), "acp-process continuity: survival projection removes the current user tag"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
-ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("eva-", "customer-", "r34.4-", "upstream-uid"), 871: ("r34.4-",)}
+ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "upstream-uid"), 871: ("r34.4-",)}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
 ISSUE_TRANSPORTS = {861: ("acp-process",)}
 

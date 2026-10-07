@@ -11,7 +11,7 @@ the real ACP/gateway processes, real transports or customer boxes.
 ## Run
 ```
 uv run --no-project python bench/instruments/reliability/run_matrix.py \
-  --hosts-file <hosts.local.json> --hosts eva-0.21.5,customer-0.21.2 \
+  --hosts-file <hosts.local.json> --hosts ref-0.21.5,customer-0.21.2 \
   --plugin-ref origin/main[,v0.24.2,...] --cells 'crash-*,baseline/*' | all --jobs 8 --out <dir> [--keep-homes] [--keep-dbs none|fail|all] [--scratch-root <dir>] \
   [--lcm-env LCM_KEY=VAL ...]
 ```
@@ -168,7 +168,7 @@ does not prove an instruction remains operative. No real model is called.
 
 ## Positive controls
 `controls.py` holds each control's refs, hosts, cells and expected red/green pattern; `run_matrix.py --control
-PC-1 --out <dir>` runs it and writes CONTROL.json (HOLDS or the mismatches). PC-1 is a differential: lcm-x `47bd28e7` (before #498, the #494 fix) vs `ae1fb16d` on eva-0.21.5, rs34-0.21.5
+PC-1 --out <dir>` runs it and writes CONTROL.json (HOLDS or the mismatches). PC-1 is a differential: lcm-x `47bd28e7` (before #498, the #494 fix) vs `ae1fb16d` on ref-0.21.5, rs34-0.21.5
 and upstream-main: `baseline/in-place/acp` PASSes at both, `acp-trailing/in-place` FAILs only at
 `47bd28e7` (the host's post-commit-proof persist strip). customer-0.21.2 passes both refs (no such strip).
 
@@ -215,7 +215,7 @@ gateway cells are UNSUPPORTED with the reason; `--transport gateway-process` is 
 ### Nightly CI (`.github/workflows/reliability-nightly.yml`)
 Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `pull_request` path-filtered to
 `bench/instruments/reliability/**` and the workflow file. Not a required check; default token only. Matrix over
-`hosts.ci.json` (pinned shas): eva-0.21.5, customer-0.21.2 and r34.4-0.21.5 on Python 3.11, upstream-main and upstream-uid
+`hosts.ci.json` (pinned shas): ref-0.21.5, customer-0.21.2 and r34.4-0.21.5 on Python 3.11, upstream-main and upstream-uid
 on 3.14. upstream-uid (2667c960) is upstream after its message-uid change: the one CI host with message uids and the P8
 flush seams. upstream-main (6f7a7991) stays before it, where the host archive copies uncovered rows behind the running
 turn (the shape that exposed #845). `ci.py prep`
