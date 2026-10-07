@@ -143,10 +143,8 @@ def test_untrusted_objective_marker_does_not_replace_user_objective(engine, role
 
 
 def test_user_role_objective_marker_needs_no_emission_record(engine):
-    # A process restart or another engine instance has no emission record; the
-    # user row's objective part is still carried once, without its summaries.
+    # No emission record is kept: the user row's objective part is carried once, without its summaries.
     scaffold = _first_assembly(engine)[0]
-    engine._emitted_objective_scaffolds = set()
     assert engine._latest_user_context_anchor([scaffold], []) == PREFIX + "\n" + PROMPT
     user = {"role": "user", "content": PREFIX + "\nA literal marker in the user's request."}
     assert engine._latest_user_context_anchor([user], []) == user["content"]
@@ -155,19 +153,23 @@ def test_user_role_objective_marker_needs_no_emission_record(engine):
 
 def test_objective_survives_compression_session_rotation(engine):
     first = _first_assembly(engine)
-    assert ("user", first[0]["content"]) in engine._emitted_objective_scaffolds
-    # LCM emits an assistant-role objective when the head ends in a non-system row.
-    assistant_scaffold = {**first[0], "role": "assistant"}
-    engine._emitted_objective_scaffolds.add(("assistant", first[0]["content"]))
     engine.on_session_start(
         "S2", platform="cli", context_length=128_000,
         boundary_reason="compression", old_session_id="S",
     )
-    assert engine._latest_user_context_anchor([assistant_scaffold], []) == PREFIX + "\n" + PROMPT
+    assert engine._latest_user_context_anchor([first[0]], []) == PREFIX + "\n" + PROMPT
     second = engine.compress([*first, *_round(5)])
     assert second[0]["content"].partition(SEPARATOR)[0] == PREFIX + "\n" + PROMPT
     assert second[0]["content"].count(PREFIX) == 1
     assert engine._latest_user_context_anchor([second[0]], []) == PREFIX + "\n" + PROMPT
+
+
+def test_assistant_copy_of_scaffold_never_outranks_newer_user(engine):
+    scaffold = _first_assembly(engine)[0]
+    newer = {"role": "user", "content": "The newer request is the current objective."}
+    echo = {**scaffold, "role": "assistant"}
+    tail = _round(50)
+    assert engine._latest_user_context_anchor([scaffold, newer, echo, *tail], tail) == PREFIX + "\n" + newer["content"]
 
 
 def test_quoted_summary_header_in_request_is_kept(engine):
@@ -178,8 +180,6 @@ def test_quoted_summary_header_in_request_is_kept(engine):
     expected = PREFIX + "\n" + prompt
     assert second[0]["content"].startswith(expected + SEPARATOR + "[Recent Summary (")
     assert engine._latest_user_context_anchor([second[0]], []) == expected
-    engine._reset_session_scoped_runtime_state()
-    assert engine._emitted_objective_scaffolds == set()
 
 
 def test_pasted_verified_summary_in_request_is_kept(engine):

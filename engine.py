@@ -7449,13 +7449,9 @@ class LCMEngine(
             ):
                 continue
             preserved_objective = self._preserved_objective_context_content(message)
-            # A user row is the user's own text (LCM emits its objective as one);
-            # any other role carries the objective only as LCM's exact emission.
-            if preserved_objective and (
-                message.get("role") == "user"
-                or (message.get("role"), preserved_objective)
-                in getattr(self, "_emitted_objective_scaffolds", set())
-            ):
+            # Only a user row carries an objective: LCM emits its objective as one, and an
+            # assistant-role summary appears only behind a retained sole user kept verbatim.
+            if preserved_objective and message.get("role") == "user":
                 if any(message == selected for selected in selected_tail_messages):
                     return None
                 cuts: list[tuple[int, bool]] = []
@@ -8040,13 +8036,6 @@ class LCMEngine(
 
         # Persist proof only for the exact provider-visible compacted snapshot
         # assembled by this engine. Ingested input is not trusted replay proof.
-        self._emitted_objective_scaffolds = {
-            (row.get("role"), self._preserved_objective_context_content(row))
-            for row in result
-            if any(row is candidate.get("row") and candidate.get("kind") == "objective"
-                   for candidate in emission_candidates)
-            and self._preserved_objective_context_content(row)
-        }
         self._remember_compacted_active_replay_snapshot(result)
         self._pending_emission_candidates = emission_candidates
         return result

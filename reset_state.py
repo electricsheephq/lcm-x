@@ -58,7 +58,6 @@ class ResetStateMixin:
         # session that produced it (#483); any other reset drops it.
         self._compress_commit_proof = None
         self._last_emission_descriptors = None
-        self._emitted_objective_scaffolds = set()  # #921: objective emissions of the previous binding
         self._clear_fresh_tail_pressure_yield_state()
         self._generated_ignored_active_replay_placeholder_hashes = set()
         self._generated_ignored_active_replay_placeholder_message_ids = set()
