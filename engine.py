@@ -2183,7 +2183,8 @@ class LCMEngine(
                     verbatim_small_source=not clipped,  # #605 F2; #947: clipped input is not whole
                 )
                 self._last_leaf_summary_model = provenance.get("model", "")
-                self._last_leaf_level_3_verbatim = level == 3 and summary_text == serialized  # #652: no fragment
+                # #652: no fragment; #947: a clipped source returned unchanged by the level-3 fallback is a fragment too
+                self._last_leaf_level_3_verbatim = level == 3 and not clipped and summary_text == serialized
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
             except Exception as exc:
                 if isinstance(exc, SweepBudgetExhausted):

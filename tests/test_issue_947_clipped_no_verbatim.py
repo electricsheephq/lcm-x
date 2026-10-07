@@ -95,3 +95,13 @@ def test_t3_compaction_route_stop_requires_a_whole_source(case, monkeypatch, cli
     assert decisions[1] == (None if expected_stop else "[USER]: " + content, expected_stop)
     leaves = engine._dag.get_session_nodes("S")
     assert bool(leaves) is not expected_stop
+
+
+@pytest.mark.parametrize("clipped_source", [True, False], ids=["clipped", "whole"])
+def test_t4_level3_fallback_of_a_clipped_source_is_a_fragment(case, monkeypatch, clipped_source):
+    """Both summary calls fail and the level-3 fallback returns the (clipped) input unchanged: not a whole source."""
+    engine, source = case
+    content = source if clipped_source else "small whole source"
+    monkeypatch.setattr(lcm_engine, "summarize_with_escalation", lambda **kwargs: (kwargs["text"], 3))
+    engine._summarize_leaf_chunk_with_rescue([{"role": "user", "content": content}])
+    assert engine._last_leaf_level_3_verbatim is (not clipped_source)
