@@ -171,3 +171,28 @@ def test_decision_timeout_kills_group(tmp_path):
                 os.kill(int(pidfile.read_text()), 9)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize(("arm", "count", "exercise"), [
+    ("LCMX-fleet", 0, "VACUOUS"), ("LCMX-fleet", 3, "EXERCISED"),
+    ("LCMX-fleet-agedoff", 0, "AGED-OFF"), ("LCMX-fleet-agedoff", 3, "CONTAMINATED")])
+def test_stub2k_aged_off_control_must_not_stub(tmp_path, arm, count, exercise):
+    import re
+    gate = TRACK / "decision/score_stub2k_gate.py"
+    stub_re = re.compile(r"^LCM active replay stubbing: replaced (\d+) evictable tool result\(s\),", re.M)
+    ns = functions("decision/score_stub2k_gate.py", "run_record", "receipt_ok", "read", "aged_stubs",
+                   ROOT=tmp_path, SHA="a" * 40, CPS=(176, 304), re=re, json=json, STUB_RE=stub_re)
+    assert "CONTAMINATED" in gate.read_text()
+    label = f"g9-{arm}-d1-r1"
+    rdir = tmp_path / "runs" / arm / "seed-1" / label
+    rdir.mkdir(parents=True)
+    (tmp_path / "logs").mkdir()
+    (tmp_path / "logs" / f"{label}.log.wall").write_text("exit 0 end 2\n")
+    expected = 2000 if arm == "LCMX-fleet" else 6000
+    (rdir / "summary.json").write_text(json.dumps({"status": "DONE", "worktree_head": "a" * 40, "checkpoints": [176, 304],
+                                                   "started": 1, "finished": 2}))
+    (rdir / "config.json").write_text(json.dumps({"product_sha": "a" * 40, "aged_tier_resolved_tokens": expected,
+                                                  "large_output_active_replay_stub_aged_threshold_tokens": expected}))
+    (rdir / "engine.log").write_text(
+        f"LCM active replay stubbing: replaced {count} evictable tool result(s), x\n" if count else "no stubbing\n")
+    assert ns["run_record"](arm, 1, "r1")[1]["exercise"] == exercise

@@ -89,7 +89,8 @@ def run_record(arm, seed, rep, smoke=False):
         raise ValueError(f"{label}: missing engine log")
     return rdir, {"id": label, "arm": arm, "seed": seed_name, "product_sha": SHA,
                   "aged_tier_resolved_tokens": expected, "aged_stub_replacements": count,
-                  "exercise": "VACUOUS" if arm == "LCMX-fleet" and count == 0 else "EXERCISED" if arm == "LCMX-fleet" else "AGED-OFF",
+                  "exercise": ("VACUOUS" if count == 0 else "EXERCISED") if arm == "LCMX-fleet"
+                  else "CONTAMINATED" if count else "AGED-OFF",
                   "wall_s": round(summary["finished"] - summary["started"], 2)}
 
 
@@ -125,6 +126,9 @@ def main():
                     out["runs"].append(rec)
                 except (OSError, ValueError, KeyError) as exc:
                     gaps.append(str(exc))
+        # an aged-off control that still stubbed is no control: the comparison is incomplete, as in the smoke rule
+        gaps += [f"{r['id']}: aged-off control recorded {r['aged_stub_replacements']} aged stub replacement(s)"
+                 for r in out["runs"] if r["exercise"] == "CONTAMINATED"]
         for cp in CPS:
             b, refs = baseline(cp)
             cells = {m: {"per_seed": {}, **b[m]} for m in METRICS}
