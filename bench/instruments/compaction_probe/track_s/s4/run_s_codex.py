@@ -427,6 +427,8 @@ def main() -> int:
         else RUNS / seed / str(a.run)
     if a.readmit:   # offline: re-read the rollout (after an extractor fix), no model calls
         summ = json.loads((rdir / "summary.json").read_text())
+        recorded = Path((summ.get("home") or {}).get("codex_home") or HOME)  # runs before #951 used one shared home
+        HOME = recorded if recorded.is_dir() else HOME
         items, _ = rollout_items(summ["thread_id"])
         adm = admission(rows, facts, items)
         jdump(rdir / "admission.json", adm)
