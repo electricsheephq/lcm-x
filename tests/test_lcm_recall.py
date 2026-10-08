@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import sqlite3
 import time
 from types import SimpleNamespace
 
@@ -1667,6 +1668,186 @@ def test_occurrence_time_legacy_row_uses_ingest_fallback_without_relative_event(
     assert hit["occurrence_time"]["event_date"] is None
     assert hit["observation_time"]["observed_at"] is None
     assert hit["observation_time"]["source"] == "ingest_fallback"
+
+
+_EVENT_TIME_KEYS = ("event_time", "event_time_source")
+
+
+def _seed_event_time_rows(engine):
+    """Rows with and without a host observation, all matching one query.
+
+    The observed rows carry sub-second host stamps so the second-precision
+    rendering is exercised; the bare rows have ``observed_at`` NULL.
+    """
+    engine._config.embeddings_enabled = False
+    observed = {}
+    bare = []
+    for index in range(12):
+        content = f"kanban dashboard sprint note {index} " + ("detail " * (index * 40))
+        if index % 2 == 0:
+            stamp = datetime(2024, 3, 20, 13, 45, index, 750_000, tzinfo=timezone.utc)
+            store_id = engine._store.append(
+                f"session-{index}",
+                {"role": "user", "content": content, "timestamp": stamp.timestamp()},
+            )
+            observed[store_id] = stamp.strftime("%Y-%m-%dT%H:%M:%SZ")
+        else:
+            bare.append(
+                engine._store.append(
+                    f"session-{index}", {"role": "assistant", "content": content}
+                )
+            )
+    return observed, bare
+
+
+def _strip_event_time(payload):
+    payload = json.loads(json.dumps(payload))
+    for hit in payload.get("hits", []):
+        for key in _EVENT_TIME_KEYS:
+            hit.pop(key, None)
+    return payload
+
+
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready", "answer_ready_non_strict"])
+def test_recall_message_hits_carry_event_time_only_from_observed_at(
+    recall_engine, monkeypatch, detail
+):
+    observed, bare = _seed_event_time_rows(recall_engine)
+    if detail == "answer_ready_non_strict":
+        _non_strict(recall_engine)
+        detail = "answer_ready"
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban dashboard sprint", "detail": detail, "limit": 25},
+            engine=recall_engine,
+        )
+    )
+    hits = [hit for hit in payload["hits"] if hit["kind"] != "summary"]
+    assert {hit["store_id"] for hit in hits} <= set(observed) | set(bare)
+    assert any(hit["store_id"] in observed for hit in hits)
+    assert any(hit["store_id"] in bare for hit in hits)
+    for hit in hits:
+        if hit["store_id"] in observed:
+            assert hit["event_time"] == observed[hit["store_id"]]
+            assert hit["event_time_source"] == "host_message_timestamp"
+        else:
+            # LCM's write time (messages.timestamp) is never relabelled as event time.
+            assert "event_time" not in hit
+            assert "event_time_source" not in hit
+    if not recall_engine._config.recall_reference_strict:
+        # Hits past the hydration limit are covered too, not only expanded ones.
+        assert len(hits) == len(observed) + len(bare)
+        assert any("content" not in hit and "event_time" in hit for hit in hits)
+
+
+def test_recall_event_time_without_source_label_emits_time_only(recall_engine, monkeypatch):
+    recall_engine._config.embeddings_enabled = False
+    store_id = recall_engine._store.append(
+        "session-a",
+        {"role": "user", "content": "kanban dashboard sprint", "timestamp": 1_710_942_330.9},
+    )
+    recall_engine._store._conn.execute(
+        "UPDATE messages SET observed_at_source = NULL WHERE store_id = ?", (store_id,)
+    )
+    payload = json.loads(
+        lcm_tools.lcm_recall({"query": "kanban dashboard sprint"}, engine=recall_engine)
+    )
+    hit = payload["hits"][0]
+    assert hit["event_time"] == "2024-03-20T13:45:30Z"
+    assert "event_time_source" not in hit
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"detail": "snippets", "limit": 25},
+        {"detail": "answer_ready", "limit": 25},
+        {"detail": "answer_ready", "limit": 25, "seen_refs": []},
+        {"detail": "answer_ready", "limit": 25, "_non_strict": True},
+    ],
+)
+def test_recall_event_time_leaves_order_ids_and_content_unchanged(
+    recall_engine, monkeypatch, args
+):
+    _seed_event_time_rows(recall_engine)
+    args = dict(args)
+    if args.pop("_non_strict", False):
+        _non_strict(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", **args}
+    with_fields = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    # Disabling the field helper reproduces main's response for the same store.
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_event_time", lambda _stored: {})
+    without_fields = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+
+    assert any("event_time" in hit for hit in with_fields["hits"])
+    assert not any("event_time" in hit for hit in without_fields["hits"])
+    assert _strip_event_time(with_fields) == without_fields
+    assert [(hit["kind"], hit.get("store_id")) for hit in with_fields["hits"]] == [
+        (hit["kind"], hit.get("store_id")) for hit in without_fields["hits"]
+    ]
+    for new, old in zip(with_fields["hits"], without_fields["hits"]):
+        assert new.get("content") == old.get("content")
+        assert new["snippet"] == old["snippet"]
+
+
+def test_recall_event_time_content_is_a_verbatim_slice(recall_engine, monkeypatch):
+    observed, _bare = _seed_event_time_rows(recall_engine)
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban dashboard sprint", "detail": "answer_ready", "limit": 25},
+            engine=recall_engine,
+        )
+    )
+    expanded = [hit for hit in payload["hits"] if "content" in hit]
+    assert expanded
+    for hit in expanded:
+        row = recall_engine._store.get(hit["store_id"])
+        start = hit["content_offset"]
+        assert hit["content"] == row["content"][start:start + hit["content_returned_chars"]]
+        assert ("event_time" in hit) == (hit["store_id"] in observed)
+
+
+def test_recall_snippets_event_time_costs_one_batched_read(recall_engine, monkeypatch):
+    _seed_event_time_rows(recall_engine)
+    calls = {"search": 0, "get_batch": 0}
+    real_search = MessageStore.search
+    real_get_batch = MessageStore.get_batch
+
+    def counted_search(self, *args, **kwargs):
+        calls["search"] += 1
+        return real_search(self, *args, **kwargs)
+
+    def counted_get_batch(self, *args, **kwargs):
+        calls["get_batch"] += 1
+        return real_get_batch(self, *args, **kwargs)
+
+    monkeypatch.setattr(MessageStore, "search", counted_search)
+    monkeypatch.setattr(MessageStore, "get_batch", counted_get_batch)
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban dashboard sprint", "limit": 25}, engine=recall_engine
+        )
+    )
+    assert any("event_time" in hit for hit in payload["hits"])
+    assert calls == {"search": 1, "get_batch": 1}
+
+
+def test_recall_event_time_read_failure_omits_the_fields(recall_engine, monkeypatch):
+    _seed_event_time_rows(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "limit": 25}
+    expected = _strip_event_time(
+        json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    )
+
+    def failing_get_batch(self, *args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(MessageStore, "get_batch", failing_get_batch)
+    payload = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    assert payload == expected
 
 
 def test_invalid_recall_detail_is_rejected(recall_engine):

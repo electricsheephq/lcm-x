@@ -65,8 +65,9 @@ Use for semantic discovery across all conversations stored in the local LCM data
 
 - `scope_bias` and recency are ranking boosts, never hard filters.
 - `include` selects all, summary, or verbatim hits.
-- `detail='snippets'` is the byte-compatible default.
+- `detail='snippets'` is the default.
 - `detail='answer_ready'` adds bounded per-session diversity and exact-ref hydration.
+- In both details, a verbatim message hit carries `event_time` (ISO 8601 UTC, e.g. `2024-03-20T13:45:30Z`) when the host recorded when the message happened, plus `event_time_source` when known. A hit without `event_time` has no recorded event time (for example imported history): do not read its `timestamp` as one, since that is when LCM stored the row. Summary hits carry neither field.
 - Follow each result's `expand_hint`: verbatim hits use `lcm_expand(store_id=...)`, current-session summaries use `lcm_expand(node_id=...)`, and cross-session summaries use `lcm_expand(node_id=..., session_id=...)`. Reach for `lcm_load_session` when the whole transcript is wanted rather than one node.
 
 ### `lcm_load_session`

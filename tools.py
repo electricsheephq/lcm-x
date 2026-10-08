@@ -97,7 +97,7 @@ from .search_query import (
 )
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
-from .store import build_message_fts_spec
+from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore
 from .config import LCMConfig
 
@@ -5004,6 +5004,30 @@ def _lcm_recall_content_window(
     }
 
 
+def _lcm_recall_event_time(stored: dict[str, Any] | None) -> dict[str, str]:
+    """Return a message hit's event-time fields from its stored host observation.
+
+    ``observed_at`` is the host/platform event time (stamped at insert from the
+    host message timestamp, or backfilled later). ``messages.timestamp`` is LCM's
+    own write time and is never shown as event time, so a row without
+    ``observed_at`` yields no fields at all (#995).
+    """
+    if not stored:
+        return {}
+    observed_at = _normalize_observed_at(stored.get("observed_at"))
+    if observed_at is None:
+        return {}
+    fields = {
+        "event_time": datetime.fromtimestamp(observed_at, tz=timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        ),
+    }
+    source = stored.get("observed_at_source")
+    if source:
+        fields["event_time_source"] = str(source)
+    return fields
+
+
 def _lcm_recall_answer_ready_content(
     engine: "LCMEngine",
     entries: list[dict[str, Any]],
@@ -5095,6 +5119,7 @@ def _lcm_recall_answer_ready_content(
             "content_source": "message",
             "role": stored.get("role"),
             "source": stored.get("source") or "",
+            **_lcm_recall_event_time(stored),
         }
     return hydrated
 
@@ -6425,6 +6450,29 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         selected_entries = ordered
         diversity_dropped = 0
         answer_ready_content = {}
+    # Event time for message hits that answer_ready hydration did not already
+    # cover (the snippets default, and answer_ready hits past the expansion
+    # limit): one batched read by store_id of only the deliverable entries,
+    # reusing rows reference-strict selection has already read. It runs after
+    # selection and never feeds ranking, selection or the hit text (#995).
+    event_time_rows: dict[int, dict[str, Any]] = (
+        dict(strict_selector.rows) if reference_strict else {}
+    )
+    event_time_ids = [
+        int(entry["hit"]["store_id"])
+        for entry in selected_entries[:limit]
+        if entry["hit"].get("kind") != "summary"
+        and entry["hit"].get("store_id") is not None
+        and _hit_identity(entry["hit"]) not in answer_ready_content
+        and int(entry["hit"]["store_id"]) not in event_time_rows
+    ]
+    if event_time_ids:
+        try:
+            event_time_rows.update(engine._store.get_batch(event_time_ids))
+        except sqlite3.Error as exc:
+            # The fields are additive: an unreadable row omits them, exactly
+            # like a row that has no observed_at.
+            logger.debug("lcm_recall event_time read failed: %s", exc)
     hits_out: list[dict[str, Any]] = []
     response_chars = 0
     response_cap_truncated = False
@@ -6450,6 +6498,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             item["store_id"] = hit.get("store_id")
             if hit.get("chunk_span"):
                 item["chunk_span"] = hit["chunk_span"]
+            if _hit_identity(hit) not in answer_ready_content and hit.get("store_id") is not None:
+                item.update(_lcm_recall_event_time(event_time_rows.get(int(hit["store_id"]))))
         if detail == "answer_ready":
             item["role"] = hit.get("role")
             item["source"] = hit.get("source") or (
