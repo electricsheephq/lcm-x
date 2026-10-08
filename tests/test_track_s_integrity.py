@@ -17,6 +17,7 @@ TRACK = Path(__file__).resolve().parents[1] / "bench/instruments/compaction_prob
 @pytest.mark.parametrize("replies,expected_calls,error", [
     ([({}, [8192]), ({}, [8192])], 2, True),
     ([({}, [8192]), ({"f": "kept"}, [10])], 2, False),
+    ([({}, [8192]), ({}, [10])], 2, True),  # a cap-triggered retry that still leaves a probe unanswered stays truncated
     ([({"f": "kept"}, [8192])], 1, False),
     ([({}, [8192, 10])], 1, False),
     ([({}, [8191])], 1, False),
