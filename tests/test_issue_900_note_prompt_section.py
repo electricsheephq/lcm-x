@@ -205,8 +205,8 @@ def test_section_keeps_foreground_note_while_auxiliary_child_is_active(plugin):
 
 
 @pytest.mark.parametrize("disabled", [
-    {"lcm_expand"}, {"lcm_grep"}, {"lcm_describe"},
-    {"lcm_grep", "lcm_describe", "lcm_expand"},
+    {"lcm_expand"}, {"lcm_grep"}, {"lcm_describe"}, {"lcm_recall"},
+    {"lcm_recall", "lcm_grep", "lcm_describe", "lcm_expand"},
 ])
 def test_section_names_only_enabled_tools(plugin, monkeypatch, disabled):
     module, register = plugin
@@ -216,11 +216,11 @@ def test_section_names_only_enabled_tools(plugin, monkeypatch, disabled):
     text = ctx.sections[0][1]({"session_id": "ordinary"})
     assert PHRASE in text
     assert text == module.lcm_system_prompt_note(disabled)
-    for name in {"lcm_grep", "lcm_describe", "lcm_expand"}:
+    for name in {"lcm_recall", "lcm_grep", "lcm_describe", "lcm_expand"}:
         assert (name in text) == (name not in disabled)
     assert ('An "Externalized tool output"' in text) == ("lcm_expand" not in disabled)
     assert ("externalized_ref=" in text) == ("lcm_expand" not in disabled)
-    assert ("Tools: " in text) == (len(disabled) < 3)
+    assert ("Tools: " in text) == (len(disabled) < 4)
 
 
 def test_prompt_section_does_not_wait_for_stable_use_lock(plugin):
