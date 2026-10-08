@@ -87,8 +87,9 @@ The checklist is safe to paste into a release note or PR validation section afte
 - [ ] git status before/after validation reviewed
 - [ ] rc tag published as a prerelease (`vX.Y.Z-rcN`) — or release is non-product (only
       `bench/`, `docs/`, `tests/`, and `.github/release-notes/` changes, per CONTRIBUTING.md)
-- [ ] Phase A / B / C / D gauntlet receipts linked for this exact rc tree (Phase D: every gating row
-      green; none `UNRUN`, `UNAVAILABLE`, `INCOMPLETE` or `INCONCLUSIVE`)
+- [ ] product release: Phase A / B / C / D gauntlet receipts linked for this exact rc tree (Phase D:
+      every gating row green; none `UNRUN`, `UNAVAILABLE`, `INCOMPLETE` or `INCONCLUSIVE`); N/A for a
+      non-product release
 
 ### Doctor triage
 - [ ] `lcm_doctor` warnings were classified as `safe/ignore`, `inspect`, or `backup-first cleanup`
