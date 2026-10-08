@@ -130,12 +130,17 @@ seeds, and the inconclusive outcome, is the operator's step. `--expect-shas` (re
 checkpoint/seed spread is unmeasured (`d2.missing_spread`, e.g. a missing receipt), a counted run
 records another commit (`d2.sha_mismatch`), an admitted score's recorded receipt hash differs from
 the selected tree's run receipt (`d2.receipt_mismatch`, e.g. a decision root from another tree), or,
-with `--second-tree`, the two trees' effective configurations differ (`d2.config_diff_keys`;
+with `--second-tree`, the configuration the arm applies differs between the trees (`d2.config_diff_keys`;
 single-tree runs compare different arms on purpose; the tokenizer is part of the configuration), a counted run
-replayed other material than the analysis reads (`d2.material_mismatch`; the runner records `material_sha256`), or the
-analysis omits a D2 seed or checkpoint (`d2.missing_required`; D2 is seeds 1/2/3 at checkpoints 176 and 304). With
-`--second-tree`, each tree's decision root and logs must sit in its run root's tree, or the analysis stops with an
-error. Host load is a diagnostic, not a verdict input:
+replayed other material than the analysis reads, or a material file no longer matches the hash its manifest lists or
+is named outside its seed directory (`d2.material_mismatch`; the runner records `material_sha256`; file mismatches are
+reported before any material is parsed), or the analysis omits a D2 seed or checkpoint
+(`d2.missing_required`; D2 is seeds 1/2/3 at checkpoints 176 and 304). Repeated `--seeds` or `--checkpoints` values
+stop the analysis with an error. With `--second-tree`, each tree's decision root and logs must sit in its run root's
+tree, or the analysis stops with an error. `d2.effective_config_diff_keys` names the keys of the runs' recorded
+`config.json` that differ; it is a diagnostic, not a verdict input, because a product default that changes between
+releases is the change under test. It is `null` when any run lacks a readable config, and
+`d2.effective_config_unavailable` names those runs. Host load is also a diagnostic, not a verdict input:
 with `--second-tree`, pass one `--load-log` that covers both trees' run windows.
 
 The historical decision runner accepts `glm|s4 <seed> [lossless-checkout] [CLI-auth-file]`;

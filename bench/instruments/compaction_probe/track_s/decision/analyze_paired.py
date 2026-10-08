@@ -43,6 +43,8 @@ if ARGS.decision_root is None or ARGS.material is None:
     AP.error("provide --decision-root/--material or TRACK_S_OUT/TRACK_S_MATERIAL")
 H, RUNS, MATERIAL = ARGS.decision_root, ARGS.run_root, ARGS.material
 ARMS, CPS, SEEDS = ARGS.arms, ARGS.checkpoints, ARGS.seeds
+if len(set(SEEDS)) != len(SEEDS) or len(set(CPS)) != len(CPS):  # a repeat would count one seed's pairs twice
+    AP.error("--seeds and --checkpoints take distinct values")
 LOGS = ARGS.logs or RUNS.parent / "decision" / "logs"
 LABELS = ARGS.labels or ARMS
 if LABELS[0] == LABELS[1]:
@@ -96,6 +98,35 @@ def grid_by_row(sc, label, seed, run, cp):
     s = json.loads((runs / arm / f"seed-{seed}" / f"d{seed}-{run}" / f"cp-{cp}" / "summary.json").read_text())
     rows = {e["event"]: e["row_index"] for e in s["events"]}
     return {(rows[g["event"]], g["item"]): g["strict"] for g in sc["metrics"]["continuity"]["grid"] if g["event"] in rows}
+
+
+def material_files(seed):
+    """The manifest's `shas` content-address every material file (facts.json included, which this analysis reads), so the
+    manifest digest binds the material only while each listed file still matches its hash. A listed name must stay a
+    plain file inside the seed directory."""
+    d = (MATERIAL / f"seed-{seed}").resolve()
+    try:
+        shas = json.loads((d / "material.manifest.json").read_text()).get("shas")
+    except (OSError, ValueError, AttributeError):
+        return [f"material/seed-{seed}: manifest unreadable"]
+    if not isinstance(shas, dict) or not shas:
+        return [f"material/seed-{seed}: manifest lists no file hashes"]
+    bad = []
+    for name, digest in sorted(shas.items()):
+        p = d / name
+        if Path(name).is_absolute() or ".." in Path(name).parts or p.is_symlink() or not p.resolve().is_relative_to(d):
+            bad.append(f"material/seed-{seed}/{name}: outside the seed directory")
+        elif not p.is_file() or hashlib.sha256(p.read_bytes()).hexdigest() != digest:
+            bad.append(f"material/seed-{seed}/{name}")
+    return bad
+
+
+if globals().get("TWO_TREE"):  # D2: material that no longer matches its manifest is reported before anything parses it
+    _bad = [x for n in SEEDS for x in material_files(n)]
+    if _bad:
+        print(json.dumps({"arms": ARMS, "labels": LABELS, "seeds": SEEDS, "checkpoints": CPS, "status": "INCOMPLETE",
+                          "d2": {"material_mismatch": _bad, "status": "INCOMPLETE", "verdict": "INCOMPLETE"}}, indent=1))
+        sys.exit(0)
 
 
 def pair_axes(cp):
@@ -337,6 +368,33 @@ def material_sha(seed):
     return hashlib.sha256(m.read_bytes()).hexdigest() if m.is_file() else None
 
 
+def effective_config_keys():
+    """Non-gating D2 diagnostic: top-level keys whose recorded effective configuration (each run's config.json) differs
+    across the analysed runs. A product default that changes between the two trees is the change under test, so this
+    never affects the verdict; it shows a reviewer which settings moved. Returns (keys, unavailable): keys is None unless
+    every run present left a readable JSON-object config, and unavailable names the runs that did not."""
+    cs, unavailable = [], []
+    for label in labels:
+        src = globals().get("TREES", {}).get(label, {})
+        runs, arm = src.get("run_root", RUNS), src.get("arm", label)
+        for n in SEEDS:
+            for run in ("r1", "r2"):
+                rd = runs / arm / f"seed-{n}" / f"d{n}-{run}"
+                if not (rd / "summary.json").is_file():
+                    continue  # no run here; the verdict's own checks report that
+                try:
+                    c = json.loads((rd / "config.json").read_text())
+                except (OSError, ValueError):
+                    c = None
+                if isinstance(c, dict):
+                    cs.append(c)
+                else:
+                    unavailable.append(f"{label}/seed-{n}/{run}")
+    if unavailable or not cs:
+        return None, unavailable
+    return sorted({k for c in cs for k in {*c, *cs[0]} if c.get(k) != cs[0].get(k)}), []
+
+
 # D2 only: every counted run replayed the material this analysis reads, and the gate covers the declared seed/checkpoint set
 material_mismatch = [f"{label}/{k}" for label in labels for k, h in arm_stats.get(label, {}).get("material_sha256", {}).items()
                      if h is None or h != material_sha(int(k.split("/")[0][5:]))] if two_tree else []
@@ -351,7 +409,9 @@ verdict = ("INCOMPLETE" if status == "INCOMPLETE" or missing_spread or sha_misma
            else "REPEAT_SEEDS" if any(spread.values()) else "BLOCK" if any(v["blocks"] for v in d2.values()) else "PASS")
 d2.update({"candidate": labels[1], "spread_over_0.10": spread, "missing_spread": missing_spread,
            "expected_shas": dict(zip(labels, expect)) if expect else None, "sha_mismatch": sha_mismatch, "receipt_mismatch": receipts,
-           "material_mismatch": material_mismatch, "missing_required": missing_required, "config_equal": (not diff) if two_tree else None, **({"config_diff_keys": diff} if diff else {}), "status": status, "verdict": verdict})
+           "material_mismatch": material_mismatch, "missing_required": missing_required, "config_equal": (not diff) if two_tree else None, **({"config_diff_keys": diff} if diff else {}),
+           **(dict(zip(("effective_config_diff_keys", "effective_config_unavailable"), effective_config_keys())) if two_tree else {}),
+           "status": status, "verdict": verdict})
 print(
     json.dumps(
         {
