@@ -121,8 +121,8 @@ each `cp-<n>/seed-<n>` whose r1/r2 facts-kept spread exceeds 0.10 (`REPEAT_SEEDS
 seeds, and the inconclusive outcome, is the operator's step. `--expect-shas` (required with
 `--second-tree`) binds each arm to its product commit. The verdict is also `INCOMPLETE` when a
 checkpoint/seed spread is unmeasured (`d2.missing_spread`, e.g. a missing receipt), a counted run
-records another commit (`d2.sha_mismatch`), or the two arms' effective configurations differ
-(`d2.config_diff_keys`).
+records another commit (`d2.sha_mismatch`), or, with `--second-tree`, the two trees' effective
+configurations differ (`d2.config_diff_keys`; single-tree runs compare different arms on purpose).
 
 The historical decision runner accepts `glm|s4 <seed> [lossless-checkout] [CLI-auth-file]`;
 `run_seeds_2_3.sh` accepts those last two inputs and retains its existing scheduling.

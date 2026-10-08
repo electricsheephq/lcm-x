@@ -292,7 +292,8 @@ missing_spread = [f"{label}/cp-{cp}/seed-{n}" for label in labels for cp in CPS 
 expect = globals().get("EXPECT_SHAS")
 sha_mismatch = [f"{label}/{k}: {(h or 'missing')[:12]}" for label, sha in zip(labels, expect or ())
                 for k, h in arm_stats.get(label, {}).get("worktree_heads", {}).items() if not str(h or "").startswith(sha)]
-configs = [c for label in labels for c in arm_stats.get(label, {}).get("run_configs", [])]
+two_tree = bool(globals().get("TWO_TREE"))  # one configuration across trees is a D2 rule; single-tree arms differ by design
+configs = [c for label in labels for c in arm_stats.get(label, {}).get("run_configs", [])] if two_tree else []
 diff = sorted({k for c in configs for k in c if c[k] != configs[0][k]})
 diff += sorted({f"arm.{k}" for c in configs if "arm" in diff and isinstance(c["arm"], dict) and isinstance(configs[0]["arm"], dict)
                 for k in {*c["arm"], *configs[0]["arm"]} if c["arm"].get(k) != configs[0]["arm"].get(k)})
@@ -300,7 +301,7 @@ verdict = ("INCOMPLETE" if status == "INCOMPLETE" or missing_spread or sha_misma
            else "REPEAT_SEEDS" if any(spread.values()) else "BLOCK" if any(v["blocks"] for v in d2.values()) else "PASS")
 d2.update({"candidate": labels[1], "spread_over_0.10": spread, "missing_spread": missing_spread,
            "expected_shas": dict(zip(labels, expect)) if expect else None, "sha_mismatch": sha_mismatch,
-           "config_equal": not diff, **({"config_diff_keys": diff} if diff else {}), "status": status, "verdict": verdict})
+           "config_equal": (not diff) if two_tree else None, **({"config_diff_keys": diff} if diff else {}), "status": status, "verdict": verdict})
 print(
     json.dumps(
         {

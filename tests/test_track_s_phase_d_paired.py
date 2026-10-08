@@ -184,9 +184,9 @@ def test_single_tree_output_is_unchanged(tmp_path):
     assert out["per_arm"]["A"]["facts_cp304_r1_r2_spread"] == {"seed-1": 0.0}
     assert out["per_arm"]["B"]["facts_cp304_r1_r2_spread"] == {"seed-1": 0.05}
     # New in single-tree mode: labels default to the arms, d2 is reported, trees are not. Two different arms are
-    # not a D2 comparison, so the configuration check makes the d2 verdict INCOMPLETE.
+    # compared on purpose there, so the one-configuration rule (a D2, two-tree rule) is not checked.
     assert out["labels"] == ["A", "B"] and "trees" not in out
-    assert out["d2"]["config_diff_keys"] == ["arm", "arm.name"] and out["d2"]["verdict"] == "INCOMPLETE"
+    assert out["d2"]["config_equal"] is None and "config_diff_keys" not in out["d2"]
     assert out["d2"]["expected_shas"] is None and out["d2"]["sha_mismatch"] == []
 
 
