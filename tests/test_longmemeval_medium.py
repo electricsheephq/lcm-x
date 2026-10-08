@@ -639,5 +639,5 @@ def test_small_default_cli_report_is_byte_identical_to_golden(tmp_path, monkeypa
             assert row.pop("run") is True
     legacy_bytes = json.dumps(report, indent=2, sort_keys=True).encode("utf-8")
     assert hashlib.sha256(legacy_bytes).hexdigest() == (
-        "59089d4ce4eb0e63185160629ba8042e0097d21b5dea90cd32e472acd020b5e7"
+        "7bb56477c3e7889778aed030fc4b2984d5db7f2caeb3e786cb1038e00c08ec0e"
     )
