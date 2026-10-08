@@ -290,7 +290,7 @@ class IdentityAnchorMixin:
 
         consumed: set[int] = set()
         matched: dict[int, list] = {}
-        emitted = None  # #1000: the active proof's projection of the view, read once on first use
+        emitted = None  # #1000: the active proof's projection of the view
         # R1: per key, the host view's occurrences consume the stored ones in order; the rest are new.
         forms_of = {id(r): forms for pairs in by_stamp.values() for r, forms in pairs}
         occurrences = [(idx, (stamps[idx], identity_at(idx))) for idx in sorted(stamps)
@@ -314,7 +314,8 @@ class IdentityAnchorMixin:
                                                shown)
             elif idx not in stamps and idx not in plan["replayed"]:  # D-D plan (ii): H1 merged LCM's carrier
                 group = self._identity_anchor_carrier_group(identity_messages[idx], consumed)
-                if group is None:  # #1000: a carrier LCM emitted around a stored user row (a survival fit's)
+                if group is None and identity_messages[idx].get("role") == "user":  # #1000: a carrier LCM
+                    # emitted around a stored user row (a survival fit's); the projection is read once
                     if emitted is None:
                         from .reconcile import _project_emitted_occurrences
 
