@@ -264,7 +264,7 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                     tools_engine = new_engine(run.m, chome, run.sid, run.args.context_length)
                     st = tools_engine.get_status()
                     clone_info = {"store_messages": st.get("store_messages"), "dag_nodes": st.get("dag_nodes")}
-                answers = {}
+                answers, cap_hit = {}, False
                 for attempt in range(2):  # one retry when the final call hits the cap; the first non-empty answer wins
                     got, meta = R.answer(reader, run.system, view, prompt, tools_engine if is_open else None,
                                          schemas, guidance, run.m.tokens.count_tokens)
@@ -274,9 +274,10 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                             answers[pid] = a
                     capped = ((meta.get("reader_calls") or [meta.get("usage")])[-1] or {}).get("completion_tokens", 0) >= 8192
                     complete = all((answers.get(p["id"]) or "").strip() for p in b["probes"])
+                    cap_hit = cap_hit or capped
                     if not capped or complete:
                         break
-                else:
+                if cap_hit and not complete:  # probes still unanswered after a cap: truncated, never lost
                     err = "READER_TRUNCATED: completion cap 8192 reached"
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"[:400]
