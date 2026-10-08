@@ -414,6 +414,19 @@ def _condensation_source_text(nodes) -> str:
     return "\n\n---\n\n".join(node.summary for node in nodes)
 
 
+_SUMMARY_DEPTH_LABELS = {0: "Recent", 1: "Session Arc", 2: "Durable"}
+
+
+def _summary_part_text(node) -> str:
+    """One frontier node as context assembly renders it in the summary prefix."""
+    label = _SUMMARY_DEPTH_LABELS.get(node.depth, f"Depth-{node.depth}")
+    return (
+        f"[{label} Summary (d{node.depth}, node {node.node_id})]\n"
+        f"{node.summary}\n"
+        f"[Expand for details: {node.expand_hint}]"
+    )
+
+
 def _normalize_total_compactions(value: Any) -> int:
     """Return a persisted compaction total only when it is a valid counter."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -7251,6 +7264,11 @@ class LCMEngine(
     def _summary_frontier_tokens(self) -> int:
         return sum(node.token_count for node in self._summary_frontier_nodes())
 
+    def _rendered_summary_frontier_tokens(self, nodes: Optional[List[SummaryNode]] = None) -> int:
+        """#977: the frontier as assembly renders it (headers, expand hints, separators, message framing)."""
+        parts = [_summary_part_text(node) for node in (self._summary_frontier_nodes() if nodes is None else nodes)]
+        return count_message_tokens({"role": "user", "content": "\n\n---\n\n".join(parts)}) if parts else 0
+
     def _select_threshold_sweep_condensation_group(self) -> List[SummaryNode]:
         """Prefer the shallowest routine depth (heaviest under prefix pressure), then bounded pressure condensation."""
         by_depth: dict[int, list[SummaryNode]] = {}
@@ -7267,12 +7285,16 @@ class LCMEngine(
         if eligible_depths:
             group_tokens = {d: sum(node.token_count for node in by_depth[d][:fanin]) for d in eligible_depths}
             # #977: with survival fit the #930 default prefix budget never falls below a quarter of the survival
-            # ceiling, so a smaller frontier is never cut: condense the shallowest depth whose group can shrink
-            # (#909) and keep the older detail; under pressure, or when no group can shrink, the heaviest.
+            # ceiling, so a frontier that renders smaller is never cut: condense the shallowest depth whose group
+            # can shrink (#909) and keep the older detail; under pressure, or when no group can shrink, the
+            # heaviest. With no known window there is no default bound. A group within twice the L3 bound may be
+            # stored whole (verbatim_small_source), and a condensation may write the minimum budget: neither shrinks.
+            light = max(_CONDENSATION_MIN_BUDGET_TOKENS, 2 * int(self._config.l3_truncate_tokens or 0))
+            routine = [d for d in sorted(eligible_depths)
+                       if count_tokens(_condensation_source_text(by_depth[d][:fanin])) > light]
             ceiling = self._survival_ceiling()
-            frontier_tokens = sum(node.token_count for nodes in by_depth.values() for node in nodes)
-            routine = [d for d in sorted(eligible_depths) if group_tokens[d] > _CONDENSATION_MIN_BUDGET_TOKENS]
-            if routine and (ceiling is None or (self._config.survival_fit and frontier_tokens <= ceiling // 4)):
+            if routine and (ceiling is None or (self._config.survival_fit and self._rendered_summary_frontier_tokens(
+                    [node for nodes in by_depth.values() for node in nodes]) <= ceiling // 4)):
                 return by_depth[routine[0]][:fanin]
             depth = max(eligible_depths, key=lambda d: (group_tokens[d], -d))
             return by_depth[depth][:fanin]
@@ -7895,16 +7917,7 @@ class LCMEngine(
                 uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d, newest=True)
                 for node in uncondensed:
                     part_keys.append((group, node.node_id))
-                    depth_label = {
-                        0: "Recent",
-                        1: "Session Arc",
-                        2: "Durable",
-                    }.get(d, f"Depth-{d}")
-                    summary_parts.append(
-                        f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
-                        f"{node.summary}\n"
-                        f"[Expand for details: {node.expand_hint}]"
-                    )
+                    summary_parts.append(_summary_part_text(node))
 
         retained_generated_context_parts: list[str] = []
         summary_message: Optional[Dict[str, Any]] = None

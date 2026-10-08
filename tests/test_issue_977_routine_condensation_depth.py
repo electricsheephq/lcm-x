@@ -35,7 +35,7 @@ def engine(tmp_path):
         instance.shutdown()
 
 
-def add_nodes(engine, depth, count, token_count):
+def add_nodes(engine, depth, count, token_count, start=0):
     ids = []
     for index in range(count):
         ids.append(engine._dag.add_node(SummaryNode(
@@ -46,7 +46,7 @@ def add_nodes(engine, depth, count, token_count):
             source_token_count=token_count * 4,
             source_ids=[],
             source_type="messages" if depth == 0 else "nodes",
-            created_at=float(index + 1),
+            created_at=float(start + index + 1),
             expand_hint="synthetic history",
         )))
     return ids
@@ -76,7 +76,7 @@ def test_pressure_is_measured_on_the_frontier_as_assembly_renders_it(engine):
     deep = add_nodes(engine, 1, 55, token_count=900)
     assert engine._rendered_summary_frontier_tokens() <= quarter
     assert selected(engine) == [(0, node_id) for node_id in shallow]
-    deep += add_nodes(engine, 1, 7, token_count=900)
+    deep += add_nodes(engine, 1, 7, token_count=900, start=55)
     # Stored token counts now total exactly a quarter, but headers, expand hints and separators put the
     # rendered prefix over it, where the default prefix bound could start to omit summaries.
     assert sum(node.token_count for node in engine._summary_frontier_nodes()) == quarter
