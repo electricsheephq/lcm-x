@@ -50,7 +50,8 @@ def classify_loss(score: dict) -> dict:
     run, mat = Path(score["run_dir"]), Path(score["material"])
     facts = {f["id"]: f for f in json.loads((mat / "facts.json").read_text())}
     admitted_lost = set(score["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids") or [])
-    lost = [fid for fid, f in facts.items() if score["probes"].get(fid, {}).get("class") != "CORRECT" or fid in admitted_lost]
+    lost = [fid for fid, f in facts.items() if fid in admitted_lost or
+            score["probes"].get(fid, {}).get("class") not in ("CORRECT", "READER_TRUNCATED")]
     data = load(run)
     out = []
     for fid in lost:

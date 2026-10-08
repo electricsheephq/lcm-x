@@ -252,7 +252,7 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
     for b in batches_for(run.sdir)[: run.args.batches or None]:
         prompt = b["text"] + "\n" + "\n".join(f"{p['id']}: {p['text']}" for p in b["probes"])
         clone_id = clone_info = answers = err = tools_engine = None
-        meta = {}
+        meta, attempts = {}, []
         if unavailable:
             err = f"UNAVAILABLE: C0 context {ctx_tokens} tokens + reserve > {run.args.reader} window"
         else:
@@ -264,13 +264,34 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                     tools_engine = new_engine(run.m, chome, run.sid, run.args.context_length)
                     st = tools_engine.get_status()
                     clone_info = {"store_messages": st.get("store_messages"), "dag_nodes": st.get("dag_nodes")}
-                answers, meta = R.answer(reader, run.system, view, prompt, tools_engine if is_open else None,
+                answers, cap_hit = {}, False
+
+                def answered(a):  # as score_s reads it: None or a blank string is unanswered; any other value is an answer
+                    return a is not None and (not isinstance(a, str) or bool(a.strip()))
+
+                for attempt in range(2):  # one retry when the final call hits the cap; the first non-empty answer wins
+                    got, meta = R.answer(reader, run.system, view, prompt, tools_engine if is_open else None,
                                          schemas, guidance, run.m.tokens.count_tokens)
+                    attempts.append(dict(meta))
+                    for pid, a in (got or {}).items():
+                        if not answered(answers.get(pid)):
+                            answers[pid] = a
+                    capped = ((meta.get("reader_calls") or [meta.get("usage")])[-1] or {}).get("completion_tokens", 0) >= 8192
+                    complete = all(answered(answers.get(p["id"])) for p in b["probes"])
+                    cap_hit = cap_hit or capped
+                    if not capped or complete:
+                        break
+                if cap_hit and not complete:  # probes still unanswered after a cap: truncated, never lost
+                    err = "READER_TRUNCATED: completion cap 8192 reached"
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"[:400]
             finally:
                 if tools_engine is not None:
                     tools_engine.shutdown()
+        meta["attempts"] = attempts
+        meta["reader_calls"] = [c for a in attempts for c in a.get("reader_calls") or []]
+        meta.update({k: sum(a.get(k) or 0 for a in attempts) for k in ("tool_calls", "tokens_read_back", "wall_s")
+                     if any(a.get(k) is not None for a in attempts)})
         run.reader_calls.append({"batch": b["id"], "calls": meta.get("reader_calls")})
         (out / "answers" / f"{b['id']}.json").write_text(json.dumps(
             {"batch": b["id"], "prompt_chars": len(prompt), "clone": clone_info, "error": err, **meta}, indent=1))

@@ -16,6 +16,86 @@ def run_score(mat, run, arm):
     return sc.score(mat, run, arm)["metrics"]
 
 
+@pytest.mark.parametrize("explicit_error", [False, True])
+def test_reader_truncation_excluded_from_probe_metrics(mat, tmp_path, explicit_error):
+    excluded = {"X-F1", "X-F2", "X-T0", "X-STATE.next_action"}
+    ans = dict(fx.GOOD | fx.GOOD_CONT)
+    ans.update(dict.fromkeys(excluded, ""))
+    run = fx.s2_run(tmp_path, answers=ans)
+    if explicit_error:
+        rows = sc.jlines(run / "results.jsonl")
+        for row in rows:
+            if row["probe_id"] in excluded:
+                row.update(status="ERROR", error="READER_TRUNCATED: completion cap 8192 reached")
+        fx.wl(run / "results.jsonl", rows)
+    else:
+        for batch in ("X-B0", "X-BCONT"):
+            fx.wj(run / "answers" / f"{batch}.json", {"batch": batch,
+                "usage": {"completion_tokens": 8192}, "reader_calls": [{"completion_tokens": 8192}]})
+    score = sc.score(mat, run, "LCMX-a")
+    assert {pid for pid, p in score["probes"].items() if p["class"] == "READER_TRUNCATED"} == excluded
+    m = score["metrics"]
+    assert m["facts_kept"]["denominator"] == 4 and m["facts_kept"]["value"] == 1.0
+    assert m["facts_kept"]["reader_truncated"] == 2
+    assert m["stale_rate"]["denominator"] == 0 and m["stale_rate"]["value"] is None
+    assert m["trap_abstention"]["denominator"] == 1 and m["trap_abstention"]["value"] == 1.0
+    assert m["trap_failure_rate"]["value"] == 0.0
+    assert m["continuation"]["denominator"] == 1 and m["continuation"]["value"] == 1.0
+    assert m["recall"]["denominator"] == 1 and m["recall"]["value"] == 1.0
+    for name in ("facts_kept", "stale_rate", "trap_abstention", "trap_failure_rate", "continuation", "recall"):
+        assert m[name]["status"].startswith("INCOMPLETE") and not m[name]["complete"]
+
+
+def test_cap_in_earlier_tool_call_is_not_final_truncation(mat, tmp_path):
+    answers = dict(fx.GOOD | fx.GOOD_CONT)
+    answers["X-F0"] = ""
+    run = fx.s2_run(tmp_path, answers=answers)
+    fx.wj(run / "answers/X-B0.json", {"batch": "X-B0", "usage": {"completion_tokens": 10},
+        "reader_calls": [{"completion_tokens": 8192}, {"completion_tokens": 10}]})
+    score = sc.score(mat, run, "LCMX-a")
+    assert score["probes"]["X-F0"]["class"] == "HALLUCINATE"
+    assert score["metrics"]["facts_kept"]["denominator"] == 6
+
+
+def test_all_facts_truncated_has_no_rate(mat, tmp_path):
+    run = fx.s2_run(tmp_path, answers=dict.fromkeys(fx.GOOD | fx.GOOD_CONT, ""))
+    for file in (run / "answers").glob("*.json"):
+        fx.wj(file, {"batch": file.stem, "usage": {"completion_tokens": 8192}})
+    score = sc.score(mat, run, "LCMX-a")
+    for name in ("facts_kept", "stale_rate", "trap_abstention", "trap_failure_rate", "continuation", "recall"):
+        assert score["metrics"][name]["value"] is None
+    assert score["metrics"]["facts_kept"]["denominator"] == 0
+    assert len([p for p in score["probes"].values() if p["class"] == "READER_TRUNCATED"]) == 10
+
+
+def test_admission_loss_outranks_reader_truncation(mat, tmp_path):
+    answers = dict(fx.GOOD | fx.GOOD_CONT)
+    answers["X-F1"] = ""
+    run = fx.s2_run(tmp_path, answers=answers, missing=["X-F1"])
+    fx.wj(run / "answers/X-B0.json", {"batch": "X-B0", "usage": {"completion_tokens": 8192}})
+    score = sc.score(mat, run, "LCMX-a")
+    assert score["probes"]["X-F1"]["class"] != "READER_TRUNCATED"
+    m = score["metrics"]["facts_kept"]
+    assert m["denominator"] == 6 and m["correct"] == 5 and m["reader_truncated"] == 0
+    assert m["lost_before_compaction"]["ids"] == ["X-F1"]
+
+
+def test_truncated_error_batch_excludes_only_unanswered(mat, tmp_path):
+    answers = dict(fx.GOOD | fx.GOOD_CONT)
+    answers["X-F1"] = ""
+    run = fx.s2_run(tmp_path, answers=answers)
+    rows = sc.jlines(run / "results.jsonl")
+    for row in rows:
+        if row["batch_id"] == "X-B0":
+            row.update(status="ERROR", error="READER_TRUNCATED: completion cap 8192 reached")
+    fx.wl(run / "results.jsonl", rows)
+    score = sc.score(mat, run, "LCMX-a")
+    assert {pid for pid, p in score["probes"].items() if p["class"] == "READER_TRUNCATED"} == {"X-F1"}
+    assert score["probes"]["X-F0"]["class"] == "CORRECT" and score["probes"]["X-T0"]["class"] == "ABSTAIN"
+    m = score["metrics"]["facts_kept"]
+    assert m["denominator"] == 5 and m["correct"] == 5 and m["reader_truncated"] == 1
+
+
 def test_facts_kept_formula_missing_rows_are_misses_and_incomplete(mat, tmp_path):
     ans = dict(fx.GOOD | fx.GOOD_CONT)
     del ans["X-F4"]                      # no row: miss + INCOMPLETE
@@ -184,3 +264,13 @@ def test_full_two_runs_three_arms_pass_path(mat, tmp_path):
     assert cont["overall"].startswith("INCOMPLETE(1 of 1 seeds; comparator: INCOMPLETE: no continuation_field row")
     stale = rp.compare(runs, "LCMX-a", "lossless-claw", "stale_rate", "parity", ["seed-x"], 1)
     assert stale["seeds"]["seed-x"]["verdict"] == "PASS" and stale["overall"] == "PASS"
+
+
+def test_non_string_answer_in_a_capped_batch_is_scored_not_raised(mat, tmp_path):
+    answers = dict(fx.GOOD | fx.GOOD_CONT)
+    answers["X-F0"] = 42  # an external arm can store a JSON number
+    run = fx.s2_run(tmp_path, answers=answers)
+    for file in (run / "answers").glob("*.json"):
+        fx.wj(file, {"batch": file.stem, "usage": {"completion_tokens": 8192}})
+    score = sc.score(mat, run, "LCMX-a")
+    assert score["probes"]["X-F0"]["class"] not in ("READER_TRUNCATED", "CORRECT")
