@@ -123,7 +123,17 @@ python3 -B "$KIT/decision/analyze_paired.py" --material "$TRACK_S_MATERIAL" \
 `--labels` (distinct; default the two arm names) key `per_arm`, `loss_classes` and `trees`.
 Every `p` is rounded for display and has an unrounded `p_exact`. The gate reads `d2.verdict`
 (`INCOMPLETE`, `REPEAT_SEEDS`, `BLOCK` or `PASS`) and, per checkpoint, `d2.cp-<n>.p_exact` and
-`effect_pts_exact` (candidate minus previous, facts kept). `d2.spread_over_0.10` lists, per label,
+`effect_pts_exact` (candidate minus previous). D2's unit is the run, stratified by seed: the facts of a
+run share its compactions, so they are correlated (the run-level variance was 3–25× the
+independent-fact variance at cp-304 on real runs). A run's kept share is kept / scored facts; the effect is
+the mean over seeds of the candidate's mean run share minus the previous tree's, and `p_exact` is the
+exact stratified run-level permutation test (`test`): every within-seed split of a seed's 4 runs into
+2 + 2, 216 splits for 3 seeds, so the minimum reachable p is 2/216 ≈ 0.0093. Every seed needs both runs
+on both sides; otherwise `p_exact` is null and the verdict is `INCOMPLETE`. `d2.cp-<n>.run_shares` and
+`<cp>.run_level` show the runs. The per-fact statistics are diagnostics only (`d2.cp-<n>.facts_per_fact`,
+`diagnostic_only`): the exact sign-flip test on per-fact share differences (`fact_sign_flip_p_exact`),
+the sign test (`sign_test_p_exact`) and the per-occurrence McNemar (`occurrence_mcnemar_p_exact`, also
+in `axes.facts_all`) all assume independent facts. `d2.spread_over_0.10` lists, per label,
 each `cp-<n>/seed-<n>` whose r1/r2 facts-kept spread exceeds 0.10 (`REPEAT_SEEDS`); repeating those
 seeds, and the inconclusive outcome, is the operator's step. `--expect-shas` (required with
 `--second-tree`) binds each arm to its product commit. The verdict is also `INCOMPLETE` when a
