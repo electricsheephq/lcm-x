@@ -85,6 +85,40 @@ Level-3 provenance and r1/r2 spread remain separately reported.
 Missing requested pairs mark the analysis `INCOMPLETE`; isolation or reader-pin failures, failed forced S4 checkpoints, auth refreshes, and a reused S4 home with `config.toml` fail the run.
 Incremental scoring maintains `decision/manifest.json` with receipt hashes and scoring times; reports ignore and list unmanifested checkpoint JSONs, while legacy directories without a manifest retain their existing behavior and report `manifest: absent`.
 
+### Release over release (Phase D, D2)
+
+D2 pairs the same arm on two product trees: the previous GA and the candidate. Replay each
+tree into its own output root (`PREV_ROOT`, `CAND_ROOT`), score each root once, then pair them.
+
+```bash
+# Previous GA tree, then the candidate tree: same arm, seeds 1/2/3, runs d<seed>-r1/-r2 each.
+TRACK_S_OUT="$PREV_ROOT" S2_PRODUCT_WORKTREE="$PREV_CHECKOUT" S2_PRODUCT_SHA="$PREV_COMMIT" \
+  python3 -B "$KIT/s2/run_s_lcmx.py" --arm LCMX-fleet \
+  --seed 1 --run d1-r1 --lane glm --reader glm --checkpoints 176,304
+TRACK_S_OUT="$CAND_ROOT" S2_PRODUCT_WORKTREE="$CAND_CHECKOUT" S2_PRODUCT_SHA="$CAND_COMMIT" \
+  python3 -B "$KIT/s2/run_s_lcmx.py" --arm LCMX-fleet \
+  --seed 1 --run d1-r1 --lane glm --reader glm --checkpoints 176,304
+for root in "$PREV_ROOT" "$CAND_ROOT"; do
+  python3 -B "$KIT/decision/score_decision.py" \
+    --run-root "$root/lcmx-runs" --logs "$root/decision/logs" \
+    --material "$TRACK_S_MATERIAL" --out "$root/decision" \
+    --arms LCMX-fleet --seeds 1 2 3 --checkpoints 176 304
+done
+python3 -B "$KIT/decision/analyze_paired.py" --material "$TRACK_S_MATERIAL" \
+  --arms LCMX-fleet LCMX-fleet --labels prev cand --seeds 1 2 3 --checkpoints 176 304 \
+  --run-root "$PREV_ROOT/lcmx-runs" --decision-root "$PREV_ROOT/decision" --logs "$PREV_ROOT/decision/logs" \
+  --second-tree "$CAND_ROOT/lcmx-runs" "$CAND_ROOT/decision" "$CAND_ROOT/decision/logs" \
+  > "$CAND_ROOT/d2-paired.json"
+```
+
+`--second-tree RUN_ROOT DECISION_ROOT LOGS` reads the second arm from the candidate root;
+`--labels` (distinct; default the two arm names) key `per_arm`, `loss_classes` and `trees`.
+Every `p` is rounded for display and has an unrounded `p_exact`. The gate reads `d2.verdict`
+(`INCOMPLETE`, `REPEAT_SEEDS`, `BLOCK` or `PASS`) and, per checkpoint, `d2.cp-<n>.p_exact` and
+`effect_pts_exact` (candidate minus previous, facts kept). `d2.spread_over_0.10` lists, per label,
+each `cp-<n>/seed-<n>` whose r1/r2 facts-kept spread exceeds 0.10 (`REPEAT_SEEDS`); repeating those
+seeds, and the inconclusive outcome, is the operator's step.
+
 The historical decision runner accepts `glm|s4 <seed> [lossless-checkout] [CLI-auth-file]`;
 `run_seeds_2_3.sh` accepts those last two inputs and retains its existing scheduling.
 The stub2k gate retains its historical rc3 SHA requirement and writes below

@@ -4,7 +4,9 @@ Axes: facts kept (all, head/middle/tail), constraint class (early_user_constrain
 strict continuity (grid items aligned by the event's row_index; both arms must have an event at that row),
 active_constraint continuity items (same alignment). b = first arm kept & second arm lost, c = second arm kept & first arm lost.
 The v1/v2 column names denote first/second CLI arms; sign-test wins favor the second arm.
-Each run pair votes once per axis; ties are excluded from the exact two-sided sign p-value."""
+Each run pair votes once per axis; ties are excluded from the exact two-sided sign p-value.
+With --second-tree the second arm is read from another run/decision/logs root (release over release, D2);
+results are keyed by --labels. Every p also has an unrounded p_exact; the d2 block uses only unrounded values."""
 
 import argparse
 import json
@@ -30,12 +32,22 @@ AP.add_argument(
 AP.add_argument("--material", type=Path, default=os.environ.get("TRACK_S_MATERIAL"))
 AP.add_argument("--logs", type=Path, help="existing decision/logs receipts")
 AP.add_argument("--load-log", type=Path, help="optional timestamped host-load log")
+AP.add_argument("--second-tree", type=Path, nargs=3, metavar=("RUN_ROOT", "DECISION_ROOT", "LOGS"),
+                help="read the SECOND arm from this run root, decision root and logs root (release over release)")
+AP.add_argument("--labels", nargs=2, metavar=("FIRST", "SECOND"), help="result keys for the two arms (default: --arms)")
 ARGS = AP.parse_args()
 if ARGS.decision_root is None or ARGS.material is None:
     AP.error("provide --decision-root/--material or TRACK_S_OUT/TRACK_S_MATERIAL")
 H, RUNS, MATERIAL = ARGS.decision_root, ARGS.run_root, ARGS.material
 ARMS, CPS, SEEDS = ARGS.arms, ARGS.checkpoints, ARGS.seeds
 LOGS = ARGS.logs or RUNS.parent / "decision" / "logs"
+LABELS = ARGS.labels or ARMS
+if LABELS[0] == LABELS[1]:
+    AP.error("labels must be distinct (pass --labels when both trees use the same arm)")
+# label -> sources; functions fall back to RUNS/H/LOGS and label == arm when a label has no entry
+TREES = {LABELS[0]: {"arm": ARMS[0], "run_root": RUNS, "decision_root": H, "logs": LOGS}}
+TREES[LABELS[1]] = {"arm": ARMS[1], **dict(zip(("run_root", "decision_root", "logs"), ARGS.second_tree or (RUNS, H, LOGS)))}
+TWO_TREE = ARGS.second_tree is not None
 
 
 def mcnemar(b, c):
@@ -56,14 +68,18 @@ def st(xs):
     return {"n": len(xs), "p50": statistics.median(xs) if xs else None, "p90": nr(xs, 0.9), "max": max(xs) if xs else None}
 
 
-def score(arm, seed, run, cp):
-    p = H / "scores" / f"cp-{cp}" / f"{arm}.seed-{seed}.d{seed}-{run}.json"
-    manifest = score_manifest.load(H / "manifest.json")
-    return json.loads(p.read_text()) if score_manifest.admitted(H, manifest, p) else None
+def score(label, seed, run, cp):
+    src = globals().get("TREES", {}).get(label, {})
+    root, arm = src.get("decision_root", H), src.get("arm", label)
+    p = root / "scores" / f"cp-{cp}" / f"{arm}.seed-{seed}.d{seed}-{run}.json"
+    manifest = score_manifest.load(root / "manifest.json")
+    return json.loads(p.read_text()) if score_manifest.admitted(root, manifest, p) else None
 
 
-def grid_by_row(sc, arm, seed, run, cp):
-    s = json.loads((RUNS / arm / f"seed-{seed}" / f"d{seed}-{run}" / f"cp-{cp}" / "summary.json").read_text())
+def grid_by_row(sc, label, seed, run, cp):
+    src = globals().get("TREES", {}).get(label, {})
+    runs, arm = src.get("run_root", RUNS), src.get("arm", label)
+    s = json.loads((runs / arm / f"seed-{seed}" / f"d{seed}-{run}" / f"cp-{cp}" / "summary.json").read_text())
     rows = {e["event"]: e["row_index"] for e in s["events"]}
     return {(rows[g["event"]], g["item"]): g["strict"] for g in sc["metrics"]["continuity"]["grid"] if g["event"] in rows}
 
@@ -86,9 +102,10 @@ def pair_axes(cp):
     n_items, excluded = {k: 0 for k in axes}, {k: 0 for k in axes}
     pairs, missing, partial = [], [], False
     signs = {k: {"wins": 0, "losses": 0, "ties": 0} for k in axes}
+    first, second = globals().get("LABELS", ARMS)
     for seed in SEEDS:
         for run in ("r1", "r2"):
-            s1, s2 = score(ARMS[0], seed, run, cp), score(ARMS[1], seed, run, cp)
+            s1, s2 = score(first, seed, run, cp), score(second, seed, run, cp)
             if not (s1 and s2):
                 missing.append(f"seed-{seed}/{run}")
                 continue
@@ -130,7 +147,7 @@ def pair_axes(cp):
             fields = {pid for s in (s1, s2) for pid in s["probes"] if "." in pid}
             for pid in fields:
                 add("continuation", kept(s1, pid), kept(s2, pid))
-            g1, g2 = grid_by_row(s1, ARMS[0], seed, run, cp), grid_by_row(s2, ARMS[1], seed, run, cp)
+            g1, g2 = grid_by_row(s1, first, seed, run, cp), grid_by_row(s2, second, seed, run, cp)
             for key in sorted(set(g1) & set(g2)):
                 if key[1].endswith("host_instruction"):
                     continue  # system slot, identical by construction
@@ -150,7 +167,9 @@ def pair_axes(cp):
             "b_v1_only": b,
             "c_v2_only": c,
             "p": round(mcnemar(b, c), 4),
-            "sign_test": {**signs[ax], "p": round(mcnemar(signs[ax]["wins"], signs[ax]["losses"]), 4)},
+            "p_exact": mcnemar(b, c),
+            "sign_test": {**signs[ax], "p": round(mcnemar(signs[ax]["wins"], signs[ax]["losses"]), 4),
+                          "p_exact": mcnemar(signs[ax]["wins"], signs[ax]["losses"])},
         }
     return {"status": "INCOMPLETE" if missing or partial or any(excluded.values()) else "COMPLETE", "missing_pairs": missing, "pairs": pairs, "axes": out}
 
@@ -169,11 +188,13 @@ def loads():
 def per_arm():
     L = loads()
     out = {}
-    for arm in ARMS:
+    for label in globals().get("LABELS", ARMS):
+        src = globals().get("TREES", {}).get(label, {})
+        arm, runs, logs = src.get("arm", label), src.get("run_root", RUNS), src.get("logs", LOGS)
         leaf, comp, failed, compl, timeouts, l3, leaves, hiload, facts = [], [], [], [], 0, 0, 0, [], {}
         for seed in SEEDS:
             for run in ("r1", "r2"):
-                w = LOGS / f"s2-{arm}-d{seed}-{run}.log.wall"
+                w = logs / f"s2-{arm}-d{seed}-{run}.log.wall"
                 if not w.exists() or not re.search(r"^exit 0 end", w.read_text(), re.M):
                     continue
                 t0 = int(re.search(r"^start (\d+)", w.read_text(), re.M)[1])
@@ -181,7 +202,7 @@ def per_arm():
                 mx = max([v for t, v in L if t0 - 600 <= t <= t1] or [0.0])
                 if mx > 16:
                     hiload.append(f"seed-{seed}/{run} (max 1-min load {mx})")
-                s = json.loads((RUNS / arm / f"seed-{seed}" / f"d{seed}-{run}" / "summary.json").read_text())
+                s = json.loads((runs / arm / f"seed-{seed}" / f"d{seed}-{run}" / "summary.json").read_text())
                 for e in s["events"]:
                     if e["is_compaction"]:
                         comp.append(e["compress_wall_s"])
@@ -195,14 +216,18 @@ def per_arm():
                             compl.append(c["usage"]["completion_tokens"])
                         if "timeout" in (str(c.get("error") or "") + str(c.get("exception") or "")).lower():
                             timeouts += 1
-                sc = score(arm, seed, run, max(CPS))
-                if sc:
-                    l3 += sc["stored_level3"]["level3"]
-                    leaves += sc["stored_level3"]["leaves"]
-                    facts.setdefault(seed, {})[run] = sc["metrics"]["facts_kept"]["value"]
-        sp = {f"seed-{k}": None if None in (v["r1"], v["r2"]) else round(abs(v["r1"] - v["r2"]), 3)
-              for k, v in facts.items() if len(v) == 2}  # None: a run had no scorable fact (all reader-truncated)
-        out[arm] = {
+                for cp in CPS:
+                    sc = score(label, seed, run, cp)
+                    if sc and cp == max(CPS):
+                        l3 += sc["stored_level3"]["level3"]
+                        leaves += sc["stored_level3"]["leaves"]
+                    if sc:
+                        facts.setdefault(cp, {}).setdefault(seed, {})[run] = sc["metrics"]["facts_kept"]["value"]
+        by_cp = {f"cp-{cp}": {f"seed-{k}": None if None in (v["r1"], v["r2"]) else round(abs(v["r1"] - v["r2"]), 3)
+                              for k, v in facts.get(cp, {}).items() if len(v) == 2}
+                 for cp in CPS}  # None: a run had no scorable fact (all reader-truncated)
+        sp = by_cp[f"cp-{max(CPS)}"]
+        out[label] = {
             "leaf_call_wall_s": st(leaf),
             "compaction_wall_s": st(comp),
             "failed_sweep_count": len(failed),
@@ -214,8 +239,9 @@ def per_arm():
             "leaves": leaves,
             "level3_rate": round(l3 / leaves, 4) if leaves else None,
             f"facts_cp{max(CPS)}_r1_r2_spread": sp,
-            "spread_over_0.10": [k for k, v in sp.items() if v is not None and v > 0.10],
-            "spread_unmeasured": [k for k, v in sp.items() if v is None],
+            "facts_r1_r2_spread_by_cp": by_cp,
+            "spread_over_0.10": [f"{cp}/{k}" for cp, s in by_cp.items() for k, v in s.items() if v is not None and v > 0.10],
+            "spread_unmeasured": [f"{cp}/{k}" for cp, s in by_cp.items() for k, v in s.items() if v is None],
             "runs_with_load_over_16": hiload,
         }
     return out
@@ -223,30 +249,46 @@ def per_arm():
 
 def losses(cp):
     out = {}
-    manifest = score_manifest.load(H / "manifest.json")
-    for arm in ARMS:
+    for label in globals().get("LABELS", ARMS):
+        src = globals().get("TREES", {}).get(label, {})
+        root, arm = src.get("decision_root", H), src.get("arm", label)
+        manifest = score_manifest.load(root / "manifest.json")
         tot = {}
         for seed in SEEDS:
-            for p in (H / "loss" / f"cp-{cp}").glob(f"{arm}.seed-{seed}.*.json"):
-                if not score_manifest.admitted(H, manifest, p):
+            for p in (root / "loss" / f"cp-{cp}").glob(f"{arm}.seed-{seed}.*.json"):
+                if not score_manifest.admitted(root, manifest, p):
                     continue
                 for k, v in json.loads(p.read_text())["counts"].items():
                     tot[k] = tot.get(k, 0) + v
-        out[arm] = tot
+        out[label] = tot
     return out
 
 
 paired = {f"cp-{cp}": {**pair_axes(cp), "loss_classes": losses(cp)} for cp in CPS}
+labels, arm_stats = globals().get("LABELS", ARMS), per_arm()
+status = "INCOMPLETE" if any(p["status"] == "INCOMPLETE" for p in paired.values()) else "COMPLETE"
+d2 = {cp: {"p_exact": a["p_exact"], "effect_pts_exact": 100 * (a["c_v2_only"] - a["b_v1_only"]) / a["n"] if a["n"] else None}
+      for cp, a in ((cp, p["axes"]["facts_all"]) for cp, p in paired.items())}  # k2 - k1 == c - b on paired items
+for v in d2.values():
+    v["net_loss_ge_5"] = v["effect_pts_exact"] is not None and v["effect_pts_exact"] <= -5
+    v["blocks"] = v["p_exact"] < 0.05 and v["net_loss_ge_5"]
+spread = {label: arm_stats.get(label, {}).get("spread_over_0.10", []) for label in labels}
+verdict = ("INCOMPLETE" if status == "INCOMPLETE" else "REPEAT_SEEDS" if any(spread.values())
+           else "BLOCK" if any(v["blocks"] for v in d2.values()) else "PASS")
+d2.update({"candidate": labels[1], "spread_over_0.10": spread, "status": status, "verdict": verdict})
 print(
     json.dumps(
         {
             "arms": ARMS,
+            "labels": labels,
+            **({"trees": {k: {f: str(x) for f, x in v.items()} for k, v in TREES.items()}} if globals().get("TWO_TREE") else {}),
             "seeds": SEEDS,
             "checkpoints": CPS,
-            "status": "INCOMPLETE" if any(p["status"] == "INCOMPLETE" for p in paired.values()) else "COMPLETE",
+            "status": status,
             "missing_pairs": {cp: p["missing_pairs"] for cp, p in paired.items() if p["missing_pairs"]},
             **paired,
-            "per_arm": per_arm(),
+            "per_arm": arm_stats,
+            "d2": d2,
         },
         indent=1,
     )

@@ -738,7 +738,8 @@ def test_spread_is_unmeasured_when_a_run_has_no_fact_rate(tmp_path):
             "stored_level3": {"level3": 0, "leaves": 1}, "metrics": {"facts_kept": {"value": value[run]}}})
     out = ns["per_arm"]()["A"]
     assert out["facts_cp304_r1_r2_spread"] == {"seed-1": None}
-    assert out["spread_unmeasured"] == ["seed-1"] and out["spread_over_0.10"] == []
+    assert out["facts_r1_r2_spread_by_cp"] == {"cp-304": {"seed-1": None}}
+    assert out["spread_unmeasured"] == ["cp-304/seed-1"] and out["spread_over_0.10"] == []
 
 
 def scorer_kit():
