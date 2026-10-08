@@ -1077,6 +1077,34 @@ def test_fresh_recall_session_is_disjoint_from_haystack_and_neutralizes_scope(tm
     assert all(hit.get("from_current_session") is False for hit in hits)
 
 
+def test_harness_summary_nodes_carry_their_sessions_time_bounds(tmp_path):
+    """#950: the recall prior multiplies a summary hit by the recency of the node's latest_at. The harness built
+    nodes with created_at 1..N and no time bounds, so every summary hit sat at the recency floor (0.5) while every
+    message hit, stored at ingest time, scored about 1.0. Nodes now carry their session's bounds, as compaction sets."""
+    import sqlite3
+
+    from benchmarking.longmemeval import StubEmbedder
+    from hermes_lcm.tools import _lcm_recall_recency_boost
+
+    question = _synthetic_dataset()[0]
+    evaluate_question(question, StubEmbedder(), provider_name="stub", tmp_dir=tmp_path, embeddings_enabled=True)
+    conn = sqlite3.connect(tmp_path / f"{question.question_id}.db")
+    try:
+        nodes = conn.execute("SELECT session_id, earliest_at, latest_at FROM summary_nodes WHERE depth = 0").fetchall()
+        bounds = {
+            sid: (lo, hi)
+            for sid, lo, hi in conn.execute(
+                "SELECT session_id, MIN(timestamp), MAX(timestamp) FROM messages GROUP BY session_id"
+            )
+        }
+    finally:
+        conn.close()
+    assert nodes and bounds
+    assert {sid: (lo, hi) for sid, lo, hi in nodes if sid in bounds} == bounds
+    now = max(hi for _, hi in bounds.values())
+    assert min(_lcm_recall_recency_boost(hi, now=now) for _, _, hi in nodes if hi is not None) > 0.99
+
+
 def test_fresh_recall_session_avoids_haystack_collision():
     """If the sentinel id already exists in the haystack, a unique variant is used."""
     from benchmarking.longmemeval import _LCM_RECALL_FRESH_SESSION
