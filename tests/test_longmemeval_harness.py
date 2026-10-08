@@ -3539,6 +3539,24 @@ def test_checkpoint_rejects_non_string_coverage_values(tmp_path, value, site):
             )
 
 
+@pytest.mark.parametrize("field,value", [("timeout", False), ("timeout", "yes"), ("degraded_reason", 3),
+                                         ("degraded_reason", None)])
+def test_checkpoint_rejects_malformed_phase_d_health_fields(tmp_path, field, value):
+    """#664 D1: a restored row's timeout is true when present and its degraded reason is a string."""
+    import benchmarking.longmemeval as lme
+
+    checkpoint = tmp_path / "checkpoint.jsonl"
+    run_harness(_synthetic_dataset()[:1], provider_name="stub", model="",
+                embeddings_enabled=False, tmp_dir=tmp_path / "live",
+                checkpoint_path=checkpoint)
+    record = json.loads(checkpoint.read_text().splitlines()[1])
+    health = record["arms"]["lcm_recall"]["recall_health"]
+    lme._validate_restored_checkpoint_metrics(record, line_number=2, path=checkpoint, embeddings_enabled=False)
+    record["arms"]["lcm_recall"]["recall_health"] = {**health, field: value}
+    with pytest.raises(ValueError, match=f"recall_health.{field}"):
+        lme._validate_restored_checkpoint_metrics(record, line_number=2, path=checkpoint, embeddings_enabled=False)
+
+
 def test_candidate_dump_header_binds_fts_order(tmp_path):
     """A dump written under the earlier recency-ordered FTS arm (no fts_order) is never appended to."""
     import benchmarking.longmemeval as lme

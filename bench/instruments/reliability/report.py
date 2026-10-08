@@ -154,6 +154,18 @@ def write(out: Path, results: list[dict], wall: float, lcm_env: dict | None = No
                          f"{row['kind']} | {row['request_id']}/{row['request_turn']} | {row['previous_reply_tag'] or '-'} | "
                          f"{row['previous_reply_in_compacted_span']} | {row['status']} | " + " | ".join(values)
                          + f" | {row.get('current_user_projected', 'unknown')} |")
+    probed = [r for r in results if r.get("probes_recorded")]
+    if probed:
+        lines += ["", "## #659 continuity probes (recorded, non-gating)", "",
+                  "Presence of request-time nonces in the first main request after each committed compaction; "
+                  "met/missed/unknown are compaction events (host-instruction-rebuild: requests between the SOUL.md "
+                  "rewrite and the next commit). Recorded only: never a bar, never the verdict.", "",
+                  "| host | cell | probe | met | missed | unknown | rate | bar | recorded |", "|---|---|---|---|---|---|---|---|---|"]
+        for r in sorted(probed, key=lambda r: (r["host"], r["cell"])):
+            for name, p in r["probes_recorded"].items():
+                pct = [f"{v:.0%}" if v is not None else "-" for v in (p["rate"], p["bar"])]
+                lines.append(f"| {r['host']} | `{r['cell']}` | {name} | {p['met']} | {p['missed']} | {p['unknown']} | "
+                             f"{pct[0]} | {pct[1]} | {p['recorded']} |")
     lines.append("")
     (out / "MATRIX.md").write_text("\n".join(lines) + "\n")
 
