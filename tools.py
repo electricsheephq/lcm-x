@@ -5106,43 +5106,39 @@ def _lcm_recall_without_event_time(item: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _lcm_recall_fit_event_time(response: dict[str, Any]) -> tuple[str, bool]:
+def _lcm_recall_fit_event_time(response: dict[str, Any]) -> tuple[str, str | None]:
     """Strip hits' event-time fields, lowest rank first, until ``response`` fits.
 
     Runs before the cap touches anything else, so the optional fields never
     cost a hit, nor a query cut the response would not otherwise need. A
-    stripped hit is reported by the ``response_cap`` reason of the
-    ``event_time_unavailable`` marker. If the response is still over the cap
-    with every field stripped, that marker is taken out too, so it is never
-    what evicts a hit; ``True`` in the result asks the caller to put it back if
-    it fits once the cap has done the rest. A ``deadline`` or ``read_error``
-    marker set before this call is left as it is. Returns ``(encoded,
-    marker_deferred)`` (#995).
+    stripped hit sets the ``event_time_unavailable`` marker with the
+    ``response_cap`` reason, unless a ``deadline`` or ``read_error`` marker is
+    already set: that reason is kept, never overwritten. If the response is
+    still over the cap with every field stripped, the marker is taken out too,
+    whatever its reason, so it is never what evicts a hit. Returns ``(encoded,
+    deferred_reason)``: ``deferred_reason`` is the reason of a marker taken out,
+    which the caller puts back if it fits once the cap has done the rest, and
+    ``None`` otherwise (#995).
     """
-    marker_droppable = response.get("event_time_unavailable_reason") in (
-        None,
-        "response_cap",
-    )
     encoded = json.dumps(response, ensure_ascii=False)
     for hit in reversed(response["hits"]):
         if len(encoded) <= _LCM_RECALL_RESPONSE_CHAR_CAP:
-            return encoded, False
+            return encoded, None
         if not any(key in hit for key in _LCM_RECALL_EVENT_TIME_KEYS):
             continue
         for key in _LCM_RECALL_EVENT_TIME_KEYS:
             hit.pop(key, None)
-        response["event_time_unavailable"] = True
-        response["event_time_unavailable_reason"] = "response_cap"
+        if not response.get("event_time_unavailable"):
+            response["event_time_unavailable"] = True
+            response["event_time_unavailable_reason"] = "response_cap"
         encoded = json.dumps(response, ensure_ascii=False)
-    if (
-        marker_droppable
-        and len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP
-        and response.get("event_time_unavailable_reason") == "response_cap"
+    if len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP and response.get(
+        "event_time_unavailable"
     ):
         del response["event_time_unavailable"]
-        del response["event_time_unavailable_reason"]
-        return json.dumps(response, ensure_ascii=False), True
-    return encoded, False
+        deferred_reason = response.pop("event_time_unavailable_reason")
+        return json.dumps(response, ensure_ascii=False), deferred_reason
+    return encoded, None
 
 
 def _lcm_recall_answer_ready_content(
@@ -6793,8 +6789,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             for key in _LCM_RECALL_EVENT_TIME_KEYS:
                 hits_out[index].pop(key, None)
             event_time_total -= event_time_chars[index]
-            event_time_unavailable = True
-            event_time_unavailable_reason = "response_cap"
+            # A ``deadline`` or ``read_error`` marker keeps its reason.
+            if not event_time_unavailable:
+                event_time_unavailable = True
+                event_time_unavailable_reason = "response_cap"
 
     degraded = bool(degraded_reasons)
     response: dict[str, Any] = {
@@ -6909,7 +6907,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             # recompute below can never grow the encoded response past the cap.
             fts_anchor_info["delivered"] = False
         encoded = json.dumps(response, ensure_ascii=False)
-        event_time_marker_deferred = False
+        event_time_marker_deferred: str | None = None
         if len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP:
             encoded, event_time_marker_deferred = _lcm_recall_fit_event_time(
                 response
@@ -6932,17 +6930,18 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 "content" in hit for hit in response["hits"]
             )
             encoded = json.dumps(response, ensure_ascii=False)
-        if event_time_marker_deferred:
+        if event_time_marker_deferred is not None:
+            # Put the marker back with its original reason, only if it fits.
             marked = {
                 **response,
                 "event_time_unavailable": True,
-                "event_time_unavailable_reason": "response_cap",
+                "event_time_unavailable_reason": event_time_marker_deferred,
             }
             marked_encoded = json.dumps(marked, ensure_ascii=False)
             if len(marked_encoded) <= _LCM_RECALL_RESPONSE_CHAR_CAP:
                 response.update(
                     event_time_unavailable=True,
-                    event_time_unavailable_reason="response_cap",
+                    event_time_unavailable_reason=event_time_marker_deferred,
                 )
                 encoded = marked_encoded
         if delta_requested:

@@ -2211,6 +2211,112 @@ def test_recall_event_time_over_the_cap_is_stripped_lowest_rank_first(
             assert new == old
 
 
+def _fail_event_time_read(monkeypatch, reason):
+    """Make the event-time read end with ``reason``, the rest of the run in budget."""
+    if reason == "read_error":
+
+        def failing_read(conn):
+            raise sqlite3.OperationalError("disk I/O error")
+
+        _patched_event_time_rows(
+            monkeypatch,
+            connect=lambda *args, **kwargs: _EventTimeReadConnection(
+                sqlite3.connect(*args, **kwargs), [], before_read=failing_read
+            ),
+        )
+        return
+    real_rows = lcm_tools._lcm_recall_event_time_rows
+
+    def spent_rows(engine, store_ids, *, deadline):
+        return real_rows(engine, store_ids, deadline=lcm_tools.time.monotonic() - 1.0)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_event_time_rows", spent_rows)
+
+
+def _event_time_marker_cap(main, exact, reason):
+    """A cap with room for ``main`` plus the ``reason`` marker, and ``main`` at it."""
+    # The two keys plus the ``", "`` that joins them to the rest of the response.
+    capped = exact + len(
+        json.dumps(
+            {"event_time_unavailable": True, "event_time_unavailable_reason": reason},
+            ensure_ascii=False,
+        )
+    )
+    # The response reports its cap, so the same digit count keeps main's size.
+    assert len(str(capped)) == len(str(exact))
+    main = json.loads(json.dumps(main))
+    main["provenance"]["answer_ready"]["response_char_cap"] = capped
+    return capped, main
+
+
+@pytest.mark.parametrize("reason", ["read_error", "deadline"])
+def test_recall_failed_event_time_read_marker_never_evicts_a_hit(
+    recall_engine, monkeypatch, reason
+):
+    _seed_event_time_rows(recall_engine)
+    _non_strict(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "detail": "answer_ready", "limit": 25}
+    main, exact = _event_time_cap_baseline(recall_engine, monkeypatch, request)
+    _fail_event_time_read(monkeypatch, reason)
+    uncapped = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    assert uncapped["event_time_unavailable_reason"] == reason
+
+    # Sized to fit exactly on main: the marker has no room, so it gives way.
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", exact)
+    encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
+    payload = json.loads(encoded)
+    assert len(encoded) <= exact
+    assert _hit_order(payload) == _hit_order(main)
+    assert "event_time_unavailable" not in payload
+    assert "event_time_unavailable_reason" not in payload
+    assert _strip_event_time(payload) == main
+
+    # With room for it, the marker comes back with its original reason.
+    capped, main = _event_time_marker_cap(main, exact, reason)
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", capped)
+    encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
+    payload = json.loads(encoded)
+    assert len(encoded) <= capped
+    assert _hit_order(payload) == _hit_order(main)
+    assert payload["event_time_unavailable"] is True
+    assert payload["event_time_unavailable_reason"] == reason
+    assert _without_event_time_marker(payload) == main
+
+
+def test_recall_event_time_cap_strip_keeps_the_read_error_reason(
+    recall_engine, monkeypatch
+):
+    observed, _bare = _seed_event_time_rows(recall_engine)
+    _non_strict(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "detail": "answer_ready", "limit": 25}
+    main, exact = _event_time_cap_baseline(recall_engine, monkeypatch, request)
+    _fail_event_time_read(monkeypatch, "read_error")
+    partial = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    # Hydrated hits keep the event time they were read with; the failed read
+    # covered the rest.
+    assert any("event_time" in hit for hit in partial["hits"])
+    assert any(
+        hit["store_id"] in observed and "event_time" not in hit
+        for hit in partial["hits"]
+    )
+    assert partial["event_time_unavailable_reason"] == "read_error"
+
+    capped, main = _event_time_marker_cap(main, exact, "read_error")
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", capped)
+    encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
+    payload = json.loads(encoded)
+    assert len(encoded) <= capped
+    # The cap stripped the fields the read did deliver, yet the reason stays
+    # the read failure, never ``response_cap``.
+    assert not any("event_time" in hit for hit in payload["hits"])
+    assert payload["event_time_unavailable"] is True
+    assert payload["event_time_unavailable_reason"] == "read_error"
+    assert _hit_order(payload) == _hit_order(main)
+    assert _without_event_time_marker(payload) == main
+
+
 def test_recall_event_time_read_of_null_observed_at_sets_no_marker(recall_engine):
     recall_engine._config.embeddings_enabled = False
     recall_engine._store.append(
