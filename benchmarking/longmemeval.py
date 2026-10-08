@@ -2469,6 +2469,11 @@ def production_recall_hits(
             for arm, status in payload.get("provenance", {}).get("coverage", {}).items()
             if isinstance(status, str)
         }
+        # Phase D D1 reads these to tell the expected embeddings-off degradation from a timeout or another reason.
+        if payload.get("timeout") is True:
+            recall_health["timeout"] = True
+        if isinstance(payload.get("degraded_reason"), str) and payload["degraded_reason"]:
+            recall_health["degraded_reason"] = payload["degraded_reason"]
     if accounting is not None:
         degraded_outcomes = _typed_provider_degraded_outcomes(payload)
         accounting.record_degraded_outcomes(degraded_outcomes)
@@ -3201,6 +3206,7 @@ def evaluate_question(
         scored["lcm_recall"]["recall_health"] = {
             "degraded": recall_health.get("degraded"),
             "coverage": recall_health.get("coverage", {}),
+            **{key: recall_health[key] for key in ("timeout", "degraded_reason") if key in recall_health},
         }
         if recall_rerank:
             scored["lcm_recall"]["recall_rerank_status"] = recall_rerank_status
@@ -3722,6 +3728,14 @@ def _validate_restored_checkpoint_metrics(
             raise ValueError(
                 f"checkpoint line {line_number} field {health_field}.coverage "
                 f"must contain only string values: {path}"
+            )
+        if "timeout" in health and health["timeout"] is not True:
+            raise ValueError(
+                f"checkpoint line {line_number} field {health_field}.timeout must be true when present: {path}"
+            )
+        if "degraded_reason" in health and not isinstance(health["degraded_reason"], str):
+            raise ValueError(
+                f"checkpoint line {line_number} field {health_field}.degraded_reason must be a string: {path}"
             )
         if (
             "fts" in health["coverage"]
