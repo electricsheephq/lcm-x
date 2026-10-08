@@ -382,6 +382,8 @@ class _RollupMaintenanceScheduler:
 _ROLLUP_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler()
 
 _SESSION_END_BUSY_TIMEOUT_MS = 50
+# A condensation may write up to this many tokens, so a group no heavier cannot shrink the frontier (#909, #977).
+_CONDENSATION_MIN_BUDGET_TOKENS = 1000
 _CODEX_GPT55_COMPACTION_THRESHOLD = 0.85
 _TOTAL_COMPACTIONS_SCOPE = "current_conversation"
 
@@ -7178,7 +7180,7 @@ class LCMEngine(
             raise ValueError("condensation requires same-depth summary nodes")
         combined_text = _condensation_source_text(nodes)
         source_tokens = sum(node.token_count for node in nodes)
-        token_budget = max(1000, int(source_tokens * 0.40))
+        token_budget = max(_CONDENSATION_MIN_BUDGET_TOKENS, int(source_tokens * 0.40))
         timeout_seconds = self._config.summary_timeout_ms / 1000
         budget = self._foreground_call_budget()
         if budget is not None:  # #605: the chain caps each attempt; refuse here before any work
@@ -7263,13 +7265,16 @@ class LCMEngine(
             if (preferred_max_depth < 0 or depth < preferred_max_depth) and len(nodes) >= fanin
         ]
         if eligible_depths:
+            group_tokens = {d: sum(node.token_count for node in by_depth[d][:fanin]) for d in eligible_depths}
             # #977: with survival fit the #930 default prefix budget never falls below a quarter of the survival
-            # ceiling, so a smaller frontier is never cut: condense the shallowest depth and keep the older detail.
+            # ceiling, so a smaller frontier is never cut: condense the shallowest depth whose group can shrink
+            # (#909) and keep the older detail; under pressure, or when no group can shrink, the heaviest.
             ceiling = self._survival_ceiling()
             frontier_tokens = sum(node.token_count for nodes in by_depth.values() for node in nodes)
-            if ceiling is None or (self._config.survival_fit and frontier_tokens <= ceiling // 4):
-                return by_depth[min(eligible_depths)][:fanin]
-            depth = max(eligible_depths, key=lambda d: (sum(node.token_count for node in by_depth[d][:fanin]), -d))
+            routine = [d for d in sorted(eligible_depths) if group_tokens[d] > _CONDENSATION_MIN_BUDGET_TOKENS]
+            if routine and (ceiling is None or (self._config.survival_fit and frontier_tokens <= ceiling // 4)):
+                return by_depth[routine[0]][:fanin]
+            depth = max(eligible_depths, key=lambda d: (group_tokens[d], -d))
             return by_depth[depth][:fanin]
         # The frontier still exceeds its sweep target but no routine group is
         # available. Permit a same-depth partial group or depth beyond the
