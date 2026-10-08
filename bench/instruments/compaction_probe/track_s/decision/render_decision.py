@@ -96,6 +96,8 @@ def rows_for(data, arms, cp):
     def truncation(col):  # facts and continuation cells: per run, the probes score_s.py excluded as READER_TRUNCATED
         key, unit = {"continuation": ("continuation", "fields"), "trap abst.": ("trap_abstention", "traps"),
                      "recall": ("recall", "facts")}.get(col, ("facts_kept", "facts") if col.startswith("facts") else (None, ""))
+        if col in ("facts head", "facts middle", "facts tail"):  # #978: own placement only; absent in older scores -> 0
+            return {"excluded": lambda r: (r["metrics"][key].get("reader_truncated_by_placement") or {}).get(col[6:], 0), "unit": unit}
         return {"excluded": lambda r: r["metrics"][key].get("reader_truncated") or 0, "unit": unit} if key else {}
     cols = [("facts kept", lambda r: r["metrics"]["facts_kept"]["value"]),
             ("facts head", lambda r: placement(r, "head")), ("facts middle", lambda r: placement(r, "middle")),

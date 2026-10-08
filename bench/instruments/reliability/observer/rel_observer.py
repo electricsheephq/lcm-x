@@ -405,7 +405,7 @@ def patch_run_agent(mod):
               host_commits=logstate["commits"] - cur["commits0"])
         note("turn_end", tag=tag(), turn_kind=cur["kind"], interrupted=interrupted, failed=failed, session=self.session_id,
              reply_tag=next(iter(re.findall(r"reply to ([A-Z]\d{2,3}):", tc.get("reply") or "")), None)
-             if not failed and not interrupted else None)
+             if reply_held and not failed and not interrupted else None)
         snapshot(failed_turn_notices=notices, provenance=_r1.provenance(json.loads((DIR / "cell.json").read_text()), []))
         return result
     cls.run_conversation = run_conversation
