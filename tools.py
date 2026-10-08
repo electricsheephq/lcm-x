@@ -5646,6 +5646,8 @@ def _lcm_recall_fts_anchor(
     arm_order: list[str],
     limit: int,
     slots: int = _LCM_RECALL_FTS_ANCHOR_SLOTS,
+    *,
+    arm_weights: list[float] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Keep the FTS arm's best message inside the delivered window (#950).
 
@@ -5653,13 +5655,19 @@ def _lcm_recall_fts_anchor(
     ``limit`` fused entries, it moves to the start of the S-th distinct session
     of that window (S = min(limit, slots)), else to slot ``limit``. At most one
     entry moves and at most one session leaves the window. ``rrf_score`` and
-    ``_final_score`` are untouched; the moved entry reports the score of the
-    entry above it (``_anchor_reported``) so delivered scores stay monotone.
+    ``_final_score`` are untouched, and the moved entry reports its own score,
+    so a relevance floor applied to the serialized score still sees the hit's
+    true strength (delivered scores need not be monotone around it).
     Inert unless at least two arms ran and FTS is one of them, so FTS-only
-    output is unchanged.
+    output is unchanged. Also inert when ``arm_weights`` (the weights
+    ``rrf_fuse`` used, aligned to ``arm_order``) gives the FTS arm a weight of
+    zero or less: an operator who switched the arm off gets no anchor from it.
     """
     info: dict[str, Any] = {"fired": False, "position": None}
     if len(arm_order) < 2 or "fts" not in arm_order or limit < 4 or not arm_hits.get("fts"):
+        return ordered, info
+    fts_index = arm_order.index("fts")
+    if arm_weights is not None and fts_index < len(arm_weights) and arm_weights[fts_index] <= 0:
         return ordered, info
     anchor = _hit_identity(arm_hits["fts"][0])
     j = next(
@@ -5682,7 +5690,6 @@ def _lcm_recall_fts_anchor(
     cut = min(cut, limit - 1)
     ordered = list(ordered)
     entry = ordered.pop(j)
-    entry["_anchor_reported"] = window[cut - 1]["_final_score"]
     info.update(fired=True, position=cut + 1)
     return ordered[:cut] + [entry] + ordered[cut:], info
 
@@ -6387,7 +6394,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     fts_anchor_info: dict[str, Any] | None = None
     if bool(getattr(engine._config, "recall_fts_anchor", True)):
         ordered, fts_anchor_info = _lcm_recall_fts_anchor(
-            ordered, arm_hits, arm_order, limit
+            ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
     # -- Response shaping (char-capped). The default snippets path retains the
@@ -6484,6 +6491,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         diversity_dropped = 0
         answer_ready_content = {}
     hits_out: list[dict[str, Any]] = []
+    delivered_identities: set[Any] = set()
     response_chars = 0
     response_cap_truncated = False
     unreferenced_omitted = 0
@@ -6495,9 +6503,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             "session_id": hit.get("session_id"),
             "timestamp": hit.get("timestamp") or 0,
             "snippet": (hit.get("snippet") or "")[:_LCM_RECALL_SNIPPET_CHARS],
-            "score": round(
-                float(entry.get("_anchor_reported", entry["_final_score"])), 6
-            ),
+            "score": round(float(entry["_final_score"]), 6),
             "expand_hint": hit.get("expand_hint"),
             "from_current_session": bool(hit.get("from_current_session")),
             "arms": arms,
@@ -6577,6 +6583,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         if reference_strict:
             strict_selector.deliver(entry)
         hits_out.append(item)
+        delivered_identities.add(_hit_identity(hit))
         if len(hits_out) >= limit:
             break
 
@@ -6615,6 +6622,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     if bool(getattr(engine._config, "rerank_enabled", False)) and rerank_scores:
         response["provenance"]["rerank_scores"] = rerank_scores
     if fts_anchor_info is not None and len(arm_order) > 1:
+        # The anchor only places the hit in the ranked window; answer_ready
+        # selection (citation and per-session rules) and the response cap still
+        # decide delivery, so report whether the anchored hit actually shipped.
+        fts_anchor_info["delivered"] = bool(fts_anchor_info["fired"]) and (
+            _hit_identity(arm_hits["fts"][0]) in delivered_identities
+        )
         response["provenance"]["fts_anchor"] = fts_anchor_info
     if degraded:
         response["degraded_reason"] = "; ".join(dict.fromkeys(degraded_reasons))

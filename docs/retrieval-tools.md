@@ -213,6 +213,27 @@ erroring the tool. `lcm_grep`'s hybrid RRF is unaffected: it keeps implicit
 actually applied to the arms that ran are echoed back under
 `provenance.arm_weights`.
 
+#### FTS anchor slot (`LCM_RECALL_FTS_ANCHOR`)
+
+`LCM_RECALL_FTS_ANCHOR` (default `true`) keeps the full-text arm's best match in
+the ranked window. When two or more arms ran and fusion pushed the full-text
+arm's position-1 message past `limit`, that one message moves into the window at
+the start of the 10th distinct session (the window's last slot when it holds
+fewer distinct sessions than that), so at most one session leaves the window. The move is
+order-only: the hit keeps its own `score`, so a relevance floor such as
+`LCM_PROACTIVE_RECALL_MIN_SCORE` still applies to it. It is inert with a single
+arm, so embeddings-off (full-text only) output is unchanged, and inert when
+`LCM_RECALL_ARM_WEIGHTS` sets `fts` to `0`. Set `LCM_RECALL_FTS_ANCHOR=false` to
+restore the previous order. Managed (evaOS fleet) profiles can set it only after
+a provisioning release adds it to the environment allowlist.
+
+With two or more arms, the response reports
+`provenance.fts_anchor = {fired, position, delivered}`: `fired` says whether the
+message moved, `position` is its 1-based slot in the ranked window (or `null`),
+and `delivered` says whether it is among the returned hits. `detail='answer_ready'`
+still applies its citation and per-session rules after the anchor, so a fired
+anchor can report `delivered: false`.
+
 `LCM_RERANK_ENABLED=true` optionally lets Voyage reorder the bounded top fused
 window after the scope/recency prior. `LCM_RERANK_MODEL` selects the Voyage
 model (`rerank-2.5-lite` by default; `rerank-2.5` for the quality-oriented

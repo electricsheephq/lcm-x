@@ -3,9 +3,10 @@
 With two or more arms, the FTS arm's raw position-1 message is kept inside the
 delivered window: when fusion pushed it past ``limit`` it moves to the start of
 the S-th distinct session (S = min(limit, 10)) or to slot ``limit``. These tests
-cover every inert case, the placement rule, the reported-score rule, the kill
-switch, provenance, FTS-only byte invariance, and parity with the frozen replay
-helper the #950 numbers were computed with.
+cover every inert case (including a zero FTS arm weight), the placement rule,
+the true-score rule, the kill switch, provenance (including whether the anchored
+hit was actually delivered), FTS-only byte invariance, and ORDER parity with the
+frozen replay helper the #950 numbers were computed with.
 """
 from __future__ import annotations
 
@@ -27,7 +28,9 @@ anchor = lcm_tools._lcm_recall_fts_anchor
 
 # -- Oracle: the frozen #950 replay helper (anchor_helper.py, sha256 3e0f0f31...),
 #    copied verbatim minus its module docstring. Only the primary variant
-#    (require_vector_session=False) is product behaviour. --
+#    (require_vector_session=False) is product behaviour. The helper's
+#    ``_anchor_reported`` score override is NOT product behaviour (the product
+#    serializes each hit's own score); parity covers order, fired and position. --
 _LCM_RECALL_FTS_ANCHOR_SLOTS = 10
 _LCM_RECALL_FTS_ANCHOR_GATE_DEPTH = 10
 
@@ -130,7 +133,6 @@ def test_inert_without_two_arms_including_fts(arm_order):
     out, info = anchor(ordered, arm_hits, arm_order, 8)
     assert out is ordered
     assert info == {"fired": False, "position": None}
-    assert "_anchor_reported" not in ordered[20]
 
 
 def test_inert_when_limit_below_four():
@@ -197,17 +199,33 @@ def test_few_distinct_sessions_falls_back_to_limit_minus_one():
     assert _ids(out)[9] == ("message", 999)
 
 
-def test_reported_score_is_the_entry_above_and_ranking_scores_untouched():
+def test_moved_entry_keeps_its_own_scores():
     ordered, arm_hits = _fused([f"s{i}" for i in range(30)], anchor_at=20)
     moved = ordered[20]
-    rrf_before, final_before = moved["rrf_score"], moved["_final_score"]
+    before = dict(moved)
     out, info = anchor(ordered, arm_hits, ["fts", "summary"], 8)
     cut = info["position"] - 1
     assert out[cut] is moved
-    assert moved["rrf_score"] == rrf_before and moved["_final_score"] == final_before
-    assert moved["_anchor_reported"] == out[cut - 1]["_final_score"]
-    reported = [e.get("_anchor_reported", e["_final_score"]) for e in out]
-    assert all(a >= b for a, b in zip(reported, reported[1:]))
+    assert moved == before  # no score override or other annotation
+    # Its true score is below the entry it now follows; nothing hides that.
+    assert moved["_final_score"] < out[cut - 1]["_final_score"]
+
+
+@pytest.mark.parametrize("fts_weight", [0.0, -1.0])
+def test_inert_when_the_fts_arm_weight_is_not_positive(fts_weight):
+    ordered, arm_hits = _fused([f"s{i}" for i in range(30)], anchor_at=20)
+    out, info = anchor(ordered, arm_hits, ["summary", "fts"], 8, arm_weights=[1.0, fts_weight])
+    assert out is ordered
+    assert info == {"fired": False, "position": None}
+
+
+def test_positive_fts_arm_weight_does_not_change_placement():
+    ordered, arm_hits = _fused([f"s{i}" for i in range(30)], anchor_at=20)
+    base, base_info = anchor([dict(e) for e in ordered], arm_hits, ["fts", "summary"], 8)
+    out, info = anchor([dict(e) for e in ordered], arm_hits, ["fts", "summary"], 8,
+                       arm_weights=[0.5, 1.0])
+    assert info == base_info == {"fired": True, "position": 8}
+    assert _ids(out) == _ids(base)
 
 
 def test_matches_the_frozen_replay_helper_on_random_lists():
@@ -236,7 +254,7 @@ def test_matches_the_frozen_replay_helper_on_random_lists():
         assert _ids(act) == _ids(exp)
         assert act_info["fired"] == exp_info["fired"]
         assert act_info["position"] == exp_info["position"]
-        assert [e.get("_anchor_reported") for e in act] == [e.get("_anchor_reported") for e in exp]
+        assert all("_anchor_reported" not in e for e in act)
         fired += bool(act_info["fired"])
     assert fired > 20  # the random cases actually exercise the firing path
 
@@ -330,13 +348,14 @@ def test_lcm_recall_anchor_fires_with_two_arms(recall_engine, monkeypatch):
     payload = json.loads(_recall_raw(recall_engine, limit=4, scope_bias=0.0))
 
     assert payload["provenance"]["arms_run"] == ["fts", "summary"]
-    assert payload["provenance"]["fts_anchor"] == {"fired": True, "position": 4}
+    assert payload["provenance"]["fts_anchor"] == {"fired": True, "position": 4, "delivered": True}
     hits = payload["hits"]
     assert [h.get("node_id") for h in hits[:3]] == node_ids[:3]
     assert hits[3]["store_id"] == store_id
-    scores = [h["score"] for h in hits]
-    assert scores[3] == scores[2]
-    assert all(a >= b for a, b in zip(scores, scores[1:]))
+    # The anchored hit serializes its OWN score (the FTS arm's 0.5 / 61), not a
+    # borrowed one, so a relevance floor on the score still applies to it.
+    assert hits[3]["score"] == round(0.5 / 61, 6)
+    assert hits[3]["score"] < hits[2]["score"]
 
 
 def test_lcm_recall_kill_switch_restores_fused_order(recall_engine, monkeypatch):
@@ -352,8 +371,75 @@ def test_lcm_recall_reports_unfired_anchor_with_two_arms(recall_engine, monkeypa
     store_id, _node_ids = _seed_two_arm_case(recall_engine, monkeypatch, n_summaries=2)
     payload = json.loads(_recall_raw(recall_engine, limit=8, scope_bias=0.0))
 
-    assert payload["provenance"]["fts_anchor"] == {"fired": False, "position": None}
+    assert payload["provenance"]["fts_anchor"] == {
+        "fired": False, "position": None, "delivered": False,
+    }
     assert payload["hits"][-1]["store_id"] == store_id
+
+
+def test_lcm_recall_zero_fts_weight_leaves_the_order_alone(recall_engine, monkeypatch):
+    store_id, node_ids = _seed_two_arm_case(recall_engine, monkeypatch)
+    recall_engine._config.recall_arm_weights = {"fts": 0.0, "summary": 1.0, "chunk": 1.0}
+    payload = json.loads(_recall_raw(recall_engine, limit=4, scope_bias=0.0))
+
+    assert payload["provenance"]["arm_weights"]["fts"] == 0.0
+    assert payload["provenance"]["fts_anchor"] == {
+        "fired": False, "position": None, "delivered": False,
+    }
+    assert [h.get("node_id") for h in payload["hits"]] == node_ids[:4]
+    assert store_id not in [h.get("store_id") for h in payload["hits"]]
+
+
+def test_lcm_recall_answer_ready_anchor_delivered(recall_engine, monkeypatch):
+    # The FTS top-1 starts at fused index 6 (outside limit 4) behind six summary
+    # nodes; the anchor moves it to slot 4 and reference-strict selection, which
+    # cannot cite a summary, admits it.
+    store_id, _node_ids = _seed_two_arm_case(recall_engine, monkeypatch)
+    payload = json.loads(_recall_raw(recall_engine, limit=4, scope_bias=0.0, detail="answer_ready"))
+
+    assert payload["provenance"]["fts_anchor"] == {"fired": True, "position": 4, "delivered": True}
+    assert store_id in [h.get("store_id") for h in payload["hits"]]
+
+
+def test_lcm_recall_answer_ready_anchor_dropped_by_session_cap(recall_engine, monkeypatch):
+    # Nine summary-arm source messages from the anchor's own session outrank it.
+    # The anchor fires (slot 8 of limit 8), but the per-session cap admits only
+    # the first five messages of that session, so the anchored hit is not
+    # delivered and provenance says so.
+    from hermes_lcm.tools import _LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT as cap
+
+    store_id = recall_engine._store.append(
+        "session-fts", {"role": "user", "content": "kanban dashboard sprint anchor"}
+    )
+    source_hits = []
+    for index in range(9):
+        sid = recall_engine._store.append(
+            "session-fts", {"role": "assistant", "content": f"unrelated filler note {index}"}
+        )
+        source_hits.append({
+            "kind": "message_excerpt",
+            "store_id": sid,
+            "session_id": "session-fts",
+            "timestamp": 10.0,
+            "snippet": f"unrelated filler note {index}",
+            "content_offset": 0,
+            "from_current_session": False,
+            "expand_hint": "Expand",
+        })
+    monkeypatch.setattr(
+        lcm_tools,
+        "_lcm_recall_summary_arm",
+        lambda *_args, **_kwargs: (list(source_hits), "full", 9, 9, []),
+    )
+    monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 10.0)
+
+    payload = json.loads(_recall_raw(recall_engine, limit=8, scope_bias=0.0, detail="answer_ready"))
+
+    assert payload["provenance"]["fts_anchor"] == {"fired": True, "position": 8, "delivered": False}
+    delivered = [h.get("store_id") for h in payload["hits"]]
+    assert store_id not in delivered
+    assert len(delivered) == cap
 
 
 def _seed_fts_only(engine, monkeypatch):
