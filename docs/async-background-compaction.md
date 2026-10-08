@@ -57,9 +57,10 @@ the turn is rejected for five reasons:
   publish path decides frontier contiguity, session binding or "already claimed". In-process markers update after
   the commit, as for a foreground leaf.
 - Promotion runs at the top of `_compress_impl`, before the no-progress hold's cleanup-only return and before pre-leaf
-  condensation. A ready chain at the live frontier is progress that costs no model call, so it also lifts the hold:
-  `should_compress` reports true while one exists, and the host calls `compress()` during a hold. If the estimate is
-  then below the #671 target, `min(T − leaf_chunk, 0.95·T)`, the pass makes no foreground summariser call at all:
+  condensation. A ready chain at the live frontier is progress that costs no model call, so it lifts the hold, but
+  only when the live prompt meets a normal compression trigger (the threshold or the full sweep): `should_compress`
+  then reports true despite the hold. Below a trigger nothing is promoted early, so the active prompt and its cache
+  prefix change only at the boundaries they change at today. If the estimate is then below the #671 target, `min(T − leaf_chunk, 0.95·T)`, the pass makes no foreground summariser call at all:
   no remainder leaf, no pre-leaf or post-drain condensation. Otherwise today's path runs for the gap.
 - Each batch is checked inside the transaction. Any failure marks it `rejected` with a reason and the fallback
   continues. The checks are those listed under "Atomic promotion" below, plus a host-row check: the host rows from
@@ -85,7 +86,11 @@ the turn is rejected for five reasons:
 - One daemon thread per process. Dedup is keyed by the store (its profile home and database path) plus the
   conversation id, because one process can serve several profile homes that use the same conversation id. It runs
   each job in the captured context of the turn that scheduled it, which carries the profile's secret scope and home
-  (#987).
+  (#987). A turn-end trigger that finds a job running for the same key sets a dirty flag instead of being dropped;
+  when the job ends, the worker re-reads the estimate and runs again if the flag is set.
+- Batch creation is arbitrated by the database, not the process: a partial unique index on the live generation of a
+  frontier (below) plus `INSERT OR IGNORE`, so two processes that open the same profile store cannot both create and
+  claim a batch for one frontier.
 - A job is scheduled at any turn end that has eligible rows past one leaf chunk. Prepared work is sized in tokens:
   the job loops until the predicted estimate after promotion, the current estimate minus the ready chain's savings
   (`source_token_count − token_count` per batch), is at or below the target with one leaf of headroom, or the worker's
@@ -95,13 +100,18 @@ the turn is rejected for five reasons:
   `LCM_SUMMARY_SPEND_MAX_CALLS`), so the foreground fallback always has budget.
 - The worker never takes the foreground's model-call slot. When the host's `auxiliary.compression.max_concurrency`
   is set, the worker uses at most that value minus one; at 1 it does not run, and today's foreground path serves the
-  profile. Unset means no host cap. A call already in flight cannot yield, so reserving the slot up front is the
-  mechanism; a test starts a foreground compression while a slow background call is in flight and asserts the
+  profile. Unset means the host imposes no cap: the fleet's summary providers are remote and serve concurrent
+  requests. A profile whose provider serializes requests (a local model) sets `max_concurrency: 1`, which turns the
+  worker off. A call already in flight cannot yield, so reserving the slot up front is the mechanism; a test starts a foreground compression while a slow background call is in flight and asserts the
   foreground call does not wait on it.
 - It holds no transaction across a model call (a gateway exit can kill it mid-call). Its writes are single statements,
   and each state change is a compare-and-set on the state it leaves plus the claim token the job wrote when it moved
   the batch to `preparing`: completion is `SET state='ready' … WHERE batch_id=? AND state='preparing' AND
-  claim_token=?`, and promotion moves only `ready` batches. A cleanup or rejection that ran first therefore wins.
+  claim_token=?`, and promotion moves only `ready` batches. Prepared-node inserts are fenced the same way: each row
+  carries the claim token and is inserted only while its batch is still `preparing` under that token
+  (`INSERT … SELECT … WHERE EXISTS (… state='preparing' AND claim_token=?)`), and promotion reads only rows whose token
+  matches the batch's. A cleanup or rejection that ran first therefore wins, and a reclaimed job's late result is
+  never published.
   The cleanup timeout for a stale `preparing` batch is longer than the worst-case prepare.
 
 **Condensation.** Prepared condensations stay out, as the non-goals say. Condensation leaves the turn by a different
@@ -133,7 +143,8 @@ Hygiene's bounded hold then covers promotion plus assembly.
 - Soak counters:
   - promotion outcomes by reason;
   - hidden-only passes that had promoted leaves, which must be 0;
-  - the visible-wait p90 filtered to threshold-triggered passes, excluding cleanup-only commits.
+  - the visible-wait p90 over the bar's whole population: every host or hygiene `compress()` that runs while a user
+    turn waits, cleanup-only and held passes included.
 - The test matrix below, the new tests, and a green reliability nightly.
 - Track S at v0.28.0 rc1 with prepare on: facts kept not worse than the previous GA.
 - The flags stay off in code until these pass. Turning prepare on by default is the owner's decision at the v0.28.0
@@ -147,7 +158,6 @@ Add config fields, all disabled by default:
 | --- | --- | ---: | --- |
 | `async_background_compaction_enabled` | `LCM_ASYNC_BACKGROUND_COMPACTION_ENABLED` | `false` | Enables the feature surface. |
 | `async_background_compaction_worker_enabled` | `LCM_ASYNC_BACKGROUND_COMPACTION_WORKER_ENABLED` | `false` | Allows automatic background preparation. Tests and hosts may still call one-shot prep manually when the feature is enabled. |
-| `async_background_compaction_max_batches` | `LCM_ASYNC_BACKGROUND_COMPACTION_MAX_BATCHES` | `2` | Backpressure cap per conversation. |
 | `async_background_compaction_retry_backoff_seconds` | `LCM_ASYNC_BACKGROUND_COMPACTION_RETRY_BACKOFF_SECONDS` | `300` | Cooldown after summary failures. |
 
 The enable flag should guard all writes to the new tables and all promotion attempts. Reader filters must still be robust if old pending rows exist after the flag is later disabled.
@@ -167,6 +177,8 @@ Suggested columns:
 - `session_id TEXT NOT NULL`
 - `state TEXT NOT NULL` — `pending`, `preparing`, `ready`, `promoting`, `promoted`, `rejected`, `failed`, `superseded`
 - `claim_token TEXT` — written with the move to `preparing`; every later state change compares it
+- `focus_topic TEXT` — the focus topic the worker summarised with (recorded for the rc1 quality read; not a rejection
+  reason)
 - `frontier_start_store_id INTEGER NOT NULL`
 - `frontier_end_store_id INTEGER NOT NULL`
 - `fresh_tail_count INTEGER NOT NULL`
@@ -189,6 +201,8 @@ Indexes:
 - `(conversation_id, state, created_at)`
 - `(session_id, state, created_at)`
 - `(next_retry_at, state)`
+- `UNIQUE (conversation_id, frontier_start_store_id, policy_fingerprint, summary_route_fingerprint) WHERE state IN
+  ('pending', 'preparing', 'ready', 'promoting')` — one live generation per frontier; creation uses `INSERT OR IGNORE`
 
 ### `pending_summary_nodes`
 
@@ -213,6 +227,7 @@ Suggested columns:
 - `earliest_at REAL`
 - `latest_at REAL`
 - `expand_hint TEXT DEFAULT ''`
+- `claim_token TEXT NOT NULL` — the claim this row was written under; promotion reads only rows matching the batch's
 - `summary_model TEXT` — the model that produced this summary (copied into `summary_node_provenance` at promotion)
 - `escalation_level INTEGER`
 
