@@ -4811,8 +4811,8 @@ class TestAssemblyBudgetSelection:
         return engine
 
     def test_assembly_skips_oversized_assistant_turn_to_preserve_user_prompt(self, tmp_path, monkeypatch):
-        # 160 (was 120): room for the #680 sentence in the LCM system note.
-        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=160)
+        # 175 (was 120): room for the #680 sentence and the #998 lcm_recall clause in the LCM system note.
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=175)
         huge_assistant = "oversized assistant tool chatter " * 400
 
         assembled = engine._assemble_context(
@@ -5723,7 +5723,8 @@ class TestAssemblyBudgetSelection:
         assert rows[-1]["content"] == "new followup"
 
     def test_assembly_skips_oversized_summary_and_keeps_later_fit_summary(self, tmp_path, monkeypatch):
-        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=140)
+        # 155 (was 140): room for the #998 lcm_recall clause in the LCM system note.
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=155)
         engine._dag.add_node(SummaryNode(
             session_id="assembly-session",
             depth=2,

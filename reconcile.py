@@ -252,6 +252,20 @@ def _finalize_emission_descriptors(messages, candidates, scope):
     return descriptors
 
 
+def _carrier_emission_key(descriptor_or_entry) -> tuple:
+    """#1000: one carrier emission, from its descriptor or its projected entry: the generated span, the suffix
+    and the stored row it was formed around (the process-local retirement key; no output index, so a
+    carried-forward copy of a retired carrier is retired too)."""
+    if isinstance(descriptor_or_entry, EmissionProjectionEntry):
+        span = descriptor_or_entry.generated_span
+        span_sha256 = hashlib.sha256(span.encode("utf-8")).hexdigest() if isinstance(span, str) else None
+        suffix_sha256, source = descriptor_or_entry.suffix_sha256, descriptor_or_entry.retained_source
+    else:
+        span_sha256 = descriptor_or_entry.get("generated_span_sha256")
+        suffix_sha256, source = descriptor_or_entry.get("suffix_sha256"), descriptor_or_entry.get("retained_source")
+    return span_sha256, suffix_sha256, source.get("store_id") if isinstance(source, Mapping) else None
+
+
 def _descriptor_shape_is_well_formed(descriptor: Any) -> bool:
     """The nested shapes proof consumers index into (#514); projection still declines the rest."""
     occurrence = descriptor.get("output_occurrence") if isinstance(descriptor, Mapping) else None
