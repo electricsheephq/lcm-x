@@ -265,15 +265,19 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                     st = tools_engine.get_status()
                     clone_info = {"store_messages": st.get("store_messages"), "dag_nodes": st.get("dag_nodes")}
                 answers, cap_hit = {}, False
+
+                def answered(a):  # as score_s reads it: None or a blank string is unanswered; any other value is an answer
+                    return a is not None and (not isinstance(a, str) or bool(a.strip()))
+
                 for attempt in range(2):  # one retry when the final call hits the cap; the first non-empty answer wins
                     got, meta = R.answer(reader, run.system, view, prompt, tools_engine if is_open else None,
                                          schemas, guidance, run.m.tokens.count_tokens)
                     attempts.append(dict(meta))
                     for pid, a in (got or {}).items():
-                        if pid not in answers or not (answers[pid] or "").strip():
+                        if not answered(answers.get(pid)):
                             answers[pid] = a
                     capped = ((meta.get("reader_calls") or [meta.get("usage")])[-1] or {}).get("completion_tokens", 0) >= 8192
-                    complete = all((answers.get(p["id"]) or "").strip() for p in b["probes"])
+                    complete = all(answered(answers.get(p["id"])) for p in b["probes"])
                     cap_hit = cap_hit or capped
                     if not capped or complete:
                         break
