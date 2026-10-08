@@ -2898,6 +2898,9 @@ def evaluate_question(
                                 flush_flat_chunks()
             summary_text = deterministic_session_summary(session)
             session_summaries[session_id] = summary_text
+            # Time bounds from the session's stored rows, as compaction sets them: the recall prior reads a node's
+            # latest_at, so without them every summary hit sat at the recency floor while message hits did not (#950).
+            earliest_at, latest_at = store.get_time_bounds(store_ids) if messages else (None, None)
             node_id = dag.add_node(
                 SummaryNode(
                     session_id=session_id,
@@ -2907,6 +2910,8 @@ def evaluate_question(
                     source_token_count=sum(len(m["content"].split()) for m in messages),
                     source_type="messages",
                     created_at=float(order),
+                    earliest_at=earliest_at,
+                    latest_at=latest_at,
                 )
             )
             summary_specs.append((session_id, node_id, summary_text))
