@@ -16,8 +16,12 @@ SHAS = {"prev": "a1" * 20, "cand": "b2" * 20}
 D2 = (1, 2, 3)  # the D2 seed set; two-tree tests replay all of it
 
 
-def manifest_bytes(seed):
-    return json.dumps({"seed": seed, "facts": FACTS}).encode()
+def facts_bytes():
+    return json.dumps([{"id": f, "placement": "head", "class": "early_user_constraint"} for f in FACTS]).encode()
+
+
+def manifest_bytes(seed):  # content-addresses its files, as gen_material.py's manifest does
+    return json.dumps({"seed": seed, "facts": FACTS, "shas": {"facts.json": hashlib.sha256(facts_bytes()).hexdigest()}}).encode()
 
 
 def kept_all(seed, run, cp):
@@ -69,16 +73,15 @@ def material(tmp_path, seeds=D2):
     for seed in seeds:
         (root / f"seed-{seed}").mkdir(parents=True, exist_ok=True)
         (root / f"seed-{seed}" / "material.manifest.json").write_bytes(manifest_bytes(seed))
-        (root / f"seed-{seed}" / "facts.json").write_text(json.dumps(
-            [{"id": f, "placement": "head", "class": "early_user_constraint"} for f in FACTS]))
+        (root / f"seed-{seed}" / "facts.json").write_bytes(facts_bytes())
     return root
 
 
-def analyze(tmp_path, arms, first, second=None, labels=None, check=True, shas=None, seeds=(1,)):
+def analyze(tmp_path, arms, first, second=None, labels=None, check=True, shas=None, seeds=(1,), material_root=None):
     runs, decision, logs = first
     command = [sys.executable, "-B", str(ANALYZE), "--arms", *arms, "--seeds", *map(str, seeds),
                "--checkpoints", *map(str, CPS), "--run-root", str(runs), "--decision-root", str(decision),
-               "--logs", str(logs), "--material", str(material(tmp_path))]
+               "--logs", str(logs), "--material", str(material_root or material(tmp_path))]
     if second:
         command += ["--second-tree", *map(str, second)]
     if labels:
@@ -93,10 +96,11 @@ def analyze(tmp_path, arms, first, second=None, labels=None, check=True, shas=No
 
 
 def two_tree(tmp_path, cand_kept=kept_all, prev_kept=kept_all, shas=(SHAS["prev"][:7], SHAS["cand"][:12]), seeds=D2,
-             **cand_options):
+             material_root=None, check=True, **cand_options):
     prev = build(tmp_path / "prev", "LCMX-fleet", prev_kept, seeds=D2)
     cand = build(tmp_path / "cand", "LCMX-fleet", cand_kept, seeds=D2, sha=SHAS["cand"], **cand_options)
-    return analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"], shas=shas, seeds=seeds)
+    return analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"], shas=shas, seeds=seeds,
+                   material_root=material_root, check=check)
 
 
 def test_two_tree_pairs_same_arm_across_roots(tmp_path):
@@ -304,3 +308,39 @@ def test_d2_requires_the_same_effective_configuration(tmp_path):
     assert out["d2"]["config_equal"] is False and out["d2"]["config_diff_keys"] == ["arm", "arm.env"]
     assert out["d2"]["verdict"] == "INCOMPLETE"
     assert two_tree(tmp_path / "same")["d2"]["config_equal"] is True
+
+
+def test_d2_rejects_repeated_seeds(tmp_path):
+    result = two_tree(tmp_path, seeds=(1, 1, 2, 3), check=False)  # seed 1 twice would double its pairs in n and p
+    assert result.returncode != 0 and "distinct" in result.stderr
+
+
+def test_d2_counts_no_score_from_a_decision_root_without_a_manifest(tmp_path):
+    prev = build(tmp_path / "prev", "LCMX-fleet", seeds=D2)
+    cand = build(tmp_path / "cand", "LCMX-fleet", seeds=D2, sha=SHAS["cand"])
+    (cand[1] / "manifest.json").unlink()  # a legacy decision root: its scores are not admitted, so none is counted
+    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"],
+                  shas=(SHAS["prev"][:7], SHAS["cand"][:12]), seeds=D2)
+    assert out["d2"]["verdict"] == "INCOMPLETE" and out["d2"]["missing_spread"]
+    assert not any(k.startswith("cand/") for k in out["d2"]["receipt_mismatch"])
+
+
+def test_d2_checks_each_material_file_against_the_manifest(tmp_path):
+    root = material(tmp_path)
+    (root / "seed-2" / "facts.json").write_bytes(facts_bytes() + b" ")  # the manifest bytes, and so its digest, are unchanged
+    d2 = two_tree(tmp_path, material_root=root)["d2"]
+    assert d2["material_mismatch"] == ["material/seed-2/facts.json"] and d2["verdict"] == "INCOMPLETE"
+
+
+def test_d2_reports_effective_config_differences_without_gating(tmp_path):
+    prev = build(tmp_path / "prev", "LCMX-fleet", seeds=D2)
+    cand = build(tmp_path / "cand", "LCMX-fleet", seeds=D2, sha=SHAS["cand"])
+    for tree, (runs, _, _) in (("prev", prev), ("cand", cand)):
+        for seed in D2:
+            for run in ("r1", "r2"):  # a product default that moved between the trees: the change under test
+                (runs / "LCMX-fleet" / f"seed-{seed}" / f"d{seed}-{run}" / "config.json").write_text(json.dumps(
+                    {"summary_prefix_target_tokens": 900 if tree == "prev" else 1200, "leaf_chunk_tokens": 8000}))
+    d2 = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"],
+                 shas=(SHAS["prev"][:7], SHAS["cand"][:12]), seeds=D2)["d2"]
+    assert d2["effective_config_diff_keys"] == ["summary_prefix_target_tokens"]
+    assert d2["config_equal"] is True and d2["verdict"] == "PASS"

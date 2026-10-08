@@ -43,6 +43,8 @@ if ARGS.decision_root is None or ARGS.material is None:
     AP.error("provide --decision-root/--material or TRACK_S_OUT/TRACK_S_MATERIAL")
 H, RUNS, MATERIAL = ARGS.decision_root, ARGS.run_root, ARGS.material
 ARMS, CPS, SEEDS = ARGS.arms, ARGS.checkpoints, ARGS.seeds
+if len(set(SEEDS)) != len(SEEDS) or len(set(CPS)) != len(CPS):  # a repeat would count one seed's pairs twice
+    AP.error("--seeds and --checkpoints take distinct values")
 LOGS = ARGS.logs or RUNS.parent / "decision" / "logs"
 LABELS = ARGS.labels or ARMS
 if LABELS[0] == LABELS[1]:
@@ -337,9 +339,39 @@ def material_sha(seed):
     return hashlib.sha256(m.read_bytes()).hexdigest() if m.is_file() else None
 
 
+def material_files(seed):
+    """The manifest's `shas` content-address every material file (facts.json included, which this analysis reads), so the
+    manifest digest binds the material only while each listed file still matches its hash."""
+    d = MATERIAL / f"seed-{seed}"
+    try:
+        shas = json.loads((d / "material.manifest.json").read_text()).get("shas")
+    except (OSError, ValueError, AttributeError):
+        return [f"material/seed-{seed}: manifest unreadable"]
+    if not isinstance(shas, dict) or not shas:
+        return [f"material/seed-{seed}: manifest lists no file hashes"]
+    return [f"material/seed-{seed}/{name}" for name, digest in sorted(shas.items())
+            if not (d / name).is_file() or hashlib.sha256((d / name).read_bytes()).hexdigest() != digest]
+
+
+def effective_config_keys():
+    """Non-gating D2 diagnostic: top-level keys whose recorded effective configuration (each run's config.json) differs
+    across the analysed runs. A product default that changes between the two trees is the change under test, so this
+    never affects the verdict; it shows a reviewer which settings moved. None when no run recorded a config."""
+    cs = []
+    for label in labels:
+        src = globals().get("TREES", {}).get(label, {})
+        runs, arm = src.get("run_root", RUNS), src.get("arm", label)
+        for n in SEEDS:
+            for run in ("r1", "r2"):
+                c = runs / arm / f"seed-{n}" / f"d{n}-{run}" / "config.json"
+                cs += [json.loads(c.read_text())] if c.is_file() else []
+    return sorted({k for c in cs for k in {*c, *cs[0]} if c.get(k) != cs[0].get(k)}) if cs else None
+
+
 # D2 only: every counted run replayed the material this analysis reads, and the gate covers the declared seed/checkpoint set
 material_mismatch = [f"{label}/{k}" for label in labels for k, h in arm_stats.get(label, {}).get("material_sha256", {}).items()
                      if h is None or h != material_sha(int(k.split("/")[0][5:]))] if two_tree else []
+material_mismatch += [x for n in SEEDS for x in material_files(n)] if two_tree else []
 missing_required = ([f"seed-{n}" for n in globals().get("D2_SEEDS", ()) if n not in SEEDS]
                     + [f"cp-{c}" for c in globals().get("D2_CPS", ()) if c not in CPS]) if two_tree else []
 configs = [c for label in labels for c in arm_stats.get(label, {}).get("run_configs", [])] if two_tree else []
@@ -351,7 +383,8 @@ verdict = ("INCOMPLETE" if status == "INCOMPLETE" or missing_spread or sha_misma
            else "REPEAT_SEEDS" if any(spread.values()) else "BLOCK" if any(v["blocks"] for v in d2.values()) else "PASS")
 d2.update({"candidate": labels[1], "spread_over_0.10": spread, "missing_spread": missing_spread,
            "expected_shas": dict(zip(labels, expect)) if expect else None, "sha_mismatch": sha_mismatch, "receipt_mismatch": receipts,
-           "material_mismatch": material_mismatch, "missing_required": missing_required, "config_equal": (not diff) if two_tree else None, **({"config_diff_keys": diff} if diff else {}), "status": status, "verdict": verdict})
+           "material_mismatch": material_mismatch, "missing_required": missing_required, "config_equal": (not diff) if two_tree else None, **({"config_diff_keys": diff} if diff else {}),
+           **({"effective_config_diff_keys": effective_config_keys()} if two_tree else {}), "status": status, "verdict": verdict})
 print(
     json.dumps(
         {
