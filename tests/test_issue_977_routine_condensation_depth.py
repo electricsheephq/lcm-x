@@ -69,12 +69,18 @@ def test_prefix_pressure_condenses_the_heaviest_depth(engine):
     assert selected(engine) == [(1, node_id) for node_id in deep[:4]]
 
 
-def test_pressure_starts_above_a_quarter_of_the_survival_ceiling(engine):
+def test_pressure_is_measured_on_the_frontier_as_assembly_renders_it(engine):
     assert engine._survival_ceiling() == 231_200
+    quarter = 231_200 // 4
     shallow = add_nodes(engine, 0, 4, token_count=500)
-    deep = add_nodes(engine, 1, 62, token_count=900)  # frontier 2,000 + 55,800 = 57,800, exactly a quarter
+    deep = add_nodes(engine, 1, 55, token_count=900)
+    assert engine._rendered_summary_frontier_tokens() <= quarter
     assert selected(engine) == [(0, node_id) for node_id in shallow]
-    add_nodes(engine, 2, 1, token_count=1)
+    deep += add_nodes(engine, 1, 7, token_count=900)
+    # Stored token counts now total exactly a quarter, but headers, expand hints and separators put the
+    # rendered prefix over it, where the default prefix bound could start to omit summaries.
+    assert sum(node.token_count for node in engine._summary_frontier_nodes()) == quarter
+    assert engine._rendered_summary_frontier_tokens() > quarter
     assert selected(engine) == [(1, node_id) for node_id in deep[:4]]
 
 
@@ -112,3 +118,28 @@ def test_only_light_groups_fall_back_to_the_heaviest_depth(engine):
     add_nodes(engine, 0, 4, token_count=100)
     deep = add_nodes(engine, 1, 4, token_count=200)
     assert selected(engine) == [(1, node_id) for node_id in deep]
+
+
+def test_a_group_the_l3_bound_would_store_whole_is_light(tmp_path):
+    # verbatim_small_source returns a source within the L3 bound whole, and up to twice it when a summary is not
+    # shorter, so with a 1,000-token bound a 1,600-token group cannot be relied on to shrink.
+    instance = make_engine(tmp_path, 272_000, l3_truncate_tokens=1_000)
+    try:
+        add_nodes(instance, 0, 4, token_count=400)
+        middle = add_nodes(instance, 1, 4, token_count=900)
+        add_nodes(instance, 2, 4, token_count=2_000)
+        assert selected(instance) == [(1, node_id) for node_id in middle]
+    finally:
+        instance.shutdown()
+
+
+def test_unknown_window_keeps_the_routine_rule_without_survival_fit(tmp_path):
+    # With no known window there is no default prefix bound to cut a frontier, with or without survival fit.
+    instance = make_engine(tmp_path, 0, survival_fit=False)
+    try:
+        assert instance._survival_ceiling() is None
+        shallow = add_nodes(instance, 0, 4, token_count=700)
+        add_nodes(instance, 1, 8, token_count=900)
+        assert selected(instance) == [(0, node_id) for node_id in shallow]
+    finally:
+        instance.shutdown()
