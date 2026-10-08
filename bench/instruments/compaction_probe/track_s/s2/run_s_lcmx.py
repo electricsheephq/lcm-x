@@ -354,6 +354,7 @@ def main():
                "worktree": str(seam.WORKTREE), "worktree_head": seam.PINNED, "context_length": args.context_length,
                "stop_row_index": stop, "slice": args.slice, "checkpoint": args.checkpoint,
                "fleet_keys_excluded": A.FLEET_EXCLUDED, "harness_overrides": A.HARNESS_OVERRIDES, "started": time.time(),
+               "material_sha256": hashlib.sha256((sdir / "material.manifest.json").read_bytes()).hexdigest(),
                "population": "prefix60k" if args.prefix60k else "full-stream"}
     if arm["unsupported"]:
         summary.update(status="UNSUPPORTED", reason=arm["unsupported"])

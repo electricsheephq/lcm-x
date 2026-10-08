@@ -85,6 +85,64 @@ Level-3 provenance and r1/r2 spread remain separately reported.
 Missing requested pairs mark the analysis `INCOMPLETE`; isolation or reader-pin failures, failed forced S4 checkpoints, auth refreshes, and a reused S4 home with `config.toml` fail the run.
 Incremental scoring maintains `decision/manifest.json` with receipt hashes and scoring times; reports ignore and list unmanifested checkpoint JSONs, while legacy directories without a manifest retain their existing behavior and report `manifest: absent`.
 
+### Release over release (Phase D, D2)
+
+D2 pairs the same arm on two product trees: the previous GA and the candidate. Replay each
+tree into its own output root (`PREV_ROOT`, `CAND_ROOT`), score each root once, then pair them.
+
+```bash
+# Previous GA tree, then the candidate tree: same arm, seeds 1/2/3, runs d<seed>-r1/-r2 each, one wall receipt per run.
+replay() {  # <root> <checkout> <commit>
+  mkdir -p "$1/decision/logs"
+  for seed in 1 2 3; do for rep in r1 r2; do
+    wall="$1/decision/logs/s2-LCMX-fleet-d$seed-$rep.log.wall"
+    echo "start $(date +%s)" > "$wall"
+    TRACK_S_OUT="$1" S2_PRODUCT_WORKTREE="$2" S2_PRODUCT_SHA="$3" \
+      python3 -B "$KIT/s2/run_s_lcmx.py" --arm LCMX-fleet \
+      --seed "$seed" --run "d$seed-$rep" --lane glm --reader glm --checkpoints 176,304 \
+      && echo "exit 0 end $(date +%s)" >> "$wall"
+  done; done
+}
+replay "$PREV_ROOT" "$PREV_CHECKOUT" "$PREV_COMMIT"
+replay "$CAND_ROOT" "$CAND_CHECKOUT" "$CAND_COMMIT"
+for root in "$PREV_ROOT" "$CAND_ROOT"; do
+  python3 -B "$KIT/decision/score_decision.py" \
+    --run-root "$root/lcmx-runs" --logs "$root/decision/logs" \
+    --material "$TRACK_S_MATERIAL" --out "$root/decision" \
+    --arms LCMX-fleet --seeds 1 2 3 --checkpoints 176 304
+done
+python3 -B "$KIT/decision/analyze_paired.py" --material "$TRACK_S_MATERIAL" \
+  --arms LCMX-fleet LCMX-fleet --labels prev cand --seeds 1 2 3 --checkpoints 176 304 \
+  --run-root "$PREV_ROOT/lcmx-runs" --decision-root "$PREV_ROOT/decision" --logs "$PREV_ROOT/decision/logs" \
+  --second-tree "$CAND_ROOT/lcmx-runs" "$CAND_ROOT/decision" "$CAND_ROOT/decision/logs" \
+  --expect-shas "$PREV_COMMIT" "$CAND_COMMIT" \
+  > "$CAND_ROOT/d2-paired.json"
+```
+
+`--second-tree RUN_ROOT DECISION_ROOT LOGS` reads the second arm from the candidate root;
+`--labels` (distinct; default the two arm names) key `per_arm`, `loss_classes` and `trees`.
+Every `p` is rounded for display and has an unrounded `p_exact`. The gate reads `d2.verdict`
+(`INCOMPLETE`, `REPEAT_SEEDS`, `BLOCK` or `PASS`) and, per checkpoint, `d2.cp-<n>.p_exact` and
+`effect_pts_exact` (candidate minus previous, facts kept). `d2.spread_over_0.10` lists, per label,
+each `cp-<n>/seed-<n>` whose r1/r2 facts-kept spread exceeds 0.10 (`REPEAT_SEEDS`); repeating those
+seeds, and the inconclusive outcome, is the operator's step. `--expect-shas` (required with
+`--second-tree`) binds each arm to its product commit. The verdict is also `INCOMPLETE` when a
+checkpoint/seed spread is unmeasured (`d2.missing_spread`, e.g. a missing receipt), a counted run
+records another commit (`d2.sha_mismatch`), an admitted score's recorded receipt hash differs from
+the selected tree's run receipt (`d2.receipt_mismatch`, e.g. a decision root from another tree), or,
+with `--second-tree`, the configuration the arm applies differs between the trees (`d2.config_diff_keys`;
+single-tree runs compare different arms on purpose; the tokenizer is part of the configuration), a counted run
+replayed other material than the analysis reads, or a material file no longer matches the hash its manifest lists or
+is named outside its seed directory (`d2.material_mismatch`; the runner records `material_sha256`; file mismatches are
+reported before any material is parsed), or the analysis omits a D2 seed or checkpoint
+(`d2.missing_required`; D2 is seeds 1/2/3 at checkpoints 176 and 304). Repeated `--seeds` or `--checkpoints` values
+stop the analysis with an error. With `--second-tree`, each tree's decision root and logs must sit in its run root's
+tree, or the analysis stops with an error. `d2.effective_config_diff_keys` names the keys of the runs' recorded
+`config.json` that differ; it is a diagnostic, not a verdict input, because a product default that changes between
+releases is the change under test. It is `null` when any run lacks a readable config, and
+`d2.effective_config_unavailable` names those runs. Host load is also a diagnostic, not a verdict input:
+with `--second-tree`, pass one `--load-log` that covers both trees' run windows.
+
 The historical decision runner accepts `glm|s4 <seed> [lossless-checkout] [CLI-auth-file]`;
 `run_seeds_2_3.sh` accepts those last two inputs and retains its existing scheduling.
 The stub2k gate retains its historical rc3 SHA requirement and writes below
