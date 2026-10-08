@@ -86,7 +86,9 @@ leaves right after the turn is rejected for five reasons:
   Track S at the v0.28.0 rc1 judges any quality effect.
 - The producing model and escalation level, stored on the prepared node (`summary_model`, `escalation_level` in
   `pending_summary_nodes` below). Promotion copies both into `summary_node_provenance`, so a restart or a hygiene clone
-  promotes with the model that wrote the summary. The worker never writes the shared `_last_leaf_summary_model` (#441).
+  promotes with the model that wrote the summary. The worker never writes a shared engine field that the foreground
+  reads after a leaf call: `_last_leaf_summary_model` (#441) and `_last_leaf_level_3_verbatim` today. S2 makes the leaf
+  helper return that per-call metadata to its caller, so concurrent foreground and background calls cannot cross.
 - Row identity hashes `timestamp`, not `observed_at`. Exclusions are recomputed with
   `_stored_publication_filter_exclusions`, and carried ranges are passed.
 
@@ -131,8 +133,10 @@ leaves right after the turn is rejected for five reasons:
 **Condensation.** Prepared condensations stay out, as the non-goals say. Condensation leaves the turn by a different
 route: a canonical off-turn condenser in the same worker, under the condensation fence (#988). It is the exception to
 the ownership rule above, and S6 must show it is safe before it ships. Its inputs are canonical nodes and it moves no
-frontier, so session end and the hygiene clone's in-memory state do not depend on it. Its node reaches the wire only
-at the next `compress()` assembly, which reads the store. If S6 cannot show this, condensation publication moves back
+frontier, so session end and the hygiene clone's in-memory state do not depend on it. Like a foreground
+condensation, its node is visible to canonical readers (recall, FTS, rollups) as soon as it commits; only the active
+prompt waits for the next `compress()` assembly. S6's proof covers readers that see a condensation commit mid-turn.
+If S6 cannot show this, condensation publication moves back
 onto `compress()` as a promotion of a prepared condensation.
 
 **Hygiene (#626).** Prepared batches live in SQLite, so hygiene's fresh clone promotes them like any other caller.
