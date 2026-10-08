@@ -838,7 +838,7 @@ def test_trap_and_recall_metrics_count_their_truncated_probes(tmp_path):
     m = sc.score(material, run, "LCMX-a")["metrics"]
     assert m["trap_abstention"]["reader_truncated"] == m["trap_failure_rate"]["reader_truncated"] == 1
     assert m["trap_abstention"]["denominator"] == 1
-    assert m["recall"]["reader_truncated"] == 1 and m["recall"]["denominator"] == 3  # X-F1 is the clipped-middle fact
+    assert m["recall"]["reader_truncated"] == 1 and m["recall"]["denominator"] == 2  # tagged X-F1..X-F3; X-F1 excluded
     assert m["facts_kept"]["reader_truncated"] == 1 and m["continuation"]["reader_truncated"] == 0
 
 

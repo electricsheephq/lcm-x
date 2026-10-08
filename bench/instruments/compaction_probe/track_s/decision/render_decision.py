@@ -94,7 +94,8 @@ def rows_for(data, arms, cp):
     lines, js = [], {}
 
     def truncation(col):  # facts and continuation cells: per run, the probes score_s.py excluded as READER_TRUNCATED
-        key, unit = ("continuation", "fields") if col == "continuation" else ("facts_kept", "facts") if col.startswith("facts") else (None, "")
+        key, unit = {"continuation": ("continuation", "fields"), "trap abst.": ("trap_abstention", "traps"),
+                     "recall": ("recall", "facts")}.get(col, ("facts_kept", "facts") if col.startswith("facts") else (None, ""))
         return {"excluded": lambda r: r["metrics"][key].get("reader_truncated") or 0, "unit": unit} if key else {}
     cols = [("facts kept", lambda r: r["metrics"]["facts_kept"]["value"]),
             ("facts head", lambda r: placement(r, "head")), ("facts middle", lambda r: placement(r, "middle")),
@@ -162,20 +163,25 @@ def behaviour(data, arms):
 
 
 def parity(js_q, cp):
-    """LCM-X vs each arm: per-seed band = max(|r1-r2|) over the two arms; parity+ = LCMX mean >= other mean - band."""
+    """LCM-X vs each arm: per-seed band = max(|r1-r2|) over the two arms; parity+ = LCMX mean >= other mean - band.
+    A verdict over a cell with reader-truncated exclusions stands (exclusion is by design) and carries the marker."""
     lines = [f"| metric (cp-{cp}) | vs arm | LCMX-fleet | other | spread used | verdict |", "|---|---|---|---|---|---|"]
     out = {}
     for m in ("facts kept", "continuation", "continuity strict"):
         for other in ARMS[1:]:
             a, b = js_q.get("LCMX-fleet", {}).get(m), js_q.get(other, {}).get(m)
+            ex = {"LCMX-fleet": (a or {}).get("excluded", 0), other: (b or {}).get("excluded", 0)}
+            inc = bool((a or {}).get("incomplete_runs") or (b or {}).get("incomplete_runs"))
             if not a or not b or a["value"] is None or b["value"] is None:
                 v = "INCOMPLETE"
                 lines.append(f"| {m} | {other} | {a and a['display']} | {b and b['display']} | — | {v} |")
             else:
                 band = max(a["spread"], b["spread"])
                 v = "parity+" if a["value"] >= b["value"] - band else "below"
-                lines.append(f"| {m} | {other} | {f3(a['value'])} | {f3(b['value'])} | {f3(band)} | {v} |")
-            out[f"{m}/{other}"] = v
+                unit = "fields" if m == "continuation" else "facts"
+                mark = f" (INCOMPLETE: LCM-X {ex['LCMX-fleet']} {unit}, other {ex[other]} {unit} excluded)" if inc else ""
+                lines.append(f"| {m} | {other} | {f3(a['value'])} | {f3(b['value'])} | {f3(band)} | {v}{mark} |")
+            out[f"{m}/{other}"] = {"verdict": v, "incomplete": inc, "excluded": ex}
     return lines, out
 
 

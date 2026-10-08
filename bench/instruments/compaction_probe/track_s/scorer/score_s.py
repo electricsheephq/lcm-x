@@ -353,7 +353,8 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     lost = sorted(set(run["admission_missing"]) & {f["id"] for f in facts})
     probes = {pid: {"class": "READER_TRUNCATED", "batch": by_id[pid]["batch"], "answer": by_id[pid]["answer"]} for pid in truncated}
     truncated_facts = {f["id"] for f in facts} & truncated
-    facts = [f for f in facts if f["id"] not in truncated]
+    all_facts, facts = facts, [f for f in facts if f["id"] not in truncated]  # recall drops its own truncated tags
+    truncated_traps = {t["id"] for t in traps} & truncated
     traps = [t for t in traps if t["id"] not in truncated]
     truncated_fields = {k for k in cont_state if f"{cont_state['id']}.{k}" in truncated}
     cont_state = {k: v for k, v in cont_state.items() if k not in truncated_fields}
@@ -399,8 +400,9 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     abst = [t["id"] for t in traps if judge(t["id"], None, True)[0] == "ABSTAIN"]
     mt = missing(t["id"] for t in traps)
     ti = base + ([("INCOMPLETE", f"no row for {mt}")] if mt else [])
-    m["trap_abstention"] = metric(len(abst) / len(traps) if traps else None, ti, abstained=abst, denominator=len(traps))
-    m["trap_failure_rate"] = metric(1 - len(abst) / len(traps) if traps else None, ti, lower_is_better=True)
+    m["trap_abstention"] = metric(len(abst) / len(traps) if traps else None, ti, abstained=abst, denominator=len(traps),
+                                  reader_truncated=len(truncated_traps))
+    m["trap_failure_rate"] = metric(1 - len(abst) / len(traps) if traps else None, ti, lower_is_better=True, reader_truncated=len(truncated_traps))
     # continuation, field by field
     fields = [k for k in cont_state if k not in CONT_META]
     ok_f, mc = [], []
@@ -417,7 +419,7 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     m["continuity"] = continuity(run, man)
     m["level3"] = level3(run)
     m["latency"] = latency(run)
-    m["recall"] = recall(run, man, facts, by_id, probes, base, lost)
+    m["recall"] = recall(run, man, all_facts, by_id, probes, base, lost)
     comp = [e for e in run["events"] if e["compaction"]]
     # S7 D1/D7 checkpoint labels: no-event = 0 compactions by this checkpoint; assembly-starved = the
     # reader request carried 0 summary blocks while the store held >= 1 summary (counted by the writer in the request it built; field summary_blocks).
@@ -512,7 +514,8 @@ def recall(run, man, facts, by_id, probes, base, lost):
             tags.setdefault(f["id"], []).append("clipped-middle")
     for t in man.get("receipt_targets", []):
         tags.setdefault(t["id"], []).append({"externalization": "externalized-file", "ancestry": "superseded-decision"}[t["kind"]])
-    tags = {pid: tg for pid, tg in tags.items() if probes.get(pid, {}).get("class") != "READER_TRUNCATED"}
+    kept = {pid: tg for pid, tg in tags.items() if probes.get(pid, {}).get("class") != "READER_TRUNCATED"}
+    cut, tags = len(tags) - len(kept), kept
     iss, per_label, per_answer, n_ok = list(base), {k: [0, 0] for k in LABELS}, [], 0
     for pid, tg in sorted(tags.items()):
         r, p = by_id.get(pid), probes.get(pid, {})
@@ -535,7 +538,7 @@ def recall(run, man, facts, by_id, probes, base, lost):
             iss.append(("UNTESTED", f"{pid}: receipt {rc}"))
         elif r is not None and not ok and ("clipped-middle" in tg or "externalized-file" in tg):
             iss.append(("FAIL", f"{'externalized-file' if 'externalized-file' in tg else 'clipped-middle'} fact unreachable: {pid}"))
-    return metric(n_ok / len(tags) if tags else None, iss, correct=n_ok, denominator=len(tags), by_label=per_label,
+    return metric(n_ok / len(tags) if tags else None, iss, correct=n_ok, denominator=len(tags), reader_truncated=cut, by_label=per_label,
                   per_answer=per_answer, label_map=run["label_map"])
 
 
