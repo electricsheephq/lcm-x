@@ -76,8 +76,11 @@ leaves right after the turn is rejected for five reasons:
 - Stub-first exits promote before they return.
 
 **What a prepared leaf carries.**
-- The summary route the foreground uses (prompt v1 today, #660). The route fingerprint includes
-  `summary_prompt_version`, so a batch prepared under another prompt version is rejected at promotion.
+- The summary route the foreground uses (prompt v1 today, #660). The route fingerprint covers every setting the
+  foreground leaf call reads: model and fallbacks, `summary_prompt_version`, `summary_reasoning_effort`, and the leaf
+  output budget (`leaf_target_ratio`, `leaf_target_min_tokens`, `leaf_target_max_tokens`). A batch prepared under any
+  other value is rejected at promotion. S3's test derives the list from the config fields
+  `_summarize_leaf_chunk_with_rescue` reads, so a new setting cannot be missed.
 - No previous-summary continuity context, because the foreground leaf passes none. This replaces preparation step 4.
   The worker records the `focus_topic` it used on the batch; a mismatch with the live list is not a rejection reason.
   Track S at the v0.28.0 rc1 judges any quality effect.
@@ -96,8 +99,10 @@ leaves right after the turn is rejected for five reasons:
   when the job ends, the worker re-reads the estimate and runs again if the flag is set.
 - Batch creation is arbitrated by the database, not the process: a partial unique index on the live generation of a
   frontier (below) plus `INSERT OR IGNORE`, so two processes that open the same profile store cannot both create and
-  claim a batch for one frontier. A new session in the conversation supersedes the previous session's live batches
-  when its first job runs, so they never block it.
+  claim a batch for one frontier. The key is the frontier alone, without the fingerprints. A job whose live
+  fingerprints differ from a live batch's first supersedes that batch (a compare-and-set to `superseded`), then
+  inserts its own, so stale and current batches never compete for promotion. A new session in the conversation
+  supersedes the previous session's live batches the same way.
 - A job is scheduled at any turn end that has eligible rows past one leaf chunk. Prepared work is sized in tokens:
   the job loops until the predicted estimate after promotion, the current estimate minus the ready chain's savings
   (per batch, the source tokens minus the rendered cost of the summary as assembly emits it, header, expand hint and
@@ -215,8 +220,9 @@ Indexes:
 - `(conversation_id, state, created_at)`
 - `(session_id, state, created_at)`
 - `(next_retry_at, state)`
-- `UNIQUE (conversation_id, session_id, frontier_start_store_id, policy_fingerprint, summary_route_fingerprint) WHERE state IN
-  ('pending', 'preparing', 'ready', 'promoting')` — one live generation per frontier; creation uses `INSERT OR IGNORE`
+- `UNIQUE (conversation_id, session_id, frontier_start_store_id) WHERE state IN ('pending', 'preparing', 'ready',
+  'promoting')` — one live generation per frontier, whatever its fingerprints; creation uses `INSERT OR IGNORE` after
+  superseding a live batch whose fingerprints are stale
 
 ### `pending_summary_nodes`
 
@@ -280,6 +286,8 @@ Hash the effective summarizer contract:
 - `summary_model`
 - `summary_fallback_models`
 - `summary_prompt_version`
+- `summary_reasoning_effort`
+- `leaf_target_ratio`, `leaf_target_min_tokens`, `leaf_target_max_tokens` (they set the leaf's output budget)
 - provider/model route after parsing, if available
 - summarizer timeout class only if it changes produced summaries or failure policy
 - plugin version/protocol version
