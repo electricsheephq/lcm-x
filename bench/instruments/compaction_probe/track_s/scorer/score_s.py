@@ -111,6 +111,27 @@ def jlines(p: Path):
     return [json.loads(x) for x in p.read_text(encoding="utf-8").splitlines() if x.strip()] if p.exists() else []
 
 
+def reader_calls(run_dir: Path):
+    """(batch id, per-call usage) as each writer records it: S2 answers/<batch>.json (reader_calls, else usage); S1
+    replay.ts clones/<batch id>/answer.json (openClone(b.id); open and wiring clones carry no reader_calls) and
+    summary.json reader_calls [{batch, calls}]."""
+    for p in sorted((run_dir / "answers").glob("*.json")):
+        a = jload(p)
+        yield a.get("batch"), a.get("reader_calls") or [a.get("usage")]
+    for p in sorted((run_dir / "clones").glob("*/answer.json")):
+        if "reader_calls" in (a := jload(p)):
+            yield p.parent.name, a["reader_calls"] or []
+    summ = jload(run_dir / "summary.json") if (run_dir / "summary.json").exists() else {}
+    for b in summ.get("reader_calls") or []:
+        yield b.get("batch"), b.get("calls") or []
+
+
+def final_capped(calls) -> bool:
+    """The batch's final reader call reached the 8192 completion cap (a delegated child call is not the reply)."""
+    calls = [c for c in calls if not isinstance(c, dict) or str(c.get("purpose") or "reader").startswith("reader")]
+    return bool(calls) and ((calls[-1] or {}).get("completion_tokens") or 0) >= 8192
+
+
 # ---- arm adapters: each returns the normalised run dict ----------------------------------------------------------
 def row_of(r, label, calls=None, tokens=None, wall=None, attribution=None, flags=()):
     return {"id": r["probe_id"], "kind": r.get("probe_kind"), "answer": r.get("answer"), "timed_out": bool(r.get("timed_out")),
@@ -201,8 +222,9 @@ def adapt_s2(run_dir: Path, rows, arm):
     summ = jload(run_dir / "summary.json")
     tool_log = {}
     for p in (run_dir / "answers").glob("*.json") if (run_dir / "answers").exists() else []:
-        a = jload(p)
-        tool_log[a.get("batch")] = {t.get("tool") for t in a.get("tool_log") or []}
+        a = jload(p)  # a retried batch keeps only its last attempt at the top level; every attempt is in attempts[]
+        logs = [a.get("tool_log")] + [t.get("tool_log") for t in a.get("attempts") or []]
+        tool_log[a.get("batch")] = {t.get("tool") for log in logs for t in log or []}
     out_rows = []
     for r in rows:
         tools = tool_log.get(r.get("batch_id"), set()) if r.get("arm_kind") == "open" else set()
@@ -307,9 +329,7 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     run = detect(run_dir, all_rows)(run_dir, rows, arm) if (run_dir / "summary.json").exists() else {
         "runtime": "unknown", "writer": None, "rows": [], "events": [], "run_status": "UNRUN", "store_backed": False,
         "admission_missing": [], "receipts": {}, "gaps": ["summary.json missing"], "label_map": {}}
-    capped = {a.get("batch") for p in (run_dir / "answers").glob("*.json") if
-              ((a := jload(p)).get("reader_calls") or [a.get("usage")])[-1] and
-              ((a.get("reader_calls") or [a.get("usage")])[-1] or {}).get("completion_tokens", 0) >= 8192}
+    capped = {b for b, calls in reader_calls(run_dir) if final_capped(calls)}
     # only unanswered probes of a capped batch are excluded; an admission-proven loss stays a loss
     truncated = {r["id"] for r in run["rows"] if (r["answer"] is None or isinstance(r["answer"], str) and not r["answer"].strip()) and
                  ((r["row_status"] == "ERROR" and "READER_TRUNCATED" in (r["error"] or "")) or r["batch"] in capped)}
@@ -335,7 +355,8 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     truncated_facts = {f["id"] for f in facts} & truncated
     facts = [f for f in facts if f["id"] not in truncated]
     traps = [t for t in traps if t["id"] not in truncated]
-    cont_state = {k: v for k, v in cont_state.items() if f"{cont_state['id']}.{k}" not in truncated}
+    truncated_fields = {k for k in cont_state if f"{cont_state['id']}.{k}" in truncated}
+    cont_state = {k: v for k, v in cont_state.items() if k not in truncated_fields}
 
     def judge(pid, expected, trap):
         r = by_id.get(pid)
@@ -392,7 +413,7 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
         probes[pid] = {"batch": (r or {}).get("batch"), "class": "CORRECT" if k in ok_f else "MISSING" if r is None else "MISS",
                        "answer": (r or {}).get("answer")}
     m["continuation"] = metric(len(ok_f) / len(fields) if fields else None, base + ([("INCOMPLETE", f"no continuation_field row for {mc}")] if mc else []),
-                               correct_fields=ok_f, denominator=len(fields))
+                               correct_fields=ok_f, reader_truncated=len(truncated_fields), denominator=len(fields))
     m["continuity"] = continuity(run, man)
     m["level3"] = level3(run)
     m["latency"] = latency(run)
