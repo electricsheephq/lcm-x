@@ -18,6 +18,9 @@ TRACK = Path(__file__).resolve().parents[1] / "bench/instruments/compaction_prob
     ([({}, [8192]), ({}, [8192])], 2, True),
     ([({}, [8192]), ({"f": "kept"}, [10])], 2, False),
     ([({}, [8192]), ({}, [10])], 2, True),  # a cap-triggered retry that still leaves a probe unanswered stays truncated
+    ([({"f": 42}, [10])], 1, False),  # a non-string answer is an answer, never an exception
+    ([({"f": 0}, [8192])], 1, False),  # a falsy non-string answer completes the batch: no retry
+    ([({}, [8192]), ({"f": ["a list"]}, [10])], 2, False),
     ([({"f": "kept"}, [8192])], 1, False),
     ([({}, [8192, 10])], 1, False),
     ([({}, [8191])], 1, False),
