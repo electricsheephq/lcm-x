@@ -200,7 +200,8 @@ def per_arm():
                     l3 += sc["stored_level3"]["level3"]
                     leaves += sc["stored_level3"]["leaves"]
                     facts.setdefault(seed, {})[run] = sc["metrics"]["facts_kept"]["value"]
-        sp = {f"seed-{k}": round(abs(v["r1"] - v["r2"]), 3) for k, v in facts.items() if len(v) == 2}
+        sp = {f"seed-{k}": None if None in (v["r1"], v["r2"]) else round(abs(v["r1"] - v["r2"]), 3)
+              for k, v in facts.items() if len(v) == 2}  # None: a run had no scorable fact (all reader-truncated)
         out[arm] = {
             "leaf_call_wall_s": st(leaf),
             "compaction_wall_s": st(comp),
@@ -213,7 +214,8 @@ def per_arm():
             "leaves": leaves,
             "level3_rate": round(l3 / leaves, 4) if leaves else None,
             f"facts_cp{max(CPS)}_r1_r2_spread": sp,
-            "spread_over_0.10": [k for k, v in sp.items() if v > 0.10],
+            "spread_over_0.10": [k for k, v in sp.items() if v is not None and v > 0.10],
+            "spread_unmeasured": [k for k, v in sp.items() if v is None],
             "runs_with_load_over_16": hiload,
         }
     return out

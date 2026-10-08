@@ -311,7 +311,7 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
               ((a := jload(p)).get("reader_calls") or [a.get("usage")])[-1] and
               ((a.get("reader_calls") or [a.get("usage")])[-1] or {}).get("completion_tokens", 0) >= 8192}
     # only unanswered probes of a capped batch are excluded; an admission-proven loss stays a loss
-    truncated = {r["id"] for r in run["rows"] if not (r["answer"] or "").strip() and
+    truncated = {r["id"] for r in run["rows"] if (r["answer"] is None or isinstance(r["answer"], str) and not r["answer"].strip()) and
                  ((r["row_status"] == "ERROR" and "READER_TRUNCATED" in (r["error"] or "")) or r["batch"] in capped)}
     truncated -= set(run["admission_missing"])
     base = [("INCOMPLETE", f"READER_TRUNCATED: {len(truncated)} probes excluded: {sorted(truncated)}")] if truncated else []
