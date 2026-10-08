@@ -382,6 +382,10 @@ class _RollupMaintenanceScheduler:
 _ROLLUP_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler()
 
 _SESSION_END_BUSY_TIMEOUT_MS = 50
+# #909/#977: a condensation group of at most this many source tokens is about as long as its summary (Track S
+# output/source rises from about 0.35 at 1.4k tokens to about 0.8 at 0.85k), so condensing it cannot be relied on to
+# shrink the frontier. The configured L3 bound applies when larger: such a source is stored whole.
+_CONDENSATION_LIGHT_GROUP_TOKENS = 512
 _CODEX_GPT55_COMPACTION_THRESHOLD = 0.85
 _TOTAL_COMPACTIONS_SCOPE = "current_conversation"
 
@@ -410,6 +414,19 @@ class SummaryResultRejected(RuntimeError):
 def _condensation_source_text(nodes) -> str:
     """The summariser source of one same-depth condensation."""
     return "\n\n---\n\n".join(node.summary for node in nodes)
+
+
+_SUMMARY_DEPTH_LABELS = {0: "Recent", 1: "Session Arc", 2: "Durable"}
+
+
+def _summary_part_text(node) -> str:
+    """One frontier node as context assembly renders it in the summary prefix."""
+    label = _SUMMARY_DEPTH_LABELS.get(node.depth, f"Depth-{node.depth}")
+    return (
+        f"[{label} Summary (d{node.depth}, node {node.node_id})]\n"
+        f"{node.summary}\n"
+        f"[Expand for details: {node.expand_hint}]"
+    )
 
 
 def _normalize_total_compactions(value: Any) -> int:
@@ -7249,8 +7266,13 @@ class LCMEngine(
     def _summary_frontier_tokens(self) -> int:
         return sum(node.token_count for node in self._summary_frontier_nodes())
 
+    def _rendered_summary_frontier_tokens(self, nodes: Optional[List[SummaryNode]] = None) -> int:
+        """#977: the frontier as assembly renders it (headers, expand hints, separators, message framing)."""
+        parts = [_summary_part_text(node) for node in (self._summary_frontier_nodes() if nodes is None else nodes)]
+        return count_message_tokens({"role": "user", "content": "\n\n---\n\n".join(parts)}) if parts else 0
+
     def _select_threshold_sweep_condensation_group(self) -> List[SummaryNode]:
-        """Prefer the heaviest routine depth, then allow bounded pressure condensation."""
+        """Prefer the shallowest routine depth (heaviest under prefix pressure), then bounded pressure condensation."""
         by_depth: dict[int, list[SummaryNode]] = {}
         for node in self._summary_frontier_nodes():
             by_depth.setdefault(node.depth, []).append(node)
@@ -7263,7 +7285,19 @@ class LCMEngine(
             if (preferred_max_depth < 0 or depth < preferred_max_depth) and len(nodes) >= fanin
         ]
         if eligible_depths:
-            depth = max(eligible_depths, key=lambda d: (sum(node.token_count for node in by_depth[d][:fanin]), -d))
+            group_tokens = {d: sum(node.token_count for node in by_depth[d][:fanin]) for d in eligible_depths}
+            # #977: with survival fit the #930 default prefix budget never falls below a quarter of the survival
+            # ceiling, so a frontier that renders smaller is never cut: condense the shallowest depth whose group
+            # can shrink (#909) and keep the older detail; under pressure, or when no group can shrink, the
+            # heaviest. With no known window there is no default bound.
+            light = max(_CONDENSATION_LIGHT_GROUP_TOKENS, int(self._config.l3_truncate_tokens or 0))
+            routine = [d for d in sorted(eligible_depths)
+                       if count_tokens(_condensation_source_text(by_depth[d][:fanin])) > light]
+            ceiling = self._survival_ceiling()
+            if routine and (ceiling is None or (self._config.survival_fit and self._rendered_summary_frontier_tokens(
+                    [node for nodes in by_depth.values() for node in nodes]) <= ceiling // 4)):
+                return by_depth[routine[0]][:fanin]
+            depth = max(eligible_depths, key=lambda d: (group_tokens[d], -d))
             return by_depth[depth][:fanin]
         # The frontier still exceeds its sweep target but no routine group is
         # available. Permit a same-depth partial group or depth beyond the
@@ -7884,16 +7918,7 @@ class LCMEngine(
                 uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d, newest=True)
                 for node in uncondensed:
                     part_keys.append((group, node.node_id))
-                    depth_label = {
-                        0: "Recent",
-                        1: "Session Arc",
-                        2: "Durable",
-                    }.get(d, f"Depth-{d}")
-                    summary_parts.append(
-                        f"[{depth_label} Summary (d{d}, node {node.node_id})]\n"
-                        f"{node.summary}\n"
-                        f"[Expand for details: {node.expand_hint}]"
-                    )
+                    summary_parts.append(_summary_part_text(node))
 
         retained_generated_context_parts: list[str] = []
         summary_message: Optional[Dict[str, Any]] = None
