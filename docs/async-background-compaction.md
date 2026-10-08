@@ -56,7 +56,9 @@ the turn is rejected for five reasons:
   `stage_compaction_publication` and marks the batch promoted, in one transaction on the DAG connection. No new
   publish path decides frontier contiguity, session binding or "already claimed". In-process markers update after
   the commit, as for a foreground leaf.
-- Promotion runs at the top of `_compress_impl`'s summarising work, before pre-leaf condensation. If the estimate is
+- Promotion runs at the top of `_compress_impl`, before the no-progress hold's cleanup-only return and before pre-leaf
+  condensation. A ready chain at the live frontier is progress that costs no model call, so it also lifts the hold:
+  `should_compress` reports true while one exists, and the host calls `compress()` during a hold. If the estimate is
   then below the #671 target, `min(T − leaf_chunk, 0.95·T)`, the pass makes no foreground summariser call at all:
   no remainder leaf, no pre-leaf or post-drain condensation. Otherwise today's path runs for the gap.
 - Each batch is checked inside the transaction. Any failure marks it `rejected` with a reason and the fallback
@@ -73,23 +75,34 @@ the turn is rejected for five reasons:
 - No previous-summary continuity context, because the foreground leaf passes none. This replaces preparation step 4.
   The worker records the `focus_topic` it used on the batch; a mismatch with the live list is not a rejection reason.
   Track S at the v0.28.0 rc1 judges any quality effect.
-- The producing model, stored with the summary. The worker never writes the shared `_last_leaf_summary_model` (#441).
+- The producing model and escalation level, stored on the prepared node (`summary_model`, `escalation_level` in
+  `pending_summary_nodes` below). Promotion copies both into `summary_node_provenance`, so a restart or a hygiene clone
+  promotes with the model that wrote the summary. The worker never writes the shared `_last_leaf_summary_model` (#441).
 - Row identity hashes `timestamp`, not `observed_at`. Exclusions are recomputed with
   `_stored_publication_filter_exclusions`, and carried ranges are passed.
 
 **The worker.**
-- One daemon thread per process, with dedup per conversation. It runs each job in the captured context of the turn
-  that scheduled it, which carries the profile's secret scope and home (#987).
+- One daemon thread per process. Dedup is keyed by the store (its profile home and database path) plus the
+  conversation id, because one process can serve several profile homes that use the same conversation id. It runs
+  each job in the captured context of the turn that scheduled it, which carries the profile's secret scope and home
+  (#987).
 - A job is scheduled at any turn end that has eligible rows past one leaf chunk. Prepared work is sized in tokens:
-  the job loops until the ready chain covers (current − target) plus one leaf, or the worker's spend share runs out.
+  the job loops until the predicted estimate after promotion, the current estimate minus the ready chain's savings
+  (`source_token_count − token_count` per batch), is at or below the target with one leaf of headroom, or the worker's
+  spend share runs out. Source tokens covered are not the measure: a summary only has to be shorter than its source.
   There is no fixed batch cap, so `async_background_compaction_max_batches` is dropped.
 - It has its own circuit-breaker key and a bounded share of the summary spend guard (default half of
   `LCM_SUMMARY_SPEND_MAX_CALLS`), so the foreground fallback always has budget.
-- When the host's `auxiliary.compression.max_concurrency` is 1, the worker yields and never holds the slot while a
-  foreground `compress()` waits.
+- The worker never takes the foreground's model-call slot. When the host's `auxiliary.compression.max_concurrency`
+  is set, the worker uses at most that value minus one; at 1 it does not run, and today's foreground path serves the
+  profile. Unset means no host cap. A call already in flight cannot yield, so reserving the slot up front is the
+  mechanism; a test starts a foreground compression while a slow background call is in flight and asserts the
+  foreground call does not wait on it.
 - It holds no transaction across a model call (a gateway exit can kill it mid-call). Its writes are single statements,
-  and the batch UPDATE is conditional on `state='ready'`. The cleanup timeout for a stale `preparing` batch is longer
-  than the worst-case prepare.
+  and each state change is a compare-and-set on the state it leaves plus the claim token the job wrote when it moved
+  the batch to `preparing`: completion is `SET state='ready' … WHERE batch_id=? AND state='preparing' AND
+  claim_token=?`, and promotion moves only `ready` batches. A cleanup or rejection that ran first therefore wins.
+  The cleanup timeout for a stale `preparing` batch is longer than the worst-case prepare.
 
 **Condensation.** Prepared condensations stay out, as the non-goals say. Condensation leaves the turn by a different
 route: a canonical off-turn condenser in the same worker, under the condensation fence (#988). Its inputs are
@@ -153,6 +166,7 @@ Suggested columns:
 - `conversation_id TEXT NOT NULL`
 - `session_id TEXT NOT NULL`
 - `state TEXT NOT NULL` — `pending`, `preparing`, `ready`, `promoting`, `promoted`, `rejected`, `failed`, `superseded`
+- `claim_token TEXT` — written with the move to `preparing`; every later state change compares it
 - `frontier_start_store_id INTEGER NOT NULL`
 - `frontier_end_store_id INTEGER NOT NULL`
 - `fresh_tail_count INTEGER NOT NULL`
@@ -199,6 +213,8 @@ Suggested columns:
 - `earliest_at REAL`
 - `latest_at REAL`
 - `expand_hint TEXT DEFAULT ''`
+- `summary_model TEXT` — the model that produced this summary (copied into `summary_node_provenance` at promotion)
+- `escalation_level INTEGER`
 
 Indexes:
 
