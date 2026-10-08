@@ -738,7 +738,8 @@ def test_spread_is_unmeasured_when_a_run_has_no_fact_rate(tmp_path):
             "stored_level3": {"level3": 0, "leaves": 1}, "metrics": {"facts_kept": {"value": value[run]}}})
     out = ns["per_arm"]()["A"]
     assert out["facts_cp304_r1_r2_spread"] == {"seed-1": None}
-    assert out["spread_unmeasured"] == ["seed-1"] and out["spread_over_0.10"] == []
+    assert out["facts_r1_r2_spread_by_cp"] == {"cp-304": {"seed-1": None}}
+    assert out["spread_unmeasured"] == ["cp-304/seed-1"] and out["spread_over_0.10"] == []
 
 
 def scorer_kit():
@@ -807,9 +808,9 @@ def test_render_decision_marks_cells_with_excluded_facts():
     a, b = js["A"], js["B"]
     assert a["facts kept"]["display"] == "0.600 (n=2/2; INCOMPLETE: 7 facts excluded)"
     assert a["facts kept"]["value"] == 0.6
-    for col in ("facts kept", "facts head", "facts tail"):
-        assert "INCOMPLETE: 7 facts excluded" in a[col]["display"]
-        assert (a[col]["incomplete_runs"], a[col]["excluded"]) == (1, 7)
+    assert (a["facts kept"]["incomplete_runs"], a["facts kept"]["excluded"]) == (1, 7)
+    for col in ("facts head", "facts tail"):  # a score written before the per-placement count: no borrowed total
+        assert "excluded" not in a[col]["display"] and (a[col]["incomplete_runs"], a[col]["excluded"]) == (0, 0)
     assert "INCOMPLETE: 2 fields excluded" in a["continuation"]["display"]
     assert (a["continuation"]["incomplete_runs"], a["continuation"]["excluded"]) == (1, 2)
     assert "INCOMPLETE" not in a["trap abst."]["display"] and a["trap abst."]["excluded"] == 0
@@ -878,3 +879,104 @@ def test_parity_verdict_carries_the_exclusion_marker():
     assert clean.endswith("| parity+ |") and "INCOMPLETE" not in clean
     assert out["continuity strict/other"] == {"verdict": "parity+", "incomplete": False,
                                               "excluded": {"LCMX-fleet": 0, "other": 0}}
+
+
+def test_facts_kept_counts_truncations_by_placement(tmp_path):
+    sc, fx = scorer_kit()
+    material = fx.material(tmp_path)
+    run = fx.s2_run(tmp_path, answers=dict(fx.GOOD | fx.GOOD_CONT, **{"X-F0": ""}))  # X-F0 is a head fact
+    fx.wj(run / "answers/X-B0.json", {"batch": "X-B0", "reader_calls": [{"completion_tokens": 8192}]})
+    fk = sc.score(material, run, "LCMX-a")["metrics"]["facts_kept"]
+    assert fk["reader_truncated"] == 1 and fk["reader_truncated_by_placement"] == {"head": 1}
+
+
+def test_render_decision_placement_cells_count_their_own_truncations():
+    def run(value, head=0):
+        r = decision_run(value, excluded=head)
+        fk = r["metrics"]["facts_kept"]
+        fk["by_class_placement"]["path|middle"] = [1, 1]
+        fk["reader_truncated_by_placement"] = {"head": head} if head else {}
+        return r
+    data = {"A": {"seed-1": [run(0.5, head=1), run(0.7)], "seed-2": [run(0.6), run(0.6)]}}
+    a = decision_ns()["rows_for"](data, ("A",), 304)[1]["A"]
+    assert "INCOMPLETE: 1 facts excluded" in a["facts kept"]["display"]
+    assert "INCOMPLETE: 1 facts excluded" in a["facts head"]["display"]
+    assert (a["facts head"]["incomplete_runs"], a["facts head"]["excluded"]) == (1, 1)
+    for col in ("facts middle", "facts tail"):
+        assert "excluded" not in a[col]["display"] and (a[col]["incomplete_runs"], a[col]["excluded"]) == (0, 0)
+
+
+def node_has_type_stripping():
+    try:
+        out = subprocess.run(["node", "--version"], capture_output=True, text=True, timeout=30).stdout
+        return tuple(int(x) for x in out.strip().lstrip("v").split(".")[:2]) >= (23, 6)
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
+@pytest.mark.skipif(not node_has_type_stripping(), reason="needs node >= 23.6 (native type stripping)")
+def test_s1_retry_rule_matches_s2():
+    """s1/retry.ts: at most 2 attempts; a retry only fills gaps; stop unless the final reader call hit the cap with
+    probes unanswered; still unanswered after a capped attempt -> READER_TRUNCATED (as s2/run_s_lcmx.py)."""
+    script = """
+import { mergeAttempt } from %s;
+const ids = ["A", "B"], cap = 8192, run = (replies) => {
+  let s = null, n = 0;
+  for (const [got, tokens] of replies) { if (s?.stop) break; s = mergeAttempt(s, got, ids, tokens, cap); n++; }
+  return { ...s, n };
+};
+process.stdout.write(JSON.stringify({
+  filled: run([[{ A: "a1" }, 8192], [{ B: "b2", A: null }, 10], [{}, 10]]),
+  twice: run([[{ A: "a1" }, 8192], [{ A: "a2" }, 8192], [{ B: "b3" }, 10]]),
+  uncapped: run([[{ A: "a1" }, 8191], [{ B: "b2" }, 10]]),
+  blank: run([[{ A: "a1", B: "  " }, 8192], [{ B: "b2" }, 10]]),
+  unparsed: run([[null, 8192], [{ A: 0, B: ["x"] }, 10]]),
+}));
+""" % json.dumps((TRACK / "s1/retry.ts").as_uri())
+    out = json.loads(subprocess.run(["node", "--no-warnings", "--input-type=module", "-e", script], capture_output=True,
+                                    text=True, timeout=60, check=True).stdout)
+    assert out["filled"]["answers"] == {"A": "a1", "B": "b2"} and out["filled"]["n"] == 2
+    assert out["filled"]["complete"] and not out["filled"].get("error")
+    assert out["twice"]["n"] == 2 and out["twice"]["answers"] == {"A": "a1"} and not out["twice"]["complete"]
+    assert out["twice"]["error"] == "READER_TRUNCATED: completion cap 8192 reached"
+    assert out["uncapped"]["n"] == 1 and not out["uncapped"]["complete"] and not out["uncapped"].get("error")
+    assert out["blank"]["n"] == 2 and out["blank"]["answers"]["B"] == "b2" and not out["blank"].get("error")
+    assert out["unparsed"]["n"] == 2 and out["unparsed"]["answers"] == {"A": 0, "B": ["x"]}  # any non-blank value counts
+
+
+@pytest.mark.skipif(not node_has_type_stripping(), reason="needs node >= 23.6 (native type stripping)")
+def test_s1_retry_record_keeps_every_reply_and_the_retry_error():
+    """#982 review: the persisted record reconstructs a split A-then-B score (each attempt's raw reply, the merged
+    answers, the attempt that supplied each), and a retry's own error outranks the synthesized READER_TRUNCATED."""
+    script = """
+import { mergeAttempt, retryError, answerRecord } from %s;
+const ids = ["A", "B"], cap = 8192;
+const a1 = { text: '{"A": "a1"}', wall_s: 1 }, a2 = { text: '{"B": "b2", "A": "x"}', wall_s: 2 };
+let s = mergeAttempt(null, { A: "a1" }, ids, 8192, cap); s = mergeAttempt(s, { B: "b2", A: "x" }, ids, 10, cap);
+let t = mergeAttempt(null, { A: "a1" }, ids, 8192, cap); t = mergeAttempt(t, null, ids, 0, cap);
+process.stdout.write(JSON.stringify({ record: answerRecord([a1, a2], s), sources: s.sources,
+  http: retryError("HTTP 500", t), none: retryError(undefined, t), ok: retryError(undefined, s) ?? null }));
+""" % json.dumps((TRACK / "s1/retry.ts").as_uri())
+    out = json.loads(subprocess.run(["node", "--no-warnings", "--input-type=module", "-e", script], capture_output=True,
+                                    text=True, timeout=60, check=True).stdout)
+    assert out["sources"] == {"A": 1, "B": 2}
+    assert out["record"] == {"attempt_replies": ['{"A": "a1"}', '{"B": "b2", "A": "x"}'],
+                             "merged_answers": {"A": "a1", "B": "b2"}, "answer_sources": {"A": 1, "B": 2}}
+    assert out["http"] == "HTTP 500"  # the retry's transport failure is reported, not hidden as a truncation
+    assert out["none"] == "READER_TRUNCATED: completion cap 8192 reached" and out["ok"] is None
+
+
+def test_s1_replay_persists_the_retry_record():
+    src = (TRACK / "s1/replay.ts").read_text()
+    helper = src[src.index("async function askRetry("):]
+    assert "retryError(" in helper[:helper.index("\n}\n")]
+    assert src.count("...answerRecord(attempts, s)") == 2  # the batch loop and the open-probe loop
+
+
+def test_s1_replay_batch_loop_calls_the_retry_helper():
+    src = (TRACK / "s1/replay.ts").read_text()
+    assert 'import { answerRecord, mergeAttempt, retryError } from "./retry.js";' in src  # relative: esbuild resolves .js to .ts
+    helper = src[src.index("async function askRetry("):]
+    assert "mergeAttempt(" in helper[:helper.index("\n}\n")]
+    loop = src[src.index("for (const b of batches) {"):src.index("for (const id of PREFIX ? [] : OPEN_PROBES)")]
+    assert "askRetry(" in loop and "await ask(" not in loop

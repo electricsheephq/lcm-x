@@ -85,6 +85,17 @@ def normalize(body: dict, api: str) -> list[dict]:
     return out
 
 
+def tool_call_args(body: dict, api: str) -> list[str]:
+    """Assistant tool-call arguments as sent (``normalize`` keeps text only); scanned for the #659 probe nonces."""
+    out = []
+    for m in body.get("messages") or []:
+        if api == "openai":
+            out += [str((c.get("function") or {}).get("arguments") or "") for c in m.get("tool_calls") or [] if isinstance(c, dict)]
+        elif isinstance(m.get("content"), list):
+            out += [json.dumps(b.get("input")) for b in m["content"] if isinstance(b, dict) and b.get("type") == "tool_use"]
+    return out
+
+
 def usage_for(messages: list[dict], scale: float) -> int:
     return int((sum(len(m.get("content") or "") for m in messages) // 4 + 800) * scale)
 
@@ -197,6 +208,8 @@ class FakeProvider:
                "messages_sha256": hashlib.sha256(blob).hexdigest(), "messages": len(messages),
                "token_estimate": usage_for(messages, 1.0)}
         context = self.continuity_context() if role == "main" and self.continuity_context else {}
+        if context.get("nonces"):
+            context = {**context, "tool_args": tool_call_args(body, api)}
         rec["continuity"] = markers(messages, **context)
         rec["current_user_tag"] = context.get("current")
         if role == "main":

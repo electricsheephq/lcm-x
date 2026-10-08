@@ -66,8 +66,37 @@ def test_production_recall_records_health_without_changing_return(
         accounting=accounting,
     )
     assert result == ((hits, "disabled", []) if return_status else hits)
-    assert health == {"degraded": degraded, "coverage": {"fts": fts}}
+    reason = {"degraded_reason": "full-text arm unavailable"} if degraded else {}
+    assert health == {"degraded": degraded, "coverage": {"fts": fts}, **reason}
     assert accounting.degraded_outcomes == []
+
+
+def test_production_recall_records_timeout_and_reason_for_phase_d(tmp_path, monkeypatch):
+    # Phase D D1: a session-scope timeout with the full-text arm complete must not read as a healthy
+    # embeddings-off row, so the timeout and the joined degraded reason are kept (#664).
+    payload = {"hits": [], "degraded": True, "timeout": True,
+               "degraded_reason": "session exclusion scope resolution timed out; semantic retrieval is disabled",
+               "provenance": {"coverage": {"fts": "ok"}, "rerank": "disabled"}}
+    _install_recall(monkeypatch, payload)
+    health = {}
+    lme.production_recall_hits(
+        _question(), SimpleNamespace(), None, None, None,
+        provider_name="none", tmp_dir=tmp_path, embeddings_enabled=False,
+        limit=10, recall_health=health,
+    )
+    assert health == {"degraded": True, "coverage": {"fts": "ok"}, "timeout": True,
+                      "degraded_reason": payload["degraded_reason"]}
+    off = {"hits": [], "degraded": True, "degraded_reason": "semantic retrieval is disabled",
+           "provenance": {"coverage": {"fts": "ok"}}}
+    _install_recall(monkeypatch, off)
+    health = {}
+    lme.production_recall_hits(
+        _question(), SimpleNamespace(), None, None, None,
+        provider_name="none", tmp_dir=tmp_path, embeddings_enabled=False,
+        limit=10, recall_health=health,
+    )
+    assert health == {"degraded": True, "coverage": {"fts": "ok"},
+                      "degraded_reason": "semantic retrieval is disabled"}  # no timeout key
 
 
 @pytest.mark.parametrize("provenance,coverage", [
@@ -157,7 +186,7 @@ def test_report_records_failed_search_and_checkpoint_health(tmp_path, monkeypatc
     assert report["lcm_recall_health"] == {**_counts(fts_none=1, degraded=1), "failed_searches": 1}
     row = json.loads(checkpoint.read_text().splitlines()[1])
     assert row["arms"]["lcm_recall"]["recall_health"] == {
-        "degraded": True, "coverage": {"fts": "none"},
+        "degraded": True, "coverage": {"fts": "none"}, "degraded_reason": "full-text arm unavailable",
     }
     assert row["arms"]["lcm_recall"]["recall@10"] == 0.0
 
