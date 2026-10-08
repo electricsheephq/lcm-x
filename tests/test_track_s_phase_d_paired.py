@@ -2,10 +2,13 @@
 
 import ast
 import hashlib
+import itertools
 import json
 import math
+import random
 import subprocess
 import sys
+from fractions import Fraction
 from pathlib import Path
 
 TRACK = Path(__file__).resolve().parents[1] / "bench/instruments/compaction_probe/track_s"
@@ -16,12 +19,16 @@ SHAS = {"prev": "a1" * 20, "cand": "b2" * 20}
 D2 = (1, 2, 3)  # the D2 seed set; two-tree tests replay all of it
 
 
-def facts_bytes():
-    return json.dumps([{"id": f, "placement": "head", "class": "early_user_constraint"} for f in FACTS]).encode()
+def facts_bytes(ids=FACTS):
+    return json.dumps([{"id": f, "placement": "head", "class": "early_user_constraint"} for f in ids]).encode()
 
 
-def manifest_bytes(seed):  # content-addresses its files, as gen_material.py's manifest does
-    return json.dumps({"seed": seed, "facts": FACTS, "shas": {"facts.json": hashlib.sha256(facts_bytes()).hexdigest()}}).encode()
+def manifest_bytes(seed, ids=FACTS):  # content-addresses its files, as gen_material.py's manifest does
+    return json.dumps({"seed": seed, "facts": ids, "shas": {"facts.json": hashlib.sha256(facts_bytes(ids)).hexdigest()}}).encode()
+
+
+def seed_ids(seed):  # the real v3 shape: 60 fact ids per seed, none shared across seeds
+    return [f"S{seed}-F{j:02d}-0" for j in range(60)]
 
 
 def kept_all(seed, run, cp):
@@ -35,14 +42,16 @@ def summary(arm, sha, seed, run):
             "material_sha256": hashlib.sha256(manifest_bytes(seed)).hexdigest()}
 
 
-def build(root, arm, kept=kept_all, seeds=(1,), sha=SHAS["prev"], value=None, summarize=summary):
-    """One tree: runs/<arm>/seed-N/dN-rX, decision/scores (admitted by manifest), logs/*.wall."""
+def build(root, arm, kept=kept_all, seeds=(1,), sha=SHAS["prev"], value=None, summarize=summary, ids=None):
+    """One tree: runs/<arm>/seed-N/dN-rX, decision/scores (admitted by manifest), logs/*.wall. ids(seed) names each seed's
+    facts (default: FACTS in every seed)."""
     runs, decision, logs = root / "runs", root / "decision", root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
     manifest_path = decision / "manifest.json"
     manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {
         "schema": "track-s-score-manifest-v2", "entries": {}}
     for seed in seeds:
+        facts = ids(seed) if ids else FACTS
         for run in ("r1", "r2"):
             rundir = runs / arm / f"seed-{seed}" / f"d{seed}-{run}"
             receipt = logs / f"s2-{arm}-d{seed}-{run}.log.wall"  # per-tree start time: receipts differ across trees
@@ -50,11 +59,11 @@ def build(root, arm, kept=kept_all, seeds=(1,), sha=SHAS["prev"], value=None, su
             for cp in CPS:
                 (rundir / f"cp-{cp}").mkdir(parents=True, exist_ok=True)
                 (rundir / f"cp-{cp}" / "summary.json").write_text(json.dumps({"events": []}))
-                ids = kept(seed, run, cp)
+                kept_ids = kept(seed, run, cp)
                 payload = {
-                    "probes": {f: {"class": "CORRECT" if f in ids else "WRONG"} for f in FACTS},
+                    "probes": {f: {"class": "CORRECT" if f in kept_ids else "WRONG"} for f in facts},
                     "metrics": {"facts_kept": {"complete": True,
-                                               "value": value(seed, run, cp) if value else len(ids) / len(FACTS)},
+                                               "value": value(seed, run, cp) if value else len(kept_ids) / len(facts)},
                                 "continuation": {"complete": True}, "continuity": {"complete": True, "grid": []}},
                     "stored_level3": {"level3": 0, "leaves": 1},
                 }
@@ -68,13 +77,22 @@ def build(root, arm, kept=kept_all, seeds=(1,), sha=SHAS["prev"], value=None, su
     return runs, decision, logs
 
 
-def material(tmp_path, seeds=D2):
+def material(tmp_path, seeds=D2, ids=None):
     root = tmp_path / "material"
     for seed in seeds:
+        facts = ids(seed) if ids else FACTS
         (root / f"seed-{seed}").mkdir(parents=True, exist_ok=True)
-        (root / f"seed-{seed}" / "material.manifest.json").write_bytes(manifest_bytes(seed))
-        (root / f"seed-{seed}" / "facts.json").write_bytes(facts_bytes())
+        (root / f"seed-{seed}" / "material.manifest.json").write_bytes(manifest_bytes(seed, facts))
+        (root / f"seed-{seed}" / "facts.json").write_bytes(facts_bytes(facts))
     return root
+
+
+def analyze_functions(*names):
+    tree = ast.parse(ANALYZE.read_text())
+    tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name in names]
+    ns = {"math": math}
+    exec(compile(tree, str(ANALYZE), "exec"), ns)
+    return ns
 
 
 def analyze(tmp_path, arms, first, second=None, labels=None, check=True, shas=None, seeds=(1,), material_root=None):
@@ -129,10 +147,7 @@ def test_two_tree_requires_distinct_labels(tmp_path):
 
 
 def test_p_exact_is_unrounded(tmp_path):
-    tree = ast.parse(ANALYZE.read_text())
-    tree.body = [n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "mcnemar"]
-    ns = {"math": math}
-    exec(compile(tree, str(ANALYZE), "exec"), ns)
+    ns = analyze_functions("mcnemar", "sign_flip")
     assert ns["mcnemar"](117, 150) < 0.05 and round(ns["mcnemar"](117, 150), 4) == 0.05
     out = two_tree(tmp_path, cand_kept=lambda *a: set(FACTS) - {"f1", "f2", "f3"})
     for cp in CPS:
@@ -141,8 +156,12 @@ def test_p_exact_is_unrounded(tmp_path):
         sign = facts["sign_test"]
         assert sign["p_exact"] == ns["mcnemar"](sign["wins"], sign["losses"])
         assert out["d2"][f"cp-{cp}"]["occurrence_mcnemar_p_exact"] == facts["p_exact"]
-        unit = out[f"cp-{cp}"]["facts_per_fact"]
-        assert unit["p_exact"] == ns["mcnemar"](unit["wins"], unit["losses"]) and out["d2"][f"cp-{cp}"]["p_exact"] == unit["p_exact"]
+        unit, d2 = out[f"cp-{cp}"]["facts_per_fact"], out["d2"][f"cp-{cp}"]
+        assert unit["test"] == d2["test"] == "exact sign-flip on per-fact share differences"
+        # f1..f3 are lost in all 6 repetitions: each per-fact difference is -6 over common = 6
+        assert unit["p_exact"] == ns["sign_flip"]([-6] * 3) == 0.25 and d2["p_exact"] == unit["p_exact"]
+        assert unit["sign_test_p_exact"] == ns["mcnemar"](unit["wins"], unit["losses"]) == d2["sign_test_p_exact"]
+        assert unit["sign_test_p"] == round(unit["sign_test_p_exact"], 4) and unit["p"] == round(unit["p_exact"], 4)
 
 
 def test_spread_is_reported_at_every_checkpoint(tmp_path):
@@ -189,6 +208,7 @@ def test_d2_unit_is_the_fact_not_the_occurrence(tmp_path):
         assert d2["unit"] == "fact" and d2["occurrence_mcnemar_p_exact"] == facts["p_exact"] == 2 / 2**24
         assert (d2["n_facts"], d2["wins"], d2["losses"], d2["ties"]) == (40, 0, 4, 36)  # pooled across seeds by fact id
         assert d2["effect_pts_exact"] == -10.0 and d2["p_exact"] == 0.125
+        assert d2["sign_test_p_exact"] == d2["p_exact"]  # one magnitude for every nonzero difference: sign-flip = sign test
         assert d2["net_loss_ge_5"] is True and d2["blocks"] is False
     assert out["d2"]["verdict"] == "PASS"
 
@@ -202,7 +222,63 @@ def test_d2_fact_share_counts_partial_repetitions(tmp_path):
         assert (unit["v1_mean_share"], unit["v2_mean_share"], unit["losses"], unit["effect_pts"]) == (1.0, 0.917, 10, -8.3)
         d2 = out["d2"][f"cp-{cp}"]
         assert d2["effect_pts_exact"] == 100 * -20 / 240 and d2["p_exact"] == 2 / 1024 and d2["blocks"] is True
+        assert d2["sign_test_p_exact"] == d2["p_exact"]  # one magnitude for every nonzero difference: sign-flip = sign test
     assert out["d2"]["verdict"] == "BLOCK"
+
+
+def test_sign_flip_dp_equals_brute_force_enumeration():
+    sign_flip = analyze_functions("sign_flip")["sign_flip"]
+    rng = random.Random(1007)
+    vectors = [[rng.choice((-2, -1, 0, 1, 2)) for _ in range(rng.randint(1, 12))] for _ in range(8)]
+    vectors += [[2, -1, 1, 2, -2, 1, 1, 2, -1, 2, 2, 1], [0, 0, 0], []]
+    for d in vectors:
+        nz = [x for x in d if x]
+        t = abs(sum(d))
+        hits = sum(abs(sum(s * abs(x) for s, x in zip(signs, nz))) >= t for signs in itertools.product((1, -1), repeat=len(nz)))
+        assert sign_flip(d) == float(Fraction(hits, 2 ** len(nz))), d
+    assert sign_flip([0, 0]) == sign_flip([]) == 1.0
+
+
+def test_sign_flip_equals_the_sign_test_when_every_magnitude_is_equal():
+    ns = analyze_functions("mcnemar", "sign_flip")
+    rng = random.Random(7)
+    for _ in range(40):
+        a = rng.choice((1, 2, 3, 6))
+        d = [a * rng.choice((-1, 0, 1)) for _ in range(rng.randint(0, 30))]
+        assert ns["sign_flip"](d) == ns["mcnemar"](sum(x > 0 for x in d), sum(x < 0 for x in d)), d
+
+
+def test_d2_sign_flip_blocks_a_concentrated_loss_the_sign_test_misses(tmp_path):
+    # Real v3 shape: seed-specific fact ids, 3 seeds x 60 = 180 facts, each over its seed's 2 runs. Per seed: 4 facts kept in
+    # both runs before and lost in both after (12 in all), 10 lose one of two runs (30), 10 gain one of two (30), 36 tied
+    # (108). Which run moves alternates, so every seed's r1/r2 spread is 0.
+    def cand_kept(seed, run, cp):
+        moved = range(4, 9) if run == "r1" else range(9, 14)
+        return {f for j, f in enumerate(seed_ids(seed)) if j >= 4 and j not in moved}
+
+    def prev_kept(seed, run, cp):
+        moved = range(14, 19) if run == "r1" else range(19, 24)
+        return {f for j, f in enumerate(seed_ids(seed)) if j not in moved}
+
+    def summarize(arm, sha, seed, run):
+        return {**summary(arm, sha, seed, run), "material_sha256": hashlib.sha256(manifest_bytes(seed, seed_ids(seed))).hexdigest()}
+    prev = build(tmp_path / "prev", "LCMX-fleet", prev_kept, seeds=D2, summarize=summarize, ids=seed_ids)
+    cand = build(tmp_path / "cand", "LCMX-fleet", cand_kept, seeds=D2, sha=SHAS["cand"], summarize=summarize, ids=seed_ids)
+    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"], shas=(SHAS["prev"], SHAS["cand"]),
+                  seeds=D2, material_root=material(tmp_path, ids=seed_ids))
+    # Derived independently of analyze_paired: the sign test on 30 wins vs 42 losses, and the sign-flip null of
+    # T = 2A + B, A a sum of 12 signs (the outright losses, d = -2 over common = 2) and B of 60 (d = +-1); observed T = -24.
+    sign_p = float(min(Fraction(1), Fraction(2 * sum(math.comb(72, i) for i in range(31)), 2 ** 72)))
+    flip_p = float(Fraction(sum(math.comb(12, i) * math.comb(60, j) for i in range(13) for j in range(61)
+                                if abs(2 * (2 * i - 12) + (2 * j - 60)) >= 24), 2 ** 72))
+    assert sign_p >= 0.05 > flip_p
+    for cp in CPS:
+        d2 = out["d2"][f"cp-{cp}"]
+        assert (d2["n_facts"], d2["wins"], d2["losses"], d2["ties"]) == (180, 30, 42, 108)
+        assert d2["effect_pts_exact"] == 100 * -24 / 360
+        assert d2["sign_test_p_exact"] == sign_p and d2["p_exact"] == flip_p
+        assert d2["net_loss_ge_5"] is True and d2["blocks"] is True
+    assert out["per_arm"]["cand"]["spread_over_0.10"] == [] and out["d2"]["verdict"] == "BLOCK"
 
 
 def test_d2_incomplete_when_a_pair_is_missing(tmp_path):

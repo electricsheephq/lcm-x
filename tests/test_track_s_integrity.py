@@ -78,7 +78,7 @@ def test_paired_reader_truncation_excludes_either_side(tmp_path, excluded_class)
             "continuation": {"complete": False, "correct_fields": ["status"], "denominator": 1},
             "continuity": {"complete": True}}}
 
-    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", MATERIAL=tmp_path,
+    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", "sign_flip", MATERIAL=tmp_path,
         SEEDS=[1], ARMS=["first", "second"], score=score, grid_by_row=lambda *a: {}, json=json,
         math=__import__("math"))
     axes = ns["pair_axes"](304)["axes"]
@@ -129,7 +129,7 @@ def paired_axes(tmp_path, score, facts=("a", "b")):
     material.mkdir()
     (material / "facts.json").write_text(json.dumps([
         {"id": f, "placement": "head", "class": "early_user_constraint"} for f in facts]))
-    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", MATERIAL=tmp_path,
+    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", "sign_flip", MATERIAL=tmp_path,
         SEEDS=[1], ARMS=["first", "second"], score=score, grid_by_row=lambda *a: {}, json=json,
         math=__import__("math"), re=__import__("re"))
     return ns["pair_axes"](304)
@@ -246,7 +246,7 @@ def test_paired_admission_losses(tmp_path):
             "facts_kept": {"complete": True, "lost_before_compaction": {"ids": ["a" if arm == "first" else "b"]}},
             "continuation": {"complete": True, "correct_fields": [], "denominator": 0},
             "continuity": {"complete": True}}}
-    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", MATERIAL=tmp_path,
+    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", "sign_flip", MATERIAL=tmp_path,
         SEEDS=[1], ARMS=["first", "second"], score=score, grid_by_row=lambda *a: {}, json=json,
         math=__import__("math"))
     axes = ns["pair_axes"](304)["axes"]
@@ -398,7 +398,7 @@ def test_paired_missing_scores_incomplete(tmp_path, missing_arm):
         return {"probes": {}, "metrics": {"facts_kept": {"complete": True},
                 "continuation": {"complete": True, "correct_fields": [], "denominator": 0},
                 "continuity": {"complete": True}}}
-    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", MATERIAL=tmp_path,
+    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", "sign_flip", MATERIAL=tmp_path,
         SEEDS=[1], ARMS=["first", "second"], score=score, grid_by_row=lambda *a: {},
         json=json, math=__import__("math"))
     result = ns["pair_axes"](304)
@@ -606,7 +606,7 @@ def paired_analysis(root, material, api):
     directory = material / "seed-1"
     directory.mkdir(exist_ok=True)
     (directory / "facts.json").write_text("[]")
-    return functions("decision/analyze_paired.py", "score", "losses", "pair_axes", "mcnemar",
+    return functions("decision/analyze_paired.py", "score", "losses", "pair_axes", "mcnemar", "sign_flip",
         H=root, MATERIAL=material, SEEDS=[1], ARMS=["first", "second"], score_manifest=api,
         grid_by_row=lambda *a: {}, json=json, math=__import__("math"))
 

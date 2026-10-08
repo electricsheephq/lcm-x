@@ -7,9 +7,11 @@ The v1/v2 column names denote first/second CLI arms; sign-test wins favor the se
 Each run pair votes once per axis; ties are excluded from the exact two-sided sign p-value.
 With --second-tree the second arm is read from another run/decision/logs root (release over release, D2);
 results are keyed by --labels. Every p also has an unrounded p_exact; the d2 block uses only unrounded values.
-The D2 gate's unit is the fact (fact id x checkpoint), not the occurrence: one planted fact repeats across seeds and runs, so
-its occurrences are not independent pairs. facts_per_fact gives each fact its kept share over its paired repetitions on each
-side and an exact two-sided sign test over the facts whose share changed; the effect is the mean per-fact share difference."""
+The D2 gate's unit is the seed's planted fact x checkpoint, not the occurrence: fact ids are specific to each seed, so a
+checkpoint holds 60 facts x 3 seeds = 180 facts, each repeated over its seed's 2 runs, and those repeats are not independent
+pairs. facts_per_fact gives each fact its kept share over its paired repetitions on each side; the gate's p is an exact paired
+sign-flip test on the per-fact share differences, and the effect is their mean. The test uses magnitude because a fact lost
+outright weighs more than a fact that drifted: the sign test it replaced (kept as a diagnostic) missed concentrated losses."""
 
 import argparse
 import hashlib
@@ -76,6 +78,26 @@ def mcnemar(b, c):
     k = min(b, c)
     p = 2 * sum(math.comb(n, i) for i in range(k + 1)) / 2**n
     return min(1.0, p)
+
+
+def sign_flip(d):
+    """Exact two-sided paired sign-flip (randomization) test on integer differences d. Under H0 each nonzero d_i is +|d_i| or
+    -|d_i| with probability 1/2 (zeros dropped); p = P(|T*| >= |T|) for T = sum(d), from the exact distribution of T* (a DP
+    over integer sums with Python ints), returned as the correctly rounded float of that fraction. No RNG."""
+    nz = [abs(x) for x in d if x]
+    if not nz:
+        return 1.0
+    dist = {0: 1}  # sum -> number of sign assignments
+    for a in nz:
+        nxt = {}
+        for s, c in dist.items():
+            nxt[s + a] = nxt.get(s + a, 0) + c
+            nxt[s - a] = nxt.get(s - a, 0) + c
+        if len(nxt) > 5_000_000:  # D2 keeps common <= lcm(1..6) and n <= 180; refuse rather than hang on anything larger
+            raise ValueError(f"sign-flip state exceeds 5,000,000 sums ({len(nxt)})")
+        dist = nxt
+    t = abs(sum(d))
+    return sum(c for s, c in dist.items() if abs(s) >= t) / 2 ** len(nz)  # int / int: exact fraction, rounded once
 
 
 def nr(xs, p):
@@ -226,8 +248,10 @@ def pair_axes(cp):
     tallies = [t for t in per_fact.values() if t[0]]
     wins, losses = sum(k2 > k1 for _, k1, k2 in tallies), sum(k2 < k1 for _, k1, k2 in tallies)  # both sides share n
     common = math.lcm(*(n for n, _, _ in tallies)) if tallies else 1  # exact mean of share differences: integer numerator
-    numerator = sum((k2 - k1) * (common // n) for n, k1, k2 in tallies)
+    diffs = [(k2 - k1) * (common // n) for n, k1, k2 in tallies]  # per-fact share differences, as numerators over common
+    numerator = sum(diffs)
     effect = 100 * numerator / (common * len(tallies)) if tallies else None
+    flip_p = sign_flip(diffs)
     fact_unit = {
         "n_facts": len(tallies),
         "v1_mean_share": round(sum(k1 / n for n, k1, _ in tallies) / len(tallies), 3) if tallies else None,
@@ -235,8 +259,12 @@ def pair_axes(cp):
         "effect_pts": None if effect is None else round(effect, 1),
         "effect_pts_exact": effect,
         "wins": wins, "losses": losses, "ties": len(tallies) - wins - losses,
-        "p": round(mcnemar(wins, losses), 4),
-        "p_exact": mcnemar(wins, losses),  # the exact two-sided sign test: McNemar's binomial on wins vs losses
+        "test": "exact sign-flip on per-fact share differences",
+        "p": round(flip_p, 4),
+        "p_exact": flip_p,
+        # non-gating diagnostic: the exact two-sided sign test (McNemar's binomial on wins vs losses), blind to magnitude
+        "sign_test_p": round(mcnemar(wins, losses), 4),
+        "sign_test_p_exact": mcnemar(wins, losses),
     }
     return {"status": "INCOMPLETE" if missing or partial or any(excluded.values()) else "COMPLETE", "missing_pairs": missing, "pairs": pairs,
             "axes": out, "facts_per_fact": fact_unit}
@@ -345,10 +373,11 @@ def losses(cp):
 paired = {f"cp-{cp}": {**pair_axes(cp), "loss_classes": losses(cp)} for cp in CPS}
 labels, arm_stats = globals().get("LABELS", ARMS), per_arm()
 status = "INCOMPLETE" if any(p["status"] == "INCOMPLETE" for p in paired.values()) else "COMPLETE"
-# D2 gates on the per-fact unit; the per-occurrence McNemar is reported beside it and never gates (it treats a fact's repeats as
-# independent pairs, so its p is too small)
+# D2 gates on the per-fact unit with the sign-flip p; the per-fact sign test and the per-occurrence McNemar are reported beside it
+# and never gate (the sign test ignores magnitude; McNemar treats a fact's repeats as independent pairs, so its p is too small)
 d2 = {cp: {"unit": "fact", "n_facts": u["n_facts"], "wins": u["wins"], "losses": u["losses"], "ties": u["ties"],
-           "p_exact": u["p_exact"], "effect_pts_exact": u["effect_pts_exact"], "occurrence_mcnemar_p_exact": a["p_exact"]}
+           "test": u["test"], "p_exact": u["p_exact"], "effect_pts_exact": u["effect_pts_exact"],
+           "sign_test_p_exact": u["sign_test_p_exact"], "occurrence_mcnemar_p_exact": a["p_exact"]}
       for cp, u, a in ((cp, p["facts_per_fact"], p["axes"]["facts_all"]) for cp, p in paired.items())}
 for v in d2.values():
     v["net_loss_ge_5"] = v["effect_pts_exact"] is not None and v["effect_pts_exact"] <= -5
