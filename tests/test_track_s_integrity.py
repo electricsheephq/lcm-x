@@ -85,6 +85,109 @@ def test_paired_reader_truncation_excludes_either_side(tmp_path, excluded_class)
     assert axes["continuation"]["n"] == axes["continuation"]["excluded"] == 2
 
 
+def test_reader_truncation_retry_keeps_answers(tmp_path):
+    import re
+
+    for name in ("facts", "traps"):
+        (tmp_path / f"{name}.json").write_text("[]")
+    replies = [({"a": "first", "b": ""}, 8192), ({"a": "", "b": "second"}, 10)]
+    calls = []
+
+    def answer(*args):
+        calls.append(args)
+        answers, tokens = replies[len(calls) - 1]
+        return answers, {"reader_calls": [{"completion_tokens": tokens}], "usage": {"completion_tokens": tokens},
+                         "tool_calls": len(calls), "tokens_read_back": 10 * len(calls), "wall_s": 1.5}
+
+    reader = SimpleNamespace(readback={"model": "synthetic"})
+    run = SimpleNamespace(db=None, home=None, dir=tmp_path, sdir=tmp_path,
+        arm={"name": "LCMX-fleet", "kind": "plain", "open": False}, receipts_out=[],
+        args=SimpleNamespace(reader="glm", batches=0, run="r1", lane="glm"),
+        ntok=lambda _: 0, sysmsg={}, system="synthetic", seed=1, run_id="synthetic",
+        timing_label="decision", reader_calls=[], m=SimpleNamespace(tokens=SimpleNamespace(count_tokens=len)))
+    ns = functions("s2/run_s_lcmx.py", "probe", Run=SimpleNamespace,
+        R=SimpleNamespace(answer=answer, ANSWER_RESERVE=1, READER_WINDOW={"glm": 100}),
+        SUMMARY_RE=re.compile("never"), json=json, jload=lambda p: json.loads(p.read_text()),
+        batches_for=lambda _: [{"id": "batch", "text": "Reply as JSON", "probes": [
+            {"id": p, "text": "q", "kind": "canary", "expect": "value"} for p in ("a", "b")]}])
+    rows = ns["probe"](run, [], reader, False)
+    assert len(calls) == 2
+    assert {r["probe_id"]: r["answer"] for r in rows} == {"a": "first", "b": "second"}
+    assert all(r["status"] == "OK" and r["error"] is None for r in rows)
+    assert rows[0]["tool_calls_batch"] == 3 and rows[0]["tokens_read_back_batch"] == 30
+    assert rows[0]["answer_wall_s_batch"] == 3.0
+    saved = json.loads((tmp_path / "answers/batch.json").read_text())
+    assert len(saved["attempts"]) == 2 and saved["error"] is None
+
+
+def paired_axes(tmp_path, score, facts=("a", "b")):
+    material = tmp_path / "seed-1"
+    material.mkdir()
+    (material / "facts.json").write_text(json.dumps([
+        {"id": f, "placement": "head", "class": "early_user_constraint"} for f in facts]))
+    ns = functions("decision/analyze_paired.py", "pair_axes", "mcnemar", MATERIAL=tmp_path,
+        SEEDS=[1], ARMS=["first", "second"], score=score, grid_by_row=lambda *a: {}, json=json,
+        math=__import__("math"), re=__import__("re"))
+    return ns["pair_axes"](304)
+
+
+TRUNCATED_ISSUE = "INCOMPLETE: READER_TRUNCATED: 1 probes excluded: ['x']"
+
+
+def test_paired_admission_loss_outranks_truncation(tmp_path):
+    def score(arm, *args):
+        probes = {f: {"class": "CORRECT"} for f in ("a", "b")}
+        facts_kept = {"complete": True, "lost_before_compaction": {"ids": []}}
+        if arm == "first":
+            probes["a"]["class"] = "READER_TRUNCATED"
+            facts_kept = {"complete": False, "issues": [TRUNCATED_ISSUE], "lost_before_compaction": {"ids": ["a"]}}
+        return {"probes": probes, "metrics": {"facts_kept": facts_kept,
+            "continuation": {"complete": True}, "continuity": {"complete": True}}}
+
+    axes = paired_axes(tmp_path, score)["axes"]
+    assert axes["facts_all"]["n"] == 4 and axes["facts_all"]["excluded"] == 0
+    assert axes["facts_all"]["c_v2_only"] == 2 and axes["facts_all"]["b_v1_only"] == 0
+
+
+def test_loss_class_admission_loss_outranks_truncation(tmp_path):
+    (tmp_path / "facts.json").write_text(json.dumps([
+        {"id": f, "placement": "head", "class": "name", "value": f"value-{f}"} for f in ("a", "b")]))
+    ns = functions("decision/loss_class.py", "classify_loss", "load", "ro", json=json, normalize=str.casefold)
+    out = ns["classify_loss"]({"run_dir": str(tmp_path / "run"), "material": str(tmp_path), "arm": "x", "seed": "seed-1",
+        "run": "r1", "checkpoint_row": 304, "probes": {"a": {"class": "READER_TRUNCATED"}, "b": {"class": "CORRECT"}},
+        "metrics": {"facts_kept": {"lost_before_compaction": {"ids": ["a"]}}}})
+    assert [(f["id"], f["loss"]) for f in out["facts"]] == [("a", "not-admitted")]
+
+
+def test_paired_trap_only_truncation_is_incomplete(tmp_path):
+    def score(arm, *args):
+        probes = {f: {"class": "CORRECT"} for f in ("a", "b")} | {"t": {"class": "READER_TRUNCATED"}}
+        incomplete = {"complete": False, "issues": [TRUNCATED_ISSUE]}
+        return {"probes": probes, "metrics": {"facts_kept": incomplete, "continuation": incomplete,
+                                              "continuity": {"complete": True}}}
+
+    result = paired_axes(tmp_path, score)
+    assert result["pairs"] == ["seed-1/r1", "seed-1/r2"] and result["missing_pairs"] == []
+    assert not any(a["excluded"] for a in result["axes"].values())
+    assert result["status"] == "INCOMPLETE"
+
+
+def test_paired_unrun_score_with_missing_probe_is_rejected(tmp_path):
+    def score(arm, *args):
+        probes = {f: {"class": "CORRECT"} for f in ("a", "b")}
+        facts_kept = {"complete": True}
+        if arm == "first":
+            probes["a"]["class"] = "MISSING"
+            facts_kept = {"complete": False, "issues": [
+                "UNRUN: run status FAILED", "INCOMPLETE: 1 of 2 scheduled facts have no result row (batches not run: B0)"]}
+        return {"probes": probes, "metrics": {"facts_kept": facts_kept, "continuation": {"complete": True},
+                                              "continuity": {"complete": True}}}
+
+    result = paired_axes(tmp_path, score)
+    assert result["pairs"] == [] and result["missing_pairs"] == [f"seed-1/{r} (incomplete score)" for r in ("r1", "r2")]
+    assert result["status"] == "INCOMPLETE"
+
+
 def functions(path, *names, **namespace):
     namespace.setdefault("Path", Path)
     tree = ast.parse((TRACK / path).read_text())

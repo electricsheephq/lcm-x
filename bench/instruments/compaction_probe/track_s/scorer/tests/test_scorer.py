@@ -69,6 +69,34 @@ def test_all_facts_truncated_has_no_rate(mat, tmp_path):
     assert len([p for p in score["probes"].values() if p["class"] == "READER_TRUNCATED"]) == 10
 
 
+def test_admission_loss_outranks_reader_truncation(mat, tmp_path):
+    answers = dict(fx.GOOD | fx.GOOD_CONT)
+    answers["X-F1"] = ""
+    run = fx.s2_run(tmp_path, answers=answers, missing=["X-F1"])
+    fx.wj(run / "answers/X-B0.json", {"batch": "X-B0", "usage": {"completion_tokens": 8192}})
+    score = sc.score(mat, run, "LCMX-a")
+    assert score["probes"]["X-F1"]["class"] != "READER_TRUNCATED"
+    m = score["metrics"]["facts_kept"]
+    assert m["denominator"] == 6 and m["correct"] == 5 and m["reader_truncated"] == 0
+    assert m["lost_before_compaction"]["ids"] == ["X-F1"]
+
+
+def test_truncated_error_batch_excludes_only_unanswered(mat, tmp_path):
+    answers = dict(fx.GOOD | fx.GOOD_CONT)
+    answers["X-F1"] = ""
+    run = fx.s2_run(tmp_path, answers=answers)
+    rows = sc.jlines(run / "results.jsonl")
+    for row in rows:
+        if row["batch_id"] == "X-B0":
+            row.update(status="ERROR", error="READER_TRUNCATED: completion cap 8192 reached")
+    fx.wl(run / "results.jsonl", rows)
+    score = sc.score(mat, run, "LCMX-a")
+    assert {pid for pid, p in score["probes"].items() if p["class"] == "READER_TRUNCATED"} == {"X-F1"}
+    assert score["probes"]["X-F0"]["class"] == "CORRECT" and score["probes"]["X-T0"]["class"] == "ABSTAIN"
+    m = score["metrics"]["facts_kept"]
+    assert m["denominator"] == 5 and m["correct"] == 5 and m["reader_truncated"] == 1
+
+
 def test_facts_kept_formula_missing_rows_are_misses_and_incomplete(mat, tmp_path):
     ans = dict(fx.GOOD | fx.GOOD_CONT)
     del ans["X-F4"]                      # no row: miss + INCOMPLETE
