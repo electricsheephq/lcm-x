@@ -163,10 +163,11 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
   `bench/specs/RELEASE-READINESS-V1.md` — Phase A (all-tools matrix on a fresh isolated clone,
   both privacy postures, planted-secret battery), Phase B (multi-agent P0/P1 adversarial sweep
   of the full release diff, upgrade/migration dimension mandatory), Phase C (30+ turn live
-  `hermes acp` soak) — before the GA tag.
+  `hermes acp` soak), Phase D (release-over-release scorecard against the previous GA: recall
+  flips, Track S facts kept, QA rows, latency) — before the GA tag.
 - The GA commit may differ from the passing rc tree by EXACTLY the release-notes addition
   (mechanically verified: `git diff rcN..GA --name-only` ⊆ `.github/release-notes/`); GA notes
-  link the three phase receipts. A P0/P1 gauntlet finding means fix → new rc → re-run; the only
+  link the four phase receipts (A-D). A P0/P1 gauntlet finding means fix → new rc → re-run; the only
   exception is a Phase B shape or a Phase C publication conflict that the previous GA also
   shows, with the candidate no worse than the base (the spec's differential rule).
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the

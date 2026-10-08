@@ -14,7 +14,7 @@ needs a live soak. Docs/bench-only releases may skip to GA with a note in the re
    at `.github/release-notes/vX.Y.Z-rc1.md`.
 3. **Run the gauntlet** (phases A-D below) against the rc tag. Every phase produces a receipt
    file under the session-notes artifacts dir; the GA cut references all of them. Phase D's full
-   tier runs once per minor, at the rc1 freeze (see its carry-forward rule).
+   tier runs at the rc1 freeze of every minor and on every patch rc (see its carry-forward rule).
 4. **Fix-and-respin**: any P0/P1 finding → fix PR (through the gate) → `-rc2` → re-run.
    Carry-forward rule (every receipt binds an exact tree, so carrying needs proof): **Phase B
    re-runs on every respin** (it is diff-scoped by definition). Phases A and C may carry a prior
@@ -135,27 +135,37 @@ one threshold, doctor at close. Minimum 30 turns. Green =
 ## Phase D — Release-over-release quality (the release scorecard, #898 / #664)
 
 Phases A-C prove that a candidate does not break. Phase D asks whether its compactions and recall
-got worse for the agent than the previous GA's, on the same material, seeds, question sets, reader
-and judge. Every row names its configuration (`OFF`, `LOCAL`, `VOYAGE-TRACKER`; #898). A row that
-did not run says `UNRUN` or `UNAVAILABLE`; it is never substituted.
+got worse for the agent than the previous GA's, on the same material, seeds, question sets, reader,
+judge and summariser. Every row names its configuration (`OFF`, `LOCAL`, `VOYAGE-TRACKER`; #898). A row
+that did not run says `UNRUN` or `UNAVAILABLE`; it is never substituted. A gating row that is `UNRUN`,
+`UNAVAILABLE`, `INCOMPLETE` or `INCONCLUSIVE` is not green.
 
 | gate | workload | producing unit | denominator | pass rule |
 |---|---|---|---|---|
-| D1 recall flips (fast tier, every rc) | LongMemEval-M retrieval, `OFF` | the recall runner + the per-question identity projection (`bench/tools/v1m-rebank/`) | 500 questions, per-question `lcm_recall` | 0 flips against the previous GA, re-scored under the current instrument. Otherwise every flip is attributed to a named commit and classified intended, with net R@10 ≥ previous GA − 0.005 and no category down more than 0.02. A defect-class loss blocks. A flip whose recall health is degraded, timed out or has no coverage is re-run once as noise. |
-| D2 facts kept (full tier) | Track S v3 material, 3 seeds × 2 runs, checkpoints 176 and 304 | `bench/instruments/compaction_probe/track_s/` (`s2/run_s_lcmx.py` → `scorer/score_s.py` → `decision/render_decision.py`) | per-fact pairs across the two trees: same seed, run index, checkpoint and fact id; exact two-sided McNemar on the discordant pairs, as `decision/analyze_paired.py` computes it | Blocks when the paired exact McNemar gives p < 0.05 AND the net loss is ≥ 5 points of facts kept. When run1 and run2 of a seed differ by more than 0.10, runs are added before judging. Reader-truncated facts are excluded and counted, never scored as kept or lost. |
+| D1 recall flips (fast tier, every rc) | LongMemEval-M retrieval, `OFF` | the recall runner + the per-question identity projection (`bench/tools/v1m-rebank/`) | 500 questions, per-question `lcm_recall`; every question stays in the denominator | 0 flips against the previous GA, re-scored under the current instrument, AND every question's recall health is clean: no timeout, no degraded result, no arm with coverage `none`. Health is checked on its own because the identity projection carries only category, abstention and metrics. An unhealthy question is re-run once; still unhealthy, it counts as a loss. Otherwise every flip is attributed to a named commit and classified intended, with net R@10 ≥ previous GA − 0.005 and no category down more than 0.02. A defect-class loss blocks. |
+| D2 facts kept (full tier) | Track S v3 material, 3 seeds × 2 runs, checkpoints 176 and 304 | `bench/instruments/compaction_probe/track_s/` (`s2/run_s_lcmx.py` → `scorer/score_s.py` → `decision/render_decision.py`) | per-fact pairs across the two trees: same seed, run index, checkpoint and fact id; exact two-sided McNemar on the discordant pairs, as `decision/analyze_paired.py` computes it | Blocks when the paired exact McNemar gives p < 0.05 AND the net loss is ≥ 5 points of facts kept. Every run must be complete. `analyze_paired.py` marks a run with any reader-truncated probe `INCOMPLETE`, so a truncated run is re-run (the S1/S2 one-retry rule makes this rare) rather than having its facts excluded. When run1 and run2 of a seed differ by more than 0.10, both runs of that seed are repeated once and the repeat replaces them; if the spread is still above 0.10, D2 is `INCONCLUSIVE`. |
 | D3 Track S absolutes | the D2 runs | the same scorer | per run | 0 admission-proven losses (a planted fact missing from the store at a checkpoint). Level-3 nodes follow Phase C's rule. |
-| D4 QA rows (full tier) | LongMemEval-S (500) and LoCoMo (1,986), `OFF`, through the pinned benchmark bridge | the QA runner + its fail-closed scorer | per-question pairs, candidate vs previous GA | Blocks when the paired exact McNemar gives p < 0.05 with a net loss. The A/A′ placebo is the candidate's rerun: the 100-question subset for LongMemEval-S, the full set for LoCoMo. If more than 5% of A/A′ pairs are discordant, the row is INCONCLUSIVE and re-runs. Failed, missing and judge-fallback questions count against the candidate. |
-| D5 latency | the gauntlet cells; the ≥ 24 h reference-agent soak | the field-window counter | per compaction event | Gauntlet cells: max ≤ 145 s, with p50/p90 recorded. Soak: p90 ≤ 60 s and max ≤ 120 s. Track S event times are recorded but not judged: they are bound by the summariser lane's latency, so Track S runs off the provider's peak hours. |
-| D6 recorded, not gating | `LOCAL` and `VOYAGE-TRACKER` recall and QA rows; the continuity suite (#659); the external arms (Codex native, lossless-claw, Hermes built-in, Claude Code) | as each row's kit | per row | Recorded in the receipt. A configuration starts gating once it has its own A/A′ with 0 discordant rows in the same session. The continuity suite gates from v0.28.0. External arms run on demand as H1 evidence. |
+| D4 QA rows (full tier) | LongMemEval-S (500) and LoCoMo (1,986), `OFF`, through the pinned benchmark bridge | the QA runner + its fail-closed scorer | per-question pairs, candidate vs previous GA | Blocks when the paired exact McNemar gives p < 0.05 with a net loss. The A/A′ placebo is the candidate's rerun: the 100-question subset for LongMemEval-S, the full set for LoCoMo. If more than 5% of A/A′ pairs are discordant, the row re-runs once (A and A′, fresh stores) and the re-run replaces it; a second result above 5% makes the row `INCONCLUSIVE`. Failed, missing and judge-fallback questions count against the candidate. |
+| D5 latency | the gauntlet cells; the ≥ 24 h reference-agent soak | the field-window counter | per compaction event; the soak needs at least 10 events | Gauntlet cells: max ≤ 145 s, with p50/p90 recorded. Soak: p90 ≤ 60 s and max ≤ 120 s over at least 10 compaction events. If the organic window has fewer, a disclosed synthetic session on the reference agent supplies the rest (the v0.26.0 pattern) and the receipt says how many events each source gave; with fewer than 10 in all, D5 is `INCONCLUSIVE`. Track S event times are recorded but not judged: they are bound by the summariser lane's latency, so Track S runs off the provider's peak hours. |
+| D6 recorded, not gating | `LOCAL` and `VOYAGE-TRACKER` recall and QA rows; the continuity suite (#659); the external arms (Codex native, lossless-claw, Hermes built-in, Claude Code) | as each row's kit | per row | Recorded in the receipt. A row becomes a gate only through a change to this spec that names its pass rule (D1's for a recall row, D4's for a QA row) and the release it starts at, and only after it has its own A/A′ with 0 discordant rows in the same session. The continuity suite's per-class bars are declared the same way, from its v0.27.0 recorded run, before v0.28.0 rc1 (#659). External arms run on demand as H1 evidence. |
 
 **Comparability.**
-- A candidate row is judged only against a previous-GA row with the same material or dataset sha, seeds, fact or question ids, reader and judge (model and effort), and scoring path.
-- A scorer change re-scores the previous GA's stored runs under the current scorer before the comparison.
-- A harness change that touches only failure handling keeps the previous row comparable, and the receipt records the diff. Any other harness change re-runs the previous GA row.
+- A candidate row is judged only against a previous-GA row with the same:
+  - material or dataset sha, seeds, and fact or question ids;
+  - reader and judge (model and effort);
+  - summariser, for D2 and D3 (provider, served model, effort and route);
+  - scoring path.
+- A scorer change re-scores the stored runs of BOTH trees under the current scorer before the comparison.
+- A harness change keeps the previous row comparable only when the receipt shows that it cannot change any scored row or denominator of the previous run. Examples: it only adds diagnostic text, or it only changes a failure path the previous run never took (failed, missing and fallback counts all 0). Any other harness change re-runs the previous GA row under the changed harness. That includes a retry that fills answers and a changed exclusion.
 
-**Carry-forward.**
-- D1 runs on every rc.
-- D2-D4 run once per minor, at the rc1 freeze. They re-run on a respin only when the rcN→rcN+1 diff touches the summariser, assembly or recall path.
+**Carry-forward.** Phase D evidence binds the exact candidate tree and the exact Phase D kit: scorer, material or dataset, reader, judge, summariser, benchmark bridge and harness.
+- D1 runs on every rc, patch rcs included.
+- D2-D4 run at the rc1 freeze of every minor and on every patch rc.
+- A later rc of the same release may carry D2-D4 forward only when both of these hold:
+  - its diff from the measured rc touches nothing outside `docs/`, `tests/`, `.github/release-notes/`, `CHANGELOG.md` and the parts of `bench/` that are not in the Phase D kit;
+  - the Phase D kit is unchanged.
+
+  The receipt records that diff (`git diff --name-only`). Any other change re-runs D2-D4 on the new rc.
 - D5's soak window is the rc's Phase C/soak window.
 
 **Wall clock.** The target is ≤ 60 min per rc for D1. D2 and D4 are hours-long and run in parallel with Phases A-C:
