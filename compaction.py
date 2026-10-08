@@ -33,6 +33,7 @@ from .reconcile import (
     _COMPACTION_COMMIT_PROOF_METADATA_PREFIX,
     _COMPACTION_COMMIT_PROOF_VERSION,
     _COMPACTION_COMMIT_PROOF_WIRE_VERSION,
+    _carrier_emission_key,
     _commit_proof_identity_digest,
     _emission_identity,
     _finalize_emission_descriptors,
@@ -721,6 +722,11 @@ class CompactionMixin:
             emissions = _finalize_emission_descriptors(
                 result, getattr(self, "_pending_emission_candidates", ()), emission_binding
             )
+            fit = getattr(self, "_survival_fit_emission", None)
+            if fit is not None:  # #1000: on its own; the pending candidates' monotonic search may be past its row
+                taken = {item["output_occurrence"]["index"] for item in emissions}
+                emissions.extend(item for item in _finalize_emission_descriptors(result, [fit], emission_binding)
+                                 if item["output_occurrence"]["index"] not in taken)
             self._carry_prior_emissions(messages, result, emissions, emission_binding)
             # The output's rows map through THIS proof's emissions (A3), never a DAG-shaped strip (F1).
             occurrences, _v4 = self._replay_occurrences(result, {"version": 4, **emission_binding, "emissions": emissions})
@@ -791,9 +797,13 @@ class CompactionMixin:
             try:
                 prior_projection = _project_emitted_occurrences(messages, proof=prior_proof)
                 result_identities = [_emission_identity(message) for message in result]
-                for entry in prior_projection.entries:
+                retired = getattr(self, "_emitted_carriers_retired", None) or {}
+                for index, entry in enumerate(prior_projection.entries):
                     if entry.generated_span is None or result_identities.count(entry.full_identity) != 1:
                         continue
+                    if entry.kind == "carrier" and (entry.output_index != index
+                                                    or _carrier_emission_key(entry) in retired):
+                        continue  # #1000: only the occurrence LCM emitted, where it emitted it, carries forward
                     carried = _finalize_emission_descriptors(result, [{
                         "kind": entry.kind,
                         "span": entry.generated_span,

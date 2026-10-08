@@ -45,6 +45,7 @@ _MAX_DECOMPOSITIONS = 3
 _DECOMPOSE_BUDGET = 2048  # T3: prefixes visited per decomposition (ingest thread)
 _DECOMPOSE_MAX_PARTS = 64
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
+_CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
 _MATCH_WORK_PER_ITEM, _MATCH_WORK_FLOOR = 32, 4096  # matching search budget per row + occurrence + key (see below)
 
 
@@ -290,19 +291,17 @@ class IdentityAnchorMixin:
 
         consumed: set[int] = set()
         matched: dict[int, list] = {}
-        emitted = None  # #1000: the active proof's projection of the view, read once
-        carriers = bool(proof) and any(isinstance(d, dict) and d.get("kind") == "carrier"
-                                       for d in proof.get("emissions") or ())
+        emitted = None  # #1000: the view's carriers LCM emitted, still where it emitted them; read once
+        carriers = [d for d in (proof.get("emissions") or ()) if isinstance(d, dict) and d.get("kind") == "carrier"
+                    ] if proof else []
 
         def emitted_carrier(idx: int) -> Optional[list]:  # #1000: a carrier LCM emitted around a stored user row
             nonlocal emitted
             if not carriers or identity_messages[idx].get("role") != "user":
                 return None
             if emitted is None:
-                from .reconcile import _project_emitted_occurrences
-
-                emitted = _project_emitted_occurrences(identity_messages, proof=proof).entries
-            return self._identity_anchor_emitted_carrier(identity_messages[idx], emitted, idx, chain, consumed)
+                emitted = self._identity_anchor_emitted_carriers(identity_messages, proof, carriers)
+            return self._identity_anchor_emitted_carrier(identity_messages[idx], emitted.get(idx), chain)
 
         # R1: per key, the host view's occurrences consume the stored ones in order; the rest are new.
         forms_of = {id(r): forms for pairs in by_stamp.values() for r, forms in pairs}
@@ -642,17 +641,49 @@ class IdentityAnchorMixin:
             return None
         return run[:len(full[0])]
 
-    def _identity_anchor_emitted_carrier(self, message, emitted, idx, chain, consumed) -> Optional[list]:
-        """#1000: ``[U]`` when the active proof binds ``message`` as a carrier LCM emitted around its stored user
-        row U (``retained_source``) and the carrier's remainder is exactly U's stored text: a replay of U. U must
-        be a user row of this session or a verified ancestor, in the bound conversation, not yet claimed. Any
-        failed check returns None and the row is stored, as before (a host row merged behind the carrier
-        makes the remainder longer than U)."""
-        entry = emitted[idx] if idx < len(emitted) else None
+    def _identity_anchor_emitted_carriers(self, identity_messages, proof, carriers) -> dict:
+        """#1000: ``{idx: entry}`` for each carrier descriptor of the active proof that the view still holds as the
+        occurrence LCM emitted: projected at its own recorded output index (continuity), and not retired. A
+        prefix and ordinal alone also bind a later byte-equal row (a NEW turn); the index does not. A carrier
+        once held this way and now absent from that index is retired: no later pass binds it (process-local)."""
+        from .reconcile import _carrier_emission_key, _project_emitted_occurrences
+
+        held = {}
+        for idx, entry in enumerate(_project_emitted_occurrences(identity_messages, proof=proof).entries):
+            if entry.kind == "carrier" and entry.output_index == idx:
+                held[_carrier_emission_key(entry)] = (idx, entry)
+        seen, retired = self._emitted_carrier_ledger()
+        out = {}
+        for descriptor in carriers:
+            key = _carrier_emission_key(descriptor)
+            if key in retired:
+                continue
+            if key in held:
+                seen[key] = None
+                out[held[key][0]] = held[key][1]
+            elif key in seen:
+                retired[key] = None
+        for ledger in (seen, retired):  # bounded: the oldest keys go first
+            while len(ledger) > _CARRIER_LEDGER_CAP:
+                del ledger[next(iter(ledger))]
+        return out
+
+    def _emitted_carrier_ledger(self) -> tuple[dict, dict]:
+        """#1000: carrier keys held at their emitted index (seen), and those since absent (retired)."""
+        if getattr(self, "_emitted_carriers_seen", None) is None:
+            self._emitted_carriers_seen, self._emitted_carriers_retired = {}, {}
+        return self._emitted_carriers_seen, self._emitted_carriers_retired
+
+    def _identity_anchor_emitted_carrier(self, message, entry, chain) -> Optional[list]:
+        """#1000: ``[U]`` when ``entry`` (the view's occurrence LCM emitted, see above) is a carrier formed around
+        its stored user row U (``retained_source``) and the carrier's remainder is exactly U's stored text: a
+        replay of U, generated content whether or not another occurrence in the view already matched U. U must
+        be a user row of this session or a verified ancestor, in the bound conversation. Any failed check
+        returns None and the row is stored, as before (a host row merged behind the carrier makes the
+        remainder longer than U)."""
         source = entry.retained_source if entry is not None and entry.kind == "carrier" else None
         store_id = source.get("store_id") if source is not None else None
-        if (type(store_id) is not int or store_id in consumed or message.get("role") != "user"
-                or message.get("tool_calls")):
+        if type(store_id) is not int or message.get("role") != "user" or message.get("tool_calls"):
             return None
         row = self._store.get_batch([store_id]).get(store_id)
         if (row is None or row.get("role") != "user" or int(row["store_id"]) != store_id

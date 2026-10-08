@@ -626,3 +626,101 @@ def test_1000_u_resent_in_the_replayed_history_is_not_stored_again(request, tmp_
             assert added == claimed, [c[:60] for c in added]  # the replayed history stores nothing new
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("when", ["first-pass", "after-claim"])
+def test_1000_stale_carrier_descriptor_never_claims_a_new_turn(tmp_path, host, monkeypatch, when):
+    """The host's view no longer holds the fitted carrier, and a GENUINELY NEW stamped user turn byte-equal to it
+    arrives. The still-active descriptor matches it by prefix and ordinal only; it is not the occurrence the fit
+    emitted (index 0), so it is one new row. ``after-claim``: the carrier was claimed in an earlier pass first, and
+    one more reply precedes the new turn (a same-length view instead is the positional cursor's R8 audit skip,
+    which origin/main shares; not this descriptor)."""
+    engine, fitted, _rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    try:
+        reply = {"role": "assistant", "content": "reply CUR", "timestamp": 30_001.0}
+        if when == "after-claim":
+            stored = len(_rows(engine))
+            engine.ingest([*fitted, reply])
+            assert [r["content"] for r in _rows(engine)[stored:]] == ["reply CUR"]
+        new = {"role": "user", "content": fitted[0]["content"], "timestamp": 40_010.0}  # a new turn, a fresh stamp
+        more = {"role": "assistant", "content": "reply NEXT", "timestamp": 40_005.0}
+        stored = len(_rows(engine))
+        engine.ingest([*fitted[1:], reply, more, new] if when == "after-claim" else [*fitted[1:], new])
+        added = [r["content"] for r in _rows(engine)[stored:]]
+        assert [c for c in added if c != more["content"]] == [new["content"]], [c[:60] for c in added]  # exactly 1
+    finally:
+        engine.shutdown()
+
+
+def test_1000_carrier_absent_from_the_view_is_retired(tmp_path, host, monkeypatch):
+    """A carrier the anchor once held at its emitted index and a later view no longer holds there is retired: a
+    still later view showing those bytes at that index again binds nothing (stored; duplicate over loss)."""
+    engine, fitted, _rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    try:
+        reply = {"role": "assistant", "content": "reply CUR", "timestamp": 30_001.0}
+        engine.ingest([*fitted, reply])  # held at index 0: claimed
+        more = {"role": "assistant", "content": "reply NEXT", "timestamp": 40_005.0}
+        new = {"role": "user", "content": fitted[0]["content"], "timestamp": 40_010.0}
+        engine.ingest([*fitted[1:], reply, more, new])  # absent from index 0: retired
+        stored = len(_rows(engine))
+        engine.on_session_start("S", **_BOUNDARY)  # cursor 0: the anchor examines the whole view again
+        again = {"role": "user", "content": fitted[0]["content"], "timestamp": 40_020.0}
+        engine.ingest([again, *fitted[1:], reply, more, new])
+        added = [r["content"] for r in _rows(engine)[stored:]]
+        assert added == [again["content"]], [c[:60] for c in added]
+    finally:
+        engine.shutdown()
+
+
+def test_1000_fit_carrier_binds_beside_a_later_recovery_emission(tmp_path, host, monkeypatch):
+    """An overflow recovery registered a ``recovery`` emission LATER in the returned list before the fit re-formed
+    the carrier at its front. Both bind: after the in-place boundary the carrier is not stored, and the recovery
+    row stays LCM's own emission (never stored)."""
+    from hermes_lcm.reconcile import _emission_identity
+
+    note = {"role": "user", "content": "[LCM overflow recovery note] a newer turn was skipped for size"}
+    real_impl = LCMEngine._compress_impl
+
+    def with_recovery(self, messages, **kwargs):
+        out = real_impl(self, messages, **kwargs)
+        if self.last_compression_noop_reason != "held":  # the published compress before it: unchanged
+            return out
+        self._pending_emission_candidates.append({"kind": "recovery", "span": note["content"],
+                                                  "full_identity": _emission_identity(note), "row": note})
+        if self._ingest_cursor == len(out):  # the cursor indexes the returned list, as a real recovery's does
+            self._ingest_cursor += 1
+        return [*out, note]
+
+    monkeypatch.setattr(LCMEngine, "_compress_impl", with_recovery)
+    engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    try:
+        assert fitted[-1] is note
+        kinds = [d["kind"] for d in engine._last_emission_descriptors["emissions"]]
+        assert "carrier" in kinds and "recovery" in kinds, kinds
+        stored = len(_rows(engine))
+        engine.ingest([*fitted, {"role": "assistant", "content": "reply CUR", "timestamp": 30_001.0}])
+        added = [r["content"] for r in _rows(engine)[stored:]]
+        assert not any("Summary (d" in c[:40] for c in added), [c[:60] for c in added]  # the carrier: not stored
+        assert note["content"] not in added and added == ["reply CUR"], [c[:60] for c in added]
+        assert sum(1 for r in _rows(engine) if r["content"] == rest) == 1
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("host_stamp", [False, True], ids=["unstamped", "host-stamped"])
+def test_1000_carrier_claimed_when_u_replay_matched_first(tmp_path, host, monkeypatch, host_stamp):
+    """The view holds the fitted carrier AND a replay of U with U's original stamp. R1 matches that replay to U
+    first; the carrier, still the fit's own occurrence, is generated content all the same: no row is added and U
+    stays one row."""
+    engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    try:
+        if host_stamp:
+            fitted[0]["timestamp"] = 40_000.0
+        u_row = next(r for r in _rows(engine) if r["role"] == "user" and r["content"] == rest)
+        stored = len(_rows(engine))
+        engine.ingest([*fitted, {"role": "user", "content": rest, "timestamp": u_row["observed_at"]}])
+        added = [r["content"] for r in _rows(engine)[stored:]]
+        assert added == [], [c[:60] for c in added]
+        assert sum(1 for r in _rows(engine) if r["content"] == rest) == 1
+    finally:
+        engine.shutdown()

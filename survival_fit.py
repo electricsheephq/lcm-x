@@ -219,14 +219,10 @@ class SurvivalFitMixin:
             logger.warning("LCM survival fit could not reach budget (after=%d, budget=%d, reason=%s)", after, budget, reason)
         self._survival_record(reason, count, ids, before, after, budget, projected, notice, warn_user=not exit_fit)
         formed = getattr(self, "_survival_cut_carrier", None)
-        if formed is not None:  # #1000: the re-formed carrier is LCM's emission, as assembly registers its own
-            merged, span, store_id = formed
-            candidate = {"kind": "carrier", "span": span, "retained_source": {"store_id": store_id},
-                         "full_identity": _emission_identity(merged), "row": merged}
-            self._survival_fit_emission = candidate
-            pending = getattr(self, "_pending_emission_candidates", None)
-            if isinstance(pending, list):
-                pending.append(candidate)
+        if formed is not None:  # #1000: the re-formed carrier is LCM's emission, as assembly registers its own;
+            merged, span, store_id = formed  # the proof finalizes it apart from the pending candidates (output order)
+            self._survival_fit_emission = {"kind": "carrier", "span": span, "retained_source": {"store_id": store_id},
+                                           "full_identity": _emission_identity(merged), "row": merged}
         return fitted
 
     def _survival_summary_identity(self, row: dict, summary: str, uid, proof_kind: str, absorbed_from=None, taken=()) -> dict:
