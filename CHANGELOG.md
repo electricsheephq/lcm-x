@@ -9,6 +9,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 ### v0.27.0
 
 - Change: the system-prompt and in-context LCM notes now name `lcm_recall` first for facts from earlier sessions, and say that `lcm_grep` searches this session by default. Every agent sees this prompt change. (#998)
+- Change: with embeddings on, `lcm_recall` moves the full-text arm's best match into the ranked window when fusion would have pushed it out, displacing at most one session; the hit keeps its own score. `detail='answer_ready'` delivery still applies its citation and per-session rules, and `provenance.fts_anchor.delivered` reports the outcome. `LCM_RECALL_FTS_ANCHOR=false` turns it off; embeddings-off output is unchanged, and it is not used by proactive recall. (#950)
 - Bench: Track S's Codex-native arm gives each run its own isolated home, so parallel runs cannot mask a credential refresh. (#951)
 - Fix: a survival projection is recognised on a cold resume even when its tool-call arguments already quote survival marks, and a projection that installs shorter stored tool calls now carries its mark. (#959)
 - Fix: the doctor's attempt-only guidance and the operator guide state the v0.27.0 plugin-only rollback floor for projected or unknown-projection stores, and the doctor shows that floor for a damaged counter record that carries projection evidence. (#966)
