@@ -130,7 +130,7 @@ def probe_cells() -> list[dict]:
         {"id": str(k), "content": f"probe item {n}", "status": st} for k, (st, n) in enumerate(todo.items(), 1)]}}}
     todo_probes = [{"probe": "todo-open" if st != "completed" else "todo-done-control", "nonce": n, "from_turn": 4,
                     "expect": "present" if st != "completed" else "absent", "carrier": "todo_fold"} for st, n in todo.items()]
-    ctrl = "HWXQZTLGPN"
+    ctrl = {t: f"HWXQZTL{s}PN" for t, s in zip(range(20, 31), "GHJKMNRSTVW")}  # one per current turn, same length
     reads = [{"turns": [6], "calls": [{"name": "read_file", "args": {"path": f"{{files}}/big-{k:02d}.txt"}}]} for k in (1, 2, 3)]
     out = []
     for m, ip in modes():
@@ -146,11 +146,11 @@ def probe_cells() -> list[dict]:
             out.append(cell(f"continuity/probe-constraint-{shape}/{m}", [], **common, tool_plan=reads, big_files=3,
                             big_lines=60, user={"payload": {
                                 "3": {"at": at, "text": f"CONSTRAINT {n}: answer in English and never touch the held file."},
-                                **{str(t): {"at": "head", "text": f"CONTROL {ctrl}: a constraint in the current turn."}
-                                   for t in range(20, 31)}}},
-                            continuity={"probes": [{"probe": "constraint", "nonce": n, "expect": "present", "from_turn": 3},
-                                                   {"probe": "constraint-control", "nonce": ctrl, "expect": "present",
-                                                    "from_turn": 20}]},
+                                **{str(t): {"at": "head", "text": f"CONTROL {c}: a constraint in the current turn."}
+                                   for t, c in ctrl.items()}}},
+                            continuity={"probes": [{"probe": "constraint", "nonce": n, "expect": "present", "from_turn": 3}] +
+                                        [{"probe": "constraint-control", "nonce": c, "expect": "present", "from_turn": t,
+                                          "to_turn": t} for t, c in ctrl.items()]},
                             doc=f"#659 P5 (recorded): a constraint nonce ({shape}) in turn 3, three large reads in turn 6; "
                                 "the fake summariser keeps tags only, so this measures structural retention."))
     return out

@@ -498,7 +498,8 @@ def apply_f4(rec: dict, cell: dict, unexpected: list) -> None:
 
 def apply_probes(rec: dict, cell: dict) -> None:
     """#659 probes are RECORDED only (modelled on apply_f4): a per-probe rate over the observed compaction events and
-    the declared bar where one exists. Never a bar, never PASS/FAIL, never the verdict or the gate."""
+    the declared bar where one exists (an unknown event never meets it). Never a bar, never PASS/FAIL, never the verdict
+    or the gate."""
     probes = (rec.get("continuity") or {}).get("probes")
     if not probes or rec["verdict"] == "ERROR":
         return
@@ -509,7 +510,8 @@ def apply_probes(rec: dict, cell: dict) -> None:
         rate, bar = (p["met"] / decided if decided else None), PROBE_BARS.get(name)
         out[name] = {"met": p["met"], "missed": p["missed"], "unknown": p["unknown"], "rate": rate, "bar": bar,
                      "recorded": "scenario not observed" if not observed else "not observed" if rate is None else
-                     "recorded" if bar is None else "meets bar" if rate >= bar else "below bar"}
+                     "recorded" if bar is None else "below bar" if rate < bar else
+                     "incomplete (unknown events)" if p["unknown"] else "meets bar"}
     rec["probes_recorded"] = out
 
 

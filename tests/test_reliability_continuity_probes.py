@@ -129,19 +129,49 @@ def test_open_todos_must_sit_in_the_fold_and_the_completed_item_never_does():
 def test_constraint_presence_per_event_with_unknown_rows_and_a_tail_control(shape):
     cell = probe_cell(shape)
     [n] = [s["nonce"] for s in cell["continuity"]["probes"] if s["probe"] == "constraint"]
-    [ctrl] = [s["nonce"] for s in cell["continuity"]["probes"] if s["probe"] == "constraint-control"]
-    obs = [commit(1, 4), commit(3, 8), commit(5, 12), commit(7, 28)]
-    reqs = [req(1, 2, 4, {n: hits(user_raw=1), ctrl: hits()}), req(2, 4, 8, {n: hits(), ctrl: hits()}),
+    ctrl = {s["from_turn"]: s["nonce"] for s in cell["continuity"]["probes"] if s["probe"] == "constraint-control"}
+    obs = [commit(1, 4), commit(3, 8), commit(5, 12), commit(7, 28), commit(9, 29)]
+    reqs = [req(1, 2, 4, {n: hits(user_raw=1)}), req(2, 4, 8, {n: hits()}),
             {"rid": 3, "ts": 6, "role": "main", "turn": 12, "continuity": {}},
-            req(4, 8, 28, {n: hits(), ctrl: hits(user_raw=1)})]
+            req(4, 8, 28, {n: hits(), ctrl[28]: hits(user_raw=1)}),
+            req(5, 10, 29, {n: hits(), ctrl[28]: hits(user_raw=1), ctrl[29]: hits()})]  # turn 29's own row dropped
     scored = CT.score(cell, reqs, obs)
     c = scored["probes"]["constraint"]
-    assert [e["ok"] for e in c["events"]] == [True, False, None, False]
-    assert (c["met"], c["missed"], c["unknown"]) == (1, 2, 1)
-    assert scored["probes"]["constraint-control"]["met"] == 1
-    assert scored["probes"]["constraint-control"]["not_applicable"] == 3
+    assert [e["ok"] for e in c["events"]] == [True, False, None, False, False]
+    assert (c["met"], c["missed"], c["unknown"]) == (1, 3, 1)
+    control = scored["probes"]["constraint-control"]
+    assert [e["ok"] for e in control["events"]] == [True, False]  # an older turn's control never stands in
+    assert list(control["events"][1]["nonces"]) == [ctrl[29]] and control["not_applicable"] == 3
     # F1-F4 rows are unchanged beside the probes.
-    assert [r["F1"] for r in scored["rows"]] == [True, True, None, True]
+    assert [r["F1"] for r in scored["rows"]] == [True, True, None, True, True]
+
+
+def test_each_current_turn_has_its_own_control_nonce():
+    for shape in ("probe-constraint-head", "probe-constraint-mid", "probe-constraint-shape"):
+        cell = probe_cell(shape)
+        specs = [s for s in cell["continuity"]["probes"] if s["probe"] == "constraint-control"]
+        assert [(s["from_turn"], s["to_turn"]) for s in specs] == [(t, t) for t in range(20, 31)]
+        assert len({s["nonce"] for s in specs}) == 11 and len({len(s["nonce"]) for s in specs}) == 1
+        for s in specs:
+            assert s["nonce"] in PC.P1.user_text(cell, "T", s["from_turn"])
+            assert s["nonce"] not in PC.P1.user_text(cell, "T", s["from_turn"] + 1)
+
+
+def test_host_instruction_needs_an_observed_commit_after_the_rewrite():
+    cell = probe_cell("probe-host-instruction")
+    v1, v2 = cell["continuity"]["soul"]["nonce"], cell["continuity"]["soul"]["rewrite"]["nonce"]
+    old = {v1: hits(system=1), v2: hits()}
+    reqs = [req(1, 2, 4, old), req(2, 4, 8, old), req(3, 6, 12, old)]
+    # Two commits, then the rewrite with no commit after it: the new line was never tested.
+    late = CT.score(cell, reqs, [commit(1, 4), commit(3, 8), {"kind": "probe_rewrite", "ts": 5, "turn": 12}])
+    assert late["scenario_observed"] is False
+    assert late["probes"]["host-instruction"]["met"] == 2
+    # No rewrite at all: every event precedes it, so the before-window specs still apply.
+    never = CT.score(cell, reqs, [commit(1, 4), commit(3, 8)])
+    assert never["scenario_observed"] is False
+    p = never["probes"]["host-instruction"]
+    assert (p["met"], p["missed"], p["not_applicable"]) == (2, 0, 0)
+    assert set(p["events"][0]["nonces"]) == {v1, v2} and "host-instruction-rebuild" not in never["probes"]
 
 
 def test_probe_scores_need_two_observed_commits_and_leave_other_cells_unchanged():
@@ -169,6 +199,11 @@ def test_apply_probes_records_rates_and_never_touches_the_verdict(verdict):
                                        "recorded": "below bar"}
     assert got["host-instruction-rebuild"]["recorded"] == "meets bar" and got["host-instruction-rebuild"]["rate"] == 1.0
     assert got["constraint"]["rate"] is None and got["constraint"]["recorded"] == "not observed"
+    unknown = {"host-instruction": {"events": [], "met": 2, "missed": 0, "unknown": 1, "not_applicable": 0},
+               "host-instruction-rebuild": {"requests": 3, "met": 2, "missed": 1, "unknown": 1}}
+    PC.apply_probes(rec := {"verdict": verdict, "continuity": {"scenario_observed": True, "probes": unknown}}, cell)
+    assert rec["probes_recorded"]["host-instruction"]["recorded"] == "incomplete (unknown events)"  # never "meets bar"
+    assert rec["probes_recorded"]["host-instruction-rebuild"]["recorded"] == "below bar"  # a miss decides
     error = {"verdict": "ERROR", "continuity": {"probes": probes}}
     PC.apply_probes(error, cell)
     assert "probes_recorded" not in error

@@ -130,7 +130,12 @@ def score(cell: dict, requests: list[dict], observations: list[dict]) -> dict:
             any(r["kind"] == "forced" and r["status"] == "observed" for r in rows) if
             (cell.get("continuity") or {}).get("forced_followup") else None}
     if (cell.get("continuity") or {}).get("probes"):
-        result["scenario_observed"] = len([r for r in rows if r["kind"] != "forced" and r["status"] == "observed"]) >= 2
+        seen = [c for c, _, r in pairs if r["kind"] != "forced" and r["status"] == "observed"]
+        result["scenario_observed"] = len(seen) >= 2
+        if (cell["continuity"].get("soul") or {}).get("rewrite"):  # P1: the new line is tested only by a later commit
+            rewrite = next((o["ts"] for o in observations if o.get("kind") == "probe_rewrite"), None)
+            result["scenario_observed"] = result["scenario_observed"] and rewrite is not None and any(
+                c.get("ts") is not None and c["ts"] >= rewrite for c in seen)
         result["probes"] = score_probes(cell, pairs, main, observations)
     return result
 
@@ -143,7 +148,7 @@ def probe_check(spec: dict, nonces: dict) -> bool:
 
 def score_probes(cell: dict, pairs: list, main: list[dict], observations: list[dict]) -> dict:
     """#659, recorded only: per probe, every compaction event (the row's first main request) checks each applicable
-    nonce spec (``from_turn``; ``window`` before/after the SOUL.md rewrite). No request or no markers is unknown,
+    nonce spec (``from_turn``/``to_turn``; ``window`` before/after the SOUL.md rewrite, before when it never ran). No request or no markers is unknown,
     never met. ``host-instruction-rebuild`` checks every main request between the rewrite and the next commit: the
     cached prompt must still carry the old line and not yet the new one."""
     scen = cell["continuity"]
@@ -154,9 +159,9 @@ def score_probes(cell: dict, pairs: list, main: list[dict], observations: list[d
     for c, req, row in pairs:
         nonces = ((req or {}).get("continuity") or {}).get("nonces")
         turn = (req or {}).get("turn") or c.get("turn") or 0
-        window = None if rewrite is None or c.get("ts") is None else "after" if c["ts"] >= rewrite else "before"
+        window = None if c.get("ts") is None else "after" if rewrite is not None and c["ts"] >= rewrite else "before"
         for name, p in out.items():
-            specs = [s for s in scen["probes"] if s["probe"] == name and turn >= s.get("from_turn", 1)
+            specs = [s for s in scen["probes"] if s["probe"] == name and s.get("from_turn", 1) <= turn <= s.get("to_turn", turn)
                      and s.get("window") in (None, window)]
             if not specs:
                 p["not_applicable"] += 1
