@@ -3,7 +3,7 @@
 This reported arm reuses the repository's existing `drive_codex.py` and `parse_rollout.py`
 by relative import. It requires Python 3.12+, the installed CLI, `TRACK_S_OUT`,
 `TRACK_S_MATERIAL`, and an explicit `--auth-file` supplied by the caller.
-Authentication is copied only to the isolated run home below `TRACK_S_OUT/s4/home`.
+Authentication is copied only to the isolated per-run home `TRACK_S_OUT/s4/home/<seed>/<run>` (a symlinked home is refused).
 See the [kit recipe](../README.md); never place auth or run data in the repository.
 
 ```bash
