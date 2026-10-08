@@ -19,6 +19,7 @@ import { createLcmExpandQueryTool } from "track-s-lossless/src/tools/lcm-expand-
 import type { LcmConfig } from "track-s-lossless/src/db/config.js";
 import type { LcmDependencies } from "track-s-lossless/src/types.js";
 import { chat, callLog, clock, zaiComplete, ZAI_MODEL, type ChatMessage } from "./zai.js";
+import { mergeAttempt } from "./retry.js";
 
 const TS = process.env.TRACK_S_OUT!, WT = process.argv[process.argv.indexOf("--worktree") + 1];
 const argv = process.argv.slice(2);
@@ -484,20 +485,32 @@ async function ask(purpose: string, system: string, asm: any, user: string, tool
   const last = [...callLog].reverse().find((c) => c.purpose === purpose);
   return { text, error, guard, context_format: fmt, summary_blocks, wall_s: Math.round(performance.now() - t0) / 1000, model_readback: last?.model_readback };
 }
+// #978: the S2 one-retry rule (retry.ts); calls = every attempt's non-summariser calls in order, attempts = metas without text
+async function askRetry(probeIds: string[], once: () => ReturnType<typeof ask>) {
+  let s: ReturnType<typeof mergeAttempt> | null = null; const attempts: any[] = [], calls: ReturnType<typeof usageOf> = [];
+  while (!s?.stop) {
+    const k = callLog.length, r = await once(), got = usageOf(callLog.slice(k).filter((x) => x.purpose !== "summariser"));
+    attempts.push(r); calls.push(...got);
+    s = mergeAttempt(s, parseObj(r.text), probeIds, got.filter((c) => c.purpose.startsWith("reader")).at(-1)?.completion_tokens ?? 0, READER_MAX_TOKENS);
+  }
+  const r = { ...attempts.at(-1), error: s.error ?? attempts.at(-1).error, guard: attempts.some((a) => a.guard),
+    wall_s: Math.round(attempts.reduce((n, a) => n + a.wall_s, 0) * 1000) / 1000 };
+  return { answers: s.answers, r, calls, attempts: attempts.map((a) => ({ ...a, text: undefined })) };
+}
 // S6 A1: + the continuation batch <prefix>-BCONT (one probe per continuation.json field), shaped as S2 builds it
 const cont0 = rd(join(MAT, "continuation.json")), pb = jl(join(MAT, "probe_batches.jsonl"));
 const batches = PREFIX ? [] : [...pb, { id: pb[0].id.replace(/-[^-]+$/, "") + "-BCONT", text: pb[0].text, probes: Object.keys(cont0)
   .filter((k) => !["id", "row_id", "row_index", "row_role"].includes(k)).map((k) => ({ id: `${cont0.id}.${k}`, kind: "continuation_field",
     expect: "value", gold: cont0[k], text: `For the pending mid-task continuation, what is its \`${k}\`?` })) }].slice(0, BATCHES);
 for (const b of batches) {
-  const c = await openClone(b.id), k0 = callLog.length;
+  const c = await openClone(b.id);
   const ctx = { deps: c.deps, lcm: c.eng, sessionId, sessionKey }; // D6 --open: the public tools on this clone, every batch
   const tools = OPEN ? [createLcmGrepTool(ctx), createLcmDescribeTool(ctx), createLcmExpandQueryTool({ ...ctx, requesterSessionKey: sessionKey })] : undefined;
   const sys = [policy && OPEN ? policy : "", c.asm.systemPromptAddition, systemSlot].filter(Boolean).join("\n\n");
   const user = b.text + "\n" + b.probes.map((p: any) => `${p.id}: ${p.text}`).join("\n");
-  const r = await ask(OPEN ? "reader-open" : "reader", sys, c.asm, user, tools, c.acct);
-  const answers = parseObj(r.text), calls = usageOf(callLog.slice(k0).filter((x) => x.purpose !== "summariser")); readerCalls.push({ batch: b.id, calls });
-  writeFileSync(join(c.dir, "answer.json"), JSON.stringify({ raw_reply: r.text, meta: { ...r, text: undefined }, reader_calls: calls, accounting: OPEN ? c.acct : undefined,
+  const { answers, r, calls, attempts } = await askRetry(b.probes.map((p: any) => p.id), () => ask(OPEN ? "reader-open" : "reader", sys, c.asm, user, tools, c.acct));
+  readerCalls.push({ batch: b.id, calls });
+  writeFileSync(join(c.dir, "answer.json"), JSON.stringify({ raw_reply: r.text, meta: { ...r, text: undefined, attempts }, reader_calls: calls, accounting: OPEN ? c.acct : undefined,
     assembled_messages: c.asm.messages.length, assembled_tokens: c.asm.estimatedTokens }, null, 2));
   const openExtra = OPEN ? { arm_kind: "open", attribution: "batch", tool_calls: c.acct.top_calls, delegated_llm_calls: c.acct.deleg_llm_calls, delegated_tool_calls: c.acct.deleg_tool_calls,
     tokens_read_back: c.acct.top_tokens, runaway_guard_hit: r.guard, recall_path: c.acct.top_calls ? recallPath(c.acct) : "context" } : {};
@@ -511,9 +524,8 @@ for (const id of PREFIX ? [] : OPEN_PROBES) {
   const ctx = { deps: c.deps, lcm: c.eng, sessionId, sessionKey };
   const tools = [createLcmGrepTool(ctx), createLcmDescribeTool(ctx), createLcmExpandQueryTool({ ...ctx, requesterSessionKey: sessionKey })];
   const sys = [policy, c.asm.systemPromptAddition, systemSlot].filter(Boolean).join("\n\n");
-  const r = await ask("reader-open", sys, c.asm, `Reply only as a JSON object mapping each probe id to its answer string (use I don't know for ABSTAIN).\n${p.id}: ${p.text}`, tools, c.acct);
-  const answers = parseObj(r.text);
-  writeFileSync(join(c.dir, "answer.json"), JSON.stringify({ raw_reply: r.text, meta: { ...r, text: undefined }, accounting: c.acct }, null, 2));
+  const { answers, r, attempts } = await askRetry([p.id], () => ask("reader-open", sys, c.asm, `Reply only as a JSON object mapping each probe id to its answer string (use I don't know for ABSTAIN).\n${p.id}: ${p.text}`, tools, c.acct));
+  writeFileSync(join(c.dir, "answer.json"), JSON.stringify({ raw_reply: r.text, meta: { ...r, text: undefined, attempts }, accounting: c.acct }, null, 2));
   results.push(row(p, answers, r, { arm: `${ARM}-open`, arm_kind: "open", batch_id: null, clone_id: `clones/open-${id}`, attribution: "answer",
     tool_calls: c.acct.top_calls, delegated_llm_calls: c.acct.deleg_llm_calls, delegated_tool_calls: c.acct.deleg_tool_calls,
     tokens_read_back: c.acct.top_tokens, delegated_tokens_read_back: c.acct.deleg_tokens, delegated_readback: [...new Set(c.acct.deleg_readback)],

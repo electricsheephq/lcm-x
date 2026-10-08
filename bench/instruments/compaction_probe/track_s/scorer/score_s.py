@@ -380,7 +380,12 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     miss = missing(f["id"] for f in facts)
     iss = base + ([("INCOMPLETE", f"{len(miss)} of {len(facts)} scheduled facts have no result row (batches not run: "
                     f"{', '.join(unasked_batches)})")] if miss else [])
-    m = {"facts_kept": metric(correct / len(facts) if facts else None, iss, correct=correct, reader_truncated=len(truncated_facts), denominator=len(facts), by_class_placement=grid,
+    by_placement = {}  # #978: each placement cell counts only its own truncated facts
+    for f in all_facts:
+        if f["id"] in truncated_facts:
+            by_placement[f["placement"]] = by_placement.get(f["placement"], 0) + 1
+    m = {"facts_kept": metric(correct / len(facts) if facts else None, iss, correct=correct, reader_truncated=len(truncated_facts),
+                              reader_truncated_by_placement=by_placement, denominator=len(facts), by_class_placement=grid,
                               lost_before_compaction={"ids": lost, "source": run.get("admission_source")})}
     # stale-value rate (lower is better): the superseded value asserted, even alongside the current one
     sup = [f for f in facts if f.get("stale")]
