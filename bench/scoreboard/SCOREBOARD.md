@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `f47a1b702fa821b04fdbc93ddaba0b55725b8846b101bf69afb6d36b1d868045`, rows: 14)
+Generated from `results.jsonl` (sha256: `0c9f48dc949926e89eb008827983e953eae24926bc426670584c36ad64c5c1ab`, rows: 17)
 
 ## Summary
 
@@ -10,6 +10,7 @@ Generated from `results.jsonl` (sha256: `f47a1b702fa821b04fdbc93ddaba0b55725b884
 |---|---|---|---|---|---|
 | AMA-Bench (open-ended, 208 episodes) | strict judged accuracy, fail-closed denominator | 1180/2496 = 47.3% (scored-only 1180/2460 = 48.0%) | F | 2026-08-02 | [details](#ama208-full-2026-08-02) |
 | Internal scale instrument (389×, 19,829 sessions / 199,641 messages) | p50_ms | 263.6 ms @ 19,829 sessions (24× vs pre-fix; 125 ms @ 8k) | P | 2026-07-30 | [details](#scale-curve-fastscan-2026-07-30) |
+| LoCoMo (locomo10, 1,986q) | accuracy | 49.7% (987/1,986) | P | 2026-10-07 | [details](#locomo10-1986-qa-off-v0261-2026-10-07) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 67.4% (1,339/1,986 MemScore) | F | 2026-08-26 | [details](#locomo10-1986-b3a-2026-08-26) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 54.6% (1,085/1,986 MemScore) | F | 2026-08-02 | [details](#locomo10-1986-declared-2026-08-02) |
 | ~~LoCoMo (locomo10, 1,986q)~~ | ~~accuracy~~ | ~~47.0% (MemScore)~~ | ~~F~~ | ~~2026-07-30~~ | ~~[details](#locomo10-1986-arm-a-2026-07-30)~~ → [successor](#locomo10-1986-declared-2026-08-02) |
@@ -19,6 +20,8 @@ Generated from `results.jsonl` (sha256: `f47a1b702fa821b04fdbc93ddaba0b55725b884
 | LongMemEval-V1 MEDIUM (500q, retrieval row) | lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed | recall@10 84.7% \| ndcg@10 0.764 \| recall@1 45.8% (470 scored + 30 abstention-excluded; 0 instrument failures) | P | 2026-10-05 | [details](#longmemeval-v1-m500-retrieval-default-v0260-2026-10-05) |
 | LongMemEval-V1 MEDIUM (500q, retrieval row) | lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed | recall@10 95.6% \| ndcg@10 0.861 \| recall@1 50.0% (470 scored + 30 abstention-excluded; 0 instrument failures) | P | 2026-08-19 | [details](#longmemeval-v1-m500-retrieval-2026-08-19) |
 | LongMemEval-V1 MEDIUM (500q, retrieval row, R1-M) | lcm_recall (product arm): recall@10 / ndcg@10 / recall@1, session level, fail-closed | recall@10 84.7% \| ndcg@10 0.764 \| recall@1 45.8% (470 scored + 30 abstention-excluded; 0 failed) | P | 2026-10-05 | [details](#longmemeval-v1-m500-retrieval-fulltext-2026-10-05) |
+| LongMemEval-V1 SMALL (cleaned, 500q, QA row) | accuracy | 86.4% (432/500); OFF on the same release 72.6% | P | 2026-10-08 | [details](#longmemeval-v1-s500-qa-local-v0261-2026-10-08) |
+| LongMemEval-V1 SMALL (cleaned, 500q, QA row) | accuracy | 72.6% (363/500) | P | 2026-10-08 | [details](#longmemeval-v1-s500-qa-off-v0261-2026-10-08) |
 | LongMemEval-V2 (451q, agentic) | accuracy | 298/451 (66.1%) | P | 2026-07-27 | [details](#longmemeval-v2-451-agentic-2026-07-27) |
 | LongMemEval-V2 (451q, static) | accuracy | 123/451 (27.3%) — official static protocol, fixed weak reader | P | 2026-07-31 | [details](#longmemeval-v2-451-static-2026-07-31) |
 | LongMemEval-V2 static (451q) | judged accuracy, full set | 143/451 = 31.7% (web 97/240 = 40.4%, enterprise 46/211 = 21.8%) | F | 2026-08-03 | [details](#v2-static-451-sota-luna-2026-08-03) |
@@ -267,6 +270,64 @@ pre-registered A/A′ pair on fresh stores: 69/1,986 discordant (3.47%), aggrega
 - +7.6 vs the superseded row is NOT pure retrieval: the judge rubric and adversarial gold changed between configs (both disclosed); corrupted gold unchanged (ceiling ≈95%)
 - initial publication claimed a single-hop regression from a label-scramble — corrected within hours (F48 §3-CORRECTION); the REAL new finding: the FTS arm is near-inert in delivery on this dataset in BOTH configs (3/49,650 vs 2/49,650) despite prose mode — under investigation
 - adversarial 32.7 is the measured-honest number against canonical abstention gold with the known B3 product weakness unfixed; Tier-F config; Voyage variant queues separately
+
+### <a id="locomo10-1986-qa-off-v0261-2026-10-07"></a>locomo10-1986-qa-off-v0261-2026-10-07
+
+**id:**
+locomo10-1986-qa-off-v0261-2026-10-07
+
+**benchmark:**
+LoCoMo (locomo10, 1,986q)
+
+**metric:**
+accuracy
+
+**value:**
+0.497
+
+**display:**
+49.7% (987/1,986)
+
+**tier:**
+P
+
+**date:**
+2026-10-07
+
+**system_commit:**
+lcm-x v0.26.1 (5fc3d1c6), the GA tag tree; no post-run delta
+
+**harness_commit:**
+memorybench-benchmark-tool @ 983a32e (branch bench/locomo-fulltext-arm; fails closed on Codex CLI error events and stops on a model reroute, lcm-x #965)
+
+**judge:**
+gpt-6.1-sol @ low via Codex CLI 0.161.0 (subscription lane); full judge prompt in the harness at src/prompts/defaults.ts (sha256 7662f645…, unchanged since the 2026-08 rows)
+
+**reader:**
+gpt-6.1-sol @ medium via Codex CLI 0.161.0 (subscription lane); answer prompt src/providers/hermes-lcm/prompts.ts (sha256 ec37e514…)
+
+**retrieval_config:**
+product defaults: embeddings OFF (full-text recall only), no fleet overlay, no speaker-attribution prefix at ingest; memorybench hermes-lcm bridge, HERMES_MB_EMBEDDINGS=off
+
+**dataset_exposure:**
+99 documented corrupted-gold rows all ran, scored as-is; known-corruption ceiling about 95% (unchanged from the earlier LoCoMo rows)
+
+**breakdown:**
+by the harness's category labels (as in the earlier rows): single-hop 17.4 (282q) / multi-hop 59.2 (321q) / temporal 29.2 (96q) / world-knowledge 61.4 (841q) / adversarial 45.7 (446q)
+
+**variance:**
+pre-registered A/A′, full rerun on fresh stores: 28/1,986 discordant (1.4%; 16 A-only, 12 A′-only; exact McNemar p = 0.57); A 49.7% vs A′ 49.5%
+
+**failclose:**
+0 failed / 0 missing / 0 judge parse fallbacks in both arms; 0 call-record violations; 0 watchdog restarts; A′ resumed 6 times under the same run id after 33 calls (21 answer, 12 judge) failed closed on Codex CLI error events, stores verified unchanged across every resume; the cause is not identified (harness kept no error text then, #976)
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6049053842
+
+**caveats:**
+- a NEW baseline for the full-text configuration; not comparable to the 67.4% row (2026-08-26), which used fastembed with fusion, a bridge-side speaker-attribution prefix (B3-A, not in the product) and the previous reader generation
+- category labels follow the harness and differ from the names some published tables use; compare by these labels or by LoCoMo category id
+- claim class: a QA baseline through the benchmark bridge on the GA tree; it does not measure host-visible behaviour, the fleet overlay, or the Voyage configuration
 
 ### <a id="longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06"></a>longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06
 
@@ -618,6 +679,124 @@ n/a
 
 **caveats:**
 - accuracy A/B on the same instrument was NULL (M12) — the established claim is latency, not accuracy; we publish both facts together
+
+### <a id="longmemeval-v1-s500-qa-local-v0261-2026-10-08"></a>longmemeval-v1-s500-qa-local-v0261-2026-10-08
+
+**id:**
+longmemeval-v1-s500-qa-local-v0261-2026-10-08
+
+**benchmark:**
+LongMemEval-V1 SMALL (cleaned, 500q, QA row)
+
+**metric:**
+accuracy
+
+**value:**
+0.864
+
+**display:**
+86.4% (432/500); OFF on the same release 72.6%
+
+**tier:**
+P
+
+**date:**
+2026-10-08
+
+**system_commit:**
+lcm-x v0.26.1 (5fc3d1c6), the GA tag tree; no post-run delta
+
+**harness_commit:**
+memorybench-benchmark-tool @ 983a32e (branch bench/locomo-fulltext-arm; fails closed on Codex CLI error events and stops on a model reroute, lcm-x #965)
+
+**judge:**
+gpt-6.1-sol @ low via Codex CLI 0.161.0 (subscription lane); full judge prompt in the harness at src/prompts/defaults.ts (sha256 7662f645…, unchanged since the 2026-08 rows)
+
+**reader:**
+gpt-6.1-sol @ medium via Codex CLI 0.161.0 (subscription lane); answer prompt src/providers/hermes-lcm/prompts.ts (sha256 ec37e514…)
+
+**retrieval_config:**
+embeddings LOCAL: fastembed BAAI/bge-small-en-v1.5 on CPU (HF offline), fused with full-text recall at the product's default fusion weights; otherwise product defaults, no fleet overlay, no speaker-attribution prefix; memorybench hermes-lcm bridge, HERMES_MB_EMBEDDINGS=on, HERMES_MB_PROVIDER=fastembed
+
+**dataset_exposure:**
+none documented for the cleaned S set; all 500 questions ran and were scored
+
+**breakdown:**
+single-session-user 95.7 (OFF 98.6) / single-session-assistant 100 (94.6) / knowledge-update 92.3 (89.7) / temporal-reasoning 83.5 (71.4) / multi-session 76.7 (47.4) / single-session-preference 80.0 (43.3); paired vs OFF: LOCAL-only correct 81, OFF-only 12
+
+**variance:**
+A/A′ on the same 100-question subset: 0/100 discordant (A 85/100, A′ 85/100); paired OFF vs LOCAL over 500 questions: exact McNemar p ≈ 1e-13
+
+**failclose:**
+0 failed / 0 missing / 0 judge parse fallbacks in both arms; 0 call-record violations on the scored calls; arm A resumed once under the same run id (3 judge calls failed closed on Codex CLI error events and were re-run; no reroute recorded)
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6051649702
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6049527257
+
+**caveats:**
+- single-session-user is the only category that moves down (net 2 of 70), the same direction as the recall-row finding on fusion weights (#950); the fleet embeddings default stays OFF (owner decision)
+- ingest cost: about 48 s per question at p50 against about 0.5 s for OFF (the bridge embeds each question's haystack on CPU); recall context about 11.7k tokens per question at the median against 3.4k
+- the 91.0% V1-S row (2026-07-29) also used fastembed bge-small but an older product tree and the previous reader generation; this row is the release-over-release reference for the local-embeddings configuration
+- claim class: a QA baseline through the benchmark bridge on the GA tree; it does not measure host-visible behaviour, the fleet overlay, or the Voyage configuration
+
+### <a id="longmemeval-v1-s500-qa-off-v0261-2026-10-08"></a>longmemeval-v1-s500-qa-off-v0261-2026-10-08
+
+**id:**
+longmemeval-v1-s500-qa-off-v0261-2026-10-08
+
+**benchmark:**
+LongMemEval-V1 SMALL (cleaned, 500q, QA row)
+
+**metric:**
+accuracy
+
+**value:**
+0.726
+
+**display:**
+72.6% (363/500)
+
+**tier:**
+P
+
+**date:**
+2026-10-08
+
+**system_commit:**
+lcm-x v0.26.1 (5fc3d1c6), the GA tag tree; no post-run delta
+
+**harness_commit:**
+memorybench-benchmark-tool @ 983a32e (branch bench/locomo-fulltext-arm; fails closed on Codex CLI error events and stops on a model reroute, lcm-x #965)
+
+**judge:**
+gpt-6.1-sol @ low via Codex CLI 0.161.0 (subscription lane); full judge prompt in the harness at src/prompts/defaults.ts (sha256 7662f645…, unchanged since the 2026-08 rows)
+
+**reader:**
+gpt-6.1-sol @ medium via Codex CLI 0.161.0 (subscription lane); answer prompt src/providers/hermes-lcm/prompts.ts (sha256 ec37e514…)
+
+**retrieval_config:**
+product defaults: embeddings OFF (full-text recall only), no fleet overlay, no speaker-attribution prefix at ingest; memorybench hermes-lcm bridge, HERMES_MB_EMBEDDINGS=off
+
+**dataset_exposure:**
+none documented for the cleaned S set; all 500 questions ran and were scored
+
+**breakdown:**
+single-session-user 98.6 (70q) / single-session-assistant 94.6 (56q) / knowledge-update 89.7 (78q) / temporal-reasoning 71.4 (133q) / multi-session 47.4 (133q) / single-session-preference 43.3 (30q)
+
+**variance:**
+pre-registered A/A′ on fresh stores over a fixed 100-question subset: 1/100 discordant; A 74/100 vs A′ 73/100 on the subset
+
+**failclose:**
+0 failed / 0 missing / 0 judge parse fallbacks in both arms; 0 call-record violations on the scored calls; arm A resumed 3 times under the same run id (9 calls failed closed on Codex CLI error events and were re-run; no reroute recorded)
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6049527257
+
+**caveats:**
+- a NEW baseline for the full-text configuration; not comparable to the 91.0% V1-S row (2026-07-29), which used fastembed embeddings, an older product tree and the previous reader generation
+- answer-call input is about 23k tokens per question, most of it the CLI's own instructions; the recall context delivered to the reader is about 3k tokens
+- claim class: a QA baseline through the benchmark bridge on the GA tree; it does not measure host-visible behaviour, the fleet overlay, or the Voyage configuration
 
 ### <a id="longmemeval-v2-451-agentic-2026-07-27"></a>longmemeval-v2-451-agentic-2026-07-27
 
