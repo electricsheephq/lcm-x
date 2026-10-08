@@ -327,9 +327,21 @@ def test_d2_counts_no_score_from_a_decision_root_without_a_manifest(tmp_path):
 
 def test_d2_checks_each_material_file_against_the_manifest(tmp_path):
     root = material(tmp_path)
-    (root / "seed-2" / "facts.json").write_bytes(facts_bytes() + b" ")  # the manifest bytes, and so its digest, are unchanged
+    (root / "seed-2" / "facts.json").write_bytes(facts_bytes()[:-1])  # truncated: invalid JSON; the manifest is unchanged
+    (root / "seed-3" / "facts.json").unlink()
+    d2 = two_tree(tmp_path, material_root=root)["d2"]  # reported as a verdict, not a crash in the facts parse
+    assert d2["material_mismatch"] == ["material/seed-2/facts.json", "material/seed-3/facts.json"]
+    assert d2["verdict"] == "INCOMPLETE"
+
+
+def test_d2_material_names_stay_inside_the_seed_directory(tmp_path):
+    root = material(tmp_path)
+    (tmp_path / "outside.json").write_text("{}")
+    manifest = json.loads(manifest_bytes(1))
+    manifest["shas"]["../../outside.json"] = hashlib.sha256(b"{}").hexdigest()
+    (root / "seed-1" / "material.manifest.json").write_text(json.dumps(manifest))
     d2 = two_tree(tmp_path, material_root=root)["d2"]
-    assert d2["material_mismatch"] == ["material/seed-2/facts.json"] and d2["verdict"] == "INCOMPLETE"
+    assert d2["material_mismatch"] == ["material/seed-1/../../outside.json: outside the seed directory"]
 
 
 def test_d2_reports_effective_config_differences_without_gating(tmp_path):
@@ -342,5 +354,18 @@ def test_d2_reports_effective_config_differences_without_gating(tmp_path):
                     {"summary_prefix_target_tokens": 900 if tree == "prev" else 1200, "leaf_chunk_tokens": 8000}))
     d2 = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"],
                  shas=(SHAS["prev"][:7], SHAS["cand"][:12]), seeds=D2)["d2"]
-    assert d2["effective_config_diff_keys"] == ["summary_prefix_target_tokens"]
+    assert d2["effective_config_diff_keys"] == ["summary_prefix_target_tokens"] and d2["effective_config_unavailable"] == []
     assert d2["config_equal"] is True and d2["verdict"] == "PASS"
+
+
+def test_d2_effective_config_diagnostic_is_unavailable_not_fatal(tmp_path):
+    prev = build(tmp_path / "prev", "LCMX-fleet", seeds=D2)
+    cand = build(tmp_path / "cand", "LCMX-fleet", seeds=D2, sha=SHAS["cand"])
+    for seed in D2:  # only the previous tree recorded configs, and one of them is truncated
+        for run in ("r1", "r2"):
+            (prev[0] / "LCMX-fleet" / f"seed-{seed}" / f"d{seed}-{run}" / "config.json").write_text('{"a": 1}')
+    (prev[0] / "LCMX-fleet" / "seed-1" / "d1-r1" / "config.json").write_text('{"a": ')
+    d2 = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"],
+                 shas=(SHAS["prev"][:7], SHAS["cand"][:12]), seeds=D2)["d2"]
+    assert d2["effective_config_diff_keys"] is None and d2["verdict"] == "PASS"
+    assert d2["effective_config_unavailable"] == ["prev/seed-1/r1"] + [f"cand/seed-{n}/{r}" for n in D2 for r in ("r1", "r2")]
