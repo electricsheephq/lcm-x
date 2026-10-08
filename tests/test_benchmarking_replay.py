@@ -100,7 +100,8 @@ def test_replay_above_threshold_compresses_and_reports_canary_recall(tmp_path):
         filler_words=80,
     )
     # #582: a window the compacted list fits (at 400 its ~550 tokens overflow and the survival fit trims it)
-    policy = _small_policy(context_length=700)
+    # #998: 750 (was 700) leaves room for the lcm_recall clause in the LCM note
+    policy = _small_policy(context_length=750)
 
     metrics = run_replay(fixture, policy, output_dir=tmp_path)
 
