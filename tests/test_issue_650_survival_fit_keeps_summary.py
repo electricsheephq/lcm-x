@@ -473,10 +473,11 @@ _BOUNDARY = dict(boundary_reason="compression", old_session_id="S", platform="te
                  conversation_id="conv", context_length=24_000)
 
 
-def _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch):
+def _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch, path="held"):
     """Hermes 0.21.x: a published compaction, the in-place boundary (no ``on_session_end`` commit), more
     turns, then a compress held at the ceiling (#618) whose survival fit re-forms the carrier around the
-    first kept user row U, and the in-place boundary again (the cursor resets: the fit's proof is unconsumed)."""
+    first kept user row U, and the in-place boundary again (the cursor resets: the fit's proof is unconsumed).
+    ``path="exception"``: the compress fails instead and the fit runs on its exception path (no proof)."""
     engine = _engine(tmp_path)
     view = _hidden_backlog(engine, stamped_replies=True)  # string users -> an assembled carrier; Hermes stamps every row
     first = engine.compress(view, current_tokens=host(view))  # publishes (durable proof)
@@ -484,9 +485,16 @@ def _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch):
     grown = [*first, *[r for i in range(12) for r in _turn(f"G{i:02d}", 20_000.0 + 10 * i, stamped_reply=True)],
              {"role": "user", "content": "[CUR] api variant", "timestamp": 30_000.0}]
     engine.ingest(grown)  # host per-turn persistence
-    monkeypatch.setattr(engine, "_hold_fit_only_applies", lambda tokens: True)  # #618 held
+    if path == "held":
+        monkeypatch.setattr(engine, "_hold_fit_only_applies", lambda tokens: True)  # #618 held
+    else:
+        def fail(*args, **kwargs):
+            raise RuntimeError("summariser down")
+
+        monkeypatch.setattr(engine, "_compress_impl", fail)
     fitted = engine.compress(grown, current_tokens=host(grown))
-    assert engine.last_compression_noop_reason == "held" and engine._last_survival_fit
+    assert engine._last_survival_fit and fitted is not grown
+    assert (engine.last_compression_noop_reason == "held") is (path == "held")
     rest = engine._generated_context_carrier_remainder(fitted[0])
     assert rest and rest != engine._generated_context_carrier_remainder(first[0])  # re-formed around U
     engine.on_session_start("S", **_BOUNDARY)
@@ -494,11 +502,12 @@ def _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch):
     return engine, fitted, rest
 
 
+@pytest.mark.parametrize("path", ["held", "exception"])
 @pytest.mark.parametrize("rewrite_current", [False, True], ids=["as-returned", "turn-end-rewrite"])
-def test_1000_held_fit_then_inplace_boundary_stores_no_carrier(tmp_path, host, monkeypatch, rewrite_current):
+def test_1000_held_fit_then_inplace_boundary_stores_no_carrier(tmp_path, host, monkeypatch, rewrite_current, path):
     """The post-turn ingest of the fitted list plus the reply stores the reply (and, after the host's
     turn-end rewrite of the current user row, that row's persist variant), never the re-formed carrier."""
-    engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch, path)
     try:
         if rewrite_current:  # turn_finalizer.py:270: the API variant becomes the persist variant
             fitted[-1] = {**fitted[-1], "content": "[CUR] persist variant"}

@@ -563,6 +563,7 @@ class CompactionMixin:
         returned = None
         try:
             self._pending_emission_candidates = []
+            self._survival_fit_emission = None
             self._compress_occurrences = None
             self._survival_fit_reason = None
             self._no_progress_candidate = False
@@ -622,6 +623,8 @@ class CompactionMixin:
                 # #651: no leaf, and neither rows nor tokens fell; #922 keeps the turn-paced hold.
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
             self._record_compress_commit_proof(messages, result)
+            if self._compress_commit_proof is None:  # #1000: no proof recorded the fit's carrier
+                self._bind_survival_fit_emission(messages, result)
             self._host_uid_record_engine(result)
             self._host_uid_log_compaction_summary()
             logger.debug("LCM compaction emission descriptor count=%d",
@@ -644,6 +647,7 @@ class CompactionMixin:
                     logger.debug("LCM survival fit after a compress exception failed", exc_info=True)
                     fitted = messages
                 if fitted is not messages:
+                    self._bind_survival_fit_emission(messages, fitted)  # #1000: no proof on this path
                     self._host_uid_record_engine(fitted)
                     logger.warning("LCM compress failed (%s); returning the survival-fitted list",
                                    type(exc).__name__, exc_info=True)
@@ -714,41 +718,10 @@ class CompactionMixin:
             ):
                 return
             emission_binding = self._emission_binding()
-            prior_proof = getattr(self, "_last_emission_descriptors", None)
-            if not self._emission_proof_matches_binding(prior_proof, emission_binding):
-                prior_proof = None
-            if not prior_proof:
-                try:
-                    durable_proof = self._durable_commit_proof_payload()
-                except Exception:  # malformed durable history never blocks a fresh proof
-                    durable_proof = None
-                prior_proof = durable_proof if durable_proof and durable_proof.get("emissions") else None
             emissions = _finalize_emission_descriptors(
                 result, getattr(self, "_pending_emission_candidates", ()), emission_binding
             )
-            if prior_proof:
-                fresh_count = len(emissions)
-                try:
-                    prior_projection = _project_emitted_occurrences(messages, proof=prior_proof)
-                    result_identities = [_emission_identity(message) for message in result]
-                    for entry in prior_projection.entries:
-                        if entry.generated_span is None or result_identities.count(entry.full_identity) != 1:
-                            continue
-                        carried = _finalize_emission_descriptors(result, [{
-                            "kind": entry.kind,
-                            "span": entry.generated_span,
-                            "retained_source": dict(entry.retained_source) if entry.retained_source is not None else None,
-                            "full_identity": entry.full_identity,
-                        }], emission_binding)
-                        if carried and all(
-                            item["output_occurrence"]["index"] != carried[0]["output_occurrence"]["index"]
-                            for item in emissions
-                        ):
-                            emissions.extend(carried)
-                except Exception as exc:  # a bad prior proof costs its carry-forward, never the fresh proof (#514)
-                    logger.warning("LCM prior-proof carry-forward skipped: %r", exc)
-                    del emissions[fresh_count:]
-            emissions.sort(key=lambda item: item["output_occurrence"]["index"])
+            self._carry_prior_emissions(messages, result, emissions, emission_binding)
             # The output's rows map through THIS proof's emissions (A3), never a DAG-shaped strip (F1).
             occurrences, _v4 = self._replay_occurrences(result, {"version": 4, **emission_binding, "emissions": emissions})
             store_ids = self._get_store_id_map_for_messages(result, occurrences)
@@ -801,6 +774,63 @@ class CompactionMixin:
                 self._persist_compress_commit_proof(proof)
         except Exception:
             self._compress_commit_proof = None
+
+    def _carry_prior_emissions(self, messages, result, emissions, emission_binding) -> None:
+        """Extend ``emissions`` with the prior proof's descriptors still emitted once in ``result``; sorted."""
+        prior_proof = getattr(self, "_last_emission_descriptors", None)
+        if not self._emission_proof_matches_binding(prior_proof, emission_binding):
+            prior_proof = None
+        if not prior_proof:
+            try:
+                durable_proof = self._durable_commit_proof_payload()
+            except Exception:  # malformed durable history never blocks a fresh proof
+                durable_proof = None
+            prior_proof = durable_proof if durable_proof and durable_proof.get("emissions") else None
+        if prior_proof:
+            fresh_count = len(emissions)
+            try:
+                prior_projection = _project_emitted_occurrences(messages, proof=prior_proof)
+                result_identities = [_emission_identity(message) for message in result]
+                for entry in prior_projection.entries:
+                    if entry.generated_span is None or result_identities.count(entry.full_identity) != 1:
+                        continue
+                    carried = _finalize_emission_descriptors(result, [{
+                        "kind": entry.kind,
+                        "span": entry.generated_span,
+                        "retained_source": dict(entry.retained_source) if entry.retained_source is not None else None,
+                        "full_identity": entry.full_identity,
+                    }], emission_binding)
+                    if carried and all(
+                        item["output_occurrence"]["index"] != carried[0]["output_occurrence"]["index"]
+                        for item in emissions
+                    ):
+                        emissions.extend(carried)
+            except Exception as exc:  # a bad prior proof costs its carry-forward, never the fresh proof (#514)
+                logger.warning("LCM prior-proof carry-forward skipped: %r", exc)
+                del emissions[fresh_count:]
+        emissions.sort(key=lambda item: item["output_occurrence"]["index"])
+
+    def _bind_survival_fit_emission(self, messages, result) -> None:
+        """#1000: a fitted list no commit proof records (the exception path, or a cursor that does not index
+        it) still binds the fit's re-formed carrier in memory, with the prior descriptors it still emits.
+        Process-local, as the proof's own descriptors; nothing is persisted."""
+        candidate = getattr(self, "_survival_fit_emission", None)
+        if candidate is None or not self._session_id or not isinstance(result, list) or not any(
+                message is candidate.get("row") for message in result):
+            return
+        try:
+            emission_binding = self._emission_binding()
+            emissions = _finalize_emission_descriptors(result, [candidate], emission_binding)
+            if not emissions:
+                return
+            self._carry_prior_emissions(messages, result, emissions, emission_binding)
+            self._last_emission_descriptors = {
+                "version": _COMPACTION_COMMIT_PROOF_VERSION,
+                **emission_binding,
+                "emissions": emissions,
+            }
+        except Exception:  # the carrier stays unbound: a replay of it is stored again, never lost
+            logger.debug("LCM survival-fit carrier binding failed", exc_info=True)
 
     def _persist_compress_commit_proof(self, proof) -> None:
         """Durable twin of the process-local proof: lets a restarted/resumed

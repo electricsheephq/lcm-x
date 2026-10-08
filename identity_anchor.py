@@ -290,6 +290,7 @@ class IdentityAnchorMixin:
 
         consumed: set[int] = set()
         matched: dict[int, list] = {}
+        emitted = None  # #1000: the active proof's projection of the view, read once on first use
         # R1: per key, the host view's occurrences consume the stored ones in order; the rest are new.
         forms_of = {id(r): forms for pairs in by_stamp.values() for r, forms in pairs}
         occurrences = [(idx, (stamps[idx], identity_at(idx))) for idx in sorted(stamps)
@@ -313,6 +314,13 @@ class IdentityAnchorMixin:
                                                shown)
             elif idx not in stamps and idx not in plan["replayed"]:  # D-D plan (ii): H1 merged LCM's carrier
                 group = self._identity_anchor_carrier_group(identity_messages[idx], consumed)
+                if group is None:  # #1000: a carrier LCM emitted around a stored user row (a survival fit's)
+                    if emitted is None:
+                        from .reconcile import _project_emitted_occurrences
+
+                        emitted = _project_emitted_occurrences(identity_messages, proof=proof).entries if proof else ()
+                    group = self._identity_anchor_emitted_carrier(identity_messages[idx], emitted, idx, chain,
+                                                                  consumed)
                 if group is not None:
                     self._identity_anchor_take(idx, group, consumed, matched, plan)
         for idx in sorted(plan["replayed"]):  # a replayed survival-fit projection: its stored replies follow it
@@ -622,6 +630,26 @@ class IdentityAnchorMixin:
         if len(full) != 1 or len(full[0]) > len(run) or any(text not in forms[i] for i, text in enumerate(full[0])):
             return None
         return run[:len(full[0])]
+
+    def _identity_anchor_emitted_carrier(self, message, emitted, idx, chain, consumed) -> Optional[list]:
+        """#1000: ``[U]`` when the active proof binds ``message`` as a carrier LCM emitted around its stored user
+        row U (``retained_source``) and the carrier's remainder is exactly U's stored text: a replay of U. U must
+        be a user row of this session or a verified ancestor, in the bound conversation, not yet claimed. Any
+        failed check returns None and the row is stored, as before (a host row merged behind the carrier
+        makes the remainder longer than U)."""
+        entry = emitted[idx] if idx < len(emitted) else None
+        source = entry.retained_source if entry is not None and entry.kind == "carrier" else None
+        store_id = source.get("store_id") if source is not None else None
+        if (type(store_id) is not int or store_id in consumed or message.get("role") != "user"
+                or message.get("tool_calls")):
+            return None
+        row = self._store.get_batch([store_id]).get(store_id)
+        if (row is None or row.get("role") != "user" or int(row["store_id"]) != store_id
+                or str(row.get("session_id") or "") not in {str(self._session_id), *chain}
+                or str(row.get("conversation_id") or "") != str(self._conversation_id or "")):
+            return None
+        self._load_host_rewrite_overrides([row])
+        return [row] if entry.effective_identity[1] in self._identity_texts(row) else None
 
     def _identity_anchor_constituent_copy(self, idx, identity, stamp, consumed, matched, plan) -> None:
         """R3 + R5: a later timestamped copy of a remainder U whose own stamp was unknown: the host view
