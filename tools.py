@@ -5007,6 +5007,9 @@ def _lcm_recall_content_window(
     }
 
 
+_LCM_RECALL_EVENT_TIME_KEYS = ("event_time", "event_time_source")
+
+
 def _lcm_recall_event_time(stored: dict[str, Any] | None) -> dict[str, str]:
     """Return a message hit's event-time fields from its stored host observation.
 
@@ -5038,12 +5041,15 @@ def _lcm_recall_event_time_rows(
 
     Returns ``(rows_by_id, unavailable_reason)``. The reason is ``"deadline"``
     when the request budget was already spent (no read is attempted) or ran out
-    during the read, and ``"read_error"`` for any other SQLite failure; it is
-    ``None`` after a successful read, including one that finds ``observed_at``
-    NULL. The field is optional, so the read gets a private read-only
-    connection whose busy wait and statement run are bounded by the remaining
-    budget, the idiom of ``_lcm_recall_summary_source_hits``; the shared store
-    connection's 30 s busy timeout is never used and never changed (#995).
+    during or by the end of the read, and ``"read_error"`` for any other SQLite
+    failure or a filesystem error opening the database; it is ``None`` after a
+    successful read, including one that finds ``observed_at`` NULL. The field is
+    optional, so the read gets a private read-only connection whose busy wait
+    and statement run are bounded by the remaining budget, the idiom of
+    ``_lcm_recall_summary_source_hits``; the shared store connection's 30 s busy
+    timeout is never used and never changed. It selects only the three columns
+    the field needs, never ``content`` or ``tool_calls``, and a read that ends
+    past the deadline is dropped rather than returned late (#995).
     """
     if time.monotonic() >= deadline:
         return {}, "deadline"
@@ -5065,11 +5071,13 @@ def _lcm_recall_event_time_rows(
         )
         conn.execute("PRAGMA query_only=ON")
         conn.set_progress_handler(interrupt_if_expired, 1000)
-        read_store = copy.copy(engine._store)
-        read_store._conn = conn
-        read_store._write_lock = threading.RLock()
-        return read_store.get_batch(store_ids), None
-    except sqlite3.Error as exc:
+        placeholders = ",".join("?" for _ in store_ids)
+        rows = conn.execute(
+            "SELECT store_id, observed_at, observed_at_source FROM messages "
+            f"WHERE store_id IN ({placeholders})",
+            store_ids,
+        ).fetchall()
+    except (sqlite3.Error, OSError) as exc:
         logger.debug("lcm_recall event_time read failed: %s", exc)
         if expired[0] or time.monotonic() >= deadline:
             return {}, "deadline"
@@ -5077,6 +5085,64 @@ def _lcm_recall_event_time_rows(
     finally:
         if conn is not None:
             conn.close()
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    return {
+        int(store_id): {"observed_at": observed_at, "observed_at_source": source}
+        for store_id, observed_at, source in rows
+    }, None
+
+
+def _lcm_recall_without_event_time(item: dict[str, Any]) -> dict[str, Any]:
+    """Return ``item`` without its optional event-time fields.
+
+    The response cap sizes hits by this view, so the optional fields can never
+    evict a hit that fits without them (#995).
+    """
+    return {
+        key: value
+        for key, value in item.items()
+        if key not in _LCM_RECALL_EVENT_TIME_KEYS
+    }
+
+
+def _lcm_recall_fit_event_time(response: dict[str, Any]) -> tuple[str, bool]:
+    """Strip hits' event-time fields, lowest rank first, until ``response`` fits.
+
+    Runs before the cap touches anything else, so the optional fields never
+    cost a hit, nor a query cut the response would not otherwise need. A
+    stripped hit is reported by the ``response_cap`` reason of the
+    ``event_time_unavailable`` marker. If the response is still over the cap
+    with every field stripped, that marker is taken out too, so it is never
+    what evicts a hit; ``True`` in the result asks the caller to put it back if
+    it fits once the cap has done the rest. A ``deadline`` or ``read_error``
+    marker set before this call is left as it is. Returns ``(encoded,
+    marker_deferred)`` (#995).
+    """
+    marker_droppable = response.get("event_time_unavailable_reason") in (
+        None,
+        "response_cap",
+    )
+    encoded = json.dumps(response, ensure_ascii=False)
+    for hit in reversed(response["hits"]):
+        if len(encoded) <= _LCM_RECALL_RESPONSE_CHAR_CAP:
+            return encoded, False
+        if not any(key in hit for key in _LCM_RECALL_EVENT_TIME_KEYS):
+            continue
+        for key in _LCM_RECALL_EVENT_TIME_KEYS:
+            hit.pop(key, None)
+        response["event_time_unavailable"] = True
+        response["event_time_unavailable_reason"] = "response_cap"
+        encoded = json.dumps(response, ensure_ascii=False)
+    if (
+        marker_droppable
+        and len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP
+        and response.get("event_time_unavailable_reason") == "response_cap"
+    ):
+        del response["event_time_unavailable"]
+        del response["event_time_unavailable_reason"]
+        return json.dumps(response, ensure_ascii=False), True
+    return encoded, False
 
 
 def _lcm_recall_answer_ready_content(
@@ -6606,6 +6672,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             event_time_unread_ids = set(event_time_ids)
     event_time_unavailable = False
     hits_out: list[dict[str, Any]] = []
+    # Characters each delivered hit's optional event-time fields add on top of
+    # its measured size (parallel to ``hits_out``).
+    event_time_chars: list[int] = []
     response_chars = 0
     response_cap_truncated = False
     unreferenced_omitted = 0
@@ -6691,11 +6760,18 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 unreferenced_omitted += 1
                 continue
             item["content_offset"], item["content_returned_chars"] = span
-        item_chars = len(json.dumps(item, ensure_ascii=False))
+        # The cap sizes a hit without its optional event-time fields, so they
+        # never evict a hit that fits without them (#995).
+        item_chars = len(
+            json.dumps(_lcm_recall_without_event_time(item), ensure_ascii=False)
+        )
         if hits_out and response_chars + item_chars > _LCM_RECALL_RESPONSE_CHAR_CAP:
             response_cap_truncated = True
             break
         response_chars += item_chars
+        event_time_chars.append(
+            len(json.dumps(item, ensure_ascii=False)) - item_chars
+        )
         if reference_strict:
             strict_selector.deliver(entry)
         if (
@@ -6707,6 +6783,18 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         hits_out.append(item)
         if len(hits_out) >= limit:
             break
+    # Over the cap only with the fields: strip them, lowest rank first, and
+    # say so, instead of dropping any hit.
+    event_time_total = response_chars + sum(event_time_chars)
+    for index in reversed(range(len(hits_out))):
+        if event_time_total <= _LCM_RECALL_RESPONSE_CHAR_CAP:
+            break
+        if event_time_chars[index]:
+            for key in _LCM_RECALL_EVENT_TIME_KEYS:
+                hits_out[index].pop(key, None)
+            event_time_total -= event_time_chars[index]
+            event_time_unavailable = True
+            event_time_unavailable_reason = "response_cap"
 
     degraded = bool(degraded_reasons)
     response: dict[str, Any] = {
@@ -6821,6 +6909,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             # recompute below can never grow the encoded response past the cap.
             fts_anchor_info["delivered"] = False
         encoded = json.dumps(response, ensure_ascii=False)
+        event_time_marker_deferred = False
+        if len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP:
+            encoded, event_time_marker_deferred = _lcm_recall_fit_event_time(
+                response
+            )
         if len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP:
             original_query = response["query"]
             response["query"] = original_query[:4_096]
@@ -6839,6 +6932,19 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 "content" in hit for hit in response["hits"]
             )
             encoded = json.dumps(response, ensure_ascii=False)
+        if event_time_marker_deferred:
+            marked = {
+                **response,
+                "event_time_unavailable": True,
+                "event_time_unavailable_reason": "response_cap",
+            }
+            marked_encoded = json.dumps(marked, ensure_ascii=False)
+            if len(marked_encoded) <= _LCM_RECALL_RESPONSE_CHAR_CAP:
+                response.update(
+                    event_time_unavailable=True,
+                    event_time_unavailable_reason="response_cap",
+                )
+                encoded = marked_encoded
         if delta_requested:
             novel_refs = [
                 hit["exact_ref"]
