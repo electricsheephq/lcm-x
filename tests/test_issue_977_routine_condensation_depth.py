@@ -98,3 +98,17 @@ def test_without_survival_fit_the_heaviest_depth_still_applies(tmp_path):
         assert selected(instance) == [(1, node_id) for node_id in deep[:4]]
     finally:
         instance.shutdown()
+
+
+def test_a_group_no_heavier_than_the_minimum_condensation_budget_is_skipped(engine):
+    # #909: condensing a group that weighs no more than the 1,000-token minimum budget cannot shrink the frontier.
+    add_nodes(engine, 0, 4, token_count=250)
+    middle = add_nodes(engine, 1, 4, token_count=900)
+    add_nodes(engine, 2, 4, token_count=2_000)
+    assert selected(engine) == [(1, node_id) for node_id in middle]
+
+
+def test_only_light_groups_fall_back_to_the_heaviest_depth(engine):
+    add_nodes(engine, 0, 4, token_count=100)
+    deep = add_nodes(engine, 1, 4, token_count=200)
+    assert selected(engine) == [(1, node_id) for node_id in deep]
