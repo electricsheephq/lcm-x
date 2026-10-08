@@ -7250,7 +7250,7 @@ class LCMEngine(
         return sum(node.token_count for node in self._summary_frontier_nodes())
 
     def _select_threshold_sweep_condensation_group(self) -> List[SummaryNode]:
-        """Prefer the heaviest routine depth, then allow bounded pressure condensation."""
+        """Prefer the shallowest routine depth (heaviest under prefix pressure), then bounded pressure condensation."""
         by_depth: dict[int, list[SummaryNode]] = {}
         for node in self._summary_frontier_nodes():
             by_depth.setdefault(node.depth, []).append(node)
@@ -7263,6 +7263,12 @@ class LCMEngine(
             if (preferred_max_depth < 0 or depth < preferred_max_depth) and len(nodes) >= fanin
         ]
         if eligible_depths:
+            # #977: with survival fit the #930 default prefix budget never falls below a quarter of the survival
+            # ceiling, so a smaller frontier is never cut: condense the shallowest depth and keep the older detail.
+            ceiling = self._survival_ceiling()
+            frontier_tokens = sum(node.token_count for nodes in by_depth.values() for node in nodes)
+            if ceiling is None or (self._config.survival_fit and frontier_tokens <= ceiling // 4):
+                return by_depth[min(eligible_depths)][:fanin]
             depth = max(eligible_depths, key=lambda d: (sum(node.token_count for node in by_depth[d][:fanin]), -d))
             return by_depth[depth][:fanin]
         # The frontier still exceeds its sweep target but no routine group is
