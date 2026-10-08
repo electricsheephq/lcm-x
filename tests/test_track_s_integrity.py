@@ -943,6 +943,35 @@ process.stdout.write(JSON.stringify({
     assert out["unparsed"]["n"] == 2 and out["unparsed"]["answers"] == {"A": 0, "B": ["x"]}  # any non-blank value counts
 
 
+@pytest.mark.skipif(not node_has_type_stripping(), reason="needs node >= 23.6 (native type stripping)")
+def test_s1_retry_record_keeps_every_reply_and_the_retry_error():
+    """#982 review: the persisted record reconstructs a split A-then-B score (each attempt's raw reply, the merged
+    answers, the attempt that supplied each), and a retry's own error outranks the synthesized READER_TRUNCATED."""
+    script = """
+import { mergeAttempt, retryError, answerRecord } from %s;
+const ids = ["A", "B"], cap = 8192;
+const a1 = { text: '{"A": "a1"}', wall_s: 1 }, a2 = { text: '{"B": "b2", "A": "x"}', wall_s: 2 };
+let s = mergeAttempt(null, { A: "a1" }, ids, 8192, cap); s = mergeAttempt(s, { B: "b2", A: "x" }, ids, 10, cap);
+let t = mergeAttempt(null, { A: "a1" }, ids, 8192, cap); t = mergeAttempt(t, null, ids, 0, cap);
+process.stdout.write(JSON.stringify({ record: answerRecord([a1, a2], s), sources: s.sources,
+  http: retryError("HTTP 500", t), none: retryError(undefined, t), ok: retryError(undefined, s) ?? null }));
+""" % json.dumps((TRACK / "s1/retry.ts").as_uri())
+    out = json.loads(subprocess.run(["node", "--no-warnings", "--input-type=module", "-e", script], capture_output=True,
+                                    text=True, timeout=60, check=True).stdout)
+    assert out["sources"] == {"A": 1, "B": 2}
+    assert out["record"] == {"attempt_replies": ['{"A": "a1"}', '{"B": "b2", "A": "x"}'],
+                             "merged_answers": {"A": "a1", "B": "b2"}, "answer_sources": {"A": 1, "B": 2}}
+    assert out["http"] == "HTTP 500"  # the retry's transport failure is reported, not hidden as a truncation
+    assert out["none"] == "READER_TRUNCATED: completion cap 8192 reached" and out["ok"] is None
+
+
+def test_s1_replay_persists_the_retry_record():
+    src = (TRACK / "s1/replay.ts").read_text()
+    helper = src[src.index("async function askRetry("):]
+    assert "retryError(" in helper[:helper.index("\n}\n")]
+    assert src.count("...answerRecord(attempts, s)") == 2  # the batch loop and the open-probe loop
+
+
 def test_s1_replay_batch_loop_calls_the_retry_helper():
     src = (TRACK / "s1/replay.ts").read_text()
     assert 'import { mergeAttempt } from "./retry.js";' in src  # relative: esbuild resolves .js to the .ts source
