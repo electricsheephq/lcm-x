@@ -249,10 +249,11 @@ class ProcessCell:
                 **({"nonces": sorted({p["nonce"] for p in probes}), "carriers": self.carriers} if probes else {})}
 
     def soul_rewrite(self, t: int) -> None:
-        """#659 P1b: rewrite HERMES_HOME/SOUL.md before turn ``before_turn`` with no restart; the note's ts is after the
-        write, so every later main request may carry it only once the host rebuilds its prompt."""
+        """#659 P1b: rewrite HERMES_HOME/SOUL.md with no restart before the first turn >= ``from_turn`` that follows a
+        commit (so main requests precede the next commit); the note's ts is after the write."""
         rw = ((self.cell.get("continuity") or {}).get("soul") or {}).get("rewrite")
-        if rw and t == rw["before_turn"] and not self.rewritten:
+        if rw and t >= rw["from_turn"] and not self.rewritten and any(
+                n.get("turn") == t - 1 for n in self.notes("compaction_committed")):
             (self.home / "SOUL.md").write_text(rw["text"] + "\n")
             self.rewritten = True
             append(self.d / "observer.jsonl", {"phase": self.phase, "ts": time.time(), "kind": "probe_rewrite", "turn": t})

@@ -205,7 +205,7 @@ def test_probe_cells_are_opt_in_r2_only_and_outside_the_nightly_gate():
         cells.validate(c)
         assert PC.unsupported(c, "acp-process") is None and c["targets"] == []
         assert c["final_compaction_check"] is False and c["min_compactions"] >= 2
-        assert float(c["lcm_env"]["LCM_CONTEXT_THRESHOLD"]) * c["window"] == 15360
+        assert float(c["lcm_env"]["LCM_CONTEXT_THRESHOLD"]) * c["window"] == 32000
         nonces = [s["nonce"] for s in c["continuity"]["probes"]]
         assert nonces and all(re.fullmatch(r"[G-Zg-z-]+", n) for n in nonces)  # no hex-shaped token
 
@@ -298,7 +298,9 @@ def test_soul_written_before_start_and_rewritten_once_mid_run(tmp_path, monkeypa
     def phase(run, first):
         seen["start"] = (run.home / "SOUL.md").read_text()
         seen["context"] = run.continuity_context()
-        for t in (15, 16, 16, 17):
+        PC.append(run.d / "observer.jsonl", {"phase": "A", "ts": 1.0, "kind": "compaction_committed", "turn": 9})
+        PC.append(run.d / "observer.jsonl", {"phase": "A", "ts": 2.0, "kind": "compaction_committed", "turn": 15})
+        for t in (10, 15, 16, 16, 17):  # 10 follows a commit but precedes from_turn; 16 is the first due turn
             run.soul_rewrite(t)
             seen[t] = (run.home / "SOUL.md").read_text()
         return {"exit": "done", "next_turn": None}
@@ -311,7 +313,7 @@ def test_soul_written_before_start_and_rewritten_once_mid_run(tmp_path, monkeypa
     rec = PC.run_cell_process(cell, "fixture", host, plugin, tmp_path / "out", 5, False,
                               identity={"method": "fixture"}, scratch_root=tmp_path / "scratch")
     assert soul["nonce"] in seen["start"] and soul["rewrite"]["nonce"] not in seen["start"]
-    assert seen[15] == seen["start"] and soul["rewrite"]["nonce"] in seen[16] and seen[17] == seen[16]
+    assert seen[10] == seen[15] == seen["start"] and soul["rewrite"]["nonce"] in seen[16] and seen[17] == seen[16]
     assert set(seen["context"]["nonces"]) == {s["nonce"] for s in cell["continuity"]["probes"]}
     notes = [n for n in PC.read_jsonl(Path(rec["dir"]) / "observer.jsonl") if n["kind"] == "probe_rewrite"]
     assert [n["turn"] for n in notes] == [16] and isinstance(notes[0]["ts"], float)

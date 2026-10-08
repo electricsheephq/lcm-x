@@ -107,18 +107,20 @@ def continuity_cells() -> list[dict]:
 
 
 # #659 probe nonces: letters G-Z only, so no hex-shaped token a host anchor index could harvest from the text.
-PROBE_ENV = {**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_FRESH_TAIL_COUNT": "4",
+# A 32,000-token trigger: at 0.12 the r34.5 rotation cells commit once, then the first rotation-child publication
+# conflicts (no durable source coverage) and no later pass commits in 30 turns.
+PROBE_ENV = {**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.25", "LCM_FRESH_TAIL_COUNT": "4",
              "LCM_FRESH_TAIL_MAX_TOKENS": "2000", "LCM_LEAF_CHUNK_TOKENS": "1000"}
 
 
 def probe_cells() -> list[dict]:
     """#659 PR A, recorded only (R2, opt-in: never in ``--cells all``, so the nightly gate is unchanged). Request-time
-    nonce probes, presence per compaction event: P1 host instruction (SOUL.md, rewritten before turn 16 with no
-    restart), P2 open todos through the default ``tool_call`` bridge (a completed item is the control), P5 a constraint
+    nonce probes, presence per compaction event: P1 host instruction (SOUL.md, rewritten with no restart before the
+    first turn from 12 on that follows a commit, so requests precede the next commit), P2 open todos through the default ``tool_call`` bridge (a completed item is the control), P5 a constraint
     stated before the fresh tail (head, mid-text, another nonce shape) with a long tool turn after it."""
     v1, v2 = "QXWZKVJMTR", "ZWVKQJMXRT"
     soul = {"nonce": v1, "text": f"Reliability host note {v1}: a fixed line for a continuity check.",
-            "rewrite": {"before_turn": 16, "nonce": v2, "text": f"Reliability host note {v2}: a fixed line for a continuity check."}}
+            "rewrite": {"from_turn": 12, "nonce": v2, "text": f"Reliability host note {v2}: a fixed line for a continuity check."}}
     host = [{"probe": "host-instruction", "nonce": v1, "expect": "present", "carrier": "system", "once": True, "window": "before"},
             {"probe": "host-instruction", "nonce": v2, "expect": "absent", "window": "before"},
             {"probe": "host-instruction", "nonce": v2, "expect": "present", "carrier": "system", "once": True, "window": "after"},
@@ -144,10 +146,11 @@ def probe_cells() -> list[dict]:
             out.append(cell(f"continuity/probe-constraint-{shape}/{m}", [], **common, tool_plan=reads, big_files=3,
                             big_lines=60, user={"payload": {
                                 "3": {"at": at, "text": f"CONSTRAINT {n}: answer in English and never touch the held file."},
-                                "27": {"at": "head", "text": f"CONTROL {ctrl}: a late constraint inside the fresh tail."}}},
+                                **{str(t): {"at": "head", "text": f"CONTROL {ctrl}: a constraint in the current turn."}
+                                   for t in range(20, 31)}}},
                             continuity={"probes": [{"probe": "constraint", "nonce": n, "expect": "present", "from_turn": 3},
                                                    {"probe": "constraint-control", "nonce": ctrl, "expect": "present",
-                                                    "from_turn": 27}]},
+                                                    "from_turn": 20}]},
                             doc=f"#659 P5 (recorded): a constraint nonce ({shape}) in turn 3, three large reads in turn 6; "
                                 "the fake summariser keeps tags only, so this measures structural retention."))
     return out
