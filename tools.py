@@ -5031,6 +5031,54 @@ def _lcm_recall_event_time(stored: dict[str, Any] | None) -> dict[str, str]:
     return fields
 
 
+def _lcm_recall_event_time_rows(
+    engine: "LCMEngine", store_ids: list[int], *, deadline: float
+) -> tuple[dict[int, dict[str, Any]], str | None]:
+    """Read the rows that carry message hits' event time, inside the deadline.
+
+    Returns ``(rows_by_id, unavailable_reason)``. The reason is ``"deadline"``
+    when the request budget was already spent (no read is attempted) or ran out
+    during the read, and ``"read_error"`` for any other SQLite failure; it is
+    ``None`` after a successful read, including one that finds ``observed_at``
+    NULL. The field is optional, so the read gets a private read-only
+    connection whose busy wait and statement run are bounded by the remaining
+    budget, the idiom of ``_lcm_recall_summary_source_hits``; the shared store
+    connection's 30 s busy timeout is never used and never changed (#995).
+    """
+    if time.monotonic() >= deadline:
+        return {}, "deadline"
+    expired = [False]
+
+    def interrupt_if_expired() -> int:
+        if time.monotonic() >= deadline:
+            expired[0] = True
+            return 1
+        return 0
+
+    conn: sqlite3.Connection | None = None
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        conn = sqlite3.connect(
+            f"{db_path.as_uri()}?mode=ro",
+            uri=True,
+            timeout=max(0.001, deadline - time.monotonic()),
+        )
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(interrupt_if_expired, 1000)
+        read_store = copy.copy(engine._store)
+        read_store._conn = conn
+        read_store._write_lock = threading.RLock()
+        return read_store.get_batch(store_ids), None
+    except sqlite3.Error as exc:
+        logger.debug("lcm_recall event_time read failed: %s", exc)
+        if expired[0] or time.monotonic() >= deadline:
+            return {}, "deadline"
+        return {}, "read_error"
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def _lcm_recall_answer_ready_content(
     engine: "LCMEngine",
     entries: list[dict[str, Any]],
@@ -6544,13 +6592,19 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         and _hit_identity(entry["hit"]) not in answer_ready_content
         and int(entry["hit"]["store_id"]) not in event_time_rows
     ]
+    # A skipped or failed read never blocks past the deadline and never looks
+    # like "no event time": a delivered hit it covered sets the response-level
+    # ``event_time_unavailable`` marker instead.
+    event_time_unavailable_reason: str | None = None
+    event_time_unread_ids: set[int] = set()
     if event_time_ids:
-        try:
-            event_time_rows.update(engine._store.get_batch(event_time_ids))
-        except sqlite3.Error as exc:
-            # The fields are additive: an unreadable row omits them, exactly
-            # like a row that has no observed_at.
-            logger.debug("lcm_recall event_time read failed: %s", exc)
+        fetched_rows, event_time_unavailable_reason = _lcm_recall_event_time_rows(
+            engine, event_time_ids, deadline=deadline
+        )
+        event_time_rows.update(fetched_rows)
+        if event_time_unavailable_reason is not None:
+            event_time_unread_ids = set(event_time_ids)
+    event_time_unavailable = False
     hits_out: list[dict[str, Any]] = []
     response_chars = 0
     response_cap_truncated = False
@@ -6644,6 +6698,12 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         response_chars += item_chars
         if reference_strict:
             strict_selector.deliver(entry)
+        if (
+            hit.get("kind") != "summary"
+            and hit.get("store_id") is not None
+            and int(hit["store_id"]) in event_time_unread_ids
+        ):
+            event_time_unavailable = True
         hits_out.append(item)
         if len(hits_out) >= limit:
             break
@@ -6697,6 +6757,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         response["degraded_reason"] = "; ".join(dict.fromkeys(degraded_reasons))
     if timed_out:
         response["timeout"] = True
+    if event_time_unavailable:
+        response["event_time_unavailable"] = True
+        response["event_time_unavailable_reason"] = event_time_unavailable_reason
     if requested_limit > _LCM_RECALL_LIMIT_CAP:
         response["limit_clamped_from"] = requested_limit
     if detail == "answer_ready":

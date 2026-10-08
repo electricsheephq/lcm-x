@@ -1750,6 +1750,9 @@ def test_recall_event_time_without_source_label_emits_time_only(recall_engine, m
     recall_engine._store._conn.execute(
         "UPDATE messages SET observed_at_source = NULL WHERE store_id = ?", (store_id,)
     )
+    # The event-time read uses its own read-only connection, which sees
+    # committed rows only, as every store write commits.
+    recall_engine._store._conn.commit()
     payload = json.loads(
         lcm_tools.lcm_recall({"query": "kanban dashboard sprint"}, engine=recall_engine)
     )
@@ -1834,20 +1837,126 @@ def test_recall_snippets_event_time_costs_one_batched_read(recall_engine, monkey
     assert calls == {"search": 1, "get_batch": 1}
 
 
-def test_recall_event_time_read_failure_omits_the_fields(recall_engine, monkeypatch):
+def test_recall_event_time_read_failure_sets_the_unavailable_marker(
+    recall_engine, monkeypatch
+):
     _seed_event_time_rows(recall_engine)
     monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
     request = {"query": "kanban dashboard sprint", "limit": 25}
     expected = _strip_event_time(
         json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
     )
+    assert "event_time_unavailable" not in expected
 
     def failing_get_batch(self, *args, **kwargs):
-        raise sqlite3.OperationalError("database is locked")
+        raise sqlite3.OperationalError("disk I/O error")
 
     monkeypatch.setattr(MessageStore, "get_batch", failing_get_batch)
     payload = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    # A failed read is reported, never passed off as "no recorded event time".
+    assert payload.pop("event_time_unavailable") is True
+    assert payload.pop("event_time_unavailable_reason") == "read_error"
     assert payload == expected
+
+
+def test_recall_event_time_read_is_skipped_once_the_deadline_is_spent(
+    recall_engine, monkeypatch
+):
+    _seed_event_time_rows(recall_engine)
+    monkeypatch.setattr(lcm_tools.time, "time", lambda: 2_000_000_000.0)
+    request = {"query": "kanban dashboard sprint", "limit": 25}
+    expected = _strip_event_time(
+        json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    )
+    reads = {"connect": 0, "get_batch": 0}
+    real_rows = lcm_tools._lcm_recall_event_time_rows
+    real_connect = lcm_tools.sqlite3.connect
+    real_get_batch = MessageStore.get_batch
+
+    def counted_connect(*args, **kwargs):
+        reads["connect"] += 1
+        return real_connect(*args, **kwargs)
+
+    def counted_get_batch(self, *args, **kwargs):
+        reads["get_batch"] += 1
+        return real_get_batch(self, *args, **kwargs)
+
+    def spent_rows(engine, store_ids, *, deadline):
+        # The rest of the pipeline ran inside its budget; only this read sees
+        # it spent, so the hits are otherwise exactly the baseline.
+        with monkeypatch.context() as patch:
+            patch.setattr(lcm_tools.sqlite3, "connect", counted_connect)
+            patch.setattr(MessageStore, "get_batch", counted_get_batch)
+            return real_rows(
+                engine, store_ids, deadline=lcm_tools.time.monotonic() - 1.0
+            )
+
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_event_time_rows", spent_rows)
+    payload = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
+    assert reads == {"connect": 0, "get_batch": 0}
+    assert payload.pop("event_time_unavailable") is True
+    assert payload.pop("event_time_unavailable_reason") == "deadline"
+    assert payload == expected
+
+
+def test_recall_event_time_read_cannot_outlive_the_deadline(recall_engine, monkeypatch):
+    _seed_event_time_rows(recall_engine)
+    recall_engine._config.recall_query_timeout_s = 1.0
+    real_get_batch = MessageStore.get_batch
+    real_rows = lcm_tools._lcm_recall_event_time_rows
+    real_connect = lcm_tools.sqlite3.connect
+    connect_timeouts = []
+
+    def recorded_connect(*args, **kwargs):
+        connect_timeouts.append(kwargs.get("timeout"))
+        return real_connect(*args, **kwargs)
+
+    def blocked_get_batch(self, store_ids):
+        # A read that would never finish on its own: only the request deadline
+        # (the private connection's progress handler) can end it.
+        self._conn.execute(
+            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n) "
+            "SELECT count(*) FROM n"
+        ).fetchall()
+        return real_get_batch(self, store_ids)
+
+    def recorded_rows(engine, store_ids, *, deadline):
+        with monkeypatch.context() as patch:
+            patch.setattr(lcm_tools.sqlite3, "connect", recorded_connect)
+            patch.setattr(MessageStore, "get_batch", blocked_get_batch)
+            return real_rows(engine, store_ids, deadline=deadline)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_event_time_rows", recorded_rows)
+    started = time.monotonic()
+    payload = json.loads(
+        lcm_tools.lcm_recall(
+            {"query": "kanban dashboard sprint", "limit": 25}, engine=recall_engine
+        )
+    )
+    elapsed = time.monotonic() - started
+    assert elapsed < 1.0 + 0.5
+    assert payload["hits"]
+    assert not any("event_time" in hit for hit in payload["hits"])
+    assert payload["event_time_unavailable"] is True
+    assert payload["event_time_unavailable_reason"] == "deadline"
+    # The busy wait is the remaining budget, never the store's 30 s timeout.
+    assert len(connect_timeouts) == 1 and 0 < connect_timeouts[0] <= 1.0
+
+
+def test_recall_event_time_read_of_null_observed_at_sets_no_marker(recall_engine):
+    recall_engine._config.embeddings_enabled = False
+    recall_engine._store.append(
+        "session-a", {"role": "assistant", "content": "kanban dashboard sprint"}
+    )
+    payload = json.loads(
+        lcm_tools.lcm_recall({"query": "kanban dashboard sprint"}, engine=recall_engine)
+    )
+    assert payload["hits"]
+    assert "event_time_unavailable" not in payload
+    assert "event_time_unavailable_reason" not in payload
+    for hit in payload["hits"]:
+        assert "event_time" not in hit
+        assert "event_time_source" not in hit
 
 
 def test_invalid_recall_detail_is_rejected(recall_engine):
