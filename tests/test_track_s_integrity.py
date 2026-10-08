@@ -974,7 +974,7 @@ def test_s1_replay_persists_the_retry_record():
 
 def test_s1_replay_batch_loop_calls_the_retry_helper():
     src = (TRACK / "s1/replay.ts").read_text()
-    assert 'import { mergeAttempt } from "./retry.js";' in src  # relative: esbuild resolves .js to the .ts source
+    assert 'import { answerRecord, mergeAttempt, retryError } from "./retry.js";' in src  # relative: esbuild resolves .js to .ts
     helper = src[src.index("async function askRetry("):]
     assert "mergeAttempt(" in helper[:helper.index("\n}\n")]
     loop = src[src.index("for (const b of batches) {"):src.index("for (const id of PREFIX ? [] : OPEN_PROBES)")]
