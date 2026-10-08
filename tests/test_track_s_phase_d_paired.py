@@ -147,7 +147,7 @@ def test_two_tree_requires_distinct_labels(tmp_path):
 
 
 def test_p_exact_is_unrounded(tmp_path):
-    ns = analyze_functions("mcnemar", "sign_flip")
+    ns = analyze_functions("mcnemar", "sign_flip", "run_level_perm")
     assert ns["mcnemar"](117, 150) < 0.05 and round(ns["mcnemar"](117, 150), 4) == 0.05
     out = two_tree(tmp_path, cand_kept=lambda *a: set(FACTS) - {"f1", "f2", "f3"})
     for cp in CPS:
@@ -155,13 +155,19 @@ def test_p_exact_is_unrounded(tmp_path):
         assert facts["p_exact"] == ns["mcnemar"](facts["b_v1_only"], facts["c_v2_only"])
         sign = facts["sign_test"]
         assert sign["p_exact"] == ns["mcnemar"](sign["wins"], sign["losses"])
-        assert out["d2"][f"cp-{cp}"]["occurrence_mcnemar_p_exact"] == facts["p_exact"]
-        unit, d2 = out[f"cp-{cp}"]["facts_per_fact"], out["d2"][f"cp-{cp}"]
-        assert unit["test"] == d2["test"] == "exact sign-flip on per-fact share differences"
+        unit, run, d2 = out[f"cp-{cp}"]["facts_per_fact"], out[f"cp-{cp}"]["run_level"], out["d2"][f"cp-{cp}"]
+        diag = d2["facts_per_fact"]
+        assert diag["occurrence_mcnemar_p_exact"] == facts["p_exact"]
+        assert unit["test"] == "exact sign-flip on per-fact share differences"
+        assert run["test"] == d2["test"] == "exact stratified run-level permutation"
         # f1..f3 are lost in all 6 repetitions: each per-fact difference is -6 over common = 6
-        assert unit["p_exact"] == ns["sign_flip"]([-6] * 3) == 0.25 and d2["p_exact"] == unit["p_exact"]
-        assert unit["sign_test_p_exact"] == ns["mcnemar"](unit["wins"], unit["losses"]) == d2["sign_test_p_exact"]
-        assert unit["sign_test_p"] == round(unit["sign_test_p_exact"], 4) and unit["p"] == round(unit["p_exact"], 4)
+        assert unit["fact_sign_flip_p_exact"] == ns["sign_flip"]([-6] * 3) == 0.25 == diag["fact_sign_flip_p_exact"]
+        assert unit["sign_test_p_exact"] == ns["mcnemar"](unit["wins"], unit["losses"]) == diag["sign_test_p_exact"]
+        assert unit["sign_test_p"] == round(unit["sign_test_p_exact"], 4)
+        assert unit["fact_sign_flip_p"] == round(unit["fact_sign_flip_p_exact"], 4)
+        # every run: 40/40 before, 37/40 after
+        assert run["p_exact"] == ns["run_level_perm"]([([(40, 40)] * 2, [(37, 40)] * 2)] * 3)[0] == 2 / 216 == d2["p_exact"]
+        assert run["p"] == round(run["p_exact"], 4) and run["effect_pts_exact"] == d2["effect_pts_exact"] == -7.5
 
 
 def test_spread_is_reported_at_every_checkpoint(tmp_path):
@@ -190,40 +196,64 @@ def test_d2_passes_a_small_loss(tmp_path):
     out = two_tree(tmp_path, cand_kept=lambda seed, run, cp: set(FACTS[1:]) if run == "r1" else set(FACTS))
     for cp in CPS:
         d2 = out["d2"][f"cp-{cp}"]
-        assert d2["effect_pts_exact"] == -1.25 and d2["p_exact"] == 1.0  # one fact lost in half its repetitions
-        assert d2["occurrence_mcnemar_p_exact"] == 0.25 and (d2["n_facts"], d2["wins"], d2["losses"]) == (40, 0, 1)
+        diag = d2["facts_per_fact"]
+        # each seed: runs 40, 40 before and 39, 40 after; every split gives +-1/80, so |T*| = 3/80 in 2 x 27 of 216 splits
+        assert d2["effect_pts_exact"] == -1.25 and d2["p_exact"] == 54 / 216
+        assert diag["fact_sign_flip_p_exact"] == 1.0  # one fact lost in half its repetitions
+        assert diag["occurrence_mcnemar_p_exact"] == 0.25 and (diag["n_facts"], diag["wins"], diag["losses"]) == (40, 0, 1)
         assert d2["net_loss_ge_5"] is False and d2["blocks"] is False
     assert out["d2"]["verdict"] == "PASS"
 
 
-def test_d2_unit_is_the_fact_not_the_occurrence(tmp_path):
-    # Four facts lost in every repetition (3 seeds x 2 runs): 24 discordant occurrences, all one way. Per occurrence that is
-    # McNemar p = 2^-23 with a 10-point loss, which would block. The four facts are the independent units: a sign test on
-    # 4 losses and 0 wins gives p = 0.125, so D2 does not block.
+def test_d2_blocks_a_consistent_loss_that_the_fact_unit_misses(tmp_path):
+    # Four facts lost in every repetition (3 seeds x 2 runs): in every seed both candidate runs keep 36/40 and both previous
+    # runs 40/40, a 10-point loss. The run-level test reaches its minimum p (the observed split and its mirror in every seed:
+    # 2/216) and blocks. The fact-level diagnostics see 4 facts (sign-flip p = 0.125) and 24 occurrences (McNemar 2^-23).
     out = two_tree(tmp_path, cand_kept=lambda *a: set(FACTS) - {"f0", "f1", "f2", "f3"})
     for cp in CPS:
         facts = out[f"cp-{cp}"]["axes"]["facts_all"]
         assert (facts["n"], facts["b_v1_only"], facts["c_v2_only"]) == (240, 24, 0) and facts["p_exact"] < 0.05
         d2 = out["d2"][f"cp-{cp}"]
-        assert d2["unit"] == "fact" and d2["occurrence_mcnemar_p_exact"] == facts["p_exact"] == 2 / 2**24
-        assert (d2["n_facts"], d2["wins"], d2["losses"], d2["ties"]) == (40, 0, 4, 36)  # pooled across seeds by fact id
-        assert d2["effect_pts_exact"] == -10.0 and d2["p_exact"] == 0.125
-        assert d2["sign_test_p_exact"] == d2["p_exact"]  # one magnitude for every nonzero difference: sign-flip = sign test
+        diag = d2["facts_per_fact"]
+        assert d2["unit"] == "run (stratified by seed)" and (d2["n_seeds"], d2["n_runs_per_side"]) == (3, 6)
+        assert d2["run_shares"] == {f"seed-{n}": {"prev": [1.0, 1.0], "cand": [0.9, 0.9]} for n in D2}
+        assert d2["p_exact"] == 2 / 216 and d2["effect_pts_exact"] == -10.0
+        assert d2["net_loss_ge_5"] is True and d2["blocks"] is True
+        assert diag["occurrence_mcnemar_p_exact"] == facts["p_exact"] == 2 / 2**24
+        assert (diag["n_facts"], diag["wins"], diag["losses"], diag["ties"]) == (40, 0, 4, 36)  # pooled across seeds by fact id
+        assert diag["effect_pts_exact"] == -10.0 and diag["fact_sign_flip_p_exact"] == 0.125
+        assert diag["sign_test_p_exact"] == diag["fact_sign_flip_p_exact"]  # one magnitude everywhere: sign-flip = sign test
+        assert diag["diagnostic_only"] == "assumes independent facts; facts within a run are correlated"
+    assert out["d2"]["verdict"] == "BLOCK"
+
+
+def test_d2_does_not_block_when_one_seed_is_reversed(tmp_path):
+    # Seeds 1 and 2: 40/40 before, 32/40 after (-20 points); seed 3 reversed: 36/40 before, 40/40 after (+10). The mean is
+    # -10 points, but a sign the seeds do not share is not significant: |T*| >= 0.3 in 28 of 216 splits.
+    out = two_tree(tmp_path, cand_kept=lambda seed, run, cp: set(FACTS) if seed == 3 else set(FACTS[8:]),
+                   prev_kept=lambda seed, run, cp: set(FACTS[4:]) if seed == 3 else set(FACTS))
+    for cp in CPS:
+        d2 = out["d2"][f"cp-{cp}"]
+        assert d2["effect_pts_exact"] == -10.0 and d2["p_exact"] == 28 / 216 and d2["p_exact"] > 0.05
         assert d2["net_loss_ge_5"] is True and d2["blocks"] is False
     assert out["d2"]["verdict"] == "PASS"
 
 
 def test_d2_fact_share_counts_partial_repetitions(tmp_path):
     # A fact lost in only some repetitions moves its share, not a whole unit: f0..f9 lost in both runs of seed 1 only is a
-    # one-third share loss on each of 10 facts (sign test p = 2/1024, mean -8.3 points), which blocks.
+    # one-third share loss on each of 10 facts (sign test p = 2/1024, mean -8.3 points). That diagnostic would block; the
+    # gate does not, because one seed of three carries the whole loss: |T*| >= |T| in 2 x 36 of 216 splits.
     out = two_tree(tmp_path, cand_kept=lambda seed, run, cp: set(FACTS[10:]) if seed == 1 else set(FACTS))
     for cp in CPS:
         unit = out[f"cp-{cp}"]["facts_per_fact"]
         assert (unit["v1_mean_share"], unit["v2_mean_share"], unit["losses"], unit["effect_pts"]) == (1.0, 0.917, 10, -8.3)
         d2 = out["d2"][f"cp-{cp}"]
-        assert d2["effect_pts_exact"] == 100 * -20 / 240 and d2["p_exact"] == 2 / 1024 and d2["blocks"] is True
-        assert d2["sign_test_p_exact"] == d2["p_exact"]  # one magnitude for every nonzero difference: sign-flip = sign test
-    assert out["d2"]["verdict"] == "BLOCK"
+        diag = d2["facts_per_fact"]
+        assert diag["effect_pts_exact"] == 100 * -20 / 240 and diag["fact_sign_flip_p_exact"] == 2 / 1024
+        assert diag["sign_test_p_exact"] == diag["fact_sign_flip_p_exact"]  # one magnitude everywhere: sign-flip = sign test
+        assert d2["effect_pts_exact"] == float(100 * Fraction(-1, 4) / 3) and d2["p_exact"] == 72 / 216
+        assert d2["blocks"] is False
+    assert out["d2"]["verdict"] == "PASS"
 
 
 def test_sign_flip_dp_equals_brute_force_enumeration():
@@ -274,11 +304,71 @@ def test_d2_sign_flip_blocks_a_concentrated_loss_the_sign_test_misses(tmp_path):
     assert sign_p >= 0.05 > flip_p
     for cp in CPS:
         d2 = out["d2"][f"cp-{cp}"]
-        assert (d2["n_facts"], d2["wins"], d2["losses"], d2["ties"]) == (180, 30, 42, 108)
-        assert d2["effect_pts_exact"] == 100 * -24 / 360
-        assert d2["sign_test_p_exact"] == sign_p and d2["p_exact"] == flip_p
+        diag = d2["facts_per_fact"]
+        assert (diag["n_facts"], diag["wins"], diag["losses"], diag["ties"]) == (180, 30, 42, 108)
+        assert diag["effect_pts_exact"] == 100 * -24 / 360
+        assert diag["sign_test_p_exact"] == sign_p and diag["fact_sign_flip_p_exact"] == flip_p
+        # the gate: every run keeps 55/60 before and 51/60 after, in every seed
+        assert d2["effect_pts_exact"] == 100 * -4 / 60 and d2["p_exact"] == 2 / 216
         assert d2["net_loss_ge_5"] is True and d2["blocks"] is True
     assert out["per_arm"]["cand"]["spread_over_0.10"] == [] and out["d2"]["verdict"] == "BLOCK"
+
+
+def seed_specific_two_tree(tmp_path, prev_kept, cand_kept):  # the real v3 shape: seed_ids, 60 facts per seed
+    def summarize(arm, sha, seed, run):
+        return {**summary(arm, sha, seed, run), "material_sha256": hashlib.sha256(manifest_bytes(seed, seed_ids(seed))).hexdigest()}
+    prev = build(tmp_path / "prev", "LCMX-fleet", prev_kept, seeds=D2, summarize=summarize, ids=seed_ids)
+    cand = build(tmp_path / "cand", "LCMX-fleet", cand_kept, seeds=D2, sha=SHAS["cand"], summarize=summarize, ids=seed_ids)
+    return analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"], shas=(SHAS["prev"], SHAS["cand"]),
+                   seeds=D2, material_root=material(tmp_path, ids=seed_ids))
+
+
+def test_d2_aa_placebo_with_correlated_facts_does_not_block(tmp_path):
+    # The A/A shape seen on real runs: one seed's run shares move a lot between runs, and each run's facts move together.
+    # Seed 1 keeps its first 39 and 33 facts on the previous runs (0.65, 0.55) and 27 and 21 on the candidate runs
+    # (0.45, 0.35): each side's spread is exactly 0.10, so the spread rule does not repeat. Seeds 2 and 3 keep every fact.
+    # Treating the 180 facts as independent gives a 6.7-point loss at p = 2/2^18, which would block; at the run level the
+    # loss is one seed's, and |T*| >= |T| in 2 x 36 of 216 splits.
+    def kept(counts):
+        return lambda seed, run, cp: set(seed_ids(seed)[:counts[run]]) if seed == 1 else set(seed_ids(seed))
+    out = seed_specific_two_tree(tmp_path, kept({"r1": 39, "r2": 33}), kept({"r1": 27, "r2": 21}))
+    for cp in CPS:
+        d2 = out["d2"][f"cp-{cp}"]
+        diag = d2["facts_per_fact"]
+        assert d2["run_shares"]["seed-1"] == {"prev": [0.65, 0.55], "cand": [0.45, 0.35]}
+        assert d2["effect_pts_exact"] == float(100 * Fraction(-1, 5) / 3) and d2["p_exact"] == 72 / 216
+        assert d2["blocks"] is False
+        # the fact-level diagnostic on the same fixture: 18 facts, all losses (6 of them lost in both runs)
+        assert diag["fact_sign_flip_p_exact"] == 2 / 2**18 < 0.05 and diag["effect_pts_exact"] <= -5
+    assert out["per_arm"]["prev"]["spread_over_0.10"] == out["per_arm"]["cand"]["spread_over_0.10"] == []
+    assert out["d2"]["verdict"] == "PASS"
+
+
+def test_run_level_perm_equals_brute_force_enumeration():
+    run_level_perm = analyze_functions("run_level_perm")["run_level_perm"]
+    splits = list(itertools.combinations(range(4), 2))
+    rng = random.Random(1007)
+    def run():
+        n = rng.choice((5, 6, 60))
+        return rng.randint(0, n), n
+    cases = [[([run(), run()], [run(), run()]) for _ in range(2)] for _ in range(25)]  # 2 seeds: 36 splits
+    cases += [[([(3, 6), (2, 6)], [(1, 6), (4, 6)]), ([(5, 60), (5, 60)], [(5, 60), (5, 60)])],  # T = 0: every split ties
+              [([(6, 6), (5, 6)], [(1, 6), (0, 6)]), ([(1, 2), (1, 2)], [(1, 2), (1, 2)])]]
+    for seeds in cases:
+        shares = [[Fraction(k, n) for k, n in (*first, *second)] for first, second in seeds]
+        t = sum((r[2] + r[3] - r[0] - r[1]) / 2 for r in shares) / len(seeds)
+        hits = 0
+        for assign in itertools.product(splits, repeat=len(seeds)):
+            star = sum(sum(r[i] for i in range(4) if i not in a) / 2 - sum(r[i] for i in a) / 2 for r, a in zip(shares, assign))
+            hits += abs(star / len(seeds)) >= abs(t)
+        assert run_level_perm(seeds) == (float(Fraction(hits, 6 ** len(seeds))), t), seeds
+    assert run_level_perm([([(1, 1), (1, 1)], [(0, 1), (0, 1)])] * 3) == (2 / 216, -1)
+    for bad in ([], [([(1, 1), (1, 1)], [(0, 1), (0, 1)])] * 8, [([(1, 1)], [(0, 1), (0, 1)])]):
+        try:
+            run_level_perm(bad)
+        except ValueError:
+            continue
+        raise AssertionError(f"accepted {bad}")
 
 
 def test_d2_incomplete_when_a_pair_is_missing(tmp_path):
@@ -288,6 +378,10 @@ def test_d2_incomplete_when_a_pair_is_missing(tmp_path):
     out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"],
                   shas=(SHAS["prev"], SHAS["cand"]), seeds=D2)
     assert out["d2"]["missing_required"] == []
+    d2 = out["d2"]["cp-304"]  # seed 1 lacks a run: the gate has no p rather than a p over fewer runs
+    assert (d2["p_exact"], d2["effect_pts_exact"], d2["blocks"], d2["n_seeds"]) == (None, None, False, 2)
+    assert d2["run_shares"]["seed-1"] == {"prev": [1.0], "cand": [0.75]}
+    assert out["d2"]["cp-176"]["blocks"] is True
     assert out["status"] == "INCOMPLETE" and out["d2"]["verdict"] == "INCOMPLETE"
 
 

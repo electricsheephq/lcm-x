@@ -7,11 +7,12 @@ The v1/v2 column names denote first/second CLI arms; sign-test wins favor the se
 Each run pair votes once per axis; ties are excluded from the exact two-sided sign p-value.
 With --second-tree the second arm is read from another run/decision/logs root (release over release, D2);
 results are keyed by --labels. Every p also has an unrounded p_exact; the d2 block uses only unrounded values.
-The D2 gate's unit is the seed's planted fact x checkpoint, not the occurrence: fact ids are specific to each seed, so a
-checkpoint holds 60 facts x 3 seeds = 180 facts, each repeated over its seed's 2 runs, and those repeats are not independent
-pairs. facts_per_fact gives each fact its kept share over its paired repetitions on each side; the gate's p is an exact paired
-sign-flip test on the per-fact share differences, and the effect is their mean. The test uses magnitude because a fact lost
-outright weighs more than a fact that drifted: the sign test it replaced (kept as a diagnostic) missed concentrated losses."""
+The D2 gate's unit is the run, stratified by seed: the facts of one run share its compactions, so they are correlated (the
+run-level variance was 3-25x the independent-fact variance at cp-304 on real runs). Each run's kept share is kept / scored
+facts; the statistic is the mean over seeds of (second side's mean run share - first side's), and p is the exact stratified
+run-level permutation test (every within-seed 2 + 2 split of the 4 runs; the minimum reachable p with 3 seeds is 2/216).
+facts_per_fact (a fact's kept share over its repetitions, the exact sign-flip and sign tests on the per-fact differences) and
+the per-occurrence McNemar are diagnostics only: they assume independent facts."""
 
 import argparse
 import hashlib
@@ -100,6 +101,32 @@ def sign_flip(d):
     return sum(c for s, c in dist.items() if abs(s) >= t) / 2 ** len(nz)  # int / int: exact fraction, rounded once
 
 
+def run_level_perm(seeds):
+    """Exact two-sided stratified run-level permutation test (the D2 gate). seeds: per seed, (first side, second side), each
+    two runs given as (kept, scored) counts. A run's share is kept / scored as a Fraction; T = mean over seeds of (second
+    side's mean share - first side's). Under H0 a seed's 4 runs are exchangeable: each of the C(4,2) = 6 within-seed splits
+    into 2 + 2 is equally likely, 6^S in all; p = #{|T*| >= |T|} / 6^S, counted exactly (a DP over the per-seed values,
+    which are Fractions, so ties compare exactly). Returns (p as the correctly rounded float, T as a Fraction). No RNG."""
+    from fractions import Fraction  # local: the offline tests extract this function by name
+    from itertools import combinations
+    if not seeds or 6 ** len(seeds) > 1_000_000:
+        raise ValueError(f"run-level permutation needs 1 to 7 seeds ({len(seeds)})")
+    dist, observed = {Fraction(0): 1}, Fraction(0)  # sum over seeds of (second mean - first mean) -> number of splits
+    for first, second in seeds:
+        if len(first) != 2 or len(second) != 2:
+            raise ValueError("each side of a seed needs exactly 2 runs")
+        r = [Fraction(k, n) for k, n in (*first, *second)]
+        observed += (r[2] + r[3] - r[0] - r[1]) / 2
+        values = [(sum(r) - 2 * (r[i] + r[j])) / 2 for i, j in combinations(range(4), 2)]  # runs i, j on the first side
+        nxt = {}
+        for s, c in dist.items():
+            for v in values:
+                nxt[s + v] = nxt.get(s + v, 0) + c
+        dist = nxt
+    hits = sum(c for s, c in dist.items() if abs(s) >= abs(observed))
+    return float(Fraction(hits, 6 ** len(seeds))), observed / len(seeds)
+
+
 def nr(xs, p):
     xs = sorted(xs)
     return xs[max(0, -(-int(p * 100) * len(xs) // 100) - 1)] if xs else None
@@ -172,6 +199,7 @@ def pair_axes(cp):
     n_items, excluded = {k: 0 for k in axes}, {k: 0 for k in axes}
     pairs, missing, partial = [], [], False
     per_fact = {}  # fact id -> [paired repetitions, first arm kept, second arm kept] (facts_all, pooled over seeds and runs)
+    per_run = {}  # (seed, run) -> [scored facts, first arm kept, second arm kept] (the facts_all items of that run pair)
     signs = {k: {"wins": 0, "losses": 0, "ties": 0} for k in axes}
     first, second = globals().get("LABELS", ARMS)
     for seed in SEEDS:
@@ -208,6 +236,7 @@ def pair_axes(cp):
                 return None if cls in ("MISSING", "READER_TRUNCATED") else cls == "CORRECT"
             lost1 = set(s1["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids", []))
             lost2 = set(s2["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids", []))
+            run_tally = per_run.setdefault((seed, run), [0, 0, 0])
             for fid, f in facts[seed].items():
                 k1 = False if fid in lost1 else kept(s1, fid)  # an admission-proven loss outranks truncation
                 k2 = False if fid in lost2 else kept(s2, fid)
@@ -215,6 +244,7 @@ def pair_axes(cp):
                 if k1 is not None and k2 is not None:
                     tally = per_fact.setdefault(fid, [0, 0, 0])
                     tally[0], tally[1], tally[2] = tally[0] + 1, tally[1] + k1, tally[2] + k2
+                    run_tally[0], run_tally[1], run_tally[2] = run_tally[0] + 1, run_tally[1] + k1, run_tally[2] + k2
                 add(f"facts_{f['placement']}", k1, k2)
                 if f["class"] == "early_user_constraint":
                     add("constraint_class", k1, k2)
@@ -260,14 +290,34 @@ def pair_axes(cp):
         "effect_pts_exact": effect,
         "wins": wins, "losses": losses, "ties": len(tallies) - wins - losses,
         "test": "exact sign-flip on per-fact share differences",
-        "p": round(flip_p, 4),
-        "p_exact": flip_p,
-        # non-gating diagnostic: the exact two-sided sign test (McNemar's binomial on wins vs losses), blind to magnitude
+        "fact_sign_flip_p": round(flip_p, 4),
+        "fact_sign_flip_p_exact": flip_p,
+        # the exact two-sided sign test (McNemar's binomial on wins vs losses), blind to magnitude
         "sign_test_p": round(mcnemar(wins, losses), 4),
         "sign_test_p_exact": mcnemar(wins, losses),
+        "diagnostic_only": "assumes independent facts; facts within a run are correlated",
+    }
+    # the D2 gate: every seed needs both runs scored on both sides; otherwise p and the effect stay None (the run is INCOMPLETE)
+    scored = {key: t for key, t in per_run.items() if t[0]}  # (seed, run) -> [scored, first kept, second kept]
+    full = [n for n in SEEDS if (n, "r1") in scored and (n, "r2") in scored]
+    shares = {f"seed-{n}": {label: [round(scored[(n, r)][i] / scored[(n, r)][0], 3) for r in ("r1", "r2") if (n, r) in scored]
+                            for i, label in ((1, first), (2, second))} for n in SEEDS}  # display only
+    run_p, run_t = None, None
+    if len(full) == len(SEEDS):
+        run_p, run_t = run_level_perm([tuple([(scored[(n, r)][i], scored[(n, r)][0]) for r in ("r1", "r2")] for i in (1, 2))
+                                       for n in SEEDS])  # per seed: (first side, second side) as (kept, scored) per run
+    run_unit = {
+        "test": "exact stratified run-level permutation",
+        "n_seeds": len(full),
+        "n_runs_per_side": 2 * len(full),
+        "run_shares": shares,
+        "effect_pts": None if run_t is None else round(float(100 * run_t), 1),
+        "effect_pts_exact": None if run_t is None else float(100 * run_t),
+        "p": None if run_p is None else round(run_p, 4),
+        "p_exact": run_p,
     }
     return {"status": "INCOMPLETE" if missing or partial or any(excluded.values()) else "COMPLETE", "missing_pairs": missing, "pairs": pairs,
-            "axes": out, "facts_per_fact": fact_unit}
+            "axes": out, "facts_per_fact": fact_unit, "run_level": run_unit}
 
 
 def loads():
@@ -373,15 +423,18 @@ def losses(cp):
 paired = {f"cp-{cp}": {**pair_axes(cp), "loss_classes": losses(cp)} for cp in CPS}
 labels, arm_stats = globals().get("LABELS", ARMS), per_arm()
 status = "INCOMPLETE" if any(p["status"] == "INCOMPLETE" for p in paired.values()) else "COMPLETE"
-# D2 gates on the per-fact unit with the sign-flip p; the per-fact sign test and the per-occurrence McNemar are reported beside it
-# and never gate (the sign test ignores magnitude; McNemar treats a fact's repeats as independent pairs, so its p is too small)
-d2 = {cp: {"unit": "fact", "n_facts": u["n_facts"], "wins": u["wins"], "losses": u["losses"], "ties": u["ties"],
-           "test": u["test"], "p_exact": u["p_exact"], "effect_pts_exact": u["effect_pts_exact"],
-           "sign_test_p_exact": u["sign_test_p_exact"], "occurrence_mcnemar_p_exact": a["p_exact"]}
-      for cp, u, a in ((cp, p["facts_per_fact"], p["axes"]["facts_all"]) for cp, p in paired.items())}
+# D2 gates on the run, stratified by seed (facts within a run share its compactions); the per-fact sign-flip and sign tests and
+# the per-occurrence McNemar are reported beside it and never gate (they treat correlated facts or repeats as independent)
+d2 = {cp: {"unit": "run (stratified by seed)", "test": r["test"], "n_seeds": r["n_seeds"], "n_runs_per_side": r["n_runs_per_side"],
+           "p_exact": r["p_exact"], "effect_pts_exact": r["effect_pts_exact"], "run_shares": r["run_shares"],
+           "facts_per_fact": {"n_facts": u["n_facts"], "wins": u["wins"], "losses": u["losses"], "ties": u["ties"],
+                              "effect_pts_exact": u["effect_pts_exact"], "fact_sign_flip_p_exact": u["fact_sign_flip_p_exact"],
+                              "sign_test_p_exact": u["sign_test_p_exact"], "occurrence_mcnemar_p_exact": a["p_exact"],
+                              "diagnostic_only": u["diagnostic_only"]}}
+      for cp, r, u, a in ((cp, p["run_level"], p["facts_per_fact"], p["axes"]["facts_all"]) for cp, p in paired.items())}
 for v in d2.values():
     v["net_loss_ge_5"] = v["effect_pts_exact"] is not None and v["effect_pts_exact"] <= -5
-    v["blocks"] = v["p_exact"] < 0.05 and v["net_loss_ge_5"]
+    v["blocks"] = v["p_exact"] is not None and v["p_exact"] < 0.05 and v["net_loss_ge_5"]
 spread = {label: arm_stats.get(label, {}).get("spread_over_0.10", []) for label in labels}
 missing_spread = [f"{label}/cp-{cp}/seed-{n}" for label in labels for cp in CPS for n in SEEDS  # receipt-skipped or unscored
                   if arm_stats.get(label, {}).get("facts_r1_r2_spread_by_cp", {}).get(f"cp-{cp}", {}).get(f"seed-{n}") is None]
