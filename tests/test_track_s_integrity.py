@@ -718,3 +718,20 @@ def test_report_without_manifest_reads_every_score(tmp_path, manifest_api):
     metadata = {}
     assert list(report["load"](scores, metadata)) == [("arm", "seed-1")]
     assert metadata["manifest"] == "absent" and metadata["ignored_unmanifested"] == []
+
+
+def test_spread_is_unmeasured_when_a_run_has_no_fact_rate(tmp_path):
+    logs, runs = tmp_path / "logs", tmp_path / "runs"
+    logs.mkdir()
+    for run in ("r1", "r2"):
+        (logs / f"s2-A-d1-{run}.log.wall").write_text("start 1\nexit 0 end 2\n")
+        summary = runs / "A" / "seed-1" / f"d1-{run}" / "summary.json"
+        summary.parent.mkdir(parents=True)
+        summary.write_text(json.dumps({"events": []}))
+    value = {"r1": None, "r2": 0.5}
+    ns = functions("decision/analyze_paired.py", "per_arm", LOGS=logs, RUNS=runs, SEEDS=[1], ARMS=["A"], CPS=[304],
+        loads=lambda: [], st=lambda xs: None, json=json, re=__import__("re"), score=lambda arm, seed, run, cp: {
+            "stored_level3": {"level3": 0, "leaves": 1}, "metrics": {"facts_kept": {"value": value[run]}}})
+    out = ns["per_arm"]()["A"]
+    assert out["facts_cp304_r1_r2_spread"] == {"seed-1": None}
+    assert out["spread_unmeasured"] == ["seed-1"] and out["spread_over_0.10"] == []

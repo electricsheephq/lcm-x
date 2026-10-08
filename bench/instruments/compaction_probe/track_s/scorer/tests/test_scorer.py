@@ -264,3 +264,13 @@ def test_full_two_runs_three_arms_pass_path(mat, tmp_path):
     assert cont["overall"].startswith("INCOMPLETE(1 of 1 seeds; comparator: INCOMPLETE: no continuation_field row")
     stale = rp.compare(runs, "LCMX-a", "lossless-claw", "stale_rate", "parity", ["seed-x"], 1)
     assert stale["seeds"]["seed-x"]["verdict"] == "PASS" and stale["overall"] == "PASS"
+
+
+def test_non_string_answer_in_a_capped_batch_is_scored_not_raised(mat, tmp_path):
+    answers = dict(fx.GOOD | fx.GOOD_CONT)
+    answers["X-F0"] = 42  # an external arm can store a JSON number
+    run = fx.s2_run(tmp_path, answers=answers)
+    for file in (run / "answers").glob("*.json"):
+        fx.wj(file, {"batch": file.stem, "usage": {"completion_tokens": 8192}})
+    score = sc.score(mat, run, "LCMX-a")
+    assert score["probes"]["X-F0"]["class"] not in ("READER_TRUNCATED", "CORRECT")
