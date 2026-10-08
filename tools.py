@@ -473,6 +473,9 @@ _LCM_RECALL_ANSWER_READY_CONTENT_CHARS = 2_400
 _LCM_RECALL_RECENCY_HALF_LIFE_S = 30 * 24 * 3600.0
 _LCM_RECALL_RECENCY_FLOOR = 0.5
 _LCM_RECALL_RRF_K = 60
+# FTS anchor slot (#950): the FTS arm's best message, when fusion pushed it out
+# of the delivered window, takes the slot of the 10th distinct session at most.
+_LCM_RECALL_FTS_ANCHOR_SLOTS = 10
 _LCM_LOAD_SESSION_DEFAULT_LIMIT = 100
 _LCM_LOAD_SESSION_HARD_LIMIT_CAP = 200
 _LCM_LOAD_SESSION_DEFAULT_MAX_CONTENT_CHARS = 4000
@@ -5662,6 +5665,68 @@ def _lcm_recall_rerank(
     return reordered, "applied", rerank_scores
 
 
+def _lcm_recall_fts_anchor(
+    ordered: list[dict[str, Any]],
+    arm_hits: dict[str, list[dict[str, Any]]],
+    arm_order: list[str],
+    limit: int,
+    slots: int = _LCM_RECALL_FTS_ANCHOR_SLOTS,
+    *,
+    arm_weights: list[float] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Keep the FTS arm's best message inside the delivered window (#950).
+
+    Rank-only: when the FTS arm's raw position-1 message fell outside the first
+    ``limit`` fused entries, it moves to the start of the S-th distinct session
+    of that window (S = min(limit, slots)), else to slot ``limit``. At most one
+    entry moves and at most one session leaves the window. ``rrf_score`` and
+    ``_final_score`` are untouched, and the moved entry reports its own score,
+    so a relevance floor applied to the serialized score still sees the hit's
+    true strength (delivered scores need not be monotone around it).
+    Inert unless at least two arms ran and FTS is one of them, so FTS-only
+    output is unchanged. Also inert when ``arm_weights`` (the weights
+    ``rrf_fuse`` used, aligned to ``arm_order``) gives the FTS arm a weight of
+    zero or less: an operator who switched the arm off gets no anchor from it.
+    """
+    info: dict[str, Any] = {"fired": False, "position": None}
+    if len(arm_order) < 2 or "fts" not in arm_order or limit < 4 or not arm_hits.get("fts"):
+        return ordered, info
+    fts_index = arm_order.index("fts")
+    if arm_weights is not None and fts_index < len(arm_weights) and arm_weights[fts_index] <= 0:
+        return ordered, info
+    anchor = _hit_identity(arm_hits["fts"][0])
+    j = next(
+        (i for i, entry in enumerate(ordered) if _hit_identity(entry["hit"]) == anchor),
+        None,
+    )
+    if j is None or j < limit:
+        return ordered, info
+    window = ordered[:limit]
+    target = min(limit, slots)
+    cut = limit - 1
+    seen: list[Any] = []
+    for i, entry in enumerate(window):
+        sid = entry["hit"].get("session_id")
+        if sid and sid not in seen:
+            seen.append(sid)
+            if len(seen) == target:
+                cut = i
+                break
+    cut = min(cut, limit - 1)
+    ordered = list(ordered)
+    entry = ordered.pop(j)
+    info.update(fired=True, position=cut + 1)
+    return ordered[:cut] + [entry] + ordered[cut:], info
+
+
+def _lcm_recall_fts_anchor_delivered(
+    hits: list[dict[str, Any]], arm_hits: dict[str, list[dict[str, Any]]]
+) -> bool:
+    """Whether the FTS arm's anchored hit is among the returned ``hits`` (#950)."""
+    anchor = _hit_identity(arm_hits["fts"][0])
+    return any(_hit_identity(hit) == anchor for hit in hits)
+
+
 def _lcm_recall_preflight_scan_deadline(now: float, deadline: float) -> float:
     """Derive the corpus preflight's independent scan deadline.
 
@@ -6357,6 +6422,19 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         provider, query, ordered, window=rerank_window, deadline=deadline, config=engine._config
     )
 
+    # -- FTS anchor slot (#950), after rerank so rerank cannot undo it. Inert
+    #    with a single arm, so FTS-only (embeddings-off) output is unchanged.
+    #    Proactive recall passes ``fts_anchor=False`` (an internal keyword, not
+    #    a tool argument): it filters hits by a score floor after the call, so
+    #    an FTS-only anchor below that floor would displace an eligible hit. --
+    fts_anchor_info: dict[str, Any] | None = None
+    if bool(kwargs.get("fts_anchor", True)) and bool(
+        getattr(engine._config, "recall_fts_anchor", True)
+    ):
+        ordered, fts_anchor_info = _lcm_recall_fts_anchor(
+            ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
+        )
+
     # -- Response shaping (char-capped). The default snippets path retains the
     # historical order and serialized response exactly. answer_ready applies
     # stable post-rank diversity before bounded exact-ref hydration.
@@ -6604,6 +6682,17 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     }
     if bool(getattr(engine._config, "rerank_enabled", False)) and rerank_scores:
         response["provenance"]["rerank_scores"] = rerank_scores
+    if fts_anchor_info is not None and len(arm_order) > 1:
+        # The anchor only places the hit in the ranked window; answer_ready
+        # selection (citation and per-session rules) and the response cap still
+        # decide delivery, so report whether the anchored hit actually shipped.
+        # ``delivered`` is null when the anchor did not fire (no anchored hit).
+        fts_anchor_info["delivered"] = (
+            _lcm_recall_fts_anchor_delivered(response["hits"], arm_hits)
+            if fts_anchor_info["fired"]
+            else None
+        )
+        response["provenance"]["fts_anchor"] = fts_anchor_info
     if degraded:
         response["degraded_reason"] = "; ".join(dict.fromkeys(degraded_reasons))
     if timed_out:
@@ -6663,6 +6752,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 "observation_is_not_occurrence": True,
             }
 
+        anchor_fired = bool(fts_anchor_info and fts_anchor_info.get("fired"))
+        if anchor_fired:
+            # Size the cap check with the widest value (``false``) so the final
+            # recompute below can never grow the encoded response past the cap.
+            fts_anchor_info["delivered"] = False
         encoded = json.dumps(response, ensure_ascii=False)
         if len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP:
             original_query = response["query"]
@@ -6697,6 +6791,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         None if novel_refs else "no_novel_exact_ref"
                     ),
                 }
+            )
+            encoded = json.dumps(response, ensure_ascii=False)
+        if anchor_fired:
+            # The cap loop may have popped the anchored hit: report delivery
+            # from the hits actually returned.
+            fts_anchor_info["delivered"] = _lcm_recall_fts_anchor_delivered(
+                response["hits"], arm_hits
             )
             encoded = json.dumps(response, ensure_ascii=False)
         return encoded

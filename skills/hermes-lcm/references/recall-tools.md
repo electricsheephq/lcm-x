@@ -68,6 +68,7 @@ Use for semantic discovery across all conversations stored in the local LCM data
 - `detail='snippets'` is the default.
 - `detail='answer_ready'` adds bounded per-session diversity and exact-ref hydration.
 - In both details, a verbatim message hit carries `event_time` (ISO 8601 UTC, e.g. `2024-03-20T13:45:30Z`) when the host recorded when the message happened, plus `event_time_source` when known. A hit without `event_time` has no recorded event time (for example imported history): do not read its `timestamp` as one, since that is when LCM stored the row. Summary hits carry neither field.
+- With embeddings on, the full-text arm's best match is kept in the ranked window (`LCM_RECALL_FTS_ANCHOR`, default `true`). `provenance.fts_anchor = {fired, position, delivered}` reports whether it moved, its 1-based slot, and whether it is among the returned hits (`null` when it did not fire; `answer_ready` citation and per-session rules and the response cap can still drop it).
 - Follow each result's `expand_hint`: verbatim hits use `lcm_expand(store_id=...)`, current-session summaries use `lcm_expand(node_id=...)`, and cross-session summaries use `lcm_expand(node_id=..., session_id=...)`. Reach for `lcm_load_session` when the whole transcript is wanted rather than one node.
 
 ### `lcm_load_session`
