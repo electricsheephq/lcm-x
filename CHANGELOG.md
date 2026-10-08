@@ -8,6 +8,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ### v0.27.0
 
+- Change: with embeddings on, `lcm_recall` keeps the full-text arm's best match among the delivered hits when fusion would have pushed it out, displacing at most one session; `LCM_RECALL_FTS_ANCHOR=false` turns it off, and embeddings-off output is unchanged. (#950)
 - Bench: Track S's Codex-native arm gives each run its own isolated home, so parallel runs cannot mask a credential refresh. (#951)
 - Fix: a survival projection is recognised on a cold resume even when its tool-call arguments already quote survival marks, and a projection that installs shorter stored tool calls now carries its mark. (#959)
 - Fix: the doctor's attempt-only guidance and the operator guide state the v0.27.0 plugin-only rollback floor for projected or unknown-projection stores, and the doctor shows that floor for a damaged counter record that carries projection evidence. (#966)
