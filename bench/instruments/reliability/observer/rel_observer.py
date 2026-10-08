@@ -461,6 +461,20 @@ def patch_model_tools(mod):
     mod.handle_function_call = traced
 
 
+def patch_inline_tools(mod):
+    """#659 P2: ``todo_list`` is an agent-level inline tool (``INLINE_TOOL_EXECUTORS``), dispatched before the registry,
+    so ``handle_function_call`` never sees it. Only that entry is wrapped: no other cell plans an inline tool."""
+    table = getattr(mod, "INLINE_TOOL_EXECUTORS", None)
+    run = table.get("todo_list") if isinstance(table, dict) else None
+    if run is None:
+        return
+
+    def traced(agent, args, ctx):
+        return dispatched(lambda: run(agent, args, ctx), "todo_list", args, getattr(ctx, "tool_call_id", None),
+                          "inline_tool_dispatch")
+    table["todo_list"] = traced
+
+
 def patch_helpers(mod):
     passes, drop = getattr(mod, "_SEQUENCE_REPAIR_PASSES", None), getattr(mod, "_drop_stray_tool_results", None)
     if not (passes and drop in passes):
@@ -475,4 +489,4 @@ def patch_helpers(mod):
 
 
 PATCHES = {"run_agent": patch_run_agent, "model_tools": patch_model_tools, "agent.agent_runtime_helpers": patch_helpers,
-           "agent.conversation_compression_manual": patch_manual}
+           "agent.conversation_compression_manual": patch_manual, "agent.inline_tool_executors": patch_inline_tools}
