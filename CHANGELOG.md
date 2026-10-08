@@ -10,6 +10,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 - Bench: Track S's Codex-native arm gives each run its own isolated home, so parallel runs cannot mask a credential refresh. (#951)
 - Fix: a survival projection is recognised on a cold resume even when its tool-call arguments already quote survival marks, and a projection that installs shorter stored tool calls now carries its mark. (#959)
+- Fix: the doctor's attempt-only guidance and the operator guide state the v0.27.0 plugin-only rollback floor for projected or unknown-projection stores, and the doctor shows that floor for a damaged counter record that carries projection evidence. (#966)
 - Fix: under an assembly cap, a newer request the host merged onto the carried objective survives on its own when the whole row does not fit; a sanitized tail copy of the objective is no longer emitted twice; the objective scan no longer re-verifies parts inside a verified summary run. (#958)
 - Change: summaries now see the middle of long messages using a shared input budget with a legacy retention floor; measured middle-fact retention rose from 0/72 to 42/72. (#611)
 - Fix: a clipped long message no longer becomes a verbatim level-3 leaf with the default or fleet input budgets. (#899)

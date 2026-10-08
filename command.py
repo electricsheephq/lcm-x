@@ -1808,6 +1808,10 @@ def _doctor_text(engine) -> str:
         fit_count = int(survival_fit.get("count") or 0)
     except (TypeError, ValueError, OverflowError):  # a damaged record: a fit with an unknown count
         fit_count = None
+    recorded_projection = survival_fit.get("projected_count", 0)
+    if fit_count == 0 and (survival_fit.get("count_lost")
+                           or not (type(recorded_projection) is int and recorded_projection == 0)):
+        fit_count = None  # #966: a zero or unreadable count beside projection evidence is an unknown count
     if fit_count != 0:
         projected = survival_fit.get("projected_count")  # absent on a record from before the key: unknown
         if type(projected) is not int or projected < 0 or survival_fit.get("count_lost"):

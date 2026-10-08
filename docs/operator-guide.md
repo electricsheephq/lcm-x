@@ -129,7 +129,13 @@ Hermes restarts: `plugins.enabled` back to `hermes-lcm` and `context.engine:
 lcm` (restore the `config.yaml` backup taken before the migration); otherwise
 Hermes reports the engine as not found, runs the built-in compressor, and
 those turns never reach the database file. A plugin-only rollback to v0.24.5
-or later is supported, because v0.24.5 already knows survival fits. A
+or later is supported only when survival fits have not projected rows and the
+projection count is known. For a store whose survival fits projected rows, or
+whose projection count is unknown, a plugin-only rollback needs v0.27.0 or later.
+Check `/lcm doctor`'s `survival_fit` entry: a positive or unknown `projected_count`,
+or `count_lost`, requires that floor. To roll such a store back to v0.24.5 through
+v0.26.x, stop Hermes and move the configured database file (by default `lcm.db`,
+with its `-wal` and `-shm` companions) aside and keep it. A
 plugin-only rollback to a 0.24.x version older than v0.24.5 is supported only
 for a store that no survival fit has touched. Two
 checks establish that, and both must hold: `/lcm doctor` reports no
