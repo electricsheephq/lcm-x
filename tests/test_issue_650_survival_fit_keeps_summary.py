@@ -584,3 +584,45 @@ def test_1000_new_stamped_turn_equal_to_a_stored_row_is_stored(tmp_path, host, m
         assert sum(1 for r in _rows(engine) if r["content"] == repeated) == before + 1
     finally:
         engine.shutdown()
+
+
+_U_BESIDE_CARRIER = pytest.mark.xfail(strict=True, reason=(
+    "pre-existing, #923 class (origin/main 25cd17a8 stores it too): an unstamped occurrence of U beside the carrier "
+    "in the claiming pass has no stamp or descriptor binding it, so it is stored as a new turn (duplicate over "
+    "loss); the shape of the NOLOSS natural cell's row 625"))
+
+
+@pytest.mark.parametrize("rewrite_current", [False, True], ids=["as-returned", "turn-end-rewrite"])
+@pytest.mark.parametrize("stamp", ["original-stamp", "unstamped"])
+@pytest.mark.parametrize("when", ["next-turn", "same-pass"])
+def test_1000_u_resent_in_the_replayed_history_is_not_stored_again(request, tmp_path, host, monkeypatch, when, stamp,
+                                                                   rewrite_current):
+    """After a held fit re-formed the carrier around U, the host re-sends U itself in the replayed history (its
+    stored text, with U's original stamp or none). ``next-turn``: the carrier claim bound U in the post-turn ingest;
+    the next history holds U as a plain row after the standalone summary (the host's state.db shape). ``same-pass``:
+    U follows the carrier in the claiming ingest. No new row is stored for U. origin/main behaves the same for U in
+    every case; the unstamped same-pass case stores a repeat there too and is pinned as a strict xfail."""
+    if when == "same-pass" and stamp == "unstamped":
+        request.applymarker(_U_BESIDE_CARRIER)
+    engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    try:
+        u_row = next(r for r in _rows(engine) if r["role"] == "user" and r["content"] == rest)
+        u = {"role": "user", "content": rest, **({"timestamp": u_row["observed_at"]} if stamp == "original-stamp" else {})}
+        reply = {"role": "assistant", "content": "reply CUR", "timestamp": 30_001.0}
+        if rewrite_current:  # turn_finalizer.py:270: the API variant becomes the persist variant
+            fitted[-1] = {**fitted[-1], "content": "[CUR] persist variant"}
+        summary = fitted[0]["content"][:engine._verified_lcm_summary_prefix_end(fitted[0]["content"])]
+        stored = len(_rows(engine))
+        if when == "next-turn":
+            engine.ingest([*fitted, reply])
+            claimed = [r["content"] for r in _rows(engine)[stored:]]
+            engine.ingest([{"role": "user", "content": summary}, u, *fitted[1:], reply])
+        else:
+            engine.ingest([fitted[0], u, *fitted[1:], reply])
+        added = [r["content"] for r in _rows(engine)[stored:]]
+        assert sum(1 for r in _rows(engine) if r["content"] == rest) == 1, [c[:60] for c in added]  # U: one row
+        if when == "next-turn":  # the precondition: the claim bound U (main: the carrier is stored, #1000)
+            assert not any("Summary (d" in c[:40] for c in claimed), [c[:60] for c in claimed]
+            assert added == claimed, [c[:60] for c in added]  # the replayed history stores nothing new
+    finally:
+        engine.shutdown()
