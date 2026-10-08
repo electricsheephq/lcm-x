@@ -553,3 +553,34 @@ def test_1000_loss_guard_host_merged_summary_with_a_repeated_prompt_is_stored(tm
         assert sum(1 for c in added if c in (repeated, merged["content"])) >= 1, [c[:60] for c in added]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("when", ["same-pass", "next-turn"])
+@pytest.mark.parametrize("prompt", ["u-row", "older-row"])
+def test_1000_new_stamped_turn_equal_to_a_stored_row_is_stored(tmp_path, host, monkeypatch, prompt, when):
+    """Right after a held fit re-formed the carrier around U, the host sends a GENUINELY NEW user turn whose
+    text is byte-identical to a stored user row (U itself, or an older one), host-stamped with its own clock.
+    The host also stamps the adopted carrier, so the carrier takes the stamped-path claim (b4718c20). The new
+    turn is one new row; the carrier is still not stored. ``same-pass``: the new turn arrives in the cursor-0
+    ingest that claims the carrier; ``next-turn``: in the ingest after it."""
+    engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    try:
+        repeated = rest if prompt == "u-row" else next(
+            r["content"] for r in _rows(engine) if r["role"] == "user" and r["content"].startswith("[T050]"))
+        assert repeated != rest or prompt == "u-row"
+        fitted[0]["timestamp"] = 40_000.0  # the host stamps the adopted carrier with its own clock
+        reply = {"role": "assistant", "content": "reply CUR", "timestamp": 30_001.0}
+        new = {"role": "user", "content": repeated, "timestamp": 40_010.0}  # a new turn, a fresh host stamp
+        before = sum(1 for r in _rows(engine) if r["content"] == repeated)
+        stored = len(_rows(engine))
+        if when == "same-pass":
+            engine.ingest([*fitted, reply, new])
+        else:
+            engine.ingest([*fitted, reply])
+            engine.ingest([*fitted, reply, new])
+        added = [r["content"] for r in _rows(engine)[stored:]]
+        assert not any("Summary (d" in c[:40] for c in added), [c[:60] for c in added]  # the carrier: not stored
+        assert added == ["reply CUR", repeated], [c[:60] for c in added]  # the new turn: exactly one new row
+        assert sum(1 for r in _rows(engine) if r["content"] == repeated) == before + 1
+    finally:
+        engine.shutdown()
