@@ -56,6 +56,12 @@ if EXPECT_SHAS and not all(re.fullmatch(r"[0-9a-f]{7,40}", x) for x in EXPECT_SH
     AP.error("--expect-shas takes two hex commit prefixes of at least 7 characters")
 if TWO_TREE and not EXPECT_SHAS:
     AP.error("--second-tree requires --expect-shas (the product commit of each tree)")
+if TWO_TREE:  # each label's decision and logs roots sit under its run root's parent: moving them to another tree fails here
+    for _label, _src in TREES.items():
+        _top = _src["run_root"].resolve().parent
+        if _src["decision_root"].resolve().parent != _top or _top not in _src["logs"].resolve().parents:
+            AP.error(f"{_label}: the decision root and logs must sit in the run root's tree ({_top})")
+D2_SEEDS, D2_CPS = (1, 2, 3), (176, 304)  # RELEASE-READINESS-V1 D2: a gating verdict needs every one of them
 
 
 def mcnemar(b, c):
@@ -200,7 +206,7 @@ def per_arm():
         src = globals().get("TREES", {}).get(label, {})
         arm, runs, logs = src.get("arm", label), src.get("run_root", RUNS), src.get("logs", LOGS)
         leaf, comp, failed, compl, timeouts, l3, leaves, hiload, facts = [], [], [], [], 0, 0, 0, [], {}
-        heads, configs = {}, []  # per counted run: recorded product commit; distinct effective configurations
+        heads, configs, materials = {}, [], {}  # per counted run: product commit, material manifest; distinct configurations
         for seed in SEEDS:
             for run in ("r1", "r2"):
                 w = logs / f"s2-{arm}-d{seed}-{run}.log.wall"
@@ -213,7 +219,9 @@ def per_arm():
                     hiload.append(f"seed-{seed}/{run} (max 1-min load {mx})")
                 s = json.loads((runs / arm / f"seed-{seed}" / f"d{seed}-{run}" / "summary.json").read_text())
                 heads[f"seed-{seed}/{run}"] = s.get("worktree_head")
-                cfg = {k: s.get(k) for k in ("arm", "fleet_keys_excluded", "harness_overrides", "context_length", "lane", "reader")}
+                materials[f"seed-{seed}/{run}"] = s.get("material_sha256")
+                cfg = {k: s.get(k) for k in ("arm", "fleet_keys_excluded", "harness_overrides", "context_length", "lane", "reader",
+                                             "tokenizer")}
                 configs += [cfg] if cfg not in configs else []
                 for e in s["events"]:
                     if e["is_compaction"]:
@@ -257,6 +265,7 @@ def per_arm():
             "spread_unmeasured": [f"{cp}/{k}" for cp, s in raw.items() for k, v in s.items() if v is None],
             "runs_with_load_over_16": hiload,
             "worktree_heads": heads,
+            "material_sha256": materials,
             "run_configs": configs,
         }
     return out
@@ -321,15 +330,28 @@ def receipt_mismatch():
 
 receipts = receipt_mismatch()
 two_tree = bool(globals().get("TWO_TREE"))  # one configuration across trees is a D2 rule; single-tree arms differ by design
+
+
+def material_sha(seed):
+    m = MATERIAL / f"seed-{seed}" / "material.manifest.json"
+    return hashlib.sha256(m.read_bytes()).hexdigest() if m.is_file() else None
+
+
+# D2 only: every counted run replayed the material this analysis reads, and the gate covers the declared seed/checkpoint set
+material_mismatch = [f"{label}/{k}" for label in labels for k, h in arm_stats.get(label, {}).get("material_sha256", {}).items()
+                     if h is None or h != material_sha(int(k.split("/")[0][5:]))] if two_tree else []
+missing_required = ([f"seed-{n}" for n in globals().get("D2_SEEDS", ()) if n not in SEEDS]
+                    + [f"cp-{c}" for c in globals().get("D2_CPS", ()) if c not in CPS]) if two_tree else []
 configs = [c for label in labels for c in arm_stats.get(label, {}).get("run_configs", [])] if two_tree else []
 diff = sorted({k for c in configs for k in c if c[k] != configs[0][k]})
 diff += sorted({f"arm.{k}" for c in configs if "arm" in diff and isinstance(c["arm"], dict) and isinstance(configs[0]["arm"], dict)
                 for k in {*c["arm"], *configs[0]["arm"]} if c["arm"].get(k) != configs[0]["arm"].get(k)})
-verdict = ("INCOMPLETE" if status == "INCOMPLETE" or missing_spread or sha_mismatch or receipts or diff
+verdict = ("INCOMPLETE" if status == "INCOMPLETE" or missing_spread or sha_mismatch or receipts or diff or material_mismatch
+           or missing_required
            else "REPEAT_SEEDS" if any(spread.values()) else "BLOCK" if any(v["blocks"] for v in d2.values()) else "PASS")
 d2.update({"candidate": labels[1], "spread_over_0.10": spread, "missing_spread": missing_spread,
            "expected_shas": dict(zip(labels, expect)) if expect else None, "sha_mismatch": sha_mismatch, "receipt_mismatch": receipts,
-           "config_equal": (not diff) if two_tree else None, **({"config_diff_keys": diff} if diff else {}), "status": status, "verdict": verdict})
+           "material_mismatch": material_mismatch, "missing_required": missing_required, "config_equal": (not diff) if two_tree else None, **({"config_diff_keys": diff} if diff else {}), "status": status, "verdict": verdict})
 print(
     json.dumps(
         {

@@ -91,13 +91,20 @@ D2 pairs the same arm on two product trees: the previous GA and the candidate. R
 tree into its own output root (`PREV_ROOT`, `CAND_ROOT`), score each root once, then pair them.
 
 ```bash
-# Previous GA tree, then the candidate tree: same arm, seeds 1/2/3, runs d<seed>-r1/-r2 each.
-TRACK_S_OUT="$PREV_ROOT" S2_PRODUCT_WORKTREE="$PREV_CHECKOUT" S2_PRODUCT_SHA="$PREV_COMMIT" \
-  python3 -B "$KIT/s2/run_s_lcmx.py" --arm LCMX-fleet \
-  --seed 1 --run d1-r1 --lane glm --reader glm --checkpoints 176,304
-TRACK_S_OUT="$CAND_ROOT" S2_PRODUCT_WORKTREE="$CAND_CHECKOUT" S2_PRODUCT_SHA="$CAND_COMMIT" \
-  python3 -B "$KIT/s2/run_s_lcmx.py" --arm LCMX-fleet \
-  --seed 1 --run d1-r1 --lane glm --reader glm --checkpoints 176,304
+# Previous GA tree, then the candidate tree: same arm, seeds 1/2/3, runs d<seed>-r1/-r2 each, one wall receipt per run.
+replay() {  # <root> <checkout> <commit>
+  mkdir -p "$1/decision/logs"
+  for seed in 1 2 3; do for rep in r1 r2; do
+    wall="$1/decision/logs/s2-LCMX-fleet-d$seed-$rep.log.wall"
+    echo "start $(date +%s)" > "$wall"
+    TRACK_S_OUT="$1" S2_PRODUCT_WORKTREE="$2" S2_PRODUCT_SHA="$3" \
+      python3 -B "$KIT/s2/run_s_lcmx.py" --arm LCMX-fleet \
+      --seed "$seed" --run "d$seed-$rep" --lane glm --reader glm --checkpoints 176,304 \
+      && echo "exit 0 end $(date +%s)" >> "$wall"
+  done; done
+}
+replay "$PREV_ROOT" "$PREV_CHECKOUT" "$PREV_COMMIT"
+replay "$CAND_ROOT" "$CAND_CHECKOUT" "$CAND_COMMIT"
 for root in "$PREV_ROOT" "$CAND_ROOT"; do
   python3 -B "$KIT/decision/score_decision.py" \
     --run-root "$root/lcmx-runs" --logs "$root/decision/logs" \
@@ -124,7 +131,11 @@ checkpoint/seed spread is unmeasured (`d2.missing_spread`, e.g. a missing receip
 records another commit (`d2.sha_mismatch`), an admitted score's recorded receipt hash differs from
 the selected tree's run receipt (`d2.receipt_mismatch`, e.g. a decision root from another tree), or,
 with `--second-tree`, the two trees' effective configurations differ (`d2.config_diff_keys`;
-single-tree runs compare different arms on purpose). Host load is a diagnostic, not a verdict input:
+single-tree runs compare different arms on purpose; the tokenizer is part of the configuration), a counted run
+replayed other material than the analysis reads (`d2.material_mismatch`; the runner records `material_sha256`), or the
+analysis omits a D2 seed or checkpoint (`d2.missing_required`; D2 is seeds 1/2/3 at checkpoints 176 and 304). With
+`--second-tree`, each tree's decision root and logs must sit in its run root's tree, or the analysis stops with an
+error. Host load is a diagnostic, not a verdict input:
 with `--second-tree`, pass one `--load-log` that covers both trees' run windows.
 
 The historical decision runner accepts `glm|s4 <seed> [lossless-checkout] [CLI-auth-file]`;

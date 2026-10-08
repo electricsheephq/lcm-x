@@ -13,6 +13,11 @@ ANALYZE = TRACK / "decision/analyze_paired.py"
 FACTS = [f"f{i}" for i in range(40)]
 CPS = (176, 304)
 SHAS = {"prev": "a1" * 20, "cand": "b2" * 20}
+D2 = (1, 2, 3)  # the D2 seed set; two-tree tests replay all of it
+
+
+def manifest_bytes(seed):
+    return json.dumps({"seed": seed, "facts": FACTS}).encode()
 
 
 def kept_all(seed, run, cp):
@@ -22,7 +27,8 @@ def kept_all(seed, run, cp):
 def summary(arm, sha, seed, run):
     return {"events": [], "worktree_head": sha, "arm": {"name": arm, "kind": "plain", "env": {"LCM_X": "1"}},
             "fleet_keys_excluded": ["k"], "harness_overrides": {"h": 1}, "context_length": 200000,
-            "lane": "glm", "reader": "glm"}
+            "lane": "glm", "reader": "glm", "tokenizer": "tiktoken",
+            "material_sha256": hashlib.sha256(manifest_bytes(seed)).hexdigest()}
 
 
 def build(root, arm, kept=kept_all, seeds=(1,), sha=SHAS["prev"], value=None, summarize=summary):
@@ -58,18 +64,19 @@ def build(root, arm, kept=kept_all, seeds=(1,), sha=SHAS["prev"], value=None, su
     return runs, decision, logs
 
 
-def material(tmp_path, seeds=(1,)):
+def material(tmp_path, seeds=D2):
     root = tmp_path / "material"
     for seed in seeds:
         (root / f"seed-{seed}").mkdir(parents=True, exist_ok=True)
+        (root / f"seed-{seed}" / "material.manifest.json").write_bytes(manifest_bytes(seed))
         (root / f"seed-{seed}" / "facts.json").write_text(json.dumps(
             [{"id": f, "placement": "head", "class": "early_user_constraint"} for f in FACTS]))
     return root
 
 
-def analyze(tmp_path, arms, first, second=None, labels=None, check=True, shas=None):
+def analyze(tmp_path, arms, first, second=None, labels=None, check=True, shas=None, seeds=(1,)):
     runs, decision, logs = first
-    command = [sys.executable, "-B", str(ANALYZE), "--arms", *arms, "--seeds", "1",
+    command = [sys.executable, "-B", str(ANALYZE), "--arms", *arms, "--seeds", *map(str, seeds),
                "--checkpoints", *map(str, CPS), "--run-root", str(runs), "--decision-root", str(decision),
                "--logs", str(logs), "--material", str(material(tmp_path))]
     if second:
@@ -85,10 +92,11 @@ def analyze(tmp_path, arms, first, second=None, labels=None, check=True, shas=No
     return json.loads(result.stdout)
 
 
-def two_tree(tmp_path, cand_kept=kept_all, prev_kept=kept_all, shas=(SHAS["prev"][:7], SHAS["cand"][:12]), **cand_options):
-    prev = build(tmp_path / "prev", "LCMX-fleet", prev_kept)
-    cand = build(tmp_path / "cand", "LCMX-fleet", cand_kept, sha=SHAS["cand"], **cand_options)
-    return analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"], shas=shas)
+def two_tree(tmp_path, cand_kept=kept_all, prev_kept=kept_all, shas=(SHAS["prev"][:7], SHAS["cand"][:12]), seeds=D2,
+             **cand_options):
+    prev = build(tmp_path / "prev", "LCMX-fleet", prev_kept, seeds=D2)
+    cand = build(tmp_path / "cand", "LCMX-fleet", cand_kept, seeds=D2, sha=SHAS["cand"], **cand_options)
+    return analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"], shas=shas, seeds=seeds)
 
 
 def test_two_tree_pairs_same_arm_across_roots(tmp_path):
@@ -101,9 +109,9 @@ def test_two_tree_pairs_same_arm_across_roots(tmp_path):
     assert out["trees"]["cand"]["logs"].endswith("cand/logs")
     for cp in CPS:
         result = out[f"cp-{cp}"]
-        assert result["pairs"] == ["seed-1/r1", "seed-1/r2"] and result["status"] == "COMPLETE"
+        assert result["pairs"] == [f"seed-{n}/{r}" for n in D2 for r in ("r1", "r2")] and result["status"] == "COMPLETE"
         facts = result["axes"]["facts_all"]
-        assert (facts["n"], facts["b_v1_only"], facts["c_v2_only"]) == (80, 4, 2)
+        assert (facts["n"], facts["b_v1_only"], facts["c_v2_only"]) == (240, 12, 6)
         assert set(result["loss_classes"]) == {"prev", "cand"}
     assert set(out["per_arm"]) == {"prev", "cand"}
 
@@ -134,11 +142,12 @@ def test_p_exact_is_unrounded(tmp_path):
 def test_spread_is_reported_at_every_checkpoint(tmp_path):
     out = two_tree(tmp_path, cand_kept=lambda seed, run, cp: set(FACTS[:30]) if (cp, run) == (176, "r2") else set(FACTS))
     cand = out["per_arm"]["cand"]
-    assert cand["facts_r1_r2_spread_by_cp"] == {"cp-176": {"seed-1": 0.25}, "cp-304": {"seed-1": 0.0}}
-    assert cand["facts_cp304_r1_r2_spread"] == {"seed-1": 0.0}
-    assert cand["spread_over_0.10"] == ["cp-176/seed-1"] and cand["spread_unmeasured"] == []
+    assert cand["facts_r1_r2_spread_by_cp"] == {"cp-176": {f"seed-{n}": 0.25 for n in D2},
+                                                "cp-304": {f"seed-{n}": 0.0 for n in D2}}
+    assert cand["facts_cp304_r1_r2_spread"] == {f"seed-{n}": 0.0 for n in D2}
+    assert cand["spread_over_0.10"] == [f"cp-176/seed-{n}" for n in D2] and cand["spread_unmeasured"] == []
     assert out["per_arm"]["prev"]["spread_over_0.10"] == []
-    assert out["d2"]["spread_over_0.10"] == {"prev": [], "cand": ["cp-176/seed-1"]}
+    assert out["d2"]["spread_over_0.10"] == {"prev": [], "cand": [f"cp-176/seed-{n}" for n in D2]}
     assert out["d2"]["verdict"] == "REPEAT_SEEDS"
 
 
@@ -156,17 +165,18 @@ def test_d2_passes_a_small_loss(tmp_path):
     out = two_tree(tmp_path, cand_kept=lambda seed, run, cp: set(FACTS[1:]) if run == "r1" else set(FACTS))
     for cp in CPS:
         d2 = out["d2"][f"cp-{cp}"]
-        assert d2["effect_pts_exact"] == -1.25 and d2["p_exact"] == 1.0
+        assert d2["effect_pts_exact"] == -1.25 and d2["p_exact"] == 0.25
         assert d2["net_loss_ge_5"] is False and d2["blocks"] is False
     assert out["d2"]["verdict"] == "PASS"
 
 
 def test_d2_incomplete_when_a_pair_is_missing(tmp_path):
-    prev = build(tmp_path / "prev", "LCMX-fleet")
-    cand = build(tmp_path / "cand", "LCMX-fleet", lambda *a: set(FACTS[:30]), sha=SHAS["cand"])
+    prev = build(tmp_path / "prev", "LCMX-fleet", seeds=D2)
+    cand = build(tmp_path / "cand", "LCMX-fleet", lambda *a: set(FACTS[:30]), seeds=D2, sha=SHAS["cand"])
     (cand[1] / "scores/cp-304/LCMX-fleet.seed-1.d1-r2.json").unlink()
     out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"],
-                  shas=(SHAS["prev"], SHAS["cand"]))
+                  shas=(SHAS["prev"], SHAS["cand"]), seeds=D2)
+    assert out["d2"]["missing_required"] == []
     assert out["status"] == "INCOMPLETE" and out["d2"]["verdict"] == "INCOMPLETE"
 
 
@@ -195,8 +205,8 @@ def test_single_tree_output_is_unchanged(tmp_path):
 def test_spread_threshold_uses_the_unrounded_spread(tmp_path):
     out = two_tree(tmp_path, value=lambda seed, run, cp: 0.6004 if (cp, run) == (176, "r2") else 0.5)
     cand = out["per_arm"]["cand"]
-    assert cand["facts_r1_r2_spread_by_cp"]["cp-176"] == {"seed-1": 0.1}
-    assert cand["spread_over_0.10"] == ["cp-176/seed-1"] and out["d2"]["verdict"] == "REPEAT_SEEDS"
+    assert cand["facts_r1_r2_spread_by_cp"]["cp-176"] == {f"seed-{n}": 0.1 for n in D2}
+    assert cand["spread_over_0.10"] == [f"cp-176/seed-{n}" for n in D2] and out["d2"]["verdict"] == "REPEAT_SEEDS"
 
 
 def test_a_spread_of_exactly_ten_points_does_not_repeat(tmp_path):
@@ -205,27 +215,69 @@ def test_a_spread_of_exactly_ten_points_does_not_repeat(tmp_path):
     assert out["per_arm"]["cand"]["spread_over_0.10"] == [] and out["d2"]["verdict"] == "PASS"
 
 
+def test_d2_roots_must_be_one_tree(tmp_path):
+    # Review repros: the candidate's run root paired with the PREVIOUS tree's decision root (round 2), or with the previous
+    # tree's decision AND logs roots (round 3), must not read the previous tree's scores as the candidate's.
+    prev = build(tmp_path / "prev", "LCMX-fleet", seeds=D2)
+    cand_runs, _, cand_logs = build(tmp_path / "cand", "LCMX-fleet", lambda *a: set(FACTS[:10]), seeds=D2, sha=SHAS["cand"])
+    for second in ((cand_runs, prev[1], cand_logs), (cand_runs, prev[1], prev[2])):
+        result = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, second, labels=["prev", "cand"],
+                         shas=(SHAS["prev"][:7], SHAS["cand"][:7]), seeds=D2, check=False)
+        assert result.returncode != 0 and "cand: the decision root and logs must sit in the run root's tree" in result.stderr
+    # Moving the run root along with them reads the previous tree's runs, which record the previous commit.
+    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, prev, labels=["prev", "cand"],
+                  shas=(SHAS["prev"][:7], SHAS["cand"][:7]), seeds=D2)
+    assert out["d2"]["sha_mismatch"] and out["d2"]["verdict"] == "INCOMPLETE"
+
+
 def test_d2_binds_scores_to_the_selected_trees_receipts(tmp_path):
-    # Review repro: the candidate's run and log roots paired with the PREVIOUS tree's decision root (a stale or wrong
-    # root) must not read the previous tree's scores as the candidate's: the manifest's receipt hashes do not match.
-    prev = build(tmp_path / "prev", "LCMX-fleet")
-    cand_runs, _, cand_logs = build(tmp_path / "cand", "LCMX-fleet", lambda *a: set(FACTS[:10]), sha=SHAS["cand"])
-    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, (cand_runs, prev[1], cand_logs), labels=["prev", "cand"],
-                  shas=(SHAS["prev"][:7], SHAS["cand"][:7]))
-    assert out["d2"]["receipt_mismatch"] and all(m.startswith("cand/") for m in out["d2"]["receipt_mismatch"])
+    # A run re-executed after scoring rewrites its receipt: the manifest's receipt hash no longer matches, so the score
+    # cannot stand for that run.
+    prev = build(tmp_path / "prev", "LCMX-fleet", seeds=D2)
+    cand = build(tmp_path / "cand", "LCMX-fleet", seeds=D2, sha=SHAS["cand"])
+    (cand[2] / "s2-LCMX-fleet-d2-r1.log.wall").write_text("start 1\nexit 0 end 2\n")
+    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"],
+                  shas=(SHAS["prev"][:7], SHAS["cand"][:7]), seeds=D2)
+    assert out["d2"]["receipt_mismatch"] == ["cand/cp-176/seed-2/r1", "cand/cp-304/seed-2/r1"]
     assert out["d2"]["verdict"] == "INCOMPLETE"
     assert two_tree(tmp_path / "ok")["d2"]["receipt_mismatch"] == []
 
 
 def test_d2_incomplete_when_receipts_are_missing(tmp_path):
-    prev = build(tmp_path / "prev", "LCMX-fleet")
-    runs, decision, _ = build(tmp_path / "cand", "LCMX-fleet", sha=SHAS["cand"])
-    (tmp_path / "no-receipts").mkdir()
-    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, (runs, decision, tmp_path / "no-receipts"),
-                  labels=["prev", "cand"], shas=(SHAS["prev"], SHAS["cand"]))
-    assert out["status"] == "COMPLETE"  # both score files are admitted; only the receipts are missing
-    assert out["d2"]["missing_spread"] == ["cand/cp-176/seed-1", "cand/cp-304/seed-1"]
+    prev = build(tmp_path / "prev", "LCMX-fleet", seeds=D2)
+    runs, decision, _ = build(tmp_path / "cand", "LCMX-fleet", seeds=D2, sha=SHAS["cand"])
+    (tmp_path / "cand" / "no-receipts").mkdir()
+    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, (runs, decision, tmp_path / "cand" / "no-receipts"),
+                  labels=["prev", "cand"], shas=(SHAS["prev"], SHAS["cand"]), seeds=D2)
+    assert out["status"] == "COMPLETE"  # every score file is admitted; only the receipts are missing
+    assert out["d2"]["missing_spread"] == [f"cand/cp-{cp}/seed-{n}" for cp in CPS for n in D2]
     assert out["d2"]["verdict"] == "INCOMPLETE"
+
+
+def test_d2_requires_the_declared_seed_set(tmp_path):
+    out = two_tree(tmp_path, seeds=(1,))
+    assert out["d2"]["missing_required"] == ["seed-2", "seed-3"] and out["d2"]["verdict"] == "INCOMPLETE"
+    assert two_tree(tmp_path / "all")["d2"]["missing_required"] == []
+
+
+def test_d2_requires_one_tokenizer(tmp_path):
+    def summarize(arm, sha, seed, run):
+        return {**summary(arm, sha, seed, run), "tokenizer": "char-estimate"}
+    out = two_tree(tmp_path, summarize=summarize)
+    assert out["d2"]["config_diff_keys"] == ["tokenizer"] and out["d2"]["verdict"] == "INCOMPLETE"
+
+
+def test_d2_binds_runs_to_the_analysed_material(tmp_path):
+    def other(arm, sha, seed, run):
+        return {**summary(arm, sha, seed, run), "material_sha256": "0" * 64}
+
+    def older(arm, sha, seed, run):  # a run from before the runner recorded its material
+        return {k: v for k, v in summary(arm, sha, seed, run).items() if k != "material_sha256"}
+    expected = [f"cand/seed-{n}/{r}" for n in D2 for r in ("r1", "r2")]
+    for name, summarize in (("other", other), ("older", older)):
+        out = two_tree(tmp_path / name, summarize=summarize)
+        assert out["d2"]["material_mismatch"] == expected and out["d2"]["verdict"] == "INCOMPLETE"
+    assert two_tree(tmp_path / "same")["d2"]["material_mismatch"] == []
 
 
 def test_d2_binds_the_recorded_product_commits(tmp_path):
@@ -233,7 +285,7 @@ def test_d2_binds_the_recorded_product_commits(tmp_path):
     assert out["d2"]["expected_shas"] == {"prev": SHAS["prev"][:7], "cand": SHAS["cand"][:12]}
     assert out["d2"]["sha_mismatch"] == [] and out["d2"]["verdict"] == "PASS"
     out = two_tree(tmp_path / "wrong", shas=(SHAS["prev"], SHAS["prev"]))
-    assert out["d2"]["sha_mismatch"] == [f"cand/seed-1/{run}: {SHAS['cand'][:12]}" for run in ("r1", "r2")]
+    assert out["d2"]["sha_mismatch"] == [f"cand/seed-{n}/{run}: {SHAS['cand'][:12]}" for n in D2 for run in ("r1", "r2")]
     assert out["d2"]["verdict"] == "INCOMPLETE"
     prev, cand = build(tmp_path / "p", "LCMX-fleet"), build(tmp_path / "c", "LCMX-fleet")
     for shas, message in ((None, "requires --expect-shas"), (("abc", SHAS["cand"]), "hex commit prefixes"),
