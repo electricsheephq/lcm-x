@@ -191,6 +191,10 @@ def user_text(cell, prefix, t):
     sep = "\n\n" if ut.get("separator_turns") == "all" or n in ut.get("separator_turns", []) else ""
     steps = sorted((int(k), v) for k, v in ut.get("repeat_from", {}).items() if int(k) <= t)  # {"151": 800}: from turn 151
     body = (FILLER * (steps[-1][1] if steps else ut["repeat"])).rstrip()
+    if payload := ut.get("payload", {}).get(str(t)):  # #659 probes: a phrase at the head or the middle of the body
+        words = body.split(" ")
+        k = len(words) // 2 if payload.get("at") == "mid" else 0
+        body = " ".join(words[:k] + [payload["text"]] + words[k:])
     if sep:  # >=64 paragraph separators inside the prompt (#545)
         words = body.split(" ")
         step = max(1, len(words) // 70)

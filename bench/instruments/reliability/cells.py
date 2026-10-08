@@ -106,6 +106,53 @@ def continuity_cells() -> list[dict]:
     return out
 
 
+# #659 probe nonces: letters G-Z only, so no hex-shaped token a host anchor index could harvest from the text.
+PROBE_ENV = {**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_FRESH_TAIL_COUNT": "4",
+             "LCM_FRESH_TAIL_MAX_TOKENS": "2000", "LCM_LEAF_CHUNK_TOKENS": "1000"}
+
+
+def probe_cells() -> list[dict]:
+    """#659 PR A, recorded only (R2, opt-in: never in ``--cells all``, so the nightly gate is unchanged). Request-time
+    nonce probes, presence per compaction event: P1 host instruction (SOUL.md, rewritten before turn 16 with no
+    restart), P2 open todos through the default ``tool_call`` bridge (a completed item is the control), P5 a constraint
+    stated before the fresh tail (head, mid-text, another nonce shape) with a long tool turn after it."""
+    v1, v2 = "QXWZKVJMTR", "ZWVKQJMXRT"
+    soul = {"nonce": v1, "text": f"Reliability host note {v1}: a fixed line for a continuity check.",
+            "rewrite": {"before_turn": 16, "nonce": v2, "text": f"Reliability host note {v2}: a fixed line for a continuity check."}}
+    host = [{"probe": "host-instruction", "nonce": v1, "expect": "present", "carrier": "system", "once": True, "window": "before"},
+            {"probe": "host-instruction", "nonce": v2, "expect": "absent", "window": "before"},
+            {"probe": "host-instruction", "nonce": v2, "expect": "present", "carrier": "system", "once": True, "window": "after"},
+            {"probe": "host-instruction", "nonce": v1, "expect": "absent", "window": "after"}]
+    todo = {"in_progress": "PNWRQZHKTL", "pending": "SLYGXMTUVW", "completed": "KRWHZPYNQS"}
+    todo_call = {"name": "tool_call", "args": {"name": "todo_list", "arguments": {"merge": False, "todos": [
+        {"id": str(k), "content": f"probe item {n}", "status": st} for k, (st, n) in enumerate(todo.items(), 1)]}}}
+    todo_probes = [{"probe": "todo-open" if st != "completed" else "todo-done-control", "nonce": n, "from_turn": 4,
+                    "expect": "present" if st != "completed" else "absent", "carrier": "todo_fold"} for st, n in todo.items()]
+    ctrl = "HWXQZTLGPN"
+    reads = [{"turns": [6], "calls": [{"name": "read_file", "args": {"path": f"{{files}}/big-{k:02d}.txt"}}]} for k in (1, 2, 3)]
+    out = []
+    for m, ip in modes():
+        common = dict(in_place=ip, turns=30, repeat=400, lcm_env=PROBE_ENV, min_compactions=2, final_compaction_check=False)
+        out.append(cell(f"continuity/probe-host-instruction/{m}", [], **common, continuity={"soul": soul, "probes": host},
+                        doc="#659 P1 (recorded; bar 100%): a SOUL.md nonce line in the system prompt after every commit; "
+                            "the mid-run rewrite must appear only after the next commit (host-instruction-rebuild)."))
+        out.append(cell(f"continuity/probe-todo/{m}", [], **common, tool_plan=[{"turns": [3], "calls": [todo_call]}],
+                        continuity={"probes": todo_probes},
+                        doc="#659 P2 (recorded): open todo items in the host's fold row after every commit, the completed "
+                            "item never; its own cell because the fold merge shape is #538."))
+        for shape, at, n in (("head", "head", "XQGTWZRMKY"), ("mid", "mid", "RVZLNWQHTX"), ("shape", "head", "gozu-ktvr-wyxn")):
+            out.append(cell(f"continuity/probe-constraint-{shape}/{m}", [], **common, tool_plan=reads, big_files=3,
+                            big_lines=60, user={"payload": {
+                                "3": {"at": at, "text": f"CONSTRAINT {n}: answer in English and never touch the held file."},
+                                "27": {"at": "head", "text": f"CONTROL {ctrl}: a late constraint inside the fresh tail."}}},
+                            continuity={"probes": [{"probe": "constraint", "nonce": n, "expect": "present", "from_turn": 3},
+                                                   {"probe": "constraint-control", "nonce": ctrl, "expect": "present",
+                                                    "from_turn": 27}]},
+                            doc=f"#659 P5 (recorded): a constraint nonce ({shape}) in turn 3, three large reads in turn 6; "
+                                "the fake summariser keeps tags only, so this measures structural retention."))
+    return out
+
+
 def registry() -> list[dict]:
     crash = {"kind": "crash_after_compaction_before_reply"}
     group559 = [{"name": "read_file", "args": {"path": "{files}/small.txt"}},
@@ -237,14 +284,15 @@ def validate(c: dict) -> None:
         assert g["turns"] == "restart" or all(1 <= t <= c["turns"] for t in g["turns"]), c["id"]
 
 
-def select(patterns: str, extra=()) -> list[dict]:
+def select(patterns: str, extra=(), opt_in=()) -> list[dict]:
+    """``opt_in`` cells (R2 process_cell.R2_PROBE_CELLS) match an explicit pattern only, never ``all``."""
     cells = registry() + list(extra)  # extra: transport-only cells (R2 process_cell.R2_CELLS)
-    for c in cells:
+    for c in cells + list(opt_in):
         validate(c)
     if patterns.strip() == "all":
         return cells
     pats = [p.strip() for p in patterns.split(",") if p.strip()]
-    chosen = [c for c in cells if any(fnmatch.fnmatchcase(c["id"], p) for p in pats)]
+    chosen = [c for c in cells + list(opt_in) if any(fnmatch.fnmatchcase(c["id"], p) for p in pats)]
     if not chosen:
         raise ValueError(f"no cell matches {patterns!r}")
     return chosen

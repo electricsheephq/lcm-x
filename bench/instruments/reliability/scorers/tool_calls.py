@@ -24,6 +24,22 @@ def canon(args) -> str:
     return json.dumps(args, sort_keys=True)
 
 
+def underlying(name: str, args):
+    """The host's ``tool_call`` bridge (tools/tool_search.py ``resolve_underlying_call``): the dispatch hooks see the
+    underlying tool while the stored call keeps the bridge. One entry, ``{name, arguments}`` or ``{calls: [entry]}``."""
+    if name != "tool_call":
+        return name, args
+    try:
+        a = json.loads(args) if isinstance(args, str) else args
+        calls = a.get("calls")
+        entry = a if calls is None else calls[0] if isinstance(calls, list) and len(calls) == 1 else None
+        inner = entry.get("arguments")
+        inner = json.loads(inner) if isinstance(inner, str) and inner.strip() else inner or {}
+        return (entry["name"], inner) if entry.get("name") else (name, args)
+    except (AttributeError, TypeError, ValueError):
+        return name, args
+
+
 def completed(a: dict) -> bool:
     end = a.get("end") or {}
     return bool(a["ended"]) and not end.get("failed") and end.get("kind") != "cancel"
@@ -43,13 +59,14 @@ def bind(atts: list[dict], lineage_of=lambda a: "chat") -> dict:
         free = [d for d in a.get("tool_dispatch", [])]
         seen = {s["id"]: s for s in a.get("tool_seen", [])}
         for c in issues:
+            name, args = underlying(c["name"], c["args"])
             d = next((d for d in free if d.get("id") == c["id"]), None) or \
-                next((d for d in free if d.get("id") is None and d["name"] == c["name"] and canon(d["args"]) == canon(c["args"])), None)
+                next((d for d in free if d.get("id") is None and d["name"] == name and canon(d["args"]) == canon(args)), None)
             if d is None:
                 gaps.append(f"{a['tag']}: planned {c['name']} ({c['id']}) was never dispatched by the host")
                 continue
             free.remove(d)
-            if d["name"] != c["name"] or canon(d["args"]) != canon(c["args"]):
+            if d["name"] != name or canon(d["args"]) != canon(args):
                 failures.append(f"{a['tag']}: {c['id']} planned {c['name']} but the host ran {d['name']}")
             elif not d.get("ok"):
                 failures.append(f"{a['tag']}: {c['name']} ({c['id']}) failed: {d.get('detail')}")

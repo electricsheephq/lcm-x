@@ -166,6 +166,29 @@ only booleans, synthetic tags and message role/counts, with no request text.
 This answers #900/#798 on pinned CI hosts and seeds #659; literal presence
 does not prove an instruction remains operative. No real model is called.
 
+### #659 continuity probes (recorded, non-gating, opt-in)
+`continuity/probe-{host-instruction,todo,constraint-head,constraint-mid,constraint-shape}/{in-place,rotation}`
+(`cells.probe_cells`, R2 only) are selected by an explicit pattern and never by `--cells all`, so the nightly matrix,
+`ci.expected_cells` and the gate are unchanged. Run them with
+`run_matrix.py --transport acp-process --hosts <host> --plugin-ref <ref> --cells 'continuity/probe-*' --out <dir>`.
+Each cell plants nonces (letters G-Z only, so no hex-shaped token) and the fake provider checks them at request time
+(`provider-requests.jsonl` keeps no text): presence, count and carrier class (system, user_raw, summary_or_head,
+todo_fold, tool_result, tool_args, assistant) in the first main request after each committed compaction, beside F1-F4.
+`apply_probes` records a per-probe rate in `probes_recorded`; it never sets a bar, the verdict or the gate.
+- **P1 host instruction** (`host-instruction`, bar 100%): a SOUL.md nonce line, exactly once in a system message.
+  SOUL.md is rewritten before turn 16 with no restart: the new line must appear only after the next commit, and every
+  main request between the rewrite and that commit must still carry the old one (`host-instruction-rebuild`).
+- **P2 open todos** (`todo-open`): the scripted model writes todos through the default `tool_call` bridge (the defer
+  list is not changed); the observer wraps the inline `todo_list` executor and B6 binds the bridge call to the unwrapped
+  dispatch. Open items must sit in the host's fold row; the completed item never may (`todo-done-control`). Its own
+  cell: the fold merge shape is #538.
+- **P5 constraint before the fresh tail** (`constraint`): a turn-3 constraint at the head, mid-text, or in another
+  nonce shape (the three "seeds"), then three large reads in turn 6; a turn-27 control inside the tail.
+
+Not measured: the summariser is a scripted fake that keeps tags only, so P5 on LCM-X measures structural retention
+(fresh tail and head anchor), not whether a real summary carries the constraint; literal presence does not prove an
+instruction is obeyed. P3/P4 (plan, goal) and the plain-Hermes arm are #659 PR B/C.
+
 ## Positive controls
 `controls.py` holds each control's refs, hosts, cells and expected red/green pattern; `run_matrix.py --control
 PC-1 --out <dir>` runs it and writes CONTROL.json (HOLDS or the mismatches). PC-1 is a differential: lcm-x `47bd28e7` (before #498, the #494 fix) vs `ae1fb16d` on ref-0.21.5, rs34-0.21.5

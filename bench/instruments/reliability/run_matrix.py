@@ -280,7 +280,8 @@ def main(argv=None) -> int:
             identities[name] = {"error": str(exc)}
     if a.transport:  # R2 (process_cell.py); without --transport the R1 in-process path is unchanged
         from bench.instruments.reliability import process_cell
-    selected = C.select(a.cells, extra=process_cell.R2_CELLS if a.transport else ())
+    selected = C.select(a.cells, extra=process_cell.R2_CELLS if a.transport else (),
+                        opt_in=process_cell.R2_PROBE_CELLS if a.transport else ())
     plugins = [plugin_tree.export(Path(a.lcm_repo), ref.strip(), out / "plugins", out) for ref in a.plugin_ref.split(",")]
     for ref in sorted({c["from_ref"] for c in selected if c.get("from_ref")}):  # native-on-off starting refs
         old = plugin_tree.export(Path(a.lcm_repo), ref, out / "plugins", out)

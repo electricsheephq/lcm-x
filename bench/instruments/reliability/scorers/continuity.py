@@ -14,9 +14,42 @@ NOTE = "This conversation uses Lossless Context Management (LCM)"
 USER = re.compile(r"\[([A-Z]\d{2,3})\]")
 REPLY = re.compile(r"reply to ([A-Z]\d{2,3}):")
 CHECKS = ("F1", "F2", "F3", "F4")
+# #659 probes: the host's todo fold header (tools/todo_tool.py TODO_INJECTION_HEADER; LCM-X protects the same row).
+TODO_HEADER = "[Your active task list was preserved across context compression]"
 
 
-def markers(messages: list[dict], *, anchor=None, previous=None, current=None) -> dict:
+def carrier(m: dict, at: int, carriers) -> str:
+    """The class of the row that holds a nonce at offset ``at``: system / user_raw / summary_or_head (the plugin's own
+    part header or preserved prefix, plugin_tree.carrier_markers) / todo_fold (after the fold header) / tool_result /
+    assistant. Without the plugin's markers a summary row reads as user_raw."""
+    role, text = m.get("role"), m.get("content") or ""
+    if role in ("system", "tool"):
+        return "system" if role == "system" else "tool_result"
+    fold = text.find(TODO_HEADER)
+    if 0 <= fold <= at:
+        return "todo_fold"
+    header, prefixes = carriers or (None, ())
+    if (header and header.search(text)) or text.lstrip().startswith(tuple(p for p in prefixes if p != TODO_HEADER)):
+        return "summary_or_head"
+    return "assistant" if role == "assistant" else "user_raw"
+
+
+def nonce_markers(messages: list[dict], nonces, tool_args=(), carriers=None) -> dict:
+    """Per probe nonce: presence, count and carrier classes in this request (synthetic nonces only, no text)."""
+    out = {}
+    for n in nonces:
+        hits = Counter()
+        for m in messages:
+            for found in re.finditer(re.escape(n), m.get("content") or ""):
+                hits[carrier(m, found.start(), carriers)] += 1
+        hits["tool_args"] += sum(a.count(n) for a in tool_args)
+        hits = {k: v for k, v in hits.items() if v}
+        out[n] = {"present": bool(hits), "count": sum(hits.values()), "carriers": hits}
+    return out
+
+
+def markers(messages: list[dict], *, anchor=None, previous=None, current=None, nonces=(), tool_args=(),
+            carriers=None) -> dict:
     """No request content escapes: only booleans, synthetic tags and role/counts."""
     users, replies, roles = set(), set(), []
     for m in messages:
@@ -31,7 +64,8 @@ def markers(messages: list[dict], *, anchor=None, previous=None, current=None) -
             "F4": current in users if current else None,
             "current_user_projected": last_user.startswith("[LCM survival fit:"),
             "user_tags": sorted(users), "reply_tags": sorted(replies), "message_roles": roles,
-            "role_counts": dict(Counter(m.get("role") for m in messages))}
+            "role_counts": dict(Counter(m.get("role") for m in messages)),
+            **({"nonces": nonce_markers(messages, nonces, tool_args, carriers)} if nonces else {})}
 
 
 def read(path: Path) -> list[dict]:
@@ -53,7 +87,7 @@ def score(cell: dict, requests: list[dict], observations: list[dict]) -> dict:
     completed = [n for n in observations if n.get("kind") == "turn_end" and n.get("turn_kind") != "final"
                  and not n.get("failed") and not n.get("interrupted") and n.get("ts") is not None]
     totals = {f: {k: 0 for k in ("present", "absent", "unknown", "not_applicable")} for f in CHECKS}
-    rows = []
+    rows, pairs = [], []
     for c in observations:
         if c.get("kind") not in ("compaction_committed", "survival_fit_committed"):
             continue
@@ -84,7 +118,8 @@ def score(cell: dict, requests: list[dict], observations: list[dict]) -> dict:
                   "not_applicable" if value == "not applicable" or (f == "F3" and prev is None) else "unknown"
             totals[f][key] += 1
         rows.append(row)
-    return {"rows": rows, "totals": totals, "compactions": len(rows),
+        pairs.append((c, req, row))
+    result = {"rows": rows, "totals": totals, "compactions": len(rows),
             "no_request": sum(r["status"] == "no request" for r in rows),
             "survival_fits": sum(r["kind"] == "survival fit" or r["survival_fit"] for r in rows),
             "scenario": cell.get("continuity") or {},
@@ -94,6 +129,56 @@ def score(cell: dict, requests: list[dict], observations: list[dict]) -> dict:
             (cell.get("continuity") or {}).get("require_survival_fit") else
             any(r["kind"] == "forced" and r["status"] == "observed" for r in rows) if
             (cell.get("continuity") or {}).get("forced_followup") else None}
+    if (cell.get("continuity") or {}).get("probes"):
+        result["scenario_observed"] = len([r for r in rows if r["kind"] != "forced" and r["status"] == "observed"]) >= 2
+        result["probes"] = score_probes(cell, pairs, main, observations)
+    return result
+
+
+def probe_check(spec: dict, nonces: dict) -> bool:
+    hit = nonces.get(spec["nonce"]) or {}
+    n = (hit.get("carriers") or {}).get(spec["carrier"], 0) if spec.get("carrier") else hit.get("count", 0)
+    return (n == 1 if spec.get("once") else n > 0) if spec["expect"] == "present" else n == 0
+
+
+def score_probes(cell: dict, pairs: list, main: list[dict], observations: list[dict]) -> dict:
+    """#659, recorded only: per probe, every compaction event (the row's first main request) checks each applicable
+    nonce spec (``from_turn``; ``window`` before/after the SOUL.md rewrite). No request or no markers is unknown,
+    never met. ``host-instruction-rebuild`` checks every main request between the rewrite and the next commit: the
+    cached prompt must still carry the old line and not yet the new one."""
+    scen = cell["continuity"]
+    rewrite = next((o["ts"] for o in observations if o.get("kind") == "probe_rewrite"), None)
+    out = {}
+    for spec in scen["probes"]:
+        out.setdefault(spec["probe"], {"events": [], "met": 0, "missed": 0, "unknown": 0, "not_applicable": 0})
+    for c, req, row in pairs:
+        nonces = ((req or {}).get("continuity") or {}).get("nonces")
+        turn = (req or {}).get("turn") or c.get("turn") or 0
+        window = None if rewrite is None or c.get("ts") is None else "after" if c["ts"] >= rewrite else "before"
+        for name, p in out.items():
+            specs = [s for s in scen["probes"] if s["probe"] == name and turn >= s.get("from_turn", 1)
+                     and s.get("window") in (None, window)]
+            if not specs:
+                p["not_applicable"] += 1
+                continue
+            ok = None if nonces is None else all(probe_check(s, nonces) for s in specs)
+            p["met" if ok else "missed" if ok is False else "unknown"] += 1
+            p["events"].append({"turn": row["turn"], "request_turn": turn, "kind": row["kind"], "status": row["status"],
+                                "ok": ok, "nonces": {} if nonces is None else {s["nonce"]: {
+                                    "expect": s["expect"], "present": (nonces.get(s["nonce"]) or {}).get("present"),
+                                    "carriers": (nonces.get(s["nonce"]) or {}).get("carriers")} for s in specs}})
+    soul = scen.get("soul") or {}
+    if rewrite is not None and soul.get("rewrite"):
+        until = min((o["ts"] for o in observations if o.get("kind") in ("compaction_committed", "survival_fit_committed")
+                     and o.get("ts") is not None and o["ts"] >= rewrite), default=float("inf"))
+        old = {"nonce": soul["nonce"], "expect": "present", "carrier": "system", "once": True}
+        new = {"nonce": soul["rewrite"]["nonce"], "expect": "absent"}
+        between = [r for r in main if rewrite < r["ts"] < until]
+        checks = [None if (n := (r.get("continuity") or {}).get("nonces")) is None else
+                  probe_check(old, n) and probe_check(new, n) for r in between]
+        out["host-instruction-rebuild"] = {"requests": len(between), "met": checks.count(True),
+                                           "missed": checks.count(False), "unknown": checks.count(None)}
+    return out
 
 
 def score_dir(cell: dict, directory: Path) -> dict:
