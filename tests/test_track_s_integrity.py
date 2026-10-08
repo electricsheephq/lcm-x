@@ -828,3 +828,53 @@ def test_continuation_metric_counts_its_truncated_fields(tmp_path):
     fx.wj(run / "answers/X-BCONT.json", {"batch": "X-BCONT", "reader_calls": [{"completion_tokens": 8192}]})
     m = sc.score(material, run, "LCMX-a")["metrics"]
     assert m["continuation"]["reader_truncated"] == 1 and m["facts_kept"]["reader_truncated"] == 0
+
+
+def test_trap_and_recall_metrics_count_their_truncated_probes(tmp_path):
+    sc, fx = scorer_kit()
+    material = fx.material(tmp_path)
+    run = fx.s2_run(tmp_path, answers=dict(fx.GOOD | fx.GOOD_CONT, **{"X-T0": "", "X-F1": ""}))
+    fx.wj(run / "answers/X-B0.json", {"batch": "X-B0", "reader_calls": [{"completion_tokens": 8192}]})
+    m = sc.score(material, run, "LCMX-a")["metrics"]
+    assert m["trap_abstention"]["reader_truncated"] == m["trap_failure_rate"]["reader_truncated"] == 1
+    assert m["trap_abstention"]["denominator"] == 1
+    assert m["recall"]["reader_truncated"] == 1 and m["recall"]["denominator"] == 3  # X-F1 is the clipped-middle fact
+    assert m["facts_kept"]["reader_truncated"] == 1 and m["continuation"]["reader_truncated"] == 0
+
+
+def decision_ns(**namespace):
+    return functions("decision/render_decision.py", "f3", "cell", "placement", "diag", "ancestry", "rows_for", "parity",
+        SEEDS=("seed-1", "seed-2"), OPEN=("A-open",), **namespace)
+
+
+def test_render_decision_marks_trap_and_recall_cells():
+    def run(value, traps=0, recall=0):
+        r = decision_run(value)
+        r["metrics"]["trap_abstention"]["reader_truncated"] = traps
+        r["metrics"]["recall"]["reader_truncated"] = recall
+        return r
+    data = {"A": {"seed-1": [run(0.5, traps=1), run(0.7)], "seed-2": [run(0.6), run(0.6, traps=2)]},
+            "A-open": {"seed-1": [run(0.5, recall=2), run(0.7)], "seed-2": [run(0.6), run(0.6)]}}
+    a = decision_ns()["rows_for"](data, ("A",), 304)[1]["A"]
+    assert a["trap abst."]["display"] == "0.600 (n=2/2; INCOMPLETE: 3 traps excluded)"
+    assert (a["trap abst."]["incomplete_runs"], a["trap abst."]["excluded"]) == (2, 3)
+    assert a["recall"]["display"] == "0.600 (n=2/2; INCOMPLETE: 2 facts excluded)"
+    assert (a["recall"]["incomplete_runs"], a["recall"]["excluded"]) == (1, 2)
+
+
+def test_parity_verdict_carries_the_exclusion_marker():
+    ns = decision_ns(ARMS=("LCMX-fleet", "other"))
+    data = {"LCMX-fleet": {"seed-1": [decision_run(0.5, excluded=7), decision_run(0.7)],
+                           "seed-2": [decision_run(0.6), decision_run(0.6)]},
+            "other": {"seed-1": [decision_run(0.6, excluded=3), decision_run(0.6)],
+                      "seed-2": [decision_run(0.6), decision_run(0.6)]}}
+    js = ns["rows_for"](data, ("LCMX-fleet", "other"), 304)[1]
+    lines, out = ns["parity"](js, 304)
+    assert "| parity+ (INCOMPLETE: LCM-X 7 facts, other 3 facts excluded) |" in next(
+        line for line in lines if line.startswith("| facts kept | other |"))
+    assert out["facts kept/other"] == {"verdict": "parity+", "incomplete": True,
+                                       "excluded": {"LCMX-fleet": 7, "other": 3}}
+    clean = next(line for line in lines if line.startswith("| continuity strict | other |"))
+    assert clean.endswith("| parity+ |") and "INCOMPLETE" not in clean
+    assert out["continuity strict/other"] == {"verdict": "parity+", "incomplete": False,
+                                              "excluded": {"LCMX-fleet": 0, "other": 0}}
