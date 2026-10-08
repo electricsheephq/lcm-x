@@ -39,9 +39,10 @@ least 10 events, with no compaction slower than on the previous GA. Visible wait
 entry to return, for every `compress()` the host or the gateway's hygiene pass runs while a user turn waits. It does
 not include host commit overhead (system-prompt rebuild, session end and start).
 
-**Prepare in the background; promote inside `compress()`.** Every canonical write stays on the thread that already
-owns it: the host's `compress()` call, or hygiene's. An off-turn worker that publishes canonical leaves right after
-the turn is rejected for five reasons:
+**Prepare in the background; promote inside `compress()`.** Every leaf publication and frontier move stays on the
+thread that already owns it: the host's `compress()` call, or hygiene's. (Condensation, which moves no frontier, is
+the one canonical write that may leave the turn; see Condensation below.) An off-turn worker that publishes canonical
+leaves right after the turn is rejected for five reasons:
 - assembly, FTS, rollups, condensation selection, store-complete and replay-drop read a canonical node at once;
 - session end finalizes with the in-process frontier (`_last_compacted_store_id`), which an off-turn writer would
   have to set on the engine the host calls;
@@ -55,12 +56,15 @@ the turn is rejected for five reasons:
 - Promotion reuses today's fenced leaf publication: `dag.add_node(before_commit=…)` with a callback that runs
   `stage_compaction_publication` and marks the batch promoted, in one transaction on the DAG connection. No new
   publish path decides frontier contiguity, session binding or "already claimed". In-process markers update after
-  the commit, as for a foreground leaf.
+  the commit, and every post-commit hook a foreground leaf runs runs for each promoted leaf: rollup invalidation
+  (`_invalidate_rollups_for_published_node`) and transcript GC (`_maybe_gc_compacted_tool_results`) today. Promotion
+  shares those steps with the foreground leaf through one helper, so a hook added later cannot be skipped.
 - Promotion runs at the top of `_compress_impl`, before the no-progress hold's cleanup-only return and before pre-leaf
   condensation. A ready chain at the live frontier is progress that costs no model call, so it lifts the hold, but
   only when the live prompt meets a normal compression trigger (the threshold or the full sweep): `should_compress`
   then reports true despite the hold. Below a trigger nothing is promoted early, so the active prompt and its cache
-  prefix change only at the boundaries they change at today. If the estimate is then below the #671 target, `min(T − leaf_chunk, 0.95·T)`, the pass makes no foreground summariser call at all:
+  prefix change only at the boundaries they change at today. If the estimate is then below the #671 target,
+  `min(T − leaf_chunk, 0.95·T)`, the pass makes no foreground summariser call at all:
   no remainder leaf, no pre-leaf or post-drain condensation. Otherwise today's path runs for the gap.
 - Each batch is checked inside the transaction. Any failure marks it `rejected` with a reason and the fallback
   continues. The checks are those listed under "Atomic promotion" below, plus a host-row check: the host rows from
@@ -72,7 +76,8 @@ the turn is rejected for five reasons:
 - Stub-first exits promote before they return.
 
 **What a prepared leaf carries.**
-- The summary route the foreground uses (prompt v1 today, #660); the route fingerprint covers it.
+- The summary route the foreground uses (prompt v1 today, #660). The route fingerprint includes
+  `summary_prompt_version`, so a batch prepared under another prompt version is rejected at promotion.
 - No previous-summary continuity context, because the foreground leaf passes none. This replaces preparation step 4.
   The worker records the `focus_topic` it used on the batch; a mismatch with the live list is not a rejection reason.
   Track S at the v0.28.0 rc1 judges any quality effect.
@@ -83,17 +88,20 @@ the turn is rejected for five reasons:
   `_stored_publication_filter_exclusions`, and carried ranges are passed.
 
 **The worker.**
-- One daemon thread per process. Dedup is keyed by the store (its profile home and database path) plus the
-  conversation id, because one process can serve several profile homes that use the same conversation id. It runs
+- One daemon thread per process. Dedup is keyed by the store (its profile home and database path), the
+  conversation id and the session id: one process can serve several profile homes that use the same conversation id,
+  and batches are bound to a session. It runs
   each job in the captured context of the turn that scheduled it, which carries the profile's secret scope and home
   (#987). A turn-end trigger that finds a job running for the same key sets a dirty flag instead of being dropped;
   when the job ends, the worker re-reads the estimate and runs again if the flag is set.
 - Batch creation is arbitrated by the database, not the process: a partial unique index on the live generation of a
   frontier (below) plus `INSERT OR IGNORE`, so two processes that open the same profile store cannot both create and
-  claim a batch for one frontier.
+  claim a batch for one frontier. A new session in the conversation supersedes the previous session's live batches
+  when its first job runs, so they never block it.
 - A job is scheduled at any turn end that has eligible rows past one leaf chunk. Prepared work is sized in tokens:
   the job loops until the predicted estimate after promotion, the current estimate minus the ready chain's savings
-  (`source_token_count − token_count` per batch), is at or below the target with one leaf of headroom, or the worker's
+  (per batch, the source tokens minus the rendered cost of the summary as assembly emits it, header, expand hint and
+  framing included), is at or below the target with one leaf of headroom, or the worker's
   spend share runs out. Source tokens covered are not the measure: a summary only has to be shorter than its source.
   There is no fixed batch cap, so `async_background_compaction_max_batches` is dropped.
 - It has its own circuit-breaker key and a bounded share of the summary spend guard (default half of
@@ -102,8 +110,9 @@ the turn is rejected for five reasons:
   is set, the worker uses at most that value minus one; at 1 it does not run, and today's foreground path serves the
   profile. Unset means the host imposes no cap: the fleet's summary providers are remote and serve concurrent
   requests. A profile whose provider serializes requests (a local model) sets `max_concurrency: 1`, which turns the
-  worker off. A call already in flight cannot yield, so reserving the slot up front is the mechanism; a test starts a foreground compression while a slow background call is in flight and asserts the
-  foreground call does not wait on it.
+  worker off. A call already in flight cannot yield, so reserving the slot up front is the mechanism; a test starts a
+  foreground compression while a slow background call is in flight and asserts the foreground call does not wait on
+  it.
 - It holds no transaction across a model call (a gateway exit can kill it mid-call). Its writes are single statements,
   and each state change is a compare-and-set on the state it leaves plus the claim token the job wrote when it moved
   the batch to `preparing`: completion is `SET state='ready' … WHERE batch_id=? AND state='preparing' AND
@@ -115,8 +124,11 @@ the turn is rejected for five reasons:
   The cleanup timeout for a stale `preparing` batch is longer than the worst-case prepare.
 
 **Condensation.** Prepared condensations stay out, as the non-goals say. Condensation leaves the turn by a different
-route: a canonical off-turn condenser in the same worker, under the condensation fence (#988). Its inputs are
-canonical nodes, it moves no frontier, and its node reaches the wire at the next `compress()` assembly.
+route: a canonical off-turn condenser in the same worker, under the condensation fence (#988). It is the exception to
+the ownership rule above, and S6 must show it is safe before it ships. Its inputs are canonical nodes and it moves no
+frontier, so session end and the hygiene clone's in-memory state do not depend on it. Its node reaches the wire only
+at the next `compress()` assembly, which reads the store. If S6 cannot show this, condensation publication moves back
+onto `compress()` as a promotion of a prepared condensation.
 
 **Hygiene (#626).** Prepared batches live in SQLite, so hygiene's fresh clone promotes them like any other caller.
 Hygiene's bounded hold then covers promotion plus assembly.
@@ -127,7 +139,9 @@ Hygiene's bounded hold then covers promotion plus assembly.
 2. S0b: a reliability cell with a fake summariser that holds 20 s per call. It records visible wait per compaction
    with prepare off and on, and prompt-prefix breaks per cycle from the fake provider's request log. It must include a
    due condensation and a remainder.
-3. S1: the background-job helper that captures context per job (#987); rollups and assertion extraction move onto it.
+3. S1: the background-job helper that captures context per job (#987); rollups, assertion extraction and the
+   pre-compaction extraction (`_run_pre_compaction_extraction`, today tied to the foreground leaf) move onto it, so a
+   promoted leaf's source rows still get their configured extraction.
 4. S2: the condensation fence (#988).
 5. S3: the two tables through a named `lcm_migration_state` step (no `SCHEMA_VERSION` bump, no `summary_nodes` column),
    with reader filters and status/doctor counts; the flag stays off.
@@ -201,7 +215,7 @@ Indexes:
 - `(conversation_id, state, created_at)`
 - `(session_id, state, created_at)`
 - `(next_retry_at, state)`
-- `UNIQUE (conversation_id, frontier_start_store_id, policy_fingerprint, summary_route_fingerprint) WHERE state IN
+- `UNIQUE (conversation_id, session_id, frontier_start_store_id, policy_fingerprint, summary_route_fingerprint) WHERE state IN
   ('pending', 'preparing', 'ready', 'promoting')` — one live generation per frontier; creation uses `INSERT OR IGNORE`
 
 ### `pending_summary_nodes`
@@ -265,6 +279,7 @@ Hash the effective summarizer contract:
 
 - `summary_model`
 - `summary_fallback_models`
+- `summary_prompt_version`
 - provider/model route after parsing, if available
 - summarizer timeout class only if it changes produced summaries or failure policy
 - plugin version/protocol version
