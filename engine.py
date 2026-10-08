@@ -7639,6 +7639,10 @@ class LCMEngine(
                 },
                 engine=self,
                 provider_override=provider_override,
+                # The FTS anchor (#950) is a tool-path ordering rule: here the
+                # relevance floor below filters the 6 hits without refill, so an
+                # FTS-only anchor under the floor would displace an eligible hit.
+                fts_anchor=False,
             )
             payload = json.loads(raw)
         except EmbeddingPrivacyPolicyError as exc:

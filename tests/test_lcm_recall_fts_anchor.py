@@ -372,7 +372,7 @@ def test_lcm_recall_reports_unfired_anchor_with_two_arms(recall_engine, monkeypa
     payload = json.loads(_recall_raw(recall_engine, limit=8, scope_bias=0.0))
 
     assert payload["provenance"]["fts_anchor"] == {
-        "fired": False, "position": None, "delivered": False,
+        "fired": False, "position": None, "delivered": None,
     }
     assert payload["hits"][-1]["store_id"] == store_id
 
@@ -384,7 +384,7 @@ def test_lcm_recall_zero_fts_weight_leaves_the_order_alone(recall_engine, monkey
 
     assert payload["provenance"]["arm_weights"]["fts"] == 0.0
     assert payload["provenance"]["fts_anchor"] == {
-        "fired": False, "position": None, "delivered": False,
+        "fired": False, "position": None, "delivered": None,
     }
     assert [h.get("node_id") for h in payload["hits"]] == node_ids[:4]
     assert store_id not in [h.get("store_id") for h in payload["hits"]]
@@ -440,6 +440,26 @@ def test_lcm_recall_answer_ready_anchor_dropped_by_session_cap(recall_engine, mo
     delivered = [h.get("store_id") for h in payload["hits"]]
     assert store_id not in delivered
     assert len(delivered) == cap
+
+
+def test_lcm_recall_delivered_is_recomputed_after_the_response_cap(recall_engine, monkeypatch):
+    # A delta request whose whole response exceeds the cap: the trimming loop
+    # pops the trailing hit, which is the anchored one, so delivered is false.
+    store_id, _node_ids = _seed_two_arm_case(recall_engine, monkeypatch)
+    args = {"limit": 4, "scope_bias": 0.0, "detail": "answer_ready", "seen_refs": []}
+    uncapped = _recall_raw(recall_engine, **args)
+    full = json.loads(uncapped)
+    assert full["provenance"]["fts_anchor"] == {"fired": True, "position": 4, "delivered": True}
+    assert full["hits"][-1]["store_id"] == store_id
+
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", len(uncapped) - 1)
+    capped = _recall_raw(recall_engine, **args)
+    payload = json.loads(capped)
+
+    assert len(capped) <= len(uncapped) - 1
+    assert payload["provenance"]["answer_ready"]["response_truncated"] is True
+    assert store_id not in [h.get("store_id") for h in payload["hits"]]
+    assert payload["provenance"]["fts_anchor"] == {"fired": True, "position": 4, "delivered": False}
 
 
 def _seed_fts_only(engine, monkeypatch):

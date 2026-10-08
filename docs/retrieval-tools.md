@@ -220,19 +220,26 @@ the ranked window. When two or more arms ran and fusion pushed the full-text
 arm's position-1 message past `limit`, that one message moves into the window at
 the start of the 10th distinct session (the window's last slot when it holds
 fewer distinct sessions than that), so at most one session leaves the window. The move is
-order-only: the hit keeps its own `score`, so a relevance floor such as
-`LCM_PROACTIVE_RECALL_MIN_SCORE` still applies to it. It is inert with a single
+order-only: the hit keeps its own `score`, so a relevance floor on `score`
+still applies to it. It is inert with a single
 arm, so embeddings-off (full-text only) output is unchanged, and inert when
-`LCM_RECALL_ARM_WEIGHTS` sets `fts` to `0`. Set `LCM_RECALL_FTS_ANCHOR=false` to
-restore the previous order. Managed (evaOS fleet) profiles can set it only after
-a provisioning release adds it to the environment allowlist.
+`LCM_RECALL_ARM_WEIGHTS` sets `fts` to `0`. It is also inert when `limit` is
+below `4`: displacing one of three or fewer hits costs more than it gains (a
+tradeoff frozen in #950). Proactive recall (`LCM_PROACTIVE_RECALL_ENABLED`) does
+not use the anchor, because it filters its hits by
+`LCM_PROACTIVE_RECALL_MIN_SCORE` without refilling them. Set
+`LCM_RECALL_FTS_ANCHOR=false` to restore the previous order. Managed (evaOS
+fleet) profiles can set it only after a provisioning release adds it to the
+environment allowlist.
 
 With two or more arms, the response reports
 `provenance.fts_anchor = {fired, position, delivered}`: `fired` says whether the
 message moved, `position` is its 1-based slot in the ranked window (or `null`),
-and `delivered` says whether it is among the returned hits. `detail='answer_ready'`
-still applies its citation and per-session rules after the anchor, so a fired
-anchor can report `delivered: false`.
+and `delivered` says whether the anchored hit is among the hits finally returned
+(`null` when the anchor did not fire, since there is no anchored hit).
+`detail='answer_ready'` still applies its citation and per-session rules and the
+response size cap after the anchor, so a fired anchor can report
+`delivered: false`.
 
 `LCM_RERANK_ENABLED=true` optionally lets Voyage reorder the bounded top fused
 window after the scope/recency prior. `LCM_RERANK_MODEL` selects the Voyage

@@ -5694,6 +5694,14 @@ def _lcm_recall_fts_anchor(
     return ordered[:cut] + [entry] + ordered[cut:], info
 
 
+def _lcm_recall_fts_anchor_delivered(
+    hits: list[dict[str, Any]], arm_hits: dict[str, list[dict[str, Any]]]
+) -> bool:
+    """Whether the FTS arm's anchored hit is among the returned ``hits`` (#950)."""
+    anchor = _hit_identity(arm_hits["fts"][0])
+    return any(_hit_identity(hit) == anchor for hit in hits)
+
+
 def _lcm_recall_preflight_scan_deadline(now: float, deadline: float) -> float:
     """Derive the corpus preflight's independent scan deadline.
 
@@ -6390,9 +6398,14 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     )
 
     # -- FTS anchor slot (#950), after rerank so rerank cannot undo it. Inert
-    #    with a single arm, so FTS-only (embeddings-off) output is unchanged. --
+    #    with a single arm, so FTS-only (embeddings-off) output is unchanged.
+    #    Proactive recall passes ``fts_anchor=False`` (an internal keyword, not
+    #    a tool argument): it filters hits by a score floor after the call, so
+    #    an FTS-only anchor below that floor would displace an eligible hit. --
     fts_anchor_info: dict[str, Any] | None = None
-    if bool(getattr(engine._config, "recall_fts_anchor", True)):
+    if bool(kwargs.get("fts_anchor", True)) and bool(
+        getattr(engine._config, "recall_fts_anchor", True)
+    ):
         ordered, fts_anchor_info = _lcm_recall_fts_anchor(
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
@@ -6491,7 +6504,6 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         diversity_dropped = 0
         answer_ready_content = {}
     hits_out: list[dict[str, Any]] = []
-    delivered_identities: set[Any] = set()
     response_chars = 0
     response_cap_truncated = False
     unreferenced_omitted = 0
@@ -6583,7 +6595,6 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         if reference_strict:
             strict_selector.deliver(entry)
         hits_out.append(item)
-        delivered_identities.add(_hit_identity(hit))
         if len(hits_out) >= limit:
             break
 
@@ -6625,8 +6636,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         # The anchor only places the hit in the ranked window; answer_ready
         # selection (citation and per-session rules) and the response cap still
         # decide delivery, so report whether the anchored hit actually shipped.
-        fts_anchor_info["delivered"] = bool(fts_anchor_info["fired"]) and (
-            _hit_identity(arm_hits["fts"][0]) in delivered_identities
+        # ``delivered`` is null when the anchor did not fire (no anchored hit).
+        fts_anchor_info["delivered"] = (
+            _lcm_recall_fts_anchor_delivered(response["hits"], arm_hits)
+            if fts_anchor_info["fired"]
+            else None
         )
         response["provenance"]["fts_anchor"] = fts_anchor_info
     if degraded:
@@ -6688,6 +6702,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 "observation_is_not_occurrence": True,
             }
 
+        anchor_fired = bool(fts_anchor_info and fts_anchor_info.get("fired"))
+        if anchor_fired:
+            # Size the cap check with the widest value (``false``) so the final
+            # recompute below can never grow the encoded response past the cap.
+            fts_anchor_info["delivered"] = False
         encoded = json.dumps(response, ensure_ascii=False)
         if len(encoded) > _LCM_RECALL_RESPONSE_CHAR_CAP:
             original_query = response["query"]
@@ -6722,6 +6741,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         None if novel_refs else "no_novel_exact_ref"
                     ),
                 }
+            )
+            encoded = json.dumps(response, ensure_ascii=False)
+        if anchor_fired:
+            # The cap loop may have popped the anchored hit: report delivery
+            # from the hits actually returned.
+            fts_anchor_info["delivered"] = _lcm_recall_fts_anchor_delivered(
+                response["hits"], arm_hits
             )
             encoded = json.dumps(response, ensure_ascii=False)
         return encoded
