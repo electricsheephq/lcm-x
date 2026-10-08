@@ -35,6 +35,8 @@ AP.add_argument("--load-log", type=Path, help="optional timestamped host-load lo
 AP.add_argument("--second-tree", type=Path, nargs=3, metavar=("RUN_ROOT", "DECISION_ROOT", "LOGS"),
                 help="read the SECOND arm from this run root, decision root and logs root (release over release)")
 AP.add_argument("--labels", nargs=2, metavar=("FIRST", "SECOND"), help="result keys for the two arms (default: --arms)")
+AP.add_argument("--expect-shas", nargs=2, metavar=("FIRST", "SECOND"),
+                help="product commit (hex prefix, >= 7) every counted run of each arm must record; required with --second-tree")
 ARGS = AP.parse_args()
 if ARGS.decision_root is None or ARGS.material is None:
     AP.error("provide --decision-root/--material or TRACK_S_OUT/TRACK_S_MATERIAL")
@@ -48,6 +50,11 @@ if LABELS[0] == LABELS[1]:
 TREES = {LABELS[0]: {"arm": ARMS[0], "run_root": RUNS, "decision_root": H, "logs": LOGS}}
 TREES[LABELS[1]] = {"arm": ARMS[1], **dict(zip(("run_root", "decision_root", "logs"), ARGS.second_tree or (RUNS, H, LOGS)))}
 TWO_TREE = ARGS.second_tree is not None
+EXPECT_SHAS = [x.lower() for x in ARGS.expect_shas] if ARGS.expect_shas else None
+if EXPECT_SHAS and not all(re.fullmatch(r"[0-9a-f]{7,40}", x) for x in EXPECT_SHAS):
+    AP.error("--expect-shas takes two hex commit prefixes of at least 7 characters")
+if TWO_TREE and not EXPECT_SHAS:
+    AP.error("--second-tree requires --expect-shas (the product commit of each tree)")
 
 
 def mcnemar(b, c):
@@ -192,6 +199,7 @@ def per_arm():
         src = globals().get("TREES", {}).get(label, {})
         arm, runs, logs = src.get("arm", label), src.get("run_root", RUNS), src.get("logs", LOGS)
         leaf, comp, failed, compl, timeouts, l3, leaves, hiload, facts = [], [], [], [], 0, 0, 0, [], {}
+        heads, configs = {}, []  # per counted run: recorded product commit; distinct effective configurations
         for seed in SEEDS:
             for run in ("r1", "r2"):
                 w = logs / f"s2-{arm}-d{seed}-{run}.log.wall"
@@ -203,6 +211,9 @@ def per_arm():
                 if mx > 16:
                     hiload.append(f"seed-{seed}/{run} (max 1-min load {mx})")
                 s = json.loads((runs / arm / f"seed-{seed}" / f"d{seed}-{run}" / "summary.json").read_text())
+                heads[f"seed-{seed}/{run}"] = s.get("worktree_head")
+                cfg = {k: s.get(k) for k in ("arm", "fleet_keys_excluded", "harness_overrides", "context_length", "lane", "reader")}
+                configs += [cfg] if cfg not in configs else []
                 for e in s["events"]:
                     if e["is_compaction"]:
                         comp.append(e["compress_wall_s"])
@@ -223,9 +234,10 @@ def per_arm():
                         leaves += sc["stored_level3"]["leaves"]
                     if sc:
                         facts.setdefault(cp, {}).setdefault(seed, {})[run] = sc["metrics"]["facts_kept"]["value"]
-        by_cp = {f"cp-{cp}": {f"seed-{k}": None if None in (v["r1"], v["r2"]) else round(abs(v["r1"] - v["r2"]), 3)
-                              for k, v in facts.get(cp, {}).items() if len(v) == 2}
-                 for cp in CPS}  # None: a run had no scorable fact (all reader-truncated)
+        raw = {f"cp-{cp}": {f"seed-{k}": None if None in (v["r1"], v["r2"]) else abs(v["r1"] - v["r2"])
+                            for k, v in facts.get(cp, {}).items() if len(v) == 2}
+               for cp in CPS}  # None: a run had no scorable fact (all reader-truncated)
+        by_cp = {cp: {k: None if v is None else round(v, 3) for k, v in sd.items()} for cp, sd in raw.items()}  # display
         sp = by_cp[f"cp-{max(CPS)}"]
         out[label] = {
             "leaf_call_wall_s": st(leaf),
@@ -240,9 +252,11 @@ def per_arm():
             "level3_rate": round(l3 / leaves, 4) if leaves else None,
             f"facts_cp{max(CPS)}_r1_r2_spread": sp,
             "facts_r1_r2_spread_by_cp": by_cp,
-            "spread_over_0.10": [f"{cp}/{k}" for cp, s in by_cp.items() for k, v in s.items() if v is not None and v > 0.10],
-            "spread_unmeasured": [f"{cp}/{k}" for cp, s in by_cp.items() for k, v in s.items() if v is None],
+            "spread_over_0.10": [f"{cp}/{k}" for cp, s in raw.items() for k, v in s.items() if v is not None and v > 0.10],
+            "spread_unmeasured": [f"{cp}/{k}" for cp, s in raw.items() for k, v in s.items() if v is None],
             "runs_with_load_over_16": hiload,
+            "worktree_heads": heads,
+            "run_configs": configs,
         }
     return out
 
@@ -273,9 +287,20 @@ for v in d2.values():
     v["net_loss_ge_5"] = v["effect_pts_exact"] is not None and v["effect_pts_exact"] <= -5
     v["blocks"] = v["p_exact"] < 0.05 and v["net_loss_ge_5"]
 spread = {label: arm_stats.get(label, {}).get("spread_over_0.10", []) for label in labels}
-verdict = ("INCOMPLETE" if status == "INCOMPLETE" else "REPEAT_SEEDS" if any(spread.values())
-           else "BLOCK" if any(v["blocks"] for v in d2.values()) else "PASS")
-d2.update({"candidate": labels[1], "spread_over_0.10": spread, "status": status, "verdict": verdict})
+missing_spread = [f"{label}/cp-{cp}/seed-{n}" for label in labels for cp in CPS for n in SEEDS  # receipt-skipped or unscored
+                  if arm_stats.get(label, {}).get("facts_r1_r2_spread_by_cp", {}).get(f"cp-{cp}", {}).get(f"seed-{n}") is None]
+expect = globals().get("EXPECT_SHAS")
+sha_mismatch = [f"{label}/{k}: {(h or 'missing')[:12]}" for label, sha in zip(labels, expect or ())
+                for k, h in arm_stats.get(label, {}).get("worktree_heads", {}).items() if not str(h or "").startswith(sha)]
+configs = [c for label in labels for c in arm_stats.get(label, {}).get("run_configs", [])]
+diff = sorted({k for c in configs for k in c if c[k] != configs[0][k]})
+diff += sorted({f"arm.{k}" for c in configs if "arm" in diff and isinstance(c["arm"], dict) and isinstance(configs[0]["arm"], dict)
+                for k in {*c["arm"], *configs[0]["arm"]} if c["arm"].get(k) != configs[0]["arm"].get(k)})
+verdict = ("INCOMPLETE" if status == "INCOMPLETE" or missing_spread or sha_mismatch or diff
+           else "REPEAT_SEEDS" if any(spread.values()) else "BLOCK" if any(v["blocks"] for v in d2.values()) else "PASS")
+d2.update({"candidate": labels[1], "spread_over_0.10": spread, "missing_spread": missing_spread,
+           "expected_shas": dict(zip(labels, expect)) if expect else None, "sha_mismatch": sha_mismatch,
+           "config_equal": not diff, **({"config_diff_keys": diff} if diff else {}), "status": status, "verdict": verdict})
 print(
     json.dumps(
         {

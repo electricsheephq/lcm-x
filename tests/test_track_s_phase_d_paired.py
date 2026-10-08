@@ -12,13 +12,20 @@ TRACK = Path(__file__).resolve().parents[1] / "bench/instruments/compaction_prob
 ANALYZE = TRACK / "decision/analyze_paired.py"
 FACTS = [f"f{i}" for i in range(40)]
 CPS = (176, 304)
+SHAS = {"prev": "a1" * 20, "cand": "b2" * 20}
 
 
 def kept_all(seed, run, cp):
     return set(FACTS)
 
 
-def build(root, arm, kept=kept_all, seeds=(1,)):
+def summary(arm, sha, seed, run):
+    return {"events": [], "worktree_head": sha, "arm": {"name": arm, "kind": "plain", "env": {"LCM_X": "1"}},
+            "fleet_keys_excluded": ["k"], "harness_overrides": {"h": 1}, "context_length": 200000,
+            "lane": "glm", "reader": "glm"}
+
+
+def build(root, arm, kept=kept_all, seeds=(1,), sha=SHAS["prev"], value=None, summarize=summary):
     """One tree: runs/<arm>/seed-N/dN-rX, decision/scores (admitted by manifest), logs/*.wall."""
     runs, decision, logs = root / "runs", root / "decision", root / "logs"
     logs.mkdir(parents=True, exist_ok=True)
@@ -34,7 +41,8 @@ def build(root, arm, kept=kept_all, seeds=(1,)):
                 ids = kept(seed, run, cp)
                 payload = {
                     "probes": {f: {"class": "CORRECT" if f in ids else "WRONG"} for f in FACTS},
-                    "metrics": {"facts_kept": {"complete": True, "value": len(ids) / len(FACTS)},
+                    "metrics": {"facts_kept": {"complete": True,
+                                               "value": value(seed, run, cp) if value else len(ids) / len(FACTS)},
                                 "continuation": {"complete": True}, "continuity": {"complete": True, "grid": []}},
                     "stored_level3": {"level3": 0, "leaves": 1},
                 }
@@ -42,7 +50,7 @@ def build(root, arm, kept=kept_all, seeds=(1,)):
                 (decision / key).parent.mkdir(parents=True, exist_ok=True)
                 (decision / key).write_text(json.dumps(payload))
                 manifest["entries"][key] = {"sha256": hashlib.sha256((decision / key).read_bytes()).hexdigest()}
-            (rundir / "summary.json").write_text(json.dumps({"events": []}))
+            (rundir / "summary.json").write_text(json.dumps(summarize(arm, sha, seed, run)))
             (logs / f"s2-{arm}-d{seed}-{run}.log.wall").write_text("start 1\nexit 0 end 2\n")
     manifest_path.write_text(json.dumps(manifest))
     return runs, decision, logs
@@ -57,7 +65,7 @@ def material(tmp_path, seeds=(1,)):
     return root
 
 
-def analyze(tmp_path, arms, first, second=None, labels=None, check=True):
+def analyze(tmp_path, arms, first, second=None, labels=None, check=True, shas=None):
     runs, decision, logs = first
     command = [sys.executable, "-B", str(ANALYZE), "--arms", *arms, "--seeds", "1",
                "--checkpoints", *map(str, CPS), "--run-root", str(runs), "--decision-root", str(decision),
@@ -66,6 +74,8 @@ def analyze(tmp_path, arms, first, second=None, labels=None, check=True):
         command += ["--second-tree", *map(str, second)]
     if labels:
         command += ["--labels", *labels]
+    if shas:
+        command += ["--expect-shas", *shas]
     result = subprocess.run(command, capture_output=True, text=True)
     if not check:
         return result
@@ -73,10 +83,10 @@ def analyze(tmp_path, arms, first, second=None, labels=None, check=True):
     return json.loads(result.stdout)
 
 
-def two_tree(tmp_path, cand_kept, prev_kept=kept_all):
+def two_tree(tmp_path, cand_kept=kept_all, prev_kept=kept_all, shas=(SHAS["prev"][:7], SHAS["cand"][:12]), **cand_options):
     prev = build(tmp_path / "prev", "LCMX-fleet", prev_kept)
-    cand = build(tmp_path / "cand", "LCMX-fleet", cand_kept)
-    return analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"])
+    cand = build(tmp_path / "cand", "LCMX-fleet", cand_kept, sha=SHAS["cand"], **cand_options)
+    return analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"], shas=shas)
 
 
 def test_two_tree_pairs_same_arm_across_roots(tmp_path):
@@ -100,7 +110,7 @@ def test_two_tree_requires_distinct_labels(tmp_path):
     prev = build(tmp_path / "prev", "LCMX-fleet")
     cand = build(tmp_path / "cand", "LCMX-fleet")
     for labels in (None, ["same", "same"]):
-        result = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=labels, check=False)
+        result = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=labels, check=False, shas=("abcdef0",) * 2)
         assert result.returncode != 0 and "labels must be distinct" in result.stderr
 
 
@@ -151,9 +161,10 @@ def test_d2_passes_a_small_loss(tmp_path):
 
 def test_d2_incomplete_when_a_pair_is_missing(tmp_path):
     prev = build(tmp_path / "prev", "LCMX-fleet")
-    cand = build(tmp_path / "cand", "LCMX-fleet", lambda *a: set(FACTS[:30]))
+    cand = build(tmp_path / "cand", "LCMX-fleet", lambda *a: set(FACTS[:30]), sha=SHAS["cand"])
     (cand[1] / "scores/cp-304/LCMX-fleet.seed-1.d1-r2.json").unlink()
-    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"])
+    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"],
+                  shas=(SHAS["prev"], SHAS["cand"]))
     assert out["status"] == "INCOMPLETE" and out["d2"]["verdict"] == "INCOMPLETE"
 
 
@@ -172,5 +183,52 @@ def test_single_tree_output_is_unchanged(tmp_path):
         assert set(out[f"cp-{cp}"]["loss_classes"]) == {"A", "B"}
     assert out["per_arm"]["A"]["facts_cp304_r1_r2_spread"] == {"seed-1": 0.0}
     assert out["per_arm"]["B"]["facts_cp304_r1_r2_spread"] == {"seed-1": 0.05}
-    # New in single-tree mode: labels default to the arms, d2 is reported, trees are not.
-    assert out["labels"] == ["A", "B"] and "trees" not in out and out["d2"]["verdict"] == "PASS"
+    # New in single-tree mode: labels default to the arms, d2 is reported, trees are not. Two different arms are
+    # not a D2 comparison, so the configuration check makes the d2 verdict INCOMPLETE.
+    assert out["labels"] == ["A", "B"] and "trees" not in out
+    assert out["d2"]["config_diff_keys"] == ["arm", "arm.name"] and out["d2"]["verdict"] == "INCOMPLETE"
+    assert out["d2"]["expected_shas"] is None and out["d2"]["sha_mismatch"] == []
+
+
+def test_spread_threshold_uses_the_unrounded_spread(tmp_path):
+    out = two_tree(tmp_path, value=lambda seed, run, cp: 0.6004 if (cp, run) == (176, "r2") else 0.5)
+    cand = out["per_arm"]["cand"]
+    assert cand["facts_r1_r2_spread_by_cp"]["cp-176"] == {"seed-1": 0.1}
+    assert cand["spread_over_0.10"] == ["cp-176/seed-1"] and out["d2"]["verdict"] == "REPEAT_SEEDS"
+
+
+def test_d2_incomplete_when_receipts_are_missing(tmp_path):
+    prev = build(tmp_path / "prev", "LCMX-fleet")
+    runs, decision, _ = build(tmp_path / "cand", "LCMX-fleet", sha=SHAS["cand"])
+    (tmp_path / "no-receipts").mkdir()
+    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, (runs, decision, tmp_path / "no-receipts"),
+                  labels=["prev", "cand"], shas=(SHAS["prev"], SHAS["cand"]))
+    assert out["status"] == "COMPLETE"  # both score files are admitted; only the receipts are missing
+    assert out["d2"]["missing_spread"] == ["cand/cp-176/seed-1", "cand/cp-304/seed-1"]
+    assert out["d2"]["verdict"] == "INCOMPLETE"
+
+
+def test_d2_binds_the_recorded_product_commits(tmp_path):
+    out = two_tree(tmp_path)
+    assert out["d2"]["expected_shas"] == {"prev": SHAS["prev"][:7], "cand": SHAS["cand"][:12]}
+    assert out["d2"]["sha_mismatch"] == [] and out["d2"]["verdict"] == "PASS"
+    out = two_tree(tmp_path / "wrong", shas=(SHAS["prev"], SHAS["prev"]))
+    assert out["d2"]["sha_mismatch"] == [f"cand/seed-1/{run}: {SHAS['cand'][:12]}" for run in ("r1", "r2")]
+    assert out["d2"]["verdict"] == "INCOMPLETE"
+    prev, cand = build(tmp_path / "p", "LCMX-fleet"), build(tmp_path / "c", "LCMX-fleet")
+    for shas, message in ((None, "requires --expect-shas"), (("abc", SHAS["cand"]), "hex commit prefixes"),
+                          (("not-hex!", SHAS["cand"]), "hex commit prefixes")):
+        result = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, cand, labels=["prev", "cand"], shas=shas, check=False)
+        assert result.returncode != 0 and message in result.stderr
+
+
+def test_d2_requires_the_same_effective_configuration(tmp_path):
+    def summarize(arm, sha, seed, run):
+        s = summary(arm, sha, seed, run)
+        if run == "r2":
+            s["arm"]["env"] = {"LCM_X": "2"}
+        return s
+    out = two_tree(tmp_path, summarize=summarize)
+    assert out["d2"]["config_equal"] is False and out["d2"]["config_diff_keys"] == ["arm", "arm.env"]
+    assert out["d2"]["verdict"] == "INCOMPLETE"
+    assert two_tree(tmp_path / "same")["d2"]["config_equal"] is True

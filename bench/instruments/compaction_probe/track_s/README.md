@@ -108,6 +108,7 @@ python3 -B "$KIT/decision/analyze_paired.py" --material "$TRACK_S_MATERIAL" \
   --arms LCMX-fleet LCMX-fleet --labels prev cand --seeds 1 2 3 --checkpoints 176 304 \
   --run-root "$PREV_ROOT/lcmx-runs" --decision-root "$PREV_ROOT/decision" --logs "$PREV_ROOT/decision/logs" \
   --second-tree "$CAND_ROOT/lcmx-runs" "$CAND_ROOT/decision" "$CAND_ROOT/decision/logs" \
+  --expect-shas "$PREV_COMMIT" "$CAND_COMMIT" \
   > "$CAND_ROOT/d2-paired.json"
 ```
 
@@ -117,7 +118,11 @@ Every `p` is rounded for display and has an unrounded `p_exact`. The gate reads 
 (`INCOMPLETE`, `REPEAT_SEEDS`, `BLOCK` or `PASS`) and, per checkpoint, `d2.cp-<n>.p_exact` and
 `effect_pts_exact` (candidate minus previous, facts kept). `d2.spread_over_0.10` lists, per label,
 each `cp-<n>/seed-<n>` whose r1/r2 facts-kept spread exceeds 0.10 (`REPEAT_SEEDS`); repeating those
-seeds, and the inconclusive outcome, is the operator's step.
+seeds, and the inconclusive outcome, is the operator's step. `--expect-shas` (required with
+`--second-tree`) binds each arm to its product commit. The verdict is also `INCOMPLETE` when a
+checkpoint/seed spread is unmeasured (`d2.missing_spread`, e.g. a missing receipt), a counted run
+records another commit (`d2.sha_mismatch`), or the two arms' effective configurations differ
+(`d2.config_diff_keys`).
 
 The historical decision runner accepts `glm|s4 <seed> [lossless-checkout] [CLI-auth-file]`;
 `run_seeds_2_3.sh` accepts those last two inputs and retains its existing scheduling.
