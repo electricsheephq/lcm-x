@@ -739,3 +739,92 @@ def test_spread_is_unmeasured_when_a_run_has_no_fact_rate(tmp_path):
     out = ns["per_arm"]()["A"]
     assert out["facts_cp304_r1_r2_spread"] == {"seed-1": None}
     assert out["spread_unmeasured"] == ["seed-1"] and out["spread_over_0.10"] == []
+
+
+def scorer_kit():
+    """score_s.py and its synthetic fixtures, loaded by path (the scorer is stdlib only and reads no environment)."""
+    return (SimpleNamespace(**runpy.run_path(str(TRACK / "scorer/score_s.py"))),
+            SimpleNamespace(**runpy.run_path(str(TRACK / "scorer/tests/fixtures.py"))))
+
+
+@pytest.mark.parametrize("source", ["clone", "summary"])
+def test_s1_capped_batch_excludes_only_unanswered(tmp_path, source):
+    sc, fx = scorer_kit()
+    material = fx.material(tmp_path)
+    run = fx.s1_run(tmp_path, answers=dict(fx.GOOD, **{"X-F1": None, "X-F4": None}))
+    capped = [{"purpose": "reader", "completion_tokens": 10}, {"purpose": "reader", "completion_tokens": 8192}]
+    # the cap counts on the final reader call only: a delegated child call at the cap is not the reader's reply
+    unknown = [{"purpose": "reader-open", "completion_tokens": None}, {"purpose": "delegated-child", "completion_tokens": 8192}]
+    if source == "clone":  # replay.ts: clones/<batch id>/answer.json; open and wiring clones carry no reader_calls
+        fx.wj(run / "clones/X-B0/answer.json", {"raw_reply": "{}", "reader_calls": capped})
+        fx.wj(run / "clones/X-B1/answer.json", {"raw_reply": "{}", "reader_calls": unknown})
+        fx.wj(run / "clones/open-X-F3/answer.json", {"raw_reply": "{}", "accounting": {"tool_log": []}})
+        (run / "clones/checkpoint-assemble").mkdir(parents=True)
+    else:
+        summary = json.loads((run / "summary.json").read_text())
+        summary["reader_calls"] = [{"batch": "X-B0", "calls": capped}, {"batch": "X-B1", "calls": unknown}]
+        fx.wj(run / "summary.json", summary)
+    score = sc.score(material, run, "lossless-claw")
+    assert {pid for pid, p in score["probes"].items() if p["class"] == "READER_TRUNCATED"} == {"X-F1"}
+    assert score["probes"]["X-F0"]["class"] == "CORRECT"
+    assert score["metrics"]["facts_kept"]["reader_truncated"] == 1
+    assert score["metrics"]["facts_kept"]["status"].startswith("INCOMPLETE(READER_TRUNCATED")
+
+
+def test_s2_open_label_reads_every_retry_attempt(tmp_path):
+    sc, fx = scorer_kit()
+    material = fx.material(tmp_path)
+    run = fx.s2_run(tmp_path, arm="LCMX-a-open", kind="open")
+    fx.wj(run / "answers/X-B0.json", {"batch": "X-B0", "tool_log": [], "attempts": [
+        {"tool_log": [{"tool": "lcm_expand"}]}, {"tool_log": []}]})
+    fx.wj(run / "answers/X-B1.json", {"batch": "X-B1", "tool_log": [], "attempts": [
+        {"tool_log": [{"tool": "lcm_grep"}]}, {"tool_log": []}]})
+    probes = sc.score(material, run, "LCMX-a-open")["probes"]
+    assert probes["X-F0"]["label"] == "expand"
+    assert probes["X-F3"]["label"] == "search only"
+    assert probes["X-T0"]["label"] == "expand"
+
+
+def decision_run(value, excluded=0, cont_excluded=0):
+    truncated = "INCOMPLETE(READER_TRUNCATED: 9 probes excluded: [])"
+
+    def metric(v, n):
+        return {"value": v, "status": truncated if n else "OK", "reader_truncated": n}
+    return {"metrics": {
+        "facts_kept": dict(metric(value, excluded), by_class_placement={"name|head": [1, 2], "path|tail": [1, 1]}),
+        "trap_abstention": metric(value, 0) | {"status": truncated if excluded else "OK"},
+        "continuation": metric(value, cont_excluded), "continuity": {"value": 1.0, "grid": []},
+        "recall": metric(value, 0)}, "_summary": {"receipts": []}}
+
+
+def test_render_decision_marks_cells_with_excluded_facts():
+    ns = functions("decision/render_decision.py", "f3", "cell", "placement", "diag", "ancestry", "rows_for",
+        SEEDS=("seed-1", "seed-2"), OPEN=("A-open",))
+    data = {"A": {"seed-1": [decision_run(0.5, excluded=7), decision_run(0.7)],
+                  "seed-2": [decision_run(0.6), decision_run(0.6, cont_excluded=2)]},
+            "B": {"seed-1": [decision_run(0.5), decision_run(0.7)], "seed-2": [decision_run(0.6), decision_run(0.6)]}}
+    lines, js = ns["rows_for"](data, ("A", "B"), 304)
+    a, b = js["A"], js["B"]
+    assert a["facts kept"]["display"] == "0.600 (n=2/2; INCOMPLETE: 7 facts excluded)"
+    assert a["facts kept"]["value"] == 0.6
+    for col in ("facts kept", "facts head", "facts tail"):
+        assert "INCOMPLETE: 7 facts excluded" in a[col]["display"]
+        assert (a[col]["incomplete_runs"], a[col]["excluded"]) == (1, 7)
+    assert "INCOMPLETE: 2 fields excluded" in a["continuation"]["display"]
+    assert (a["continuation"]["incomplete_runs"], a["continuation"]["excluded"]) == (1, 2)
+    assert "INCOMPLETE" not in a["trap abst."]["display"] and a["trap abst."]["excluded"] == 0
+    for col in ("facts kept", "continuation"):
+        assert b[col]["display"] == "0.600 (n=2/2)" and (b[col]["incomplete_runs"], b[col]["excluded"]) == (0, 0)
+    assert any("INCOMPLETE: 7 facts excluded" in line for line in lines if line.startswith("| A |"))
+    short = {"A": {"seed-1": [decision_run(0.5, excluded=3)], "seed-2": []}}
+    display = ns["rows_for"](short, ("A",), 304)[1]["A"]["facts kept"]["display"]
+    assert display.startswith("INCOMPLETE (n=1/0") and display.endswith("; 3 facts excluded)")
+
+
+def test_continuation_metric_counts_its_truncated_fields(tmp_path):
+    sc, fx = scorer_kit()
+    material = fx.material(tmp_path)
+    run = fx.s2_run(tmp_path, answers=dict(fx.GOOD | fx.GOOD_CONT, **{"X-STATE.status": ""}))
+    fx.wj(run / "answers/X-BCONT.json", {"batch": "X-BCONT", "reader_calls": [{"completion_tokens": 8192}]})
+    m = sc.score(material, run, "LCMX-a")["metrics"]
+    assert m["continuation"]["reader_truncated"] == 1 and m["facts_kept"]["reader_truncated"] == 0
