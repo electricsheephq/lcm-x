@@ -36,6 +36,7 @@ from .host_uid import _valid_uid
 from .host_uid_emit import ADDRESS_KEYS, IDENTITY_KEYS, identity_emit_enabled, record_absorbed_message
 from .message_analysis import _is_codex_interim
 from .message_content import normalize_content_value
+from .reconcile import _emission_identity
 from .store import _normalize_observed_at
 from .tokens import count_message_tokens, count_messages_tokens
 
@@ -217,6 +218,11 @@ class SurvivalFitMixin:
         if after > budget:  # still the best list available: returned, but never reported as within budget
             logger.warning("LCM survival fit could not reach budget (after=%d, budget=%d, reason=%s)", after, budget, reason)
         self._survival_record(reason, count, ids, before, after, budget, projected, notice, warn_user=not exit_fit)
+        formed = getattr(self, "_survival_cut_carrier", None)
+        if formed is not None:  # #1000: the re-formed carrier is LCM's emission, as assembly registers its own;
+            merged, span, store_id = formed  # the proof finalizes it apart from the pending candidates (output order)
+            self._survival_fit_emission = {"kind": "carrier", "span": span, "retained_source": {"store_id": store_id},
+                                           "full_identity": _emission_identity(merged), "row": merged}
         return fitted
 
     def _survival_summary_identity(self, row: dict, summary: str, uid, proof_kind: str, absorbed_from=None, taken=()) -> dict:
@@ -239,9 +245,11 @@ class SurvivalFitMixin:
         oldest whole-turn one whose FINAL list (notice included) fits; with ``whole_turns`` there is no
         projection. A carrier ending the kept prefix is split: its user row leaves with its turn, and the
         summary is re-formed around the first kept user row as assembly forms it. ``keep_from``: no cut drops
-        ``result[keep_from:]`` (#668: an exit fit keeps the fresh tail)."""
+        ``result[keep_from:]`` (#668: an exit fit keeps the fresh tail). ``_survival_cut_carrier``: the
+        returned list's re-formed carrier, its summary span and its user row's store id, else None (#1000)."""
+        self._survival_cut_carrier = None
         head, body = list(result[:lead]), list(result[lead:])
-        summary = summary_uid = None
+        summary = summary_uid = formed = None
         remainder = self._generated_context_carrier_remainder(head[-1]) if whole_turns and head else None
         if remainder is not None:
             carrier = head.pop()
@@ -268,6 +276,8 @@ class SurvivalFitMixin:
             return persisted or id(message) in store_ids or self._is_verified_replay_scaffold_message(message)
 
         def build(cut: int, kept, reply=None):
+            nonlocal formed
+            formed = None
             kept_ids = {id(row) for row in kept}  # live rows: identity, one pass (not kept x dropped)
             dropped = [m for m in body[:cut] if m is not reply and id(m) not in kept_ids]
             mapped = sorted(store_ids[id(message)] for message in dropped if id(message) in store_ids)
@@ -287,11 +297,18 @@ class SurvivalFitMixin:
                         and self._generated_context_carrier_remainder(merged) == kept[0]["content"]):
                     self._survival_summary_identity(merged, summary, summary_uid, "carrier", kept[0],
                                                     taken=out + kept[1:])  # site 19
+                    formed = (merged, kept[0])
                     kept = [merged, *kept[1:]]
                 else:
                     out.append(self._survival_summary_identity({"role": "user", "content": summary}, summary,
                                                                summary_uid, "survival_summary", taken=out + kept))
             return out + kept or result[-1:], count, ids, notice
+
+        def accepted(fitted, count, ids, kept, notice):
+            """The returned cut: its carrier is recorded only when its user row is a mapped stored row."""
+            if formed is not None and id(formed[1]) in store_ids:
+                self._survival_cut_carrier = (formed[0], f"{summary}\n\n", store_ids[id(formed[1])])
+            return fitted, count, ids, any(id(m) not in body_ids for m in kept), notice
 
         def keep_reply(cut: int, kept):
             reply = body[cut - 1] if cut else None
@@ -336,7 +353,7 @@ class SurvivalFitMixin:
             if index:
                 fitted, count, ids, notice = build(index, kept, reply)
                 if self._survival_measure(fitted) <= budget:
-                    return fitted, count, ids, any(id(m) not in body_ids for m in kept), notice
+                    return accepted(fitted, count, ids, kept, notice)
         if whole_turns:
             return None
         # the newest user turn alone is over budget: a bounded projection of it
@@ -348,7 +365,7 @@ class SurvivalFitMixin:
         kept = self._survival_projection(body[cut:], store_ids, budget - self._survival_measure(noticed))
         kept, reply = keep_reply(cut, kept)
         fitted, count, ids, notice = build(cut, kept, reply)
-        return fitted, count, ids, any(id(m) not in body_ids for m in kept), notice
+        return accepted(fitted, count, ids, kept, notice)
 
     @staticmethod
     def _survival_with_notice(content: Any, notice: str) -> Any:

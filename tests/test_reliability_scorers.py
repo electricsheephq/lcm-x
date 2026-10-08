@@ -677,6 +677,24 @@ def test_r14_a4_a_failed_db_copy_is_error_and_not_scored(tmp_path, monkeypatch, 
     assert out["verdict"] == "ERROR" and missing in out["reason"]
 
 
+def test_985_a_failed_probe_keeps_its_own_reason_when_the_db_copy_fails(tmp_path, monkeypatch):
+    """Regression (#985): a host that died before creating its databases reported only "database copy failed",
+    which hid the probe's own error and stderr tail. The verdict stays ERROR and the reason now leads with the
+    probe's failure; a finished probe with a failed copy keeps today's reason."""
+    def never(*_a, **_k):
+        raise AssertionError("scored despite a failed DB copy")
+    monkeypatch.setattr(run_matrix.bars, "score", never)
+    errors = ["lcm.db: FileNotFoundError('lcm.db does not exist')"]
+    died = {"exit": "error", "reason": "host process ended: EOF; stderr: Traceback ... ImportError: x"}
+    out = run_matrix.verdict_fields({"faults": []}, tmp_path, died, set(), {}, errors)
+    assert out["verdict"] == "ERROR"
+    assert out["reason"].startswith("probe failed before the databases were complete: host process ended: EOF")
+    assert "ImportError: x" in out["reason"] and "database copy failed, not scored: lcm.db" in out["reason"]
+    for last in ({"exit": "done"}, {"exit": "unsupported", "reason": "r"}):
+        rec = run_matrix.verdict_fields({"faults": []}, tmp_path, last, set(), {}, errors)
+        assert rec == {"verdict": "ERROR", "reason": "database copy failed, not scored: " + errors[0]}
+
+
 def test_r14_t17_an_unapplied_bar_is_not_covered():
     row = {"cell": "native-long-prefix/rotation", "verdict": "PASS", "applicable_bars": ["B1", "B2", "B4", "B5", "B7"]}
     assert report.issue_status([row], "", ("B6",))[0].startswith("NOT COVERED on B6")

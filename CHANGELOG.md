@@ -8,6 +8,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ### v0.27.0
 
+- Change: the system-prompt and in-context LCM notes now name `lcm_recall` first for facts from earlier sessions, and say that `lcm_grep` searches this session by default. Every agent sees this prompt change. (#998)
+- Change: with embeddings on, `lcm_recall` moves the full-text arm's best match into the ranked window when fusion would have pushed it out, displacing at most one session; the hit keeps its own score. `detail='answer_ready'` delivery still applies its citation and per-session rules, and `provenance.fts_anchor.delivered` reports the outcome. `LCM_RECALL_FTS_ANCHOR=false` turns it off; embeddings-off output is unchanged, and it is not used by proactive recall. (#950)
 - Bench: Track S's Codex-native arm gives each run its own isolated home, so parallel runs cannot mask a credential refresh. (#951)
 - Fix: a survival projection is recognised on a cold resume even when its tool-call arguments already quote survival marks, and a projection that installs shorter stored tool calls now carries its mark. (#959)
 - Fix: the doctor's attempt-only guidance and the operator guide state the v0.27.0 plugin-only rollback floor for projected or unknown-projection stores, and the doctor shows that floor for a damaged counter record that carries projection evidence. (#966)
@@ -28,6 +30,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: reset session gate observations, rank the oldest condensation group, and reserve tool-result stubs and proactive recall when bounding summaries, including inactive explicit caps. (#954)
 - Fix: a routine threshold sweep condenses the shallowest eligible depth again, skipping a group the summariser cannot shrink (at most 512 tokens, or within the L3 bound); the heaviest depth applies only when the rendered summary frontier exceeds a quarter of the survival ceiling, survival fit is off with a known window, or no group can shrink, so older summaries keep their detail. (#977)
 - Fix: after a survival fit with projected rows or an unknown projection count, the doctor advises a plugin-only rollback to v0.27.0 or later; older targets require stopping Hermes and moving the database aside to avoid cold-resume duplicates. (#919)
+- Fix: a summary carrier that a survival fit re-forms around a kept user row is no longer stored again as a new row after a Hermes in-place compression boundary, including when the host stamps the carrier or rewrites the current user row at turn end. The fit records the carrier as LCM's emission, and the identity anchor recognises it only when its remainder is exactly that stored row; anything else is still stored. A cold restart after a non-published fit can still store that carrier once. (#1000)
 
 ## v0.26.1 (delegated-child compaction fix)
 

@@ -2469,6 +2469,11 @@ def production_recall_hits(
             for arm, status in payload.get("provenance", {}).get("coverage", {}).items()
             if isinstance(status, str)
         }
+        # Phase D D1 reads these to tell the expected embeddings-off degradation from a timeout or another reason.
+        if payload.get("timeout") is True:
+            recall_health["timeout"] = True
+        if isinstance(payload.get("degraded_reason"), str) and payload["degraded_reason"]:
+            recall_health["degraded_reason"] = payload["degraded_reason"]
     if accounting is not None:
         degraded_outcomes = _typed_provider_degraded_outcomes(payload)
         accounting.record_degraded_outcomes(degraded_outcomes)
@@ -2898,6 +2903,9 @@ def evaluate_question(
                                 flush_flat_chunks()
             summary_text = deterministic_session_summary(session)
             session_summaries[session_id] = summary_text
+            # Time bounds from the session's stored rows, as compaction sets them: the recall prior reads a node's
+            # latest_at, so without them every summary hit sat at the recency floor while message hits did not (#950).
+            earliest_at, latest_at = store.get_time_bounds(store_ids) if messages else (None, None)
             node_id = dag.add_node(
                 SummaryNode(
                     session_id=session_id,
@@ -2907,6 +2915,8 @@ def evaluate_question(
                     source_token_count=sum(len(m["content"].split()) for m in messages),
                     source_type="messages",
                     created_at=float(order),
+                    earliest_at=earliest_at,
+                    latest_at=latest_at,
                 )
             )
             summary_specs.append((session_id, node_id, summary_text))
@@ -3201,6 +3211,7 @@ def evaluate_question(
         scored["lcm_recall"]["recall_health"] = {
             "degraded": recall_health.get("degraded"),
             "coverage": recall_health.get("coverage", {}),
+            **{key: recall_health[key] for key in ("timeout", "degraded_reason") if key in recall_health},
         }
         if recall_rerank:
             scored["lcm_recall"]["recall_rerank_status"] = recall_rerank_status
@@ -3722,6 +3733,14 @@ def _validate_restored_checkpoint_metrics(
             raise ValueError(
                 f"checkpoint line {line_number} field {health_field}.coverage "
                 f"must contain only string values: {path}"
+            )
+        if "timeout" in health and health["timeout"] is not True:
+            raise ValueError(
+                f"checkpoint line {line_number} field {health_field}.timeout must be true when present: {path}"
+            )
+        if "degraded_reason" in health and not isinstance(health["degraded_reason"], str):
+            raise ValueError(
+                f"checkpoint line {line_number} field {health_field}.degraded_reason must be a string: {path}"
             )
         if (
             "fts" in health["coverage"]

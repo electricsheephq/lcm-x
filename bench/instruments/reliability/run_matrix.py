@@ -99,7 +99,11 @@ def verdict_fields(cell: dict, d: Path, last: dict, fired: set, citations: dict,
                    db_dir: Path | None = None) -> dict:
     """The record's verdict. The scorers only run on a finished probe with complete DB copies (in ``db_dir``)."""
     if backup_errors:  # takes precedence over every other outcome
-        return {"verdict": "ERROR", "reason": "database copy failed, not scored: " + "; ".join(backup_errors)}
+        copy = "database copy failed, not scored: " + "; ".join(backup_errors)
+        if last["exit"] not in ("done", "unsupported"):  # the probe's own failure (stderr tail) is the likely cause
+            return {"verdict": "ERROR", "reason": "probe failed before the databases were complete: "
+                    f"{last.get('reason') or last}; {copy}"}
+        return {"verdict": "ERROR", "reason": copy}
     if last["exit"] == "unsupported":
         return {"verdict": "UNSUPPORTED", "reason": last.get("reason")}
     if last["exit"] != "done":
@@ -202,7 +206,7 @@ def run_cell(cell: dict, host_name: str, host: dict, plugin: dict, out: Path, ti
             break
         else:
             last = {"exit": "error", "reason": "phase budget exhausted"}
-        backup_errors = copy_dbs(home, s / "db")  # consulted only for a finished probe (verdict_fields)
+        backup_errors = copy_dbs(home, s / "db")  # any failure makes the cell ERROR (verdict_fields)
         fired_file = d / "faults-fired.jsonl"
         fired = {json.loads(x)["kind"] for x in fired_file.read_text().splitlines()} if fired_file.exists() else set()
         first_phase = d / "phase-A.json"
@@ -280,7 +284,8 @@ def main(argv=None) -> int:
             identities[name] = {"error": str(exc)}
     if a.transport:  # R2 (process_cell.py); without --transport the R1 in-process path is unchanged
         from bench.instruments.reliability import process_cell
-    selected = C.select(a.cells, extra=process_cell.R2_CELLS if a.transport else ())
+    selected = C.select(a.cells, extra=process_cell.R2_CELLS if a.transport else (),
+                        opt_in=process_cell.R2_PROBE_CELLS if a.transport else ())
     plugins = [plugin_tree.export(Path(a.lcm_repo), ref.strip(), out / "plugins", out) for ref in a.plugin_ref.split(",")]
     for ref in sorted({c["from_ref"] for c in selected if c.get("from_ref")}):  # native-on-off starting refs
         old = plugin_tree.export(Path(a.lcm_repo), ref, out / "plugins", out)
