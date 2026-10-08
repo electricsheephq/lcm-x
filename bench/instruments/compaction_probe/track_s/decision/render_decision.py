@@ -40,21 +40,24 @@ def load(cp):
     return out
 
 
-def cell(runs_by_seed, fn, need=2):
-    """-> (display, value|None, n per seed, max run-to-run spread)"""
-    means, ns, spreads, raw = [], [], [], []
+def cell(runs_by_seed, fn, need=2, excluded=None, unit="facts"):
+    """-> (display, value|None, n per seed, max run-to-run spread, runs with reader-truncated exclusions, excluded total).
+    A run whose score excluded reader-truncated probes still enters the mean; the cell says so and how many."""
+    means, ns, spreads, raw, cut = [], [], [], [], []
     for seed in SEEDS:
         rs = runs_by_seed.get(seed, [])
         vals = [fn(r) for r in rs]
         ns.append(len(rs))
         raw.append("/".join(f3(v) for v in vals) or "none")
+        cut += [x for x in map(excluded, rs[:need]) if x] if excluded else []
         if len(rs) >= need and all(v is not None for v in vals[:need]):
             means.append(sum(vals[:need]) / need)
             spreads.append(max(vals[:need]) - min(vals[:need]))
-    n = "/".join(map(str, ns))
+    n, mark = "/".join(map(str, ns)), f"{sum(cut)} {unit} excluded" if cut else ""
     if len(means) == len(SEEDS):
-        return f"{f3(sum(means) / len(means))} (n={n})", sum(means) / len(means), ns, max(spreads)
-    return f"INCOMPLETE (n={n}; runs {'<br>'.join(raw)})", None, ns, None
+        return (f"{f3(sum(means) / len(means))} (n={n}{'; INCOMPLETE: ' + mark if mark else ''})", sum(means) / len(means), ns,
+                max(spreads), len(cut), sum(cut))
+    return f"INCOMPLETE (n={n}; runs {'<br>'.join(raw)}{'; ' + mark if mark else ''})", None, ns, None, len(cut), sum(cut)
 
 
 def placement(r, p):
@@ -89,6 +92,11 @@ def spend_window(summary):
 
 def rows_for(data, arms, cp):
     lines, js = [], {}
+
+    def truncation(col):  # facts and continuation cells: per run, the probes score_s.py excluded as READER_TRUNCATED
+        key, unit = {"continuation": ("continuation", "fields"), "trap abst.": ("trap_abstention", "traps"),
+                     "recall": ("recall", "facts")}.get(col, ("facts_kept", "facts") if col.startswith("facts") else (None, ""))
+        return {"excluded": lambda r: r["metrics"][key].get("reader_truncated") or 0, "unit": unit} if key else {}
     cols = [("facts kept", lambda r: r["metrics"]["facts_kept"]["value"]),
             ("facts head", lambda r: placement(r, "head")), ("facts middle", lambda r: placement(r, "middle")),
             ("facts tail", lambda r: placement(r, "tail")),
@@ -104,8 +112,10 @@ def rows_for(data, arms, cp):
             lines.append(f"| {a} | " + " | ".join("UNSUPPORTED (n=0/0/0; end-only probe)" if a == "codex-native" and cp == 176 else "INCOMPLETE (n=0/0/0)" for _ in cols) + " |")
             continue
         need = 1 if a in OPEN else 2
-        cs = {c: cell(data.get(a + "-open", {}) if c == "recall" and a != "codex-native" and a not in OPEN else data[a], fn, need=2) for c, fn in cols}
-        js[a] = {c: {"display": v[0], "value": v[1], "n": v[2], "spread": v[3]} for c, v in cs.items()}
+        cs = {c: cell(data.get(a + "-open", {}) if c == "recall" and a != "codex-native" and a not in OPEN else data[a], fn, need=2,
+                      **truncation(c)) for c, fn in cols}
+        js[a] = {c: {"display": v[0], "value": v[1], "n": v[2], "spread": v[3], "incomplete_runs": v[4], "excluded": v[5]}
+                 for c, v in cs.items()}
         js[a]["recall_source"] = a + "-open" if a != "codex-native" and a not in OPEN else a
         if need == 1:  # -open: one run per seed by design -> INCOMPLETE under the 2-run rule; per-seed values shown
             js[a]["note"] = "one run per seed (D6); every cell INCOMPLETE under the 2-run rule"
@@ -153,20 +163,25 @@ def behaviour(data, arms):
 
 
 def parity(js_q, cp):
-    """LCM-X vs each arm: per-seed band = max(|r1-r2|) over the two arms; parity+ = LCMX mean >= other mean - band."""
+    """LCM-X vs each arm: per-seed band = max(|r1-r2|) over the two arms; parity+ = LCMX mean >= other mean - band.
+    A verdict over a cell with reader-truncated exclusions stands (exclusion is by design) and carries the marker."""
     lines = [f"| metric (cp-{cp}) | vs arm | LCMX-fleet | other | spread used | verdict |", "|---|---|---|---|---|---|"]
     out = {}
     for m in ("facts kept", "continuation", "continuity strict"):
         for other in ARMS[1:]:
             a, b = js_q.get("LCMX-fleet", {}).get(m), js_q.get(other, {}).get(m)
+            ex = {"LCMX-fleet": (a or {}).get("excluded", 0), other: (b or {}).get("excluded", 0)}
+            inc = bool((a or {}).get("incomplete_runs") or (b or {}).get("incomplete_runs"))
             if not a or not b or a["value"] is None or b["value"] is None:
                 v = "INCOMPLETE"
                 lines.append(f"| {m} | {other} | {a and a['display']} | {b and b['display']} | — | {v} |")
             else:
                 band = max(a["spread"], b["spread"])
                 v = "parity+" if a["value"] >= b["value"] - band else "below"
-                lines.append(f"| {m} | {other} | {f3(a['value'])} | {f3(b['value'])} | {f3(band)} | {v} |")
-            out[f"{m}/{other}"] = v
+                unit = "fields" if m == "continuation" else "facts"
+                mark = f" (INCOMPLETE: LCM-X {ex['LCMX-fleet']} {unit}, other {ex[other]} {unit} excluded)" if inc else ""
+                lines.append(f"| {m} | {other} | {f3(a['value'])} | {f3(b['value'])} | {f3(band)} | {v}{mark} |")
+            out[f"{m}/{other}"] = {"verdict": v, "incomplete": inc, "excluded": ex}
     return lines, out
 
 
