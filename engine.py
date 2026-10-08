@@ -382,8 +382,10 @@ class _RollupMaintenanceScheduler:
 _ROLLUP_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler()
 
 _SESSION_END_BUSY_TIMEOUT_MS = 50
-# A condensation may write up to this many tokens, so a group no heavier cannot shrink the frontier (#909, #977).
-_CONDENSATION_MIN_BUDGET_TOKENS = 1000
+# #909/#977: a condensation group of at most this many source tokens is about as long as its summary (Track S
+# output/source rises from about 0.35 at 1.4k tokens to about 0.8 at 0.85k), so condensing it cannot be relied on to
+# shrink the frontier. The configured L3 bound applies when larger: such a source is stored whole.
+_CONDENSATION_LIGHT_GROUP_TOKENS = 512
 _CODEX_GPT55_COMPACTION_THRESHOLD = 0.85
 _TOTAL_COMPACTIONS_SCOPE = "current_conversation"
 
@@ -7193,7 +7195,7 @@ class LCMEngine(
             raise ValueError("condensation requires same-depth summary nodes")
         combined_text = _condensation_source_text(nodes)
         source_tokens = sum(node.token_count for node in nodes)
-        token_budget = max(_CONDENSATION_MIN_BUDGET_TOKENS, int(source_tokens * 0.40))
+        token_budget = max(1000, int(source_tokens * 0.40))
         timeout_seconds = self._config.summary_timeout_ms / 1000
         budget = self._foreground_call_budget()
         if budget is not None:  # #605: the chain caps each attempt; refuse here before any work
@@ -7287,9 +7289,8 @@ class LCMEngine(
             # #977: with survival fit the #930 default prefix budget never falls below a quarter of the survival
             # ceiling, so a frontier that renders smaller is never cut: condense the shallowest depth whose group
             # can shrink (#909) and keep the older detail; under pressure, or when no group can shrink, the
-            # heaviest. With no known window there is no default bound. A group within twice the L3 bound may be
-            # stored whole (verbatim_small_source), and a condensation may write the minimum budget: neither shrinks.
-            light = max(_CONDENSATION_MIN_BUDGET_TOKENS, 2 * int(self._config.l3_truncate_tokens or 0))
+            # heaviest. With no known window there is no default bound.
+            light = max(_CONDENSATION_LIGHT_GROUP_TOKENS, int(self._config.l3_truncate_tokens or 0))
             routine = [d for d in sorted(eligible_depths)
                        if count_tokens(_condensation_source_text(by_depth[d][:fanin])) > light]
             ceiling = self._survival_ceiling()

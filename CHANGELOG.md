@@ -25,7 +25,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: `/lcm` refuses every subcommand when the session and engine profiles are known and differ, refuses unproven writes when a profile is unknown, preserves same-profile cold starts, and names the opened store when a profile is unknown. (#852)
 - Fix: withhold the LCM note from active auxiliary and rotated bypass sessions. (#953)
 - Fix: reset session gate observations, rank the oldest condensation group, and reserve tool-result stubs and proactive recall when bounding summaries, including inactive explicit caps. (#954)
-- Fix: a routine threshold sweep condenses the shallowest eligible depth again, skipping a group too light to shrink; the heaviest depth applies only when the rendered summary frontier exceeds a quarter of the survival ceiling, survival fit is off with a known window, or no group can shrink, so older summaries keep their detail. (#977)
+- Fix: a routine threshold sweep condenses the shallowest eligible depth again, skipping a group the summariser cannot shrink (at most 512 tokens, or within the L3 bound); the heaviest depth applies only when the rendered summary frontier exceeds a quarter of the survival ceiling, survival fit is off with a known window, or no group can shrink, so older summaries keep their detail. (#977)
 - Fix: after a survival fit with projected rows or an unknown projection count, the doctor advises a plugin-only rollback to v0.27.0 or later; older targets require stopping Hermes and moving the database aside to avoid cold-resume duplicates. (#919)
 
 ## v0.26.1 (delegated-child compaction fix)
