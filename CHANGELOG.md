@@ -8,6 +8,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ### v0.27.0
 
+- Change: `lcm_recall` message hits carry `event_time` (ISO 8601 UTC) and `event_time_source` when the host recorded when the message happened; hits without a recorded time omit both, a read skipped at the recall deadline or failed sets the response-level `event_time_unavailable` marker instead, the fields give way before any hit under the response cap (reason `response_cap`), and ranking, delivered hits and hit text are unchanged. (#995)
 - Change: the system-prompt and in-context LCM notes now name `lcm_recall` first for facts from earlier sessions, and say that `lcm_grep` searches this session by default. Every agent sees this prompt change. (#998)
 - Change: with embeddings on, `lcm_recall` moves the full-text arm's best match into the ranked window when fusion would have pushed it out, displacing at most one session; the hit keeps its own score. `detail='answer_ready'` delivery still applies its citation and per-session rules, and `provenance.fts_anchor.delivered` reports the outcome. `LCM_RECALL_FTS_ANCHOR=false` turns it off; embeddings-off output is unchanged, and it is not used by proactive recall. (#950)
 - Bench: Track S's Codex-native arm gives each run its own isolated home, so parallel runs cannot mask a credential refresh. (#951)
