@@ -9,6 +9,7 @@ With --second-tree the second arm is read from another run/decision/logs root (r
 results are keyed by --labels. Every p also has an unrounded p_exact; the d2 block uses only unrounded values."""
 
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -252,7 +253,7 @@ def per_arm():
             "level3_rate": round(l3 / leaves, 4) if leaves else None,
             f"facts_cp{max(CPS)}_r1_r2_spread": sp,
             "facts_r1_r2_spread_by_cp": by_cp,
-            "spread_over_0.10": [f"{cp}/{k}" for cp, s in raw.items() for k, v in s.items() if v is not None and v > 0.10],
+            "spread_over_0.10": [f"{cp}/{k}" for cp, s in raw.items() for k, v in s.items() if v is not None and round(v, 9) > 0.10],  # exact at the boundary
             "spread_unmeasured": [f"{cp}/{k}" for cp, s in raw.items() for k, v in s.items() if v is None],
             "runs_with_load_over_16": hiload,
             "worktree_heads": heads,
@@ -292,15 +293,42 @@ missing_spread = [f"{label}/cp-{cp}/seed-{n}" for label in labels for cp in CPS 
 expect = globals().get("EXPECT_SHAS")
 sha_mismatch = [f"{label}/{k}: {(h or 'missing')[:12]}" for label, sha in zip(labels, expect or ())
                 for k, h in arm_stats.get(label, {}).get("worktree_heads", {}).items() if not str(h or "").startswith(sha)]
+
+
+def receipt_mismatch():
+    """Each admitted score must have been scored from THIS tree's run: its manifest receipt hash must equal the hash of the
+    wall receipt in the label's logs root (a decision root from another tree fails here)."""
+    out, trees = [], globals().get("TREES")
+    if trees is None:  # extracted for an offline test without the CLI's tree map: nothing to bind
+        return out
+    for label in labels:
+        src = trees.get(label, {})
+        root, logs, arm = src.get("decision_root", H), src.get("logs", LOGS), src.get("arm", label)
+        manifest = score_manifest.load(root / "manifest.json")
+        for cp in CPS:
+            for n in SEEDS:
+                for run in ("r1", "r2"):
+                    key = f"scores/cp-{cp}/{arm}.seed-{n}.d{n}-{run}.json"
+                    entry = (manifest or {}).get("entries", {}).get(key)
+                    if entry is None or not score_manifest.admitted(root, manifest, root / key):
+                        continue
+                    w = logs / f"s2-{arm}-d{n}-{run}.log.wall"
+                    have = hashlib.sha256(w.read_bytes()).hexdigest() if w.is_file() else None
+                    if entry.get("receipt_sha256") != have:
+                        out.append(f"{label}/cp-{cp}/seed-{n}/{run}")
+    return out
+
+
+receipts = receipt_mismatch()
 two_tree = bool(globals().get("TWO_TREE"))  # one configuration across trees is a D2 rule; single-tree arms differ by design
 configs = [c for label in labels for c in arm_stats.get(label, {}).get("run_configs", [])] if two_tree else []
 diff = sorted({k for c in configs for k in c if c[k] != configs[0][k]})
 diff += sorted({f"arm.{k}" for c in configs if "arm" in diff and isinstance(c["arm"], dict) and isinstance(configs[0]["arm"], dict)
                 for k in {*c["arm"], *configs[0]["arm"]} if c["arm"].get(k) != configs[0]["arm"].get(k)})
-verdict = ("INCOMPLETE" if status == "INCOMPLETE" or missing_spread or sha_mismatch or diff
+verdict = ("INCOMPLETE" if status == "INCOMPLETE" or missing_spread or sha_mismatch or receipts or diff
            else "REPEAT_SEEDS" if any(spread.values()) else "BLOCK" if any(v["blocks"] for v in d2.values()) else "PASS")
 d2.update({"candidate": labels[1], "spread_over_0.10": spread, "missing_spread": missing_spread,
-           "expected_shas": dict(zip(labels, expect)) if expect else None, "sha_mismatch": sha_mismatch,
+           "expected_shas": dict(zip(labels, expect)) if expect else None, "sha_mismatch": sha_mismatch, "receipt_mismatch": receipts,
            "config_equal": (not diff) if two_tree else None, **({"config_diff_keys": diff} if diff else {}), "status": status, "verdict": verdict})
 print(
     json.dumps(

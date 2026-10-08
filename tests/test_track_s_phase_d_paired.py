@@ -35,6 +35,8 @@ def build(root, arm, kept=kept_all, seeds=(1,), sha=SHAS["prev"], value=None, su
     for seed in seeds:
         for run in ("r1", "r2"):
             rundir = runs / arm / f"seed-{seed}" / f"d{seed}-{run}"
+            receipt = logs / f"s2-{arm}-d{seed}-{run}.log.wall"  # per-tree start time: receipts differ across trees
+            receipt.write_text(f"start {int(sha[:6], 16)}\nexit 0 end {int(sha[:6], 16) + 9}\n")
             for cp in CPS:
                 (rundir / f"cp-{cp}").mkdir(parents=True, exist_ok=True)
                 (rundir / f"cp-{cp}" / "summary.json").write_text(json.dumps({"events": []}))
@@ -49,9 +51,9 @@ def build(root, arm, kept=kept_all, seeds=(1,), sha=SHAS["prev"], value=None, su
                 key = f"scores/cp-{cp}/{arm}.seed-{seed}.d{seed}-{run}.json"
                 (decision / key).parent.mkdir(parents=True, exist_ok=True)
                 (decision / key).write_text(json.dumps(payload))
-                manifest["entries"][key] = {"sha256": hashlib.sha256((decision / key).read_bytes()).hexdigest()}
+                manifest["entries"][key] = {"sha256": hashlib.sha256((decision / key).read_bytes()).hexdigest(),
+                                            "receipt_sha256": hashlib.sha256(receipt.read_bytes()).hexdigest()}
             (rundir / "summary.json").write_text(json.dumps(summarize(arm, sha, seed, run)))
-            (logs / f"s2-{arm}-d{seed}-{run}.log.wall").write_text("start 1\nexit 0 end 2\n")
     manifest_path.write_text(json.dumps(manifest))
     return runs, decision, logs
 
@@ -195,6 +197,24 @@ def test_spread_threshold_uses_the_unrounded_spread(tmp_path):
     cand = out["per_arm"]["cand"]
     assert cand["facts_r1_r2_spread_by_cp"]["cp-176"] == {"seed-1": 0.1}
     assert cand["spread_over_0.10"] == ["cp-176/seed-1"] and out["d2"]["verdict"] == "REPEAT_SEEDS"
+
+
+def test_a_spread_of_exactly_ten_points_does_not_repeat(tmp_path):
+    # 48/60 vs 42/60: 0.8 - 0.7 is 0.10000000000000009 in binary floating point; the rule repeats only above 0.10.
+    out = two_tree(tmp_path, value=lambda seed, run, cp: 0.8 if run == "r1" else 0.7)
+    assert out["per_arm"]["cand"]["spread_over_0.10"] == [] and out["d2"]["verdict"] == "PASS"
+
+
+def test_d2_binds_scores_to_the_selected_trees_receipts(tmp_path):
+    # Review repro: the candidate's run and log roots paired with the PREVIOUS tree's decision root (a stale or wrong
+    # root) must not read the previous tree's scores as the candidate's: the manifest's receipt hashes do not match.
+    prev = build(tmp_path / "prev", "LCMX-fleet")
+    cand_runs, _, cand_logs = build(tmp_path / "cand", "LCMX-fleet", lambda *a: set(FACTS[:10]), sha=SHAS["cand"])
+    out = analyze(tmp_path, ["LCMX-fleet", "LCMX-fleet"], prev, (cand_runs, prev[1], cand_logs), labels=["prev", "cand"],
+                  shas=(SHAS["prev"][:7], SHAS["cand"][:7]))
+    assert out["d2"]["receipt_mismatch"] and all(m.startswith("cand/") for m in out["d2"]["receipt_mismatch"])
+    assert out["d2"]["verdict"] == "INCOMPLETE"
+    assert two_tree(tmp_path / "ok")["d2"]["receipt_mismatch"] == []
 
 
 def test_d2_incomplete_when_receipts_are_missing(tmp_path):
