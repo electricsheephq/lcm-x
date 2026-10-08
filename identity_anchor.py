@@ -290,7 +290,20 @@ class IdentityAnchorMixin:
 
         consumed: set[int] = set()
         matched: dict[int, list] = {}
-        emitted = None  # #1000: the active proof's projection of the view
+        emitted = None  # #1000: the active proof's projection of the view, read once
+        carriers = bool(proof) and any(isinstance(d, dict) and d.get("kind") == "carrier"
+                                       for d in proof.get("emissions") or ())
+
+        def emitted_carrier(idx: int) -> Optional[list]:  # #1000: a carrier LCM emitted around a stored user row
+            nonlocal emitted
+            if not carriers or identity_messages[idx].get("role") != "user":
+                return None
+            if emitted is None:
+                from .reconcile import _project_emitted_occurrences
+
+                emitted = _project_emitted_occurrences(identity_messages, proof=proof).entries
+            return self._identity_anchor_emitted_carrier(identity_messages[idx], emitted, idx, chain, consumed)
+
         # R1: per key, the host view's occurrences consume the stored ones in order; the rest are new.
         forms_of = {id(r): forms for pairs in by_stamp.values() for r, forms in pairs}
         occurrences = [(idx, (stamps[idx], identity_at(idx))) for idx in sorted(stamps)
@@ -304,6 +317,10 @@ class IdentityAnchorMixin:
         for idx in range(start, n if wanted else start):  # nothing stamped: only the #633 audit below
             identity = identity_at(idx) if idx in stamps and idx not in plan["replayed"] else None
             if identity is not None and identity[0] == "user":
+                group = emitted_carrier(idx)  # #1000: Hermes 0.21.5 stamps the adopted carrier with its own clock;
+                if group is not None:  # the claim is the descriptor's and the stored text's, never the stamp's
+                    self._identity_anchor_take(idx, group, consumed, matched, plan)
+                    continue
                 row = self._identity_anchor_ws_row(identity, stamps[idx], [r for r, _f in by_stamp[stamps[idx]]], consumed)
                 if row is not None:  # R1-ws: the host persisted this occurrence without its edge whitespace
                     plan.setdefault("ws", []).append((row, identity_messages[idx]))
@@ -314,14 +331,7 @@ class IdentityAnchorMixin:
                                                shown)
             elif idx not in stamps and idx not in plan["replayed"]:  # D-D plan (ii): H1 merged LCM's carrier
                 group = self._identity_anchor_carrier_group(identity_messages[idx], consumed)
-                if group is None and identity_messages[idx].get("role") == "user":  # #1000: a carrier LCM
-                    # emitted around a stored user row (a survival fit's); the projection is read once
-                    if emitted is None:
-                        from .reconcile import _project_emitted_occurrences
-
-                        emitted = _project_emitted_occurrences(identity_messages, proof=proof).entries if proof else ()
-                    group = self._identity_anchor_emitted_carrier(identity_messages[idx], emitted, idx, chain,
-                                                                  consumed)
+                group = group if group is not None else emitted_carrier(idx)  # #1000: a survival fit's carrier
                 if group is not None:
                     self._identity_anchor_take(idx, group, consumed, matched, plan)
         for idx in sorted(plan["replayed"]):  # a replayed survival-fit projection: its stored replies follow it

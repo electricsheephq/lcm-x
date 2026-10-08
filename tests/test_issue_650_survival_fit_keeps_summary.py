@@ -502,13 +502,20 @@ def _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch, path="held"):
     return engine, fitted, rest
 
 
+@pytest.mark.parametrize("host_stamp", [False, True], ids=["unstamped", "host-stamped"])
 @pytest.mark.parametrize("path", ["held", "exception"])
 @pytest.mark.parametrize("rewrite_current", [False, True], ids=["as-returned", "turn-end-rewrite"])
-def test_1000_held_fit_then_inplace_boundary_stores_no_carrier(tmp_path, host, monkeypatch, rewrite_current, path):
+def test_1000_held_fit_then_inplace_boundary_stores_no_carrier(tmp_path, host, monkeypatch, rewrite_current, path,
+                                                               host_stamp):
     """The post-turn ingest of the fitted list plus the reply stores the reply (and, after the host's
-    turn-end rewrite of the current user row, that row's persist variant), never the re-formed carrier."""
+    turn-end rewrite of the current user row, that row's persist variant), never the re-formed carrier.
+    ``host_stamp``: the host stamps the adopted carrier, which has none, with its own clock (Hermes 0.21.5:
+    the Track H forced cell stored every carrier with a fresh ``host_message_timestamp``)."""
     engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch, path)
     try:
+        if host_stamp:
+            assert "timestamp" not in fitted[0]
+            fitted[0]["timestamp"] = 40_000.0  # in place: the host stamps the object it adopted
         if rewrite_current:  # turn_finalizer.py:270: the API variant becomes the persist variant
             fitted[-1] = {**fitted[-1], "content": "[CUR] persist variant"}
         stored = len(_rows(engine))
@@ -522,8 +529,10 @@ def test_1000_held_fit_then_inplace_boundary_stores_no_carrier(tmp_path, host, m
         engine.shutdown()
 
 
+@pytest.mark.parametrize("host_stamp", [False, True], ids=["unstamped", "host-stamped"])
 @pytest.mark.parametrize("prompt", ["older-row", "carrier-row"])
-def test_1000_loss_guard_host_merged_summary_with_a_repeated_prompt_is_stored(tmp_path, host, monkeypatch, prompt):
+def test_1000_loss_guard_host_merged_summary_with_a_repeated_prompt_is_stored(tmp_path, host, monkeypatch, prompt,
+                                                                             host_stamp):
     """No carrier descriptor binds a host merge of LCM's standalone summary and a NEW prompt whose text
     equals a stored user row (an older one, or U itself: byte-equal to the emitted carrier, but a second
     occurrence the descriptor does not bind): that row is new content and is stored (duplicate over loss)."""
@@ -533,6 +542,8 @@ def test_1000_loss_guard_host_merged_summary_with_a_repeated_prompt_is_stored(tm
         repeated = rest if prompt == "carrier-row" else next(
             r["content"] for r in _rows(engine) if r["role"] == "user" and r["content"].startswith("[T050]"))
         merged = {"role": "user", "content": f"{summary}\n\n{repeated}"}  # H1's _merge_consecutive_users
+        if host_stamp:  # the host stamps both rows with its own clock
+            fitted[0]["timestamp"], merged["timestamp"] = 40_000.0, 40_002.0
         assert engine._generated_context_carrier_remainder(merged) == repeated
         assert (merged["content"] == fitted[0]["content"]) is (prompt == "carrier-row")
         stored = len(_rows(engine))
