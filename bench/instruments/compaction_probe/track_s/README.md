@@ -123,7 +123,12 @@ python3 -B "$KIT/decision/analyze_paired.py" --material "$TRACK_S_MATERIAL" \
 `--labels` (distinct; default the two arm names) key `per_arm`, `loss_classes` and `trees`.
 Every `p` is rounded for display and has an unrounded `p_exact`. The gate reads `d2.verdict`
 (`INCOMPLETE`, `REPEAT_SEEDS`, `BLOCK` or `PASS`) and, per checkpoint, `d2.cp-<n>.p_exact` and
-`effect_pts_exact` (candidate minus previous, facts kept). `d2.spread_over_0.10` lists, per label,
+`effect_pts_exact` (candidate minus previous). D2's unit is the fact (fact id × checkpoint), not the
+occurrence: each fact's kept share over its paired repetitions (seeds × runs) on each side, an exact
+two-sided sign test over the facts whose share changed (`wins`/`losses`/`ties`, `n_facts`), and the mean
+per-fact share difference as the effect (`<cp>.facts_per_fact` has the same with display rounding). The
+per-occurrence McNemar stays in `axes.facts_all` and `d2.cp-<n>.occurrence_mcnemar_p_exact`; it does not
+gate, because a fact's repetitions are not independent pairs. `d2.spread_over_0.10` lists, per label,
 each `cp-<n>/seed-<n>` whose r1/r2 facts-kept spread exceeds 0.10 (`REPEAT_SEEDS`); repeating those
 seeds, and the inconclusive outcome, is the operator's step. `--expect-shas` (required with
 `--second-tree`) binds each arm to its product commit. The verdict is also `INCOMPLETE` when a

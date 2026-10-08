@@ -6,7 +6,10 @@ active_constraint continuity items (same alignment). b = first arm kept & second
 The v1/v2 column names denote first/second CLI arms; sign-test wins favor the second arm.
 Each run pair votes once per axis; ties are excluded from the exact two-sided sign p-value.
 With --second-tree the second arm is read from another run/decision/logs root (release over release, D2);
-results are keyed by --labels. Every p also has an unrounded p_exact; the d2 block uses only unrounded values."""
+results are keyed by --labels. Every p also has an unrounded p_exact; the d2 block uses only unrounded values.
+The D2 gate's unit is the fact (fact id x checkpoint), not the occurrence: one planted fact repeats across seeds and runs, so
+its occurrences are not independent pairs. facts_per_fact gives each fact its kept share over its paired repetitions on each
+side and an exact two-sided sign test over the facts whose share changed; the effect is the mean per-fact share difference."""
 
 import argparse
 import hashlib
@@ -146,6 +149,7 @@ def pair_axes(cp):
     }  # [b, c, v1 kept, v2 kept] + n below
     n_items, excluded = {k: 0 for k in axes}, {k: 0 for k in axes}
     pairs, missing, partial = [], [], False
+    per_fact = {}  # fact id -> [paired repetitions, first arm kept, second arm kept] (facts_all, pooled over seeds and runs)
     signs = {k: {"wins": 0, "losses": 0, "ties": 0} for k in axes}
     first, second = globals().get("LABELS", ARMS)
     for seed in SEEDS:
@@ -186,6 +190,9 @@ def pair_axes(cp):
                 k1 = False if fid in lost1 else kept(s1, fid)  # an admission-proven loss outranks truncation
                 k2 = False if fid in lost2 else kept(s2, fid)
                 add("facts_all", k1, k2)
+                if k1 is not None and k2 is not None:
+                    tally = per_fact.setdefault(fid, [0, 0, 0])
+                    tally[0], tally[1], tally[2] = tally[0] + 1, tally[1] + k1, tally[2] + k2
                 add(f"facts_{f['placement']}", k1, k2)
                 if f["class"] == "early_user_constraint":
                     add("constraint_class", k1, k2)
@@ -216,7 +223,23 @@ def pair_axes(cp):
             "sign_test": {**signs[ax], "p": round(mcnemar(signs[ax]["wins"], signs[ax]["losses"]), 4),
                           "p_exact": mcnemar(signs[ax]["wins"], signs[ax]["losses"])},
         }
-    return {"status": "INCOMPLETE" if missing or partial or any(excluded.values()) else "COMPLETE", "missing_pairs": missing, "pairs": pairs, "axes": out}
+    tallies = [t for t in per_fact.values() if t[0]]
+    wins, losses = sum(k2 > k1 for _, k1, k2 in tallies), sum(k2 < k1 for _, k1, k2 in tallies)  # both sides share n
+    common = math.lcm(*(n for n, _, _ in tallies)) if tallies else 1  # exact mean of share differences: integer numerator
+    numerator = sum((k2 - k1) * (common // n) for n, k1, k2 in tallies)
+    effect = 100 * numerator / (common * len(tallies)) if tallies else None
+    fact_unit = {
+        "n_facts": len(tallies),
+        "v1_mean_share": round(sum(k1 / n for n, k1, _ in tallies) / len(tallies), 3) if tallies else None,
+        "v2_mean_share": round(sum(k2 / n for n, _, k2 in tallies) / len(tallies), 3) if tallies else None,
+        "effect_pts": None if effect is None else round(effect, 1),
+        "effect_pts_exact": effect,
+        "wins": wins, "losses": losses, "ties": len(tallies) - wins - losses,
+        "p": round(mcnemar(wins, losses), 4),
+        "p_exact": mcnemar(wins, losses),  # the exact two-sided sign test: McNemar's binomial on wins vs losses
+    }
+    return {"status": "INCOMPLETE" if missing or partial or any(excluded.values()) else "COMPLETE", "missing_pairs": missing, "pairs": pairs,
+            "axes": out, "facts_per_fact": fact_unit}
 
 
 def loads():
@@ -322,8 +345,11 @@ def losses(cp):
 paired = {f"cp-{cp}": {**pair_axes(cp), "loss_classes": losses(cp)} for cp in CPS}
 labels, arm_stats = globals().get("LABELS", ARMS), per_arm()
 status = "INCOMPLETE" if any(p["status"] == "INCOMPLETE" for p in paired.values()) else "COMPLETE"
-d2 = {cp: {"p_exact": a["p_exact"], "effect_pts_exact": 100 * (a["c_v2_only"] - a["b_v1_only"]) / a["n"] if a["n"] else None}
-      for cp, a in ((cp, p["axes"]["facts_all"]) for cp, p in paired.items())}  # k2 - k1 == c - b on paired items
+# D2 gates on the per-fact unit; the per-occurrence McNemar is reported beside it and never gates (it treats a fact's repeats as
+# independent pairs, so its p is too small)
+d2 = {cp: {"unit": "fact", "n_facts": u["n_facts"], "wins": u["wins"], "losses": u["losses"], "ties": u["ties"],
+           "p_exact": u["p_exact"], "effect_pts_exact": u["effect_pts_exact"], "occurrence_mcnemar_p_exact": a["p_exact"]}
+      for cp, u, a in ((cp, p["facts_per_fact"], p["axes"]["facts_all"]) for cp, p in paired.items())}
 for v in d2.values():
     v["net_loss_ge_5"] = v["effect_pts_exact"] is not None and v["effect_pts_exact"] <= -5
     v["blocks"] = v["p_exact"] < 0.05 and v["net_loss_ge_5"]

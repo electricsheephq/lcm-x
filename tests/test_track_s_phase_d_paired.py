@@ -140,7 +140,9 @@ def test_p_exact_is_unrounded(tmp_path):
         assert facts["p_exact"] == ns["mcnemar"](facts["b_v1_only"], facts["c_v2_only"])
         sign = facts["sign_test"]
         assert sign["p_exact"] == ns["mcnemar"](sign["wins"], sign["losses"])
-        assert out["d2"][f"cp-{cp}"]["p_exact"] == facts["p_exact"]
+        assert out["d2"][f"cp-{cp}"]["occurrence_mcnemar_p_exact"] == facts["p_exact"]
+        unit = out[f"cp-{cp}"]["facts_per_fact"]
+        assert unit["p_exact"] == ns["mcnemar"](unit["wins"], unit["losses"]) and out["d2"][f"cp-{cp}"]["p_exact"] == unit["p_exact"]
 
 
 def test_spread_is_reported_at_every_checkpoint(tmp_path):
@@ -169,9 +171,38 @@ def test_d2_passes_a_small_loss(tmp_path):
     out = two_tree(tmp_path, cand_kept=lambda seed, run, cp: set(FACTS[1:]) if run == "r1" else set(FACTS))
     for cp in CPS:
         d2 = out["d2"][f"cp-{cp}"]
-        assert d2["effect_pts_exact"] == -1.25 and d2["p_exact"] == 0.25
+        assert d2["effect_pts_exact"] == -1.25 and d2["p_exact"] == 1.0  # one fact lost in half its repetitions
+        assert d2["occurrence_mcnemar_p_exact"] == 0.25 and (d2["n_facts"], d2["wins"], d2["losses"]) == (40, 0, 1)
         assert d2["net_loss_ge_5"] is False and d2["blocks"] is False
     assert out["d2"]["verdict"] == "PASS"
+
+
+def test_d2_unit_is_the_fact_not_the_occurrence(tmp_path):
+    # Four facts lost in every repetition (3 seeds x 2 runs): 24 discordant occurrences, all one way. Per occurrence that is
+    # McNemar p = 2^-23 with a 10-point loss, which would block. The four facts are the independent units: a sign test on
+    # 4 losses and 0 wins gives p = 0.125, so D2 does not block.
+    out = two_tree(tmp_path, cand_kept=lambda *a: set(FACTS) - {"f0", "f1", "f2", "f3"})
+    for cp in CPS:
+        facts = out[f"cp-{cp}"]["axes"]["facts_all"]
+        assert (facts["n"], facts["b_v1_only"], facts["c_v2_only"]) == (240, 24, 0) and facts["p_exact"] < 0.05
+        d2 = out["d2"][f"cp-{cp}"]
+        assert d2["unit"] == "fact" and d2["occurrence_mcnemar_p_exact"] == facts["p_exact"] == 2 / 2**24
+        assert (d2["n_facts"], d2["wins"], d2["losses"], d2["ties"]) == (40, 0, 4, 36)  # pooled across seeds by fact id
+        assert d2["effect_pts_exact"] == -10.0 and d2["p_exact"] == 0.125
+        assert d2["net_loss_ge_5"] is True and d2["blocks"] is False
+    assert out["d2"]["verdict"] == "PASS"
+
+
+def test_d2_fact_share_counts_partial_repetitions(tmp_path):
+    # A fact lost in only some repetitions moves its share, not a whole unit: f0..f9 lost in both runs of seed 1 only is a
+    # one-third share loss on each of 10 facts (sign test p = 2/1024, mean -8.3 points), which blocks.
+    out = two_tree(tmp_path, cand_kept=lambda seed, run, cp: set(FACTS[10:]) if seed == 1 else set(FACTS))
+    for cp in CPS:
+        unit = out[f"cp-{cp}"]["facts_per_fact"]
+        assert (unit["v1_mean_share"], unit["v2_mean_share"], unit["losses"], unit["effect_pts"]) == (1.0, 0.917, 10, -8.3)
+        d2 = out["d2"][f"cp-{cp}"]
+        assert d2["effect_pts_exact"] == 100 * -20 / 240 and d2["p_exact"] == 2 / 1024 and d2["blocks"] is True
+    assert out["d2"]["verdict"] == "BLOCK"
 
 
 def test_d2_incomplete_when_a_pair_is_missing(tmp_path):
