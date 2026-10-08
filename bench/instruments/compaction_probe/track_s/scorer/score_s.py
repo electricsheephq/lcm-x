@@ -307,7 +307,14 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     run = detect(run_dir, all_rows)(run_dir, rows, arm) if (run_dir / "summary.json").exists() else {
         "runtime": "unknown", "writer": None, "rows": [], "events": [], "run_status": "UNRUN", "store_backed": False,
         "admission_missing": [], "receipts": {}, "gaps": ["summary.json missing"], "label_map": {}}
-    base = []
+    capped = {a.get("batch") for p in (run_dir / "answers").glob("*.json") if
+              ((a := jload(p)).get("reader_calls") or [a.get("usage")])[-1] and
+              ((a.get("reader_calls") or [a.get("usage")])[-1] or {}).get("completion_tokens", 0) >= 8192}
+    # only unanswered probes of a capped batch are excluded; an admission-proven loss stays a loss
+    truncated = {r["id"] for r in run["rows"] if (r["answer"] is None or isinstance(r["answer"], str) and not r["answer"].strip()) and
+                 ((r["row_status"] == "ERROR" and "READER_TRUNCATED" in (r["error"] or "")) or r["batch"] in capped)}
+    truncated -= set(run["admission_missing"])
+    base = [("INCOMPLETE", f"READER_TRUNCATED: {len(truncated)} probes excluded: {sorted(truncated)}")] if truncated else []
     if run["run_status"] not in ("DONE", "COMPLETED"):
         base.append(("UNRUN", f"run status {run['run_status']}"))
     if not rows:
@@ -324,7 +331,11 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     batch_of = {p["id"]: b["id"] for b in batches for p in b["probes"]}
     unasked_batches = sorted({batch_of[i] for i in batch_of if i not in by_id})
     lost = sorted(set(run["admission_missing"]) & {f["id"] for f in facts})
-    probes = {}
+    probes = {pid: {"class": "READER_TRUNCATED", "batch": by_id[pid]["batch"], "answer": by_id[pid]["answer"]} for pid in truncated}
+    truncated_facts = {f["id"] for f in facts} & truncated
+    facts = [f for f in facts if f["id"] not in truncated]
+    traps = [t for t in traps if t["id"] not in truncated]
+    cont_state = {k: v for k, v in cont_state.items() if f"{cont_state['id']}.{k}" not in truncated}
 
     def judge(pid, expected, trap):
         r = by_id.get(pid)
@@ -347,7 +358,7 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     miss = missing(f["id"] for f in facts)
     iss = base + ([("INCOMPLETE", f"{len(miss)} of {len(facts)} scheduled facts have no result row (batches not run: "
                     f"{', '.join(unasked_batches)})")] if miss else [])
-    m = {"facts_kept": metric(correct / len(facts), iss, correct=correct, denominator=len(facts), by_class_placement=grid,
+    m = {"facts_kept": metric(correct / len(facts) if facts else None, iss, correct=correct, reader_truncated=len(truncated_facts), denominator=len(facts), by_class_placement=grid,
                               lost_before_compaction={"ids": lost, "source": run.get("admission_source")})}
     # stale-value rate (lower is better): the superseded value asserted, even alongside the current one
     sup = [f for f in facts if f.get("stale")]
@@ -367,8 +378,8 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     abst = [t["id"] for t in traps if judge(t["id"], None, True)[0] == "ABSTAIN"]
     mt = missing(t["id"] for t in traps)
     ti = base + ([("INCOMPLETE", f"no row for {mt}")] if mt else [])
-    m["trap_abstention"] = metric(len(abst) / len(traps), ti, abstained=abst, denominator=len(traps))
-    m["trap_failure_rate"] = metric(1 - len(abst) / len(traps), ti, lower_is_better=True)
+    m["trap_abstention"] = metric(len(abst) / len(traps) if traps else None, ti, abstained=abst, denominator=len(traps))
+    m["trap_failure_rate"] = metric(1 - len(abst) / len(traps) if traps else None, ti, lower_is_better=True)
     # continuation, field by field
     fields = [k for k in cont_state if k not in CONT_META]
     ok_f, mc = [], []
@@ -380,7 +391,7 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
             ok_f.append(k)
         probes[pid] = {"batch": (r or {}).get("batch"), "class": "CORRECT" if k in ok_f else "MISSING" if r is None else "MISS",
                        "answer": (r or {}).get("answer")}
-    m["continuation"] = metric(len(ok_f) / len(fields), base + ([("INCOMPLETE", f"no continuation_field row for {mc}")] if mc else []),
+    m["continuation"] = metric(len(ok_f) / len(fields) if fields else None, base + ([("INCOMPLETE", f"no continuation_field row for {mc}")] if mc else []),
                                correct_fields=ok_f, denominator=len(fields))
     m["continuity"] = continuity(run, man)
     m["level3"] = level3(run)
@@ -480,6 +491,7 @@ def recall(run, man, facts, by_id, probes, base, lost):
             tags.setdefault(f["id"], []).append("clipped-middle")
     for t in man.get("receipt_targets", []):
         tags.setdefault(t["id"], []).append({"externalization": "externalized-file", "ancestry": "superseded-decision"}[t["kind"]])
+    tags = {pid: tg for pid, tg in tags.items() if probes.get(pid, {}).get("class") != "READER_TRUNCATED"}
     iss, per_label, per_answer, n_ok = list(base), {k: [0, 0] for k in LABELS}, [], 0
     for pid, tg in sorted(tags.items()):
         r, p = by_id.get(pid), probes.get(pid, {})
