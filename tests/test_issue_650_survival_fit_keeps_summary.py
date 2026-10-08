@@ -50,20 +50,21 @@ def _engine(tmp_path, window=24_000) -> LCMEngine:
     return engine
 
 
-def _turn(tag: str, ts: float, list_users: bool = False) -> list[dict]:
+def _turn(tag: str, ts: float, list_users: bool = False, stamped_reply: bool = False) -> list[dict]:
     text = f"[{tag}] user turn{PAD}"
+    reply = {"role": "assistant", "content": f"reply to {tag}{PAD}"}
     return [{"role": "user", "content": [{"type": "text", "text": text}] if list_users else text, "timestamp": ts},
-            {"role": "assistant", "content": f"reply to {tag}{PAD}"}]
+            {**reply, "timestamp": ts + 1} if stamped_reply else reply]
 
 
 def _rows(engine) -> list[dict]:
     return engine._store.get_session_messages(engine._session_id, limit=100_000)
 
 
-def _hidden_backlog(engine, *, system=False, list_users=False, big_newest=0) -> list[dict]:
+def _hidden_backlog(engine, *, system=False, list_users=False, big_newest=0, stamped_replies=False) -> list[dict]:
     """Every turn stored; the host list no longer shows the oldest 48 turns (a hidden backlog)."""
     head = [{"role": "system", "content": "system prompt"}] if system else []
-    turns = [r for i in range(108) for r in _turn(f"T{i:03d}", 10.0 * i, list_users)]
+    turns = [r for i in range(108) for r in _turn(f"T{i:03d}", 10.0 * i, list_users, stamped_replies)]
     if big_newest:
         turns += [{"role": "user", "content": "[N] newest", "timestamp": 5000.0},
                   {"role": "assistant", "content": "answer " * big_newest}]
@@ -462,5 +463,73 @@ def test_r3_split_carrier_without_a_carrier_shape_matches_assembly(tmp_path, hos
                                       request_cap=engine._survival_measure(expected))
         assert result == expected
         assert engine._is_replayed_context_scaffold_message(result[0])
+    finally:
+        engine.shutdown()
+
+
+# -- #1000: a fit's re-formed carrier is a replay, never a new row --------------------------------------
+
+_BOUNDARY = dict(boundary_reason="compression", old_session_id="S", platform="telegram",
+                 conversation_id="conv", context_length=24_000)
+
+
+def _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch):
+    """Hermes 0.21.x: a published compaction, the in-place boundary (no ``on_session_end`` commit), more
+    turns, then a compress held at the ceiling (#618) whose survival fit re-forms the carrier around the
+    first kept user row U, and the in-place boundary again (the cursor resets: the fit's proof is unconsumed)."""
+    engine = _engine(tmp_path)
+    view = _hidden_backlog(engine, stamped_replies=True)  # string users -> an assembled carrier; Hermes stamps every row
+    first = engine.compress(view, current_tokens=host(view))  # publishes (durable proof)
+    engine.on_session_start("S", **_BOUNDARY)  # the 0.21.x in-place commit signal
+    grown = [*first, *[r for i in range(12) for r in _turn(f"G{i:02d}", 20_000.0 + 10 * i, stamped_reply=True)],
+             {"role": "user", "content": "[CUR] api variant", "timestamp": 30_000.0}]
+    engine.ingest(grown)  # host per-turn persistence
+    monkeypatch.setattr(engine, "_hold_fit_only_applies", lambda tokens: True)  # #618 held
+    fitted = engine.compress(grown, current_tokens=host(grown))
+    assert engine.last_compression_noop_reason == "held" and engine._last_survival_fit
+    rest = engine._generated_context_carrier_remainder(fitted[0])
+    assert rest and rest != engine._generated_context_carrier_remainder(first[0])  # re-formed around U
+    engine.on_session_start("S", **_BOUNDARY)
+    assert engine._ingest_cursor == 0 and engine._ingest_cursor_needs_reconcile  # documents the reset
+    return engine, fitted, rest
+
+
+@pytest.mark.parametrize("rewrite_current", [False, True], ids=["as-returned", "turn-end-rewrite"])
+def test_1000_held_fit_then_inplace_boundary_stores_no_carrier(tmp_path, host, monkeypatch, rewrite_current):
+    """The post-turn ingest of the fitted list plus the reply stores the reply (and, after the host's
+    turn-end rewrite of the current user row, that row's persist variant), never the re-formed carrier."""
+    engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    try:
+        if rewrite_current:  # turn_finalizer.py:270: the API variant becomes the persist variant
+            fitted[-1] = {**fitted[-1], "content": "[CUR] persist variant"}
+        stored = len(_rows(engine))
+        engine.ingest([*fitted, {"role": "assistant", "content": "reply CUR", "timestamp": 30_001.0}])
+        added = [r["content"] for r in _rows(engine)[stored:]]
+        assert not any("Summary (d" in c[:40] for c in added), [c[:60] for c in added]  # main: the carrier
+        assert sum(1 for r in _rows(engine) if r["content"] == rest) == 1  # U itself stays one row
+        # the persist variant of the current user row is the separate "stored twice" shape, not #1000
+        assert [c for c in added if c != "[CUR] persist variant"] == ["reply CUR"], [c[:60] for c in added]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("prompt", ["older-row", "carrier-row"])
+def test_1000_loss_guard_host_merged_summary_with_a_repeated_prompt_is_stored(tmp_path, host, monkeypatch, prompt):
+    """No carrier descriptor binds a host merge of LCM's standalone summary and a NEW prompt whose text
+    equals a stored user row (an older one, or U itself: byte-equal to the emitted carrier, but a second
+    occurrence the descriptor does not bind): that row is new content and is stored (duplicate over loss)."""
+    engine, fitted, rest = _held_fit_after_inplace_boundary(tmp_path, host, monkeypatch)
+    try:
+        summary = fitted[0]["content"][:engine._verified_lcm_summary_prefix_end(fitted[0]["content"])]
+        repeated = rest if prompt == "carrier-row" else next(
+            r["content"] for r in _rows(engine) if r["role"] == "user" and r["content"].startswith("[T050]"))
+        merged = {"role": "user", "content": f"{summary}\n\n{repeated}"}  # H1's _merge_consecutive_users
+        assert engine._generated_context_carrier_remainder(merged) == repeated
+        assert (merged["content"] == fitted[0]["content"]) is (prompt == "carrier-row")
+        stored = len(_rows(engine))
+        engine.ingest([*fitted, {"role": "assistant", "content": "reply CUR", "timestamp": 30_001.0}, merged])
+        added = [r["content"] for r in _rows(engine)[stored:]]
+        assert "reply CUR" in added
+        assert sum(1 for c in added if c in (repeated, merged["content"])) >= 1, [c[:60] for c in added]
     finally:
         engine.shutdown()
