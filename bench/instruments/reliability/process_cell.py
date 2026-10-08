@@ -23,7 +23,8 @@ import sqlite3
 import time
 from pathlib import Path
 
-from bench.instruments.reliability import acp_driver as AD, cells as C, fake_provider as FP, probe as P1, run_matrix as RM
+from bench.instruments.reliability import acp_driver as AD, cells as C, fake_provider as FP, plugin_tree, probe as P1
+from bench.instruments.reliability import run_matrix as RM
 from bench.instruments.reliability.scorers import continuity
 
 OBSERVER = Path(__file__).with_name("observer")
@@ -39,6 +40,11 @@ PROCESS_FAULTS = {"acp-process": {"crash_after_compaction_before_reply", "cancel
 R2_CELLS = [{**C.cell("anthropic-route/acp-process", [], in_place=True,
                       doc="baseline/in-place/acp with the main model on the Anthropic Messages API (fake provider)"),
              "api": "anthropic"}] + C.continuity_cells()
+# #659 probes: selected by an explicit --cells pattern only (cells.select opt_in), so --cells all, the nightly matrix and
+# ci.expected_cells are unchanged.
+R2_PROBE_CELLS = C.probe_cells()
+# #659: the only probe class with a declared bar (the host rebuilds its system prompt at every commit).
+PROBE_BARS = {"host-instruction": 1.0, "host-instruction-rebuild": 1.0}
 # gateway-process: why no local platform can drive an R1 gateway cell, cited per host at run time.
 GATEWAY_ANCHORS = {
     "turn_runner": ("gateway/run_turn.py", "TurnRunner(self, turn_ctx)"),
@@ -217,7 +223,7 @@ class ProcessCell:
         self.home, self.files, self.work = self.scratch / "hermes-home", d / "files", self.scratch / "home" / "work"
         self.transcript, self.proc, self.sid, self.text_tag = d / "transcript.jsonl", None, None, None
         self.phase, self.log_mark, self.fired, self.backlog_log, self.last_turn = "A", 0, set(), [], 0
-        self.scenario = Scenario(self)
+        self.scenario, self.carriers, self.rewritten = Scenario(self), None, False
         self.provider = FP.FakeProvider(d / "provider-requests.jsonl", main=self.scenario.main,
                                         usage_scale=float(cell["assistant"].get("usage_scale", 1.0)),
                                         continuity_context=self.continuity_context)
@@ -237,8 +243,20 @@ class ProcessCell:
     def continuity_context(self) -> dict:
         ends = [n for n in self.notes("turn_end") if n.get("turn_kind") != "final" and not n.get("failed")
                 and not n.get("interrupted")]
+        probes = (self.cell.get("continuity") or {}).get("probes") or []
         return {"anchor": "T01" if (self.cell.get("continuity") or {}).get("sole_user") else None,
-                "previous": ends[-1].get("reply_tag") if ends else None, "current": self.text_tag}
+                "previous": ends[-1].get("reply_tag") if ends else None, "current": self.text_tag,
+                **({"nonces": sorted({p["nonce"] for p in probes}), "carriers": self.carriers} if probes else {})}
+
+    def soul_rewrite(self, t: int) -> None:
+        """#659 P1b: rewrite HERMES_HOME/SOUL.md with no restart before the first turn >= ``from_turn`` that follows a
+        commit (so main requests precede the next commit); the note's ts is after the write."""
+        rw = ((self.cell.get("continuity") or {}).get("soul") or {}).get("rewrite")
+        if rw and t >= rw["from_turn"] and not self.rewritten and any(
+                n.get("turn") == t - 1 for n in self.notes("compaction_committed")):
+            (self.home / "SOUL.md").write_text(rw["text"] + "\n")
+            self.rewritten = True
+            append(self.d / "observer.jsonl", {"phase": self.phase, "ts": time.time(), "kind": "probe_rewrite", "turn": t})
 
     def fire(self, kind: str, turn: int, **extra) -> None:
         append(self.d / "faults-fired.jsonl", {"kind": kind, "phase": self.phase, "turn": turn})
@@ -291,6 +309,7 @@ class ProcessCell:
         return [SANDBOX_EXEC, "-p", SANDBOX, *base] if os.path.exists(SANDBOX_EXEC) else base
 
     def turn(self, t: int, kind: str = "normal") -> str | None:
+        self.soul_rewrite(t)
         text = P1.user_text(self.cell, "T", t)
         n = int(self.cell["user_text"].get("identical_turns", {}).get(str(t), t))
         self.text_tag, self.last_turn = None if text == "continue" else f"T{n:02d}", t
@@ -477,6 +496,25 @@ def apply_f4(rec: dict, cell: dict, unexpected: list) -> None:
         rec.update(verdict="FAIL", reason=f"continuity F4: {reason}")
 
 
+def apply_probes(rec: dict, cell: dict) -> None:
+    """#659 probes are RECORDED only (modelled on apply_f4): a per-probe rate over the observed compaction events and
+    the declared bar where one exists (an unknown event never meets it). Never a bar, never PASS/FAIL, never the verdict
+    or the gate."""
+    probes = (rec.get("continuity") or {}).get("probes")
+    if not probes or rec["verdict"] == "ERROR":
+        return
+    observed = rec["continuity"].get("scenario_observed") is not False
+    out = {}
+    for name, p in probes.items():
+        decided = p["met"] + p["missed"]
+        rate, bar = (p["met"] / decided if decided else None), PROBE_BARS.get(name)
+        out[name] = {"met": p["met"], "missed": p["missed"], "unknown": p["unknown"], "rate": rate, "bar": bar,
+                     "recorded": "scenario not observed" if not observed else "not observed" if rate is None else
+                     "recorded" if bar is None else "below bar" if rate < bar else
+                     "incomplete (unknown events)" if p["unknown"] else "meets bar"}
+    rec["probes_recorded"] = out
+
+
 def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: Path, timeout: int, keep: bool,
                      keep_dbs: str = "none", lcm_env: dict | None = None, identity: dict | None = None,
                      transport: str = "acp-process", turn_timeout: float = 300.0,
@@ -512,6 +550,13 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         (home / "models_dev_cache.json").write_text(json.dumps({"rel": {"id": "rel", "name": "reliability fake", "models": {}}}))
         P1.write_tool_files(d / "files", cell)
         run = ProcessCell(cell, d, host, transport, turn_timeout, phase_timeout=timeout, scratch=s)
+        if (cell.get("continuity") or {}).get("probes"):
+            try:  # the plugin's own summary/head carrier markers; without them a summary row reads as user_raw
+                run.carriers = plugin_tree.carrier_markers(Path(plugin["tree"]))
+            except (OSError, ValueError, SyntaxError):
+                run.carriers = None
+        if soul := (cell.get("continuity") or {}).get("soul"):  # #659 P1: before the host starts
+            (home / "SOUL.md").write_text(soul["text"] + "\n")
         run.provider.start()
         (home / "config.yaml").write_text(config_yaml(cell, plugin, run.provider.base_url))
         (d / "cell.json").write_text(json.dumps({**cell, "plugin": plugin, "host": host_name, "host_src": host["src"],
@@ -561,6 +606,7 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
         rec.update(RM.verdict_fields({**cell, "chat_root": run.sid, "transport": transport}, d, last, run.fired, rec["citations"], backup_errors,
                                      s / "db"))
         apply_f4(rec, cell, run.scenario.unexpected)
+        apply_probes(rec, cell)
         return done()
     finally:
         RM.release_scratch(s, d, rec, keep_dbs, keep)
