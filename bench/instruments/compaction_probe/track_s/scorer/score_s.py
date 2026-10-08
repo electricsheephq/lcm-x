@@ -310,9 +310,10 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     capped = {a.get("batch") for p in (run_dir / "answers").glob("*.json") if
               ((a := jload(p)).get("reader_calls") or [a.get("usage")])[-1] and
               ((a.get("reader_calls") or [a.get("usage")])[-1] or {}).get("completion_tokens", 0) >= 8192}
-    truncated = {r["id"] for r in run["rows"] if
-                 (r["row_status"] == "ERROR" and "READER_TRUNCATED" in (r["error"] or "")) or
-                 (r["batch"] in capped and not (r["answer"] or "").strip())}
+    # only unanswered probes of a capped batch are excluded; an admission-proven loss stays a loss
+    truncated = {r["id"] for r in run["rows"] if not (r["answer"] or "").strip() and
+                 ((r["row_status"] == "ERROR" and "READER_TRUNCATED" in (r["error"] or "")) or r["batch"] in capped)}
+    truncated -= set(run["admission_missing"])
     base = [("INCOMPLETE", f"READER_TRUNCATED: {len(truncated)} probes excluded: {sorted(truncated)}")] if truncated else []
     if run["run_status"] not in ("DONE", "COMPLETED"):
         base.append(("UNRUN", f"run status {run['run_status']}"))

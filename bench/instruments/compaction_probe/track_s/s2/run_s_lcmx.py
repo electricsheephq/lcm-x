@@ -264,15 +264,20 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                     tools_engine = new_engine(run.m, chome, run.sid, run.args.context_length)
                     st = tools_engine.get_status()
                     clone_info = {"store_messages": st.get("store_messages"), "dag_nodes": st.get("dag_nodes")}
-                for attempt in range(2):
-                    answers, meta = R.answer(reader, run.system, view, prompt, tools_engine if is_open else None,
-                                             schemas, guidance, run.m.tokens.count_tokens)
+                answers = {}
+                for attempt in range(2):  # one retry when the final call hits the cap; the first non-empty answer wins
+                    got, meta = R.answer(reader, run.system, view, prompt, tools_engine if is_open else None,
+                                         schemas, guidance, run.m.tokens.count_tokens)
                     attempts.append(dict(meta))
-                    if not ((meta.get("reader_calls") or [meta.get("usage")])[-1] or {}).get("completion_tokens", 0) >= 8192 or all(
-                            ((answers or {}).get(p["id"]) or "").strip() for p in b["probes"]):
+                    for pid, a in (got or {}).items():
+                        if pid not in answers or not (answers[pid] or "").strip():
+                            answers[pid] = a
+                    capped = ((meta.get("reader_calls") or [meta.get("usage")])[-1] or {}).get("completion_tokens", 0) >= 8192
+                    complete = all((answers.get(p["id"]) or "").strip() for p in b["probes"])
+                    if not capped or complete:
                         break
-                    if attempt:
-                        err = "READER_TRUNCATED: completion cap 8192 reached"
+                else:
+                    err = "READER_TRUNCATED: completion cap 8192 reached"
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"[:400]
             finally:
@@ -280,6 +285,8 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                     tools_engine.shutdown()
         meta["attempts"] = attempts
         meta["reader_calls"] = [c for a in attempts for c in a.get("reader_calls") or []]
+        meta.update({k: sum(a.get(k) or 0 for a in attempts) for k in ("tool_calls", "tokens_read_back", "wall_s")
+                     if any(a.get(k) is not None for a in attempts)})
         run.reader_calls.append({"batch": b["id"], "calls": meta.get("reader_calls")})
         (out / "answers" / f"{b['id']}.json").write_text(json.dumps(
             {"batch": b["id"], "prompt_chars": len(prompt), "clone": clone_info, "error": err, **meta}, indent=1))

@@ -84,7 +84,7 @@ def pair_axes(cp):
         )
     }  # [b, c, v1 kept, v2 kept] + n below
     n_items, excluded = {k: 0 for k in axes}, {k: 0 for k in axes}
-    pairs, missing = [], []
+    pairs, missing, partial = [], [], False
     signs = {k: {"wins": 0, "losses": 0, "ties": 0} for k in axes}
     for seed in SEEDS:
         for run in ("r1", "r2"):
@@ -92,13 +92,16 @@ def pair_axes(cp):
             if not (s1 and s2):
                 missing.append(f"seed-{seed}/{run}")
                 continue
-            if not all(s.get("metrics", {}).get(m, {}).get("complete") is True or
-                       (m != "continuity" and any(p.get("class") in ("MISSING", "READER_TRUNCATED")
-                                                  for p in s["probes"].values()))
+            def partial_only(s, m):  # incomplete only through reader truncation or missing result rows
+                return m != "continuity" and any(p.get("class") in ("MISSING", "READER_TRUNCATED") for p in s["probes"].values()) and all(
+                    i.startswith(("INCOMPLETE: READER_TRUNCATED: ", "INCOMPLETE: no continuation_field row ")) or
+                    (i.startswith("INCOMPLETE: ") and "scheduled facts have no result row" in i) for i in s.get("metrics", {}).get(m, {}).get("issues", []))
+            if not all(s.get("metrics", {}).get(m, {}).get("complete") is True or partial_only(s, m)
                        for s in (s1, s2) for m in ("facts_kept", "continuation", "continuity")):
                 missing.append(f"seed-{seed}/{run} (incomplete score)")
                 continue
             pairs.append(f"seed-{seed}/{run}")
+            partial = partial or any(p.get("class") in ("MISSING", "READER_TRUNCATED") for s in (s1, s2) for p in s["probes"].values())
             run_delta = {k: 0 for k in axes}
 
             def add(ax, k1, k2):
@@ -118,8 +121,8 @@ def pair_axes(cp):
             lost1 = set(s1["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids", []))
             lost2 = set(s2["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids", []))
             for fid, f in facts[seed].items():
-                k1, k2 = kept(s1, fid), kept(s2, fid)
-                k1, k2 = (None if k1 is None else k1 and fid not in lost1), (None if k2 is None else k2 and fid not in lost2)
+                k1 = False if fid in lost1 else kept(s1, fid)  # an admission-proven loss outranks truncation
+                k2 = False if fid in lost2 else kept(s2, fid)
                 add("facts_all", k1, k2)
                 add(f"facts_{f['placement']}", k1, k2)
                 if f["class"] == "early_user_constraint":
@@ -149,7 +152,7 @@ def pair_axes(cp):
             "p": round(mcnemar(b, c), 4),
             "sign_test": {**signs[ax], "p": round(mcnemar(signs[ax]["wins"], signs[ax]["losses"]), 4)},
         }
-    return {"status": "INCOMPLETE" if missing or any(excluded.values()) else "COMPLETE", "missing_pairs": missing, "pairs": pairs, "axes": out}
+    return {"status": "INCOMPLETE" if missing or partial or any(excluded.values()) else "COMPLETE", "missing_pairs": missing, "pairs": pairs, "axes": out}
 
 
 def loads():

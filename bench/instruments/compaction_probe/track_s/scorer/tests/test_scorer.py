@@ -20,8 +20,7 @@ def run_score(mat, run, arm):
 def test_reader_truncation_excluded_from_probe_metrics(mat, tmp_path, explicit_error):
     excluded = {"X-F1", "X-F2", "X-T0", "X-STATE.next_action"}
     ans = dict(fx.GOOD | fx.GOOD_CONT)
-    if not explicit_error:
-        ans.update(dict.fromkeys(excluded, ""))
+    ans.update(dict.fromkeys(excluded, ""))
     run = fx.s2_run(tmp_path, answers=ans)
     if explicit_error:
         rows = sc.jlines(run / "results.jsonl")
