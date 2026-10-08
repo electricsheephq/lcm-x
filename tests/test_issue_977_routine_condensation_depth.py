@@ -106,26 +106,25 @@ def test_without_survival_fit_the_heaviest_depth_still_applies(tmp_path):
         instance.shutdown()
 
 
-def test_a_group_no_heavier_than_the_minimum_condensation_budget_is_skipped(engine):
-    # #909: condensing a group that weighs no more than the 1,000-token minimum budget cannot shrink the frontier.
-    add_nodes(engine, 0, 4, token_count=250)
+def test_a_light_shallowest_group_is_skipped_for_the_next_shrinkable_depth(engine):
+    # #909: a group of at most 512 tokens is about as long as its summary, so condensing it cannot shrink the frontier.
+    add_nodes(engine, 0, 4, token_count=100)
     middle = add_nodes(engine, 1, 4, token_count=900)
     add_nodes(engine, 2, 4, token_count=2_000)
     assert selected(engine) == [(1, node_id) for node_id in middle]
 
 
 def test_only_light_groups_fall_back_to_the_heaviest_depth(engine):
-    add_nodes(engine, 0, 4, token_count=100)
-    deep = add_nodes(engine, 1, 4, token_count=200)
+    add_nodes(engine, 0, 4, token_count=50)
+    deep = add_nodes(engine, 1, 4, token_count=100)
     assert selected(engine) == [(1, node_id) for node_id in deep]
 
 
 def test_a_group_the_l3_bound_would_store_whole_is_light(tmp_path):
-    # verbatim_small_source returns a source within the L3 bound whole, and up to twice it when a summary is not
-    # shorter, so with a 1,000-token bound a 1,600-token group cannot be relied on to shrink.
-    instance = make_engine(tmp_path, 272_000, l3_truncate_tokens=1_000)
+    # verbatim_small_source stores a source within the configured L3 bound whole, so it cannot shrink the frontier.
+    instance = make_engine(tmp_path, 272_000, l3_truncate_tokens=2_000)
     try:
-        add_nodes(instance, 0, 4, token_count=400)
+        add_nodes(instance, 0, 4, token_count=300)
         middle = add_nodes(instance, 1, 4, token_count=900)
         add_nodes(instance, 2, 4, token_count=2_000)
         assert selected(instance) == [(1, node_id) for node_id in middle]
@@ -143,3 +142,11 @@ def test_unknown_window_keeps_the_routine_rule_without_survival_fit(tmp_path):
         assert selected(instance) == [(0, node_id) for node_id in shallow]
     finally:
         instance.shutdown()
+
+
+def test_a_small_group_that_still_shrinks_is_condensed_at_the_shallowest_depth(engine):
+    # Track S, seed 2: an 818-token depth-0 group condensed to 548 tokens. Skipping it would have sent the sweep to
+    # depth 1 and written the depth-2 node this change removes.
+    shallow = add_nodes(engine, 0, 4, token_count=205)
+    add_nodes(engine, 1, 6, token_count=900)
+    assert selected(engine) == [(0, node_id) for node_id in shallow]
