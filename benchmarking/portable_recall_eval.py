@@ -48,6 +48,8 @@ class FrozenCase:
     gold: tuple[GoldSpan, ...] | None  # None means exact gold is unavailable
     noanswer: bool = False
     capture_ms: float = 0.0
+    delivery_detail: str = "snippets"
+    delivery_include: str = "all"
 
 
 def canonical_bytes(value):
@@ -58,6 +60,8 @@ def validate_cases(cases):
     identities, conversations = set(), {}
     for case in cases:
         validate_candidates(case.candidates)
+        if case.delivery_detail not in {"snippets", "answer_ready"} or case.delivery_include not in {"all", "summaries", "verbatim"}:
+            raise ValueError("invalid frozen delivery profile")
         if case.case_id in identities or case.split not in {"dev", "holdout"}:
             raise ValueError("duplicate case or invalid split")
         identities.add(case.case_id)
@@ -88,6 +92,11 @@ def write_frozen(path: Path, cases, *, input_kind: str, posture: str, source_ide
               "source_identity": source_identity, "case_count": len(records),
               "corpus_sha256": hashlib.sha256(canonical_bytes(records)).hexdigest(),
               "candidate_cap": 30, "production_hit_cap": 25}
+    header.update(delivery_configuration(cases))
+    if input_kind == "synthetic" and all(
+        (c.delivery_detail, c.delivery_include) == ("answer_ready", "verbatim") for c in cases
+    ):
+        header["synthetic_single_session_delivery_cap"] = 5
     if provenance is not None:
         header["provenance"] = provenance
     with path.open("x", encoding="utf-8") as stream:
@@ -155,6 +164,14 @@ checks by the owning portable-host harness.
     return tuple(cases)
 
 
+def delivery_configuration(cases):
+    profiles = sorted({(c.delivery_detail, c.delivery_include) for c in cases})
+    maximum = max((len(c.candidates) for c in cases), default=0)
+    return {"delivery_profiles": [{"detail": d, "include": i} for d, i in profiles],
+            "observed_max_candidate_count": maximum,
+            "recall_at_5_gain_possible_by_permutation": maximum > 5}
+
+
 def capture_synthetic(*, tmp_dir: Path, posture: str, local_model: str = ""):
     """Reuse evaluate_question; require its root-owned candidate_sink seam.
 
@@ -196,16 +213,20 @@ instrument's stub only with embeddings disabled. LOCAL uses real FastEmbed.
                     raise ValueError("synthetic source projection changed")
                 annotations = [(selected[0], 0, len(source))]
             case = freeze_production_pool(**context, scope_id=identity,
-                                         split=fixture["split"], span_annotations=annotations)
+                                         split=fixture["split"], span_annotations=annotations,
+                                         detail="answer_ready", include="verbatim")
             captured.append(replace(case, case_id=identity, capture_ms=capture_ms))
 
         instrument.evaluate_question(
             question, providers.summary, chunk_provider=providers.chunk,
             provider_name=provider_name, tmp_dir=tmp_dir,
             embeddings_enabled=posture == "LOCAL", top_k=30, candidate_sink=sink,
+            recall_detail="answer_ready", recall_include="verbatim",
         )
     if len(captured) != 120:
         raise ValueError("production sink did not capture every synthetic case once")
+    if any(len(case.candidates) > 5 for case in captured):
+        raise ValueError("single-session answer-ready delivery exceeded its production cap")
     validate_cases(captured)
     return tuple(captured)
 
@@ -281,6 +302,7 @@ def freeze_production_pool(
     question, config, store, dag, provider, *, tmp_dir, embeddings_enabled,
     provider_name, scope_id, split, chunk_provider=None, span_annotations=None,
     hits=None,
+    detail="snippets", include="all",
 ):
     """Callback contract for the existing per-question LongMemEval instrument.
 
@@ -296,6 +318,7 @@ The store must be a fresh public corpus. This function never opens a live DB.
             question, config, store, dag, provider, tmp_dir=tmp_dir,
             embeddings_enabled=embeddings_enabled, provider_name=provider_name,
             chunk_provider_embedder=chunk_provider, limit=30,
+            detail=detail, include=include,
         )
     candidates = []
     for hit in hits:
@@ -309,6 +332,12 @@ The store must be a fresh public corpus. This function never opens a live DB.
             ref = f"{scope_id}:message:{hit['store_id']}"
         text = hit.get("content") if isinstance(hit.get("content"), str) else hit["snippet"]
         offset = hit.get("content_offset")
+        if detail == "answer_ready" and (
+            type(offset) is not int or offset < 0
+            or type(hit.get("content_returned_chars")) is not int
+            or hit["content_returned_chars"] != len(text)
+        ):
+            raise SpanCaptureUnavailable("citation-bearing delivery lacks an exact span")
         if offset is None:
             offset = source.find(text)
             if offset < 0 or source.find(text, offset + 1) >= 0:
@@ -336,7 +365,8 @@ The store must be a fresh public corpus. This function never opens a live DB.
             gold_list.append(GoldSpan(f"{scope_id}:message:{sid}", start, end, text))
         gold = tuple(gold_list)
     return FrozenCase(question.question_id, scope_id, split, question.category,
-                      question.question, tuple(candidates), lexical, gold, question.is_abstention)
+                      question.question, tuple(candidates), lexical, gold, question.is_abstention,
+                      delivery_detail=detail, delivery_include=include)
 
 
 def covers(candidate, gold):
@@ -406,6 +436,7 @@ def evaluate(cases, scorers, *, split="holdout", timeout_s=1.0):
               "calibration": "UNMEASURED: no calibrated correctness probabilities claimed",
               "promotion_scope": "frozen corpus only; no default activation",
               "candidate_cap": 30, "production_hit_cap": 25, "arms": {}}
+    report.update(delivery_configuration(cases))
     for name, samples in rows.items():
         means = {key: statistics.mean(v[key] for v in samples if v[key] is not None)
                  if any(v[key] is not None for v in samples) else None

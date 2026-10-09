@@ -10,7 +10,7 @@ from optional_scorer import (
 )
 from benchmarking.portable_recall_eval import (
     FrozenCase, GoldSpan, evaluate, ndcg, read_frozen, synthetic_cases,
-    validate_cases, write_frozen,
+    SpanCaptureUnavailable, freeze_production_pool, validate_cases, write_frozen,
 )
 
 
@@ -186,3 +186,32 @@ def test_promotion_exact_coverage_and_missing_annotation_boundary():
     assert unlabelled["answer_correctness"] == "UNMEASURED"
     repeated = (cases[0].candidates[-1], cases[0].candidates[-1])
     assert ndcg(repeated, cases[0].gold) == 1
+
+
+def test_answer_ready_capture_requires_published_exact_span(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+    from benchmarking import longmemeval as instrument
+    monkeypatch.setattr(instrument, "fts_hits", lambda *args: [])
+    source = "xxsupportyy"
+    store = SimpleNamespace(get=lambda identity: {"content": source})
+    question = SimpleNamespace(question_id="fixture", category="exact-id",
+                               question="q", is_abstention=False)
+    hit = {"kind": "message_excerpt", "store_id": 1, "snippet": "[support]",
+           "content": "support", "content_offset": 2, "content_returned_chars": 7}
+
+    def capture(value):
+        return freeze_production_pool(
+            question, None, store, None, None, tmp_dir=tmp_path,
+            embeddings_enabled=False, provider_name="stub", scope_id="fixture",
+            split="holdout", hits=[value], detail="answer_ready", include="verbatim",
+        )
+
+    case = capture(hit)
+    assert case.candidates[0].text == source[2:9]
+    assert case.candidates[0].char_start == 2 and case.candidates[0].char_end == 9
+    assert case.delivery_detail == "answer_ready" and case.delivery_include == "verbatim"
+    assert evaluate((case,), {})["recall_at_5_gain_possible_by_permutation"] is False
+    for bad in ({**hit, "content_offset": None}, {**hit, "content_returned_chars": 8},
+                {**hit, "content_offset": 0}):
+        with pytest.raises(SpanCaptureUnavailable):
+            capture(bad)

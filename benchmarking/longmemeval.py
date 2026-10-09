@@ -2422,6 +2422,8 @@ def production_recall_hits(
     return_status: bool = False,
     accounting: ProviderAccounting | None = None,
     recall_health: dict | None = None,
+    detail: str = "snippets",
+    include: str = "all",
 ) -> list[dict[str, Any]] | tuple[list[dict[str, Any]], str, list[list[Any]]]:
     """Invoke the REAL ``tools.lcm_recall`` against this question's temp store.
 
@@ -2433,7 +2435,11 @@ def production_recall_hits(
     current-session id). The warmed harness embedder is injected through
     ``lcm_recall``'s provider cache so no second model load or network call occurs;
     ``lcm_recall`` clamps ``limit`` to its own production ceiling.
+    Opt-in detail/include select the existing delivery profile. Defaults preserve
+    the original snippet/all request exactly.
     """
+    if detail not in {"snippets", "answer_ready"} or include not in {"all", "summaries", "verbatim"}:
+        raise ValueError("invalid production delivery profile")
     _ensure_hermes_lcm_package()
     import hermes_lcm.tools as lcm_tools
 
@@ -2459,9 +2465,12 @@ def production_recall_hits(
             chunk_cache_key,
             chunk_provider_embedder,
         )
-    payload = json.loads(
-        lcm_tools.lcm_recall({"query": question.question, "limit": limit}, engine=engine)
-    )
+    recall_args = {"query": question.question, "limit": limit}
+    if detail != "snippets":
+        recall_args["detail"] = detail
+    if include != "all":
+        recall_args["include"] = include
+    payload = json.loads(lcm_tools.lcm_recall(recall_args, engine=engine))
     if recall_health is not None:
         recall_health["degraded"] = bool(payload.get("degraded"))
         recall_health["coverage"] = {
@@ -2664,6 +2673,8 @@ def evaluate_question(
     chunk_provider=None,
     accounting: ProviderAccounting | None = None,
     candidate_sink: Callable[..., None] | None = None,
+    recall_detail: str = "snippets",
+    recall_include: str = "all",
 ) -> dict[str, Any]:
     """Ingest one question into a fresh store and score every retrieval arm.
 
@@ -3173,6 +3184,8 @@ def evaluate_question(
                 return_status=recall_rerank,
                 accounting=accounting,
                 recall_health=recall_health,
+                **({"detail": recall_detail, "include": recall_include}
+                   if (recall_detail, recall_include) != ("snippets", "all") else {}),
             )
         )
         if recall_rerank:

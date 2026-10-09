@@ -166,3 +166,30 @@ Both outputs are create-only. Do not compare that subset as full-S span recall.
 Optional cached local scoring of the exported pool uses the existing `run`
 command. Public hosted inference is outside the approved synthetic-only Jev
 campaign and requires its own explicit data/recipient/budget authorization.
+
+## Synthetic citation-bearing delivery correction
+
+The synthetic frozen pool opts into the existing production
+`detail=answer_ready, include=verbatim` delivery profile, matching the portable
+facade. The helper/instrument defaults remain `snippets/all`; the public full-S
+baseline uses those unchanged defaults. Answer-ready applies its real production
+selection, bounded hydration, reference validation and response limits. It is a
+distinct delivery configuration and must not be compared as the same snippet
+baseline. Scorers still receive exactly the same frozen pool within each run.
+
+Citation-bearing capture requires published integer `content_offset` and
+`content_returned_chars`; the length and stored source slice must match the
+unchanged delivered text exactly. Missing/wrong offsets fail closed. Highlighted
+FTS snippets are not stripped, guessed or assigned offset zero. The corpus digest
+includes every case's detail/include profile; the header and report disclose
+profiles and observed maximum candidate count.
+
+**These 120 scenarios each have one session.** Production answer-ready caps
+delivery at five hits per session, so these frozen pools contain at most five.
+The synthetic header records that cap, and header/report explicitly report
+`recall_at_5_gain_possible_by_permutation=false`. Pure reranking cannot improve
+delivered Recall@5 in this configuration. nDCG may change, but it cannot satisfy
+the approved three-point span-recall promotion gate. A measured NO_ADOPTION is
+valid; unavailable/incomplete runs remain INSUFFICIENT_EVIDENCE. Retain the
+baseline unless the approved gain gate is demonstrated. This correction does
+not redesign fixtures, raise production limits or change the adoption policy.
