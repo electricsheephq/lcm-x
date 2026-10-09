@@ -84,6 +84,9 @@ HOST_ONLY = {
     # #597: turn-end notification clears only this engine's in-memory progress
     # refusal hold; it reads no store and grants no access.
     "note_turn_complete",
+    # #1014: waits for this engine's queued incremental embedding passes (tests
+    # and diagnostics), like drain_rollup_maintenance; it reads no store.
+    "drain_embedding_maintenance",
 }
 
 

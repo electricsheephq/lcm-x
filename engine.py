@@ -102,6 +102,7 @@ from .runtime_identity import (
     _git_runtime_identity,
     _plugin_metadata,
 )
+from .embedding_maintenance import run_incremental_embedding_pass
 from .rollup_builder import (
     initialize_rollup_invalidation_outbox,
     mark_stale_for_published_summary,
@@ -179,6 +180,8 @@ logger = logging.getLogger(__name__)
 _NATIVE_RECOVERY_WARNING_LOGGED = False
 
 _ASSERTION_EXTRACTION_PROCESS_SLOT = threading.BoundedSemaphore(1)
+_EMBEDDING_SCHEMA_READY: set[tuple[Path, bool]] = set()
+_EMBEDDING_SCHEMA_LOCK = threading.Lock()
 
 class _RollupMaintenanceScheduler:
     """Run deduplicated rollup jobs on one process-wide worker.
@@ -190,7 +193,15 @@ class _RollupMaintenanceScheduler:
     during an in-flight build without allowing concurrent duplicate builds.
     """
 
-    def __init__(self, max_pending_jobs: int = 64) -> None:
+    def __init__(
+        self,
+        max_pending_jobs: int = 64,
+        *,
+        kind: str = "temporal rollup",
+        thread_name: str = "lcm-rollup-maintenance",
+    ) -> None:
+        self._kind = kind
+        self._thread_name = thread_name
         self._condition = threading.Condition()
         self._max_pending_jobs = max(1, int(max_pending_jobs))
         self._jobs: deque[
@@ -262,8 +273,9 @@ class _RollupMaintenanceScheduler:
                 return True
             if len(self._jobs) >= self._max_pending_jobs:
                 logger.warning(
-                    "LCM temporal rollup maintenance queue is full; "
+                    "LCM %s maintenance queue is full; "
                     "deferring database=%s scope=%s until a later bind",
+                    self._kind,
                     key[0],
                     key[1],
                 )
@@ -271,7 +283,7 @@ class _RollupMaintenanceScheduler:
             if self._worker is None or not self._worker.is_alive():
                 worker = threading.Thread(
                     target=self._run,
-                    name="lcm-rollup-maintenance",
+                    name=self._thread_name,
                     daemon=True,
                 )
                 worker.start()
@@ -359,7 +371,8 @@ class _RollupMaintenanceScheduler:
                     job()
                 except (Exception, asyncio.CancelledError):
                     logger.warning(
-                        "LCM background temporal rollup maintenance failed for database=%s scope=%s",
+                        "LCM background %s maintenance failed for database=%s scope=%s",
+                        self._kind,
                         key[0],
                         key[1],
                         exc_info=True,
@@ -380,6 +393,11 @@ class _RollupMaintenanceScheduler:
 
 
 _ROLLUP_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler()
+# #1014: incremental embedding passes get their own worker, so a slow local
+# model load never delays a rollup pass and draining one never waits on the other.
+_EMBEDDING_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler(
+    kind="incremental embedding", thread_name="lcm-embedding-maintenance"
+)
 
 _SESSION_END_BUSY_TIMEOUT_MS = 50
 # #909/#977: a condensation group of at most this many source tokens is about as long as its summary (Track S
@@ -812,6 +830,7 @@ class LCMEngine(
         # The scheduler associates this identity only with outstanding work, so
         # diagnostic drains do not retain every historical session key forever.
         self._rollup_maintenance_owner = object()
+        self._embedding_maintenance_owner = object()
         # Host-facing engine name: ENGINE_NAME, or the legacy alias when the
         # active Hermes config still selects ``context.engine: lcm`` (#471).
         self._engine_name = ENGINE_NAME
@@ -2307,6 +2326,67 @@ class LCMEngine(
                 exc_info=True,
             )
 
+    def _schedule_embedding_maintenance(self) -> None:
+        """Prepare schema, then enqueue one bounded embedding pass (#1014).
+
+        Active exactly when ``embeddings_enabled``. The scheduler keeps at most
+        one pass queued per database, and the pass runs the backfill core under
+        its lease on a private connection.
+        """
+        if not getattr(self._config, "embeddings_enabled", False):
+            return
+        try:
+            raw_database_path = str(self._dag.db_path)
+            if raw_database_path == ":memory:":
+                logger.info(
+                    "LCM skips incremental embedding for an isolated in-memory "
+                    "SQLite database"
+                )
+                return
+            database_path = Path(raw_database_path).resolve()
+            config = copy.deepcopy(self._config)
+            from . import command
+            from .embedding_maintenance import _automatic_chunks_allowed
+            from .vector_store import VectorStore
+
+            chunks_allowed = _automatic_chunks_allowed(config, command)
+            schema_key = (database_path, chunks_allowed)
+            with _EMBEDDING_SCHEMA_LOCK:
+                if schema_key not in _EMBEDDING_SCHEMA_READY:
+                    # First-use DDL (including inflight migration) must finish here:
+                    # changing the schema in the worker can break foreground FTS5 writes.
+                    store = VectorStore(database_path, config=config)
+                    try:
+                        if chunks_allowed:
+                            store.ensure_chunk_schema()
+                        command._ensure_inflight_table(store.connection)
+                    finally:
+                        store.close()
+                    _EMBEDDING_SCHEMA_READY.add(schema_key)
+            cached = getattr(self, "_lcm_embedding_provider_cache", None)
+            breaker = getattr(cached[1], "breaker", None) if cached else None
+
+            def maintain() -> None:
+                run_incremental_embedding_pass(database_path, config, breaker=breaker)
+
+            _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(
+                self._rollup_maintenance_key("embeddings"),
+                maintain,
+                owner=self._embedding_maintenance_owner,
+            )
+        except Exception:
+            logger.warning(
+                "LCM could not schedule background incremental embedding",
+                exc_info=True,
+            )
+
+    def drain_embedding_maintenance(self, timeout: float | None = None) -> bool:
+        """Wait for embedding passes scheduled by this engine (tests and diagnostics)."""
+        return _EMBEDDING_MAINTENANCE_SCHEDULER.drain_owner(
+            self._embedding_maintenance_owner,
+            timeout=timeout,
+        )
+
     def drain_rollup_maintenance(self, timeout: float | None = None) -> bool:
         """Wait for rollup jobs scheduled by this engine (tests and diagnostics)."""
         return _ROLLUP_MAINTENANCE_SCHEDULER.drain_owner(
@@ -2366,6 +2446,8 @@ class LCMEngine(
             and not self._session_stateless
         ):
             self._schedule_rollup_maintenance(session_id)
+        if not self._session_ignored and not self._session_stateless:
+            self._schedule_embedding_maintenance()
 
     def _invalidate_rollups_for_published_node(self, node: "SummaryNode") -> None:
         """Stale the rollups covering EVERY UTC day a just-published node spans.
@@ -2377,7 +2459,11 @@ class LCMEngine(
         ``earliest_at``/``latest_at`` coverage span is passed through so a summary
         crossing midnight stales BOTH days, not only its newest (maintainer #388
         blocker 2 / B2).
+        A leaf publication is also the trigger for incremental embedding
+        (#1014); condensed nodes are not embedding targets.
         """
+        if node.depth == 0:
+            self._schedule_embedding_maintenance()
         if not self._config.temporal_rollups_enabled:
             return
         mark_stale_for_published_summary(
