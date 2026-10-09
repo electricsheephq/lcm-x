@@ -180,3 +180,20 @@ def test_floored_inherited_threshold_still_allows_the_codex_gpt55_autoraise(tmp_
 
     assert (threshold, source) == (0.85, "codex_gpt55_autoraise")
     assert notice == {"from": 0.75, "to": 0.85}
+
+
+def test_zero_fresh_tail_count_means_no_tail_under_the_default_cap(tmp_path):
+    # #1013 behaviour note: LCM_FRESH_TAIL_COUNT=0 is the documented "no fresh tail" opt-out; the 24000-token
+    # default cap must not turn it into a one-message tail.
+    engine, _hermes_home = _default_engine(tmp_path)
+    engine._config.fresh_tail_count = 0
+    assert engine._config.fresh_tail_max_tokens == 24_000
+    messages = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"turn {i}"} for i in range(6)]
+    try:
+        boundary = engine._fresh_tail_boundary(messages)
+    finally:
+        engine.shutdown()
+
+    assert engine._effective_fresh_tail_max_tokens() == 0
+    assert boundary.count == 0
+    assert boundary.start == len(messages)

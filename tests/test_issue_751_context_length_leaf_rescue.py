@@ -57,7 +57,9 @@ def _install_provider(monkeypatch, window=WINDOW, error=CONTEXT_LENGTH_ERROR, re
 
 def _engine(tmp_path, sweep=False, **config):
     settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 2000, "context_threshold": 0.001,
-                "threshold_full_sweep_enabled": sweep, "database_path": str(tmp_path / "lcm.db"), **config}
+                "threshold_full_sweep_enabled": sweep, "database_path": str(tmp_path / "lcm.db"),
+                # #1013: background rollup builds would add their own summariser calls.
+                "temporal_rollups_enabled": False, **config}
     engine = LCMEngine(config=LCMConfig(**settings))
     engine.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
     return engine

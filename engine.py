@@ -2544,13 +2544,13 @@ class LCMEngine(
         and trigger compression.  Below 50K the count-based limit is
         sufficient and clamping would break small-context test fixtures.
         When fresh_tail_count is 0 the user explicitly wants no fresh
-        tail, so the implicit token cap must not override that.
+        tail, so no token cap (explicit or the default) may override that.
         """
+        if not self._config.fresh_tail_count:
+            return 0
         explicit = self._config.fresh_tail_max_tokens
         if explicit > 0:
             return explicit
-        if not self._config.fresh_tail_count:
-            return 0
         ctx = self.context_length or 0
         if ctx < 50_000:
             return 0
