@@ -633,18 +633,32 @@ _PLACEHOLDER_MAX_CHARS = 512
 # so v0.26.1 and older readers (rollback) still recognize the stub.
 _RAW_PAYLOAD_PREVIEW_MIN_CHARS = 40
 _RAW_PAYLOAD_PREVIEW_JOINER = " ... "
+# Only this many chars per ``room`` char are scanned at each end of a large payload, so a
+# multi-megabyte message is never split or copied whole to build a few hundred preview chars.
+_RAW_PAYLOAD_PREVIEW_SCAN_FACTOR = 8
+_RAW_PAYLOAD_PREVIEW_TRANSLATION = str.maketrans({"[": "(", "]": ")", ";": ",", '"': "'"})
+
+
+def _raw_payload_preview_text(text: str) -> str:
+    text = " ".join(text.split())
+    return text.translate(_RAW_PAYLOAD_PREVIEW_TRANSLATION).replace("ref=", "ref_")
 
 
 def _raw_payload_preview(content: str, room: int) -> str:
     """#1016: a deterministic, whitespace-collapsed head/tail preview of at most ``room`` chars that
     cannot forge stub syntax: ``[``/``]``/``;`` are mapped and ``ref=`` is neutralized, so no
     recognizer (fullmatch or finditer) can read a ref, or the end of the stub, out of the user's text."""
-    text = " ".join((content or "").split())
-    text = text.translate(str.maketrans({"[": "(", "]": ")", ";": ",", '"': "'"})).replace("ref=", "ref_")
-    if len(text) <= room:
-        return text
+    content = content or ""
     keep = room - len(_RAW_PAYLOAD_PREVIEW_JOINER)
     head = keep * 7 // 10
+    window = room * _RAW_PAYLOAD_PREVIEW_SCAN_FACTOR
+    if len(content) > 2 * window:
+        head_text = _raw_payload_preview_text(content[:window])[:head]
+        tail_text = _raw_payload_preview_text(content[-window:])[-(keep - head):]
+        return f"{head_text}{_RAW_PAYLOAD_PREVIEW_JOINER}{tail_text}"
+    text = _raw_payload_preview_text(content)
+    if len(text) <= room:
+        return text
     return f"{text[:head]}{_RAW_PAYLOAD_PREVIEW_JOINER}{text[len(text) - (keep - head):]}"
 
 

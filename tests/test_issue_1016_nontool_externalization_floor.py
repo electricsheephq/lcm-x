@@ -217,6 +217,24 @@ def test_c_preview_is_deterministic_whitespace_collapsed_and_bounded():
     assert extract_externalized_ref(stub) == summary["ref"]
 
 
+def test_c_preview_of_a_huge_payload_scans_only_its_ends():
+    import tracemalloc
+
+    content = "a " * 10_000_000 + "ZQX omega\n"  # 20 MB of one-char words
+    summary = {"kind": "raw_payload", "role": "user", "content_chars": len(content),
+               "content_bytes": len(content), "ref": "20261009_000000_raw_payload_user_0123456789ab_1a.json"}
+    tracemalloc.start()
+    try:
+        stub = _build_externalized_placeholder(summary, content=content)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert peak < 1_000_000  # splitting the whole payload would allocate hundreds of MB
+    assert 'preview="a a a' in stub and "a ZQX omega" + '"' in stub
+    assert len(stub) < 512
+    assert extract_externalized_ref(stub) == summary["ref"]
+
+
 # The v0.26.1 recognizer, frozen: a rollback from this release must still read the new stub.
 V0261_EXTERNALIZED_REF_RE = re.compile(
     r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]"
