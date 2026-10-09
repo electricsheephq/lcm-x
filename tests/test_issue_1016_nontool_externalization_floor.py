@@ -8,7 +8,6 @@ import re
 import pytest
 
 import hermes_lcm.escalation as escalation
-import hermes_lcm.externalize as externalize
 import hermes_lcm.ingest_protection as ingest_protection
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
@@ -195,7 +194,7 @@ def test_c_user_turn_over_the_floor_gets_a_preview_and_read_hint_stub(tmp_path):
     assert stub.startswith("[Externalized payload: kind=raw_payload; role=user;")
     assert stub.endswith(f'read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]')
     assert HEAD in stub and TAIL in stub and MID not in stub
-    assert len(stub) <= externalize._RAW_PAYLOAD_PLACEHOLDER_MAX_CHARS
+    assert len(stub) < 512
 
     assert is_externalized_placeholder(stub)
     assert extract_externalized_refs(stub) == [ref]
@@ -214,8 +213,49 @@ def test_c_preview_is_deterministic_whitespace_collapsed_and_bounded():
     assert stub == _build_externalized_placeholder(summary, content=content)
     assert 'preview="alpha beta gamma x' in stub
     assert "x omega" + '"' in stub
-    assert len(stub) <= externalize._RAW_PAYLOAD_PLACEHOLDER_MAX_CHARS
+    assert len(stub) < 512
     assert extract_externalized_ref(stub) == summary["ref"]
+
+
+# The v0.26.1 recognizer, frozen: a rollback from this release must still read the new stub.
+V0261_EXTERNALIZED_REF_RE = re.compile(
+    r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]"
+)
+
+
+def _v0261_is_externalized_placeholder(text: str) -> bool:
+    """Return true for a compact legacy externalized payload/tool marker."""
+    if not isinstance(text, str):
+        return False
+    stripped = text.strip()
+    if not stripped or len(stripped) > 512:
+        return False
+    return bool(V0261_EXTERNALIZED_REF_RE.fullmatch(stripped))
+
+
+@pytest.mark.parametrize(("role", "has_preview"), [("user", True), ("assistant", True), ("r" * 500, False)],
+                         ids=["user", "assistant", "max-role"])
+def test_c_stub_for_a_150k_row_with_a_long_ref_passes_the_v0261_recognizer(role, has_preview):
+    content = _big_text(150_000)
+    ref = "20261009_235959_raw_payload_" + "m" * 48 + "_0123456789ab_18dcd4bff70b9fd8.json"
+    summary = {"kind": "raw_payload", "role": role, "content_chars": len(content),
+               "content_bytes": len(content.encode()), "ref": ref}
+    stub = _build_externalized_placeholder(summary, content=content)
+    assert len(stub) < 512
+    assert _v0261_is_externalized_placeholder(stub)
+    assert V0261_EXTERNALIZED_REF_RE.fullmatch(stub).group(1) == ref
+    # The longest role (120 chars after sanitizing) with the longest generated ref leaves no room: hint only.
+    assert ('preview="' + HEAD in stub and TAIL + '"' in stub) is has_preview
+    assert ("preview=" in stub) is has_preview
+    assert f'read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]' in stub
+
+
+def test_c_stub_written_at_ingest_passes_the_v0261_recognizer(tmp_path):
+    engine = _engine(tmp_path)
+    engine.ingest([{"role": "user", "content": _big_text(150_000)}])
+    [row] = [r for r in _stored(engine) if r["role"] == "user"]
+    assert _v0261_is_externalized_placeholder(row["content"])
+    assert V0261_EXTERNALIZED_REF_RE.fullmatch(row["content"]).group(1) == _payload_files(tmp_path)[0].name
 
 
 # --- (d) tool output and media keep the configured threshold -----------------------------

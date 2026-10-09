@@ -7660,8 +7660,6 @@ class TestIngestExternalization:
         import hermes_lcm.tools as lcm_tools
         from hermes_lcm.engine import LCMEngine
 
-        from hermes_lcm.externalize import _RAW_PAYLOAD_PLACEHOLDER_MAX_CHARS
-
         engine, output_dir = self._engine(tmp_path)
         # #1016: above the 100k non-tool floor; the needle sits outside the stub's preview.
         content = ("r " * 30_000) + "ACTIVE_RAW_NEEDLE " + ("r " * 30_000)
@@ -7673,7 +7671,7 @@ class TestIngestExternalization:
         active_content = active_context[0]["content"]
         assert active_content.startswith("[Externalized payload: kind=raw_payload;")
         assert "ACTIVE_RAW_NEEDLE" not in active_content
-        assert len(active_content) <= _RAW_PAYLOAD_PLACEHOLDER_MAX_CHARS
+        assert len(active_content) < 512
         assert messages[0]["content"] == content
 
         stored = engine._store.get_session_messages("ingest-session")
