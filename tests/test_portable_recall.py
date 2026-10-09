@@ -103,8 +103,12 @@ def test_production_recall_and_exact_unicode_pagination(tmp_path):
     receipt = client.ingest("session-a", event_id="event-1", messages=[{"role": "user", "content": text}])
     result = client.call("lcm_recall", {"session": "session-a", "query": "nebula"})
     assert "error" not in result
+    assert result["total_results"] == 1
     hits = list(references(result))
     assert hits and all(hit["corpus_id"] == receipt["corpus_id"] for hit in hits)
+    for hit in hits:
+        page = client.call("lcm_expand", {"session": "session-a", "reference": hit["portable_ref"], "max_tokens": 2000})
+        assert page["content"] == hit["content"][:len(page["content"])]
     # The full stored span is independently pageable, without normalizing text.
     reference = f"lcmx:{receipt['corpus_id']}:lcm:{receipt['store_ids'][0]}:0-{len(text)}"
     offset, parts = 0, []
@@ -238,7 +242,7 @@ def test_codex_finalized_tools_and_unmatched_chronology(tmp_path):
     write_jsonl(path, events)
     report = client.capture("session-a", transcript=path, transcript_root=tmp_path)
     assert report["coverage_complete"] and len(rows(client)) == 4
-    status = client.call("lcm_portable_status", {"session": "session-a"})
+    status = client.call("lcm_status", {"session": "session-a"})
     assert status["tool_pairing"]["unmatched_results"] == 1
     assert status["tool_pairing"]["unresolved_calls"] == 1
     assert not status["native_context_engine"] and not status["native_host_qualified"]
@@ -292,6 +296,13 @@ def test_hooks_fail_open_and_emit_only_sessionstart_context(tmp_path):
     payload = {"session_id": "session-a", "transcript_path": str(path), "hook_event_name": "PreCompact"}
     output, receipt = client.hook(payload, transcript_root=tmp_path)
     assert output == {} and receipt["status"] == "observed"
+    for count, event in enumerate(("UserPromptSubmit", "PostToolUse"), start=2):
+        with path.open("a") as stream:
+            stream.write(json.dumps(claude("incremental hook evidence", "incremental-" + event)) + "\n")
+        payload["hook_event_name"] = event
+        output, receipt = client.hook(payload, transcript_root=tmp_path)
+        assert output == {} and receipt["status"] == "observed"
+        assert len(rows(client)) == count
     payload["hook_event_name"] = "SessionStart"
     output, receipt = client.hook(payload, transcript_root=tmp_path)
     assert output["hookSpecificOutput"]["additionalContext"] and receipt["capsule_emitted"]
@@ -300,7 +311,7 @@ def test_hooks_fail_open_and_emit_only_sessionstart_context(tmp_path):
     payload["session_id"] = "wrong-session"
     output, receipt = client.hook(payload, transcript_root=tmp_path)
     assert output == {} and receipt["status"] == "failed_open"
-    status = client.call("lcm_portable_status", {"session": "session-a"})
+    status = client.call("lcm_status", {"session": "session-a"})
     assert status["hooks"]["SessionStart"]["qualified"] is False
     assert status["hooks"]["SessionStart"]["injection_confirmed"] is False
 

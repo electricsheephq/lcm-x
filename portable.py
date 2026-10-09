@@ -149,6 +149,19 @@ class PortableRecall:
             return value
         result = {key: self._decorate(item, context, corpus) for key, item in value.items()}
         exact = result.get("exact_ref")
+        # Baseline answer_ready publishes a strict span tuple. Its exact_ref
+        # string is optional (delta mode), so format that tuple here without
+        # changing production selection or hydration budgets.
+        if exact is None and result.get("kind") in {"message", "message_excerpt", "chunk"}:
+            row_id, start, length = (result.get(key) for key in
+                                     ("store_id", "content_offset", "content_returned_chars"))
+            if all(type(item) is int for item in (row_id, start, length)) and length > 0:
+                row = context._store.get(row_id)
+                content = str(row.get("content") or "") if row else ""
+                end = start + length
+                if (row and row["session_id"] == context.current_session_id and 0 <= start < end <= len(content)
+                        and ("content" not in result or result["content"] == content[start:end])):
+                    exact = result["exact_ref"] = f"lcm:{row_id}:{start}-{end}"
         if isinstance(exact, str) and LOCAL_REF.fullmatch(exact):
             result["portable_ref"] = f"lcmx:{corpus}:{exact}"
             result["corpus_id"] = corpus
@@ -173,7 +186,7 @@ class PortableRecall:
         context = self.open(session)
         corpus = self.corpus_id(session)
         try:
-            if name == "lcm_portable_status":
+            if name == "lcm_status":
                 return self.status(session, context)
             if name == "lcm_recall":
                 query = _label(arguments["query"], "query", 4096)
@@ -450,7 +463,8 @@ class PortableRecall:
             if not isinstance(payload, dict):
                 raise PortableError("invalid_hook_payload")
             event = payload.get("hook_event_name")
-            if event not in {"PreCompact", "PostCompact", "SessionStart", "Stop", "SessionEnd"}:
+            if event not in {"PreCompact", "PostCompact", "SessionStart", "Stop", "SessionEnd",
+                             "UserPromptSubmit", "PostToolUse"}:
                 raise PortableError("unsupported_hook_event")
             session = _label(payload.get("session_id"), "session")
             agent = payload.get("agent_id")
@@ -595,7 +609,7 @@ def tool_schemas() -> list[dict[str, Any]]:
          {"session": session, "reference": {"type": "string"},
           "offset": {"type": "integer", "minimum": 0},
           "max_tokens": {"type": "integer", "minimum": 1, "maximum": 2000}}, ["session", "reference"]),
-        ("lcm_portable_status", "Read observed capture/hooks; qualification and native replacement remain false.",
+        ("lcm_status", "Read observed capture/hooks; qualification and native replacement remain false.",
          {"session": session}, ["session"]),
     ]
     return [{"name": name, "description": description,
