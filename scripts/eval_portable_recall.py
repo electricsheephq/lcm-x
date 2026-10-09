@@ -11,7 +11,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from benchmarking.portable_recall_eval import (
-    capture_public, capture_synthetic, evaluate, read_frozen, synthetic_cases, write_frozen,
+    capture_public, capture_synthetic, evaluate, merge_public, read_frozen, synthetic_cases, write_frozen,
 )
 from optional_scorer import BGE_MODEL, BGE_REVISION, JEV_MODEL, JevBudget, LocalBGEScorer, PublicJevScorer
 
@@ -34,6 +34,16 @@ def main():
     public.add_argument("--posture", choices=("OFF", "LOCAL"), required=True)
     public.add_argument("--local-model", default="")
     public.add_argument("--source-identity", required=True)
+    public.add_argument("--shard-index", type=int, default=0)
+    public.add_argument("--shard-count", type=int, default=1)
+    merge = commands.add_parser("merge-public")
+    merge.add_argument("--dataset", type=Path, required=True)
+    merge.add_argument("--dataset-sha256", required=True)
+    merge.add_argument("--baseline-input", type=Path, action="append", required=True)
+    merge.add_argument("--frozen-input", type=Path, action="append", required=True,
+                       help="pool files in matching baseline-input order")
+    merge.add_argument("--baseline-output", type=Path, required=True)
+    merge.add_argument("--frozen-output", dest="output", type=Path, required=True)
     run = commands.add_parser("run")
     run.add_argument("--input", type=Path, required=True)
     run.add_argument("--output", type=Path, required=True)
@@ -46,6 +56,27 @@ def main():
     args = parser.parse_args()
     if args.output.exists():
         parser.error("output already exists; preserve frozen evidence")
+    if args.command == "merge-public":
+        inputs = [args.dataset, *args.baseline_input, *args.frozen_input]
+        if (args.baseline_output.exists() or args.baseline_output.resolve() == args.output.resolve()
+                or {args.baseline_output.resolve(), args.output.resolve()} & {p.resolve() for p in inputs}):
+            parser.error("outputs must be distinct new files and must not alias inputs")
+        try:
+            cases, baseline = merge_public(
+                args.dataset, expected_sha256=args.dataset_sha256,
+                baseline_inputs=args.baseline_input, frozen_inputs=args.frozen_input,
+            )
+        except (ValueError, KeyError, TypeError, AttributeError) as error:
+            parser.error(f"invalid public shard cohort: {error}")
+        header = write_frozen(args.output, cases, input_kind="public",
+                              posture=baseline["provenance"]["posture"],
+                              source_identity=baseline["source_identity"], provenance=baseline["provenance"])
+        baseline["frozen_corpus_sha256"] = header["corpus_sha256"]
+        with args.baseline_output.open("x", encoding="utf-8") as stream:
+            json.dump(baseline, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+        print(json.dumps(baseline["provenance"], sort_keys=True))
+        return
     if args.command == "freeze-public":
         if args.baseline_output.exists() or args.baseline_output.resolve() == args.output.resolve():
             parser.error("baseline and frozen outputs must be distinct, new files")
@@ -60,6 +91,7 @@ def main():
             cases, baseline = capture_public(
                 args.dataset, expected_sha256=args.dataset_sha256, tmp_dir=Path(directory),
                 posture=args.posture, local_model=args.local_model, dev_header=dev_header,
+                shard_index=args.shard_index, shard_count=args.shard_count,
             )
         baseline["source_identity"] = args.source_identity
         header = write_frozen(args.output, cases, input_kind="public", posture=args.posture,

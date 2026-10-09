@@ -231,21 +231,9 @@ instrument's stub only with embeddings disabled. LOCAL uses real FastEmbed.
     return tuple(captured)
 
 
-def capture_public(dataset: Path, *, expected_sha256: str, tmp_dir: Path,
-                   posture: str, local_model: str, dev_header: dict):
-    """Full pinned LongMemEval_S holdout; one existing baseline pass per case.
-
-The expected byte checksum comes from the root's pinned download receipt.
-No exact character-span annotations exist in these official labels. Failed
-source projections are recorded and excluded from the frozen scoring pool.
-"""
-    import inspect
-    from dataclasses import replace
+def public_questions(dataset: Path, expected_sha256: str):
+    """Validate the complete pinned cohort before partitioning or merging."""
     from . import longmemeval as instrument
-    if "candidate_sink" not in inspect.signature(instrument.evaluate_question).parameters:
-        raise RuntimeError("existing instrument needs the candidate_sink integration")
-    if posture not in {"OFF", "LOCAL"} or (posture == "LOCAL" and not local_model):
-        raise ValueError("LOCAL requires an explicit local embedding model")
     if instrument.DATASET_REVISION != DATASET_REVISION:
         raise ValueError("instrument dataset revision differs from the registered pin")
     instrument.validate_dataset_path_label(dataset, "s")
@@ -256,10 +244,36 @@ source projections are recorded and excluded from the frozen scoring pool.
         raise ValueError("full LongMemEval_S checksum/count mismatch")
     if len({q.question_id for q in questions}) != len(questions):
         raise ValueError("duplicate public question identity")
+    return questions, actual_sha256
+
+
+def public_shard(question_ids, index, count):
+    if type(count) is not int or type(index) is not int or not 1 <= count <= 500 or not 0 <= index < count:
+        raise ValueError("invalid public shard index/count")
+    return {"index": index, "count": count, "question_ids": question_ids[index::count],
+            "full_question_ids_sha256": hashlib.sha256(canonical_bytes(question_ids)).hexdigest()}
+
+
+def capture_public(dataset: Path, *, expected_sha256: str, tmp_dir: Path,
+                   posture: str, local_model: str, dev_header: dict,
+                   shard_index: int = 0, shard_count: int = 1):
+    """One unchanged baseline pass per selected question of the pinned500.
+
+    No exact character-span gold is inferred from official session/turn labels.
+    """
+    import inspect
+    from dataclasses import replace
+    from . import longmemeval as instrument
+    if "candidate_sink" not in inspect.signature(instrument.evaluate_question).parameters:
+        raise RuntimeError("existing instrument needs the candidate_sink integration")
+    if posture not in {"OFF", "LOCAL"} or (posture == "LOCAL" and not local_model):
+        raise ValueError("LOCAL requires an explicit local embedding model")
+    questions, actual_sha256 = public_questions(dataset, expected_sha256)
+    shard = public_shard([q.question_id for q in questions], shard_index, shard_count)
     provider_name = "stub" if posture == "OFF" else "fastembed"
     providers = instrument.resolve_harness_providers(provider_name, local_model)
     cases, rows = [], []
-    for question in questions:
+    for question in questions[shard_index::shard_count]:
         capture = {"status": "MISSING_CAPTURE", "exact_span_gold": "UNMEASURED"}
         calls = 0
 
@@ -290,12 +304,115 @@ source projections are recorded and excluded from the frozen scoring pool.
         "posture": posture, "summary_binding": list(providers.summary_binding),
         "chunk_binding": list(providers.chunk_binding), "full_holdout_questions": 500,
         "current_instrument_top_k": 10, "rerank": False, "recall_rerank": False,
-        "captured_questions": len(cases), "unmeasured_capture_questions": 500 - len(cases),
+        "captured_questions": len(cases), "unmeasured_capture_questions": len(rows) - len(cases),
+        "evaluated_questions": len(rows), "cohort_complete": shard_count == 1,
+        "shard": shard, "local_model": local_model,
+        "delivery_detail": "snippets", "delivery_include": "all",
         "exact_span_gold": "UNMEASURED", "answer_correctness": "UNMEASURED",
         "dev_registration": {"corpus_sha256": dev_header["corpus_sha256"],
-                             "synthetic_dev": 40, "synthetic_holdout": 80},
+                             "synthetic_dev": 40, "synthetic_holdout": 80,
+                             "source_identity": dev_header["source_identity"]},
     }
     return tuple(cases), {"provenance": provenance, "per_question": rows}
+
+
+def merge_public(dataset: Path, *, expected_sha256: str, baseline_inputs, frozen_inputs):
+    """Validate every shard/pool before returning a complete ordered cohort."""
+    from . import longmemeval as instrument
+    questions, actual_sha256 = public_questions(dataset, expected_sha256)
+    ids = [q.question_id for q in questions]
+    if not baseline_inputs or len(baseline_inputs) != len(frozen_inputs):
+        raise ValueError("matching baseline/frozen inputs are required")
+    rows, cases, seen, pins, shard_count = {}, {}, set(), None, None
+    receipts = []
+    variable = {"shard", "captured_questions", "unmeasured_capture_questions",
+                "evaluated_questions", "cohort_complete"}
+    for baseline_path, frozen_path in zip(baseline_inputs, frozen_inputs):
+        baseline_bytes = Path(baseline_path).read_bytes()
+        baseline = json.loads(baseline_bytes)
+        provenance = baseline["provenance"]
+        shard = provenance["shard"]
+        expected_shard = public_shard(ids, shard["index"], shard["count"])
+        if shard != expected_shard or shard["index"] in seen:
+            raise ValueError("duplicate or invalid shard identity")
+        if shard_count is not None and shard_count != shard["count"]:
+            raise ValueError("mixed public shard count")
+        shard_count = shard["count"]
+        seen.add(shard["index"])
+        current_pins = {k: v for k, v in provenance.items() if k not in variable}
+        current_pins["source_identity"] = baseline["source_identity"]
+        if not current_pins["source_identity"] or (pins is not None and current_pins != pins):
+            raise ValueError("mixed public shard pins")
+        pins = current_pins
+        if (provenance["dataset"] != {**instrument.dataset_coordinates("s"), "sha256": actual_sha256}
+                or provenance["full_holdout_questions"] != 500
+                or provenance["current_instrument_top_k"] != 10
+                or provenance["rerank"] is not False or provenance["recall_rerank"] is not False
+                or provenance["exact_span_gold"] != "UNMEASURED"
+                or provenance["answer_correctness"] != "UNMEASURED"
+                or provenance["delivery_detail"] != "snippets" or provenance["delivery_include"] != "all"
+                or provenance["posture"] not in {"OFF", "LOCAL"}
+                or (provenance["posture"] == "LOCAL" and not provenance["local_model"])
+                or not provenance["summary_binding"] or not provenance["chunk_binding"]
+                or provenance["dev_registration"]["synthetic_dev"] != 40
+                or provenance["dev_registration"]["synthetic_holdout"] != 80
+                or not provenance["dev_registration"]["source_identity"]
+                or len(provenance["dev_registration"]["corpus_sha256"]) != 64
+                or set(provenance["dev_registration"]["corpus_sha256"]) - set("0123456789abcdef")):
+            raise ValueError("invalid public configuration pins")
+        shard_rows = baseline["per_question"]
+        if [row["question_id"] for row in shard_rows] != shard["question_ids"]:
+            raise ValueError("duplicate, missing or foreign public rows")
+        captured = []
+        for row in shard_rows:
+            qid = row["question_id"]
+            capture = row["capture"]
+            if (qid in rows or not isinstance(row["current_instrument_metrics"], dict)
+                    or capture["exact_span_gold"] != "UNMEASURED"
+                    or capture["status"] not in {"CAPTURED", "UNMEASURED_CAPTURE: source_projection"}):
+                raise ValueError("invalid public row or capture metadata")
+            rows[qid] = row
+            if capture["status"] == "CAPTURED":
+                captured.append(qid)
+        if (provenance["evaluated_questions"] != len(shard_rows)
+                or provenance["captured_questions"] != len(captured)
+                or provenance["unmeasured_capture_questions"] != len(shard_rows) - len(captured)
+                or provenance["cohort_complete"] is not (shard["count"] == 1)):
+            raise ValueError("invalid public shard counts")
+        header, shard_cases = read_frozen(Path(frozen_path))
+        if (header["input_kind"] != "public" or header["posture"] != provenance["posture"]
+                or header["source_identity"] != baseline["source_identity"]
+                or header["provenance"] != provenance
+                or header["corpus_sha256"] != baseline["frozen_corpus_sha256"]
+                or [case.case_id for case in shard_cases] != captured):
+            raise ValueError("frozen public pool does not match baseline")
+        for case in shard_cases:
+            if (case.case_id in cases or case.gold is not None or case.split != "holdout"
+                    or case.conversation_id != case.case_id
+                    or (case.delivery_detail, case.delivery_include) != ("snippets", "all")
+                    or any(c.scope_id != case.case_id for c in case.candidates)):
+                raise ValueError("invalid frozen public case")
+            cases[case.case_id] = case
+        receipts.append({"index": shard["index"], "frozen_corpus_sha256": header["corpus_sha256"],
+                         "baseline_sha256": hashlib.sha256(baseline_bytes).hexdigest()})
+    count = shard["count"]
+    if seen != set(range(count)) or len(baseline_inputs) != count or set(rows) != set(ids):
+        raise ValueError("incomplete public500 shard cohort")
+    for question in questions:
+        qid = question.question_id
+        if (rows[qid]["category"] != question.category
+                or (qid in cases and (cases[qid].category != question.category
+                    or cases[qid].query != question.question or cases[qid].noanswer != question.is_abstention))):
+            raise ValueError("public row differs from pinned question")
+    source_identity = pins.pop("source_identity")
+    provenance = {**pins, "captured_questions": len(cases),
+                  "unmeasured_capture_questions": 500 - len(cases), "evaluated_questions": 500,
+                  "cohort_complete": True, "shard": public_shard(ids, 0, 1),
+                  "aggregation": {"method": "index-modulo-original-order", "shard_count": count,
+                                  "shards": sorted(receipts, key=lambda r: r["index"])}}
+    return tuple(cases[qid] for qid in ids if qid in cases), {
+        "source_identity": source_identity, "provenance": provenance,
+        "per_question": [rows[qid] for qid in ids]}
 
 
 def freeze_production_pool(
