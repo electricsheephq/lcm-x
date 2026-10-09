@@ -3128,9 +3128,12 @@ def ensure_message_stem_fts(conn: sqlite3.Connection, spec: ExternalContentFtsSp
             # optional index, and restored triggers commit with the reset flags.
             conn.execute("BEGIN IMMEDIATE")
             state = _stem_metadata(conn, "fts_stem_state")
-            missing = not get_existing_table_names(conn, [spec.table_name]) or _fts_missing_triggers(conn, spec)
+            table_existed = bool(get_existing_table_names(conn, [spec.table_name]))
+            missing = not table_existed or _fts_missing_triggers(conn, spec)
             _create_stem_fts(conn, spec)
-            if state == "ready" and missing:
+            if missing and (state or table_existed):
+                # Writes skipped the index while a trigger was absent, whatever the prior state; an
+                # unreset backfill would skip those rows (their docsize exists) and still go ready.
                 _stem_metadata(conn, "fts_stem_reset", "1")
                 _stem_metadata(conn, "fts_stem_state", "backfilling")
             elif (state != "ready" and _stem_metadata(conn, "fts_stem_reset") != "1"
@@ -3168,19 +3171,28 @@ def _run_stem_backfill(db_path: str, spec: ExternalContentFtsSpec, stamp: str) -
                 conn.execute("DELETE FROM metadata WHERE key='fts_stem_reset'")
             conn.commit()
             for _ in range(2):
-                lo, hi = conn.execute("SELECT MIN(store_id), MAX(store_id) FROM messages").fetchone()
-                for start in range(lo or 0, (hi or -1) + 1, 1000):
+                # Page by key, 1000 existing rows at a time: sparse or imported store_ids cost no
+                # empty batches, so the run scales with the message count, not the id span.
+                last = conn.execute("SELECT COALESCE(MIN(store_id), 1) - 1 FROM messages").fetchone()[0]
+                while True:
+                    end = conn.execute(
+                        "SELECT MAX(store_id) FROM (SELECT store_id FROM messages WHERE store_id > ? "
+                        "ORDER BY store_id LIMIT 1000)", (last,),
+                    ).fetchone()[0]
+                    if end is None:
+                        break
                     if not disk_available():
                         return
                     conn.execute("BEGIN IMMEDIATE")
                     conn.execute(
                         "INSERT INTO messages_fts_stem(rowid, content) "
-                        "SELECT store_id, content FROM messages WHERE store_id BETWEEN ? AND ? "
+                        "SELECT store_id, content FROM messages WHERE store_id > ? AND store_id <= ? "
                         "AND NOT EXISTS (SELECT 1 FROM messages_fts_stem_docsize WHERE id=store_id)",
-                        (start, start + 999),
+                        (last, end),
                     )
                     conn.commit()
                     time.sleep(0.03)
+                    last = end
                 if not disk_available():
                     return
                 conn.execute("BEGIN IMMEDIATE")

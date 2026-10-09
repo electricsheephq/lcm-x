@@ -419,3 +419,75 @@ def test_round3_backfilling_open_takes_no_write_lock(store, monkeypatch):
         holder.rollback()
         holder.close()
     assert dispatched == [1]
+
+
+def test_round4_trigger_repair_during_backfill_resets(store):
+    """A trigger repaired while the state is already ``backfilling`` must reset the index: an
+    update made while the trigger was absent leaves a stale entry the resumed backfill skips."""
+    from hermes_lcm.store import build_message_stem_fts_spec
+    conn = partial(store)
+    conn.execute("INSERT INTO messages_fts_stem(rowid, content) SELECT store_id, content FROM messages WHERE store_id=1")
+    conn.commit()
+    boot._drop_fts_triggers(conn, build_message_stem_fts_spec().trigger_sqls)
+    conn.execute("UPDATE messages SET content='zebra crossing' WHERE store_id=1")
+    conn.commit()
+    reopened = MessageStore(store.db_path)
+    try:
+        assert boot._stem_metadata(conn, "fts_stem_reset") == "1"  # unset before the fix
+        finish(store)
+        consistent(conn)
+        match = "SELECT rowid FROM messages_fts_stem WHERE messages_fts_stem MATCH ? ORDER BY rowid"
+        assert conn.execute(match, ("zebra",)).fetchall() == [(1,)]
+        assert conn.execute(match, ("deployment",)).fetchall() == [(2,), (3,)]
+    finally:
+        reopened.close()
+
+
+def test_round4_readiness_flip_during_query_falls_back_to_plain(store):
+    """A repair or reset that clears the stem index between the readiness read and the query must
+    not let the partial index answer as ``stem``; the plain index answers instead."""
+    conn = partial(store)
+    finish(store)
+    expected = [hit["store_id"] for hit in store.search("visit", stemmed=False)]
+    assert expected
+
+    class FlipOnStemQuery:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def execute(self, sql, *args):
+            if "messages_fts_stem MATCH" in sql:
+                other = sqlite3.connect(str(store.db_path))
+                other.executemany("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                                  [("fts_stem_state", "backfilling"), ("fts_stem_reset", "1")])
+                other.execute("INSERT INTO messages_fts_stem(messages_fts_stem) VALUES('delete-all')")
+                other.commit()
+                other.close()
+            return self.inner.execute(sql, *args)
+
+    store._conn = FlipOnStemQuery(conn)
+    try:
+        hits = store.search("visit", stemmed=True)
+    finally:
+        store._conn = conn
+    assert [hit["store_id"] for hit in hits] == expected  # [] answered as "stem" before the fix
+    assert store._last_fts_index == "plain"
+
+
+def test_round4_backfill_pages_by_key_not_id_span(store, monkeypatch):
+    """Sparse store_ids cost no empty batches: one page covers three rows 50M ids apart."""
+    conn = partial(store, 2)
+    conn.execute("INSERT INTO messages(store_id, session_id, role, content, timestamp) "
+                 "VALUES(50000000, 'sparse', 'tool', 'visit deployment', 1)")
+    conn.commit()
+    batches = []
+
+    def count_batch(_):
+        batches.append(1)
+        if len(batches) > 10:
+            raise RuntimeError("backfill walked the id span")
+
+    monkeypatch.setattr(boot.time, "sleep", count_batch)
+    finish(store)
+    consistent(conn)
+    assert len(batches) == 1

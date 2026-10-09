@@ -1636,17 +1636,35 @@ class MessageStore:
 
     # -- Search -------------------------------------------------------------
 
-    def search(self, query: str, session_id: str | None = None,
-               limit: int = 20, sort: str | None = None,
-               source: str | None = None,
-               conversation_id: str | None = None,
-               role: str | None = None,
-               time_from: float | None = None,
-               time_to: float | None = None,
-               exclude_session_ids: Collection[str] | None = None,
-               allow_operators: bool = False,
-               agent_operators: bool = False,
-               stemmed: bool = False) -> List[Dict[str, Any]]:
+    def _stem_state(self) -> str:
+        try:
+            row = self._conn.execute("SELECT value FROM metadata WHERE key='fts_stem_state'").fetchone()
+        except sqlite3.Error:
+            return ""
+        return str(row[0]) if row else ""
+
+    def search(self, query: str, *args: Any, stemmed: bool = False, **kwargs: Any) -> List[Dict[str, Any]]:
+        """FTS5 search across raw messages; ``_search_fts`` holds the retrieval contract.
+
+        A stem answer stands only if the stem index is still ``ready`` after the query: a repair
+        or reset can clear it between the readiness read and the query, and a partial index must
+        not answer as complete, so the plain index answers instead."""
+        results = self._search_fts(query, *args, stemmed=stemmed, **kwargs)
+        if self._last_fts_index == "stem" and self._stem_state() != "ready":
+            results = self._search_fts(query, *args, stemmed=False, **kwargs)
+        return results
+
+    def _search_fts(self, query: str, session_id: str | None = None,
+                    limit: int = 20, sort: str | None = None,
+                    source: str | None = None,
+                    conversation_id: str | None = None,
+                    role: str | None = None,
+                    time_from: float | None = None,
+                    time_to: float | None = None,
+                    exclude_session_ids: Collection[str] | None = None,
+                    allow_operators: bool = False,
+                    agent_operators: bool = False,
+                    stemmed: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1663,13 +1681,8 @@ class MessageStore:
         """
         fts_table = "messages_fts"
         self._last_fts_index = "plain"
-        if stemmed:
-            try:
-                state = self._conn.execute("SELECT value FROM metadata WHERE key='fts_stem_state'").fetchone()
-                if state and state[0] == "ready":
-                    fts_table = "messages_fts_stem"
-            except sqlite3.Error:
-                pass
+        if stemmed and self._stem_state() == "ready":
+            fts_table = "messages_fts_stem"
         safe_query = sanitize_fts5_query(query, allow_operators=allow_operators, agent_operators=agent_operators)
         syntax_retried = False
         terms = extract_search_terms(safe_query)
