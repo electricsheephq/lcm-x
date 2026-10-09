@@ -363,7 +363,7 @@ Useful environment variables:
 | Variable | Default | Use |
 |----------|---------|-----|
 | `LCM_CONTEXT_THRESHOLD` | `0.35` | Fraction of the context window that triggers LCM compaction |
-| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall |
+| `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall. Also settable as `lcm.context_threshold_tokens` in config.yaml; the environment variable wins when it holds an integer (`0` turns the YAML value off); an empty or non-integer value falls back to the YAML key. |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold fractions, for example `"glm-5.3:0.115"`. Each key is matched as a substring of the active route's model name (the longest key wins) and takes priority over `LCM_CONTEXT_THRESHOLD`. Also settable as `lcm.model_thresholds` in config.yaml |
 | `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
 | `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
@@ -701,6 +701,9 @@ agents) so a larger window does not silently delay compaction, lower recall, or
 let long sessions accumulate more noise before LCM intervenes. Leave it at `0`
 to keep ratio-based behavior. When the absolute override is active, Codex
 GPT-5.5 ratio auto-raise is suppressed so the absolute setpoint stays pinned.
+The same pin can be set as `lcm.context_threshold_tokens` in `config.yaml`;
+`LCM_ABSOLUTE_THRESHOLD_TOKENS` takes precedence, and `lcm_status` reports which
+one applied under `config_sources.absolute_threshold_tokens`.
 
 A single fraction scales the trigger with each route's window. That is fine when
 you want each route to use the same share of its window, but on a profile that
