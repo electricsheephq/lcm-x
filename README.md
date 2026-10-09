@@ -136,10 +136,11 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line identifies itself as
-`hermes-lcm-x v0.26.0 (15 tools)` until the
+The `main` line identifies itself as `hermes-lcm-x v0.26.0` until the
 first v0.27.0 release candidate bumps it (patch releases such as v0.26.1 are cut from `release/v0.26.x` and carry their own identity). An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
+The manifest declares 15 tools; runtime discovery advertises 13 by default,
+or 15 with both assertion and adaptive-retrieval flags on.
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
 for it. v0.25.0 makes a hidden backlog drain at turn pace (#597); v0.28.0
@@ -252,11 +253,12 @@ Expected signals:
 - selected context engine is `lcm-x`
 - tool list includes `lcm_grep`, `lcm_recall`, `lcm_recent`,
   `lcm_load_session`, `lcm_describe`, `lcm_expand`, `lcm_expand_query`,
-  `lcm_status`, `lcm_inspect`, and `lcm_doctor`
+  `lcm_compute`, `lcm_compile_evidence`, `lcm_evidence_pack`,
+  `lcm_status`, `lcm_inspect`, and `lcm_doctor` (13 by default)
 - the normal available-skills index includes `hermes-lcm`; current hosts can
   also resolve the explicit plugin-qualified skill `hermes-lcm-x:hermes-lcm`
 
-On the `main` line, typical output is:
+On the `main` line, output with both opt-in flags enabled is:
 
 ```text
 Plugins (1):
@@ -277,8 +279,8 @@ best-effort git identity:
 
 If startup logs say LCM tools are available through `context-engine schemas` or
 mention the `Path B fallback`, that is expected on older Hermes hosts such as
-Hermes Agent v0.16. All 15 `lcm_*` tools remain available through the
-context-engine path; standalone plugin-registry registration is not required
+Hermes Agent v0.16. The 13 default `lcm_*` tools and any flag-enabled tools
+remain available through the context-engine path; standalone plugin-registry registration is not required
 there.
 
 ### Update it
@@ -444,6 +446,12 @@ tool schemas (`ContextEngine.get_tool_schemas`), which is the intended path.
 Use these tools for current-session recall after compaction. Use Hermes
 `session_search` for earlier separate sessions or broad cross-session history
 outside the LCM database.
+
+Both host paths hide `lcm_query_state` until `LCM_ASSERTIONS_ENABLED=true`
+and `lcm_retrieve` until `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`. The other 13
+schemas remain advertised by default. `LCM_DISABLED_TOOLS` hides any named
+tool, including a flag-enabled tool. Restart after changing the loaded flags.
+The manifest still declares all 15 tools.
 
 | Tool | Use |
 |------|-----|

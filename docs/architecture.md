@@ -19,8 +19,10 @@ runtime evidence.
 - **SQLite message store** - preserves raw messages by default before compaction
 - **Summary DAG** - compacts older context into depth-aware summary nodes
 - **Bounded recovery** - pages raw messages, child summaries, and externalized payloads without flooding the main context
-- **Agent tools** - 15 schemas spanning retrieval, session/provenance,
-  query/evidence, computation, status, inspection, and doctor workflows
+- **Agent tools** - 15 declared schemas spanning retrieval, session/provenance,
+  query/evidence, computation, status, inspection, and doctor workflows; 13 are
+  advertised by default, with `lcm_query_state` and `lcm_retrieve` hidden until
+  their assertion/adaptive-retrieval flags are on. `LCM_DISABLED_TOOLS` can hide any tool.
 - **Source-aware retrieval** - filters raw rows and summaries by descendant source lineage
 - **Session controls** - ignore noisy sessions or keep sessions read-only with glob patterns
 - **Large payload controls** - optional ingest-time externalization for oversized tool/media/raw payloads, plus transcript GC for already-externalized tool results

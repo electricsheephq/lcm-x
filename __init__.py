@@ -700,10 +700,9 @@ def register(ctx):
         ("lcm_inspect", LCM_INSPECT, "🧭"),
         ("lcm_doctor", LCM_DOCTOR, "🏥"),
     ]
-    # LCM_DISABLED_TOOLS (comma-separated lcm_* names) removes tools from the
-    # plugin-registry registration too, mirroring engine.get_tool_schemas() so
-    # disabled tools cost zero tokens on every host path.
-    _disabled = _disabled_tool_names()
+    # Share the loaded-config filter with the native context-engine path:
+    # explicitly disabled and flag-dormant tools cost no schema tokens.
+    _disabled = engine._omitted_tool_names()
     if _disabled:
         _TOOLS = [t for t in _TOOLS if t[0] not in _disabled]
     register_tool = getattr(ctx, "register_tool", None)
