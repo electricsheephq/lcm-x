@@ -18,6 +18,9 @@ def _isolate_host_capability_storage(tmp_path, monkeypatch):
         "HERMES_PROFILE",
         "LCM_HERMES_BASE_DIR",
         "LCM_LARGE_OUTPUT_EXTERNALIZATION_PATH",
+        "LCM_ASSERTIONS_ENABLED",
+        "LCM_ADAPTIVE_RETRIEVAL_ENABLED",
+        "LCM_DISABLED_TOOLS",
     ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -28,11 +31,9 @@ def _isolate_host_capability_storage(tmp_path, monkeypatch):
 EXPECTED_LCM_TOOLS = {
     "lcm_grep",
     "lcm_recall",
-    "lcm_query_state",
     "lcm_compute",
     "lcm_compile_evidence",
     "lcm_evidence_pack",
-    "lcm_retrieve",
     "lcm_recent",
     "lcm_load_session",
     "lcm_describe",
@@ -143,11 +144,22 @@ class TestRegistrationGating:
         assert ctx.engine is not None
         assert ctx.engine.name == "lcm-x"
         assert registered_tools == []
-        assert EXPECTED_LCM_TOOLS.issubset(
-            {schema["name"] for schema in ctx.engine.get_tool_schemas()}
-        )
+        assert {schema["name"] for schema in ctx.engine.get_tool_schemas()} == EXPECTED_LCM_TOOLS
 
-    def test_registers_tools_when_host_explicitly_supports_message_forwarding(self):
+    @pytest.mark.parametrize(("assertions", "adaptive", "disabled"), [
+        (False, False, ""),
+        (True, False, ""),
+        (False, True, ""),
+        (True, True, ""),
+        (False, False, "lcm_compute"),
+        (True, True, "lcm_compute,lcm_query_state,lcm_retrieve"),
+    ])
+    def test_registers_tools_when_host_explicitly_supports_message_forwarding(
+        self, monkeypatch, assertions, adaptive, disabled
+    ):
+        monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", str(assertions).lower())
+        monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", str(adaptive).lower())
+        monkeypatch.setenv("LCM_DISABLED_TOOLS", disabled)
         module = _load_plugin_module("hermes_lcm_gating_register")
         registered_tools = []
 
@@ -167,7 +179,17 @@ class TestRegistrationGating:
         module.register(ctx)
 
         assert ctx.engine is not None
-        assert set(registered_tools) == EXPECTED_LCM_TOOLS
+        expected = EXPECTED_LCM_TOOLS.copy()
+        if assertions:
+            expected.add("lcm_query_state")
+        if adaptive:
+            expected.add("lcm_retrieve")
+        expected.difference_update(filter(None, disabled.split(",")))
+        try:
+            assert set(registered_tools) == expected
+            assert {schema["name"] for schema in ctx.engine.get_tool_schemas()} == expected
+        finally:
+            ctx.engine.shutdown()
 
     def test_existing_context_engine_path_still_loads_without_register_tool(self):
         module = _load_plugin_module("hermes_lcm_gating_no_register_tool")

@@ -20,17 +20,18 @@ def _isolate_plugin_registration_storage(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes-home"
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("LCM_DATABASE_PATH", raising=False)
+    monkeypatch.delenv("LCM_ASSERTIONS_ENABLED", raising=False)
+    monkeypatch.delenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", raising=False)
+    monkeypatch.delenv("LCM_DISABLED_TOOLS", raising=False)
     return hermes_home
 
 
 EXPECTED_LCM_TOOLS = {
     "lcm_grep",
     "lcm_recall",
-    "lcm_query_state",
     "lcm_compute",
     "lcm_compile_evidence",
     "lcm_evidence_pack",
-    "lcm_retrieve",
     "lcm_recent",
     "lcm_load_session",
     "lcm_describe",
@@ -40,6 +41,9 @@ EXPECTED_LCM_TOOLS = {
     "lcm_inspect",
     "lcm_doctor",
 }
+
+
+ALL_LCM_TOOLS = EXPECTED_LCM_TOOLS | {"lcm_query_state", "lcm_retrieve"}
 
 
 def _load_plugin_entrypoint_module(module_name: str):
@@ -359,7 +363,7 @@ def test_plugin_manifest_lists_all_registered_tools():
     repo_root = Path(__file__).resolve().parent.parent
     manifest = (repo_root / "plugin.yaml").read_text(encoding="utf-8")
 
-    for tool_name in EXPECTED_LCM_TOOLS:
+    for tool_name in ALL_LCM_TOOLS:
         assert f"  - {tool_name}\n" in manifest
 
 
@@ -647,10 +651,12 @@ def test_plugin_entrypoint_registers_lcm_context_engine(_isolate_plugin_registra
     assert "plugin_git_dirty" in identity
 
     tool_names = {schema["name"] for schema in engine.get_tool_schemas()}
-    assert EXPECTED_LCM_TOOLS.issubset(tool_names)
+    assert tool_names == EXPECTED_LCM_TOOLS
 
 
-def test_plugin_entrypoint_registers_declared_lcm_tools():
+def test_plugin_entrypoint_registers_declared_lcm_tools(monkeypatch):
+    monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", "true")
+    monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", "true")
     module = _load_plugin_entrypoint_module("hermes_lcm_packaging_tool_registration")
     registered = []
 
@@ -679,7 +685,7 @@ def test_plugin_entrypoint_registers_declared_lcm_tools():
     module.register(ctx)
 
     assert ctx.engine is not None
-    assert {entry["name"] for entry in registered} == EXPECTED_LCM_TOOLS
+    assert {entry["name"] for entry in registered} == ALL_LCM_TOOLS
     assert {entry["toolset"] for entry in registered} == {"context_engine"}
     for entry in registered:
         assert entry["schema"]["name"] == entry["name"]
@@ -716,7 +722,7 @@ def test_plugin_entrypoint_skips_registered_lcm_tools_without_message_forwarding
 
     assert ctx.engine is not None
     assert registered == {}
-    assert EXPECTED_LCM_TOOLS.issubset({schema["name"] for schema in ctx.engine.get_tool_schemas()})
+    assert {schema["name"] for schema in ctx.engine.get_tool_schemas()} == EXPECTED_LCM_TOOLS
 
 
 def test_capability_false_host_log_describes_expected_path_b_fallback(caplog):
@@ -741,7 +747,7 @@ def test_capability_false_host_log_describes_expected_path_b_fallback(caplog):
     messages = "\n".join(record.getMessage() for record in caplog.records)
     assert ctx.engine is not None
     assert registered == []
-    assert EXPECTED_LCM_TOOLS.issubset({schema["name"] for schema in ctx.engine.get_tool_schemas()})
+    assert {schema["name"] for schema in ctx.engine.get_tool_schemas()} == EXPECTED_LCM_TOOLS
     assert "LCM tools are available through context-engine schemas" in messages
     assert "expected Path B fallback" in messages
     assert "tool registration skipped because" not in messages
@@ -1314,6 +1320,8 @@ def test_register_gracefully_degrades_when_register_tool_hook_raises():
 
 
 def test_registered_tool_handlers_route_through_engine_handle_tool_call(monkeypatch):
+    monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", "true")
+    monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", "true")
     module = _load_plugin_entrypoint_module("hermes_lcm_packaging_tool_handler_route")
     registered = {}
 
@@ -1340,7 +1348,7 @@ def test_registered_tool_handlers_route_through_engine_handle_tool_call(monkeypa
     ctx = _Ctx()
     module.register(ctx)
     assert ctx.engine is not None
-    assert set(registered) == EXPECTED_LCM_TOOLS
+    assert set(registered) == ALL_LCM_TOOLS
 
     calls = []
 
@@ -1355,7 +1363,7 @@ def test_registered_tool_handlers_route_through_engine_handle_tool_call(monkeypa
         args = {"query": "current turn"}
         assert ctx.registry_dispatch(tool_name, args, messages) == f"handled:{tool_name}"
 
-    assert {name for name, _, _ in calls} == EXPECTED_LCM_TOOLS
+    assert {name for name, _, _ in calls} == ALL_LCM_TOOLS
     for name, args, kwargs in calls:
         assert args == {"query": "current turn"}
         assert kwargs["messages"] == messages
