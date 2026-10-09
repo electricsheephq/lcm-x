@@ -42,6 +42,7 @@ def test_recall_or_stopword_phrase_survives():
     ("OR*", "or*"), ("alpha AND beta", "alpha and beta"),
     ("OR", "or"), ("NOT", "not"), ("NEAR", "near"), ("OR NOT", "or not"),
     ("(alpha OR gamma) beta", "alpha or gamma beta"),
+    ('"function(foo)" OR alpha', '"function(foo)" OR alpha'),
 ])
 def test_grep_agent_sanitizer_mode(query, expected):
     import sqlite3

@@ -94,7 +94,7 @@ from .retrieval_core import (
 from .rollup_store import RollupStore
 from .search_query import (
     AGE_DECAY_RATE, build_recall_or_query, contains_emoji, normalize_search_sort, recall_content_terms,
-    extract_search_terms, requires_like_fallback, sanitize_fts5_query,
+    requires_like_fallback, sanitize_fts5_query,
 )
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
@@ -4409,20 +4409,22 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         payload = json.loads(_lcm_grep_full_text(parsed_args, **kwargs))
         query = _coerce_query_arg(args.get("query"))
         safe = sanitize_fts5_query(query, agent_operators=True)
-        or_query = " OR ".join(
-            term for term in recall_content_terms(query)
-            if term.strip('"').upper() not in {"NOT", "NEAR", "OR", "AND"}
-        )
+        tokens = re.findall(r'"[^"]*"|[^\s"]+', safe)
+        operands = list(dict.fromkeys(
+            token for token in tokens
+            if token.startswith('"') or token.upper() not in {"NOT", "NEAR", "OR", "AND"}
+        ))
+        or_query = " OR ".join(operands)
         if (
             payload.get("total_results") == 0 and not payload.get("message_search_error")
             and payload.get("content_scope") in {"history", "both"}
             and not requires_like_fallback(query, safe)
-            and "OR" not in sanitize_fts5_query(query, allow_operators=True).split()
-            and "NOT" not in safe.split()
-            and len(extract_search_terms(safe)) >= 2 and or_query
+            and not {"OR", "NOT"}.intersection(tokens)
+            and not re.search(r"[()]", re.sub(r'"[^"]*"', "", query))
+            and len(operands) >= 2
         ):
             retry_args = {**parsed_args, "query": or_query,
-                          "_agent_operators": False, "_allow_operators": True, "_grep_any_term": True}
+                          "_agent_operators": True, "_allow_operators": True, "_grep_any_term": True}
             payload = json.loads(_lcm_grep_full_text(retry_args, **kwargs))
             payload["query"] = query
             payload["retried"] = "any_term"

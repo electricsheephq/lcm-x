@@ -134,7 +134,8 @@ def sanitize_fts5_query(query: str, *, allow_operators: bool = False,
 
 def _sanitize_agent_fts5_query(query: str, neutral: str) -> str:
     """Grep-only infix operators and term prefixes; malformed quotes stay prose."""
-    if query.count('"') % 2 or "(" in query or ")" in query:
+    outside_phrases = _QUOTED_PHRASE_RE.sub(" ", query)
+    if query.count('"') % 2 or "(" in outside_phrases or ")" in outside_phrases:
         return _neutralize_bare_operators(neutral)
     safe = _sanitize_query(query, lambda char: char if char == "*" else _fts5_safe_char(char))
     tokens: list[str] = []

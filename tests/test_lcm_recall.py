@@ -244,7 +244,7 @@ def test_grep_neutralized_forms_match_main(recall_engine, query, contents, layer
 
 
 @pytest.mark.parametrize("word", ["NOT", "NEAR", "OR", "AND"])
-def test_grep_retry_never_includes_operator_words(recall_engine, monkeypatch, word):
+def test_grep_retry_keeps_quoted_operator_words_literal(recall_engine, monkeypatch, word):
     recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha beta"})
     original = recall_engine._store.search
     queries = []
@@ -257,7 +257,57 @@ def test_grep_retry_never_includes_operator_words(recall_engine, monkeypatch, wo
     payload = json.loads(lcm_tools.lcm_grep({"query": f'alpha "{word}" beta'}, engine=recall_engine))
     assert payload["total_results"] == 1
     assert payload["retried"] == "any_term"
-    assert queries == [f'alpha "{word}" beta', "alpha OR beta"]
+    assert queries == [f'alpha "{word}" beta', f'alpha OR "{word}" OR beta']
+
+
+@pytest.mark.parametrize(("query", "content", "retry"), [
+    ("deploy* missing", "deployment", "deploy* OR missing"),
+    ("the launch", "the", "the OR launch"),
+    ('"alpha OR beta" gamma', "alpha or beta", '"alpha OR beta" OR gamma'),
+    ('"not now" gamma', "not now", '"not now" OR gamma'),
+    ('alpha "NOT" beta', "not", 'alpha OR "NOT" OR beta'),
+    ("deploy* missing deploy*", "deployment", "deploy* OR missing"),
+])
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_retry_preserves_own_operands(recall_engine, monkeypatch, query, content, retry, layer):
+    target = getattr(recall_engine, "_" + layer)
+    if layer == "store":
+        target.append(CURRENT, {"role": "user", "content": content})
+    else:
+        target.add_node(SummaryNode(
+            session_id=CURRENT, depth=0, summary=content,
+            token_count=4, source_ids=[], source_type="messages",
+        ))
+    original = target.search
+    queries = []
+
+    def capture(query, **kwargs):
+        queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(target, "search", capture)
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=recall_engine))
+    assert payload["query"] == query
+    assert payload["total_results"] == 1
+    assert payload["retried"] == "any_term"
+    assert queries == [query, retry]
+
+
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_quoted_parentheses_preserve_or(recall_engine, layer):
+    for content in ("function(foo)", "alpha"):
+        if layer == "store":
+            recall_engine._store.append(CURRENT, {"role": "user", "content": content})
+        else:
+            recall_engine._dag.add_node(SummaryNode(
+                session_id=CURRENT, depth=0, summary=content,
+                token_count=3, source_ids=[], source_type="messages",
+            ))
+    payload = json.loads(lcm_tools.lcm_grep(
+        {"query": '"function(foo)" OR alpha'}, engine=recall_engine,
+    ))
+    assert payload["total_results"] == 2
+    assert "retried" not in payload
 
 
 def test_grep_bare_near_retry_omits_near(recall_engine, monkeypatch):

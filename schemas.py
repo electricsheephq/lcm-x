@@ -29,9 +29,10 @@ LCM_GREP = {
             "query": {
                 "type": "string",
                 "description": (
-                    "Full-text query: AND by default; uppercase OR/NOT, quoted phrases, and term* prefixes "
+                    "Indexed history full-text query: AND by default; uppercase OR/NOT, quoted phrases, and term* prefixes "
                     "(at least 2 alphanumeric characters) are honoured. Zero hits with multiple terms retry once "
-                    "as any-term matching (retried='any_term'), except OR/NOT queries and CJK/emoji substring searches."
+                    "as any-term matching (retried='any_term'), except top-level OR/NOT queries and CJK/emoji substring searches. "
+                    "content_scope='externalized' matches the literal query text; operators and retry do not apply."
                 ),
             },
             "limit": {
