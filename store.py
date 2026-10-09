@@ -379,7 +379,8 @@ class MessageStore:
         self._ensure_conversation_id_column()
         self._ensure_time_contract_columns()
         self._conn.commit()
-        ensure_message_stem_fts(self._conn, build_message_stem_fts_spec())
+        # False: a busy writer deferred stem init, so this handle reads only the plain index.
+        self._stem_usable = ensure_message_stem_fts(self._conn, build_message_stem_fts_spec())
 
     def _ensure_source_column(self) -> None:
         columns = {
@@ -1637,6 +1638,8 @@ class MessageStore:
     # -- Search -------------------------------------------------------------
 
     def _stem_state(self) -> str:
+        if not getattr(self, "_stem_usable", True):
+            return ""
         try:
             row = self._conn.execute("SELECT value FROM metadata WHERE key='fts_stem_state'").fetchone()
         except sqlite3.Error:

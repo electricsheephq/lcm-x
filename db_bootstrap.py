@@ -3109,10 +3109,13 @@ def _mark_stem_ready(conn: sqlite3.Connection) -> None:
     )
 
 
-def ensure_message_stem_fts(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> None:
-    """DDL and constant-size state checks only; never populate on the open path."""
+def ensure_message_stem_fts(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> bool:
+    """DDL and constant-size state checks only; never populate on the open path.
+
+    Returns False when a busy writer deferred the work to the next open: the caller must not
+    read the stem index on this handle, whose state may claim ``ready`` over missing triggers."""
     if conn.execute("PRAGMA query_only").fetchone()[0]:
-        return
+        return True
     state = _stem_metadata(conn, "fts_stem_state")
     if (state in ("ready", "backfilling")
             and get_existing_table_names(conn, [spec.table_name])
@@ -3121,12 +3124,19 @@ def ensure_message_stem_fts(conn: sqlite3.Connection, spec: ExternalContentFtsSp
         # flight, or one skipped for low disk, is re-dispatched; the dispatch claims on its own.
         if state == "backfilling":
             dispatch_background_stem_backfill(conn, spec)
-        return
+        return True
+    previous_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
     try:
         with conn:
             # Acquire write ownership before any DDL: read-only handles skip the
             # optional index, and restored triggers commit with the reset flags.
-            conn.execute("BEGIN IMMEDIATE")
+            # The index is optional, so a busy writer gets a short wait, not the
+            # open's full busy timeout (#622); the next open retries.
+            conn.execute(f"PRAGMA busy_timeout={INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS}")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            finally:
+                conn.execute(f"PRAGMA busy_timeout={previous_timeout}")
             state = _stem_metadata(conn, "fts_stem_state")
             table_existed = bool(get_existing_table_names(conn, [spec.table_name]))
             missing = not table_existed or _fts_missing_triggers(conn, spec)
@@ -3142,12 +3152,16 @@ def ensure_message_stem_fts(conn: sqlite3.Connection, spec: ExternalContentFtsSp
             elif not state:
                 _stem_metadata(conn, "fts_stem_state", "backfilling")
     except sqlite3.OperationalError as exc:
+        if _is_sqlite_lock_error(exc):
+            logger.warning("Database busy: stem index initialization deferred to the next open")
+            return False
         if "readonly" not in str(exc).lower() and "read-only" not in str(exc).lower():
             raise
         logger.info("Read-only database: skipping optional stem index initialization")
-        return
+        return True
     if _stem_metadata(conn, "fts_stem_state") == "backfilling":
         dispatch_background_stem_backfill(conn, spec)
+    return True
 
 
 _stem_threads: dict[str, threading.Thread] = {}

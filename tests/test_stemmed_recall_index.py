@@ -491,3 +491,45 @@ def test_round4_backfill_pages_by_key_not_id_span(store, monkeypatch):
     finish(store)
     consistent(conn)
     assert len(batches) == 1
+
+
+@pytest.mark.parametrize("scenario", ["pre_stem", "ready_missing_trigger"])
+def test_round5_busy_writer_defers_stem_init_without_failing_open(store, monkeypatch, scenario):
+    """#622: when stem init needs the write lock (first upgrade, trigger repair) and a writer holds
+    it, the open neither fails nor waits the full busy timeout; this handle reads only the plain
+    index, and the next open does the work."""
+    import hermes_lcm.store as store_mod
+    from hermes_lcm.store import build_message_stem_fts_spec
+    spec = build_message_stem_fts_spec()
+    conn = partial(store)
+    if scenario == "ready_missing_trigger":
+        finish(store)
+        boot._drop_fts_triggers(conn, spec.trigger_sqls)
+    else:
+        boot._drop_fts_artifacts(conn, spec)
+        conn.execute("DELETE FROM metadata WHERE key LIKE 'fts_stem_%'")
+    conn.commit()
+    original = store_mod.configure_connection
+    with monkeypatch.context() as short:
+        short.setattr(store_mod, "configure_connection",
+                      lambda c: (original(c), c.execute("PRAGMA busy_timeout=1")))
+        holder = sqlite3.connect(str(store.db_path), isolation_level=None)
+        holder.execute("BEGIN IMMEDIATE")
+        try:
+            reopened = MessageStore(store.db_path)  # raised "database is locked" before the fix
+        finally:
+            holder.rollback()
+            holder.close()
+    try:
+        assert reopened.connection.execute("PRAGMA busy_timeout").fetchone()[0] == 1
+        assert reopened.search("visit", stemmed=True)
+        assert reopened._last_fts_index == "plain"
+    finally:
+        reopened.close()
+    again = MessageStore(store.db_path)
+    try:
+        assert boot._stem_metadata(conn, "fts_stem_state") == "backfilling"
+        assert boot._stem_metadata(conn, "fts_stem_reset") == ("1" if scenario == "ready_missing_trigger" else "")
+        assert not boot._fts_missing_triggers(conn, spec)
+    finally:
+        again.close()
