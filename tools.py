@@ -6419,6 +6419,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         coverage["summary"] = cov
                         if cov == "none":
                             degraded_reasons.append("summary vectors are unavailable")
+                            summary_fts_fallback = not run_fts and run_summary
                         elif cov == "bounded":
                             degraded_reasons.append(
                                 _lcm_recall_bounded_reason("summary", scanned, total)

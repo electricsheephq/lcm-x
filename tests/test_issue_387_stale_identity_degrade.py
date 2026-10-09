@@ -374,6 +374,26 @@ def test_unavailable_summaries_only_recall_falls_back_to_fts(engine, monkeypatch
     assert payload.get("timeout", False) is (failure is TimeoutError)
 
 
+def test_summaries_only_recall_without_summary_vectors_falls_back_to_fts(engine, monkeypatch):
+    # A new embeddings-on store has no summary vectors until background embedding runs (#1014).
+    _seed(engine, "matching")
+    _providers(monkeypatch)
+    calls = []
+    fts = tools._lcm_recall_fts_arm
+
+    def capture_fts(*args, **kwargs):
+        calls.append(kwargs["deadline"])
+        return fts(*args, **kwargs)
+
+    monkeypatch.setattr(tools, "_lcm_recall_summary_arm", lambda *args, **kwargs: ([], "none", 0, 0, []))
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", capture_fts)
+    payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
+    assert engine.store_id in [hit["store_id"] for hit in payload["hits"]]
+    assert len(calls) == 1
+    assert payload["provenance"]["coverage"] == {"summary": "none", "fts": "ok"}
+    assert payload["degraded_reason"] == "summary vectors are unavailable"
+
+
 @pytest.mark.parametrize("stage", ["query", "scan"])
 def test_summaries_only_privacy_error_still_raises(engine, monkeypatch, stage):
     _seed(engine, "matching")
