@@ -505,13 +505,29 @@ def test_h_label_just_outside_the_tail_window_still_redacts_its_value(label):
     assert _key_runs(_raw_payload_preview(content, room)) == []
 
 
-def test_h_credential_longer_than_the_tail_window_leaves_no_fragment(tmp_path):
-    token = (KEY * 80)[:5000]
+@pytest.mark.parametrize("length", [5_000, 12_000], ids=["inside-context", "beyond-context"])
+def test_h_credential_longer_than_the_tail_window_leaves_no_fragment(tmp_path, length):
+    token = (KEY * 200)[:length]
     engine, stub = _ingest_paste(tmp_path, _paste(150_000, tail=f'api_key="{token}"'))
     assert len(stub) < 512 and _v0261_is_externalized_placeholder(stub)
     assert _key_runs(stub) == []
     texts = _provider_texts(engine, tmp_path)
     assert texts and not any(_key_runs(t) for t in texts)
+
+
+def test_h_truncated_pem_at_the_end_of_a_paste_leaves_no_body_line():
+    body = [hashlib.sha512(str(i).encode()).hexdigest()[:64] for i in range(50)]  # synthetic, not a key
+    content = _paste(150_000, tail="-----BEGIN RSA PRIVATE KEY-----\n" + "\n".join(body))
+    preview = _raw_payload_preview(content, 300)
+    assert not any(line[:32] in preview for line in body)
+
+
+def test_h_unbroken_cjk_keeps_its_tail():
+    room = 300
+    keep = room - 5
+    content = "\u6f22\u5b57\u4eee\u540d" * 40_000  # 160,000 chars with no whitespace
+    preview = _raw_payload_preview(content, room)
+    assert preview.endswith(content[-(keep - keep * 7 // 10):])
 
 
 # --- (g) preview text cannot break replay identity (rc2) -----------------------------------
