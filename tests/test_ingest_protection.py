@@ -4340,9 +4340,9 @@ def _ignored_cleanup_engine(tmp_path, config):
     return engine
 
 
-def _ignored_cleanup_first_pass(tmp_path, config, user_timestamp):
+def _ignored_cleanup_first_pass(tmp_path, config, user_timestamp, **host_fields):
     """#1013: a cleanup that drops an ignored row outside the tail returns a lone user turn."""
-    user = {"role": "user", "content": "fresh request"}
+    user = {"role": "user", "content": "fresh request", **host_fields}
     if user_timestamp is not None:
         user["timestamp"] = user_timestamp
     first = _ignored_cleanup_engine(tmp_path, config)
@@ -4366,6 +4366,54 @@ def test_cold_rebind_after_ignored_row_cleanup_replays_the_timestamped_turn_once
         second.compress(first_active)
         assert _stored_contents(second) == ["fresh request"]
         assert second._last_ingest_reconciliation["action"] == "advanced cursor"
+    finally:
+        second.shutdown()
+
+
+@pytest.mark.parametrize("replay_id_key", ["platform_message_id", "message_id"])
+def test_cold_rebind_after_ignored_row_cleanup_replays_the_host_id_turn_once(tmp_path, replay_id_key):
+    """A gateway turn carries its platform id (restored history names it ``message_id``): with no
+    timestamp at all, the id alone proves the replay."""
+    config = _ignored_cleanup_config(tmp_path)
+    _ignored_cleanup_first_pass(tmp_path, config, None, platform_message_id="101")
+
+    second = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        second.compress([{"role": "user", "content": "fresh request", replay_id_key: "101"}])
+        assert _stored_contents(second) == ["fresh request"]
+        assert second._last_ingest_reconciliation["action"] == "advanced cursor"
+    finally:
+        second.shutdown()
+
+
+def test_same_second_delta_with_a_new_host_id_after_ignored_row_cleanup_is_stored(tmp_path, monkeypatch):
+    """Whole-second platform times collide; a distinct platform id is a distinct turn for the cleanup
+    proof. The #436 identity anchor (on by default) matches occurrences by host stamp and payload, and
+    the store keeps no platform id, so it is switched off here to test the proof on its own."""
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "off")
+    config = _ignored_cleanup_config(tmp_path)
+    _ignored_cleanup_first_pass(tmp_path, config, 1_760_000_001.0, platform_message_id="101")
+
+    second = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        second.compress([
+            {"role": "user", "content": "fresh request", "timestamp": 1_760_000_001.0, "platform_message_id": "102"}
+        ])
+        assert _stored_contents(second) == ["fresh request", "fresh request"]
+    finally:
+        second.shutdown()
+
+
+def test_identity_free_replay_after_ignored_row_cleanup_is_stored_again(tmp_path):
+    """No platform id and no timestamp: the replay cannot be proven, so it is stored again
+    (a recoverable duplicate rather than a lost turn)."""
+    config = _ignored_cleanup_config(tmp_path)
+    first_active = _ignored_cleanup_first_pass(tmp_path, config, None)
+
+    second = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        second.compress(first_active)
+        assert _stored_contents(second) == ["fresh request", "fresh request"]
     finally:
         second.shutdown()
 

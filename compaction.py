@@ -37,11 +37,11 @@ from .reconcile import (
     _commit_proof_identity_digest,
     _emission_identity,
     _finalize_emission_descriptors,
+    _host_row_key,
     _project_emitted_occurrences,
     _proof_user_identity,
 )
 from .sanitize import _contains_sensitive_redaction
-from .store import _normalize_observed_at
 from .sqlite_util import _is_sqlite_locked_error
 from .survival_fit import _RECOVERY_THRESHOLD_SHARE
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
@@ -773,15 +773,15 @@ class CompactionMixin:
             proof["recovery"] = self._last_compression_status == "overflow_recovery"
             # #1013: an output that dropped ignored rows with no leaf is still a rewrite the host
             # adopts; a cold rebind needs this proof to tell its replay from a new turn. Same text is
-            # not identity (a gateway may send only a new turn), so the proof binds each row's host
-            # timestamp and is not written when a row has none: an unprovable row is stored again.
+            # not identity (a gateway may send only a new turn), so the proof binds each row's host key
+            # (its platform message id, else its timestamp) and is not written when a row has neither:
+            # an unprovable row is stored again rather than lost.
             proof["filtered"] = False
             if (getattr(self, "_compress_dropped_ignored_rows", False) and self._last_compression_status != "error"
                     and not (proof["published"] or proof["recovery"])):
-                stamps = [_normalize_observed_at(m.get("timestamp"))
-                          for m, identity in zip(result, output_identities) if identity is not None]
-                if stamps and None not in stamps:
-                    proof["filtered"], proof["filtered_observed_at"] = True, stamps
+                keys = [_host_row_key(m) for m, identity in zip(result, output_identities) if identity is not None]
+                if keys and None not in keys:
+                    proof["filtered"], proof["filtered_row_keys"] = True, keys
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
@@ -894,8 +894,8 @@ class CompactionMixin:
                 ],
                 "emissions": copy.deepcopy(proof.get("emissions") or []),
             }
-            if proof.get("filtered_observed_at") is not None:
-                payload["filtered_observed_at"] = list(proof["filtered_observed_at"])
+            if proof.get("filtered_row_keys") is not None:
+                payload["filtered_row_keys"] = [list(key) for key in proof["filtered_row_keys"]]
             if not payload["effective_sha256"]:
                 # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
                 payload["scaffold_sha256"] = proof.get("output_sha256_v3", full)

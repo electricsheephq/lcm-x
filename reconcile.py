@@ -396,6 +396,16 @@ def _merged_composite(entry) -> bool:
     ) > (entry.suffix_length or 0)
 
 
+def _host_row_key(message) -> Optional[list]:
+    """#1013: a row's strongest host identity: its platform message id (``message_id`` once the
+    host restores it), else its host timestamp, else None (same text alone is never identity)."""
+    host_id = message.get("platform_message_id") or message.get("message_id")
+    if host_id is not None and str(host_id).strip():
+        return ["id", str(host_id)]
+    observed_at = _normalize_observed_at(message.get("timestamp"))
+    return None if observed_at is None else ["ts", observed_at]
+
+
 def _proof_user_identity(identity):
     """Identity compared against a commit proof: user content without edge whitespace
     (Hermes ACP persists ``prompt.strip()``). Proof-bound positions only (#498)."""
@@ -2236,11 +2246,10 @@ class ReconcileMixin:
             projection, occurrences = self._occurrence_replay_identities(messages, payload)
 
             target = list(payload.get("effective_sha256") or [])
-            stamps = payload.get("filtered_observed_at")
-            if stamps is not None:  # #1013: an ignored-row cleanup proof also binds each row's host timestamp
-                observed = [_normalize_observed_at(m.get("timestamp"))
-                            for m, identity in zip(messages, occurrences) if identity is not None]
-                if None in stamps or len(stamps) != len(target) or observed[:len(stamps)] != list(stamps):
+            keys = payload.get("filtered_row_keys")
+            if keys is not None:  # #1013: an ignored-row cleanup proof also binds each row's host key
+                observed = [_host_row_key(m) for m, identity in zip(messages, occurrences) if identity is not None]
+                if None in keys or len(keys) != len(target) or observed[:len(keys)] != [list(k) for k in keys]:
                     return None
             droppable = list(payload.get("droppable") or [])
             skip_landing = list(payload.get("skip_landing") or [])
