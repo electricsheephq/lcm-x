@@ -37,6 +37,7 @@ from .reconcile import (
     _commit_proof_identity_digest,
     _emission_identity,
     _finalize_emission_descriptors,
+    _host_row_key,
     _project_emitted_occurrences,
     _proof_user_identity,
 )
@@ -770,13 +771,24 @@ class CompactionMixin:
             proof["native"] = False
             proof["published"] = self._last_compression_status == "compacted"
             proof["recovery"] = self._last_compression_status == "overflow_recovery"
+            # #1013: an output that dropped ignored rows with no leaf is still a rewrite the host
+            # adopts; a cold rebind needs this proof to tell its replay from a new turn. Same text is
+            # not identity (a gateway may send only a new turn), so the proof binds each row's host key
+            # (its platform message id, else its timestamp) and is not written when a row has neither:
+            # an unprovable row is stored again rather than lost.
+            proof["filtered"] = False
+            if (getattr(self, "_compress_dropped_ignored_rows", False) and self._last_compression_status != "error"
+                    and not (proof["published"] or proof["recovery"])):
+                keys = [_host_row_key(m) for m, identity in zip(result, output_identities) if identity is not None]
+                if keys and None not in keys:
+                    proof["filtered"], proof["filtered_row_keys"] = True, keys
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "emissions": copy.deepcopy(emissions),
             }
             self._compress_commit_proof = proof
-            if proof["published"] or proof["native"] or proof["recovery"]:
+            if proof["published"] or proof["native"] or proof["recovery"] or proof["filtered"]:
                 self._persist_compress_commit_proof(proof)
         except Exception:
             self._compress_commit_proof = None
@@ -846,7 +858,8 @@ class CompactionMixin:
         """Durable twin of the process-local proof: lets a restarted/resumed
         process re-index the host's post-compaction list without guessing.
 
-        Written for a published LCM compaction or adopted native recovery;
+        Written for a published LCM compaction, adopted native recovery, or an
+        output that dropped ignored rows (#1013);
         ``last_store_id`` marks where later rows begin.
         """
         try:
@@ -881,6 +894,8 @@ class CompactionMixin:
                 ],
                 "emissions": copy.deepcopy(proof.get("emissions") or []),
             }
+            if proof.get("filtered_row_keys") is not None:
+                payload["filtered_row_keys"] = [list(key) for key in proof["filtered_row_keys"]]
             if not payload["effective_sha256"]:
                 # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
                 payload["scaffold_sha256"] = proof.get("output_sha256_v3", full)
@@ -908,6 +923,7 @@ class CompactionMixin:
     ) -> List[Dict[str, Any]]:
         """Return a replay-safe active view after publication cannot finish."""
         self._store.rollback_pending_write()
+        self._compress_dropped_ignored_rows = False  # #1013: no proof outlives a rolled-back publication
         fallback = active_context
         if recovery_assembly_cap is not None and not context_is_assembled:
             leading_anchor_count = self._leading_anchor_count(active_context)
@@ -1200,6 +1216,7 @@ class CompactionMixin:
         5. Assemble new active context: summaries + fresh tail
         """
         self._objective_only_noop = False
+        self._compress_dropped_ignored_rows = False
         self._compress_host_rows_consumed = self._compress_hidden_rows_consumed = 0
         # Preflight handoffs are one-shot instructions for this invocation.
         # Consume them before every early return so a later unrelated turn can
@@ -1550,7 +1567,9 @@ class CompactionMixin:
             # review of #723: the input of refused passes since the last stored leaf, returned if none stores one
             refused_input = (refused_input or (working_messages, pressure_messages,
                                                dropped_replayed_scaffold_messages)) if route_stop else None
-            fresh_tail_start = self._fresh_tail_start(pressure_messages)
+            # #1013: the tail's token cap measures what the active context replays (a quarantined
+            # row as its placeholder), not the raw host text; pressure stays on the raw view.
+            fresh_tail_start = self._fresh_tail_start(working_messages)
 
             # Keep only a real system prompt anchored. Gateway sessions may
             # pass only conversation messages, so index 0 can be an old user
@@ -1631,7 +1650,7 @@ class CompactionMixin:
                 working_messages = [message for index, message in enumerate(working_messages) if index not in drops]
                 pressure_messages = [message for index, message in enumerate(pressure_messages) if index not in drops]
                 candidate_start = leading_anchor_count
-                fresh_tail_start = self._fresh_tail_start(pressure_messages)
+                fresh_tail_start = self._fresh_tail_start(working_messages)
                 # A kept row at or below F has no raw store lineage for a new leaf: return it
                 # raw after the committed summary instead of a pass that cannot publish.
                 if fresh_tail_start <= leading_anchor_count or (resumed_prefix and kept):
@@ -1721,6 +1740,7 @@ class CompactionMixin:
                 drop_dependent_reply_into_tail = drop_dependent_reply
                 if dropped_ignored_backlog:
                     dropped_replayed_scaffold_messages = True
+                    self._compress_dropped_ignored_rows = True  # #1013: the output needs a durable proof
                     working_messages = (
                         working_messages[:candidate_start]
                         + kept_working
@@ -1731,7 +1751,7 @@ class CompactionMixin:
                         + kept_pressure
                         + pressure_messages[fresh_tail_start:]
                     )
-                    fresh_tail_start = self._fresh_tail_start(pressure_messages)
+                    fresh_tail_start = self._fresh_tail_start(working_messages)
                 if drop_dependent_reply_into_tail:
                     tail_scan_start = max(fresh_tail_start, leading_anchor_count)
                     pending_tail_dependents: list[tuple[Dict[str, Any], str]] = []
@@ -2145,7 +2165,7 @@ class CompactionMixin:
 
             if threshold_full_sweep_active:
                 leading_anchor_count = self._leading_anchor_count(working_messages)
-                remaining_fresh_tail_start = self._fresh_tail_start(pressure_messages)
+                remaining_fresh_tail_start = self._fresh_tail_start(working_messages)
                 remaining_raw = working_messages[
                     leading_anchor_count:remaining_fresh_tail_start
                 ]
@@ -2169,7 +2189,7 @@ class CompactionMixin:
                 if (not deferred_maintenance_active) and self.threshold_tokens > 0 and estimated_active_tokens < self.threshold_tokens:
                     break
                 leading_anchor_count = self._leading_anchor_count(working_messages)
-                remaining_fresh_tail_start = self._fresh_tail_start(pressure_messages)
+                remaining_fresh_tail_start = self._fresh_tail_start(working_messages)
                 remaining_raw = working_messages[
                     leading_anchor_count:remaining_fresh_tail_start
                 ]

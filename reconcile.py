@@ -49,6 +49,7 @@ from .ingest_protection import (
 )
 from .message_content import normalize_content_value, text_content_for_pattern_matching
 from .sanitize import _clean_active_assistant_message
+from .store import _normalize_observed_at
 
 import logging
 
@@ -393,6 +394,16 @@ def _merged_composite(entry) -> bool:
     return entry is not None and entry.kind != "recovery_base" and entry.generated_span is not None and len(
         entry.effective_identity[1].strip().encode("utf-8")
     ) > (entry.suffix_length or 0)
+
+
+def _host_row_key(message) -> Optional[list]:
+    """#1013: a row's strongest host identity: its platform message id (``message_id`` once the
+    host restores it), else its host timestamp, else None (same text alone is never identity)."""
+    host_id = message.get("platform_message_id") or message.get("message_id")
+    if host_id is not None and str(host_id).strip():
+        return ["id", str(host_id)]
+    observed_at = _normalize_observed_at(message.get("timestamp"))
+    return None if observed_at is None else ["ts", observed_at]
 
 
 def _proof_user_identity(identity):
@@ -2235,6 +2246,11 @@ class ReconcileMixin:
             projection, occurrences = self._occurrence_replay_identities(messages, payload)
 
             target = list(payload.get("effective_sha256") or [])
+            keys = payload.get("filtered_row_keys")
+            if keys is not None:  # #1013: an ignored-row cleanup proof also binds each row's host key
+                observed = [_host_row_key(m) for m, identity in zip(messages, occurrences) if identity is not None]
+                if None in keys or len(keys) != len(target) or observed[:len(keys)] != [list(k) for k in keys]:
+                    return None
             droppable = list(payload.get("droppable") or [])
             skip_landing = list(payload.get("skip_landing") or [])
             summary_index = payload.get("native_summary_index")

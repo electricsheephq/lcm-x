@@ -2150,6 +2150,7 @@ class TestEngineABC:
             fresh_tail_count=4,
             leaf_chunk_tokens=100,
             fresh_tail_pressure_yield_enabled=False,
+            threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
         )
         instance = LCMEngine(config=config)
         instance._session_id = "test-session"
@@ -2181,6 +2182,7 @@ class TestEngineABC:
             fresh_tail_count=4,
             leaf_chunk_tokens=100,
             fresh_tail_pressure_yield_enabled=False,
+            threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
         )
         instance = LCMEngine(config=config)
         instance._session_id = "test-session"
@@ -6318,6 +6320,7 @@ class TestMessageFiltering:
         monkeypatch.setattr(message_patterns_mod, "_regex_engine", _FakeTimeoutRegexEngine)
 
     def _make_engine(self, tmp_path, db_name, **config_kwargs):
+        config_kwargs.setdefault("threshold_full_sweep_enabled", False)  # #1013: pre-#1013 single-pass compaction
         config = LCMConfig(
             database_path=str(tmp_path / db_name),
             **config_kwargs,
@@ -6885,6 +6888,7 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         first.on_session_start(
@@ -6920,6 +6924,7 @@ class TestMessageFiltering:
                 database_path=str(db_path),
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         try:
@@ -6953,6 +6958,7 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         engine.on_session_start(
@@ -7018,6 +7024,7 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         first.on_session_start(
@@ -7051,6 +7058,7 @@ class TestMessageFiltering:
                 database_path=str(db_path),
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         try:
@@ -9357,6 +9365,7 @@ class TestMessageFiltering:
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
                 ignore_message_patterns=["SECRET"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         engine.on_session_start(
@@ -29338,6 +29347,7 @@ class TestExtractionDuringCompress:
             extraction_model="test-extract-model",
             fresh_tail_count=4,
             leaf_chunk_tokens=100,
+            threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
         )
         eng = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         eng._session_id = "extract-integration"

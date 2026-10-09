@@ -114,7 +114,7 @@ class TestRuntimeContextThreshold:
         from hermes_lcm.config import LCMConfig
         from hermes_lcm.engine import LCMEngine
 
-        config = LCMConfig()
+        config = LCMConfig(context_threshold=0.35)  # #1013: pin the base these cases measure from
         if model_thresholds:
             config.model_thresholds = model_thresholds
 

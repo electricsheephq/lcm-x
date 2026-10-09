@@ -108,6 +108,11 @@ def _config_from_policy(policy: LCMPolicy, database_path: Path):
         incremental_max_depth=policy.incremental_max_depth,
         condensation_fanin=policy.condensation_fanin,
         dynamic_leaf_chunk_enabled=policy.dynamic_leaf_chunk_enabled,
+        # Pinned to policy@v1 semantics: LCMPolicy does not carry these, so the
+        # pre-#1013 defaults are passed explicitly and a default flip cannot
+        # silently change existing policy@v1 runs.
+        fresh_tail_max_tokens=0,
+        threshold_full_sweep_enabled=False,
         database_path=str(database_path),
     )
 
