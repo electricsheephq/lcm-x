@@ -23,7 +23,7 @@ from hermes_lcm.ingest_protection import (
     is_externalized_ingest_placeholder,
     protect_message_for_ingest,
 )
-from hermes_lcm.tokens import count_messages_tokens
+from hermes_lcm.tokens import count_messages_tokens, count_tokens
 
 # The v0.24.7 ref regex, copied literally (the tool-stub builder comment says it must keep working).
 V0247_EXTERNALIZED_REF_RE = re.compile(
@@ -256,6 +256,58 @@ def test_c_stub_written_at_ingest_passes_the_v0261_recognizer(tmp_path):
     [row] = [r for r in _stored(engine) if r["role"] == "user"]
     assert _v0261_is_externalized_placeholder(row["content"])
     assert V0261_EXTERNALIZED_REF_RE.fullmatch(row["content"]).group(1) == _payload_files(tmp_path)[0].name
+
+
+# --- the floor in tokens: dense scripts reach 25k tokens well under 100k chars ------------------
+def _cjk_text(n):
+    body = ("日本語の長い文書です。漢字と仮名で書かれています。" * (n // 25 + 1))[: n - 3 * (len(HEAD) + 2)]
+    half = len(body) // 2
+    return f"{HEAD} {body[:half]} {MID} {body[half:]} {TAIL}"
+
+
+def test_cjk_user_turn_at_the_token_floor_is_externalized_with_a_preview(tmp_path):
+    engine = _engine(tmp_path)
+    big = _cjk_text(40_000)
+    assert len(big) < FLOOR and count_tokens(big) >= 25_000
+    engine.ingest([{"role": "system", "content": "sys"}, {"role": "user", "content": big}])
+
+    [row] = [r for r in _stored(engine) if r["role"] == "user"]
+    [payload_file] = _payload_files(tmp_path)
+    ref = payload_file.name
+    assert row["content"].startswith("[Externalized payload: kind=raw_payload; role=user;")
+    assert 'preview="' + HEAD in row["content"] and MID not in row["content"]
+    assert row["content"].endswith(f'read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]')
+    assert json.loads(payload_file.read_text())["content"] == big
+
+
+def test_ascii_user_turn_under_both_floors_stays_inline(tmp_path):
+    engine = _engine(tmp_path)
+    big = _big_text(90_000)
+    assert count_tokens(big) < 25_000
+    engine.ingest([{"role": "system", "content": "sys"}, {"role": "user", "content": big}])
+
+    assert [r["content"] for r in _stored(engine) if r["role"] == "user"] == [big]
+    assert _payload_files(tmp_path) == []
+
+
+@pytest.mark.parametrize("chars", [40_000, 80_000])  # ~27k and ~53k estimated tokens (over the 48k threshold)
+def test_cjk_arrival_turn_in_a_64k_window_carries_the_stub_not_an_over_cap_notice(tmp_path, chars):
+    engine = _engine(tmp_path)  # context_length=64_000, threshold 0.75
+    big = _cjk_text(chars)
+    history = [
+        {"role": "system", "content": "You are a probe agent."},
+        {"role": "user", "content": "Remember the code word ZQXSMALLCONTROL."},
+        {"role": "assistant", "content": "Noted."},
+    ]
+    engine.ingest(history)
+    history.append({"role": "user", "content": big})
+
+    if engine.should_compress_preflight(history):
+        history = engine.compress(history, current_tokens=count_messages_tokens(history))
+    users = [m for m in history if m.get("role") == "user"]
+    assert users[-1]["content"].startswith("[Externalized payload: kind=raw_payload; role=user;")
+    assert 'preview="' + HEAD in users[-1]["content"] and "lcm_expand(externalized_ref=" in users[-1]["content"]
+    assert count_messages_tokens(history) < 48_000
 
 
 # --- (d) tool output and media keep the configured threshold -----------------------------
