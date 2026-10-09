@@ -107,7 +107,8 @@ def _neutralize_bare_operators(sanitized: str) -> str:
     return "".join(out)
 
 
-def sanitize_fts5_query(query: str, *, allow_operators: bool = False) -> str:
+def sanitize_fts5_query(query: str, *, allow_operators: bool = False,
+                        agent_operators: bool = False) -> str:
     """Reduce a query to FTS5-safe terms, preserving balanced phrase quotes.
 
     Composed (NFC) first so a decomposed accent is one alphanumeric character
@@ -120,10 +121,47 @@ def sanitize_fts5_query(query: str, *, allow_operators: bool = False) -> str:
     keeps bare AND/OR/NOT/NEAR intact. It must never be set for text that came
     from a user or an agent: the default assumes raw prose, which is the only
     safe reading when the two cannot be told apart.
+
+    ``agent_operators`` is a separate grep-only mode for infix OR/NOT/NEAR
+    and term* prefixes. Other callers retain the existing defaults.
     """
     composed = unicodedata.normalize("NFC", query or "")
     sanitized = _sanitize_query(composed, _fts5_safe_char)
+    if agent_operators:
+        return _sanitize_agent_fts5_query(composed, sanitized)
     return sanitized if allow_operators else _neutralize_bare_operators(sanitized)
+
+
+def _sanitize_agent_fts5_query(query: str, neutral: str) -> str:
+    """Grep-only infix operators and term prefixes; malformed quotes stay prose."""
+    if query.count('"') % 2 or query.count("(") != query.count(")"):
+        return _neutralize_bare_operators(neutral)
+    safe = _sanitize_query(query, lambda char: char if char == "*" else _fts5_safe_char(char))
+    tokens: list[str] = []
+    for token in re.findall(r'"[^"]*"|[^\s"]+', safe):
+        if token.startswith('"'):
+            tokens.append(token)
+        elif token.endswith("*") and token.count("*") == 1 and sum(c.isalnum() for c in token[:-1]) >= 2:
+            stem = token[:-1]
+            tokens.append((stem.lower() if stem in _BOOLEAN_OPERATORS else stem) + "*")
+        else:
+            tokens.extend(token.replace("*", " ").split())
+    operators = {"OR", "NOT", "NEAR"}
+    return " ".join(
+        token if token != "AND" else "and"
+        for i, token in enumerate(tokens)
+        if token not in operators or (
+            0 < i < len(tokens) - 1
+            and tokens[i - 1] not in operators and tokens[i + 1] not in operators
+        )
+    )
+
+
+def is_fts5_syntax_error(exc: Exception) -> bool:
+    """Distinguish MATCH grammar failures from a missing/broken index."""
+    return any(marker in str(exc).lower() for marker in (
+        "fts5: syntax error", "unterminated string", "malformed match", "fts5: parser stack overflow",
+    ))
 
 
 def sanitize_like_query(query: str) -> str:

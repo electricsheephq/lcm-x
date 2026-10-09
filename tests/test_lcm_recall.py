@@ -153,8 +153,145 @@ def test_public_grep_cannot_enable_recall_operators(recall_engine, monkeypatch, 
         {**args, "_allow_operators": True}, engine=engine,
     ))
     assert crafted == ordinary
-    assert crafted["results"] == []
+    assert crafted["results"]
     assert operator_flags == [True, False, False]
+
+
+@pytest.fixture
+def grep_operator_engine(recall_engine):
+    for content in ("alpha", "beta", "alpha or beta"):
+        recall_engine._store.append(CURRENT, {"role": "user", "content": content})
+    return recall_engine
+
+
+def test_grep_agent_or_matches_all_three_rows(grep_operator_engine):
+    payload = json.loads(lcm_tools.lcm_grep({"query": "alpha OR beta"}, engine=grep_operator_engine))
+    assert {hit["snippet"].replace(">>>", "").replace("<<<", "") for hit in payload["results"]} == {
+        "alpha", "beta", "alpha or beta",
+    }
+    assert payload["total_results"] == 3
+    assert payload["sort"] == "recency"
+    assert "retried" not in payload
+
+
+def test_grep_agent_prefix_matches_deployment(recall_engine):
+    target = recall_engine._store.append(CURRENT, {"role": "user", "content": "deployment"})
+    payload = json.loads(lcm_tools.lcm_grep({"query": "deploy*"}, engine=recall_engine))
+    assert [hit["store_id"] for hit in payload["results"]] == [target]
+    assert "retried" not in payload
+
+
+def test_grep_agent_not_excludes_both_row(grep_operator_engine):
+    payload = json.loads(lcm_tools.lcm_grep({"query": "alpha NOT beta"}, engine=grep_operator_engine))
+    assert len(payload["results"]) == 1
+    assert "beta" not in payload["results"][0]["snippet"]
+    assert "retried" not in payload
+
+
+@pytest.mark.parametrize(("query", "count"), [
+    ("OR alpha", 2), ("alpha OR", 2), ("NOT alpha", 2),
+    ("alpha OR OR beta", 1), ("alpha*beta", 1), ("*", 0),
+    ('alpha OR "beta', 1), ("alpha OR (beta", 1),
+])
+def test_grep_invalid_operator_forms_are_safe(grep_operator_engine, query, count):
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=grep_operator_engine))
+    assert "error" not in payload
+    assert "message_search_error" not in payload
+    assert payload["total_results"] == count
+
+
+@pytest.mark.parametrize(("query", "retried", "count"), [
+    ("alpha gamma", True, 1), ("alpha", False, 1), ("alpha beta", False, 1),
+    ("alpha OR gamma", False, 1), ("gamma OR delta", False, 0),
+    ("gamma", False, 0), ("alpha 東京", False, 1), ("alpha 🚀", False, 1),
+])
+def test_grep_zero_hit_retry_is_bounded(recall_engine, monkeypatch, query, retried, count):
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha beta"})
+    original = recall_engine._store.search
+    calls = []
+
+    def capture(query, **kwargs):
+        calls.append((query, kwargs))
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "search", capture)
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=recall_engine))
+    assert payload["query"] == query
+    assert payload["total_results"] == count
+    assert (payload.get("retried") == "any_term") is retried
+    assert len(calls) == (2 if retried else 1)
+    if retried:
+        assert calls[1][0] == "alpha OR gamma"
+        assert calls[1][1]["allow_operators"] is True
+
+
+@pytest.mark.parametrize(("query", "count", "retried"), [
+    ("alpha OR beta", 3, False), ("alpha NOT beta", 1, False),
+    ("deploy*", 1, False), ("alpha gamma", 2, True),
+])
+def test_grep_summary_operator_and_retry_parity(recall_engine, query, count, retried):
+    for content in ("alpha", "beta", "alpha or beta", "deployment"):
+        recall_engine._dag.add_node(SummaryNode(
+            session_id=CURRENT, depth=0, summary=content,
+            token_count=3, source_ids=[], source_type="messages",
+        ))
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=recall_engine))
+    assert len(payload["results"]) == count
+    assert all(hit["type"] == "summary" for hit in payload["results"])
+    assert (payload.get("retried") == "any_term") is retried
+    # Existing direct DAG consumers still neutralize OR and strip prefixes.
+    assert len(recall_engine._dag.search("alpha OR beta", session_id=CURRENT)) == 1
+    assert recall_engine._dag.search("deploy*", session_id=CURRENT) == []
+
+
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_match_syntax_error_retries_neutralized_fts_once(recall_engine, monkeypatch, layer):
+    import hermes_lcm.dag as dag_module
+    import hermes_lcm.store as store_module
+
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha or beta"})
+    recall_engine._dag.add_node(SummaryNode(
+        session_id=CURRENT, depth=0, summary="alpha or beta",
+        token_count=3, source_ids=[], source_type="messages",
+    ))
+    target = getattr(recall_engine, "_" + layer)
+    module = store_module if layer == "store" else dag_module
+    original = module.sanitize_fts5_query
+    queries = []
+
+    def broken_operator(query, **kwargs):
+        return "alpha OR" if kwargs.get("agent_operators") else original(query, **kwargs)
+
+    monkeypatch.setattr(module, "sanitize_fts5_query", broken_operator)
+    monkeypatch.setattr(target, "_search_like", lambda *a, **kw: pytest.fail("syntax error reached LIKE"))
+    target._conn.set_trace_callback(queries.append)
+    assert len(target.search("alpha OR beta", session_id=CURRENT, agent_operators=True)) == 1
+    table = "messages_fts" if layer == "store" else "nodes_fts"
+    match_queries = [sql for sql in queries if f"WHERE {table} MATCH" in sql]
+    assert len(match_queries) == 2
+    assert "MATCH 'alpha OR'" in match_queries[0]
+    assert "MATCH 'alpha or beta'" in match_queries[1]
+
+
+def test_recall_portland_or_keeps_existing_composition(recall_engine, monkeypatch):
+    from hermes_lcm.search_query import sanitize_fts5_query
+
+    recall_engine._config.embeddings_enabled = False
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "Portland or hotel"})
+    original = recall_engine._store.search
+    queries = []
+
+    def capture(query, **kwargs):
+        queries.append((query, kwargs))
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "search", capture)
+    payload = json.loads(lcm_tools.lcm_recall({"query": "Portland, OR hotel"}, engine=recall_engine))
+    assert payload["hits"]
+    assert queries[0][0] == "Portland OR hotel"  # Recall's existing content-term OR composition.
+    assert queries[0][1]["allow_operators"] is True
+    assert not queries[0][1].get("agent_operators")
+    assert sanitize_fts5_query("Portland, OR hotel") == "Portland or hotel"
 
 
 def test_recall_or_emoji_signal_survives_launch_distractors(recall_engine, monkeypatch):

@@ -46,6 +46,7 @@ from .search_query import (
     normalize_search_sort,
     requires_like_fallback,
     sanitize_fts5_query,
+    is_fts5_syntax_error,
     sanitize_like_query,
     AGE_DECAY_RATE,
     should_apply_directness_rank_adjustment,
@@ -1618,7 +1619,8 @@ class MessageStore:
                time_from: float | None = None,
                time_to: float | None = None,
                exclude_session_ids: Collection[str] | None = None,
-               allow_operators: bool = False) -> List[Dict[str, Any]]:
+               allow_operators: bool = False,
+               agent_operators: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1633,7 +1635,8 @@ class MessageStore:
         - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
           keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
         """
-        safe_query = sanitize_fts5_query(query, allow_operators=allow_operators)
+        safe_query = sanitize_fts5_query(query, allow_operators=allow_operators, agent_operators=agent_operators)
+        syntax_retried = False
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
@@ -1710,6 +1713,14 @@ class MessageStore:
                 ).fetchall()
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
+                if agent_operators and is_fts5_syntax_error(exc):
+                    if syntax_retried:
+                        return []
+                    safe_query = sanitize_fts5_query(query)
+                    syntax_retried = True
+                    offset = scanned_rows = 0
+                    results.clear()
+                    continue
                 logger.warning("FTS message search failed, falling back to LIKE: %s", exc)
                 return self._search_like(
                     query,

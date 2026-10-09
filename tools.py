@@ -94,6 +94,7 @@ from .retrieval_core import (
 from .rollup_store import RollupStore
 from .search_query import (
     AGE_DECAY_RATE, build_recall_or_query, contains_emoji, normalize_search_sort, recall_content_terms,
+    extract_search_terms, requires_like_fallback, sanitize_fts5_query,
 )
 from .session_patterns import build_session_match_keys, compile_session_pattern
 from .sqlite_util import _sqlite_savepoint
@@ -3286,6 +3287,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 time_to=time_to,
                 exclude_session_ids=excluded_session_ids,
                 allow_operators=bool(args.get("_allow_operators", False)),
+                **({"agent_operators": True} if args.get("_agent_operators") else {}),
             )
             for hit in msg_hits:
                 if hit.get("session_id") in excluded_session_ids:
@@ -3325,6 +3327,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 limit=source_limit,
                 sort=sort,
                 source=source,
+                **({"agent_operators": True} if args.get("_agent_operators") else {}),
+                **({"allow_operators": True} if args.get("_grep_any_term") else {}),
             )
             for node in node_hits:
                 if node.session_id in excluded_session_ids:
@@ -4398,8 +4402,27 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     parsed_args = dict(args)
     parsed_args["_excluded_session_ids"] = excluded_session_ids
     parsed_args.pop("_allow_operators", None)
+    parsed_args.pop("_agent_operators", None)
+    parsed_args.pop("_grep_any_term", None)
+    parsed_args["_agent_operators"] = True
     if mode == "full_text":
-        return _lcm_grep_full_text(parsed_args, **kwargs)
+        payload = json.loads(_lcm_grep_full_text(parsed_args, **kwargs))
+        query = _coerce_query_arg(args.get("query"))
+        safe = sanitize_fts5_query(query, agent_operators=True)
+        or_query = build_recall_or_query(query)
+        if (
+            payload.get("total_results") == 0 and not payload.get("message_search_error")
+            and payload.get("content_scope") in {"history", "both"}
+            and not requires_like_fallback(query, safe)
+            and "OR" not in sanitize_fts5_query(query, allow_operators=True).split()
+            and len(extract_search_terms(safe)) >= 2 and or_query
+        ):
+            retry_args = {**parsed_args, "query": or_query,
+                          "_agent_operators": False, "_allow_operators": True, "_grep_any_term": True}
+            payload = json.loads(_lcm_grep_full_text(retry_args, **kwargs))
+            payload["query"] = query
+            payload["retried"] = "any_term"
+        return json.dumps(payload)
 
     timeout_s = max(
         0.001,

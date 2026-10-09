@@ -46,6 +46,7 @@ from .search_query import (
     normalize_search_sort,
     requires_like_fallback,
     sanitize_fts5_query,
+    is_fts5_syntax_error,
     sanitize_like_query,
     should_apply_directness_rank_adjustment,
 )
@@ -651,7 +652,9 @@ class SummaryDAG:
 
     def search(self, query: str, session_id: str | None = None,
                limit: int = 20, sort: str | None = None,
-               source: str | None = None) -> List[SummaryNode]:
+               source: str | None = None, *,
+               agent_operators: bool = False,
+               allow_operators: bool = False) -> List[SummaryNode]:
         """FTS5 search across summary nodes.
 
         Retrieval contract:
@@ -662,7 +665,8 @@ class SummaryDAG:
           session-level source presence
         - mixed-source nodes may match more than one ``source`` filter
         """
-        safe_query = sanitize_fts5_query(query)
+        safe_query = sanitize_fts5_query(query, agent_operators=agent_operators, allow_operators=allow_operators)
+        syntax_retried = False
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
@@ -702,6 +706,14 @@ class SummaryDAG:
                         ).fetchall()
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
+                if agent_operators and is_fts5_syntax_error(exc):
+                    if syntax_retried:
+                        return []
+                    safe_query = sanitize_fts5_query(query)
+                    syntax_retried = True
+                    offset = scanned_rows = 0
+                    results.clear()
+                    continue
                 logger.warning("FTS node search failed, falling back to LIKE: %s", exc)
                 return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
 
