@@ -123,3 +123,46 @@ Repeat LOCAL as a separate configuration. Dev and holdout reports are separate,
 and evidence paths are create-only. The author ran no tests, model downloads,
 inference, installation or production retrieval; remote execution and independent
 semantic review remain integration gates.
+
+## Public full-S holdout capture
+
+`freeze-public` consumes the previously downloaded file named `longmemeval_s`.
+The root's existing `lcm_longmemeval.py fetch --dataset-label s` pins revision
+`2ec2a557f339b6c0369619b1ed5793734cc87533`; record its download receipt and byte
+SHA-256 before this command. The loader hashes the same bytes it parses and
+requires the expected checksum, 500 questions, unique question IDs and matching
+instrument revision. The supplied checksum proves byte identity against that
+receipt; this command does not independently contact Hugging Face or certify
+the operator's download origin. It never downloads the dataset.
+
+Freeze the synthetic registration first: the command requires a same-posture
+120-case corpus with the exact registered 40-dev/80-holdout identities/splits.
+Tune only on those 40 dev cases, freeze model/rubric/confidence, then treat all
+500 public S questions as holdout. There is no public limit or dev split option.
+The report records the synthetic corpus digest, dataset coordinates/checksum,
+source identity and resolved summary/chunk embedding identities. CI must also
+pin and record its cached local embedding model weights/environment.
+
+Each question calls the existing instrument exactly once, with its default
+`top_k=10`, reranking disabled, and the fresh per-question store. Its callback
+freezes the same already-returned production hits before closure, without a
+second baseline or re-expansion. Baseline output preserves all current
+per-question session/turn metrics, mode/degradation labels and latency. Summary
+turn markers remain coarse. OFF has embeddings disabled; LOCAL uses the named
+real FastEmbed model. They are separate measurements under the existing
+[methodology](../../benchmarks/METHODOLOGY.md).
+
+No public exact-span gold is inferred from `has_answer` or summary labels.
+Every public frozen case has `gold=null`, so exact-span metrics and promotion
+remain unmeasured/insufficient. Ambiguous/transformed source snippets produce
+`UNMEASURED_CAPTURE: source_projection` in that question's baseline row and are
+excluded from frozen scoring; report full/captured/missing counts explicitly.
+Both outputs are create-only. Do not compare that subset as full-S span recall.
+
+`python scripts/eval_portable_recall.py freeze-public --dataset DATASET_DIR/longmemeval_s --dataset-sha256 PINNED_DOWNLOAD_SHA256 --posture OFF --dev-corpus synthetic-off.jsonl --source-identity COMMIT_SHA:OFF --baseline-output public-off-baseline.json --output public-off-pool.jsonl`
+
+`python scripts/eval_portable_recall.py freeze-public --dataset DATASET_DIR/longmemeval_s --dataset-sha256 PINNED_DOWNLOAD_SHA256 --posture LOCAL --local-model BAAI/bge-small-en-v1.5 --dev-corpus synthetic-local.jsonl --source-identity COMMIT_SHA:PINNED_EMBEDDING_IDENTITY --baseline-output public-local-baseline.json --output public-local-pool.jsonl`
+
+Optional cached local scoring of the exported pool uses the existing `run`
+command. Public hosted inference is outside the approved synthetic-only Jev
+campaign and requires its own explicit data/recipient/budget authorization.

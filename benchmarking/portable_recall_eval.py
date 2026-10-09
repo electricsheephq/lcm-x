@@ -24,6 +24,10 @@ CATEGORIES = ("exact-id", "paraphrase", "correction", "negation", "date",
               "contradiction", "noanswer", "fork", "scope", "tool-argument")
 
 
+class SpanCaptureUnavailable(ValueError):
+    """Production text cannot be assigned an exact, unchanged source interval."""
+
+
 @dataclass(frozen=True)
 class GoldSpan:
     source_ref: str
@@ -72,7 +76,8 @@ def validate_cases(cases):
             raise ValueError("duplicate gold span")
 
 
-def write_frozen(path: Path, cases, *, input_kind: str, posture: str, source_identity: str):
+def write_frozen(path: Path, cases, *, input_kind: str, posture: str, source_identity: str,
+                 provenance: dict | None = None):
     """Create once; never replace a previously frozen corpus."""
     if input_kind not in {"synthetic", "public"} or posture not in {"OFF", "LOCAL"}:
         raise ValueError("invalid corpus permission or posture")
@@ -83,6 +88,8 @@ def write_frozen(path: Path, cases, *, input_kind: str, posture: str, source_ide
               "source_identity": source_identity, "case_count": len(records),
               "corpus_sha256": hashlib.sha256(canonical_bytes(records)).hexdigest(),
               "candidate_cap": 30, "production_hit_cap": 25}
+    if provenance is not None:
+        header["provenance"] = provenance
     with path.open("x", encoding="utf-8") as stream:
         stream.write(json.dumps({"header": header}, sort_keys=True) + "\n")
         for record in records:
@@ -203,6 +210,73 @@ instrument's stub only with embeddings disabled. LOCAL uses real FastEmbed.
     return tuple(captured)
 
 
+def capture_public(dataset: Path, *, expected_sha256: str, tmp_dir: Path,
+                   posture: str, local_model: str, dev_header: dict):
+    """Full pinned LongMemEval_S holdout; one existing baseline pass per case.
+
+The expected byte checksum comes from the root's pinned download receipt.
+No exact character-span annotations exist in these official labels. Failed
+source projections are recorded and excluded from the frozen scoring pool.
+"""
+    import inspect
+    from dataclasses import replace
+    from . import longmemeval as instrument
+    if "candidate_sink" not in inspect.signature(instrument.evaluate_question).parameters:
+        raise RuntimeError("existing instrument needs the candidate_sink integration")
+    if posture not in {"OFF", "LOCAL"} or (posture == "LOCAL" and not local_model):
+        raise ValueError("LOCAL requires an explicit local embedding model")
+    if instrument.DATASET_REVISION != DATASET_REVISION:
+        raise ValueError("instrument dataset revision differs from the registered pin")
+    instrument.validate_dataset_path_label(dataset, "s")
+    if len(expected_sha256) != 64 or set(expected_sha256) - set("0123456789abcdef"):
+        raise ValueError("expected dataset SHA-256 must come from the pinned download receipt")
+    questions, actual_sha256 = instrument.load_questions_with_sha256(dataset)
+    if actual_sha256 != expected_sha256 or len(questions) != 500:
+        raise ValueError("full LongMemEval_S checksum/count mismatch")
+    if len({q.question_id for q in questions}) != len(questions):
+        raise ValueError("duplicate public question identity")
+    provider_name = "stub" if posture == "OFF" else "fastembed"
+    providers = instrument.resolve_harness_providers(provider_name, local_model)
+    cases, rows = [], []
+    for question in questions:
+        capture = {"status": "MISSING_CAPTURE", "exact_span_gold": "UNMEASURED"}
+        calls = 0
+
+        def sink(*, store_id_to_turn, capture_ms=0, **context):
+            nonlocal calls
+            calls += 1
+            try:
+                case = freeze_production_pool(**context, scope_id=question.question_id,
+                                             split="holdout", span_annotations=None)
+            except SpanCaptureUnavailable:
+                capture["status"] = "UNMEASURED_CAPTURE: source_projection"
+                return
+            cases.append(replace(case, capture_ms=capture_ms))
+            capture["status"] = "CAPTURED"
+
+        scores = instrument.evaluate_question(
+            question, providers.summary, chunk_provider=providers.chunk,
+            provider_name=provider_name, tmp_dir=tmp_dir,
+            embeddings_enabled=posture == "LOCAL", top_k=10, candidate_sink=sink,
+        )
+        if calls != 1:
+            raise ValueError("production sink must capture once per public baseline question")
+        rows.append({"question_id": question.question_id, "category": question.category,
+                     "capture": capture, "current_instrument_metrics": scores})
+    validate_cases(cases)
+    provenance = {
+        "dataset": {**instrument.dataset_coordinates("s"), "sha256": actual_sha256},
+        "posture": posture, "summary_binding": list(providers.summary_binding),
+        "chunk_binding": list(providers.chunk_binding), "full_holdout_questions": 500,
+        "current_instrument_top_k": 10, "rerank": False, "recall_rerank": False,
+        "captured_questions": len(cases), "unmeasured_capture_questions": 500 - len(cases),
+        "exact_span_gold": "UNMEASURED", "answer_correctness": "UNMEASURED",
+        "dev_registration": {"corpus_sha256": dev_header["corpus_sha256"],
+                             "synthetic_dev": 40, "synthetic_holdout": 80},
+    }
+    return tuple(cases), {"provenance": provenance, "per_question": rows}
+
+
 def freeze_production_pool(
     question, config, store, dag, provider, *, tmp_dir, embeddings_enabled,
     provider_name, scope_id, split, chunk_provider=None, span_annotations=None,
@@ -238,9 +312,9 @@ The store must be a fresh public corpus. This function never opens a live DB.
         if offset is None:
             offset = source.find(text)
             if offset < 0 or source.find(text, offset + 1) >= 0:
-                raise ValueError("production span is ambiguous; use exact answer-ready capture")
+                raise SpanCaptureUnavailable("production span is ambiguous; use exact answer-ready capture")
         if source[offset:offset + len(text)] != text:
-            raise ValueError("production source round-trip failed")
+            raise SpanCaptureUnavailable("production source round-trip failed")
         candidates.append(Candidate(f"{ref}:{offset}-{offset + len(text)}", text,
                                     scope_id, ref, offset, offset + len(text)))
     # Existing FTS, restricted to this already-frozen pool; no replacement router.
