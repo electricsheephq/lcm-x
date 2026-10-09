@@ -36,6 +36,21 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: after a survival fit with projected rows or an unknown projection count, the doctor advises a plugin-only rollback to v0.27.0 or later; older targets require stopping Hermes and moving the database aside to avoid cold-resume duplicates. (#919)
 - Fix: a summary carrier that a survival fit re-forms around a kept user row is no longer stored again as a new row after a Hermes in-place compression boundary, including when the host stamps the carrier or rewrites the current user row at turn end. The fit records the carrier as LCM's emission, and the identity anchor recognises it only when its remainder is exactly that stored row; anything else is still stored. A cold restart after a non-published fit can still store that carrier once. (#1000)
 
+## v0.26.2 (user/assistant text externalization floor)
+
+- Fix: user, assistant and other non-tool message text is externalized only above 100,000 characters or about 25,000
+  estimated tokens, whichever comes first (so dense scripts such as CJK are covered), whatever the configured
+  threshold. Above it, the stub carries a short head-and-tail preview, built from bounded scans of the text's two
+  ends, and the `lcm_expand(externalized_ref=…)` read hint, and stays within the existing 512-character placeholder
+  bound, so v0.26.1 can still read it. Tool output and media payloads are unchanged. Existing placeholder rows are not
+  rewritten, and each is readable with `lcm_expand`. (#1016, #1020)
+- Fix (rc2): the preview redacts the plugin's existing sensitive-text patterns in each scan window before slicing,
+  whatever the redaction setting. Its tail scan keeps up to 8,192 characters of context before its window and drops a
+  credential run that its start cuts, so a credential cut off from its label or PEM BEGIN line does not reach the
+  preview (known limits: #1034). The preview writes
+  `quarantined_assistant_output` as `quarantined-assistant-output`, so a cold restart no longer appends the session's
+  history again. (#1016, #1031)
+
 ## v0.26.1 (delegated-child compaction fix)
 
 - Fix: a delegated child (a `delegate_task` subagent) whose engine is a fresh copy of the parent's now keeps the
