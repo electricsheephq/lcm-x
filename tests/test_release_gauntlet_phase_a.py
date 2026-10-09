@@ -465,6 +465,10 @@ def test_engine_threads_embedding_privacy_setting(tmp_path, privacy_setting, exp
 
     assert captured["sensitive_patterns_enabled"] is False
     assert captured["embedding_privacy_enabled"] is expected
+    # The all-tools matrix must expose both default-dormant tools.
+    assert captured["assertions_enabled"] is True
+    assert captured["adaptive_retrieval_enabled"] is True
+    assert len(phase_a.SCENARIOS) == 15
 
 
 def test_noop_scenario_is_a_runner_failure(tmp_path):

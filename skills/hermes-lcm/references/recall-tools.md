@@ -9,7 +9,9 @@ Use recall tools when the answer depends on historical evidence that may have be
 Use for discovery across current-session raw messages and summary nodes.
 
 - `query` is FTS5 text by default; it is not a regex.
-- Prefer 1-3 distinctive terms or one quoted phrase because FTS5 combines extra terms with AND.
+- Indexed history full-text queries AND terms by default; uppercase OR/NOT, quoted phrases, and term* prefixes (2+ alphanumeric characters) are honoured.
+- Indexed history zero hits with multiple terms retry once with any-term matching; `retried='any_term'` reports this. Top-level OR/NOT queries and CJK/emoji substring searches do not retry.
+- `content_scope='externalized'` matches the literal query text; operators and retry do not apply.
 - Keep `sort='recency'` for recent events, use `sort='relevance'` for the strongest older match, and use `sort='hybrid'` when both matter.
 - `mode='semantic'` or `'hybrid'` is useful when embeddings are configured; degraded coverage is reported.
 - Broader `session_scope='all'|'session'` is explicit, bounded, raw-message-only archive recovery inside `lcm.db`.
@@ -34,7 +36,7 @@ Use when current-session compacted material must be expanded and synthesized int
 
 - Always provide `prompt`.
 - Provide either a small `query` or explicit `node_ids` when known.
-- `query` follows the same narrow FTS construction rules as `lcm_grep`.
+- `query` ANDs terms and supports quoted phrases; prefer 1-3 distinctive terms.
 - The expansion path is model-backed and bounded by answer/context token limits.
 
 Recommended current-session escalation:
@@ -106,8 +108,12 @@ Use only over exact cited evidence validated by the compiler for supported date 
 
 ## Default-off advanced paths
 
-- `lcm_query_state` queries the same-database assertion sidecar when that feature is enabled.
-- `lcm_retrieve` is the default-off bounded adaptive controller. It is not required for ordinary recall and must not replace the stable workflow above without measured benefit.
+- `lcm_query_state` is hidden until `LCM_ASSERTIONS_ENABLED=true`, then queries the same-database assertion sidecar.
+- `lcm_retrieve` is hidden until `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`. It is the default-off bounded adaptive controller, is not required for ordinary recall, and must not replace the stable workflow above without measured benefit.
+
+Both host paths advertise the other 13 schemas by default. `LCM_DISABLED_TOOLS`
+hides any named tool, including a flag-enabled one. Cached dormant calls still
+return their existing `status: disabled` responses.
 
 ## Operator tools
 

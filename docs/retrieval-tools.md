@@ -28,6 +28,11 @@ remains `session_search`/`lcm_recall`/`lcm_grep`; once an LCM session id and nod
 id are known, they can be retrieved directly through the explicit cross-session
 arguments documented below.
 
+Runtime discovery exposes 13 schemas by default. `lcm_query_state` appears
+only with `LCM_ASSERTIONS_ENABLED=true`; `lcm_retrieve` appears only with
+`LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`. `LCM_DISABLED_TOOLS` hides any named
+tool, even when its flag is enabled. The manifest retains all 15 declarations.
+
 | Tool | Use |
 |------|-----|
 | `lcm_grep` | Search current-session raw messages and summaries. `mode='full_text'` is the byte-compatible default; `mode='semantic'` searches embedded summaries; `mode='hybrid'` combines full-text and semantic ranks with RRF. Set `exclude_current_session=true` or pass `exclude_session_ids` to remove sessions before candidate caps, fusion, and final ranking. Opt into `content_scope='externalized'` or `'both'` for bounded literal search over recoverable payload prefixes owned by the active session. Opt into `session_scope='all'` or `session_scope='session'` (with `session_id`) for bounded archive recovery over rows already present in `lcm.db`, including externally backfilled rows that may carry source strings such as `openclaw-lcm:*`; broader scopes return raw-message hits only in full-text mode and cannot search externalized payloads. Raw-message filters `role`, `time_from`, `time_to`, `source`, and `conversation_id` are pushed into the full-text query; when any is supplied, externalized payload results are omitted, and summary hits are omitted for the role/time filters so the filter contract stays exact. Use `session_search` for earlier separate sessions or broad cross-session recall. |

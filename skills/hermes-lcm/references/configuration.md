@@ -72,6 +72,16 @@ including SQLite's cap. Example: `LCM_SQLITE_MMAP_SIZE=0 hermes` after restartin
 
 Change one tuning variable at a time, then re-check `lcm_status`, context pressure, summary health, latency, and actual answer quality.
 
+### Tool exposure
+
+Both native context-engine schemas and plugin-registry registration advertise
+13 tools by default. `LCM_ASSERTIONS_ENABLED=true` exposes `lcm_query_state`;
+`LCM_ADAPTIVE_RETRIEVAL_ENABLED=true` exposes `lcm_retrieve`. Restart after
+changing these loaded process flags. `LCM_DISABLED_TOOLS` (comma-separated
+names) hides any tool, including a flag-enabled one, and refuses direct calls.
+Calls through a cached dormant schema retain the existing disabled response.
+The manifest continues to declare all 15 tools.
+
 ### Recall ranking
 
 - `LCM_RECALL_ARM_WEIGHTS` (default `fts=0.5,summary=1.0,chunk=1.0`): per-arm RRF weights for `lcm_recall`; see `docs/retrieval-tools.md`.

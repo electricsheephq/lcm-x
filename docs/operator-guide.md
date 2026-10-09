@@ -282,15 +282,17 @@ Expected signals:
 
 - plugin list includes `hermes-lcm-x`
 - selected context engine is `lcm-x`
-- tool list includes all 15 schemas: `lcm_grep`, `lcm_recall`,
-  `lcm_query_state`, `lcm_compute`, `lcm_compile_evidence`,
-  `lcm_evidence_pack`, `lcm_retrieve`, `lcm_recent`, `lcm_load_session`,
+- tool list includes 13 default schemas: `lcm_grep`, `lcm_recall`,
+  `lcm_compute`, `lcm_compile_evidence`,
+  `lcm_evidence_pack`, `lcm_recent`, `lcm_load_session`,
   `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`,
   and `lcm_doctor`
+- `lcm_query_state` and `lcm_retrieve` appear only with their backing flags on;
+  `LCM_DISABLED_TOOLS` can hide any of these tools
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm-x:hermes-lcm` on hosts that support plugin skills
 
-On the `main` line, typical output is:
+On the `main` line, output with both opt-in flags enabled is:
 
 ```text
 Plugins (1):
@@ -336,7 +338,7 @@ LCM tools are still available through the context-engine schema/dispatch path
 registration (Path A) on those hosts because Path A would shadow Path B and lose
 current-turn ingest.
 
-Healthy signals are the same as above: selected context engine `lcm-x`, all 15
+Healthy signals are the same as above: selected context engine `lcm-x`, 13 default
 `lcm_*` tools in the live tool list, and `lcm_status` / `lcm_inspect` / `lcm_doctor` responding
 after one normal message initializes the session.
 
@@ -506,18 +508,25 @@ change and a rollback to an older plugin still opens the store (the older build 
 
 ### Evidence and adaptive retrieval (0.21 RC)
 
-Hermes exposes all 15 LCM tool schemas whenever LCM is the active context
-engine. Exposure is not activation. On a stock install:
+When LCM is the active context engine, both native schemas and plugin-registry
+registration advertise 13 tools on a stock install. Dormant tools are hidden
+until their backing flag is on in the loaded process config:
 
 - `lcm_compute`, `lcm_compile_evidence`, and `lcm_evidence_pack` are bounded,
   provider-neutral operations over caller-supplied exact refs. Calling them does
   not enable a store, run an extractor, or activate an answering model.
-- `lcm_query_state` returns `status: disabled` until
-  `LCM_ASSERTIONS_ENABLED=true` creates/binds the rebuildable assertion sidecar.
-- `lcm_retrieve` returns `status: disabled` until
+- `lcm_query_state` is advertised only when `LCM_ASSERTIONS_ENABLED=true`
+  creates/binds the rebuildable assertion sidecar.
+- `lcm_retrieve` is advertised only when
   `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`. The controller itself has no model or
   provider client, but retrieval calls it dispatches retain their existing
   embedding-provider behavior.
+
+`LCM_DISABLED_TOOLS` still hides any named tool, including one whose backing
+flag is on, and refuses direct calls to it. A host calling a cached dormant
+schema still receives the handler's existing `status: disabled` response.
+Restart after changing the loaded flags. `plugin.yaml` continues to declare
+all 15 tools for manifest checks.
 
 | Variable | Default | Use |
 |----------|---------|-----|

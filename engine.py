@@ -4718,7 +4718,7 @@ class LCMEngine(
         return self.carry_over_new_session_context(old_session_id, new_session_id)
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
-        disabled = self._disabled_tool_names()
+        disabled = self._omitted_tool_names()
         schemas = [
             LCM_GREP,
             LCM_RECALL,
@@ -4739,6 +4739,15 @@ class LCMEngine(
         if disabled:
             return [s for s in schemas if s.get("name") not in disabled]
         return schemas
+
+    def _omitted_tool_names(self) -> set[str]:
+        """Hide explicitly disabled and flag-dormant tools on both host paths."""
+        omitted = self._disabled_tool_names()
+        if not self._config.assertions_enabled:
+            omitted.add("lcm_query_state")
+        if not self._config.adaptive_retrieval_enabled:
+            omitted.add("lcm_retrieve")
+        return omitted
 
     @staticmethod
     def _disabled_tool_names() -> set[str]:

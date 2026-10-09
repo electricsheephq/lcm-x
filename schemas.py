@@ -11,7 +11,7 @@ LCM_GREP = {
         "node expansion is intentionally deferred. Use lcm_expand(store_id=...) on a cross-session message hit "
         "to drill into its full content. Set content_scope='externalized' or 'both' to opt into bounded, active-session "
         "search over recoverable payload sidecars. For Hermes-tracked session history outside the LCM database, use session_search. "
-        "For open-ended cross-conversation recall by meaning ('have we ever discussed…'), prefer lcm_recall."
+        "For open-ended cross-conversation recall ('have we ever discussed…'), prefer lcm_recall."
     ),
     "parameters": {
         "type": "object",
@@ -20,7 +20,7 @@ LCM_GREP = {
                 "type": "string",
                 "enum": ["full_text", "semantic", "hybrid"],
                 "description": (
-                    "Retrieval mode. 'full_text' preserves the historical FTS behavior byte-for-byte. "
+                    "Retrieval mode. 'full_text' searches indexed terms and quoted phrases. "
                     "'semantic' searches embedded summaries and degrades to full-text on provider timeout or transient unavailability. "
                     "'hybrid' fuses full-text and semantic ranks with reciprocal-rank fusion (RRF)."
                 ),
@@ -29,9 +29,10 @@ LCM_GREP = {
             "query": {
                 "type": "string",
                 "description": (
-                    "Search query (FTS5 syntax: keywords, phrases, OR/NOT). "
-                    "FTS5 defaults to AND matching, so prefer 1-3 distinctive terms or one quoted multi-word phrase. "
-                    "Wrap exact phrases in quotes. Short CJK fragments and emoji-heavy queries may use substring fallback instead of plain FTS token matching."
+                    "Indexed history full-text query: AND by default; uppercase OR/NOT, quoted phrases, and term* prefixes "
+                    "(at least 2 alphanumeric characters) are honoured. Zero hits with multiple terms retry once "
+                    "as any-term matching (retried='any_term'), except top-level OR/NOT queries and CJK/emoji substring searches. "
+                    "content_scope='externalized' matches the literal query text; operators and retry do not apply."
                 ),
             },
             "limit": {
@@ -143,7 +144,8 @@ LCM_GREP = {
 LCM_RECALL = {
     "name": "lcm_recall",
     "description": (
-        "Search the agent's entire memory across ALL conversations and all time by meaning. "
+        "Search memory across ALL conversations and all time: semantic matching when embeddings are enabled, "
+        "full-text matching otherwise. "
         "Returns the most relevant memories — summaries and verbatim excerpts — ranked by relevance, "
         "recency, and relatedness to the current conversation, each with an expand_hint handle to the "
         "original content: verbatim excerpts get lcm_expand(store_id=...), current-session summary hits get "
@@ -162,8 +164,8 @@ LCM_RECALL = {
             "query": {
                 "type": "string",
                 "description": (
-                    "Natural-language description of what to recall. Searched by meaning across every "
-                    "conversation and keyword-matched over raw history; distinctive phrasing recalls best."
+                    "What to recall across conversations: semantic matching with embeddings enabled, "
+                    "full-text otherwise; distinctive phrasing recalls best."
                 ),
             },
             "limit": {

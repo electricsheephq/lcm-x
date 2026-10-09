@@ -32,6 +32,31 @@ def test_recall_or_stopword_phrase_survives():
     assert build_recall_or_query('"The Who" band') == '"The Who" OR band'
 
 
+@pytest.mark.parametrize(("query", "expected"), [
+    ("alpha OR beta", "alpha OR beta"), ("alpha NOT beta", "alpha NOT beta"),
+    ("alpha NEAR beta", "alpha near beta"), ("deploy*", "deploy*"),
+    ("a*", "a"), ("ab*", "ab*"), ("alpha*beta", "alpha beta"), ("*", ""),
+    ("OR alpha", "alpha"), ("alpha OR", "alpha"), ("NOT alpha", "alpha"),
+    ("alpha OR OR beta", "alpha beta"), ('alpha OR "beta', "alpha or beta"),
+    ('"alpha OR beta" deploy*', '"alpha OR beta" deploy*'),
+    ("OR*", "or*"), ("alpha AND beta", "alpha and beta"),
+    ("OR", "or"), ("NOT", "not"), ("NEAR", "near"), ("OR NOT", "or not"),
+    ("(alpha OR gamma) beta", "alpha or gamma beta"),
+    ('"function(foo)" OR alpha', '"function(foo)" OR alpha'),
+])
+def test_grep_agent_sanitizer_mode(query, expected):
+    import sqlite3
+    from hermes_lcm.search_query import sanitize_fts5_query
+
+    safe = sanitize_fts5_query(query, agent_operators=True)
+    assert safe == expected
+    if safe:
+        with sqlite3.connect(":memory:") as conn:
+            conn.execute("CREATE VIRTUAL TABLE t USING fts5(x)")
+            conn.execute("INSERT INTO t VALUES ('alpha or beta deployment')")
+            conn.execute("SELECT x FROM t WHERE t MATCH ?", (safe,)).fetchall()
+
+
 def test_recall_or_dedupes_ascii_case_only():
     from hermes_lcm.search_query import build_recall_or_query
 
@@ -54,7 +79,9 @@ def test_bundled_recall_policy_distinguishes_or_and():
     policy = (Path(__file__).resolve().parents[1] / "skills/hermes-lcm/references/recall-policy.md").read_text()
     assert "`lcm_recall`'s full-text arm ORs content words" in policy
     assert "stop words dropped, quoted phrases kept" in policy
-    assert "`lcm_grep`, its fallbacks, and `lcm_expand_query` still AND their terms" in policy
+    assert "`lcm_grep` ANDs full-text terms by default" in policy
+    assert "retries zero hits once as any-term matching" in policy
+    assert "`lcm_expand_query` still ANDs its terms" in policy
     assert "Do not pad a query with synonyms." in policy
 
 
