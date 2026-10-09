@@ -577,7 +577,9 @@ def test_lcm_merge_tool_call_mismatch_backtracks(build):
 
 
 @pytest.mark.parametrize("externalized", [False, True])
-def test_lcm_merge_externalized_constituent_is_unverified(tmp_path, externalized):
+def test_lcm_merge_externalized_constituent_is_unverified(tmp_path, externalized, monkeypatch):
+    # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
     from hermes_lcm.host_uid import host_uid_doctor_lines
     from tests.test_host_uid_shadow import _classify, _gate
 

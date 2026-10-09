@@ -235,6 +235,8 @@ def test_host_that_keeps_the_raw_form_gets_no_override(tmp_path, monkeypatch):
 
 
 def test_externalized_large_user_row_keeps_its_identity(tmp_path, monkeypatch):
+    # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
     host = _AcpHost(
         tmp_path,
         monkeypatch,

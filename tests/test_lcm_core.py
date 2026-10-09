@@ -5723,7 +5723,8 @@ class TestAssemblyBudgetSelection:
         assert rows[-1]["content"] == "new followup"
 
     def test_assembly_skips_oversized_summary_and_keeps_later_fit_summary(self, tmp_path, monkeypatch):
-        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=140)
+        # 150 (was 140): room for the #1016 clause in the LCM system note.
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=150)
         engine._dag.add_node(SummaryNode(
             session_id="assembly-session",
             depth=2,
@@ -7421,12 +7422,10 @@ class TestIngestExternalization:
             {"role": "assistant", "content": marker},
         ])
 
+        # #1016: assistant text under the 100k non-tool floor stays inline (it was a raw_payload stub).
         stored = engine._store.get_session_messages("ingest-session")
-        assert stored[0]["content"].startswith("[Externalized payload:")
-        payload_file = next(output_dir.glob("*.json"))
-        payload = json.loads(payload_file.read_text())
-        assert payload["kind"] == "raw_payload"
-        assert payload["content"] == marker
+        assert stored[0]["content"] == marker
+        assert not output_dir.exists() or not list(output_dir.glob("*.json"))
         assert "assistant recovered text" not in stored[0]["content"]
 
     def test_ingest_preserves_unrecoverable_truncation_marker_inline(self, tmp_path):
@@ -7641,7 +7640,9 @@ class TestIngestExternalization:
 
     def test_ingest_externalizes_generic_oversized_raw_payload_fallback(self, tmp_path):
         engine, output_dir = self._engine(tmp_path)
-        content = "GENERIC_RAW_NEEDLE:" + ("z" * 5000)
+        # #1016: user text is externalized only above the 100k non-tool floor; the needle sits
+        # mid-payload, outside the stub's head/tail preview.
+        content = ("z " * 30_000) + "GENERIC_RAW_NEEDLE " + ("z " * 30_000)
 
         engine._ingest_messages([{"role": "user", "content": content}])
 
@@ -7660,7 +7661,8 @@ class TestIngestExternalization:
         from hermes_lcm.engine import LCMEngine
 
         engine, output_dir = self._engine(tmp_path)
-        content = "ACTIVE_RAW_NEEDLE:" + ("r" * 5000)
+        # #1016: above the 100k non-tool floor; the needle sits outside the stub's preview.
+        content = ("r " * 30_000) + "ACTIVE_RAW_NEEDLE " + ("r " * 30_000)
         messages = [{"role": "user", "content": content}]
 
         active_context = engine.compress(messages)
@@ -7679,7 +7681,7 @@ class TestIngestExternalization:
         payload_path = next(output_dir.glob("*.json"))
         expanded = json.loads(
             lcm_tools.lcm_expand(
-                {"externalized_ref": payload_path.name, "max_tokens": 20_000},
+                {"externalized_ref": payload_path.name, "max_tokens": 200_000},
                 engine=engine,
             )
         )
@@ -7702,7 +7704,8 @@ class TestIngestExternalization:
 
     def test_preflight_requests_cleanup_for_oversized_raw_payload_stub(self, tmp_path):
         engine, _output_dir = self._engine(tmp_path)
-        content = "PREFLIGHT_RAW_NEEDLE:" + ("r" * 5000)
+        # #1016: was 5k chars; user text is stubbed only above the 100k non-tool floor.
+        content = ("r " * 30_000) + "PREFLIGHT_RAW_NEEDLE " + ("r " * 30_000)
         messages = [{"role": "user", "content": content}]
 
         assert engine.should_compress_preflight(messages) is True
@@ -7717,7 +7720,8 @@ class TestIngestExternalization:
         import hermes_lcm.tools as lcm_tools
 
         engine, output_dir = self._engine(tmp_path)
-        content = "INJECTED_ROLE_RAW_NEEDLE:" + ("z" * 5000)
+        # #1016: above the 100k non-tool floor; the needle sits outside the stub's preview.
+        content = ("z " * 30_000) + "INJECTED_ROLE_RAW_NEEDLE " + ("z " * 30_000)
         injected_role = "user; ref=bogus]"
 
         engine._ingest_messages([{"role": injected_role, "content": content}])
@@ -7731,9 +7735,9 @@ class TestIngestExternalization:
         payload_file = next(output_dir.glob("*.json"))
         payload = json.loads(payload_file.read_text())
         assert payload["role"] == injected_role
-        by_store_id = json.loads(lcm_tools.lcm_expand({"store_id": stored[0]["store_id"], "max_tokens": 20_000}, engine=engine))
+        by_store_id = json.loads(lcm_tools.lcm_expand({"store_id": stored[0]["store_id"], "max_tokens": 200_000}, engine=engine))
         assert by_store_id["externalized_ref"] == payload_file.name
-        expanded = json.loads(lcm_tools.lcm_expand({"externalized_ref": by_store_id["externalized_ref"], "max_tokens": 20_000}, engine=engine))
+        expanded = json.loads(lcm_tools.lcm_expand({"externalized_ref": by_store_id["externalized_ref"], "max_tokens": 200_000}, engine=engine))
         assert expanded["content"] == content
 
     def test_engine_bootstrap_does_not_externalize_until_ingest_path_runs(self, tmp_path):

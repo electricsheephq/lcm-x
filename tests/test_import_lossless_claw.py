@@ -577,7 +577,9 @@ def test_apply_import_routes_oversized_payloads_through_ingest_protection(tmp_pa
     externalized_dir = tmp_path / "externalized"
     create_lossless_source(source_db)
 
-    large_content = "IMPORT_RAW_NEEDLE:" + ("q" * 5000)
+    # #1016: user text is externalized only above the 100k non-tool floor; the needle sits
+    # mid-payload, outside the stub's head/tail preview.
+    large_content = ("q " * 30_000) + "IMPORT_RAW_NEEDLE " + ("q " * 30_000)
     conn = sqlite3.connect(source_db)
     conn.execute("UPDATE messages SET content = ? WHERE message_id = 10", (large_content,))
     conn.commit()

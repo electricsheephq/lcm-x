@@ -629,10 +629,55 @@ def _externalized_summary(path: Path, payload: Dict[str, Any]) -> Dict[str, Any]
 # placeholder limit that v0.24.7 readers (``is_externalized_placeholder``) enforce.
 _PLACEHOLDER_TOOL_NAME_MAX_CHARS = 64
 _PLACEHOLDER_MAX_CHARS = 512
+# #1016: the ``raw_payload`` stub's head/tail preview is sized to the room the 512 rule leaves,
+# so v0.26.1 and older readers (rollback) still recognize the stub.
+_RAW_PAYLOAD_PREVIEW_MIN_CHARS = 40
+_RAW_PAYLOAD_PREVIEW_JOINER = " ... "
+# Only this many chars per ``room`` char are scanned at each end of a large payload, so a
+# multi-megabyte message is never split or copied whole to build a few hundred preview chars.
+_RAW_PAYLOAD_PREVIEW_SCAN_FACTOR = 8
+_RAW_PAYLOAD_PREVIEW_TRANSLATION = str.maketrans({"[": "(", "]": ")", ";": ",", '"': "'"})
 
 
-def _build_externalized_placeholder(summary: Dict[str, Any]) -> str:
+def _raw_payload_preview_text(text: str) -> str:
+    text = " ".join(text.split())
+    return text.translate(_RAW_PAYLOAD_PREVIEW_TRANSLATION).replace("ref=", "ref_")
+
+
+def _raw_payload_preview(content: str, room: int) -> str:
+    """#1016: a deterministic, whitespace-collapsed head/tail preview of at most ``room`` chars that
+    cannot forge stub syntax: ``[``/``]``/``;`` are mapped and ``ref=`` is neutralized, so no
+    recognizer (fullmatch or finditer) can read a ref, or the end of the stub, out of the user's text."""
+    content = content or ""
+    keep = room - len(_RAW_PAYLOAD_PREVIEW_JOINER)
+    head = keep * 7 // 10
+    window = room * _RAW_PAYLOAD_PREVIEW_SCAN_FACTOR
+    if len(content) > 2 * window:
+        head_text = _raw_payload_preview_text(content[:window])[:head]
+        tail_text = _raw_payload_preview_text(content[-window:])[-(keep - head):]
+        return f"{head_text}{_RAW_PAYLOAD_PREVIEW_JOINER}{tail_text}"
+    text = _raw_payload_preview_text(content)
+    if len(text) <= room:
+        return text
+    return f"{text[:head]}{_RAW_PAYLOAD_PREVIEW_JOINER}{text[len(text) - (keep - head):]}"
+
+
+def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | None = None) -> str:
     kind = _placeholder_metadata(summary.get("kind", "tool_result") or "tool_result")
+    if kind == "raw_payload" and content:
+        # #1016: say what the payload holds and how to read it, within the 512 rule; ``ref=`` stays last.
+        ref = summary.get("ref", "")
+        head = (
+            f"[Externalized payload: kind={kind}; role={_placeholder_metadata(summary.get('role') or '?')}; "
+            f"chars={summary.get('content_chars', 0)}; bytes={summary.get('content_bytes', 0)}; "
+        )
+        rest = f'read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]'
+        # Strictly under the 512 rule, as raw_payload stubs always were.
+        room = _PLACEHOLDER_MAX_CHARS - 1 - len(head) - len(rest) - len('preview=""; ')
+        if room >= _RAW_PAYLOAD_PREVIEW_MIN_CHARS:
+            return f'{head}preview="{_raw_payload_preview(content, room)}"; {rest}'
+        if len(head) + len(rest) < _PLACEHOLDER_MAX_CHARS:
+            return f"{head}{rest}"
     if kind != "tool_result":
         role = _placeholder_metadata(summary.get("role") or "?")
         return (
@@ -1319,7 +1364,7 @@ def maybe_externalize_payload(
             # #680: the supplied name wins (an older payload may hold none, or another call's).
             existing = {**existing, "tool_name": tool_name}
         return {
-            "placeholder": _build_externalized_placeholder(existing),
+            "placeholder": _build_externalized_placeholder(existing, content=content),
             "path": existing_path,
             "payload": existing,
         }
@@ -1369,7 +1414,8 @@ def maybe_externalize_payload(
             "content_chars": payload["content_chars"],
             "content_bytes": payload["content_bytes"],
             "ref": path.name,
-        }
+        },
+        content=content,
     )
     return {
         "placeholder": placeholder,
