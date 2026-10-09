@@ -21,6 +21,8 @@ import sys
 import tempfile
 import time
 from types import ModuleType
+# This is an all-tools subject (15), not the stock default exposure (13).
+# _engine() opts into both dormant tools so their live scenarios remain covered.
 SCENARIOS = {
     "lcm_grep", "lcm_recall", "lcm_query_state", "lcm_compute", "lcm_compile_evidence", "lcm_evidence_pack", "lcm_retrieve", "lcm_recent",
     "lcm_load_session", "lcm_describe", "lcm_expand", "lcm_expand_query", "lcm_status", "lcm_inspect", "lcm_doctor",
