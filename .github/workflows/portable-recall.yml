@@ -15,6 +15,7 @@ on:
   pull_request:
     paths:
       - "portable.py"
+      - "docs/portable-qualification.md"
       - "optional_scorer.py"
       - "store.py"
       - "benchmarking/portable_recall_eval.py"

@@ -90,23 +90,34 @@ The pinned LongMemEval-S revision is
 `2ec2a557f339b6c0369619b1ed5793734cc87533`, data SHA-256
 `08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894`.
 [Registration run 37894293829](https://github.com/electricsheephq/lcm-x/actions/runs/37894293829)
-keeps OFF and LOCAL configurations separate. The OFF baseline completed 500
-questions: session-label Recall@5 84.20%, nDCG@10 0.83345. Do not compare these
-public metrics with synthetic exact-span metrics as one release score.
+completed OFF 500. Its serial LOCAL job hit the three-hour runner limit before
+exporting a public report or checkpoint, so its processed count is unmeasured.
+The [LOCAL-only successor](https://github.com/electricsheephq/lcm-x/actions/runs/37914546868)
+completed all 500 pinned questions in ten disjoint shards with unchanged retrieval
+settings, original embedding dependency constraints and one shared model cache.
+Strict aggregation validated complete question membership, source/model/config
+pins and frozen-pool lineage. Evaluation source is
+`a75bd7837c63aba57daa126ac505ab922622b09d`; final documentation/package metadata
+changes preserve the measured runtime. No model or host campaign was repeated.
 
-Public default snippets contain display highlights/ellipses and do not expose
-truthful stored-source offsets. The strict export rejected all 500 OFF pools;
-this capture failure is separate from absent exact-span gold. Public snippet
-ranking is unqualified under the stored-offset scorer contract. No fabricated
-references or substituted source prefixes are exported. Public exact-span recall,
-reader answer correctness and confidence calibration remain UNMEASURED. The
-LOCAL serial public job hit the three-hour runner limit before exporting a
-public report. Its processed-question count and retrieval metrics are unmeasured.
-The admitted successor partitions the same pinned 500 questions into disjoint
-hosted shards and requires complete identity-checked aggregation. It repeats
-only the unfinished LOCAL baseline, with unchanged retrieval/model configuration;
-OFF, scoring and host receipts remain retained. Final completion is recorded in
-the canonical tracker; sharded timing is not compared directly to serial timing.
+| Posture | Questions | Session-label Recall@5 | nDCG@10 | Strict source capture |
+| --- | --- | --- | --- | --- |
+| OFF | 500 | 84.20% | 0.83345 | 0 pools; 500 source-projection rejections |
+| LOCAL, BGE-small floor | 500 | 90.63% | 0.87767 | 445 pools; 55 source-projection rejections |
+
+These are separate embedding configurations, not a classifier gain or release
+score. Public session/turn-label metrics do not measure exact supporting spans
+or reader answers. Strict export rejects highlighted, truncated or otherwise
+nonmatching text; accepted pools have validated unchanged stored-source slices.
+Public exact-span gold is unavailable even for the 445 captured LOCAL pools.
+Public fixed-pool classifier evaluation, exact-span recall, reader correctness
+and confidence calibration remain UNMEASURED or unqualified. No fabricated
+references, substitute source prefixes or inferred span labels are exported.
+
+The successful successor used 39m58s elapsed across hosted jobs; it repeated
+computation lost to the serial timeout. Shard-local caches and execution topology
+change timing, so this does not establish an end-to-end speedup over a completed
+serial baseline. OFF, frozen scoring and host receipts are retained separately.
 
 ## Distribution and later gates
 
