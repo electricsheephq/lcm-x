@@ -25,6 +25,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: "3.12"
@@ -52,6 +53,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: "3.12"
@@ -75,6 +77,11 @@ jobs:
           POSTURE: ${{ matrix.posture }}
         run: |
           python scripts/eval_portable_recall.py freeze-synthetic --posture "$POSTURE" --local-model BAAI/bge-small-en-v1.5 --source-identity "$(git rev-parse HEAD):$POSTURE:BAAI/bge-small-en-v1.5" --output evidence/synthetic.jsonl
+      - name: Export frozen public/synthetic-only input for the separately authorized Jev campaign
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: portable-frozen-${{ matrix.posture }}
+          path: evidence/synthetic.jsonl
       - name: Development pass with frozen policy
         run: python scripts/eval_portable_recall.py run --input evidence/synthetic.jsonl --output evidence/dev-bge.json --split dev --scorer bge
       - name: Single held-out pass with identical pools
