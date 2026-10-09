@@ -360,21 +360,21 @@ Useful environment variables:
 
 | Variable | Default | Use |
 |----------|---------|-----|
-| `LCM_CONTEXT_THRESHOLD` | `0.35` | Fraction of the context window that triggers LCM compaction |
+| `LCM_CONTEXT_THRESHOLD` | `0.75` | Fraction of the context window that triggers LCM compaction; the survival fit (`LCM_SURVIVAL_FIT`) protects against overflow, so the trigger does not need to be low for safety |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold fractions, for example `"glm-5.3:0.115"`. Each key is matched as a substring of the active route's model name (the longest key wins) and takes priority over `LCM_CONTEXT_THRESHOLD`. Also settable as `lcm.model_thresholds` in config.yaml |
-| `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
-| `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
+| `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
+| `LCM_FRESH_TAIL_MAX_TOKENS` | `24000` | Token cap for the protected fresh tail; always retains the newest message and complete assistant/tool-result groups. `0` removes the explicit cap (on a window of 50k tokens or more the engine then derives one at half the window) |
 | `LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED` | `true` | Default-on: when compaction is deadlocked because the count-protected tail covers the whole over-threshold session (#441), the tail yields to a derived token bound so compaction can progress; `false` restores the strict count tail (rollback switch) |
 | `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS` | `3` | Consecutive tail-blocked compaction attempts under host-observed pressure before the yield engages; any attempt not blocked by the tail resets the count; `1` yields on first observation |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
-| `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
+| `LCM_LEAF_CHUNK_TOKENS` | `8000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
 | `LCM_LEAF_TARGET_RATIO` | `0.20` | Leaf summary target as a share of the leaf's source tokens (`> 0` and `<= 1`); target = `min(MAX, max(MIN, int(source_tokens * RATIO)))` and the first summary call gets `max_tokens` = 2 × target (#614) |
 | `LCM_LEAF_TARGET_MIN_TOKENS` | `2000` | Floor of the leaf summary target (`>= 1`) |
 | `LCM_LEAF_TARGET_MAX_TOKENS` | `12000` | Cap of the leaf summary target (`>=` the floor); an out-of-range value of any of the three keys falls back to its default with a config warning |
-| `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable chunk-sized leaf compaction passes instead of compacting the whole non-tail raw backlog per pass |
+| `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable backlog-sized leaf chunk targets; when off, one leaf takes at most max(`LCM_LEAF_CHUNK_TOKENS`, `LCM_DYNAMIC_LEAF_CHUNK_MAX`) of the oldest non-tail raw backlog, capped at 40% of a known window |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `40000` | Upper bound for dynamic leaf chunk targets |
-| `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `false` | At threshold, opt into one synchronous bounded sweep that drains chunked raw history before publishing one new active context |
+| `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `true` | At threshold, run one synchronous bounded sweep that drains chunked raw history before publishing one new active context; `false` compacts only until pressure falls below the trigger |
 | `LCM_SUMMARY_PREFIX_TARGET_TOKENS` | `0` | Sweep-only summary-frontier target; `0` derives one `LCM_LEAF_CHUNK_TOKENS` budget |
 | `LCM_FOREGROUND_SOFT_SECONDS` | `60` | Sweep soft target, counted from `compress()` entry: after the first stored leaf or condensed node, no summariser call starts unless its recent duration says it ends by then (`0` = none; at most the hard bound) |
 | `LCM_FOREGROUND_HARD_SECONDS` | `120` | Sweep hard bound, counted from `compress()` entry: no summariser call starts unless it is expected to end, with a finalize reserve, by then, and none gets a timeout past it (`0` or invalid = `120`) |
@@ -385,9 +385,9 @@ Useful environment variables:
 | `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | unset (`auto`) | Protect provider-bound copies for known cloud embedding providers without rewriting durable data. Set `false` for an explicit raw-cloud opt-out (`privacy:off` vector revision); local providers remain unchanged |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
-| `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
+| `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `true` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
-| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `false` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `true` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders |
@@ -404,7 +404,7 @@ Useful environment variables:
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
 | `LCM_SUMMARY_PROMPT_VERSION` | `1` | Summariser prompt version: `1` (original prompts) or `2` (opt-in v2 prompts); other values fall back to `1` with a config warning. See [Summary prompt version](#summary-prompt-version) |
-| `LCM_TEMPORAL_ROLLUPS_ENABLED` | `false` | Enable derived UTC day/week/month summary rollups and their maintenance hooks |
+| `LCM_TEMPORAL_ROLLUPS_ENABLED` | `true` | Enable derived UTC day/week/month summary rollups and their maintenance hooks; rollup builds call the summary model |
 | `LCM_ROLLUP_DAILY_TARGET_TOKENS` | `5000` | Target size for daily rollup summarization |
 | `LCM_ROLLUP_DAILY_MAX_TOKENS` | `15000` | Hard token ceiling for a daily rollup |
 | `LCM_ROLLUP_AGGREGATE_MAX_TOKENS` | `20000` | Hard token ceiling for weekly and monthly rollups |
@@ -552,11 +552,11 @@ Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
 ### Temporal rollup operations
 
-Temporal rollups are opt-in. Set `LCM_TEMPORAL_ROLLUPS_ENABLED=true`, tune the
-four `LCM_ROLLUP_*` controls above if needed, and restart Hermes. Rollup periods
-are UTC calendar periods. Enabling the feature creates its tables lazily; a
-disabled install creates no rollup tables and leaves the core schema untouched,
-so a base build still opens the database.
+Temporal rollups are on by default. Tune the four `LCM_ROLLUP_*` controls
+above if needed; set `LCM_TEMPORAL_ROLLUPS_ENABLED=false` and restart Hermes to
+turn them off. Rollup periods are UTC calendar periods. The feature creates its
+tables lazily; a disabled install creates no rollup tables and leaves the core
+schema untouched, so a base build still opens the database.
 
 Automatic maintenance marks a day (and its containing week and month) stale when
 a **summary node covering that day is published** — publication, not raw
@@ -680,10 +680,16 @@ state / cache-break signals.
 
 ### Threshold ownership
 
-When `context.engine: lcm-x` is active, `LCM_CONTEXT_THRESHOLD` is the compaction
-threshold LCM uses. Hermes core `compression.threshold` belongs to the built-in
-compressor. Hermes core `compression.enabled` is still the global gate that
-allows compaction, so leave it enabled when using LCM.
+When `context.engine: lcm-x` is active, LCM takes its compaction threshold from,
+in order: `LCM_CONTEXT_THRESHOLD`, then `lcm.context_threshold` in config.yaml,
+then the Hermes core `compression.threshold` raised to at least the LCM default
+(`0.75`). A bare Hermes install seeds `compression.threshold: 0.50`, so without
+an LCM setting LCM uses `0.75`; `/lcm status` reports the source
+`config_yaml:compression.threshold(floored)` and a config warning when the
+inherited value was raised. To go lower, set `LCM_CONTEXT_THRESHOLD` or
+`lcm.context_threshold`. When Hermes core `compression.enabled` is false, LCM
+uses its own default; that flag is still the global gate that allows
+compaction, so leave it enabled when using LCM.
 
 If `LCM_ABSOLUTE_THRESHOLD_TOKENS` is set to a positive integer, it overrides the
 ratio-derived trigger after window math runs. Use this when you want a fixed
@@ -811,6 +817,11 @@ A reasonable first pass for a true 1M effective window is:
 | Balanced large-context use | `350000` to `500000` | `0.35` to `0.50` | Good starting point for many long-running agents |
 | Keep more raw context active | `600000+` | `0.60+` | Higher token burn, later compaction |
 
+The default `0.75` suits windows up to about 272k tokens. On a true 1M window it
+starts compaction at `750000` prompt tokens, so pick a row above, or set
+`LCM_MODEL_THRESHOLDS` / `LCM_ABSOLUTE_THRESHOLD_TOKENS`, if that is later than
+you want.
+
 What the main knobs do:
 
 - `LCM_CONTEXT_THRESHOLD` decides when compaction starts. Lower values build the
@@ -818,8 +829,9 @@ What the main knobs do:
 - `LCM_FRESH_TAIL_COUNT` protects recent messages from compaction. Raise it if
   your agent often needs the last few tool calls or planning turns verbatim.
 - `LCM_LEAF_CHUNK_TOKENS` is the raw-backlog floor before a leaf compaction pass
-  starts. With the default `LCM_DYNAMIC_LEAF_CHUNK_ENABLED=false`, the pass
-  compacts the whole non-tail raw backlog, not only a chunk of this size.
+  starts. With the default `LCM_DYNAMIC_LEAF_CHUNK_ENABLED=false`, one leaf takes
+  the oldest non-tail raw backlog up to max(`LCM_LEAF_CHUNK_TOKENS`,
+  `LCM_DYNAMIC_LEAF_CHUNK_MAX`), capped at 40% of a known window (see below).
 - `LCM_DYNAMIC_LEAF_CHUNK_ENABLED=true` changes leaf passes into chunk-sized
   work. In that mode `LCM_LEAF_CHUNK_TOKENS` is the base target and
   `LCM_DYNAMIC_LEAF_CHUNK_MAX` is the upper bound for a dynamic chunk target.
@@ -830,7 +842,7 @@ What the main knobs do:
   are the historical constants, so an unset key changes nothing. No test
   measures what another ratio costs in kept facts; change the default only
   after a measurement (#614).
-- `LCM_THRESHOLD_FULL_SWEEP_ENABLED=true` makes a threshold-triggered invocation
+- `LCM_THRESHOLD_FULL_SWEEP_ENABLED=true` (the default) makes a threshold-triggered invocation
   keep draining oldest raw chunks outside the protected tail, even after prompt
   pressure falls below the trigger. It always uses the configured working leaf
   size, then condenses a too-large summary frontier toward
@@ -871,22 +883,26 @@ What the main knobs do:
 - `LCM_EXPANSION_CONTEXT_TOKENS` controls how much recovered material
   `lcm_expand_query` may feed to the auxiliary model. It does not change what
   LCM stores.
-- `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true` helps when large tool outputs,
-  logs, media payloads, or raw JSON blobs dominate token pressure.
+- `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true` (the default) helps when large
+  tool outputs, logs, media payloads, or raw JSON blobs dominate token pressure.
 
 Common questions:
 
 **Should I leave the default threshold on a 1M-token model?**
 
-Not always. The default `0.35` means compaction starts around `350000` prompt
-tokens on a true 1M effective window. That leaves far more headroom for new
-content but compacts more aggressively, which can shorten recall of older
-details.
+Not always. The default `0.75` means compaction starts around `750000` prompt
+tokens on a true 1M effective window. That keeps the most raw history live, and
+the survival fit (`LCM_SURVIVAL_FIT`, on by default, with `LCM_SURVIVAL_RESERVE`
+`0.15`) keeps a prompt that outgrows the window from overflowing, so a low
+trigger is not needed for safety. A lower threshold trades live context for
+headroom: it compacts earlier and more often, lowers prompt spend, and moves
+older details into summaries sooner. If `750000` is more than you want to spend
+per prompt, pick a row from the table above.
 
 **Should I change leaf chunk settings first?**
 
-Usually no. Start with `LCM_CONTEXT_THRESHOLD`, `LCM_FRESH_TAIL_COUNT`, and large
-output externalization. Only tune leaf chunking after checking `lcm_status` and
+Usually no. Start with `LCM_CONTEXT_THRESHOLD` and `LCM_FRESH_TAIL_COUNT`; large
+output externalization is on by default. Only tune leaf chunking after checking `lcm_status` and
 understanding whether your workload is dominated by huge raw backlog passes. If
 you want chunk-sized leaf passes, enable dynamic leaf chunking explicitly.
 
@@ -984,13 +1000,15 @@ session to `lcm.db`.
 
 ### Large tool-output handling
 
-Externalization for ordinary large tool output is opt-in. When enabled,
+Externalization for ordinary large tool output is on by default
+(`LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=false` turns it off). When enabled,
 oversized tool results are written to plugin-managed JSON files and referenced
 from summaries. They remain inspectable later through
 `lcm_describe(externalized_ref=...)` and `lcm_expand(externalized_ref=...)`.
 
-Active-replay stubbing is separately opt-in and requires ordinary large-output
-externalization. Newly ingested textual tool results above the first-sight token threshold (10,000)
+Active-replay stubbing is on by default, is switched off separately with
+`LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=false`, and requires ordinary
+large-output externalization. Newly ingested textual tool results above the first-sight token threshold (10,000)
 are durably externalized and immediately replaced in provider-visible replay,
 including results in the protected fresh tail. Preflight adopts that replay
 change even if no leaf compaction is eligible. At a compaction, a second historical

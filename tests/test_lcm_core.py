@@ -767,10 +767,10 @@ class TestProviderPrefixedAuxiliaryCalls:
 class TestConfig:
     def test_defaults(self):
         c = LCMConfig()
-        assert c.fresh_tail_count == 32
-        assert c.fresh_tail_max_tokens == 0
-        assert c.leaf_chunk_tokens == 20_000
-        assert c.context_threshold == 0.35
+        assert c.fresh_tail_count == 24
+        assert c.fresh_tail_max_tokens == 24_000
+        assert c.leaf_chunk_tokens == 8_000
+        assert c.context_threshold == 0.75
         assert c.incremental_max_depth == 3
         assert c.condensation_fanin == 4
         assert c.dynamic_leaf_chunk_enabled is False
@@ -785,17 +785,17 @@ class TestConfig:
         assert c.embedding_privacy_enabled is None
         assert c.sensitive_patterns == ["api_key", "bearer_token", "password_assignment", "private_key"]
         assert c.sensitive_patterns_source == "default"
-        assert c.large_output_externalization_enabled is False
+        assert c.large_output_externalization_enabled is True
         assert c.large_output_externalization_threshold_chars == 12_000
         assert c.large_output_externalization_path == ""
-        assert c.large_output_active_replay_stubbing_enabled is False
+        assert c.large_output_active_replay_stubbing_enabled is True
         assert c.large_output_active_replay_stub_threshold_tokens == 10_000
         assert c.large_output_active_replay_stub_aged_threshold_tokens == 2_000
         assert c.large_output_transcript_gc_enabled is False
         assert c.deferred_maintenance_enabled is False
         assert c.deferred_maintenance_max_passes == 4
         assert c.critical_budget_pressure_ratio == 0.0
-        assert c.threshold_full_sweep_enabled is False
+        assert c.threshold_full_sweep_enabled is True
         assert c.summary_prefix_target_tokens == 0
         assert c.ignore_session_patterns == []
         assert c.stateless_session_patterns == []
@@ -904,10 +904,10 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.fresh_tail_count == 32
-        assert c.fresh_tail_max_tokens == 0
-        assert c.leaf_chunk_tokens == 20_000
-        assert c.context_threshold == 0.35
+        assert c.fresh_tail_count == 24
+        assert c.fresh_tail_max_tokens == 24_000
+        assert c.leaf_chunk_tokens == 8_000
+        assert c.context_threshold == 0.75
         assert c.max_assembly_tokens == 0
         assert c.reserve_tokens_floor == 0
         assert c.expansion_context_tokens == 32_000
@@ -916,26 +916,26 @@ class TestConfig:
     def test_from_env_reads_hermes_compression_threshold_when_lcm_env_missing(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
-        (hermes_home / "config.yaml").write_text("compression:\n  threshold: 0.68\n")
+        (hermes_home / "config.yaml").write_text("compression:\n  threshold: 0.88\n")
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.68
+        assert c.context_threshold == 0.88
 
     def test_from_env_reads_hermes_codex_gpt55_autoraise_flag(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  threshold: 0.68\n  codex_gpt55_autoraise: false\n"
+            "compression:\n  threshold: 0.88\n  codex_gpt55_autoraise: false\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.68
+        assert c.context_threshold == 0.88
         assert c.codex_gpt55_autoraise_enabled is False
         assert c.config_sources["codex_gpt55_autoraise_enabled"] == "config_yaml:compression.codex_gpt55_autoraise"
 
@@ -1023,7 +1023,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_ignores_numeric_zero_disabled_hermes_threshold(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
@@ -1036,7 +1036,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_ignores_numeric_zero_float_disabled_hermes_threshold(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
@@ -1049,20 +1049,20 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_numeric_one_keeps_hermes_threshold_fallback(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  enabled: 1\n  threshold: 0.50\n"
+            "compression:\n  enabled: 1\n  threshold: 0.80\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.50
+        assert c.context_threshold == 0.80
 
     def test_from_env_ignores_disabled_hermes_threshold_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
@@ -1078,7 +1078,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_ignores_numeric_zero_float_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
@@ -1094,7 +1094,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_numeric_one_float_keeps_threshold_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
@@ -1102,7 +1102,7 @@ class TestConfig:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  enabled: 1.0\n  threshold: '0.50'\n"
+            "compression:\n  enabled: 1.0\n  threshold: '0.80'\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
@@ -1110,21 +1110,21 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.50
+        assert c.context_threshold == 0.80
 
     def test_from_env_reads_hermes_threshold_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
 
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
-        (hermes_home / "config.yaml").write_text("compression:\n  threshold: '0.68'\n")
+        (hermes_home / "config.yaml").write_text("compression:\n  threshold: '0.88'\n")
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
         monkeypatch.setattr(config_mod, "yaml", None)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.68
+        assert c.context_threshold == 0.88
 
     def test_from_env_lcm_section_overrides_compression_section(self, monkeypatch, tmp_path):
         """lcm.context_threshold in config.yaml takes priority over compression.threshold."""
@@ -1170,7 +1170,7 @@ class TestConfig:
         # context_threshold nested under lcm > subsection — must be ignored
         (hermes_home / "config.yaml").write_text(
             "lcm:\n  subsection:\n    context_threshold: 0.99\n"
-            "compression:\n  enabled: true\n  threshold: 0.60\n"
+            "compression:\n  enabled: true\n  threshold: 0.90\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
@@ -1179,7 +1179,7 @@ class TestConfig:
         c = LCMConfig.from_env()
 
         # Must fall through to compression.threshold, NOT the nested 0.99
-        assert c.context_threshold == 0.60
+        assert c.context_threshold == 0.90
 
     def test_from_env_nested_compression_threshold_ignored(self, monkeypatch, tmp_path):
         """Deeply nested threshold under compression: should NOT be matched."""
@@ -1188,7 +1188,7 @@ class TestConfig:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  enabled: true\n  subsection:\n    threshold: 0.99\n  threshold: 0.55\n"
+            "compression:\n  enabled: true\n  subsection:\n    threshold: 0.99\n  threshold: 0.85\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
@@ -1196,7 +1196,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.55
+        assert c.context_threshold == 0.85
 
 
 class TestSessionPatterns:

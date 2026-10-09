@@ -281,7 +281,7 @@ def test_lcm_status_does_not_report_invalid_env_as_effective_source(tmp_path, mo
 def test_lcm_status_text_reports_config_source_for_context_threshold(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes_home"
     hermes_home.mkdir()
-    (hermes_home / "config.yaml").write_text("compression:\n  threshold: 0.44\n")
+    (hermes_home / "config.yaml").write_text("compression:\n  threshold: 0.84\n")
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
@@ -292,7 +292,7 @@ def test_lcm_status_text_reports_config_source_for_context_threshold(tmp_path, m
 
     result = handle_lcm_command("status", engine)
 
-    assert "context_threshold: 0.44" in result
+    assert "context_threshold: 0.84" in result
     assert "context_threshold_source: config_yaml:compression.threshold" in result
 
 

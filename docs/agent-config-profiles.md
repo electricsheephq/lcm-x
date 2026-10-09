@@ -2,7 +2,7 @@
 
 Copy-paste starting points for common agent shapes. Every profile below is
 **additive to a stock install** — with none of these variables set, LCM runs
-exactly as before. Mix and match: the feature families are independent.
+at its defaults. Mix and match: the feature families are independent.
 
 For the full variable table see
 [Operator guide → Configuration](operator-guide.md#configuration); for what
@@ -23,8 +23,9 @@ each feature does and why, see [Feature overview](features-overview.md).
      (`LCM_EXPANSION_REASONING_EFFORT`); other keys under `lcm:` are ignored
      and reported by `/lcm doctor`;
    - when neither `LCM_CONTEXT_THRESHOLD` nor `lcm.context_threshold` is set,
-     LCM inherits the Hermes global `compression.threshold`, unless
-     `compression.enabled` is false; then LCM uses its own default.
+     LCM inherits the Hermes global `compression.threshold` raised to at least
+     its own default (`0.75`), unless `compression.enabled` is false; then LCM
+     uses its own default. Set one of the two LCM keys to go lower.
 3. **Summarization inherits Hermes auxiliary routing.** Rollup builds and
    compaction summaries go through the auxiliary model unless you override
    `LCM_SUMMARY_MODEL` — so a fully-local Hermes (local auxiliary model) makes
@@ -49,33 +50,38 @@ context:
 ```
 
 You get bounded active context, the summary DAG, lossless recovery, and the
-full `lcm_*` tool set at their tested defaults.
+full `lcm_*` tool set at their tested defaults. The defaults are the
+configuration the managed deployment runs: compaction at `0.75` of the window,
+a 24-message fresh tail capped at 24000 tokens, 8000-token leaf chunks, the
+threshold full sweep, large-output externalization with active-replay stubbing,
+and temporal rollups.
 
 ## Profile: heavy tool-use coding agent
 
 For agents that run builds, tests, linters, and searches all day. The goal is
 to stop giant tool outputs from monopolizing the prompt while keeping every
-byte recoverable.
+byte recoverable. The defaults already do this; these are the knobs to tune.
 
 ```bash
-# Externalize oversized payloads out of lcm.db into recoverable files
-export LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true
+# On by default: oversized payloads move out of lcm.db into recoverable files
+# export LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true
 
-# Replace token-heavy tool results in the provider-visible prompt with refs
-export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=true
-# A new result is stubbed from 10000 tokens; at a compaction, older results
-# outside the fresh tail are stubbed from 2000 tokens (0 = the first-sight value)
+# On by default: token-heavy tool results in the provider-visible prompt
+# become refs. A new result is stubbed from 10000 tokens; at a compaction,
+# older results outside the fresh tail are stubbed from 2000 tokens
+# (0 = the first-sight value)
+# export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=true
 # export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS=10000
 # export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS=2000
 
-# Cap the protected fresh tail by tokens (0 = off). Prevents one giant recent
-# tool result from pinning the whole budget; newest message and complete
-# assistant/tool groups are always retained.
-export LCM_FRESH_TAIL_MAX_TOKENS=24000
+# Default 24000: caps the protected fresh tail by tokens. Prevents one giant
+# recent tool result from pinning the whole budget; newest message and
+# complete assistant/tool groups are always retained.
+# export LCM_FRESH_TAIL_MAX_TOKENS=24000
 
-# Optional: at threshold, drain the whole raw backlog in one bounded sweep
-# (fewer, larger compactions — useful after long unattended runs)
-export LCM_THRESHOLD_FULL_SWEEP_ENABLED=true
+# On by default: at threshold, keep summarising the oldest raw chunks in one
+# bounded sweep (fewer compactions)
+# export LCM_THRESHOLD_FULL_SWEEP_ENABLED=true
 ```
 
 Recovery stays first-class: `lcm_describe`/`lcm_expand` read externalized
@@ -88,8 +94,8 @@ For agents that live for weeks and get asked "what did we do last Tuesday?"
 and "have we talked about this before?".
 
 ```bash
-# Time-indexed memory: day/week/month rollups + the lcm_recent tool
-export LCM_TEMPORAL_ROLLUPS_ENABLED=true
+# Time-indexed memory (day/week/month rollups + the lcm_recent tool) is on by
+# default: LCM_TEMPORAL_ROLLUPS_ENABLED=true
 
 # Meaning-based recall: semantic + hybrid lcm_grep over summaries
 export LCM_EMBEDDINGS_ENABLED=true
@@ -119,7 +125,7 @@ No bytes leave the machine. Pair with a local Hermes auxiliary model so
 summarization is local too.
 
 ```bash
-export LCM_TEMPORAL_ROLLUPS_ENABLED=true
+# Temporal rollups are on by default and summarise through the auxiliary model
 
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=fastembed       # in-process ONNX, CPU-friendly

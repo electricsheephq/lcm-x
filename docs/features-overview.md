@@ -9,10 +9,12 @@ embedding provider setup see [Embeddings setup](embeddings-setup.md).
 From v0.24.0 the installed plugin is `hermes-lcm-x` and the runtime engine is
 `lcm-x` (#471); the bundled skill keeps the name `hermes-lcm`.
 
-**Every feature below ships default-off.** A stock install behaves exactly
-like the previous release until an operator opts in with an environment
-variable, and each family keeps its data out of the core schema until first
-use, so a disabled install stays readable by older builds.
+**Defaults.** Families 1 (large-output externalization, active-replay
+stubbing, the fresh-tail token cap and the threshold full sweep) and 2
+(temporal rollups) are on by default, because the managed deployment runs them
+on every profile. The other families ship default-off until an operator opts in
+with an environment variable. Each family keeps its data out of the core schema
+until first use, so a disabled install stays readable by older builds.
 
 ## The one-paragraph mental model
 
@@ -68,7 +70,8 @@ Failure posture: externalization is fail-open (if a write fails, the provider
 still receives the original inline payload — nothing is dropped), and every
 replaced payload keeps a lossless recovery path via its ref.
 
-Key switches: `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED`,
+Key switches (all on by default; set `false`, or `0` for the tail cap, to turn
+one off): `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED`,
 `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (+ threshold vars),
 `LCM_FRESH_TAIL_MAX_TOKENS`, `LCM_THRESHOLD_FULL_SWEEP_ENABLED`.
 Full table: [Operator guide → Configuration](operator-guide.md#configuration).
@@ -92,7 +95,7 @@ on exactly these seams): build tokens carry non-reusable nonces, late or
 superseded builders cannot overwrite newer state, deleted sources stale every
 covered period, and multi-target rebuild seeding is atomic.
 
-Key switches: `LCM_TEMPORAL_ROLLUPS_ENABLED` (+ `LCM_ROLLUP_*` tuning).
+Key switches: `LCM_TEMPORAL_ROLLUPS_ENABLED` (on by default) (+ `LCM_ROLLUP_*` tuning).
 
 ## Family 3 — Semantic retrieval (embeddings + hybrid search)
 

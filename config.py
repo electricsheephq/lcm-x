@@ -261,7 +261,8 @@ def _hermes_compression_threshold(default: float) -> float:
 
     Priority when no ``LCM_CONTEXT_THRESHOLD`` env var is set:
       1. ``lcm.context_threshold`` (LCM-specific override in config.yaml)
-      2. ``compression.threshold`` (Hermes global setting, unless compression disabled)
+      2. ``compression.threshold`` (Hermes global setting, unless compression disabled),
+         raised to at least ``default`` (#1013)
 
     Hermes gateways may load ``~/.hermes/config.yaml`` without exporting every
     setting into the process environment. The ``lcm.context_threshold`` key lets
@@ -331,25 +332,43 @@ def _parse_model_thresholds_env(raw: str) -> dict[str, float]:
     return result
 
 
+_FLOORED_COMPRESSION_THRESHOLD_SOURCE = "config_yaml:compression.threshold(floored)"
+
+
 def _hermes_compression_threshold_with_source(default: float) -> tuple[float, str]:
+    value, source, _warning = _hermes_compression_threshold_with_source_and_warning(default)
+    return value, source
+
+
+def _hermes_compression_threshold_with_source_and_warning(default: float) -> tuple[float, str, str | None]:
+    """Resolve the non-env threshold; an inherited host value is raised to at least ``default`` (#1013).
+
+    ``lcm.context_threshold`` is the explicit way to go lower and is not floored.
+    """
     cfg = _load_hermes_config_yaml()
     try:
         lcm_section = cfg.get("lcm") or {}
         if isinstance(lcm_section, dict):
             lcm_val = lcm_section.get("context_threshold")
             if lcm_val is not None:
-                return float(lcm_val), "config_yaml:lcm.context_threshold"
+                return float(lcm_val), "config_yaml:lcm.context_threshold", None
         compression = cfg.get("compression") or {}
         if not isinstance(compression, dict):
-            return default, "default"
+            return default, "default", None
         if _config_bool_disabled(compression.get("enabled")):
-            return default, "default"
+            return default, "default", None
         comp_val = compression.get("threshold")
         if comp_val is not None:
-            return float(comp_val), "config_yaml:compression.threshold"
+            inherited = float(comp_val)
+            if inherited < default:
+                return default, _FLOORED_COMPRESSION_THRESHOLD_SOURCE, (
+                    f"inherited compression.threshold={inherited:g} raised to the LCM default {default:g}; "
+                    "set lcm.context_threshold or LCM_CONTEXT_THRESHOLD to go lower"
+                )
+            return inherited, "config_yaml:compression.threshold", None
     except Exception:
-        return default, "default"
-    return default, "default"
+        return default, "default", None
+    return default, "default", None
 
 
 def _hermes_auxiliary_compression_timeout_ms(default: int) -> int:
@@ -1096,13 +1115,17 @@ class LCMConfig:
                     f"invalid env LCM_LEAF_TARGET_MIN_TOKENS={c.leaf_target_min_tokens!r} ignored "
                     f"(must be <= leaf_target_max_tokens={c.leaf_target_max_tokens})")
             c.leaf_target_min_tokens = LCMConfig.leaf_target_min_tokens
-        context_default, context_source = _hermes_compression_threshold_with_source(c.context_threshold)
+        context_default, context_source, floor_warning = _hermes_compression_threshold_with_source_and_warning(
+            c.context_threshold
+        )
         c.context_threshold, source, warning = _parse_float_env_with_source(
             "LCM_CONTEXT_THRESHOLD",
             context_default,
             default_source=context_source,
         )
         _record("context_threshold", source, warning)
+        if source == _FLOORED_COMPRESSION_THRESHOLD_SOURCE and floor_warning:
+            config_source_warnings.append(floor_warning)
         # Per-model threshold overrides: load from lcm.model_thresholds in
         # config.yaml, then LCM_MODEL_THRESHOLDS env var (comma-separated
         # key:value pairs). Env overrides config.yaml.
