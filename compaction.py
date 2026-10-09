@@ -770,13 +770,16 @@ class CompactionMixin:
             proof["native"] = False
             proof["published"] = self._last_compression_status == "compacted"
             proof["recovery"] = self._last_compression_status == "overflow_recovery"
+            # #1013: an output that dropped ignored rows with no leaf is still a rewrite the host
+            # adopts; a cold rebind needs this proof to tell its replay from a new turn.
+            proof["filtered"] = bool(getattr(self, "_compress_dropped_ignored_rows", False))
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "emissions": copy.deepcopy(emissions),
             }
             self._compress_commit_proof = proof
-            if proof["published"] or proof["native"] or proof["recovery"]:
+            if proof["published"] or proof["native"] or proof["recovery"] or proof["filtered"]:
                 self._persist_compress_commit_proof(proof)
         except Exception:
             self._compress_commit_proof = None
@@ -846,7 +849,8 @@ class CompactionMixin:
         """Durable twin of the process-local proof: lets a restarted/resumed
         process re-index the host's post-compaction list without guessing.
 
-        Written for a published LCM compaction or adopted native recovery;
+        Written for a published LCM compaction, adopted native recovery, or an
+        output that dropped ignored rows (#1013);
         ``last_store_id`` marks where later rows begin.
         """
         try:
@@ -1200,6 +1204,7 @@ class CompactionMixin:
         5. Assemble new active context: summaries + fresh tail
         """
         self._objective_only_noop = False
+        self._compress_dropped_ignored_rows = False
         self._compress_host_rows_consumed = self._compress_hidden_rows_consumed = 0
         # Preflight handoffs are one-shot instructions for this invocation.
         # Consume them before every early return so a later unrelated turn can
@@ -1721,6 +1726,7 @@ class CompactionMixin:
                 drop_dependent_reply_into_tail = drop_dependent_reply
                 if dropped_ignored_backlog:
                     dropped_replayed_scaffold_messages = True
+                    self._compress_dropped_ignored_rows = True  # #1013: the output needs a durable proof
                     working_messages = (
                         working_messages[:candidate_start]
                         + kept_working

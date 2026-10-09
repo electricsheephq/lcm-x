@@ -753,6 +753,7 @@ class LCMEngine(
         self._hold_fit_only_requested = False
         self._no_progress_candidate = False  # set by _compress_impl for compress()
         self._objective_only_noop = False
+        self._compress_dropped_ignored_rows = False  # #1013: this compress() dropped ignored rows
         self._last_gate_tokens = 0  # the latest should_compress/preflight observation
         # #651 one-shot handoff: preflight asked for maintenance below the host
         # threshold, so the automatic compress() that follows is cleanup-only.
@@ -3735,7 +3736,8 @@ class LCMEngine(
                 for emission in scoped_proof.get("emissions") or ():
                     emission["scope"] = {**(emission.get("scope") or {}), "session_id": session_id}
             commit_proof["input"] = None
-            if commit_proof.get("published") or commit_proof.get("native") or commit_proof.get("recovery"):
+            if (commit_proof.get("published") or commit_proof.get("native") or commit_proof.get("recovery")
+                    or commit_proof.get("filtered")):
                 self._persist_compress_commit_proof(commit_proof)
         elif can_reassign:
             # No transferred commit proof (proof creation failed, an end that
