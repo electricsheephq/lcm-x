@@ -4409,12 +4409,16 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
         payload = json.loads(_lcm_grep_full_text(parsed_args, **kwargs))
         query = _coerce_query_arg(args.get("query"))
         safe = sanitize_fts5_query(query, agent_operators=True)
-        or_query = build_recall_or_query(query)
+        or_query = " OR ".join(
+            term for term in recall_content_terms(query)
+            if term.strip('"').upper() not in {"NOT", "NEAR", "OR", "AND"}
+        )
         if (
             payload.get("total_results") == 0 and not payload.get("message_search_error")
             and payload.get("content_scope") in {"history", "both"}
             and not requires_like_fallback(query, safe)
             and "OR" not in sanitize_fts5_query(query, allow_operators=True).split()
+            and "NOT" not in safe.split()
             and len(extract_search_terms(safe)) >= 2 and or_query
         ):
             retry_args = {**parsed_args, "query": or_query,

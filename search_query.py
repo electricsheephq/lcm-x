@@ -122,7 +122,7 @@ def sanitize_fts5_query(query: str, *, allow_operators: bool = False,
     from a user or an agent: the default assumes raw prose, which is the only
     safe reading when the two cannot be told apart.
 
-    ``agent_operators`` is a separate grep-only mode for infix OR/NOT/NEAR
+    ``agent_operators`` is a separate grep-only mode for infix OR/NOT
     and term* prefixes. Other callers retain the existing defaults.
     """
     composed = unicodedata.normalize("NFC", query or "")
@@ -134,7 +134,7 @@ def sanitize_fts5_query(query: str, *, allow_operators: bool = False,
 
 def _sanitize_agent_fts5_query(query: str, neutral: str) -> str:
     """Grep-only infix operators and term prefixes; malformed quotes stay prose."""
-    if query.count('"') % 2 or query.count("(") != query.count(")"):
+    if query.count('"') % 2 or "(" in query or ")" in query:
         return _neutralize_bare_operators(neutral)
     safe = _sanitize_query(query, lambda char: char if char == "*" else _fts5_safe_char(char))
     tokens: list[str] = []
@@ -146,15 +146,16 @@ def _sanitize_agent_fts5_query(query: str, neutral: str) -> str:
             tokens.append((stem.lower() if stem in _BOOLEAN_OPERATORS else stem) + "*")
         else:
             tokens.extend(token.replace("*", " ").split())
-    operators = {"OR", "NOT", "NEAR"}
-    return " ".join(
-        token if token != "AND" else "and"
+    operators = {"OR", "NOT"}
+    sanitized = " ".join(
+        token.lower() if token in {"AND", "NEAR"} else token
         for i, token in enumerate(tokens)
         if token not in operators or (
             0 < i < len(tokens) - 1
             and tokens[i - 1] not in operators and tokens[i + 1] not in operators
         )
     )
+    return sanitized or _neutralize_bare_operators(neutral)
 
 
 def is_fts5_syntax_error(exc: Exception) -> bool:

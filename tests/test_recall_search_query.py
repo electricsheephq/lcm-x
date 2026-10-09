@@ -34,12 +34,14 @@ def test_recall_or_stopword_phrase_survives():
 
 @pytest.mark.parametrize(("query", "expected"), [
     ("alpha OR beta", "alpha OR beta"), ("alpha NOT beta", "alpha NOT beta"),
-    ("alpha NEAR beta", "alpha NEAR beta"), ("deploy*", "deploy*"),
+    ("alpha NEAR beta", "alpha near beta"), ("deploy*", "deploy*"),
     ("a*", "a"), ("ab*", "ab*"), ("alpha*beta", "alpha beta"), ("*", ""),
     ("OR alpha", "alpha"), ("alpha OR", "alpha"), ("NOT alpha", "alpha"),
     ("alpha OR OR beta", "alpha beta"), ('alpha OR "beta', "alpha or beta"),
     ('"alpha OR beta" deploy*', '"alpha OR beta" deploy*'),
     ("OR*", "or*"), ("alpha AND beta", "alpha and beta"),
+    ("OR", "or"), ("NOT", "not"), ("NEAR", "near"), ("OR NOT", "or not"),
+    ("(alpha OR gamma) beta", "alpha or gamma beta"),
 ])
 def test_grep_agent_sanitizer_mode(query, expected):
     import sqlite3

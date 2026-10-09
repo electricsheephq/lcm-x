@@ -706,9 +706,7 @@ class SummaryDAG:
                         ).fetchall()
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
-                if agent_operators and is_fts5_syntax_error(exc):
-                    if syntax_retried:
-                        return []
+                if agent_operators and not syntax_retried and is_fts5_syntax_error(exc):
                     safe_query = sanitize_fts5_query(query)
                     syntax_retried = True
                     offset = scanned_rows = 0

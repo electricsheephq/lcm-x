@@ -188,6 +188,94 @@ def test_grep_agent_not_excludes_both_row(grep_operator_engine):
     assert "retried" not in payload
 
 
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_zero_hit_not_never_retries(recall_engine, layer):
+    for content in (
+        "deploy staging done", "staging cluster rebooted", "this is not related at all",
+    ):
+        if layer == "store":
+            recall_engine._store.append(CURRENT, {"role": "user", "content": content})
+        else:
+            recall_engine._dag.add_node(SummaryNode(
+                session_id=CURRENT, depth=0, summary=content,
+                token_count=6, source_ids=[], source_type="messages",
+            ))
+    payload = json.loads(lcm_tools.lcm_grep({"query": "deploy NOT staging"}, engine=recall_engine))
+    assert payload["results"] == []
+    assert payload["total_results"] == 0
+    assert "retried" not in payload
+
+
+@pytest.mark.parametrize("query", ["OR", "NOT", "NEAR", "OR NOT"])
+def test_grep_operator_only_queries_stay_on_fts(recall_engine, monkeypatch, query):
+    for target in (recall_engine._store, recall_engine._dag):
+        monkeypatch.setattr(target, "_search_like", lambda *a, **kw: pytest.fail("operator-only LIKE scan"))
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=recall_engine))
+    assert payload["results"] == []
+    assert "message_search_error" not in payload
+    assert "retried" not in payload
+
+
+@pytest.mark.parametrize(("query", "contents"), [
+    ("(alpha OR gamma) beta", ("alpha beta", "gamma beta", "alpha gamma")),
+    ("alpha NEAR beta", ("alpha beta", "alpha near beta", "alpha", "beta")),
+])
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_neutralized_forms_match_main(recall_engine, query, contents, layer):
+    for content in contents:
+        if layer == "store":
+            recall_engine._store.append(CURRENT, {"role": "user", "content": content})
+        else:
+            recall_engine._dag.add_node(SummaryNode(
+                session_id=CURRENT, depth=0, summary=content,
+                token_count=4, source_ids=[], source_type="messages",
+            ))
+    target = getattr(recall_engine, "_" + layer)
+    identity = (lambda hit: hit["store_id"]) if layer == "store" else (lambda hit: hit.node_id)
+    expected = [identity(hit) for hit in target.search(query, session_id=CURRENT, sort="recency")]
+    actual = [identity(hit) for hit in target.search(
+        query, session_id=CURRENT, sort="recency", agent_operators=True,
+    )]
+    assert actual == expected
+    payload = json.loads(lcm_tools.lcm_grep({"query": query}, engine=recall_engine))
+    key = "store_id" if layer == "store" else "node_id"
+    assert [hit[key] for hit in payload["results"]] == expected
+    assert "retried" not in payload
+
+
+@pytest.mark.parametrize("word", ["NOT", "NEAR", "OR", "AND"])
+def test_grep_retry_never_includes_operator_words(recall_engine, monkeypatch, word):
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha beta"})
+    original = recall_engine._store.search
+    queries = []
+
+    def capture(query, **kwargs):
+        queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "search", capture)
+    payload = json.loads(lcm_tools.lcm_grep({"query": f'alpha "{word}" beta'}, engine=recall_engine))
+    assert payload["total_results"] == 1
+    assert payload["retried"] == "any_term"
+    assert queries == [f'alpha "{word}" beta', "alpha OR beta"]
+
+
+def test_grep_bare_near_retry_omits_near(recall_engine, monkeypatch):
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha beta"})
+    original = recall_engine._store.search
+    queries = []
+
+    def capture(query, **kwargs):
+        queries.append(query)
+        return original(query, **kwargs)
+
+    monkeypatch.setattr(recall_engine._store, "search", capture)
+    payload = json.loads(lcm_tools.lcm_grep({"query": "alpha NEAR beta"}, engine=recall_engine))
+    assert payload["total_results"] == 1
+    assert payload["retried"] == "any_term"
+    assert queries == ["alpha NEAR beta", "alpha OR beta"]
+
+
 @pytest.mark.parametrize(("query", "count"), [
     ("OR alpha", 2), ("alpha OR", 2), ("NOT alpha", 2),
     ("alpha OR OR beta", 1), ("alpha*beta", 1), ("*", 0),
@@ -271,6 +359,37 @@ def test_grep_match_syntax_error_retries_neutralized_fts_once(recall_engine, mon
     assert len(match_queries) == 2
     assert "MATCH 'alpha OR'" in match_queries[0]
     assert "MATCH 'alpha or beta'" in match_queries[1]
+
+
+@pytest.mark.parametrize("layer", ["store", "dag"])
+def test_grep_second_match_syntax_error_falls_back_like_main(recall_engine, monkeypatch, layer):
+    import hermes_lcm.dag as dag_module
+    import hermes_lcm.store as store_module
+
+    recall_engine._store.append(CURRENT, {"role": "user", "content": "alpha beta"})
+    recall_engine._dag.add_node(SummaryNode(
+        session_id=CURRENT, depth=0, summary="alpha beta",
+        token_count=2, source_ids=[], source_type="messages",
+    ))
+    target = getattr(recall_engine, "_" + layer)
+    module = store_module if layer == "store" else dag_module
+    expected = target._search_like("alpha beta", session_id=CURRENT)
+    original = target._search_like
+    like_queries = []
+    match_queries = []
+
+    def capture_like(query, **kwargs):
+        like_queries.append(query)
+        return original(query, **kwargs)
+
+    # Both the agent form and the neutralized retry produce MATCH syntax errors.
+    monkeypatch.setattr(module, "sanitize_fts5_query", lambda *a, **kw: "alpha OR")
+    monkeypatch.setattr(target, "_search_like", capture_like)
+    target._conn.set_trace_callback(match_queries.append)
+    assert target.search("alpha beta", session_id=CURRENT, agent_operators=True) == expected
+    assert like_queries == ["alpha beta"]
+    table = "messages_fts" if layer == "store" else "nodes_fts"
+    assert len([sql for sql in match_queries if f"WHERE {table} MATCH" in sql]) == 2
 
 
 def test_recall_portland_or_keeps_existing_composition(recall_engine, monkeypatch):

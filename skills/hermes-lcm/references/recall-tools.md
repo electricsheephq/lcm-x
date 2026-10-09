@@ -10,7 +10,7 @@ Use for discovery across current-session raw messages and summary nodes.
 
 - `query` is FTS5 text by default; it is not a regex.
 - Full-text queries AND terms by default; uppercase OR/NOT, quoted phrases, and term* prefixes (2+ alphanumeric characters) are honoured.
-- Zero hits with multiple terms retry once with any-term matching; `retried='any_term'` reports this. OR queries and CJK/emoji substring searches do not retry.
+- Zero hits with multiple terms retry once with any-term matching; `retried='any_term'` reports this. OR/NOT queries and CJK/emoji substring searches do not retry.
 - Keep `sort='recency'` for recent events, use `sort='relevance'` for the strongest older match, and use `sort='hybrid'` when both matter.
 - `mode='semantic'` or `'hybrid'` is useful when embeddings are configured; degraded coverage is reported.
 - Broader `session_scope='all'|'session'` is explicit, bounded, raw-message-only archive recovery inside `lcm.db`.
