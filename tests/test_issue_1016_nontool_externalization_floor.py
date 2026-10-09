@@ -14,6 +14,7 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import (
     _build_externalized_placeholder,
+    _raw_payload_preview,
     extract_externalized_ref,
     extract_externalized_refs,
     find_externalized_payload_for_message,
@@ -213,7 +214,8 @@ def test_c_preview_is_deterministic_whitespace_collapsed_and_bounded():
     stub = _build_externalized_placeholder(summary, content=content)
     assert stub == _build_externalized_placeholder(summary, content=content)
     assert 'preview="alpha beta gamma x' in stub
-    assert "x omega" + '"' in stub
+    # rc2: the tail scan drops the token its start cuts (here the 200,000-char run), so the tail is "omega".
+    assert " ... omega" + '"' in stub
     assert len(stub) < 512
     assert extract_externalized_ref(stub) == summary["ref"]
 
@@ -490,6 +492,26 @@ def test_f_control_ordinary_preview_is_unchanged():
         return " ".join(text.split()).translate(str.maketrans({"[": "(", "]": ")", ";": ",", '"': "'"})).replace("ref=", "ref_")
 
     assert m.group(1) == f"{rc1(content[:window])[:head]} ... {rc1(content[-window:])[-(keep - head):]}"
+
+
+# --- (h) a credential at the edge of the tail scan window (rc2 review) ---------------------
+@pytest.mark.parametrize("label", ['api_key="', "api_key = "], ids=["adjacent", "spaced"])
+def test_h_label_just_outside_the_tail_window_still_redacts_its_value(label):
+    room = 300
+    window = room * 8
+    rest = '"' + " " * (window - len(KEY) - 1)  # collapsible padding pulls the value into the tail slice
+    content = _paste(150_000, tail=label) + KEY + rest
+    assert content[-window:].startswith(KEY)  # the label sits just outside the window
+    assert _key_runs(_raw_payload_preview(content, room)) == []
+
+
+def test_h_credential_longer_than_the_tail_window_leaves_no_fragment(tmp_path):
+    token = (KEY * 80)[:5000]
+    engine, stub = _ingest_paste(tmp_path, _paste(150_000, tail=f'api_key="{token}"'))
+    assert len(stub) < 512 and _v0261_is_externalized_placeholder(stub)
+    assert _key_runs(stub) == []
+    texts = _provider_texts(engine, tmp_path)
+    assert texts and not any(_key_runs(t) for t in texts)
 
 
 # --- (g) preview text cannot break replay identity (rc2) -----------------------------------
