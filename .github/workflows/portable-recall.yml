@@ -1,6 +1,12 @@
 name: Portable recall v1
 on:
   workflow_dispatch:
+    inputs:
+      frozen_run_id:
+        description: "Reuse registered public/synthetic pools from this repository's completed run; empty registers a new baseline"
+        type: string
+        required: false
+        default: ""
   pull_request:
     paths:
       - "portable.py"
@@ -14,9 +20,10 @@ on:
       - ".github/workflows/portable-recall.yml"
 permissions:
   contents: read
+  actions: read
 concurrency:
   group: portable-recall-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   focused:
     runs-on: ubuntu-latest
@@ -39,6 +46,7 @@ jobs:
           name: portable-packages
           path: portable-artifacts
   evaluation:
+    if: github.event_name == 'workflow_dispatch' && inputs.frozen_run_id == ''
     runs-on: ubuntu-latest
     timeout-minutes: 180
     strategy:
@@ -99,4 +107,55 @@ jobs:
         if: always()
         with:
           name: portable-eval-${{ matrix.posture }}
+          path: evidence
+
+  frozen-scoring:
+    if: github.event_name == 'workflow_dispatch' && inputs.frozen_run_id != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        posture: [OFF, LOCAL]
+    env:
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - name: Install and record the scoring environment
+        run: |
+          pip install numpy==2.5.3 huggingface-hub==0.35.3 -r requirements-portable-eval.txt
+          mkdir evidence
+          pip freeze > evidence/environment.txt
+          git rev-parse HEAD > evidence/source-sha.txt
+      - name: Download the registered pools without repeating production retrieval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_RUN: ${{ inputs.frozen_run_id }}
+          POSTURE: ${{ matrix.posture }}
+        run: |
+          gh run download "$BASELINE_RUN" --repo "$GITHUB_REPOSITORY" --name "portable-frozen-$POSTURE" --dir frozen
+          echo "$BASELINE_RUN" > evidence/baseline-run.txt
+      - name: Cache the pinned reranker before timing
+        run: |
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          from optional_scorer import BGE_MODEL, BGE_REVISION
+          snapshot_download(BGE_MODEL, revision=BGE_REVISION, allow_patterns=['*.json', '*.safetensors', '*.model', 'tokenizer*', 'special_tokens_map.json'])
+          PY
+      - name: Single development and held-out scoring passes over identical frozen pools
+        run: |
+          python scripts/eval_portable_recall.py run --input frozen/synthetic.jsonl --output evidence/dev-bge.json --split dev --scorer bge
+          python scripts/eval_portable_recall.py run --input frozen/synthetic.jsonl --output evidence/holdout-bge.json --split holdout --scorer bge
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: portable-frozen-scores-${{ matrix.posture }}
           path: evidence

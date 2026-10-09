@@ -154,9 +154,11 @@ class LocalBGEScorer:
     def __init__(self, *, model=None):
         if model is None:
             from sentence_transformers import CrossEncoder
+            from torch import nn
             model = CrossEncoder(
                 BGE_MODEL, revision=BGE_REVISION, local_files_only=True,
                 trust_remote_code=False, device="cpu", max_length=512,
+                activation_fn=nn.Identity(),
             )
         self.model = model
         self._busy = threading.Lock()
@@ -168,7 +170,7 @@ class LocalBGEScorer:
             from math import exp
             logits = self.model.predict(
                 [(query, c.text) for c in candidates], batch_size=8,
-                show_progress_bar=False, activation_fn=_identity_activation,
+                show_progress_bar=False,
             )
             if len(logits) != len(candidates):
                 raise ValueError("incomplete model output")
@@ -182,10 +184,6 @@ class LocalBGEScorer:
             return scores
         finally:
             self._busy.release()
-
-
-def _identity_activation(value):
-    return value
 
 
 @dataclass

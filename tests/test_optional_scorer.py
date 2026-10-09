@@ -5,7 +5,7 @@ from dataclasses import replace
 import pytest
 
 from optional_scorer import (
-    Candidate, CandidateScore, JEV_LEVELS, JEV_MODEL, JEV_REQUEST_RESERVE,
+    BGE_REVISION, Candidate, CandidateScore, JEV_LEVELS, JEV_MODEL, JEV_REQUEST_RESERVE,
     JevBudget, LocalBGEScorer, PublicJevScorer, score_candidates,
 )
 from benchmarking.portable_recall_eval import (
@@ -88,6 +88,29 @@ def test_local_model_pin_adapter_without_model_download():
     pool = (candidate("a"), candidate("b"))
     result = score_candidates("q", pool, LocalBGEScorer(model=Model()))
     assert result.status == "scored" and result.candidates[0] is pool[1]
+
+
+
+def test_local_model_constructor_uses_registered_identity_module(monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    class Identity:
+        pass
+
+    observed = {}
+
+    def cross_encoder(name, **kwargs):
+        observed.update(name=name, **kwargs)
+        return object()
+
+    monkeypatch.setitem(sys.modules, "sentence_transformers", SimpleNamespace(CrossEncoder=cross_encoder))
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(nn=SimpleNamespace(Identity=Identity)))
+    LocalBGEScorer()
+    assert isinstance(observed["activation_fn"], Identity)
+    assert observed["revision"] == BGE_REVISION
+    assert observed["local_files_only"] is True
+    assert observed["trust_remote_code"] is False
 
 
 def jev_reply(payload, confidence=.9):
