@@ -136,7 +136,7 @@ separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
 The `release/v0.26.x` patch line identifies itself as
-`hermes-lcm-x v0.26.1 (15 tools)` — v0.26.0 plus the delegated-child compaction fix (#937) — on top of the
+`hermes-lcm-x v0.26.2 (15 tools)` — v0.26.1 plus the user/assistant text externalization floor (#1016) — on top of the
 `v0.26.0` release tag, which identifies itself as `hermes-lcm-x v0.26.0 (15 tools)`. The `main` line keeps
 `0.26.0` until the first v0.27.0 release candidate bumps it. An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
@@ -260,7 +260,7 @@ On the `release/v0.26.x` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.26.1 (15 tools)
+  ✓ hermes-lcm-x v0.26.2 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x

@@ -6,6 +6,15 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+## v0.26.2 (user/assistant text externalization floor)
+
+- Fix: user, assistant and other non-tool message text is externalized only above 100,000 characters or about 25,000
+  estimated tokens, whichever comes first (so dense scripts such as CJK are covered), whatever the configured
+  threshold. Above it, the stub carries a short head-and-tail preview, built from bounded scans of the text's two
+  ends, and the `lcm_expand(externalized_ref=…)` read hint, and stays within the existing 512-character placeholder
+  bound, so v0.26.1 can still read it. Tool output and media payloads are unchanged. Existing placeholder rows are not
+  rewritten, and each is readable with `lcm_expand`. (#1016, #1020)
+
 ## v0.26.1 (delegated-child compaction fix)
 
 - Fix: a delegated child (a `delegate_task` subagent) whose engine is a fresh copy of the parent's now keeps the

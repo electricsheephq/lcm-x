@@ -288,7 +288,7 @@ On the `release/v0.26.x` line, typical output is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.26.1 (15 tools)
+  ✓ hermes-lcm-x v0.26.2 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -296,8 +296,8 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.26.1` is a patch cut from the `release/v0.26.x` branch at `v0.26.0` (`867eb587`): it adds
-the delegated-child compaction fix (#937). Its `v0.26.1-rc1` tag carries the identity first, the gauntlet
+and tag. `0.26.2` is a patch cut from the `release/v0.26.x` branch at `v0.26.1` (`5fc3d1c6`): it adds
+the user/assistant text externalization floor (#1016). Its `v0.26.2-rc1` tag carries the identity first, the gauntlet
 runs at the last rc tag, and the GA tree is that rc tree plus the GA release-notes file (`v0.26.0` shipped
 the same way). The `main` line keeps `0.26.0` until the first v0.27.0 release candidate.
 
