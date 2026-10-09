@@ -27,6 +27,7 @@ from .db_bootstrap import (
 
 
 _OWNERSHIP_QUERY_MAX_RANGES = 200
+_BIND_CAS_ATTEMPTS = 8
 
 
 class LifecycleBindingChangedError(RuntimeError):
@@ -176,9 +177,26 @@ class LifecycleStateStore:
         *,
         conversation_id: str | None = None,
     ) -> LifecycleState:
-        existing = self.get_by_conversation(conversation_id) if conversation_id else self.get_by_session(session_id)
-        conversation_id = conversation_id or (existing.conversation_id if existing else session_id)
-        now = time.time()
+        """#634 compare-and-swap; a stale read never overwrites a newer write."""
+        resolved = conversation_id
+        for _ in range(_BIND_CAS_ATTEMPTS):
+            existing = self.get_by_conversation(resolved) if resolved else self.get_by_session(session_id)
+            resolved = resolved or (existing.conversation_id if existing else session_id)
+            if existing is not None and existing.current_session_id == session_id:
+                return existing
+            cursor = self._conn.execute(*self._bind_plan(existing, session_id, resolved, time.time()))
+            self._conn.commit()
+            if cursor.rowcount == 1:
+                state = self.get_by_conversation(resolved)
+                assert state is not None
+                return state
+        return self._bind_session_in_write_transaction(session_id, resolved)
+
+    @staticmethod
+    def _bind_plan(
+        existing: LifecycleState | None, session_id: str, conversation_id: str, now: float,
+    ) -> tuple[str, tuple[Any, ...]]:
+        """Build the same bind decision for CAS and the write-transaction fallback."""
         current_frontier = 0
         current_bound_at = now
         last_finalized_session_id = None
@@ -192,8 +210,6 @@ class LifecycleStateStore:
         last_reset_at = None
 
         if existing is not None:
-            if existing.current_session_id == session_id:
-                return existing
             # A session rebinding after its OWN finalize (same id; Hermes in-place
             # compaction, restart/resume) resumes its published frontier: its DAG
             # still claims every source row up to it (#483, #247 class).
@@ -207,16 +223,6 @@ class LifecycleStateStore:
                 )
                 else 0
             )
-            current_bound_at = (
-                existing.current_bound_at if existing.current_session_id == session_id else now
-            )
-            last_finalized_session_id = existing.last_finalized_session_id
-            last_finalized_frontier = existing.last_finalized_frontier_store_id
-            debt_kind = existing.debt_kind
-            debt_size_estimate = existing.debt_size_estimate
-            last_finalized_at = existing.last_finalized_at
-            debt_updated_at = existing.debt_updated_at
-            last_maintenance_attempt_at = existing.last_maintenance_attempt_at
             last_rollover_at = (
                 now
                 if (
@@ -229,9 +235,26 @@ class LifecycleStateStore:
                 )
                 else existing.last_rollover_at
             )
-            last_reset_at = existing.last_reset_at
 
-        self._conn.execute(
+            return (
+                """
+                UPDATE lcm_lifecycle_state
+                SET current_session_id = ?, current_frontier_store_id = ?, current_bound_at = ?,
+                    last_rollover_at = ?, updated_at = ?
+                WHERE conversation_id = ?
+                  AND current_session_id IS ?
+                  AND last_finalized_session_id IS ?
+                  AND last_finalized_frontier_store_id = ?
+                  AND last_finalized_at IS ?
+                  AND last_reset_at IS ?
+                """,
+                (session_id, current_frontier, now, last_rollover_at, now, conversation_id,
+                 existing.current_session_id, existing.last_finalized_session_id,
+                 existing.last_finalized_frontier_store_id, existing.last_finalized_at,
+                 existing.last_reset_at),
+            )
+
+        return (
             """
             INSERT INTO lcm_lifecycle_state(
                 conversation_id,
@@ -249,20 +272,7 @@ class LifecycleStateStore:
                 last_reset_at,
                 updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(conversation_id) DO UPDATE SET
-                current_session_id = excluded.current_session_id,
-                last_finalized_session_id = excluded.last_finalized_session_id,
-                current_frontier_store_id = excluded.current_frontier_store_id,
-                last_finalized_frontier_store_id = excluded.last_finalized_frontier_store_id,
-                debt_kind = excluded.debt_kind,
-                debt_size_estimate = excluded.debt_size_estimate,
-                current_bound_at = excluded.current_bound_at,
-                last_finalized_at = excluded.last_finalized_at,
-                debt_updated_at = excluded.debt_updated_at,
-                last_maintenance_attempt_at = excluded.last_maintenance_attempt_at,
-                last_rollover_at = excluded.last_rollover_at,
-                last_reset_at = excluded.last_reset_at,
-                updated_at = excluded.updated_at
+            ON CONFLICT(conversation_id) DO NOTHING
             """,
             (
                 conversation_id,
@@ -281,10 +291,20 @@ class LifecycleStateStore:
                 now,
             ),
         )
-        self._conn.commit()
-        state = self.get_by_conversation(conversation_id)
-        assert state is not None
-        return state
+
+    def _bind_session_in_write_transaction(self, session_id: str, conversation_id: str) -> LifecycleState:
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            existing = self.get_by_conversation(conversation_id)
+            if existing is None or existing.current_session_id != session_id:
+                self._conn.execute(*self._bind_plan(existing, session_id, conversation_id, time.time()))
+            state = self.get_by_conversation(conversation_id)
+            assert state is not None
+            self._conn.commit()
+            return state
+        except BaseException:
+            self._conn.rollback()
+            raise
 
     @_synchronized
     def rebind_own_finalized(self, session_id: str, conversation_id: str) -> LifecycleState | None:
@@ -318,48 +338,32 @@ class LifecycleStateStore:
         session_id: str,
         frontier_store_id: int = 0,
     ) -> LifecycleState | None:
-        state = self.get_by_conversation(conversation_id)
-        if state is None:
+        if not conversation_id:
             return None
         now = time.time()
-        current_session_id = state.current_session_id
-        current_frontier = state.current_frontier_store_id
-        if current_session_id == session_id:
-            current_session_id = None
-            current_frontier = 0
-        # Record only the finalizing session's own frontier: another session's
-        # finalized frontier must never become this session's resumable one
-        # (bind_session restores it by owner, #484 round 2).
-        finalized_frontier = int(frontier_store_id or 0)
-        if state.last_finalized_session_id == session_id and (
-            state.last_reset_at is None or (state.last_finalized_at or 0) >= state.last_reset_at
-        ):
-            finalized_frontier = max(finalized_frontier, state.last_finalized_frontier_store_id)
-        self._conn.execute(
+        frontier = int(frontier_store_id or 0)
+        cursor = self._conn.execute(
             """
             UPDATE lcm_lifecycle_state
-            SET current_session_id = ?,
-                last_finalized_session_id = ?,
-                current_frontier_store_id = ?,
-                last_finalized_frontier_store_id = ?,
-                debt_kind = debt_kind,
-                debt_size_estimate = debt_size_estimate,
-                last_finalized_at = ?,
-                updated_at = ?
-            WHERE conversation_id = ?
+            SET current_session_id = CASE WHEN current_session_id = :sid THEN NULL ELSE current_session_id END,
+                current_frontier_store_id = CASE WHEN current_session_id = :sid THEN 0
+                                                 ELSE current_frontier_store_id END,
+                last_finalized_frontier_store_id = CASE
+                    WHEN last_finalized_session_id = :sid
+                     AND (last_reset_at IS NULL OR COALESCE(last_finalized_at, 0) >= last_reset_at)
+                    THEN MAX(:frontier, COALESCE(last_finalized_frontier_store_id, 0))
+                    ELSE :frontier END,
+                last_finalized_session_id = :sid,
+                last_finalized_at = :now,
+                updated_at = :now
+            WHERE conversation_id = :cid
             """,
-            (
-                current_session_id,
-                session_id,
-                current_frontier,
-                finalized_frontier,
-                now,
-                now,
-                state.conversation_id,
-            ),
+            {"sid": session_id, "frontier": frontier, "now": now, "cid": conversation_id},
         )
         self._conn.commit()
-        return self.get_by_conversation(state.conversation_id)
+        if cursor.rowcount == 0:
+            return None
+        return self.get_by_conversation(conversation_id)
 
     @_synchronized
     def record_rollover(
