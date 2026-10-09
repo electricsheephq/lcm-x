@@ -637,24 +637,43 @@ _RAW_PAYLOAD_PREVIEW_JOINER = " ... "
 # multi-megabyte message is never split or copied whole to build a few hundred preview chars.
 _RAW_PAYLOAD_PREVIEW_SCAN_FACTOR = 8
 _RAW_PAYLOAD_PREVIEW_TRANSLATION = str.maketrans({"[": "(", "]": ")", ";": ",", '"': "'"})
+# The replay identity matcher (here and in v0.26.1) skips a stub that holds this kind.
+_RAW_PAYLOAD_PREVIEW_QUARANTINE_RE = re.compile("quarantined_assistant_output", re.IGNORECASE)
+# Context scanned before the tail window: enough to hold the label of a cut credential and the BEGIN
+# line of a cut PEM key (an 8192-bit RSA key is about 6.4k chars).
+_RAW_PAYLOAD_PREVIEW_CONTEXT = 8192
+# The catalog's credential-value alphabet; a run of it cut by the tail scan's start is dropped.
+_RAW_PAYLOAD_PREVIEW_CUT_RUN_RE = re.compile(r"[A-Za-z0-9._~+/=-]*")
 
 
 def _raw_payload_preview_text(text: str) -> str:
-    text = " ".join(text.split())
+    from .ingest_protection import redact_catalog_sensitive_text
+
+    # Redact before collapsing and slicing: a slice that cuts a credential's label blinds every detector.
+    text = " ".join(redact_catalog_sensitive_text(text).split())
+    text = _RAW_PAYLOAD_PREVIEW_QUARANTINE_RE.sub("quarantined-assistant-output", text)
     return text.translate(_RAW_PAYLOAD_PREVIEW_TRANSLATION).replace("ref=", "ref_")
 
 
 def _raw_payload_preview(content: str, room: int) -> str:
     """#1016: a deterministic, whitespace-collapsed head/tail preview of at most ``room`` chars that
     cannot forge stub syntax: ``[``/``]``/``;`` are mapped and ``ref=`` is neutralized, so no
-    recognizer (fullmatch or finditer) can read a ref, or the end of the stub, out of the user's text."""
+    recognizer (fullmatch or finditer) can read a ref, or the end of the stub, out of the user's text.
+    Each scan window is redacted with the full sensitive-pattern catalog first, whatever the config."""
     content = content or ""
     keep = room - len(_RAW_PAYLOAD_PREVIEW_JOINER)
     head = keep * 7 // 10
     window = room * _RAW_PAYLOAD_PREVIEW_SCAN_FACTOR
     if len(content) > 2 * window:
         head_text = _raw_payload_preview_text(content[:window])[:head]
-        tail_text = _raw_payload_preview_text(content[-window:])[-(keep - head):]
+        # The tail scan reaches back far enough to see the label or PEM BEGIN line of a credential the
+        # window cuts, and drops a credential-alphabet run its own start cuts, so no unlabeled tail of a
+        # credential reaches the preview.
+        start = max(window, len(content) - window - _RAW_PAYLOAD_PREVIEW_CONTEXT)
+        tail_scan = content[start:]
+        if _RAW_PAYLOAD_PREVIEW_CUT_RUN_RE.fullmatch(content[start - 1]):
+            tail_scan = tail_scan[_RAW_PAYLOAD_PREVIEW_CUT_RUN_RE.match(tail_scan).end() :]
+        tail_text = _raw_payload_preview_text(tail_scan)[-(keep - head):]
         return f"{head_text}{_RAW_PAYLOAD_PREVIEW_JOINER}{tail_text}"
     text = _raw_payload_preview_text(content)
     if len(text) <= room:
