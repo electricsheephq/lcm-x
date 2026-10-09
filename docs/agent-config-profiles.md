@@ -53,7 +53,7 @@ You get bounded active context, the summary DAG, lossless recovery, and the
 full `lcm_*` tool set at their tested defaults. The defaults are the
 configuration the managed deployment runs: compaction at `0.75` of the window,
 a 24-message fresh tail capped at 24000 tokens, 8000-token leaf chunks, the
-threshold full sweep and temporal rollups.
+threshold full sweep.
 
 ## Profile: heavy tool-use coding agent
 
@@ -92,8 +92,8 @@ For agents that live for weeks and get asked "what did we do last Tuesday?"
 and "have we talked about this before?".
 
 ```bash
-# Time-indexed memory (day/week/month rollups + the lcm_recent tool) is on by
-# default: LCM_TEMPORAL_ROLLUPS_ENABLED=true
+# Time-indexed memory: day/week/month rollups + the lcm_recent tool
+export LCM_TEMPORAL_ROLLUPS_ENABLED=true
 
 # Meaning-based recall: semantic + hybrid lcm_grep over summaries
 export LCM_EMBEDDINGS_ENABLED=true
@@ -123,7 +123,7 @@ No bytes leave the machine. Pair with a local Hermes auxiliary model so
 summarization is local too.
 
 ```bash
-# Temporal rollups are on by default and summarise through the auxiliary model
+export LCM_TEMPORAL_ROLLUPS_ENABLED=true
 
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=fastembed       # in-process ONNX, CPU-friendly

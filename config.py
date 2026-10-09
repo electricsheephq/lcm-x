@@ -1023,8 +1023,8 @@ class LCMConfig:
     empty_lifecycle_gc_max_age_hours: float | None = 24.0
 
     # -- Temporal rollups ---
-    # Enabled by default; the engine's ingest/build hooks are flag-gated.
-    temporal_rollups_enabled: bool = True
+    # Disabled by default; the engine's ingest/build hooks are flag-gated.
+    temporal_rollups_enabled: bool = False
     rollup_daily_target_tokens: int = 5_000
     rollup_daily_max_tokens: int = 15_000
     rollup_aggregate_max_tokens: int = 20_000

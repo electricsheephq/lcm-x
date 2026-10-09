@@ -1,12 +1,8 @@
 """#1013: the product defaults are the deployed configuration.
 
-Each feature that the new defaults turn on (temporal rollups, the threshold
-full sweep) must run on a default install with no extra setup: a fresh store,
-and rollup maintenance skipping an in-memory database.
+The threshold full sweep, which the new defaults turn on, must run on a default
+install with no extra setup.
 """
-
-import logging
-import sqlite3
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
@@ -27,8 +23,8 @@ def test_defaults_match_the_deployed_configuration():
     assert config.fresh_tail_max_tokens == 24_000
     assert config.leaf_chunk_tokens == 8_000
     assert config.threshold_full_sweep_enabled is True
-    assert config.temporal_rollups_enabled is True
-    # Unchanged by #1013 part 1: externalization stays opt-in pending its role scope.
+    # Unchanged by #1013 part 1: externalization and rollups stay opt-in for now.
+    assert config.temporal_rollups_enabled is False
     assert config.large_output_externalization_enabled is False
     assert config.large_output_active_replay_stubbing_enabled is False
     assert config.embeddings_enabled is False
@@ -36,34 +32,6 @@ def test_defaults_match_the_deployed_configuration():
     assert config.survival_reserve == 0.15
     assert config.large_output_externalization_threshold_chars == 12_000
     assert config.large_output_active_replay_stub_threshold_tokens == 10_000
-
-
-def test_temporal_rollups_are_active_by_default_on_a_fresh_store(tmp_path):
-    engine, hermes_home = _default_engine(tmp_path)
-    try:
-        engine.on_session_start("defaults-rollup", conversation_id="defaults-rollup-conv", context_length=200_000)
-    finally:
-        engine.shutdown()
-
-    connection = sqlite3.connect(str(hermes_home / "lcm.db"))
-    try:
-        tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
-    finally:
-        connection.close()
-    assert "lcm_rollups" in tables
-
-
-def test_temporal_rollup_maintenance_skips_an_in_memory_database_by_default(caplog):
-    engine = LCMEngine(config=LCMConfig(database_path=":memory:"))
-    try:
-        with caplog.at_level(logging.WARNING):
-            engine.on_session_start("defaults-memory", conversation_id="defaults-memory-conv", context_length=200_000)
-    finally:
-        engine.shutdown()
-
-    assert engine._config.temporal_rollups_enabled is True
-    assert "temporal rollup maintenance" in caplog.text
-    assert "maintenance skipped" in caplog.text
 
 
 def test_threshold_full_sweep_is_active_by_default(tmp_path, monkeypatch):

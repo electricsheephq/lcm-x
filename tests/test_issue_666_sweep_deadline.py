@@ -94,9 +94,7 @@ def test_d2_no_deadline_keeps_the_timeouts_and_level_3(monkeypatch, clock):
 def _engine(tmp_path, **config) -> LCMEngine:
     settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000,
-                "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"),
-                # #1013: background rollup builds would add their own timed summariser calls.
-                "temporal_rollups_enabled": False, **config}
+                "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
     engine.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
     return engine

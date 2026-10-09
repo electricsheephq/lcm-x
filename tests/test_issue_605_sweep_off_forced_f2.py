@@ -74,9 +74,7 @@ def _engine(tmp_path, context_length: int = 200_000, **config) -> LCMEngine:
     # takes the no-call verbatim path (F2) of one within the level 3 bound.
     settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": False, "max_assembly_tokens": 100_000, "l3_truncate_tokens": 2,
-                "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"),
-                # #1013: background rollup builds would add their own timed summariser calls.
-                "temporal_rollups_enabled": False, **config}
+                "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
     engine.on_session_start("S", platform="telegram", context_length=context_length, conversation_id="conv")
     return engine

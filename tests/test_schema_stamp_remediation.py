@@ -679,8 +679,7 @@ def test_remediate_noop_when_version_supported(tmp_path):
 
 
 def _healthy_engine(tmp_path: Path) -> LCMEngine:
-    # #1013: rollups (on by default) would create lcm_rollups, which this repair test creates itself.
-    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), temporal_rollups_enabled=False)
+    config = LCMConfig(database_path=str(tmp_path / "lcm.db"))
     return LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
 
 

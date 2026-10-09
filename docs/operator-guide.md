@@ -404,7 +404,7 @@ Useful environment variables:
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
 | `LCM_SUMMARY_PROMPT_VERSION` | `1` | Summariser prompt version: `1` (original prompts) or `2` (opt-in v2 prompts); other values fall back to `1` with a config warning. See [Summary prompt version](#summary-prompt-version) |
-| `LCM_TEMPORAL_ROLLUPS_ENABLED` | `true` | Enable derived UTC day/week/month summary rollups and their maintenance hooks; rollup builds call the summary model |
+| `LCM_TEMPORAL_ROLLUPS_ENABLED` | `false` | Enable derived UTC day/week/month summary rollups and their maintenance hooks |
 | `LCM_ROLLUP_DAILY_TARGET_TOKENS` | `5000` | Target size for daily rollup summarization |
 | `LCM_ROLLUP_DAILY_MAX_TOKENS` | `15000` | Hard token ceiling for a daily rollup |
 | `LCM_ROLLUP_AGGREGATE_MAX_TOKENS` | `20000` | Hard token ceiling for weekly and monthly rollups |
@@ -552,11 +552,11 @@ Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
 ### Temporal rollup operations
 
-Temporal rollups are on by default. Tune the four `LCM_ROLLUP_*` controls
-above if needed; set `LCM_TEMPORAL_ROLLUPS_ENABLED=false` and restart Hermes to
-turn them off. Rollup periods are UTC calendar periods. The feature creates its
-tables lazily; a disabled install creates no rollup tables and leaves the core
-schema untouched, so a base build still opens the database.
+Temporal rollups are opt-in. Set `LCM_TEMPORAL_ROLLUPS_ENABLED=true`, tune the
+four `LCM_ROLLUP_*` controls above if needed, and restart Hermes. Rollup periods
+are UTC calendar periods. Enabling the feature creates its tables lazily; a
+disabled install creates no rollup tables and leaves the core schema untouched,
+so a base build still opens the database.
 
 Automatic maintenance marks a day (and its containing week and month) stale when
 a **summary node covering that day is published** — publication, not raw
