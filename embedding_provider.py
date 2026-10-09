@@ -8,6 +8,7 @@ command; resolving a provider never performs network or disk-heavy work.
 from __future__ import annotations
 
 import importlib.util
+import ipaddress
 import json
 import logging
 import os
@@ -22,6 +23,7 @@ from email.utils import parsedate_to_datetime
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
+from urllib.parse import urlsplit
 
 from .config import LCMConfig
 from .tokens import count_tokens
@@ -315,6 +317,14 @@ def _run_blocking_with_deadline(
     return value
 
 
+def _is_loopback_url(url: str) -> bool:
+    try:
+        host = urlsplit(url).hostname or ""
+        return host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
+
+
 def _default_http_transport(
     *,
     url: str,
@@ -330,7 +340,10 @@ def _default_http_transport(
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        open_request = urllib.request.urlopen
+        if _is_loopback_url(url):
+            open_request = urllib.request.build_opener(urllib.request.ProxyHandler({})).open
+        with open_request(request, timeout=timeout) as response:
             return HttpResponse(
                 status=int(response.status),
                 headers=dict(response.headers.items()),
@@ -359,6 +372,12 @@ class EmbeddingCircuitBreaker:
             self._open_until = 0.0
             self._failures = 0
         return current >= self._open_until
+
+    def is_open(self, *, now: float | None = None) -> bool:
+        """Read-only peek: never resets state another thread may have just set."""
+        open_until = self._open_until
+        current = time.monotonic() if now is None else now
+        return bool(open_until) and current < open_until
 
     def record_success(self) -> None:
         self._failures = 0
