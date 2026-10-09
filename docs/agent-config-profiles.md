@@ -73,8 +73,9 @@ export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=true
 # export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS=2000
 
 # Default 24000: caps the protected fresh tail by tokens. Prevents one giant
-# recent tool result from pinning the whole budget; newest message and
-# complete assistant/tool groups are always retained.
+# recent tool result from pinning the whole budget; while LCM_FRESH_TAIL_COUNT
+# is nonzero, the newest message and complete assistant/tool groups are always
+# retained (LCM_FRESH_TAIL_COUNT=0 keeps no fresh tail).
 # export LCM_FRESH_TAIL_MAX_TOKENS=24000
 
 # On by default: at threshold, keep summarising the oldest raw chunks in one

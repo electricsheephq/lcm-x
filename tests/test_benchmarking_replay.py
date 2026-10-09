@@ -93,16 +93,16 @@ def test_replay_defaults_partial_summary_profile_failure_mode_to_none(tmp_path):
     assert metrics.summary_failure_mode is SummaryFailureMode.NONE
 
 
-def test_replay_above_threshold_compresses_and_reports_canary_recall(tmp_path, monkeypatch):
-    # #1013: the active-canary count was sized for the pre-#1013 single-pass compaction (no full sweep).
-    build = replay_module._config_from_policy
+def test_config_from_policy_pins_pre_1013_defaults_policy_does_not_carry(tmp_path):
+    """#1013 flipped these LCMConfig defaults; LCMPolicy does not carry them, so policy@v1 runs keep
+    the pre-#1013 values (fresh_tail_count, leaf_chunk_tokens, context_threshold come from the policy)."""
+    config = replay_module._config_from_policy(_small_policy(), tmp_path / "lcm.db")
 
-    def single_pass(policy, database_path):
-        config = build(policy, database_path)
-        config.threshold_full_sweep_enabled = False
-        return config
+    assert config.fresh_tail_max_tokens == 0
+    assert config.threshold_full_sweep_enabled is False
 
-    monkeypatch.setattr(replay_module, "_config_from_policy", single_pass)
+
+def test_replay_above_threshold_compresses_and_reports_canary_recall(tmp_path):
     fixture = make_synthetic_fixture(
         name="pressure",
         message_pairs=8,

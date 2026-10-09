@@ -579,7 +579,7 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold overrides. Format: `"glm-5.2:0.70,glm-5.2-1M:0.25"`. Keys matched as substrings (longest wins). Also settable as `lcm.model_thresholds` in config.yaml. |
 | `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
-| `LCM_FRESH_TAIL_MAX_TOKENS` | `24000` | Token cap for the protected fresh tail; always retains the newest message and complete assistant/tool-result groups. `0` removes the explicit cap (on a window of 50k tokens or more the engine then derives one at half the window) |
+| `LCM_FRESH_TAIL_MAX_TOKENS` | `24000` | Token cap for the protected fresh tail; while `LCM_FRESH_TAIL_COUNT` is nonzero it always retains the newest message and complete assistant/tool-result groups (`LCM_FRESH_TAIL_COUNT=0` keeps no fresh tail, whatever the cap). `0` removes the explicit cap (on a window of 50k tokens or more the engine then derives one at half the window) |
 | `LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED` | `true` | Default-on: when compaction is deadlocked because the count-protected tail covers the whole over-threshold session (#441), the tail yields to a derived token bound so compaction can progress; `false` restores the strict count tail (rollback switch) |
 | `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS` | `3` | Consecutive tail-blocked compaction attempts under host-observed pressure before the yield engages; any attempt not blocked by the tail resets the count; `1` yields on first observation |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
@@ -599,9 +599,10 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
 
 When `LCM_FRESH_TAIL_MAX_TOKENS` is above `0`, the protected suffix must satisfy
-both the message-count and token bounds. The newest message is never dropped,
-and a boundary that would begin inside an assistant tool-call/result group is
-moved back to that assistant even when doing so exceeds a configured bound.
+both the message-count and token bounds. While `LCM_FRESH_TAIL_COUNT` is nonzero
+the newest message is never dropped (`0` keeps no fresh tail), and a boundary
+that would begin inside an assistant tool-call/result group is moved back to that
+assistant even when doing so exceeds a configured bound.
 
 ### Filtering and storage settings
 
