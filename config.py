@@ -629,9 +629,10 @@ class LCMConfig:
     """All tunables for the LCM engine."""
 
     # -- Fresh tail: recent messages never compacted ---
-    fresh_tail_count: int = 32
-    # Optional token cap for the protected suffix (0 = disabled)
-    fresh_tail_max_tokens: int = 0
+    fresh_tail_count: int = 24
+    # Token cap for the protected suffix (0 = no explicit cap; the engine then
+    # derives one from the context window, see _effective_fresh_tail_max_tokens)
+    fresh_tail_max_tokens: int = 24_000
     # Let the count-protected tail yield to a derived token bound when the
     # host reports sustained over-threshold pressure and the tail is the only
     # reason compaction cannot make progress. Fires only in a state that
@@ -647,9 +648,9 @@ class LCMConfig:
 
     # -- Compaction thresholds ---
     # Max source tokens in a leaf chunk before summarization triggers
-    leaf_chunk_tokens: int = 20_000
+    leaf_chunk_tokens: int = 8_000
     # Fraction of context window that triggers compaction (0.0–1.0)
-    context_threshold: float = 0.35
+    context_threshold: float = 0.75
     # Per-model threshold overrides. Keys are matched as substrings against
     # the model name (longest match wins). When a key matches, its value
     # replaces context_threshold for that model. Loaded from
@@ -684,8 +685,8 @@ class LCMConfig:
     # Disabled at 0.0. When set, only bypass cache-friendly/deferred polite
     # gates once prompt pressure reaches this fraction of the context window.
     critical_budget_pressure_ratio: float = 0.0
-    # Opt into one bounded synchronous sweep after threshold pressure is reached.
-    threshold_full_sweep_enabled: bool = False
+    # Run one bounded synchronous sweep after threshold pressure is reached.
+    threshold_full_sweep_enabled: bool = True
     # Target frontier-summary size after a sweep (0 = derive one leaf budget).
     summary_prefix_target_tokens: int = 0
     # #605: from compress() entry, after the first stored leaf or condensed node no summariser call starts unless it is expected
@@ -772,7 +773,7 @@ class LCMConfig:
     # -- Large tool-output externalization ---
     # When enabled, oversized tool results are written to plugin-managed storage
     # and replaced with compact references in pre-compaction serializer input.
-    large_output_externalization_enabled: bool = False
+    large_output_externalization_enabled: bool = True
     # Character threshold above which tool results are externalized.
     large_output_externalization_threshold_chars: int = 12_000
     # Explicit storage directory for externalized payloads (empty = auto under hermes home).
@@ -780,8 +781,8 @@ class LCMConfig:
     # Replace eligible textual tool results with durable compact refs in
     # provider-visible replay. Current-turn ingest is intercepted immediately;
     # historical assembly separately respects the protected fresh tail. This
-    # remains opt-in and requires large-output externalization.
-    large_output_active_replay_stubbing_enabled: bool = False
+    # requires large-output externalization.
+    large_output_active_replay_stubbing_enabled: bool = True
     # Token-aware active-replay threshold. The character threshold above still
     # controls ordinary ingest externalization; this threshold controls when a
     # provider-visible textual tool result is replaced by its durable ref.
@@ -1003,8 +1004,8 @@ class LCMConfig:
     empty_lifecycle_gc_max_age_hours: float | None = 24.0
 
     # -- Temporal rollups ---
-    # Disabled by default; the engine's ingest/build hooks are flag-gated.
-    temporal_rollups_enabled: bool = False
+    # Enabled by default; the engine's ingest/build hooks are flag-gated.
+    temporal_rollups_enabled: bool = True
     rollup_daily_target_tokens: int = 5_000
     rollup_daily_max_tokens: int = 15_000
     rollup_aggregate_max_tokens: int = 20_000

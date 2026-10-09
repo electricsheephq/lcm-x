@@ -2536,8 +2536,8 @@ class LCMEngine(
     def _effective_fresh_tail_max_tokens(self) -> int:
         """Return the active fresh-tail token cap.
 
-        When the user has not set LCM_FRESH_TAIL_MAX_TOKENS explicitly
-        (config value is 0) and the context is large enough to matter
+        When the configured cap is 0 (LCM_FRESH_TAIL_MAX_TOKENS=0; the
+        default is 24000) and the context is large enough to matter
         (> 50K), derive a context-proportional default so the fresh tail
         cannot consume the entire model window on small context models.
         50% of context_length leaves room for leaf chunks to accumulate
