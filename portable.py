@@ -135,7 +135,7 @@ class PortableRecall:
         store = MessageStore(path, ingest_protection_config=config, hermes_home=str(path.parent))
         try:
             if store.read_metadata_json("portable:binding") is None:
-                store.write_metadata_json("portable:binding", binding)
+                store.write_metadata_json(["portable:binding"], _json(binding))
             dag = SummaryDAG(path)
         except BaseException:
             store.close()
@@ -370,7 +370,7 @@ class PortableRecall:
             report["coverage_scope"] = "this_transcript;all_preserved_generations"
             if report["unsupported_total"]:
                 report["coverage_complete"] = False
-            context._store.write_metadata_json("portable:capture_status", report)
+            context._store.write_metadata_json(["portable:capture_status"], _json(report))
         finally:
             context.close()
         return report
@@ -473,7 +473,7 @@ class PortableRecall:
                 observed[event] = {"configured": True, "observed": True, "qualified": False,
                                    "capsule_emitted": bool(receipt.get("capsule_emitted")),
                                    "injection_confirmed": False}
-                context._store.write_metadata_json("portable:hooks", observed)
+                context._store.write_metadata_json(["portable:hooks"], _json(observed))
             finally:
                 context.close()
             return output, receipt
