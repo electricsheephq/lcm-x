@@ -102,7 +102,8 @@ def parts(tmp_path):
 def _engine(tmp_path, **config) -> LCMEngine:
     settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "database_path": str(tmp_path / "lcm.db"),
                 "rollup_daily_target_tokens": 12, "rollup_daily_max_tokens": 20, "rollup_builds_per_pass": 4,
-                **config}
+                # #1013: these cells run maintenance by hand; no engine-scheduled background pass.
+                "temporal_rollups_enabled": False, **config}
     engine = LCMEngine(config=LCMConfig(**settings))
     engine.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
     return engine
