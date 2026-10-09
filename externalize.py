@@ -637,17 +637,24 @@ _RAW_PAYLOAD_PREVIEW_JOINER = " ... "
 # multi-megabyte message is never split or copied whole to build a few hundred preview chars.
 _RAW_PAYLOAD_PREVIEW_SCAN_FACTOR = 8
 _RAW_PAYLOAD_PREVIEW_TRANSLATION = str.maketrans({"[": "(", "]": ")", ";": ",", '"': "'"})
+# The replay identity matcher (here and in v0.26.1) skips a stub that holds this kind.
+_RAW_PAYLOAD_PREVIEW_QUARANTINE_RE = re.compile("quarantined_assistant_output", re.IGNORECASE)
 
 
 def _raw_payload_preview_text(text: str) -> str:
-    text = " ".join(text.split())
+    from .ingest_protection import redact_catalog_sensitive_text
+
+    # Redact before collapsing and slicing: a slice that cuts a credential's label blinds every detector.
+    text = " ".join(redact_catalog_sensitive_text(text).split())
+    text = _RAW_PAYLOAD_PREVIEW_QUARANTINE_RE.sub("quarantined-assistant-output", text)
     return text.translate(_RAW_PAYLOAD_PREVIEW_TRANSLATION).replace("ref=", "ref_")
 
 
 def _raw_payload_preview(content: str, room: int) -> str:
     """#1016: a deterministic, whitespace-collapsed head/tail preview of at most ``room`` chars that
     cannot forge stub syntax: ``[``/``]``/``;`` are mapped and ``ref=`` is neutralized, so no
-    recognizer (fullmatch or finditer) can read a ref, or the end of the stub, out of the user's text."""
+    recognizer (fullmatch or finditer) can read a ref, or the end of the stub, out of the user's text.
+    Each scan window is redacted with the full sensitive-pattern catalog first, whatever the config."""
     content = content or ""
     keep = room - len(_RAW_PAYLOAD_PREVIEW_JOINER)
     head = keep * 7 // 10

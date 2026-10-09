@@ -2091,6 +2091,19 @@ def redact_sensitive_text(text: str, config) -> str:
     return protected
 
 
+def redact_catalog_sensitive_text(text: str) -> str:
+    """#1016: redact every catalog pattern, whatever the config, in derived text (the raw_payload
+    preview) whose head/tail slicing could otherwise cut a credential's label off its value."""
+    protected = text
+    for name in _private_key_first(list(_SENSITIVE_PATTERN_CATALOG)):
+        protected = _apply_sensitive_pattern(
+            name,
+            lambda match, pattern_name=name: _redact_match(pattern_name, match),
+            protected,
+        )
+    return protected
+
+
 def _redact_entire_sensitive_string(text: str, pattern_name: str) -> str:
     if not text or _SENSITIVE_PLACEHOLDER_PREFIX in text:
         return text
