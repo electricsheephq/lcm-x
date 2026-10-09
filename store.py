@@ -25,6 +25,7 @@ from .db_bootstrap import (
     add_column_if_missing,
     configure_connection,
     ensure_external_content_fts,
+    ensure_message_stem_fts,
     mark_migration_step_complete,
     refuse_schema_version_too_new,
     run_versioned_migrations,
@@ -267,6 +268,29 @@ def build_message_fts_spec() -> ExternalContentFtsSpec:
     )
 
 
+def build_message_stem_fts_spec() -> ExternalContentFtsSpec:
+    return ExternalContentFtsSpec(
+        table_name="messages_fts_stem", content_table="messages",
+        content_rowid="store_id", indexed_column="content", tokenize="porter unicode61",
+        trigger_sqls=(
+            """CREATE TRIGGER IF NOT EXISTS msg_fts_stem_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts_stem(rowid, content) VALUES(new.store_id, new.content);
+            END;""",
+            """CREATE TRIGGER IF NOT EXISTS msg_fts_stem_delete AFTER DELETE ON messages BEGIN
+                INSERT INTO messages_fts_stem(messages_fts_stem, rowid, content)
+                SELECT 'delete', old.store_id, old.content
+                WHERE EXISTS (SELECT 1 FROM messages_fts_stem_docsize WHERE id=old.store_id);
+            END;""",
+            """CREATE TRIGGER IF NOT EXISTS msg_fts_stem_update AFTER UPDATE OF content ON messages BEGIN
+                INSERT INTO messages_fts_stem(messages_fts_stem, rowid, content)
+                SELECT 'delete', old.store_id, old.content
+                WHERE EXISTS (SELECT 1 FROM messages_fts_stem_docsize WHERE id=old.store_id);
+                INSERT INTO messages_fts_stem(rowid, content) VALUES(new.store_id, new.content);
+            END;""",
+        ),
+    )
+
+
 def delete_message_relations(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
     """#436 T7: the ``message_relations`` of rows about to be deleted (``rows_sql`` selects their
     store_ids) go with them, on the caller's connection and transaction: a store_id reused after the
@@ -355,6 +379,7 @@ class MessageStore:
         self._ensure_conversation_id_column()
         self._ensure_time_contract_columns()
         self._conn.commit()
+        ensure_message_stem_fts(self._conn, build_message_stem_fts_spec())
 
     def _ensure_source_column(self) -> None:
         columns = {
@@ -1620,7 +1645,8 @@ class MessageStore:
                time_to: float | None = None,
                exclude_session_ids: Collection[str] | None = None,
                allow_operators: bool = False,
-               agent_operators: bool = False) -> List[Dict[str, Any]]:
+               agent_operators: bool = False,
+               stemmed: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1635,6 +1661,15 @@ class MessageStore:
         - ``allow_operators`` marks a query the CALLER composed as FTS5 syntax,
           keeping its bare AND/OR/NOT/NEAR. Never set it for user or agent text
         """
+        fts_table = "messages_fts"
+        self._last_fts_index = "plain"
+        if stemmed:
+            try:
+                state = self._conn.execute("SELECT value FROM metadata WHERE key='fts_stem_state'").fetchone()
+                if state and state[0] == "ready":
+                    fts_table = "messages_fts_stem"
+            except sqlite3.Error:
+                pass
         safe_query = sanitize_fts5_query(query, allow_operators=allow_operators, agent_operators=agent_operators)
         syntax_retried = False
         terms = extract_search_terms(safe_query)
@@ -1673,7 +1708,7 @@ class MessageStore:
         results: list[Dict[str, Any]] = []
         while True:
             try:
-                where = ["messages_fts MATCH ?"]
+                where = [f"{fts_table} MATCH ?"]
                 args: list[Any] = [safe_query]
                 if session_id is not None:
                     where.append("m.session_id = ?")
@@ -1704,15 +1739,21 @@ class MessageStore:
                               m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
                               m.ingested_at, m.observed_at, m.observed_at_source,
                               rank as search_rank,
-                              snippet(messages_fts, 0, '>>>', '<<<', '...', 40) as snippet
-                       FROM messages_fts fts
+                              snippet({fts_table}, 0, '>>>', '<<<', '...', 40) as snippet
+                       FROM {fts_table} fts
                        JOIN messages m ON m.store_id = fts.rowid
                        WHERE {' AND '.join(where)}
                        ORDER BY {order_by} LIMIT ? OFFSET ?""",
                     args,
                 ).fetchall()
+                self._last_fts_index = "stem" if fts_table == "messages_fts_stem" else "plain"
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
+                if fts_table == "messages_fts_stem":
+                    fts_table = "messages_fts"
+                    offset = scanned_rows = 0
+                    results.clear()
+                    continue
                 if agent_operators and not syntax_retried and is_fts5_syntax_error(exc):
                     safe_query = sanitize_fts5_query(query)
                     syntax_retried = True
