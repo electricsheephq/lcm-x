@@ -639,8 +639,11 @@ _RAW_PAYLOAD_PREVIEW_SCAN_FACTOR = 8
 _RAW_PAYLOAD_PREVIEW_TRANSLATION = str.maketrans({"[": "(", "]": ")", ";": ",", '"': "'"})
 # The replay identity matcher (here and in v0.26.1) skips a stub that holds this kind.
 _RAW_PAYLOAD_PREVIEW_QUARANTINE_RE = re.compile("quarantined_assistant_output", re.IGNORECASE)
-_RAW_PAYLOAD_PREVIEW_LABEL_MARGIN = 256
-_RAW_PAYLOAD_PREVIEW_WHITESPACE_RE = re.compile(r"\s")
+# Context scanned before the tail window: enough to hold the label of a cut credential and the BEGIN
+# line of a cut PEM key (an 8192-bit RSA key is about 6.4k chars).
+_RAW_PAYLOAD_PREVIEW_CONTEXT = 8192
+# The catalog's credential-value alphabet; a run of it cut by the tail scan's start is dropped.
+_RAW_PAYLOAD_PREVIEW_CUT_RUN_RE = re.compile(r"[A-Za-z0-9._~+/=-]*")
 
 
 def _raw_payload_preview_text(text: str) -> str:
@@ -663,13 +666,13 @@ def _raw_payload_preview(content: str, room: int) -> str:
     window = room * _RAW_PAYLOAD_PREVIEW_SCAN_FACTOR
     if len(content) > 2 * window:
         head_text = _raw_payload_preview_text(content[:window])[:head]
-        # The tail scan reaches back far enough to see a label just outside the window, and drops the
-        # token its start cuts: a long credential must not leave its unlabeled tail in the preview.
-        start = len(content) - window - _RAW_PAYLOAD_PREVIEW_LABEL_MARGIN
+        # The tail scan reaches back far enough to see the label or PEM BEGIN line of a credential the
+        # window cuts, and drops a credential-alphabet run its own start cuts, so no unlabeled tail of a
+        # credential reaches the preview.
+        start = max(window, len(content) - window - _RAW_PAYLOAD_PREVIEW_CONTEXT)
         tail_scan = content[start:]
-        if not content[start - 1].isspace():
-            cut = _RAW_PAYLOAD_PREVIEW_WHITESPACE_RE.search(tail_scan)
-            tail_scan = tail_scan[cut.start() :] if cut else ""
+        if _RAW_PAYLOAD_PREVIEW_CUT_RUN_RE.fullmatch(content[start - 1]):
+            tail_scan = tail_scan[_RAW_PAYLOAD_PREVIEW_CUT_RUN_RE.match(tail_scan).end() :]
         tail_text = _raw_payload_preview_text(tail_scan)[-(keep - head):]
         return f"{head_text}{_RAW_PAYLOAD_PREVIEW_JOINER}{tail_text}"
     text = _raw_payload_preview_text(content)
