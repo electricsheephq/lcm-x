@@ -216,7 +216,9 @@ def test_sensitive_patterns_redact_before_large_payload_externalization(tmp_path
         large_output_externalization_threshold_chars=40,
     )
     secret = "sk-externalized1234567890abcdef"
-    content = f"api_key={secret}\n" + ("large payload line\n" * 20)
+    # #1016: user text is externalized only above the 100k non-tool floor; the stub's
+    # preview carries the head, so it must be built from the redacted text too.
+    content = f"api_key={secret}\n" + ("large payload line\n" * 6000)
 
     engine._ingest_messages([{"role": "user", "content": content}])
 
@@ -4317,6 +4319,156 @@ def test_no_system_trailing_ignored_quarantined_assistant_rebind_does_not_duplic
 
     second_rows = second._store.get_session_messages(second.current_session_id)
     assert [row["content"] for row in second_rows] == ["fresh request"]
+
+
+def _ignored_cleanup_config(tmp_path, **overrides):
+    settings = {"fresh_tail_count": 1, "leaf_chunk_tokens": 10_000, "context_threshold": 0.95, **overrides}
+    return LCMConfig(
+        database_path=str(tmp_path / "lcm.db"),
+        large_output_externalization_path=str(tmp_path / "externalized"),
+        **settings,
+    )
+
+
+def _ignored_cleanup_engine(tmp_path, config):
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    engine._compiled_ignore_message_patterns = [_ContainsBrokenAssistantPattern()]
+    engine.on_session_start(
+        "ignored-cleanup-rebind-session",
+        platform="telegram",
+        conversation_id="ignored-cleanup-rebind-conversation",
+        context_length=10_000,
+    )
+    return engine
+
+
+def _ignored_cleanup_first_pass(tmp_path, config, user_timestamp, **host_fields):
+    """#1013: a cleanup that drops an ignored row outside the tail returns a lone user turn."""
+    user = {"role": "user", "content": "fresh request", **host_fields}
+    if user_timestamp is not None:
+        user["timestamp"] = user_timestamp
+    first = _ignored_cleanup_engine(tmp_path, config)
+    first_active = first.compress([{"role": "assistant", "content": _broken_assistant_output()}, user])
+    assert [(m["role"], m["content"]) for m in first_active] == [("user", "fresh request")]
+    first.shutdown()
+    return first_active
+
+
+def _stored_contents(engine):
+    return [row["content"] for row in engine._store.get_session_messages(engine.current_session_id)]
+
+
+def test_cold_rebind_after_ignored_row_cleanup_replays_the_timestamped_turn_once(tmp_path):
+    """The returned turn carries its host timestamp, so a cold rebind can prove the replay."""
+    config = _ignored_cleanup_config(tmp_path)
+    first_active = _ignored_cleanup_first_pass(tmp_path, config, 1_760_000_001.0)
+
+    second = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        second.compress(first_active)
+        assert _stored_contents(second) == ["fresh request"]
+        assert second._last_ingest_reconciliation["action"] == "advanced cursor"
+    finally:
+        second.shutdown()
+
+
+@pytest.mark.parametrize("replay_id_key", ["platform_message_id", "message_id"])
+def test_cold_rebind_after_ignored_row_cleanup_replays_the_host_id_turn_once(tmp_path, replay_id_key):
+    """A gateway turn carries its platform id (restored history names it ``message_id``): with no
+    timestamp at all, the id alone proves the replay."""
+    config = _ignored_cleanup_config(tmp_path)
+    _ignored_cleanup_first_pass(tmp_path, config, None, platform_message_id="101")
+
+    second = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        second.compress([{"role": "user", "content": "fresh request", replay_id_key: "101"}])
+        assert _stored_contents(second) == ["fresh request"]
+        assert second._last_ingest_reconciliation["action"] == "advanced cursor"
+    finally:
+        second.shutdown()
+
+
+def test_same_second_delta_with_a_new_host_id_after_ignored_row_cleanup_is_stored(tmp_path, monkeypatch):
+    """Whole-second platform times collide; a distinct platform id is a distinct turn for the cleanup
+    proof. The #436 identity anchor (on by default) matches occurrences by host stamp and payload, and
+    the store keeps no platform id, so it is switched off here to test the proof on its own."""
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "off")
+    config = _ignored_cleanup_config(tmp_path)
+    _ignored_cleanup_first_pass(tmp_path, config, 1_760_000_001.0, platform_message_id="101")
+
+    second = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        second.compress([
+            {"role": "user", "content": "fresh request", "timestamp": 1_760_000_001.0, "platform_message_id": "102"}
+        ])
+        assert _stored_contents(second) == ["fresh request", "fresh request"]
+    finally:
+        second.shutdown()
+
+
+def test_identity_free_replay_after_ignored_row_cleanup_is_stored_again(tmp_path):
+    """No platform id and no timestamp: the replay cannot be proven, so it is stored again
+    (a recoverable duplicate rather than a lost turn)."""
+    config = _ignored_cleanup_config(tmp_path)
+    first_active = _ignored_cleanup_first_pass(tmp_path, config, None)
+
+    second = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        second.compress(first_active)
+        assert _stored_contents(second) == ["fresh request", "fresh request"]
+    finally:
+        second.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("first_timestamp", "delta_timestamp"),
+    [(1_760_000_001.0, 1_760_000_999.0), (None, None)],
+    ids=["newer-timestamp", "no-timestamps"],
+)
+def test_delta_only_identical_turn_after_ignored_row_cleanup_is_stored(tmp_path, first_timestamp, delta_timestamp):
+    """A gateway may deliver only the new turn; same text is not proof of replay, so it is kept."""
+    config = _ignored_cleanup_config(tmp_path)
+    _ignored_cleanup_first_pass(tmp_path, config, first_timestamp)
+    delta = {"role": "user", "content": "fresh request"}
+    if delta_timestamp is not None:
+        delta["timestamp"] = delta_timestamp
+
+    second = _ignored_cleanup_engine(tmp_path, config)
+    try:
+        second.compress([delta])
+        assert _stored_contents(second) == ["fresh request", "fresh request"]
+    finally:
+        second.shutdown()
+
+
+def test_ignored_row_cleanup_proof_is_not_kept_after_a_publication_rollback(tmp_path, monkeypatch):
+    """A compress that drops ignored rows and then fails to publish its leaf leaves no durable proof."""
+    config = _ignored_cleanup_config(tmp_path, fresh_tail_count=2, leaf_chunk_tokens=1_000, context_threshold=0.5)
+    engine = _ignored_cleanup_engine(tmp_path, config)
+    messages = [{"role": "assistant", "content": _broken_assistant_output()}]
+    for index in range(8):
+        messages.append({
+            "role": "user" if index % 2 == 0 else "assistant",
+            "content": f"backlog {index} " + ("words " * 400),
+        })
+    messages.append({"role": "user", "content": "fresh request"})
+
+    def fake_leaf(chunk, focus_topic=None, deadline=None):
+        del focus_topic, deadline
+        return chunk, count_messages_tokens(chunk), "backlog summary", 1, 0
+
+    def locked(*args, **kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(engine, "_summarize_leaf_chunk_with_rescue", fake_leaf)
+    monkeypatch.setattr(engine._dag, "add_node", locked)
+    try:
+        engine.compress(messages, current_tokens=9_000)
+        assert engine._last_compression_status == "error"
+        assert engine._last_compression_noop_reason == "summary publication blocked by SQLite lock"
+        assert engine._durable_commit_proof_payload() is None
+    finally:
+        engine.shutdown()
 
 
 def test_only_ignored_quarantined_assistant_rebind_does_not_store_placeholder(tmp_path):

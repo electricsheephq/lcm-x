@@ -767,10 +767,10 @@ class TestProviderPrefixedAuxiliaryCalls:
 class TestConfig:
     def test_defaults(self):
         c = LCMConfig()
-        assert c.fresh_tail_count == 32
-        assert c.fresh_tail_max_tokens == 0
-        assert c.leaf_chunk_tokens == 20_000
-        assert c.context_threshold == 0.35
+        assert c.fresh_tail_count == 24
+        assert c.fresh_tail_max_tokens == 24_000
+        assert c.leaf_chunk_tokens == 8_000
+        assert c.context_threshold == 0.75
         assert c.incremental_max_depth == 3
         assert c.condensation_fanin == 4
         assert c.dynamic_leaf_chunk_enabled is False
@@ -795,7 +795,7 @@ class TestConfig:
         assert c.deferred_maintenance_enabled is False
         assert c.deferred_maintenance_max_passes == 4
         assert c.critical_budget_pressure_ratio == 0.0
-        assert c.threshold_full_sweep_enabled is False
+        assert c.threshold_full_sweep_enabled is True
         assert c.summary_prefix_target_tokens == 0
         assert c.ignore_session_patterns == []
         assert c.stateless_session_patterns == []
@@ -904,10 +904,10 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.fresh_tail_count == 32
-        assert c.fresh_tail_max_tokens == 0
-        assert c.leaf_chunk_tokens == 20_000
-        assert c.context_threshold == 0.35
+        assert c.fresh_tail_count == 24
+        assert c.fresh_tail_max_tokens == 24_000
+        assert c.leaf_chunk_tokens == 8_000
+        assert c.context_threshold == 0.75
         assert c.max_assembly_tokens == 0
         assert c.reserve_tokens_floor == 0
         assert c.expansion_context_tokens == 32_000
@@ -916,26 +916,26 @@ class TestConfig:
     def test_from_env_reads_hermes_compression_threshold_when_lcm_env_missing(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
-        (hermes_home / "config.yaml").write_text("compression:\n  threshold: 0.68\n")
+        (hermes_home / "config.yaml").write_text("compression:\n  threshold: 0.88\n")
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.68
+        assert c.context_threshold == 0.88
 
     def test_from_env_reads_hermes_codex_gpt55_autoraise_flag(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  threshold: 0.68\n  codex_gpt55_autoraise: false\n"
+            "compression:\n  threshold: 0.88\n  codex_gpt55_autoraise: false\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.68
+        assert c.context_threshold == 0.88
         assert c.codex_gpt55_autoraise_enabled is False
         assert c.config_sources["codex_gpt55_autoraise_enabled"] == "config_yaml:compression.codex_gpt55_autoraise"
 
@@ -1023,7 +1023,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_ignores_numeric_zero_disabled_hermes_threshold(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
@@ -1036,7 +1036,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_ignores_numeric_zero_float_disabled_hermes_threshold(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
@@ -1049,20 +1049,20 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_numeric_one_keeps_hermes_threshold_fallback(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  enabled: 1\n  threshold: 0.50\n"
+            "compression:\n  enabled: 1\n  threshold: 0.80\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.50
+        assert c.context_threshold == 0.80
 
     def test_from_env_ignores_disabled_hermes_threshold_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
@@ -1078,7 +1078,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_ignores_numeric_zero_float_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
@@ -1094,7 +1094,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.35
+        assert c.context_threshold == 0.75
 
     def test_from_env_numeric_one_float_keeps_threshold_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
@@ -1102,7 +1102,7 @@ class TestConfig:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  enabled: 1.0\n  threshold: '0.50'\n"
+            "compression:\n  enabled: 1.0\n  threshold: '0.80'\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
@@ -1110,21 +1110,21 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.50
+        assert c.context_threshold == 0.80
 
     def test_from_env_reads_hermes_threshold_without_pyyaml(self, monkeypatch, tmp_path):
         import hermes_lcm.config as config_mod
 
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
-        (hermes_home / "config.yaml").write_text("compression:\n  threshold: '0.68'\n")
+        (hermes_home / "config.yaml").write_text("compression:\n  threshold: '0.88'\n")
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
         monkeypatch.setattr(config_mod, "yaml", None)
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.68
+        assert c.context_threshold == 0.88
 
     def test_from_env_lcm_section_overrides_compression_section(self, monkeypatch, tmp_path):
         """lcm.context_threshold in config.yaml takes priority over compression.threshold."""
@@ -1170,7 +1170,7 @@ class TestConfig:
         # context_threshold nested under lcm > subsection — must be ignored
         (hermes_home / "config.yaml").write_text(
             "lcm:\n  subsection:\n    context_threshold: 0.99\n"
-            "compression:\n  enabled: true\n  threshold: 0.60\n"
+            "compression:\n  enabled: true\n  threshold: 0.90\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
@@ -1179,7 +1179,7 @@ class TestConfig:
         c = LCMConfig.from_env()
 
         # Must fall through to compression.threshold, NOT the nested 0.99
-        assert c.context_threshold == 0.60
+        assert c.context_threshold == 0.90
 
     def test_from_env_nested_compression_threshold_ignored(self, monkeypatch, tmp_path):
         """Deeply nested threshold under compression: should NOT be matched."""
@@ -1188,7 +1188,7 @@ class TestConfig:
         hermes_home = tmp_path / "hermes"
         hermes_home.mkdir()
         (hermes_home / "config.yaml").write_text(
-            "compression:\n  enabled: true\n  subsection:\n    threshold: 0.99\n  threshold: 0.55\n"
+            "compression:\n  enabled: true\n  subsection:\n    threshold: 0.99\n  threshold: 0.85\n"
         )
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
         monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
@@ -1196,7 +1196,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.context_threshold == 0.55
+        assert c.context_threshold == 0.85
 
 
 class TestSessionPatterns:
@@ -5723,8 +5723,8 @@ class TestAssemblyBudgetSelection:
         assert rows[-1]["content"] == "new followup"
 
     def test_assembly_skips_oversized_summary_and_keeps_later_fit_summary(self, tmp_path, monkeypatch):
-        # 155 (was 140): room for the #998 lcm_recall clause in the LCM system note.
-        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=155)
+        # 165 (was 140): room for the #998 lcm_recall clause and the #1016 clause in the LCM system note.
+        engine = self._engine(tmp_path, monkeypatch, max_assembly_tokens=165)
         engine._dag.add_node(SummaryNode(
             session_id="assembly-session",
             depth=2,
@@ -7422,12 +7422,10 @@ class TestIngestExternalization:
             {"role": "assistant", "content": marker},
         ])
 
+        # #1016: assistant text under the 100k non-tool floor stays inline (it was a raw_payload stub).
         stored = engine._store.get_session_messages("ingest-session")
-        assert stored[0]["content"].startswith("[Externalized payload:")
-        payload_file = next(output_dir.glob("*.json"))
-        payload = json.loads(payload_file.read_text())
-        assert payload["kind"] == "raw_payload"
-        assert payload["content"] == marker
+        assert stored[0]["content"] == marker
+        assert not output_dir.exists() or not list(output_dir.glob("*.json"))
         assert "assistant recovered text" not in stored[0]["content"]
 
     def test_ingest_preserves_unrecoverable_truncation_marker_inline(self, tmp_path):
@@ -7642,7 +7640,9 @@ class TestIngestExternalization:
 
     def test_ingest_externalizes_generic_oversized_raw_payload_fallback(self, tmp_path):
         engine, output_dir = self._engine(tmp_path)
-        content = "GENERIC_RAW_NEEDLE:" + ("z" * 5000)
+        # #1016: user text is externalized only above the 100k non-tool floor; the needle sits
+        # mid-payload, outside the stub's head/tail preview.
+        content = ("z " * 30_000) + "GENERIC_RAW_NEEDLE " + ("z " * 30_000)
 
         engine._ingest_messages([{"role": "user", "content": content}])
 
@@ -7661,7 +7661,8 @@ class TestIngestExternalization:
         from hermes_lcm.engine import LCMEngine
 
         engine, output_dir = self._engine(tmp_path)
-        content = "ACTIVE_RAW_NEEDLE:" + ("r" * 5000)
+        # #1016: above the 100k non-tool floor; the needle sits outside the stub's preview.
+        content = ("r " * 30_000) + "ACTIVE_RAW_NEEDLE " + ("r " * 30_000)
         messages = [{"role": "user", "content": content}]
 
         active_context = engine.compress(messages)
@@ -7680,7 +7681,7 @@ class TestIngestExternalization:
         payload_path = next(output_dir.glob("*.json"))
         expanded = json.loads(
             lcm_tools.lcm_expand(
-                {"externalized_ref": payload_path.name, "max_tokens": 20_000},
+                {"externalized_ref": payload_path.name, "max_tokens": 200_000},
                 engine=engine,
             )
         )
@@ -7703,7 +7704,8 @@ class TestIngestExternalization:
 
     def test_preflight_requests_cleanup_for_oversized_raw_payload_stub(self, tmp_path):
         engine, _output_dir = self._engine(tmp_path)
-        content = "PREFLIGHT_RAW_NEEDLE:" + ("r" * 5000)
+        # #1016: was 5k chars; user text is stubbed only above the 100k non-tool floor.
+        content = ("r " * 30_000) + "PREFLIGHT_RAW_NEEDLE " + ("r " * 30_000)
         messages = [{"role": "user", "content": content}]
 
         assert engine.should_compress_preflight(messages) is True
@@ -7718,7 +7720,8 @@ class TestIngestExternalization:
         import hermes_lcm.tools as lcm_tools
 
         engine, output_dir = self._engine(tmp_path)
-        content = "INJECTED_ROLE_RAW_NEEDLE:" + ("z" * 5000)
+        # #1016: above the 100k non-tool floor; the needle sits outside the stub's preview.
+        content = ("z " * 30_000) + "INJECTED_ROLE_RAW_NEEDLE " + ("z " * 30_000)
         injected_role = "user; ref=bogus]"
 
         engine._ingest_messages([{"role": injected_role, "content": content}])
@@ -7732,9 +7735,9 @@ class TestIngestExternalization:
         payload_file = next(output_dir.glob("*.json"))
         payload = json.loads(payload_file.read_text())
         assert payload["role"] == injected_role
-        by_store_id = json.loads(lcm_tools.lcm_expand({"store_id": stored[0]["store_id"], "max_tokens": 20_000}, engine=engine))
+        by_store_id = json.loads(lcm_tools.lcm_expand({"store_id": stored[0]["store_id"], "max_tokens": 200_000}, engine=engine))
         assert by_store_id["externalized_ref"] == payload_file.name
-        expanded = json.loads(lcm_tools.lcm_expand({"externalized_ref": by_store_id["externalized_ref"], "max_tokens": 20_000}, engine=engine))
+        expanded = json.loads(lcm_tools.lcm_expand({"externalized_ref": by_store_id["externalized_ref"], "max_tokens": 200_000}, engine=engine))
         assert expanded["content"] == content
 
     def test_engine_bootstrap_does_not_externalize_until_ingest_path_runs(self, tmp_path):

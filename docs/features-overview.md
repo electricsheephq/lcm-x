@@ -9,10 +9,11 @@ embedding provider setup see [Embeddings setup](embeddings-setup.md).
 From v0.24.0 the installed plugin is `hermes-lcm-x` and the runtime engine is
 `lcm-x` (#471); the bundled skill keeps the name `hermes-lcm`.
 
-**Every feature below ships default-off.** A stock install behaves exactly
-like the previous release until an operator opts in with an environment
-variable, and each family keeps its data out of the core schema until first
-use, so a disabled install stays readable by older builds.
+**Defaults.** The fresh-tail token cap and the threshold full sweep (family 1)
+are on by default, because the managed deployment runs them on every profile.
+The other features ship default-off until an operator opts in with an
+environment variable. Each family keeps its data out of the core schema
+until first use, so a disabled install stays readable by older builds.
 
 ## The one-paragraph mental model
 
@@ -70,7 +71,8 @@ replaced payload keeps a lossless recovery path via its ref.
 
 Key switches: `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED`,
 `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (+ threshold vars),
-`LCM_FRESH_TAIL_MAX_TOKENS`, `LCM_THRESHOLD_FULL_SWEEP_ENABLED`.
+`LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`), `LCM_THRESHOLD_FULL_SWEEP_ENABLED`
+(default `true`).
 Full table: [Operator guide → Configuration](operator-guide.md#configuration).
 
 ## Family 2 — Temporal memory (rollups + `lcm_recent`)

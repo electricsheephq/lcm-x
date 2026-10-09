@@ -233,7 +233,7 @@ def test_the_exit_is_a_partial_stop_in_lcm_status_and_the_doctor(make_engine, su
 
 
 def test_the_summary_prefix_stays_first_after_an_exit(make_engine, summaries, caplog):
-    engine = exit_engine(make_engine)
+    engine = exit_engine(make_engine, threshold_full_sweep_enabled=False)  # #1013: one summary row, as before
     first = run(engine, text_view(), caplog)
     assert summaries and engine.last_compression_status == "compacted"
     calls = len(summaries)

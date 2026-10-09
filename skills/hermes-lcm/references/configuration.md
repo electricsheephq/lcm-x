@@ -49,9 +49,10 @@ steps for a legacy install without editing config or deleting anything.
 
 Use `docs/operator-guide.md` as the complete current source. Start with:
 
-- `LCM_CONTEXT_THRESHOLD`: when normal context pressure triggers compaction;
-- `LCM_FRESH_TAIL_COUNT`: newest messages kept raw;
-- `LCM_LEAF_CHUNK_TOKENS`: maximum raw material per leaf compaction group;
+- `LCM_CONTEXT_THRESHOLD` (default `0.75`): when normal context pressure triggers compaction;
+- `LCM_FRESH_TAIL_COUNT` (default `24`) and `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`): newest messages kept raw, and their token cap;
+- `LCM_LEAF_CHUNK_TOKENS` (default `8000`): maximum raw material per leaf compaction group;
+- `LCM_THRESHOLD_FULL_SWEEP_ENABLED` (default `true`): the threshold full sweep;
 - `LCM_LEAF_TARGET_RATIO` (default `0.20`), `LCM_LEAF_TARGET_MIN_TOKENS` (default `2000`) and `LCM_LEAF_TARGET_MAX_TOKENS` (default `12000`): leaf summary target `min(MAX, max(MIN, int(source_tokens * RATIO)))`; the first summary call gets twice the target as `max_tokens`. Defaults are unchanged; change them only after measuring what a different ratio keeps (#614);
 - `LCM_DATABASE_PATH`: profile-local SQLite path when the default is unsuitable;
 - `LCM_NATIVE_RECOVERY` (default `false`): removed in v0.25.0; ignored if set

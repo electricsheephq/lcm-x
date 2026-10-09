@@ -771,6 +771,7 @@ class LCMEngine(
         self._hold_fit_only_requested = False
         self._no_progress_candidate = False  # set by _compress_impl for compress()
         self._objective_only_noop = False
+        self._compress_dropped_ignored_rows = False  # #1013: this compress() dropped ignored rows
         self._last_gate_tokens = 0  # the latest should_compress/preflight observation
         # #651 one-shot handoff: preflight asked for maintenance below the host
         # threshold, so the automatic compress() that follows is cleanup-only.
@@ -2622,21 +2623,21 @@ class LCMEngine(
     def _effective_fresh_tail_max_tokens(self) -> int:
         """Return the active fresh-tail token cap.
 
-        When the user has not set LCM_FRESH_TAIL_MAX_TOKENS explicitly
-        (config value is 0) and the context is large enough to matter
+        When the configured cap is 0 (LCM_FRESH_TAIL_MAX_TOKENS=0; the
+        default is 24000) and the context is large enough to matter
         (> 50K), derive a context-proportional default so the fresh tail
         cannot consume the entire model window on small context models.
         50% of context_length leaves room for leaf chunks to accumulate
         and trigger compression.  Below 50K the count-based limit is
         sufficient and clamping would break small-context test fixtures.
         When fresh_tail_count is 0 the user explicitly wants no fresh
-        tail, so the implicit token cap must not override that.
+        tail, so no token cap (explicit or the default) may override that.
         """
+        if not self._config.fresh_tail_count:
+            return 0
         explicit = self._config.fresh_tail_max_tokens
         if explicit > 0:
             return explicit
-        if not self._config.fresh_tail_count:
-            return 0
         ctx = self.context_length or 0
         if ctx < 50_000:
             return 0
@@ -3821,7 +3822,8 @@ class LCMEngine(
                 for emission in scoped_proof.get("emissions") or ():
                     emission["scope"] = {**(emission.get("scope") or {}), "session_id": session_id}
             commit_proof["input"] = None
-            if commit_proof.get("published") or commit_proof.get("native") or commit_proof.get("recovery"):
+            if (commit_proof.get("published") or commit_proof.get("native") or commit_proof.get("recovery")
+                    or commit_proof.get("filtered")):
                 self._persist_compress_commit_proof(commit_proof)
         elif can_reassign:
             # No transferred commit proof (proof creation failed, an end that
@@ -7472,8 +7474,8 @@ class LCMEngine(
             "Tools: lcm_recall find facts from any earlier session, lcm_grep search, "
             "lcm_describe inspect DAG, lcm_expand recover details. "
             # #680: covers old and new stubs; no "[" here, so the note never parses as a stub.
-            'An "Externalized tool output" stub ending in ref=R means the full output is stored: '
-            'lcm_expand(externalized_ref="R") returns it.]'
+            'An "Externalized tool output" or user/assistant "Externalized payload" stub ending in ref=R '
+            'means the full output is stored: lcm_expand(externalized_ref="R") returns it.]'
         )
         if isinstance(content, str):
             return content + note

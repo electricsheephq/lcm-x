@@ -3287,6 +3287,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 time_to=time_to,
                 exclude_session_ids=excluded_session_ids,
                 allow_operators=bool(args.get("_allow_operators", False)),
+                **({"stemmed": True} if args.get("_stemmed") else {}),
                 **({"agent_operators": True} if args.get("_agent_operators") else {}),
             )
             for hit in msg_hits:
@@ -3551,6 +3552,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
         "total_results": len(results),
         "results": results[:limit],
     }
+    if args.get("_stemmed"):
+        response["fts_index"] = getattr(engine._store, "_last_fts_index", "plain")
     if role is not None:
         response["role"] = role
     if time_from is not None:
@@ -4404,6 +4407,7 @@ def lcm_grep(args: Dict[str, Any], **kwargs) -> str:
     parsed_args.pop("_allow_operators", None)
     parsed_args.pop("_agent_operators", None)
     parsed_args.pop("_grep_any_term", None)
+    parsed_args.pop("_stemmed", None)
     parsed_args["_agent_operators"] = True
     if mode == "full_text":
         payload = json.loads(_lcm_grep_full_text(parsed_args, **kwargs))
@@ -5316,6 +5320,11 @@ def _lcm_recall_approx_reason(arm: str) -> str:
     )
 
 
+class _RecallFtsHits(list):
+    """Keep the served index with this arm's rows, including an empty result."""
+    fts_index = "plain"
+
+
 def _lcm_recall_fts_arm(
     engine: "LCMEngine",
     query: str,
@@ -5331,6 +5340,7 @@ def _lcm_recall_fts_arm(
         {
             "query": or_query or query,
             "_allow_operators": bool(or_query),
+            "_stemmed": True,
             "sort": "relevance" if or_query or contains_emoji(query) else "recency",
             "mode": "recall",
             "session_scope": "all",
@@ -5350,7 +5360,8 @@ def _lcm_recall_fts_arm(
     message_search_error = payload.get("message_search_error")
     if message_search_error:
         return [], {"error": f"full-text message search failed: {message_search_error}"}
-    hits: list[dict[str, Any]] = []
+    hits = _RecallFtsHits()
+    hits.fts_index = payload.get("fts_index", "plain")
     for row in payload.get("results", []):
         store_id = row.get("store_id")
         if store_id is None:
@@ -6172,9 +6183,10 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     provider: Any = None
     provider_override = str(kwargs.get("provider_override") or "").strip()
 
+    served_fts_index = "plain"
     # -- FTS arm (the default-on value: works with embeddings disabled) --
     def _run_fts_arm() -> None:
-        nonlocal timed_out
+        nonlocal timed_out, served_fts_index
         fts_deadline = deadline
         fts_sub_budget_applied = False
         configured_provider = provider_override or str(
@@ -6253,6 +6265,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 degraded_reasons.append("full-text arm unavailable")
                 timed_out = timed_out or bool(fts_error.get("timeout"))
         else:
+            served_fts_index = getattr(hits, "fts_index", "plain")
             arm_hits["fts"] = hits
             coverage["fts"] = "ok"
 
@@ -6835,6 +6848,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             "arms_run": arm_order,
             "arm_weights": {name: arm_weights[i] for i, name in enumerate(arm_order)},
             "coverage": coverage,
+            "fts_index": served_fts_index,
             "rerank": rerank_status,
             "ordering": (
                 "rrf-fusion -> scope/recency prior -> rerank reorder (top window); "

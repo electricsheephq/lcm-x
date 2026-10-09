@@ -40,7 +40,8 @@ class _Provider:
 
 
 def _engine(tmp_path, session_id=SID, **overrides):
-    config = LCMConfig(database_path=str(tmp_path / "l.db"))
+    # #1013: these replay cells were sized for the pre-#1013 32-message fresh tail.
+    config = LCMConfig(database_path=str(tmp_path / "l.db"), fresh_tail_count=32)
     for key, value in overrides.items():
         setattr(config, key, value)
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "h"))

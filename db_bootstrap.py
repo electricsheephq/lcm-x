@@ -16,7 +16,7 @@ import shutil
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from typing import Iterable, Sequence
 
 from .config import sqlite_mmap_size
@@ -63,12 +63,14 @@ class ExternalContentFtsSpec:
         content_rowid: str,
         indexed_column: str,
         trigger_sqls: Sequence[str],
+        tokenize: str = "",
     ) -> None:
         self.table_name = table_name
         self.content_table = content_table
         self.content_rowid = content_rowid
         self.indexed_column = indexed_column
         self.trigger_sqls = tuple(trigger_sqls)
+        self.tokenize = tokenize
 
 
 def _is_sqlite_lock_error(exc: BaseException) -> bool:
@@ -477,7 +479,8 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
     # The feature table's *internal* shape is intentionally NOT checked here — an
     # early-variant feature table is still an interim stamp, repaired on apply.
     allowed = set(_V5_CORE_TABLE_COLUMNS) | set(_V5_CORE_PRESENCE_ONLY)
-    for fts in _V5_CORE_PRESENCE_ONLY:
+    allowed.add("messages_fts_stem")
+    for fts in (*_V5_CORE_PRESENCE_ONLY, "messages_fts_stem"):
         allowed.update(get_fts_shadow_table_names(fts))
     for table in tables:
         if table in allowed:
@@ -2514,6 +2517,11 @@ def _fts_needs_rebuild_structural(conn: sqlite3.Connection, spec: ExternalConten
         if "virtual table" not in normalized or "using fts5" not in normalized:
             return True
 
+        if spec.tokenize and not re.search(
+            r"tokenize\s*=\s*[\"']" + re.escape(spec.tokenize) + r"[\"']", normalized
+        ):
+            return True
+
         columns = conn.execute(
             f"PRAGMA table_info({quote_sql_identifier(spec.table_name)})"
         ).fetchall()
@@ -2925,6 +2933,7 @@ def join_background_integrity_scans(timeout: float | None = None) -> None:
         threads = list(_integrity_scan_threads.values())
     for thread in threads:
         thread.join(timeout)
+    join_background_stem_backfills(timeout)
 
 
 def _fts_needs_rebuild(
@@ -3067,6 +3076,203 @@ def _drop_fts_triggers(conn: sqlite3.Connection, trigger_sqls: Sequence[str]) ->
 def _drop_fts_artifacts(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> None:
     _drop_fts_triggers(conn, spec.trigger_sqls)
     _drop_fts_table(conn, spec.table_name)
+
+
+def _fts_tokenize_clause(spec: ExternalContentFtsSpec) -> str:
+    return ", tokenize='" + spec.tokenize.replace("'", "''") + "'" if spec.tokenize else ""
+
+
+def _create_stem_fts(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> None:
+    conn.execute(
+        f"CREATE VIRTUAL TABLE IF NOT EXISTS {spec.table_name} USING fts5("
+        f"content, content='messages', content_rowid='store_id'{_fts_tokenize_clause(spec)})"
+    )
+    for sql in spec.trigger_sqls:
+        conn.execute(sql)
+
+
+def _stem_metadata(conn: sqlite3.Connection, key: str, value: str | None = None) -> str:
+    if value is not None:
+        conn.execute("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)", (key, value))
+    row = conn.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
+    return str(row[0]) if row else ""
+
+
+def _mark_stem_ready(conn: sqlite3.Connection) -> None:
+    _stem_metadata(conn, "fts_stem_state", "ready")
+    if not get_existing_table_names(conn, ["lcm_migration_state"]):
+        logger.warning("Stem index ready; migration history table missing, skipping marker")
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO lcm_migration_state(step_name, completed_at) "
+        "VALUES('fts_stem_v1', strftime('%s','now'))"
+    )
+
+
+def ensure_message_stem_fts(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> bool:
+    """DDL and constant-size state checks only; never populate on the open path.
+
+    Returns False when a busy writer deferred the work to the next open: the caller must not
+    read the stem index on this handle, whose state may claim ``ready`` over missing triggers."""
+    if conn.execute("PRAGMA query_only").fetchone()[0]:
+        return True
+    state = _stem_metadata(conn, "fts_stem_state")
+    if (state in ("ready", "backfilling")
+            and get_existing_table_names(conn, [spec.table_name])
+            and not _fts_missing_triggers(conn, spec)):
+        # Nothing to repair: a steady-state open takes no write lock (#622). A backfill still in
+        # flight, or one skipped for low disk, is re-dispatched; the dispatch claims on its own.
+        if state == "backfilling":
+            dispatch_background_stem_backfill(conn, spec)
+        return True
+    previous_timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+    try:
+        with conn:
+            # Acquire write ownership before any DDL: read-only handles skip the
+            # optional index, and restored triggers commit with the reset flags.
+            # The index is optional, so a busy writer gets a short wait, not the
+            # open's full busy timeout (#622); the next open retries.
+            conn.execute(f"PRAGMA busy_timeout={INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS}")
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+            finally:
+                conn.execute(f"PRAGMA busy_timeout={previous_timeout}")
+            state = _stem_metadata(conn, "fts_stem_state")
+            table_existed = bool(get_existing_table_names(conn, [spec.table_name]))
+            missing = not table_existed or _fts_missing_triggers(conn, spec)
+            _create_stem_fts(conn, spec)
+            if missing and (state or table_existed):
+                # Writes skipped the index while a trigger was absent, whatever the prior state; an
+                # unreset backfill would skip those rows (their docsize exists) and still go ready.
+                _stem_metadata(conn, "fts_stem_reset", "1")
+                _stem_metadata(conn, "fts_stem_state", "backfilling")
+            elif (state != "ready" and _stem_metadata(conn, "fts_stem_reset") != "1"
+                  and not conn.execute("SELECT 1 FROM messages LIMIT 1").fetchone()):
+                _mark_stem_ready(conn)
+            elif not state:
+                _stem_metadata(conn, "fts_stem_state", "backfilling")
+    except sqlite3.OperationalError as exc:
+        if _is_sqlite_lock_error(exc):
+            logger.warning("Database busy: stem index initialization deferred to the next open")
+            return False
+        if "readonly" not in str(exc).lower() and "read-only" not in str(exc).lower():
+            raise
+        logger.info("Read-only database: skipping optional stem index initialization")
+        return True
+    if _stem_metadata(conn, "fts_stem_state") == "backfilling":
+        dispatch_background_stem_backfill(conn, spec)
+    return True
+
+
+_stem_threads: dict[str, threading.Thread] = {}
+_stem_lock = threading.Lock()
+
+
+def _run_stem_backfill(db_path: str, spec: ExternalContentFtsSpec, stamp: str) -> None:
+    try:
+        with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+            def disk_available() -> bool:
+                if _check_disk_space(db_path):
+                    return True
+                logger.warning("Low disk space: stem backfill skipped")
+                return False
+
+            if not disk_available():
+                return
+            conn.execute("BEGIN IMMEDIATE")
+            if _stem_metadata(conn, "fts_stem_reset") == "1":
+                conn.execute("INSERT INTO messages_fts_stem(messages_fts_stem) VALUES('delete-all')")
+                conn.execute("DELETE FROM metadata WHERE key='fts_stem_reset'")
+            conn.commit()
+            for _ in range(2):
+                # Page by key, 1000 existing rows at a time: sparse or imported store_ids cost no
+                # empty batches, so the run scales with the message count, not the id span.
+                last = conn.execute("SELECT COALESCE(MIN(store_id), 1) - 1 FROM messages").fetchone()[0]
+                while True:
+                    end = conn.execute(
+                        "SELECT MAX(store_id) FROM (SELECT store_id FROM messages WHERE store_id > ? "
+                        "ORDER BY store_id LIMIT 1000)", (last,),
+                    ).fetchone()[0]
+                    if end is None:
+                        break
+                    if not disk_available():
+                        return
+                    conn.execute("BEGIN IMMEDIATE")
+                    conn.execute(
+                        "INSERT INTO messages_fts_stem(rowid, content) "
+                        "SELECT store_id, content FROM messages WHERE store_id > ? AND store_id <= ? "
+                        "AND NOT EXISTS (SELECT 1 FROM messages_fts_stem_docsize WHERE id=store_id)",
+                        (last, end),
+                    )
+                    conn.commit()
+                    time.sleep(0.03)
+                    last = end
+                if not disk_available():
+                    return
+                conn.execute("BEGIN IMMEDIATE")
+                indexed = conn.execute("SELECT COUNT(*) FROM messages_fts_stem_docsize").fetchone()[0]
+                total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+                if indexed == total and _stem_metadata(conn, "fts_stem_reset") != "1":
+                    _mark_stem_ready(conn)
+                    conn.commit()
+                    return
+                conn.commit()
+            logger.warning("Stem backfill count mismatch; leaving state backfilling")
+    except Exception:
+        logger.exception("Background stem backfill failed; leaving state backfilling")
+    finally:
+        try:
+            with closing(sqlite3.connect(db_path, timeout=0.05)) as cleanup:
+                cleanup.execute("DELETE FROM metadata WHERE key='fts_stem_claim' AND value=?", (stamp,))
+                cleanup.commit()
+        except sqlite3.Error:
+            logger.warning("Could not clear stem backfill claim; it will expire")
+        with _stem_lock:
+            if _stem_threads.get(db_path) is threading.current_thread():
+                _stem_threads.pop(db_path, None)
+
+
+def dispatch_background_stem_backfill(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> None:
+    db_path = _database_path_for_connection(conn)
+    if not db_path or db_path == ":memory:":
+        return
+    with _stem_lock:
+        if db_path in _stem_threads and _stem_threads[db_path].is_alive():
+            return
+        stamp = str(time.time())
+        try:
+            with closing(sqlite3.connect(db_path, timeout=INTEGRITY_SCAN_CLAIM_BUSY_TIMEOUT_MS / 1000)) as claim:
+                claim.execute("BEGIN IMMEDIATE")
+                previous = _stem_metadata(claim, "fts_stem_claim")
+                if previous and float(stamp) - float(previous) < INTEGRITY_SCAN_STALE_SECONDS:
+                    return
+                _stem_metadata(claim, "fts_stem_claim", stamp)
+                claim.commit()
+        except sqlite3.Error:
+            logger.warning("Stem backfill claim locked; skipped for this open")
+            return
+        thread = threading.Thread(target=_run_stem_backfill, args=(db_path, spec, stamp), daemon=True)
+        _stem_threads[db_path] = thread
+        thread.start()
+
+
+def join_background_stem_backfills(timeout: float | None = None) -> None:
+    with _stem_lock:
+        threads = list(_stem_threads.values())
+    for thread in threads:
+        thread.join(timeout)
+
+
+def stem_index_status(conn: sqlite3.Connection | None) -> str:
+    try:
+        state = _stem_metadata(conn, "fts_stem_state")
+        if state == "backfilling":
+            indexed = conn.execute("SELECT COUNT(*) FROM messages_fts_stem_docsize").fetchone()[0]
+            total = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
+            return f"backfilling {indexed}/{total}"
+        return state or "absent"
+    except (sqlite3.Error, AttributeError, TypeError):
+        return "absent"
 
 
 def _check_disk_space(db_path: str) -> bool:
@@ -3310,7 +3516,7 @@ def repair_external_content_fts(
                     CREATE VIRTUAL TABLE {quote_sql_identifier(spec.table_name)} USING fts5(
                         {quote_sql_identifier(spec.indexed_column)},
                         content={quote_sql_identifier(spec.content_table)},
-                        content_rowid={quote_sql_identifier(spec.content_rowid)}
+                        content_rowid={quote_sql_identifier(spec.content_rowid)}{_fts_tokenize_clause(spec)}
                     )
                     """
                 )

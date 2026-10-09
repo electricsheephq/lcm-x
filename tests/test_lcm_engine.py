@@ -596,7 +596,9 @@ def test_profile_rebind_clears_old_auxiliary_session_state(tmp_path):
         engine.shutdown()
 
 
-def test_config_database_path_profile_rebind_updates_externalization_home(tmp_path):
+def test_config_database_path_profile_rebind_updates_externalization_home(tmp_path, monkeypatch):
+    # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
     home_a = tmp_path / "profile-a"
     home_b = tmp_path / "profile-b"
     config = LCMConfig(
@@ -2148,6 +2150,7 @@ class TestEngineABC:
             fresh_tail_count=4,
             leaf_chunk_tokens=100,
             fresh_tail_pressure_yield_enabled=False,
+            threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
         )
         instance = LCMEngine(config=config)
         instance._session_id = "test-session"
@@ -2179,6 +2182,7 @@ class TestEngineABC:
             fresh_tail_count=4,
             leaf_chunk_tokens=100,
             fresh_tail_pressure_yield_enabled=False,
+            threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
         )
         instance = LCMEngine(config=config)
         instance._session_id = "test-session"
@@ -3863,7 +3867,9 @@ class TestEngineABC:
         finally:
             instance.shutdown()
 
-    def test_late_off_current_normal_session_end_dedupes_externalized_prefix(self, tmp_path):
+    def test_late_off_current_normal_session_end_dedupes_externalized_prefix(self, tmp_path, monkeypatch):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         config = LCMConfig(
             database_path=str(tmp_path / "late-off-current-externalized-prefix.db"),
             ignore_session_patterns=["cron"],
@@ -3873,7 +3879,7 @@ class TestEngineABC:
         )
         instance = LCMEngine(config=config)
         try:
-            raw_opener = {"role": "user", "content": "externalized opener " + "x" * 200}
+            raw_opener = {"role": "user", "content": "x" * 900 + " externalized opener " + "x" * 900}  # #1016: marker outside the stub's head/tail preview
 
             instance.on_session_start("reused-id", platform="cron", context_length=1_000)
             instance.ingest([{"role": "user", "content": "ignored opener"}])
@@ -6314,6 +6320,7 @@ class TestMessageFiltering:
         monkeypatch.setattr(message_patterns_mod, "_regex_engine", _FakeTimeoutRegexEngine)
 
     def _make_engine(self, tmp_path, db_name, **config_kwargs):
+        config_kwargs.setdefault("threshold_full_sweep_enabled", False)  # #1013: pre-#1013 single-pass compaction
         config = LCMConfig(
             database_path=str(tmp_path / db_name),
             **config_kwargs,
@@ -6881,6 +6888,7 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         first.on_session_start(
@@ -6916,6 +6924,7 @@ class TestMessageFiltering:
                 database_path=str(db_path),
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         try:
@@ -6949,6 +6958,7 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         engine.on_session_start(
@@ -7014,6 +7024,7 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         first.on_session_start(
@@ -7047,6 +7058,7 @@ class TestMessageFiltering:
                 database_path=str(db_path),
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         try:
@@ -8065,6 +8077,8 @@ class TestMessageFiltering:
             second.shutdown()
 
     def test_source_ids_exclude_stored_externalized_rows_ignored_by_current_filter(self, tmp_path, monkeypatch):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         db_path = tmp_path / "lcm_msg_ignore_externalized_source_ids_exclude.db"
         hermes_home = tmp_path / "hermes-externalized-ignore"
         first = LCMEngine(
@@ -8080,7 +8094,7 @@ class TestMessageFiltering:
         first.on_session_start("session", platform="telegram", context_length=1000)
         ignored_store_id = first._store.append(
             "session",
-            {"role": "user", "content": "SECRET_PAYLOAD_MARKER externalized row " + "x" * 200},
+            {"role": "user", "content": "x" * 900 + " SECRET_PAYLOAD_MARKER externalized row " + "x" * 900},  # #1016: marker outside the stub's head/tail preview
         )
         stored_externalized_row = first._store.get(ignored_store_id)
         assert stored_externalized_row is not None
@@ -8125,7 +8139,9 @@ class TestMessageFiltering:
         finally:
             second.shutdown()
 
-    def test_preflight_filters_stored_externalized_rows_ignored_by_current_filter(self, tmp_path):
+    def test_preflight_filters_stored_externalized_rows_ignored_by_current_filter(self, tmp_path, monkeypatch):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         db_path = tmp_path / "lcm_msg_ignore_externalized_preflight.db"
         hermes_home = tmp_path / "hermes-externalized-preflight"
         first = LCMEngine(
@@ -8142,7 +8158,7 @@ class TestMessageFiltering:
         first.on_session_start("session", platform="telegram", context_length=1000)
         ignored_store_id = first._store.append(
             "session",
-            {"role": "user", "content": "SECRET_PAYLOAD_MARKER externalized row " + "x" * 200},
+            {"role": "user", "content": "x" * 900 + " SECRET_PAYLOAD_MARKER externalized row " + "x" * 900},  # #1016: marker outside the stub's head/tail preview
         )
         stored_externalized_row = first._store.get(ignored_store_id)
         assert stored_externalized_row is not None
@@ -8184,6 +8200,8 @@ class TestMessageFiltering:
     def test_user_copied_externalized_placeholder_after_ignored_externalized_row_is_not_filtered(
         self, tmp_path, monkeypatch
     ):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         db_path = tmp_path / "lcm_msg_ignore_externalized_literal_copy.db"
         hermes_home = tmp_path / "hermes-externalized-literal-copy"
         first = LCMEngine(
@@ -8245,7 +8263,9 @@ class TestMessageFiltering:
         finally:
             second.shutdown()
 
-    def test_prior_externalized_placeholder_scan_pages_past_default_limit(self, tmp_path):
+    def test_prior_externalized_placeholder_scan_pages_past_default_limit(self, tmp_path, monkeypatch):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         db_path = tmp_path / "lcm_msg_ignore_externalized_prior_scan_pages.db"
         hermes_home = tmp_path / "hermes-externalized-prior-scan-pages"
         engine = LCMEngine(
@@ -8284,6 +8304,8 @@ class TestMessageFiltering:
     def test_duplicate_stored_externalized_rows_ignored_by_current_filter_are_all_filtered(
         self, tmp_path, monkeypatch
     ):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         db_path = tmp_path / "lcm_msg_ignore_duplicate_externalized_replay.db"
         hermes_home = tmp_path / "hermes-duplicate-externalized-replay"
         first = LCMEngine(
@@ -8546,7 +8568,9 @@ class TestMessageFiltering:
         finally:
             engine.shutdown()
 
-    def test_active_externalized_stub_without_store_id_is_filtered_after_ignore_added(self, tmp_path):
+    def test_active_externalized_stub_without_store_id_is_filtered_after_ignore_added(self, tmp_path, monkeypatch):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         db_path = tmp_path / "lcm_msg_ignore_externalized_active_stub.db"
         hermes_home = tmp_path / "hermes-externalized-active-stub"
         first = LCMEngine(
@@ -9341,6 +9365,7 @@ class TestMessageFiltering:
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
                 ignore_message_patterns=["SECRET"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
             )
         )
         engine.on_session_start(
@@ -9598,7 +9623,9 @@ class TestMessageFiltering:
         finally:
             second.shutdown()
 
-    def test_preflight_ambiguous_generated_placeholder_still_requests_externalization_cleanup(self, tmp_path):
+    def test_preflight_ambiguous_generated_placeholder_still_requests_externalization_cleanup(self, tmp_path, monkeypatch):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         db_path = tmp_path / "lcm_msg_ignore_preflight_placeholder_externalize_cleanup.db"
         first = LCMEngine(
             config=LCMConfig(
@@ -29320,6 +29347,7 @@ class TestExtractionDuringCompress:
             extraction_model="test-extract-model",
             fresh_tail_count=4,
             leaf_chunk_tokens=100,
+            threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
         )
         eng = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         eng._session_id = "extract-integration"

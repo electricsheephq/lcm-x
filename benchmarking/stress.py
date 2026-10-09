@@ -436,9 +436,11 @@ def _db_counts(db_path: Path) -> dict[str, int]:
     out: dict[str, int] = {}
     con = sqlite3.connect(db_path)
     try:
-        for table in ["messages", "summary_nodes", "messages_fts", "nodes_fts", "lcm_lifecycle_state"]:
+        for table in ["messages", "summary_nodes", "messages_fts", "messages_fts_stem", "nodes_fts", "lcm_lifecycle_state"]:
             try:
-                out[table] = int(con.execute(f"select count(*) from {table}").fetchone()[0])
+                # External-content COUNT(*) reads through to messages; the stem index's own size is docsize.
+                source = "messages_fts_stem_docsize" if table == "messages_fts_stem" else table
+                out[table] = int(con.execute(f"select count(*) from {source}").fetchone()[0])
             except sqlite3.Error:
                 out[table] = -1
     finally:

@@ -575,21 +575,21 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 
 | Variable | Default | Use |
 |----------|---------|-----|
-| `LCM_CONTEXT_THRESHOLD` | `0.35` | Fraction of the context window that triggers LCM compaction |
+| `LCM_CONTEXT_THRESHOLD` | `0.75` | Fraction of the context window that triggers LCM compaction; the survival fit (`LCM_SURVIVAL_FIT`) protects against overflow, so the trigger does not need to be low for safety |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `0` | If `> 0`, force compaction at this absolute prompt-token count instead of `context_length × LCM_CONTEXT_THRESHOLD`. Cross-model context-health setpoint (common coding default: `130000`) so large windows do not delay compaction and degrade recall |
 | `LCM_MODEL_THRESHOLDS` | empty | Per-model threshold overrides. Format: `"glm-5.2:0.70,glm-5.2-1M:0.25"`. Keys matched as substrings (longest wins). Also settable as `lcm.model_thresholds` in config.yaml. |
-| `LCM_FRESH_TAIL_COUNT` | `32` | Recent messages protected from compaction |
-| `LCM_FRESH_TAIL_MAX_TOKENS` | `0` | Optional token cap for the protected fresh tail (`0` disables it); always retains the newest message and complete assistant/tool-result groups |
+| `LCM_FRESH_TAIL_COUNT` | `24` | Recent messages protected from compaction |
+| `LCM_FRESH_TAIL_MAX_TOKENS` | `24000` | Token cap for the protected fresh tail; while `LCM_FRESH_TAIL_COUNT` is nonzero it always retains the newest message and complete assistant/tool-result groups (`LCM_FRESH_TAIL_COUNT=0` keeps no fresh tail, whatever the cap). `0` removes the explicit cap (on a window of 50k tokens or more the engine then derives one at half the window) |
 | `LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED` | `true` | Default-on: when compaction is deadlocked because the count-protected tail covers the whole over-threshold session (#441), the tail yields to a derived token bound so compaction can progress; `false` restores the strict count tail (rollback switch) |
 | `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS` | `3` | Consecutive tail-blocked compaction attempts under host-observed pressure before the yield engages; any attempt not blocked by the tail resets the count; `1` yields on first observation |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
-| `LCM_LEAF_CHUNK_TOKENS` | `20000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
+| `LCM_LEAF_CHUNK_TOKENS` | `8000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
 | `LCM_LEAF_TARGET_RATIO` | `0.20` | Leaf summary target as a share of the leaf's source tokens (`> 0` and `<= 1`); target = `min(MAX, max(MIN, int(source_tokens * RATIO)))` and the first summary call gets `max_tokens` = 2 × target (#614) |
 | `LCM_LEAF_TARGET_MIN_TOKENS` | `2000` | Floor of the leaf summary target (`>= 1`) |
 | `LCM_LEAF_TARGET_MAX_TOKENS` | `12000` | Cap of the leaf summary target (`>=` the floor); an out-of-range value of any of the three keys falls back to its default with a config warning |
-| `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable chunk-sized leaf compaction passes instead of compacting the whole non-tail raw backlog per pass |
+| `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable backlog-sized leaf chunk targets; when off, one leaf takes at most max(`LCM_LEAF_CHUNK_TOKENS`, `LCM_DYNAMIC_LEAF_CHUNK_MAX`) of the oldest non-tail raw backlog, capped at 40% of a known window |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `40000` | Upper bound for dynamic leaf chunk targets |
-| `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `false` | At threshold, opt into one synchronous bounded sweep that drains chunked raw history before publishing one new active context |
+| `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `true` | At threshold, run one synchronous bounded sweep that drains chunked raw history before publishing one new active context; `false` compacts only until pressure falls below the trigger |
 | `LCM_SUMMARY_PREFIX_TARGET_TOKENS` | `0` | Sweep-only summary-frontier target; `0` derives one `LCM_LEAF_CHUNK_TOKENS` budget |
 | `LCM_FOREGROUND_SOFT_SECONDS` | `60` | Sweep soft target, counted from `compress()` entry: after the first stored leaf or condensed node, no summariser call starts unless its recent duration says it ends by then (`0` = none; at most the hard bound) |
 | `LCM_FOREGROUND_HARD_SECONDS` | `120` | Sweep hard bound, counted from `compress()` entry: no summariser call starts unless it is expected to end, with a finalize reserve, by then, and none gets a timeout past it (`0` or invalid = `120`) |
@@ -598,10 +598,11 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup; a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
 
-When `LCM_FRESH_TAIL_MAX_TOKENS` is enabled, the protected suffix must satisfy
-both the message-count and token bounds. The newest message is never dropped,
-and a boundary that would begin inside an assistant tool-call/result group is
-moved back to that assistant even when doing so exceeds a configured bound.
+When `LCM_FRESH_TAIL_MAX_TOKENS` is above `0`, the protected suffix must satisfy
+both the message-count and token bounds. While `LCM_FRESH_TAIL_COUNT` is nonzero
+the newest message is never dropped (`0` keeps no fresh tail), and a boundary
+that would begin inside an assistant tool-call/result group is moved back to that
+assistant even when doing so exceeds a configured bound.
 
 ### Filtering and storage settings
 
@@ -701,10 +702,16 @@ endpoint-aware locality for remote Ollama configurations.
 
 ### Threshold ownership
 
-When `context.engine: lcm-x` is active, `LCM_CONTEXT_THRESHOLD` is the compaction
-threshold LCM uses. Hermes core `compression.threshold` belongs to the built-in
-compressor. Hermes core `compression.enabled` is still the global gate that
-allows compaction, so leave it enabled when using LCM.
+When `context.engine: lcm-x` is active, LCM takes its compaction threshold from,
+in order: `LCM_CONTEXT_THRESHOLD`, then `lcm.context_threshold` in config.yaml,
+then the Hermes core `compression.threshold` raised to at least the LCM default
+(`0.75`). A bare Hermes install seeds `compression.threshold: 0.50`, so without
+an LCM setting LCM uses `0.75`; `/lcm status` reports the source
+`config_yaml:compression.threshold(floored)` and a config warning when the
+inherited value was raised. To go lower, set `LCM_CONTEXT_THRESHOLD` or
+`lcm.context_threshold`. When Hermes core `compression.enabled` is false, LCM
+uses its own default; that flag is still the global gate that allows
+compaction, so leave it enabled when using LCM.
 
 If `LCM_ABSOLUTE_THRESHOLD_TOKENS` is set to a positive integer, it overrides the
 ratio-derived trigger after window math runs. Use this when you want a fixed
@@ -771,6 +778,11 @@ A reasonable first pass for a true 1M effective window is:
 | Balanced large-context use | `350000` to `500000` | `0.35` to `0.50` | Good starting point for many long-running agents |
 | Keep more raw context active | `600000+` | `0.60+` | Higher token burn, later compaction |
 
+The default `0.75` suits windows up to about 272k tokens. On a true 1M window it
+starts compaction at `750000` prompt tokens, so pick a row above, or set
+`LCM_MODEL_THRESHOLDS` / `LCM_ABSOLUTE_THRESHOLD_TOKENS`, if that is later than
+you want.
+
 Tune against your effective `context_length` if Hermes caps the provider's
 advertised window.
 
@@ -778,7 +790,7 @@ Start with `LCM_CONTEXT_THRESHOLD`, `LCM_FRESH_TAIL_COUNT`, and large output
 externalization. Only tune leaf chunking after checking `lcm_status` and
 understanding whether your workload is dominated by huge raw backlog passes.
 
-`LCM_THRESHOLD_FULL_SWEEP_ENABLED=true` is an opt-in cache-shape policy. Once
+`LCM_THRESHOLD_FULL_SWEEP_ENABLED` (default `true`) is a cache-shape policy. Once
 threshold pressure triggers compaction, the invocation keeps summarizing the
 oldest raw chunks outside the protected fresh tail even after pressure falls
 below the trigger. It then condenses the provider-visible summary frontier only
