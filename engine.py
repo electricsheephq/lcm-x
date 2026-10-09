@@ -191,7 +191,15 @@ class _RollupMaintenanceScheduler:
     during an in-flight build without allowing concurrent duplicate builds.
     """
 
-    def __init__(self, max_pending_jobs: int = 64) -> None:
+    def __init__(
+        self,
+        max_pending_jobs: int = 64,
+        *,
+        kind: str = "temporal rollup",
+        thread_name: str = "lcm-rollup-maintenance",
+    ) -> None:
+        self._kind = kind
+        self._thread_name = thread_name
         self._condition = threading.Condition()
         self._max_pending_jobs = max(1, int(max_pending_jobs))
         self._jobs: deque[
@@ -263,8 +271,9 @@ class _RollupMaintenanceScheduler:
                 return True
             if len(self._jobs) >= self._max_pending_jobs:
                 logger.warning(
-                    "LCM temporal rollup maintenance queue is full; "
+                    "LCM %s maintenance queue is full; "
                     "deferring database=%s scope=%s until a later bind",
+                    self._kind,
                     key[0],
                     key[1],
                 )
@@ -272,7 +281,7 @@ class _RollupMaintenanceScheduler:
             if self._worker is None or not self._worker.is_alive():
                 worker = threading.Thread(
                     target=self._run,
-                    name="lcm-rollup-maintenance",
+                    name=self._thread_name,
                     daemon=True,
                 )
                 worker.start()
@@ -360,7 +369,8 @@ class _RollupMaintenanceScheduler:
                     job()
                 except (Exception, asyncio.CancelledError):
                     logger.warning(
-                        "LCM background temporal rollup maintenance failed for database=%s scope=%s",
+                        "LCM background %s maintenance failed for database=%s scope=%s",
+                        self._kind,
                         key[0],
                         key[1],
                         exc_info=True,
@@ -383,7 +393,9 @@ class _RollupMaintenanceScheduler:
 _ROLLUP_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler()
 # #1014: incremental embedding passes get their own worker, so a slow local
 # model load never delays a rollup pass and draining one never waits on the other.
-_EMBEDDING_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler()
+_EMBEDDING_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler(
+    kind="incremental embedding", thread_name="lcm-embedding-maintenance"
+)
 
 _SESSION_END_BUSY_TIMEOUT_MS = 50
 # #909/#977: a condensation group of at most this many source tokens is about as long as its summary (Track S

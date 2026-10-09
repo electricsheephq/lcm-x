@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 
 import pytest
 
@@ -392,3 +393,26 @@ def test_status_backlog_names_uncertain_rows_the_pass_cannot_retry(tmp_path, hom
         )
     finally:
         engine.shutdown()
+
+
+def test_embedding_worker_is_named_for_embeddings_not_rollups(caplog):
+    scheduler = lcm_engine._RollupMaintenanceScheduler(
+        max_pending_jobs=1, kind="incremental embedding",
+        thread_name="lcm-embedding-maintenance",
+    )
+    assert lcm_engine._EMBEDDING_MAINTENANCE_SCHEDULER._thread_name == "lcm-embedding-maintenance"
+    assert lcm_engine._EMBEDDING_MAINTENANCE_SCHEDULER._kind == "incremental embedding"
+    assert lcm_engine._ROLLUP_MAINTENANCE_SCHEDULER._thread_name == "lcm-rollup-maintenance"
+    started, release = threading.Event(), threading.Event()
+    try:
+        assert scheduler.schedule(("db", "embeddings"), lambda: (started.set(), release.wait()))
+        assert started.wait(5)  # the first job is active, so the queue is empty
+        assert scheduler.schedule(("db-2", "embeddings"), lambda: None)
+        with caplog.at_level(logging.WARNING, logger=lcm_engine.__name__):
+            assert not scheduler.schedule(("db-3", "embeddings"), lambda: None)
+        full = [r.getMessage() for r in caplog.records if "queue is full" in r.getMessage()]
+        assert full and full[0].startswith("LCM incremental embedding maintenance queue is full")
+        assert scheduler._worker.name == "lcm-embedding-maintenance"
+    finally:
+        release.set()
+        scheduler.drain({("db", "embeddings"), ("db-2", "embeddings")}, timeout=5)
