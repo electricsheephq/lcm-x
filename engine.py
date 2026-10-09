@@ -39,6 +39,7 @@ from .engine_registry import (
     _remove_registry_entries_for_engine,
     ActiveEngineUseResult,
     ActiveEngineUseStatus,
+    live_bound_session_ids,
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
 )
 from .escalation import (
@@ -2339,7 +2340,10 @@ class LCMEngine(
             self._config.empty_lifecycle_gc_enabled
             and self._lifecycle.row_count() > self._config.empty_lifecycle_gc_threshold
         ):
-            protected = {str(self._session_id)} if self._session_id else None
+            # #753: also keep rows other live clones in this process have bound.
+            protected = live_bound_session_ids()
+            if self._session_id:
+                protected.add(str(self._session_id))
             max_age = self._config.empty_lifecycle_gc_max_age_hours
             try:
                 deleted = self._lifecycle.prune_empty_sessions(
