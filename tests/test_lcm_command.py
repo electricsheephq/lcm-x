@@ -273,7 +273,7 @@ def test_lcm_status_does_not_report_invalid_env_as_effective_source(tmp_path, mo
 
     payload = json.loads(lcm_tools.lcm_status({}, engine=engine))
 
-    assert payload["config"]["leaf_chunk_tokens"] == 20000
+    assert payload["config"]["leaf_chunk_tokens"] == 8000
     assert payload["config_sources"]["leaf_chunk_tokens"] == "default"
     assert any("LCM_LEAF_CHUNK_TOKENS" in warning for warning in payload["config_source_warnings"])
 

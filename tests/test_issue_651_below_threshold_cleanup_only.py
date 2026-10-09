@@ -208,7 +208,8 @@ def test_t3_the_hold_survives_a_following_turn_that_stores_new_rows(tmp_path, su
 def test_t3_a_hidden_only_leaf_advances_coverage_and_holds_until_turn_end(tmp_path, summaries):
     """#581 (b): the view is all fresh tail; the leaf covers owned rows the view does not show. It consumes no
     host row; #904 keeps the host list unchanged and holds further passes until turn end."""
-    engine = _engine(tmp_path, leaf_chunk_tokens=400, context_threshold=0.001)
+    engine = _engine(tmp_path, leaf_chunk_tokens=400, context_threshold=0.001,
+                     threshold_full_sweep_enabled=False)  # #1013: one hidden-only leaf, as before the default flip
     old = [*_turn("H1", 100.0), *_turn("H2", 110.0)]
     tail = _turn("T9", 900.0)
     try:
@@ -284,7 +285,8 @@ def test_t4_the_hold_does_not_apply_at_the_survival_ceiling(tmp_path, summaries)
 def _review_trace_engine(tmp_path):
     """The review's trace: window 100k, threshold 35k, reserve 0.15, assembly cap 90k; a foreground no-progress
     pass at 40k arms the hold; an in-process auxiliary (LCM-bypassed) call then runs on this thread."""
-    engine = _engine(tmp_path, context_length=100_000, leaf_chunk_tokens=100_000, max_assembly_tokens=90_000)
+    engine = _engine(tmp_path, context_length=100_000, leaf_chunk_tokens=100_000, max_assembly_tokens=90_000,
+                     context_threshold=0.35)  # #1013: the review trace is the pre-#1013 35k threshold
     view = _view(1)  # #668: an unshortenable newest turn still arms the no-progress hold
     assert engine.threshold_tokens == 35_000
     engine.last_prompt_tokens = 40_000

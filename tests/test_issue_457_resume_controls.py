@@ -43,6 +43,9 @@ def _engine(tmp_path, **overrides):
     config = LCMConfig(
         database_path=str(tmp_path / "lcm.db"),
         large_output_externalization_path=str(tmp_path / "externalized"),
+        # #1013: these resume cells were sized for the pre-#1013 compaction defaults.
+        context_threshold=0.35, fresh_tail_count=32, fresh_tail_max_tokens=0, leaf_chunk_tokens=20_000,
+        threshold_full_sweep_enabled=False,
     )
     for key, value in overrides.items():
         setattr(config, key, value)

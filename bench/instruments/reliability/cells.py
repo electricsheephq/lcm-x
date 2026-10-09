@@ -49,6 +49,12 @@ ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.
 ISSUE_TRANSPORTS = {861: ("acp-process",)}
 
 
+# #1013 changed the product defaults; a cell sized for the earlier trigger pins the old values here.
+PRE_1013_DEFAULTS = {"LCM_CONTEXT_THRESHOLD": "0.35", "LCM_FRESH_TAIL_COUNT": "32", "LCM_FRESH_TAIL_MAX_TOKENS": "0",
+                     "LCM_LEAF_CHUNK_TOKENS": "20000", "LCM_THRESHOLD_FULL_SWEEP_ENABLED": "false",
+                     "LCM_TEMPORAL_ROLLUPS_ENABLED": "false"}
+
+
 def tight(window: int) -> dict:
     k = window / 64000
     return {"LCM_CONTEXT_THRESHOLD": "0.5", "LCM_FRESH_TAIL_COUNT": "24", "LCM_FRESH_TAIL_MAX_TOKENS": str(int(12000 * k)),
@@ -194,9 +200,10 @@ def registry() -> list[dict]:
             cell(f"cancel-retry/{m}", [7, 493, 544], in_place=ip, faults=[{"kind": "cancel_then_retry", "turn": 22}],
                  doc="ACP cancel (request_hard_interrupt) during the provider call, then the same prompt re-sent: the "
                      "host re-attaches the cancelled prompt (acp_adapter/server.py _attach_interrupted_prompt)."),
-            cell(f"long-80/{m}", [], in_place=ip, turns=80, repeat=1000, lcm_env={},
+            cell(f"long-80/{m}", [], in_place=ip, turns=80, repeat=1000, lcm_env=PRE_1013_DEFAULTS,
                  assistant={"real_usage": True}, min_compactions=8,
-                 doc="LCM default tuning with provider-reported usage, 80 turns (the LONG cells of the #553 probe file)."),
+                 doc="LCM default tuning with provider-reported usage, 80 turns (the LONG cells of the #553 probe file); "
+                     "pinned to the pre-#1013 defaults, whose earlier trigger its 8-compaction minimum was sized for."),
             cell(f"multi-session-one-process/{m}", [566], in_place=ip, cron_every=5,
                  doc="A chat session S0 and a fresh platform='cron' agent every 5 S0 turns in ONE host process "
                      "(cron/scheduler.py); cron turns are tagged K."),

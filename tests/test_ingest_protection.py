@@ -3971,6 +3971,7 @@ def test_ignore_message_patterns_match_original_suspicious_assistant_before_stor
         fresh_tail_count=10,
         leaf_chunk_tokens=10_000,
         context_threshold=0.95,
+        fresh_tail_max_tokens=0,  # #1013: the quarantine rebind shape needs the pre-#1013 uncapped tail
         large_output_externalization_path=str(tmp_path / "externalized"),
     )
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
@@ -4002,6 +4003,7 @@ def test_ignored_quarantined_assistant_rebind_reconciliation_does_not_duplicate_
         fresh_tail_count=10,
         leaf_chunk_tokens=10_000,
         context_threshold=0.95,
+        fresh_tail_max_tokens=0,  # #1013: the quarantine rebind shape needs the pre-#1013 uncapped tail
         large_output_externalization_path=str(tmp_path / "externalized"),
     )
     messages = [
@@ -4046,6 +4048,7 @@ def test_existing_quarantined_assistant_row_rebinds_after_ignore_pattern_added(t
         fresh_tail_count=10,
         leaf_chunk_tokens=10_000,
         context_threshold=0.95,
+        fresh_tail_max_tokens=0,  # #1013: the quarantine rebind shape needs the pre-#1013 uncapped tail
         large_output_externalization_path=str(tmp_path / "externalized"),
     )
     messages = [
@@ -4242,6 +4245,7 @@ def test_no_system_ignored_quarantined_assistant_rebind_does_not_duplicate_tail(
         fresh_tail_count=10,
         leaf_chunk_tokens=10_000,
         context_threshold=0.95,
+        fresh_tail_max_tokens=0,  # #1013: the quarantine rebind shape needs the pre-#1013 uncapped tail
         large_output_externalization_path=str(tmp_path / "externalized"),
     )
     messages = [
@@ -4574,6 +4578,7 @@ def test_no_system_raw_ignored_quarantined_assistant_rebind_preserves_repeated_t
         fresh_tail_count=10,
         leaf_chunk_tokens=10_000,
         context_threshold=0.95,
+        fresh_tail_max_tokens=0,  # #1013: the quarantine rebind shape needs the pre-#1013 uncapped tail
         large_output_externalization_path=str(tmp_path / "externalized"),
     )
     messages = [

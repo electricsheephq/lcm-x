@@ -101,7 +101,7 @@ def test_no_compaction_labels_a_summary_as_the_user_objective(tmp_path, monkeypa
 
 def test_default_settings_first_compaction_keeps_the_real_request(tmp_path, monkeypatch):
     engine = _engine(tmp_path, monkeypatch, "t84b")
-    assert engine._config.fresh_tail_count == 32 and engine._config.max_assembly_tokens == 0
+    assert engine._config.fresh_tail_count == 24 and engine._config.max_assembly_tokens == 0
     msgs = _opening(False)
     for i in range(20):
         msgs += _tool_turn(i)

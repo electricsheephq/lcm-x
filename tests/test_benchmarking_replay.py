@@ -7,6 +7,7 @@ import sys
 import pytest
 
 import benchmarking.h3_composition_replay as h3_composition_replay
+import benchmarking.replay as replay_module
 import hermes_lcm.engine as lcm_engine
 
 from benchmarking.fixtures import make_synthetic_fixture
@@ -92,7 +93,16 @@ def test_replay_defaults_partial_summary_profile_failure_mode_to_none(tmp_path):
     assert metrics.summary_failure_mode is SummaryFailureMode.NONE
 
 
-def test_replay_above_threshold_compresses_and_reports_canary_recall(tmp_path):
+def test_replay_above_threshold_compresses_and_reports_canary_recall(tmp_path, monkeypatch):
+    # #1013: the active-canary count was sized for the pre-#1013 single-pass compaction (no full sweep).
+    build = replay_module._config_from_policy
+
+    def single_pass(policy, database_path):
+        config = build(policy, database_path)
+        config.threshold_full_sweep_enabled = False
+        return config
+
+    monkeypatch.setattr(replay_module, "_config_from_policy", single_pass)
     fixture = make_synthetic_fixture(
         name="pressure",
         message_pairs=8,

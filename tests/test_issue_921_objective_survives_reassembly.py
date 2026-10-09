@@ -37,6 +37,7 @@ def engine(tmp_path, monkeypatch):
         fresh_tail_max_tokens=2000,
         leaf_chunk_tokens=8000,
         threshold_full_sweep_enabled=True,
+        context_threshold=0.35,  # #1013: the rounds are sized to cross the pre-#1013 threshold
     ), hermes_home=str(tmp_path / "home"))
     instance.on_session_start("S", platform="cli", context_length=128_000)
     try:

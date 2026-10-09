@@ -40,6 +40,7 @@ def summaries(monkeypatch):
 
 def _engine(tmp_path, session="S", context_length=200_000, **config) -> LCMEngine:
     settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
+                "threshold_full_sweep_enabled": False,  # #1013: pin the pre-#1013 single-pass compaction
                 "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
     engine.on_session_start(session, platform="telegram", context_length=context_length, conversation_id="conv")

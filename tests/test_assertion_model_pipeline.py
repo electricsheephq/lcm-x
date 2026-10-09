@@ -307,6 +307,7 @@ def test_compression_hook_queues_exact_rows_without_waiting_for_assertion_public
         assertion_extraction_max_sources_per_pass=2,
         fresh_tail_count=4,
         leaf_chunk_tokens=100,
+        threshold_full_sweep_enabled=False,  # #1013: this cell expects the pre-#1013 single compaction pass
     ))
     engine._session_id = "compression-session"
     engine.context_length = 200_000

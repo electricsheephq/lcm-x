@@ -47,7 +47,8 @@ def make_engine(tmp_path):
         settings = dict(database_path=str(tmp_path / "lcm.db"), fresh_tail_count=2, leaf_chunk_tokens=400,
                         context_threshold=0.001, threshold_full_sweep_enabled=True,
                         max_assembly_tokens=100_000, l3_truncate_tokens=2, condensation_fanin=2,
-                        foreground_soft_seconds=0)
+                        foreground_soft_seconds=0,
+                        temporal_rollups_enabled=False)  # #1013: rollup builds would add summariser calls
         settings.update(overrides)
         engine = LCMEngine(config=LCMConfig(**settings), hermes_home=str(tmp_path / "hermes"))
         engine.on_session_start("S", context_length=200_000, conversation_id="conv")
