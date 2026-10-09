@@ -374,6 +374,31 @@ def test_unavailable_summaries_only_recall_falls_back_to_fts(engine, monkeypatch
     assert payload.get("timeout", False) is (failure is TimeoutError)
 
 
+@pytest.mark.parametrize("stage", ["query", "scan"])
+def test_summaries_only_fallback_gets_the_whole_remaining_budget(engine, monkeypatch, stage):
+    # The semantic arm has already failed, so the fallback does not keep the cap reserved for it.
+    _seed(engine, "matching")
+    _providers(monkeypatch)
+    now = [1000.0]
+    monkeypatch.setattr(tools.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(tools, "_lcm_recall_has_usable_vector_corpus", lambda *args, **kwargs: True)
+    deadlines = []
+    fts = tools._lcm_recall_fts_arm
+
+    def capture_fts(*args, **kwargs):
+        deadlines.append(kwargs["deadline"])
+        return fts(*args, **kwargs)
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("synthetic outage")
+
+    monkeypatch.setattr(tools, "_lcm_grep_embed_query" if stage == "query" else "_lcm_recall_summary_arm", unavailable)
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", capture_fts)
+    payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
+    assert engine.store_id in [hit["store_id"] for hit in payload["hits"]]
+    assert deadlines == [pytest.approx(1000.0 + engine._config.recall_query_timeout_s)]
+
+
 def test_summaries_only_recall_without_summary_vectors_falls_back_to_fts(engine, monkeypatch):
     # A new embeddings-on store has no summary vectors until background embedding runs (#1014).
     _seed(engine, "matching")

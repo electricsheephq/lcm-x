@@ -6185,7 +6185,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     served_fts_index = "plain"
     # -- FTS arm (the default-on value: works with embeddings disabled) --
-    def _run_fts_arm() -> None:
+    def _run_fts_arm(fallback: bool = False) -> None:
         nonlocal timed_out, served_fts_index
         fts_deadline = deadline
         fts_sub_budget_applied = False
@@ -6195,8 +6195,11 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         configured_model = str(
             getattr(engine._config, "embedding_model", "") or ""
         ).strip()
+        # A fallback runs because the semantic arm already failed, so it gets the
+        # whole remaining budget rather than the cap reserved for that arm (#887).
         semantic_available = (
-            embeddings_enabled
+            not fallback
+            and embeddings_enabled
             and (run_summary or run_chunk)
             # A timed-out scope resolution drops the vector arms (fail closed)
             # and an empty whitelist leaves them nothing eligible to return;
@@ -6351,7 +6354,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 degraded_reasons.append(f"embedding provider unavailable: {exc}")
                 summary_fts_fallback = not run_fts and run_summary
             if summary_fts_fallback and "fts" not in coverage and time.monotonic() < deadline:
-                _run_fts_arm()
+                _run_fts_arm(fallback=True)
 
             if run_chunk and provider is not None:
                 try:
@@ -6445,7 +6448,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         summary_fts_fallback = not run_fts and run_summary
             # Scan failures use the same fallback, without repeating an earlier FTS arm.
             if summary_fts_fallback and "fts" not in coverage and time.monotonic() < deadline:
-                _run_fts_arm()
+                _run_fts_arm(fallback=True)
             if chunk_query_vector is not None:
                 if run_chunk:
                     try:
