@@ -244,6 +244,7 @@ class PortableRecall:
     def ingest(self, session: str, *, event_id: str, messages: list[dict[str, Any]],
                generation: str = "manual-v1", envelope: dict[str, Any] | None = None,
                checkpoint_key: str = "", checkpoint: dict[str, Any] | None = None) -> dict[str, Any]:
+        session = _label(session, "session")
         event_id = _label(event_id, "event_id", 1024)
         generation = _label(generation, "generation")
         if not isinstance(messages, list) or len(messages) > 100:

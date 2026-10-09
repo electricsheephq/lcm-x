@@ -48,7 +48,6 @@ jobs:
       OMP_NUM_THREADS: "4"
       MKL_NUM_THREADS: "4"
       TOKENIZERS_PARALLELISM: "false"
-      LCM_LONGMEMEVAL_FASTEMBED_CACHE: ${{ runner.temp }}/fastembed
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
         with:
@@ -56,6 +55,8 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: "3.12"
+      - name: Set isolated embedding cache
+        run: echo "LCM_LONGMEMEVAL_FASTEMBED_CACHE=$RUNNER_TEMP/fastembed" >> "$GITHUB_ENV"
       - name: Install and record evaluation environment
         run: |
           pip install numpy==2.5.3 fastembed==0.7.3 huggingface-hub==0.35.3 -r requirements-portable-eval.txt

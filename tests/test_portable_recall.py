@@ -348,3 +348,18 @@ def test_cli_normal_package_import_without_hermes_and_fail_open(tmp_path):
             "from hermes_lcm.portable import PortableRecall;assert 'agent.context_engine' not in sys.modules")
     imported = subprocess.run([sys.executable, "-B", "-c", code], text=True, capture_output=True, timeout=20)
     assert imported.returncode == 0, imported.stderr
+
+
+def test_manual_session_normalization_preserves_exact_expansion(tmp_path):
+    client = portable(tmp_path)
+    text = "synthetic normalized session evidence"
+    receipt = client.ingest(" session-a ", event_id="event-normalized",
+                            messages=[{"role": "user", "content": text}])
+    duplicate = client.ingest("session-a", event_id="event-normalized",
+                              messages=[{"role": "user", "content": text}])
+    assert duplicate["status"] == "duplicate"
+    reference = f"lcmx:{receipt['corpus_id']}:lcm:{receipt['store_ids'][0]}:0-{len(text)}"
+    for session in ("session-a", " session-a "):
+        expanded = client.call("lcm_expand", {"session": session, "reference": reference})
+        assert expanded["content"] == text
+        assert expanded["session"] == "session-a"
