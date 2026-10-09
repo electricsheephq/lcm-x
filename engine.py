@@ -7377,8 +7377,8 @@ class LCMEngine(
             "Tools: lcm_recall find facts from any earlier session, lcm_grep search, "
             "lcm_describe inspect DAG, lcm_expand recover details. "
             # #680: covers old and new stubs; no "[" here, so the note never parses as a stub.
-            'An "Externalized tool output" stub ending in ref=R means the full output is stored: '
-            'lcm_expand(externalized_ref="R") returns it.]'
+            'An "Externalized tool output" or user/assistant "Externalized payload" stub ending in ref=R '
+            'means the full output is stored: lcm_expand(externalized_ref="R") returns it.]'
         )
         if isinstance(content, str):
             return content + note

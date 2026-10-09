@@ -216,7 +216,9 @@ def test_sensitive_patterns_redact_before_large_payload_externalization(tmp_path
         large_output_externalization_threshold_chars=40,
     )
     secret = "sk-externalized1234567890abcdef"
-    content = f"api_key={secret}\n" + ("large payload line\n" * 20)
+    # #1016: user text is externalized only above the 100k non-tool floor; the stub's
+    # preview carries the head, so it must be built from the redacted text too.
+    content = f"api_key={secret}\n" + ("large payload line\n" * 6000)
 
     engine._ingest_messages([{"role": "user", "content": content}])
 

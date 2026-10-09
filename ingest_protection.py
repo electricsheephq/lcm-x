@@ -69,6 +69,15 @@ def _contains_media_payload(value: Any) -> bool:
     return False
 
 
+# #1016: user/assistant text (``raw_payload``) is externalized only above
+# max(large_output_externalization_threshold_chars, this floor). The configured threshold
+# (12,000 chars by default) was sized for tool output; below the floor the model and
+# recall must see the user's own words. 100,000 chars matches Lossless Claw, which
+# externalizes non-tool messages only at 25,000 tokens. Tool results and media payloads
+# keep the configured threshold. Not a config key.
+_NON_TOOL_EXTERNALIZATION_FLOOR_CHARS = 100_000
+
+
 def _externalization_kind_for_message(message: Dict[str, Any]) -> str:
     role = str(message.get("role") or "unknown")
     if role == "tool":
@@ -2745,8 +2754,10 @@ def protect_message_for_ingest(
                 )
                 if placeholder:
                     externalized = {"placeholder": placeholder}
-            if externalized is None:
-                kind = _externalization_kind_for_message(msg)
+            kind = _externalization_kind_for_message(msg)
+            if externalized is None and (
+                kind != "raw_payload" or len(normalized_content) > _NON_TOOL_EXTERNALIZATION_FLOOR_CHARS
+            ):
                 externalized = maybe_externalize_payload(
                     normalized_content,
                     kind=kind,

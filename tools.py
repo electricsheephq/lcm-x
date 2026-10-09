@@ -18,6 +18,7 @@ from .externalize import (
     _inspect_top_level_json_string_fields_before_content as _externalized_top_level_fields_before_content,
     extract_externalized_ref,
     extract_externalized_refs,
+    externalized_placeholder_max_chars,
     find_externalized_payload_for_message,
     get_large_output_storage_dir,
     load_externalized_payload,
@@ -1319,7 +1320,7 @@ def _restore_ingest_placeholder_for_lookup(
 def _is_compact_externalized_marker(content: str, ref: str | None) -> bool:
     if not ref or not content:
         return False
-    if len(content) > 512:
+    if len(content) > externalized_placeholder_max_chars(content):
         return False
     return (
         content.startswith("[Externalized tool output:")
