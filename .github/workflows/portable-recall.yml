@@ -1,0 +1,94 @@
+name: Portable recall v1
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - "portable.py"
+      - "optional_scorer.py"
+      - "store.py"
+      - "benchmarking/portable_recall_eval.py"
+      - "benchmarking/longmemeval.py"
+      - "scripts/*portable*"
+      - "tests/test_portable_recall.py"
+      - "tests/test_optional_scorer.py"
+      - ".github/workflows/portable-recall.yml"
+permissions:
+  contents: read
+concurrency:
+  group: portable-recall-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - run: pip install pytest==9.1.1 numpy==2.5.3 ruff==0.15.13
+      - run: python -B -m pytest tests/test_portable_recall.py tests/test_optional_scorer.py -q -p no:cacheprovider
+      - run: ruff check portable.py optional_scorer.py scripts/lcm_portable.py scripts/package_portable.py scripts/eval_portable_recall.py benchmarking/portable_recall_eval.py benchmarking/longmemeval.py tests/test_portable_recall.py tests/test_optional_scorer.py
+      - name: Build the actual local packages
+        run: python scripts/package_portable.py --output portable-artifacts
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: portable-packages
+          path: portable-artifacts
+  evaluation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        posture: [OFF, LOCAL]
+    env:
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      TOKENIZERS_PARALLELISM: "false"
+      LCM_LONGMEMEVAL_FASTEMBED_CACHE: ${{ runner.temp }}/fastembed
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - name: Install and record evaluation environment
+        run: |
+          pip install numpy==2.5.3 fastembed==0.7.3 huggingface-hub==0.35.3 -r requirements-portable-eval.txt
+          mkdir evidence
+          pip freeze > evidence/environment.txt
+          git rev-parse HEAD > evidence/source-sha.txt
+      - name: Cache pinned reranker weights before timing
+        run: |
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          from optional_scorer import BGE_MODEL, BGE_REVISION
+          snapshot_download(BGE_MODEL, revision=BGE_REVISION, allow_patterns=['*.json', '*.safetensors', '*.model', 'tokenizer*', 'special_tokens_map.json'])
+          PY
+      - name: Freeze synthetic corpus using production retrieval
+        env:
+          POSTURE: ${{ matrix.posture }}
+        run: |
+          python scripts/eval_portable_recall.py freeze-synthetic --posture "$POSTURE" --local-model BAAI/bge-small-en-v1.5 --source-identity "$(git rev-parse HEAD):$POSTURE:BAAI/bge-small-en-v1.5" --output evidence/synthetic.jsonl
+      - name: Development pass with frozen policy
+        run: python scripts/eval_portable_recall.py run --input evidence/synthetic.jsonl --output evidence/dev-bge.json --split dev --scorer bge
+      - name: Single held-out pass with identical pools
+        run: python scripts/eval_portable_recall.py run --input evidence/synthetic.jsonl --output evidence/holdout-bge.json --split holdout --scorer bge
+      - name: Download pinned public corpus separately
+        run: python scripts/lcm_longmemeval.py fetch --output "$RUNNER_TEMP/public"
+      - name: Public baseline and frozen pools
+        env:
+          POSTURE: ${{ matrix.posture }}
+        run: |
+          python scripts/eval_portable_recall.py freeze-public --dataset "$RUNNER_TEMP/public/longmemeval_s" --posture "$POSTURE" --local-model BAAI/bge-small-en-v1.5 --source-identity "$(git rev-parse HEAD):$POSTURE:BAAI/bge-small-en-v1.5" --output evidence/public.jsonl --baseline-output evidence/public-baseline.json
+      - name: Public held-out scorer pass
+        run: python scripts/eval_portable_recall.py run --input evidence/public.jsonl --output evidence/public-bge.json --scorer bge
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: portable-eval-${{ matrix.posture }}
+          path: evidence
