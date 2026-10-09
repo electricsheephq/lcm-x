@@ -139,6 +139,8 @@ Freeze the synthetic registration first: the command requires a same-posture
 120-case corpus with the exact registered 40-dev/80-holdout identities/splits.
 Tune only on those 40 dev cases, freeze model/rubric/confidence, then treat all
 500 public S questions as holdout. There is no public limit or dev split option.
+A validated shard is a disjoint execution partition of this complete holdout,
+not a selectable smaller benchmark.
 The report records the synthetic corpus digest, dataset coordinates/checksum,
 source identity and resolved summary/chunk embedding identities. CI must also
 pin and record its cached local embedding model weights/environment.
@@ -193,3 +195,37 @@ the approved three-point span-recall promotion gate. A measured NO_ADOPTION is
 valid; unavailable/incomplete runs remain INSUFFICIENT_EVIDENCE. Retain the
 baseline unless the approved gain gate is demonstrated. This correction does
 not redesign fixtures, raise production limits or change the adoption policy.
+
+## Public LOCAL runner correction
+
+The registered serial LOCAL job in run 37894293829 exceeded GitHub's three-hour
+limit before writing a public report. Its processed-question count is unmeasured;
+the timeout is not a retrieval score. Preserve that receipt and the completed OFF
+and synthetic/scorer evidence. One changed execution mechanism completes the
+same LOCAL500 cohort, without retuning or another scorer trial.
+
+`freeze-public --shard-index I --shard-count N` first validates the full pinned
+500-question file, then selects original indices modulo N. Default 0/1 retains
+the serial interface. A report records full ordered-question identity, partition,
+processed counts, source/model/configuration and development-registration pins.
+Each selected question uses the unchanged instrument call and fresh store.
+
+`merge-public` requires the pinned dataset plus every baseline and matching frozen
+shard. It validates a complete disjoint shard set and all 500 original question
+IDs, matching pins and capture counts before producing a complete report in
+original order. Missing, duplicated, mixed or foreign rows fail closed. Neither
+individual shards nor a partial aggregate establish full-S completion. Source
+projection failures and absent public exact-span gold retain their original
+unmeasured status; aggregation creates no new labels or fabricated references.
+
+The LOCAL-only workflow input requires registration run 37894293829, reuses its
+synthetic corpus and embedding dependency constraints, and shares one prewarmed
+FastEmbed cache across ten 50-question hosted jobs. It records actual dependency,
+source and cache identities. Unused reranker dependencies are not installed for
+this retrieval-only successor. Aggregate validation checks those receipts match.
+OFF, frozen scoring, Jev and native-host scenarios are not repeated.
+
+This correction repeats computation lost to the timed-out job; it does not choose
+among tuning trials. Ranking metrics use the same corpus, model and retrieval
+configuration. Sharded timing and preparation cost are reported separately and
+are not directly comparable to the serial runner's elapsed time.

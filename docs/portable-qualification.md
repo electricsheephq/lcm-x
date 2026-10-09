@@ -100,8 +100,13 @@ this capture failure is separate from absent exact-span gold. Public snippet
 ranking is unqualified under the stored-offset scorer contract. No fabricated
 references or substituted source prefixes are exported. Public exact-span recall,
 reader answer correctness and confidence calibration remain UNMEASURED. The
-LOCAL public baseline's final receipt is recorded in the canonical tracker when
-its pending hosted gate completes; no unchanged rerun is needed.
+LOCAL serial public job hit the three-hour runner limit before exporting a
+public report. Its processed-question count and retrieval metrics are unmeasured.
+The admitted successor partitions the same pinned 500 questions into disjoint
+hosted shards and requires complete identity-checked aggregation. It repeats
+only the unfinished LOCAL baseline, with unchanged retrieval/model configuration;
+OFF, scoring and host receipts remain retained. Final completion is recorded in
+the canonical tracker; sharded timing is not compared directly to serial timing.
 
 ## Distribution and later gates
 
