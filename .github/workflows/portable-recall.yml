@@ -84,7 +84,7 @@ jobs:
         env:
           POSTURE: ${{ matrix.posture }}
         run: |
-          python scripts/eval_portable_recall.py freeze-public --dataset "$RUNNER_TEMP/public/longmemeval_s" --posture "$POSTURE" --local-model BAAI/bge-small-en-v1.5 --source-identity "$(git rev-parse HEAD):$POSTURE:BAAI/bge-small-en-v1.5" --output evidence/public.jsonl --baseline-output evidence/public-baseline.json
+          python scripts/eval_portable_recall.py freeze-public --dataset "$RUNNER_TEMP/public/longmemeval_s" --posture "$POSTURE" --local-model BAAI/bge-small-en-v1.5 --source-identity "$(git rev-parse HEAD):$POSTURE:BAAI/bge-small-en-v1.5" --dataset-sha256 "$(sha256sum "$RUNNER_TEMP/public/longmemeval_s" | cut -d ' ' -f1)" --dev-corpus evidence/synthetic.jsonl --frozen-output evidence/public.jsonl --baseline-output evidence/public-baseline.json
       - name: Public held-out scorer pass
         run: python scripts/eval_portable_recall.py run --input evidence/public.jsonl --output evidence/public-bge.json --scorer bge
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
