@@ -18,10 +18,13 @@ from typing import Any
 import uuid
 
 from .db_bootstrap import (
+    _create_stem_fts,
     check_external_content_fts_integrity,
     external_content_fts_needs_repair,
     inspect_lcm_schema_health,
     join_background_integrity_scans,
+    dispatch_background_stem_backfill,
+    stem_index_status,
     load_integrity_failed,
     remediate_interim_schema_stamp,
     repair_external_content_fts,
@@ -65,7 +68,7 @@ from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
-from .store import build_message_fts_spec, delete_host_uid_bindings, delete_message_relations
+from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_host_uid_bindings, delete_message_relations
 from .survival_fit import SURVIVAL_FIT_COUNTER_KEY
 from .host_uid import host_uid_doctor_lines
 from .chunking import (
@@ -560,6 +563,7 @@ def _status_text(engine) -> str:
 
     lines = [
         "LCM status",
+        f"stem index: {stem_index_status(engine._store.connection)}",
         f"engine: {status.get('engine', engine.name)}",
         f"plugin_name: {runtime_identity.get('plugin_name', '(unknown)')}",
         f"plugin_version: {runtime_identity.get('plugin_version', '(unknown)')}",
@@ -1102,6 +1106,12 @@ def _doctor_repair_apply_text(engine) -> str:
     try:
         messages_result = repair_external_content_fts(conn, build_message_fts_spec())
         nodes_result = repair_external_content_fts(conn, build_nodes_fts_spec())
+        with conn:
+            conn.execute("BEGIN IMMEDIATE")
+            _create_stem_fts(conn, build_message_stem_fts_spec())
+            conn.executemany("INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                             [("fts_stem_state", "backfilling"), ("fts_stem_reset", "1")])
+        dispatch_background_stem_backfill(conn, build_message_stem_fts_spec())
     except sqlite3.Error as exc:
         return "\n".join([
             "LCM doctor repair apply",
@@ -1951,6 +1961,7 @@ def _doctor_text(engine) -> str:
         f"summary_nodes_total: {total_nodes}",
         f"summary_node_sessions_total: {total_node_sessions}",
         f"messages_fts: {store_fts}",
+        f"stem index: {stem_index_status(store_conn)}",
         f"messages_fts_rows: {store_fts_count}",
         f"nodes_fts: {node_fts}",
         f"nodes_fts_rows: {node_fts_count}",
