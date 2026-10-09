@@ -656,7 +656,7 @@ class ReconcileMixin:
             or not persisted_output_preview_sha256
         ):
             return False
-        recovered_with_stat = recover_hermes_persisted_output_with_file_stat(content)
+        recovered_with_stat = recover_hermes_persisted_output_with_file_stat(content, hermes_home=self._hermes_home)
         if recovered_with_stat is None:
             return False
         require_live_file_freshness = True
@@ -960,7 +960,7 @@ class ReconcileMixin:
             persisted_output_source_path = _persisted_output_saved_path(content)
             persisted_output_preview_sha256, allow_redacted_preview_match = self._persisted_output_marker_replay_proof(content)
             durable_content = None
-            recovered_with_stat = recover_hermes_persisted_output_with_file_stat(content) if not stored_row else None
+            recovered_with_stat = recover_hermes_persisted_output_with_file_stat(content, hermes_home=self._hermes_home) if not stored_row else None
             recovered_content = recovered_with_stat[0] if recovered_with_stat is not None else None
             recovered_identity_content = None
             if recovered_content is not None:
@@ -1792,7 +1792,8 @@ class ReconcileMixin:
                 str(msg.get("role") or "") == "tool"
                 and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
                 and recover_hermes_persisted_output_with_file_stat(
-                    normalize_content_value(msg.get("content")) or ""
+                    normalize_content_value(msg.get("content")) or "",
+                    hermes_home=self._hermes_home,
                 )
                 is None
                 for msg in candidate_identity_messages
@@ -1814,7 +1815,8 @@ class ReconcileMixin:
                 str(msg.get("role") or "") == "tool"
                 and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
                 and recover_hermes_persisted_output_with_file_stat(
-                    normalize_content_value(msg.get("content")) or ""
+                    normalize_content_value(msg.get("content")) or "",
+                    hermes_home=self._hermes_home,
                 )
                 is None
                 for msg in candidate_identity_messages
@@ -2721,7 +2723,8 @@ class ReconcileMixin:
             str(msg.get("role") or "") == "tool"
             and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
             and recover_hermes_persisted_output_with_file_stat(
-                normalize_content_value(msg.get("content")) or ""
+                normalize_content_value(msg.get("content")) or "",
+                hermes_home=self._hermes_home,
             )
             is None
             for msg in messages
