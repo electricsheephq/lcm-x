@@ -123,8 +123,8 @@ copy-paste setups per agent type.
 The latest stable release is
 `v0.26.2@6800cf45ad05280e6cf6fa9e1ad96c62b7132646` (plugin `hermes-lcm-x`, engine
 `lcm-x`; the rename shipped in v0.24.0, #471), a patch on v0.26.1 in which user and
-assistant text is externalized only above 100,000 characters, with a preview and
-a read hint (#1016). It carries
+assistant text is externalized only above 100,000 characters or about 25,000
+estimated tokens, whichever comes first, with a preview and a read hint (#1016). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
 is an independent flag that transforms only the provider-bound copy — see
