@@ -564,3 +564,13 @@ def test_automatic_chunk_discovery_is_bounded_by_new_messages_not_the_store(
         assert len(calls) <= 5
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize(
+    "spelling", ["fastembed", "fast-embed", " FastEmbed ", "Fast-Embed", "OLLAMA"]
+)
+def test_every_accepted_local_provider_spelling_allows_automatic_chunks(spelling):
+    config = LCMConfig(embedding_provider=spelling, embedding_model="model-a")
+    resolved = provider_mod.resolve_provider(config)
+    assert resolved.provider_id in {"fastembed", "ollama"}
+    assert maintenance_mod._automatic_chunks_allowed(config, command_mod)

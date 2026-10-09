@@ -71,6 +71,8 @@ def run_incremental_embedding_pass(db_path: str | Path, config: Any, *, breaker:
 
 def _automatic_chunks_allowed(config: Any, command: Any) -> bool:
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+    # resolve_provider accepts `fast-embed` for the provider whose id is `fastembed`.
+    provider = {"fast-embed": "fastembed"}.get(provider, provider)
     if not command._is_local_embedding_provider(provider):
         return False
     if provider != "ollama":
