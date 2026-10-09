@@ -567,6 +567,10 @@ def test_r13_import_provenance_fails_closed_outside_the_host_tree(tmp_path, monk
     for d in (src, tree, elsewhere):
         d.mkdir()
     cell = {"host_src": str(src), "host_python": sys.executable, "plugin": {"tree": str(tree), "module": "hermes_plugins.x"}}
+    # Host modules an earlier real-host test left loaded would be violations too, and the 20-entry cap would hide
+    # the ones asserted below (#1041): start from no loaded host modules.
+    for name in [n for n in sys.modules if n.split(".")[0] in probe.HOST_PREFIXES or n.startswith("hermes_plugins.")]:
+        monkeypatch.delitem(sys.modules, name)
     monkeypatch.setitem(sys.modules, "run_agent", types.SimpleNamespace(__file__=str(elsewhere / "run_agent.py")))
     monkeypatch.setitem(sys.modules, "hermes_state", types.SimpleNamespace(__file__=str(src / "hermes_state.py")))
     monkeypatch.setitem(sys.modules, "hermes_plugins.x", types.SimpleNamespace(__file__=str(src / "x.py")))
