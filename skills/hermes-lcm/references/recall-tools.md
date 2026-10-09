@@ -106,8 +106,12 @@ Use only over exact cited evidence validated by the compiler for supported date 
 
 ## Default-off advanced paths
 
-- `lcm_query_state` queries the same-database assertion sidecar when that feature is enabled.
-- `lcm_retrieve` is the default-off bounded adaptive controller. It is not required for ordinary recall and must not replace the stable workflow above without measured benefit.
+- `lcm_query_state` is hidden until `LCM_ASSERTIONS_ENABLED=true`, then queries the same-database assertion sidecar.
+- `lcm_retrieve` is hidden until `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`. It is the default-off bounded adaptive controller, is not required for ordinary recall, and must not replace the stable workflow above without measured benefit.
+
+Both host paths advertise the other 13 schemas by default. `LCM_DISABLED_TOOLS`
+hides any named tool, including a flag-enabled one. Cached dormant calls still
+return their existing `status: disabled` responses.
 
 ## Operator tools
 
