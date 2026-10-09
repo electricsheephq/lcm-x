@@ -159,6 +159,26 @@ def test_jev_uncertain_send_keeps_reservation_and_blocks_over_budget(tmp_path):
         budget.reserve()
 
 
+
+@pytest.mark.parametrize("probabilities, score, expected_status", [
+    ({"0": 0.0, "1": .01, "2": .99}, 1.98, "scored"),
+    ({"0": .05, "1": .05, "2": .9}, .2, "unavailable"),
+])
+def test_jev_rounded_wire_preserves_bounded_numeric_validation(tmp_path, probabilities, score, expected_status):
+    def rounded(payload, timeout):
+        reply = transport(payload, timeout)
+        for answer in reply["answers"].values():
+            answer.update(probabilities=probabilities, score=score)
+        return reply
+
+    scorer = PublicJevScorer(input_kind="synthetic", allow_public_egress=True,
+                            budget=JevBudget(tmp_path / "rounded.jsonl"), transport=rounded)
+    result = score_candidates("fixture", (candidate("a"),), scorer)
+    assert result.status == expected_status
+    if expected_status == "scored":
+        assert result.scores[0].score == pytest.approx(.995)
+
+
 def test_jev_confidence_abstention_uses_baseline(tmp_path):
     def low(payload, timeout):
         return json.loads(json.dumps(jev_reply(payload, confidence=.1)))

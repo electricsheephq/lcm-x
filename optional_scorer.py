@@ -321,12 +321,20 @@ class PublicJevScorer:
                 score, confidence = answer["score"], answer["confidence"]
                 if any(type(v) not in (float, int) or not math.isfinite(v) for v in (score, confidence)):
                     raise ValueError("invalid numeric output")
-                if not math.isclose(sum(values), 1.0, abs_tol=1e-5) or not math.isclose(score, expected, abs_tol=1e-5):
+                # The observed Jev wire rounds probabilities and its separately
+                # computed score to two decimals. For three levels the rounding
+                # envelopes are .015 for total mass and .020 for weighted score.
+                # Keep strict finite/range/schema checks, then calculate our own
+                # normalized signal rather than trust aggregate model arithmetic.
+                mass = sum(values)
+                if (not 0 <= score <= 2
+                        or not math.isclose(mass, 1.0, rel_tol=0.0, abs_tol=.015000001)
+                        or not math.isclose(score, expected, rel_tol=0.0, abs_tol=.020000001)):
                     raise ValueError("inconsistent score distribution")
                 if not 0 <= confidence <= 1:
                     raise ValueError("invalid confidence")
                 abstain |= confidence < self.min_confidence
-                scores.append(CandidateScore(candidate.candidate_id, score / 2))
+                scores.append(CandidateScore(candidate.candidate_id, expected / mass / 2))
             return None if abstain else scores
         finally:
             self._busy.release()
