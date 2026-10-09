@@ -14,6 +14,12 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
   ends, and the `lcm_expand(externalized_ref=…)` read hint, and stays within the existing 512-character placeholder
   bound, so v0.26.1 can still read it. Tool output and media payloads are unchanged. Existing placeholder rows are not
   rewritten, and each is readable with `lcm_expand`. (#1016, #1020)
+- Fix (rc2): the preview redacts the plugin's existing sensitive-text patterns in each scan window before slicing,
+  whatever the redaction setting. Its tail scan keeps up to 8,192 characters of context before its window and drops a
+  credential run that its start cuts, so a credential cut off from its label or PEM BEGIN line does not reach the
+  preview (known limits: #1034). The preview writes
+  `quarantined_assistant_output` as `quarantined-assistant-output`, so a cold restart no longer appends the session's
+  history again. (#1016, #1031)
 
 ## v0.26.1 (delegated-child compaction fix)
 
