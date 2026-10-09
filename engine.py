@@ -102,6 +102,7 @@ from .runtime_identity import (
     _git_runtime_identity,
     _plugin_metadata,
 )
+from .embedding_maintenance import run_incremental_embedding_pass
 from .rollup_builder import (
     initialize_rollup_invalidation_outbox,
     mark_stale_for_published_summary,
@@ -380,6 +381,9 @@ class _RollupMaintenanceScheduler:
 
 
 _ROLLUP_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler()
+# #1014: incremental embedding passes get their own worker, so a slow local
+# model load never delays a rollup pass and draining one never waits on the other.
+_EMBEDDING_MAINTENANCE_SCHEDULER = _RollupMaintenanceScheduler()
 
 _SESSION_END_BUSY_TIMEOUT_MS = 50
 # #909/#977: a condensation group of at most this many source tokens is about as long as its summary (Track S
@@ -811,6 +815,7 @@ class LCMEngine(
         # The scheduler associates this identity only with outstanding work, so
         # diagnostic drains do not retain every historical session key forever.
         self._rollup_maintenance_owner = object()
+        self._embedding_maintenance_owner = object()
         # Host-facing engine name: ENGINE_NAME, or the legacy alias when the
         # active Hermes config still selects ``context.engine: lcm`` (#471).
         self._engine_name = ENGINE_NAME
@@ -2306,6 +2311,49 @@ class LCMEngine(
                 exc_info=True,
             )
 
+    def _schedule_embedding_maintenance(self) -> None:
+        """Enqueue one bounded incremental embedding pass (#1014); never blocks.
+
+        Active exactly when ``embeddings_enabled``. The scheduler keeps at most
+        one pass queued per database, and the pass runs the backfill core under
+        its lease on a private connection.
+        """
+        if not getattr(self._config, "embeddings_enabled", False):
+            return
+        try:
+            raw_database_path = str(self._dag.db_path)
+            if raw_database_path == ":memory:":
+                logger.info(
+                    "LCM skips incremental embedding for an isolated in-memory "
+                    "SQLite database"
+                )
+                return
+            database_path = Path(raw_database_path).resolve()
+            config = copy.deepcopy(self._config)
+            cached = getattr(self, "_lcm_embedding_provider_cache", None)
+            breaker = getattr(cached[1], "breaker", None) if cached else None
+
+            def maintain() -> None:
+                run_incremental_embedding_pass(database_path, config, breaker=breaker)
+
+            _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(
+                self._rollup_maintenance_key("embeddings"),
+                maintain,
+                owner=self._embedding_maintenance_owner,
+            )
+        except Exception:
+            logger.warning(
+                "LCM could not schedule background incremental embedding",
+                exc_info=True,
+            )
+
+    def drain_embedding_maintenance(self, timeout: float | None = None) -> bool:
+        """Wait for embedding passes scheduled by this engine (tests and diagnostics)."""
+        return _EMBEDDING_MAINTENANCE_SCHEDULER.drain_owner(
+            self._embedding_maintenance_owner,
+            timeout=timeout,
+        )
+
     def drain_rollup_maintenance(self, timeout: float | None = None) -> bool:
         """Wait for rollup jobs scheduled by this engine (tests and diagnostics)."""
         return _ROLLUP_MAINTENANCE_SCHEDULER.drain_owner(
@@ -2365,6 +2413,8 @@ class LCMEngine(
             and not self._session_stateless
         ):
             self._schedule_rollup_maintenance(session_id)
+        if not self._session_ignored and not self._session_stateless:
+            self._schedule_embedding_maintenance()
 
     def _invalidate_rollups_for_published_node(self, node: "SummaryNode") -> None:
         """Stale the rollups covering EVERY UTC day a just-published node spans.
@@ -2376,7 +2426,9 @@ class LCMEngine(
         ``earliest_at``/``latest_at`` coverage span is passed through so a summary
         crossing midnight stales BOTH days, not only its newest (maintainer #388
         blocker 2 / B2).
+        Publication is also the trigger for incremental embedding (#1014).
         """
+        self._schedule_embedding_maintenance()
         if not self._config.temporal_rollups_enabled:
             return
         mark_stale_for_published_summary(

@@ -74,6 +74,7 @@ from .chunking import (
     group_by_store_id,
     normalize_content_policy,
 )
+from .embedding_maintenance import incremental_embedding_state
 from .embedding_provider import (
     EmbeddedDocumentBatch,
     EmbeddingProviderError,
@@ -659,7 +660,62 @@ def _status_text(engine) -> str:
         )
     if source_stats.get("error"):
         lines.append(f"source_lineage_error: {source_stats['error']}")
+    if bool(getattr(engine._config, "embeddings_enabled", False)):
+        lines.extend(_embedding_maintenance_status_lines(engine))
     return "\n".join(lines)
+
+
+def _embedding_maintenance_status_lines(engine) -> list[str]:
+    """Unembedded backlog per corpus and the last incremental pass (#1014)."""
+    db_path = engine._store.db_path
+    backlog = {"summaries": "(no profile)", "chunks": "(no profile)"}
+
+    def _count(conn, identity: str, pending: int) -> str:
+        # In-flight rows are not pending; a provider failure after dispatch
+        # leaves them uncertain until an operator `--retry-uncertain` run.
+        try:
+            uncertain = int(conn.execute(
+                "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight "
+                "WHERE identity_hash = ? AND state IN ('dispatched', 'uncertain')",
+                (identity,),
+            ).fetchone()[0])
+        except sqlite3.OperationalError:
+            uncertain = 0
+        return f"{pending} (uncertain {uncertain})" if uncertain else str(pending)
+
+    try:
+        conn = _embedding_read_connection(db_path)
+        try:
+            profile = _embedding_current_profile(conn)
+            if profile is not None:
+                identity = str(profile["identity_hash"])
+                backlog["summaries"] = _count(
+                    conn, identity, _embedding_pending_rows(conn, identity, 0)[0]
+                )
+            chunk_profile = _chunk_current_profile(conn)
+            if chunk_profile is not None:
+                policy = normalize_content_policy(getattr(
+                    engine._config, "embedding_content_policy", "conversational"
+                ))
+                identity = str(chunk_profile["identity_hash"])
+                backlog["chunks"] = _count(
+                    conn, identity, _chunk_pending_rows(conn, identity, policy, 0)[0]
+                )
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        backlog = {name: f"(unavailable: {exc})" for name in backlog}
+    last, failures = incremental_embedding_state(db_path)
+    last_text = "(never)" if last is None else (
+        datetime.fromtimestamp(last[0], tz=timezone.utc).isoformat(timespec="seconds")
+        + f" {last[1]}"
+    )
+    return [
+        f"embedding_backlog_summaries: {backlog['summaries']}",
+        f"embedding_backlog_chunks: {backlog['chunks']}",
+        f"embedding_incremental_last_pass: {last_text}",
+        f"embedding_incremental_failures: {failures}",
+    ]
 
 
 def _scan_clean_candidates(engine) -> dict[str, Any]:
@@ -3280,6 +3336,19 @@ class _BackfillLeaseLost(RuntimeError):
     """The caller no longer owns the exact backfill lease generation."""
 
 
+class _BackfillRefusal(str):
+    """Refusal text that also carries a machine-readable reason (#1014).
+
+    It renders exactly like the plain refusal string, so command output is
+    unchanged; the incremental pass reads ``reason`` to skip a held lease quietly.
+    """
+
+    def __new__(cls, text: str, *, reason: str) -> "_BackfillRefusal":
+        refusal = super().__new__(cls, text)
+        refusal.reason = reason
+        return refusal
+
+
 class _LocalPublishError(RuntimeError):
     """The batch-publish CALL itself failed locally (e.g. SQLITE_BUSY on BEGIN
     IMMEDIATE, or a commit I/O error), as opposed to a provider/network error.
@@ -4107,10 +4176,26 @@ def _embedding_backfill_summary_text(
     engine, *, apply: bool, limit: int, retry_uncertain: bool,
     include_next_hint: bool = True, expected_dtype: str | None = None,
 ) -> str:
+    result = _embedding_backfill_summary_run(
+        engine._config, engine._store.db_path, apply=apply, limit=limit,
+        retry_uncertain=retry_uncertain, include_next_hint=include_next_hint,
+        expected_dtype=expected_dtype,
+    )
+    return str(result) if isinstance(result, str) else _embedding_backfill_report(**result)
+
+
+def _embedding_backfill_summary_run(
+    config, db_path, *, apply: bool, limit: int, retry_uncertain: bool,
+    include_next_hint: bool = True, expected_dtype: str | None = None,
+) -> str | dict[str, Any]:
+    """Summary backfill core: refusal text, or the report fields (#1014).
+
+    Shared by `/lcm embed backfill` and the incremental maintenance pass.
+    """
     mode = "apply" if apply else "dry-run"
     started = time.monotonic()
 
-    if not bool(getattr(engine._config, "embeddings_enabled", False)):
+    if not bool(getattr(config, "embeddings_enabled", False)):
         return "\n".join([
             "LCM embedding backfill",
             f"mode: {mode}",
@@ -4118,7 +4203,6 @@ def _embedding_backfill_summary_text(
             "error: embeddings are disabled; set LCM_EMBEDDINGS_ENABLED=true, then run `/lcm embed warmup`",
         ])
 
-    db_path = engine._store.db_path
     # Resolve the active profile (read-only) — needed by both modes. The
     # *pending* set for apply is (re-)discovered AFTER the lease is claimed.
     try:
@@ -4176,7 +4260,7 @@ def _embedding_backfill_summary_text(
         est_batches = _embedding_batch_estimate(
             provider_name,
             [document[2] for document in documents],
-            getattr(engine._config, "embedding_max_batch_items", None),
+            getattr(config, "embedding_max_batch_items", None),
         )
         return est_tokens, est_cost_tokens, est_batches
 
@@ -4193,7 +4277,7 @@ def _embedding_backfill_summary_text(
             privacy_error,
         ) = _prepare_embedding_provider_documents(
             raw_documents,
-            config=engine._config,
+            config=config,
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
@@ -4205,7 +4289,7 @@ def _embedding_backfill_summary_text(
         if privacy_withheld:
             privacy_error = None
         estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
-        return _embedding_backfill_report(
+        return dict(
             mode=mode,
             status="refused" if privacy_error else "dry-run",
             provider=provider_name,
@@ -4251,7 +4335,7 @@ def _embedding_backfill_summary_text(
     privacy_blocked = 0
     privacy_withheld = 0
     try:
-        store = VectorStore(db_path, config=engine._config)
+        store = VectorStore(db_path, config=config)
         conn = store.connection
         _ensure_inflight_table(conn)
         # Claim BEFORE discovery: acquire the lease, then re-query pending rows
@@ -4261,12 +4345,12 @@ def _embedding_backfill_summary_text(
             conn, ttl_s=ttl_s, heartbeat_s=heartbeat_s
         )
         if lease is None:
-            return "\n".join([
+            return _BackfillRefusal("\n".join([
                 "LCM embedding backfill",
                 "mode: apply",
                 "status: refused",
                 "error: another embedding backfill holds the lease; retry after it exits or after the lease TTL expires",
-            ])
+            ]), reason="lease_held")
         _prepare_inflight_for_lease(conn, identity, lease)
         captured_identity = store.capture_identity(model, provider=provider_name)
         if captured_identity.identity_hash != identity:
@@ -4300,7 +4384,7 @@ def _embedding_backfill_summary_text(
             privacy_error,
         ) = _prepare_embedding_provider_documents(
             raw_documents,
-            config=engine._config,
+            config=config,
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
@@ -4321,7 +4405,7 @@ def _embedding_backfill_summary_text(
         provider = (
             None
             if privacy_error is not None or (privacy_withheld and not documents)
-            else resolve_provider(engine._config, for_backfill=True)
+            else resolve_provider(config, for_backfill=True)
         )
         if privacy_error is not None or (privacy_withheld and not documents):
             pass
@@ -4334,7 +4418,7 @@ def _embedding_backfill_summary_text(
             error = "configured provider does not match the current profile; run `/lcm embed warmup`"
         else:
             batch_size = _embedding_backfill_batch_size(
-                getattr(engine._config, "embedding_max_batch_items", None)
+                getattr(config, "embedding_max_batch_items", None)
             )
             for offset in range(0, len(documents), batch_size):
                 # Renew the heartbeat lease; if it was stolen (TTL lapsed and a
@@ -4386,7 +4470,7 @@ def _embedding_backfill_summary_text(
                         try:
                             validate_embedding_privacy_dispatch(
                                 [batch[index][1] for index in normalized],
-                                engine._config,
+                                config,
                                 expected_revision=privacy_revision,
                             )
                         except EmbeddingPrivacyPolicyError as exc:
@@ -4640,7 +4724,7 @@ def _embedding_backfill_summary_text(
         privacy_withheld=privacy_withheld,
     )
     estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
-    return _embedding_backfill_report(
+    return dict(
         mode=mode,
         status=status,
         provider=provider_name,
@@ -4931,8 +5015,23 @@ def _chunk_backfill_text(
     confirm_raw_text: bool = False, include_next_hint: bool = True,
     expected_dtype: str | None = None,
 ) -> str:
+    result = _chunk_backfill_run(
+        engine._config, engine._store.db_path, apply=apply, limit=limit,
+        retry_uncertain=retry_uncertain, policy=policy,
+        confirm_raw_text=confirm_raw_text, include_next_hint=include_next_hint,
+        expected_dtype=expected_dtype,
+    )
+    return str(result) if isinstance(result, str) else _embedding_backfill_report(**result)
+
+
+def _chunk_backfill_run(
+    config, db_path, *, apply: bool, limit: int, retry_uncertain: bool, policy: str,
+    confirm_raw_text: bool = False, include_next_hint: bool = True,
+    expected_dtype: str | None = None,
+) -> str | dict[str, Any]:
+    """Chunk backfill core: refusal text, or the report fields (#1014)."""
     policy = normalize_content_policy(policy or getattr(
-        engine._config, "embedding_content_policy", "conversational"
+        config, "embedding_content_policy", "conversational"
     ))
     mode = "apply" if apply else "dry-run"
     started = time.monotonic()
@@ -4947,17 +5046,16 @@ def _chunk_backfill_text(
             f"error: {message}",
         ])
 
-    if not bool(getattr(engine._config, "embeddings_enabled", False)):
+    if not bool(getattr(config, "embeddings_enabled", False)):
         return _refused(
             "embeddings are disabled; set LCM_EMBEDDINGS_ENABLED=true, then run "
             "`/lcm embed warmup`"
         )
 
-    db_path = engine._store.db_path
     configured_provider = str(
-        getattr(engine._config, "embedding_provider", "") or ""
+        getattr(config, "embedding_provider", "") or ""
     ).strip().lower()
-    configured_model = str(getattr(engine._config, "embedding_model", "") or "").strip()
+    configured_model = str(getattr(config, "embedding_model", "") or "").strip()
 
     try:
         read_conn = _embedding_read_connection(db_path)
@@ -5009,7 +5107,7 @@ def _chunk_backfill_text(
             and _is_voyage_context_model(model)
         ):
             return _chunk_context_estimates(
-                documents, getattr(engine._config, "embedding_max_batch_items", None)
+                documents, getattr(config, "embedding_max_batch_items", None)
             )
         est_tokens = sum(document[2] for document in documents)
         est_cost_tokens = sum(
@@ -5021,7 +5119,7 @@ def _chunk_backfill_text(
         est_batches = _embedding_batch_estimate(
             provider_name,
             [document[2] for document in documents],
-            getattr(engine._config, "embedding_max_batch_items", None),
+            getattr(config, "embedding_max_batch_items", None),
         )
         return est_tokens, est_cost_tokens, est_batches
 
@@ -5033,7 +5131,7 @@ def _chunk_backfill_text(
         ):
             try:
                 expected_privacy_revision = embedding_privacy_revision(
-                    engine._config
+                    config
                 )
             except EmbeddingPrivacyPolicyError as exc:
                 return _refused(str(exc))
@@ -5045,7 +5143,7 @@ def _chunk_backfill_text(
             privacy_error,
         ) = _prepare_embedding_provider_documents(
             rows,
-            config=engine._config,
+            config=config,
             provider_name=provider_name,
             expected_revision=expected_privacy_revision,
         )
@@ -5059,7 +5157,7 @@ def _chunk_backfill_text(
         estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(
             documents
         )
-        return _embedding_backfill_report(
+        return dict(
             mode=mode,
             status="refused" if privacy_error else "dry-run",
             provider=provider_name,
@@ -5132,7 +5230,7 @@ def _chunk_backfill_text(
     privacy_blocked = 0
     privacy_withheld = 0
     try:
-        store = VectorStore(db_path, config=engine._config)
+        store = VectorStore(db_path, config=config)
         store.ensure_chunk_schema()
         conn = store.connection
         _ensure_inflight_table(conn)
@@ -5141,10 +5239,10 @@ def _chunk_backfill_text(
         )
         if lease is None:
             store.close()
-            return _refused(
+            return _BackfillRefusal(_refused(
                 "another embedding backfill holds the lease; retry after it exits "
                 "or after the lease TTL expires"
-            )
+            ), reason="lease_held")
         _prepare_inflight_for_lease(conn, identity, lease)
         captured_identity = EmbeddingIdentity.canonical(
             provider_name,
@@ -5177,7 +5275,7 @@ def _chunk_backfill_text(
             privacy_error,
         ) = _prepare_embedding_provider_documents(
             rows,
-            config=engine._config,
+            config=config,
             provider_name=provider_name,
             expected_revision=profile_revision,
         )
@@ -5193,7 +5291,7 @@ def _chunk_backfill_text(
             stop_reason = "privacy_refused"
 
         chunk_provider_config = dataclasses.replace(
-            engine._config, embedding_model=model
+            config, embedding_model=model
         )
         provider = (
             None
@@ -5211,7 +5309,7 @@ def _chunk_backfill_text(
             error = "configured provider does not match the chunk profile; run `/lcm embed warmup`"
         else:
             batch_size = _embedding_backfill_batch_size(
-                getattr(engine._config, "embedding_max_batch_items", None)
+                getattr(config, "embedding_max_batch_items", None)
             )
             for offset in range(0, len(documents), batch_size):
                 if not lease.renew():
@@ -5251,7 +5349,7 @@ def _chunk_backfill_text(
                         try:
                             validate_embedding_privacy_dispatch(
                                 [batch[index][1] for index in normalized],
-                                engine._config,
+                                config,
                                 expected_revision=privacy_revision,
                             )
                         except EmbeddingPrivacyPolicyError as exc:
@@ -5470,7 +5568,7 @@ def _chunk_backfill_text(
         privacy_withheld=privacy_withheld,
     )
     estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
-    return _embedding_backfill_report(
+    return dict(
         mode=mode, status=status, provider=provider_name, model=model,
         pending=pending, selected=len(documents) + privacy_withheld,
         estimated_tokens=estimated_tokens, estimated_cost_tokens=estimated_cost_tokens,

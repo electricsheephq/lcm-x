@@ -44,6 +44,12 @@ answers from its full-text arm (for every `include`) with `degraded=true` and an
 `embedding_identity_stale:` reason, sends no query to the stale arm, and reads none of its
 vectors. The remedy is `/lcm embed warmup`, then `/lcm embed backfill --apply`.
 
+With embeddings on and a registered profile, new summaries are embedded by a bounded
+background pass after each published summary and on session bind; new message chunks are
+embedded the same way only with a local provider, because cloud chunk consent
+(`--confirm-raw-text`) is per invocation. The pass shares the backfill lease and skips while a
+manual backfill holds it. `/lcm status` reports the backlog per corpus and the last pass.
+
 Vector identity binds provider, model, dimension, storage shape, and the active
 privacy revision. A policy change requires a new warmup/identity rather than
 mixing vectors. Evidence and status expose aggregate policy state, never matched
