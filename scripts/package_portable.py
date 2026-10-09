@@ -26,15 +26,21 @@ if not a.config:
         print(json.dumps({'systemMessage':'LCM-X capture is unconfigured; native compaction continues.'}))
         raise SystemExit(0)
     p.error('set LCMX_PORTABLE_CONFIG or pass --config; no implicit store is opened')
-c=json.loads(Path(a.config).read_text())
-required=['root','project','instance','transcript_root']
-if any(not isinstance(c.get(k),str) or not c[k] for k in required):
-    p.error('configuration requires root, project, instance and transcript_root')
-for k in ('root','transcript_root'):
-    if not Path(c[k]).is_absolute(): p.error(k+' must be absolute')
+try:
+    c=json.loads(Path(a.config).read_text())
+    required=['root','project','instance','transcript_root']
+    if any(not isinstance(c.get(k),str) or not c[k] for k in required):
+        raise ValueError('configuration requires root, project, instance and transcript_root')
+    for k in ('root','transcript_root'):
+        if not Path(c[k]).is_absolute(): raise ValueError(k+' must be absolute')
+except (OSError, ValueError, TypeError):
+    if a.mode=='hook':
+        print(json.dumps({'systemMessage':'LCM-X capture configuration is unavailable; native compaction continues.'}))
+        raise SystemExit(0)
+    p.error('portable configuration is invalid or unavailable')
 script=Path(__file__).resolve().parents[1]/'lib'/'lcmx'/'scripts'/'lcm_portable.py'
 cmd=[sys.executable,str(script),'--root',c['root'],'--project',c['project'],
-     '--instance',c['instance'],'--host',a.host,a.mode]
+     '--instance',c['instance'],'--host',{'claude-code':'claude','codex':'codex','mcp':'manual'}[a.host],a.mode]
 if a.mode=='hook': cmd+=['--transcript-root',c['transcript_root']]
 raise SystemExit(subprocess.call(cmd))
 """
