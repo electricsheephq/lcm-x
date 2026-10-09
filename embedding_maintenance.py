@@ -17,12 +17,12 @@ remote Ollama stays operator-initiated.
 from __future__ import annotations
 
 import logging
-import ipaddress
 import threading
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+
+from .embedding_provider import _is_loopback_url
 
 logger = logging.getLogger(__name__)
 
@@ -81,11 +81,7 @@ def _automatic_chunks_allowed(config: Any, command: Any) -> bool:
     base_url = str(
         getattr(config, "ollama_base_url", "http://localhost:11434")
     ).strip().rstrip("/") or "http://localhost:11434"
-    try:
-        host = urlsplit(base_url).hostname or ""
-        return host == "localhost" or ipaddress.ip_address(host).is_loopback
-    except ValueError:
-        return False  # a hostname other than localhost is not verifiably local
+    return _is_loopback_url(base_url)
 
 
 def _corpus_failure(result: dict[str, Any]) -> str | None:

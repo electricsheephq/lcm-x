@@ -180,6 +180,8 @@ logger = logging.getLogger(__name__)
 _NATIVE_RECOVERY_WARNING_LOGGED = False
 
 _ASSERTION_EXTRACTION_PROCESS_SLOT = threading.BoundedSemaphore(1)
+_EMBEDDING_SCHEMA_READY: set[tuple[Path, bool]] = set()
+_EMBEDDING_SCHEMA_LOCK = threading.Lock()
 
 class _RollupMaintenanceScheduler:
     """Run deduplicated rollup jobs on one process-wide worker.
@@ -2348,17 +2350,18 @@ class LCMEngine(
 
             chunks_allowed = _automatic_chunks_allowed(config, command)
             schema_key = (database_path, chunks_allowed)
-            if getattr(self, "_embedding_schema_ready", None) != schema_key:
-                # First-use DDL (including inflight migration) must finish here:
-                # changing the schema in the worker can break foreground FTS5 writes.
-                store = VectorStore(database_path, config=config)
-                try:
-                    if chunks_allowed:
-                        store.ensure_chunk_schema()
-                    command._ensure_inflight_table(store.connection)
-                finally:
-                    store.close()
-                self._embedding_schema_ready = schema_key
+            with _EMBEDDING_SCHEMA_LOCK:
+                if schema_key not in _EMBEDDING_SCHEMA_READY:
+                    # First-use DDL (including inflight migration) must finish here:
+                    # changing the schema in the worker can break foreground FTS5 writes.
+                    store = VectorStore(database_path, config=config)
+                    try:
+                        if chunks_allowed:
+                            store.ensure_chunk_schema()
+                        command._ensure_inflight_table(store.connection)
+                    finally:
+                        store.close()
+                    _EMBEDDING_SCHEMA_READY.add(schema_key)
             cached = getattr(self, "_lcm_embedding_provider_cache", None)
             breaker = getattr(cached[1], "breaker", None) if cached else None
 

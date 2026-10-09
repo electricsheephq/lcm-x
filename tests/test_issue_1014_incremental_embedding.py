@@ -9,9 +9,12 @@ unless a test says so.
 from __future__ import annotations
 
 import json
+import io
 import logging
 import sqlite3
 import threading
+import urllib.error
+from types import SimpleNamespace
 
 import pytest
 
@@ -282,6 +285,81 @@ def test_schema_preparation_retries_and_caches_per_database_and_chunk_policy(
         assert ensured_paths[-1] == str(next_path)
     finally:
         engine.shutdown()
+
+
+def test_schema_preparation_is_shared_by_engines(tmp_path, home, monkeypatch):
+    engine = _make_engine(tmp_path, home, register=False)
+    other = _make_engine(tmp_path, home, register=False)
+    ensured = []
+    real_ensure = command_mod._ensure_inflight_table
+
+    def ensure(conn):
+        ensured.append(conn.execute("PRAGMA database_list").fetchone()[2])
+        real_ensure(conn)
+
+    monkeypatch.setattr(command_mod, "_ensure_inflight_table", ensure)
+    monkeypatch.setattr(
+        lcm_engine._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
+        lambda *args, **kwargs: None,
+    )
+    try:
+        engine._schedule_embedding_maintenance()
+        other._schedule_embedding_maintenance()
+        assert ensured == [str(tmp_path / "incremental.db")]
+        other._config.ollama_base_url = "http://remote.example:11434"
+        other._schedule_embedding_maintenance()
+        assert len(ensured) == 2  # same database, different chunk policy
+        monkeypatch.setattr(other._dag, "db_path", tmp_path / "other.db")
+        other._schedule_embedding_maintenance()
+        assert ensured[-1] == str(tmp_path / "other.db") and len(ensured) == 3
+    finally:
+        other.shutdown()
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("host,loopback", [
+    ("localhost", True), ("127.0.0.2", True), ("[::1]", True),
+    ("remote.example", False), ("192.0.2.1", False),
+])
+@pytest.mark.parametrize("http_error", [False, True])
+def test_http_transport_bypasses_proxy_only_for_loopback(monkeypatch, host, loopback, http_error):
+    monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:9999")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    routes = []
+    url = f"http://{host}:11434/api/embed"
+    body = b'{"result":"offline fixture"}'
+    headers = {"Content-Type": "application/json"}
+
+    def open_request(request, *, timeout, route):
+        routes.append(route)
+        assert request.method == "POST" and timeout == 3.0
+        assert json.loads(request.data) == {"input": "synthetic message"}
+        if http_error:
+            raise urllib.error.HTTPError(url, 429, "busy", headers, io.BytesIO(body))
+        response = io.BytesIO(body)
+        response.status = 200
+        response.headers = headers
+        return response
+
+    def build_opener(handler):
+        assert isinstance(handler, provider_mod.urllib.request.ProxyHandler)
+        assert handler.proxies == {}
+        return SimpleNamespace(open=lambda request, **kwargs: open_request(
+            request, route="direct", **kwargs,
+        ))
+
+    monkeypatch.setattr(provider_mod.urllib.request, "build_opener", build_opener)
+    monkeypatch.setattr(provider_mod.urllib.request, "urlopen", lambda request, **kwargs:
+                        open_request(request, route="environment proxy", **kwargs))
+    result = provider_mod._default_http_transport(
+        url=url, payload={"input": "synthetic message"}, headers=headers, timeout=3.0,
+    )
+    assert routes == ["direct" if loopback else "environment proxy"]
+    assert result.status == (429 if http_error else 200)
+    assert result.body == body and result.headers == headers
+    config = LCMConfig(embedding_provider="ollama", ollama_base_url=url)
+    assert maintenance_mod._automatic_chunks_allowed(config, command_mod) is loopback
 
 
 def test_b_held_manual_lease_skips_then_next_pass_completes_once(
