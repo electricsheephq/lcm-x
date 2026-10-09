@@ -327,6 +327,96 @@ def test_stale_summaries_only_recall_falls_back_to_fts(engine, monkeypatch, stat
     assert sum(len(provider.queries) for provider in instances.values()) == 0
 
 
+@pytest.mark.parametrize(
+    ("stage", "failure", "reason"),
+    [
+        ("resolve", None, "embedding provider is not configured"),
+        ("query", tools.VoyageError, "query embedding failed: synthetic outage"),
+        ("resolve", TimeoutError, None),
+        ("query", TimeoutError, None),
+        ("resolve", RuntimeError, "embedding provider unavailable: synthetic outage"),
+        ("query", RuntimeError, "embedding provider unavailable: synthetic outage"),
+        ("scan", TimeoutError, None),
+        ("scan", RuntimeError, "summary arm failed: synthetic outage"),
+    ],
+    ids=["unconfigured", "voyage-error", "resolution-timeout", "query-timeout",
+         "resolution-error", "query-error", "scan-timeout", "scan-error"],
+)
+def test_unavailable_summaries_only_recall_falls_back_to_fts(engine, monkeypatch, stage, failure, reason):
+    _seed(engine, "matching")
+    _providers(monkeypatch)
+    calls = []
+    fts = tools._lcm_recall_fts_arm
+
+    def capture_fts(*args, **kwargs):
+        calls.append(kwargs["deadline"])
+        return fts(*args, **kwargs)
+
+    def unavailable(*args, **kwargs):
+        # Simulate a timeout without consuming the remaining request budget.
+        if failure is tools.VoyageError:
+            raise failure("unavailable", "synthetic outage")
+        if failure is not None:
+            raise failure("synthetic outage")
+        return None
+
+    target = {"resolve": "resolve_provider", "query": "_lcm_grep_embed_query",
+              "scan": "_lcm_recall_summary_arm"}[stage]
+    monkeypatch.setattr(tools, target, unavailable)
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", capture_fts)
+    payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
+    assert engine.store_id in [hit["store_id"] for hit in payload["hits"]]
+    assert len(calls) == 1
+    coverage = payload["provenance"]["coverage"]
+    assert coverage == ({"summary": "none", "fts": "ok"} if stage == "scan" else {"fts": "ok"})
+    assert payload["degraded"] is (reason is not None)
+    assert payload.get("degraded_reason") == reason
+    assert payload.get("timeout", False) is (failure is TimeoutError)
+
+
+@pytest.mark.parametrize("stage", ["query", "scan"])
+def test_summaries_only_privacy_error_still_raises(engine, monkeypatch, stage):
+    _seed(engine, "matching")
+    _providers(monkeypatch)
+
+    def invalid(*args, **kwargs):
+        raise privacy.EmbeddingPrivacyPolicyError("synthetic invalid policy")
+
+    def no_fts(*args, **kwargs):
+        pytest.fail("privacy-policy error ran the full-text fallback")
+
+    target = "_lcm_grep_embed_query" if stage == "query" else "_lcm_recall_summary_arm"
+    monkeypatch.setattr(tools, target, invalid)
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", no_fts)
+    with pytest.raises(privacy.EmbeddingPrivacyPolicyError, match="synthetic invalid policy"):
+        tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine)
+
+
+@pytest.mark.parametrize("stage", ["resolve", "query", "scan"])
+@pytest.mark.parametrize("failure", [TimeoutError, RuntimeError])
+def test_summaries_only_failure_after_deadline_runs_no_fts(engine, monkeypatch, stage, failure):
+    _seed(engine, "matching")
+    _providers(monkeypatch)
+    now = [time.monotonic()]
+    monkeypatch.setattr(tools.time, "monotonic", lambda: now[0])
+
+    def expired(*args, **kwargs):
+        now[0] += engine._config.recall_query_timeout_s + 1
+        raise failure("synthetic outage")
+
+    def no_fts(*args, **kwargs):
+        pytest.fail("full-text fallback started after the request deadline")
+
+    target = {"resolve": "resolve_provider", "query": "_lcm_grep_embed_query",
+              "scan": "_lcm_recall_summary_arm"}[stage]
+    monkeypatch.setattr(tools, target, expired)
+    monkeypatch.setattr(tools, "_lcm_recall_fts_arm", no_fts)
+    payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
+    assert "fts" not in payload["provenance"]["coverage"]
+    assert payload["hits"] == []
+    assert payload.get("timeout", False) is (failure is TimeoutError)
+
+
 def test_matching_summaries_only_recall_runs_no_fts_arm(engine, monkeypatch):
     _seed(engine, "matching")
     _providers(monkeypatch)
@@ -337,6 +427,9 @@ def test_matching_summaries_only_recall_runs_no_fts_arm(engine, monkeypatch):
     monkeypatch.setattr(tools, "_lcm_recall_fts_arm", no_fts)
     payload = json.loads(tools.lcm_recall({"query": "Zebrawood", "include": "summaries"}, engine=engine))
     assert "fts" not in payload["provenance"]["coverage"]
+    assert payload["provenance"]["coverage"]["summary"] == "full"
+    assert payload["hits"]
+    assert payload["degraded"] is False
 
 
 @pytest.mark.parametrize(

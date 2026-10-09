@@ -6271,10 +6271,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     if run_fts:
         _run_fts_arm()
-    # include='summaries' runs no FTS arm while embeddings are on. When its only
-    # semantic arm has a stale identity, it falls back to full text, as it
-    # already does with embeddings off.
-    summary_stale_fts_fallback = False
+    # Summaries-only recall falls back to full text when its semantic arm is
+    # unavailable, provided the request still has time left.
+    summary_fts_fallback = False
 
     # -- Vector arms. Local/same-model corpora share one query embedding;
     # Voyage's context chunk corpus resolves and embeds with its own model. --
@@ -6320,6 +6319,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 )
                 if provider is None:
                     degraded_reasons.append("embedding provider is not configured")
+                    summary_fts_fallback = not run_fts and run_summary
                 elif run_summary:
                     query_vector = _lcm_grep_embed_query(
                         provider,
@@ -6334,20 +6334,23 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             except EmbeddingIdentityStaleError:
                 coverage["summary"] = "none"
                 degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
-                summary_stale_fts_fallback = not run_fts
+                summary_fts_fallback = not run_fts and run_summary
             except EmbeddingPrivacyPolicyError:
                 # Deterministic configuration error — never degrade (#367).
                 raise
             except VoyageError as exc:
                 provider = None
                 degraded_reasons.append(f"query embedding failed: {exc}")
+                summary_fts_fallback = not run_fts and run_summary
             except TimeoutError:
                 provider = None
                 timed_out = True
+                summary_fts_fallback = not run_fts and run_summary
             except Exception as exc:  # noqa: BLE001 - degrade, never bare-error the whole tool
                 provider = None
                 degraded_reasons.append(f"embedding provider unavailable: {exc}")
-            if summary_stale_fts_fallback:
+                summary_fts_fallback = not run_fts and run_summary
+            if summary_fts_fallback and "fts" not in coverage and time.monotonic() < deadline:
                 _run_fts_arm()
 
             if run_chunk and provider is not None:
@@ -6427,18 +6430,20 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["summary"] = "none"
+                        summary_fts_fallback = not run_fts and run_summary
                     except EmbeddingIdentityStaleError:
                         coverage["summary"] = "none"
                         degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
-                        summary_stale_fts_fallback = not run_fts
+                        summary_fts_fallback = not run_fts and run_summary
                     except EmbeddingPrivacyPolicyError:
                         # Deterministic configuration error — never degrade (#367).
                         raise
                     except Exception as exc:  # noqa: BLE001
                         coverage["summary"] = "none"
                         degraded_reasons.append(f"summary arm failed: {exc}")
-            # The identity can also drift between the query check and the scan.
-            if summary_stale_fts_fallback and "fts" not in coverage:
+                        summary_fts_fallback = not run_fts and run_summary
+            # Scan failures use the same fallback, without repeating an earlier FTS arm.
+            if summary_fts_fallback and "fts" not in coverage and time.monotonic() < deadline:
                 _run_fts_arm()
             if chunk_query_vector is not None:
                 if run_chunk:
