@@ -629,10 +629,42 @@ def _externalized_summary(path: Path, payload: Dict[str, Any]) -> Dict[str, Any]
 # placeholder limit that v0.24.7 readers (``is_externalized_placeholder``) enforce.
 _PLACEHOLDER_TOOL_NAME_MAX_CHARS = 64
 _PLACEHOLDER_MAX_CHARS = 512
+# #1016: a user/assistant (``raw_payload``) stub carries a head/tail preview, so its
+# kind alone gets a larger bound; every other stub keeps the 512 rule.
+_RAW_PAYLOAD_PLACEHOLDER_PREFIX = "[Externalized payload: kind=raw_payload;"
+_RAW_PAYLOAD_PLACEHOLDER_MAX_CHARS = 1536
+_RAW_PAYLOAD_PREVIEW_HEAD_CHARS = 500
+_RAW_PAYLOAD_PREVIEW_TAIL_CHARS = 300
 
 
-def _build_externalized_placeholder(summary: Dict[str, Any]) -> str:
+def externalized_placeholder_max_chars(text: str) -> int:
+    return _RAW_PAYLOAD_PLACEHOLDER_MAX_CHARS if text.startswith(_RAW_PAYLOAD_PLACEHOLDER_PREFIX) else _PLACEHOLDER_MAX_CHARS
+
+
+def _raw_payload_preview(content: str) -> str:
+    """#1016: a deterministic, whitespace-collapsed head/tail preview that cannot forge stub syntax.
+
+    ``[``/``]``/``;`` are mapped and ``ref=`` is neutralized, so no recognizer (fullmatch or
+    finditer) can read a ref, or the end of the stub, out of the user's own text."""
+    text = " ".join((content or "").split())
+    text = text.translate(str.maketrans({"[": "(", "]": ")", ";": ",", '"': "'"})).replace("ref=", "ref_")
+    if len(text) <= _RAW_PAYLOAD_PREVIEW_HEAD_CHARS + _RAW_PAYLOAD_PREVIEW_TAIL_CHARS:
+        return text
+    return f"{text[:_RAW_PAYLOAD_PREVIEW_HEAD_CHARS]} ... {text[-_RAW_PAYLOAD_PREVIEW_TAIL_CHARS:]}"
+
+
+def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | None = None) -> str:
     kind = _placeholder_metadata(summary.get("kind", "tool_result") or "tool_result")
+    if kind == "raw_payload" and content:
+        # #1016: say what the payload holds and how to read it; ``ref=`` stays the last field.
+        ref = summary.get("ref", "")
+        head = (
+            f"[Externalized payload: kind={kind}; role={_placeholder_metadata(summary.get('role') or '?')}; "
+            f"chars={summary.get('content_chars', 0)}; bytes={summary.get('content_bytes', 0)}; preview=\""
+        )
+        rest = f'"; read it with lcm_expand(externalized_ref="{ref}"); ref={ref}]'
+        room = max(0, _RAW_PAYLOAD_PLACEHOLDER_MAX_CHARS - len(head) - len(rest))
+        return f"{head}{_raw_payload_preview(content)[:room]}{rest}"
     if kind != "tool_result":
         role = _placeholder_metadata(summary.get("role") or "?")
         return (
@@ -690,7 +722,7 @@ def is_externalized_placeholder(text: str) -> bool:
     if not isinstance(text, str):
         return False
     stripped = text.strip()
-    if not stripped or len(stripped) > 512:
+    if not stripped or len(stripped) > externalized_placeholder_max_chars(stripped):
         return False
     return bool(_EXTERNALIZED_REF_RE.fullmatch(stripped))
 
@@ -1319,7 +1351,7 @@ def maybe_externalize_payload(
             # #680: the supplied name wins (an older payload may hold none, or another call's).
             existing = {**existing, "tool_name": tool_name}
         return {
-            "placeholder": _build_externalized_placeholder(existing),
+            "placeholder": _build_externalized_placeholder(existing, content=content),
             "path": existing_path,
             "payload": existing,
         }
@@ -1369,7 +1401,8 @@ def maybe_externalize_payload(
             "content_chars": payload["content_chars"],
             "content_bytes": payload["content_bytes"],
             "ref": path.name,
-        }
+        },
+        content=content,
     )
     return {
         "placeholder": placeholder,

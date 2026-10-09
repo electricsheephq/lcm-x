@@ -114,7 +114,9 @@ def test_t3_warning_once_per_process(tmp_path, monkeypatch, caplog):
         assert sum(record.getMessage() == WARNING for record in caplog.records) == expected
 
 
-def test_user_replay_externalization_ignores_flag(tmp_path):
+def test_user_replay_externalization_ignores_flag(tmp_path, monkeypatch):
+    # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
     for enabled in (False, True):
         home = tmp_path / str(enabled)
         home.mkdir()
@@ -122,7 +124,9 @@ def test_user_replay_externalization_ignores_flag(tmp_path):
                          large_output_externalization_threshold_chars=12_000,
                          large_output_externalization_path=str(home / "externalized"))
         try:
-            rows = [{"role": "user", "content": "ordinary retained prose " * 2800 + "retained fact"}]
+            # #1016: the marker sits outside the stub's head/tail preview.
+            rows = [{"role": "user", "content": "ordinary retained prose " * 1400 + "retained fact "
+                     + "ordinary retained prose " * 1400}]
             replay = engine._ingest_messages(rows)
             assert "retained fact" not in replay[0]["content"]
             assert "retained fact" not in engine._store.get_session_messages("S")[0]["content"]

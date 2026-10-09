@@ -253,12 +253,13 @@ def test_t4_pre_leaf_rejection_skips_the_post_drain_condensation(tmp_path, monke
 
 # Recorded at the base of this change (v0.24.6 for these paths): per sweep shape, the summariser calls as
 # (depth, source_tokens), the telemetry passes and stop reason, and a digest of the returned context.
-# The digests were re-pinned for #680: the LCM system note in the returned context gained one sentence.
+# The digests were re-pinned for #680: the LCM system note in the returned context gained one sentence,
+# and for #1016: that sentence names user/assistant payload stubs (calls and passes unchanged).
 T5_EXPECTED = {
     "partial": ([(0, 361)] * 12, (12, 0, 12, "pass_budget_exhausted"),
-                "7b537c108b1818dc04de210ec3a313eb0f61dcb9516f04ba392508f5b9479fdb"),
+                "0032a38280f9f2cae135466e3c055dd66d68f8483174a895ccfd2425ba0c26e6"),
     "drained": ([(0, 361)] * 5 + [(1, 260)], (5, 1, 6, "summary_prefix_target_reached"),
-                "525063f307cca86317324a516d82e101116afdcc3f5098028114fbc521ddd1b7"),
+                "1f66e6b108c454838738c37dfbacd80db11cfd159bd7c52704da5ec618f0f22e"),
 }
 
 
