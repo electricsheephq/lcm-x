@@ -33,6 +33,7 @@ from .externalize import (
     maybe_externalize_payload,
 )
 from .message_content import normalize_content_value
+from .tokens import count_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -67,6 +68,29 @@ def _contains_media_payload(value: Any) -> bool:
             if _contains_media_payload(nested):
                 return True
     return False
+
+
+# #1016: user/assistant text (``raw_payload``) is externalized only above
+# max(large_output_externalization_threshold_chars, this floor). The configured threshold
+# (12,000 chars by default) was sized for tool output; below the floor the model and
+# recall must see the user's own words. 100,000 chars matches Lossless Claw, which
+# externalizes non-tool messages only at 25,000 tokens. Tool results and media payloads
+# keep the configured threshold. Not a config key. Dense scripts (CJK: ~1.5 chars/token)
+# reach the same 25,000 tokens well under 100k chars, so the floor is also met in tokens,
+# counted by ``tokens.count_tokens`` as assembly counts them.
+_NON_TOOL_EXTERNALIZATION_FLOOR_CHARS = 100_000
+_NON_TOOL_EXTERNALIZATION_FLOOR_TOKENS = 25_000
+
+
+def _non_tool_text_over_floor(text: str, config) -> bool:
+    if len(text) > _NON_TOOL_EXTERNALIZATION_FLOOR_CHARS:
+        return True
+    # Count tokens only where externalization could apply (enabled, over the configured threshold).
+    if not getattr(config, "large_output_externalization_enabled", False):
+        return False
+    if len(text) <= int(getattr(config, "large_output_externalization_threshold_chars", 0) or 0):
+        return False
+    return count_tokens(text) >= _NON_TOOL_EXTERNALIZATION_FLOOR_TOKENS
 
 
 def _externalization_kind_for_message(message: Dict[str, Any]) -> str:
@@ -2067,6 +2091,19 @@ def redact_sensitive_text(text: str, config) -> str:
     return protected
 
 
+def redact_catalog_sensitive_text(text: str) -> str:
+    """#1016: redact every catalog pattern, whatever the config, in derived text (the raw_payload
+    preview) whose head/tail slicing could otherwise cut a credential's label off its value."""
+    protected = text
+    for name in _private_key_first(list(_SENSITIVE_PATTERN_CATALOG)):
+        protected = _apply_sensitive_pattern(
+            name,
+            lambda match, pattern_name=name: _redact_match(pattern_name, match),
+            protected,
+        )
+    return protected
+
+
 def _redact_entire_sensitive_string(text: str, pattern_name: str) -> str:
     if not text or _SENSITIVE_PLACEHOLDER_PREFIX in text:
         return text
@@ -2745,8 +2782,10 @@ def protect_message_for_ingest(
                 )
                 if placeholder:
                     externalized = {"placeholder": placeholder}
-            if externalized is None:
-                kind = _externalization_kind_for_message(msg)
+            kind = _externalization_kind_for_message(msg)
+            if externalized is None and (
+                kind != "raw_payload" or _non_tool_text_over_floor(normalized_content, config)
+            ):
                 externalized = maybe_externalize_payload(
                     normalized_content,
                     kind=kind,

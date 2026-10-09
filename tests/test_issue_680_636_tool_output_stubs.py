@@ -502,8 +502,8 @@ def test_t8_the_stub_is_not_stored_on_the_next_turn(overflow_engine, with_system
 def test_t9_system_note_gains_one_sentence_and_is_otherwise_unchanged():
     note = LCMEngine._append_lcm_note_to_content("SYSTEM")[len("SYSTEM"):]
     sentence = (
-        'An "Externalized tool output" stub ending in ref=R means the full output is stored: '
-        'lcm_expand(externalized_ref="R") returns it.'
+        'An "Externalized tool output" or user/assistant "Externalized payload" stub ending in ref=R '
+        'means the full output is stored: lcm_expand(externalized_ref="R") returns it.'
     )
 
     # #998 names lcm_recall first; the v0.24.7 base above stays literal.
