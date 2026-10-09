@@ -8,18 +8,21 @@ itself (lease, in-flight markers, privacy policy, dtype, budget, provider
 timeout), one batch per corpus, so it can never publish a row twice alongside a
 manual backfill or another process.
 
-Message chunks are embedded only for a local provider: the cloud raw-text
-authorization (`--confirm-raw-text`) is per invocation and never persisted, so
-cloud chunk embedding stays operator-initiated.
+Message chunks are embedded only for FastEmbed or an Ollama endpoint on a
+loopback host: the raw-text authorization (`--confirm-raw-text`) is per
+invocation and never persisted, so chunk embedding for a cloud provider or a
+remote Ollama stays operator-initiated.
 """
 
 from __future__ import annotations
 
 import logging
+import ipaddress
 import threading
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +69,23 @@ def run_incremental_embedding_pass(db_path: str | Path, config: Any, *, breaker:
     return outcome
 
 
+def _automatic_chunks_allowed(config: Any, command: Any) -> bool:
+    provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+    if not command._is_local_embedding_provider(provider):
+        return False
+    if provider != "ollama":
+        return True  # FastEmbed runs in this process
+    # Read the base URL exactly as resolve_provider/OllamaProvider do.
+    base_url = str(
+        getattr(config, "ollama_base_url", "http://localhost:11434")
+    ).strip().rstrip("/") or "http://localhost:11434"
+    try:
+        host = urlsplit(base_url).hostname or ""
+        return host == "localhost" or ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False  # a hostname other than localhost is not verifiably local
+
+
 def _corpus_failure(result: dict[str, Any]) -> str | None:
     if result["status"] in {"error", "failed"}:
         if result["error"]:
@@ -101,20 +121,32 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
     corpora = [("summaries", lambda: command._embedding_backfill_summary_run(
         config, db_path, apply=True, limit=limit, retry_uncertain=False,
     ))]
-    if command._is_local_embedding_provider(getattr(config, "embedding_provider", "")):
+    if _automatic_chunks_allowed(config, command):
         corpora.append(("chunks", lambda: command._chunk_backfill_run(
             config, db_path, apply=True, limit=limit, retry_uncertain=False, policy="",
+            incremental=True,
         )))
-    outcomes = []
+    outcomes: list[str] = []
+    failures: list[str] = []
     for name, run in corpora:
         result = run()
         if isinstance(result, str):
             if getattr(result, "reason", "") == "lease_held":
-                return "lease_held", None  # a manual backfill or another process
+                if not outcomes:
+                    return "lease_held", None  # a manual backfill or another process
+                outcomes.append(f"{name}=lease_held")
+                break
             outcomes.append(f"{name}=refused")
             continue
         failure = _corpus_failure(result)
-        if failure is not None:
-            return f"{name}={result['status']}", failure
-        outcomes.append(f"{name}={result['status']}:{result['embedded']}")
-    return " ".join(outcomes), None
+        if failure is None:
+            outcomes.append(f"{name}={result['status']}:{result['embedded']}")
+            continue
+        outcomes.append(f"{name}={result['status']}")
+        failures.append(f"{name}: {failure}")
+        # A whole-run error (provider resolution, profile mismatch, auth,
+        # privacy refusal) is shared by both corpora; a row-level failure of
+        # one corpus must not starve the other.
+        if result["status"] == "error":
+            break
+    return " ".join(outcomes), "; ".join(failures) or None

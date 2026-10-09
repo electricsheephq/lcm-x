@@ -46,7 +46,7 @@ vectors. The remedy is `/lcm embed warmup`, then `/lcm embed backfill --apply`.
 
 With embeddings on and a registered profile, new leaf summaries are embedded by a bounded
 background pass after each published leaf summary and on session bind; new message chunks are
-embedded the same way only with a local provider, because cloud chunk consent
+embedded the same way only with fastembed or a loopback Ollama endpoint, because chunk consent
 (`--confirm-raw-text`) is per invocation. The pass shares the backfill lease and skips while a
 manual backfill holds it. `/lcm status` reports the backlog per corpus and the last pass.
 

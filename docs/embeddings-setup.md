@@ -206,10 +206,13 @@ is refused until the pass ends, as with two manual runs. There is no new setting
 
 - **Summaries** are embedded with any provider. With a cloud provider this means new summaries
   are sent to it automatically, one bounded batch per pass, without a manual backfill.
-- **Message chunks** are embedded automatically only with a local provider (fastembed or Ollama).
-  On a cloud provider the chunk corpus stays operator-initiated: `--confirm-raw-text` authorizes
-  one invocation and is never stored, so run `/lcm embed backfill --corpus chunks --apply
-  --confirm-raw-text` yourself when you want chunk recall.
+- **Message chunks** are embedded automatically only with fastembed, or with Ollama whose
+  `LCM_OLLAMA_BASE_URL` host is loopback (`localhost`, `127.0.0.0/8`, `::1`). The pass resumes after
+  the newest message whose chunks are embedded, so its cost follows new messages, not the store;
+  older backlog stays with `/lcm embed backfill`. On a cloud provider or a remote Ollama the chunk
+  corpus stays operator-initiated: `--confirm-raw-text` authorizes one invocation and is never
+  stored, so run `/lcm embed backfill --corpus chunks --apply --confirm-raw-text` yourself when you
+  want chunk recall.
 - If the provider is unavailable (for example fastembed is not installed), the pass is skipped and
   counted; the first skip in a process logs a `WARNING`, later ones log at `DEBUG`.
 

@@ -463,3 +463,104 @@ def test_condensed_publication_does_not_schedule_a_pass(tmp_path, home, monkeypa
         assert scheduled == [True]
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("base_url", "chunks_run"),
+    [
+        ("http://10.1.2.3:11434", False),
+        ("https://ollama.example.com", False),
+        ("http://127.0.0.2:11434/", True),
+        ("http://[::1]:11434", True),
+        ("http://localhost:11434", True),
+    ],
+)
+def test_remote_ollama_gets_summaries_but_never_automatic_chunks(
+    tmp_path, home, providers, monkeypatch, base_url, chunks_run
+):
+    chunk_runs = []
+    real_chunk_run = command_mod._chunk_backfill_run
+    monkeypatch.setattr(
+        command_mod,
+        "_chunk_backfill_run",
+        lambda *args, **kwargs: chunk_runs.append(kwargs) or real_chunk_run(*args, **kwargs),
+    )
+    engine = _make_engine(tmp_path, home)
+    engine._config.ollama_base_url = base_url
+    try:
+        _drive_until_leaf(engine, monkeypatch)
+        _drain(engine)
+
+        assert _summary_vector_ids(engine) == _leaf_ids(engine) != []
+        assert bool(chunk_runs) is chunks_run
+        assert (_chunk_vector_count(engine) > 0) is chunks_run
+    finally:
+        engine.shutdown()
+
+
+def test_a_summary_failure_does_not_starve_the_chunk_corpus(
+    tmp_path, home, providers, monkeypatch
+):
+    monkeypatch.setattr(
+        command_mod,
+        "_embedding_backfill_summary_run",
+        lambda *_args, **_kwargs: {
+            "status": "failed", "error": None, "failed": [("1", "provider_error:bad row")],
+            "selected": 1, "privacy_withheld": 0, "skipped": [], "embedded": 0,
+            "stop_reason": None,
+        },
+    )
+    engine = _make_engine(tmp_path, home)
+    try:
+        for index in range(3):
+            engine._store.append(SESSION, {"role": "user", "content": f"message {index} {FILLER}"})
+        _, before = maintenance_mod.incremental_embedding_state(engine._config.database_path)
+        outcome = maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config
+        )
+        _, after = maintenance_mod.incremental_embedding_state(engine._config.database_path)
+
+        assert outcome.startswith("summaries=failed chunks=complete:")
+        assert _chunk_vector_count(engine) >= 3
+        assert after == before + 1
+    finally:
+        engine.shutdown()
+
+
+def test_automatic_chunk_discovery_is_bounded_by_new_messages_not_the_store(
+    tmp_path, home, providers, monkeypatch
+):
+    engine = _make_engine(tmp_path, home)
+    db_path = engine._config.database_path
+    calls = []
+    real_chunk_message = command_mod.chunk_message
+    monkeypatch.setattr(
+        command_mod,
+        "chunk_message",
+        lambda *args, **kwargs: calls.append(args[0]) or real_chunk_message(*args, **kwargs),
+    )
+    try:
+        for index in range(600):
+            engine._store.append(SESSION, {"role": "user", "content": f"old {index} {FILLER}"})
+        batch = command_mod._embedding_backfill_batch_size(
+            engine._config.embedding_max_batch_items
+        )
+
+        # A fresh store: one pass reads about one batch of messages, oldest first.
+        calls.clear()
+        maintenance_mod.run_incremental_embedding_pass(db_path, engine._config)
+        assert _chunk_vector_count(engine) == batch
+        assert len(calls) <= batch + 2
+
+        # Steady state: the whole history is embedded; three new messages cost
+        # about three chunker calls, not one per stored message.
+        report = handle_lcm_command("embed backfill --corpus chunks --apply --limit 10000", engine)
+        assert "status: complete" in report
+        for index in range(3):
+            engine._store.append(SESSION, {"role": "user", "content": f"new {index} {FILLER}"})
+        calls.clear()
+        maintenance_mod.run_incremental_embedding_pass(db_path, engine._config)
+        assert _chunk_vector_count(engine) == 603
+        assert len(calls) <= 5
+    finally:
+        engine.shutdown()

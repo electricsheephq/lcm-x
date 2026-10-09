@@ -4852,6 +4852,8 @@ def _chunk_pending_rows(
     identity_hash: str | None,
     policy: str,
     limit: int,
+    *,
+    incremental: bool = False,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
     """Discover policy-chunked messages whose chunks are not yet embedded.
 
@@ -4860,15 +4862,32 @@ def _chunk_pending_rows(
     active policy, and excludes chunk ids already embedded under the identity or
     held in-flight. Returns the total pending count, up to ``limit`` documents
     as ``(chunk_id, text, tokens)``, and a metadata map for the selected chunks.
+
+    ``incremental`` (the #1014 automatic pass) resumes after the newest message
+    with an embedded or in-flight chunk, oldest first, and stops at a message
+    boundary once ``limit`` chunks are found, so its cost tracks new messages
+    rather than the store; the returned total then counts only what it saw.
     """
-    already = _chunk_embedded_ids(conn, identity_hash)
-    inflight = _chunk_inflight_ids(conn, identity_hash)
+    if incremental:
+        cursor = _chunk_cursor(conn, identity_hash)
+        already = inflight = set()
+        rows = conn.execute(
+            "SELECT store_id, role, content FROM messages WHERE store_id > ? "
+            "ORDER BY store_id",
+            (cursor,),
+        )
+    else:
+        already = _chunk_embedded_ids(conn, identity_hash)
+        inflight = _chunk_inflight_ids(conn, identity_hash)
+        rows = conn.execute(
+            "SELECT store_id, role, content FROM messages ORDER BY store_id DESC"
+        )
     total = 0
     documents: list[tuple[str, str, int]] = []
     meta: dict[str, tuple[int, int, int, int]] = {}
-    for row in conn.execute(
-        "SELECT store_id, role, content FROM messages ORDER BY store_id DESC"
-    ):
+    for row in rows:
+        if incremental and len(documents) >= limit:
+            break
         for chunk in chunk_message(row[0], row[1], row[2], policy=policy):
             chunk_id = chunk.chunk_id
             if chunk_id in already or chunk_id in inflight:
@@ -4878,7 +4897,7 @@ def _chunk_pending_rows(
             if chunk.char_end <= chunk.char_start:
                 continue
             total += 1
-            if len(documents) < limit:
+            if len(documents) < limit or incremental:
                 documents.append((chunk_id, chunk.text, chunk.token_estimate))
                 meta[chunk_id] = (
                     chunk.store_id,
@@ -4887,6 +4906,22 @@ def _chunk_pending_rows(
                     chunk.char_end,
                 )
     return total, documents, meta
+
+
+def _chunk_cursor(conn: sqlite3.Connection, identity_hash: str | None) -> int:
+    """Newest message id with a chunk embedded or in flight under the identity."""
+    cursor = 0
+    for sql in (
+        "SELECT MAX(store_id) FROM lcm_chunk_meta WHERE identity_hash = ?",
+        "SELECT MAX(CAST(substr(embedded_id, 1, instr(embedded_id, ':') - 1) "
+        "AS INTEGER)) FROM lcm_embedding_backfill_inflight WHERE identity_hash = ?",
+    ):
+        try:
+            value = conn.execute(sql, (identity_hash,)).fetchone()[0]
+        except sqlite3.OperationalError:
+            continue  # table not created yet
+        cursor = max(cursor, int(value or 0))
+    return cursor
 
 
 def _rebuild_chunk_document(
@@ -4968,12 +5003,15 @@ def _chunk_authorized_uncertain_rows(
 
 
 def _chunk_backfill_remaining(
-    db_path, identity_hash: str | None, policy: str, pending: int, embedded: int
+    db_path, identity_hash: str | None, policy: str, pending: int, embedded: int,
+    incremental: bool = False,
 ) -> tuple[int, int, int]:
     try:
         check_conn = _embedding_read_connection(db_path)
         try:
-            remaining, _, _ = _chunk_pending_rows(check_conn, identity_hash, policy, 1)
+            remaining, _, _ = _chunk_pending_rows(
+                check_conn, identity_hash, policy, 1, incremental=incremental
+            )
             if identity_hash:
                 try:
                     in_flight = int(check_conn.execute(
@@ -5027,9 +5065,12 @@ def _chunk_backfill_text(
 def _chunk_backfill_run(
     config, db_path, *, apply: bool, limit: int, retry_uncertain: bool, policy: str,
     confirm_raw_text: bool = False, include_next_hint: bool = True,
-    expected_dtype: str | None = None,
+    expected_dtype: str | None = None, incremental: bool = False,
 ) -> str | dict[str, Any]:
-    """Chunk backfill core: refusal text, or the report fields (#1014)."""
+    """Chunk backfill core: refusal text, or the report fields (#1014).
+
+    ``incremental`` selects bounded cursor discovery for the automatic pass.
+    """
     policy = normalize_content_policy(policy or getattr(
         config, "embedding_content_policy", "conversational"
     ))
@@ -5264,7 +5305,7 @@ def _chunk_backfill_run(
             authorized_uncertain_ids = {row[0] for row in rows}
         else:
             pending, rows, chunk_meta = _chunk_pending_rows(
-                conn, identity, policy, limit
+                conn, identity, policy, limit, incremental=incremental
             )
             authorized_uncertain_ids = set()
         (
@@ -5558,7 +5599,7 @@ def _chunk_backfill_run(
             store.close()
 
     remaining, in_flight_count, uncertain_count = _chunk_backfill_remaining(
-        db_path, identity, policy, pending, embedded
+        db_path, identity, policy, pending, embedded, incremental
     )
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
