@@ -2324,7 +2324,7 @@ class LCMEngine(
             )
 
     def _schedule_embedding_maintenance(self) -> None:
-        """Enqueue one bounded incremental embedding pass (#1014); never blocks.
+        """Prepare schema, then enqueue one bounded embedding pass (#1014).
 
         Active exactly when ``embeddings_enabled``. The scheduler keeps at most
         one pass queued per database, and the pass runs the backfill core under
@@ -2342,6 +2342,23 @@ class LCMEngine(
                 return
             database_path = Path(raw_database_path).resolve()
             config = copy.deepcopy(self._config)
+            from . import command
+            from .embedding_maintenance import _automatic_chunks_allowed
+            from .vector_store import VectorStore
+
+            chunks_allowed = _automatic_chunks_allowed(config, command)
+            schema_key = (database_path, chunks_allowed)
+            if getattr(self, "_embedding_schema_ready", None) != schema_key:
+                # First-use DDL (including inflight migration) must finish here:
+                # changing the schema in the worker can break foreground FTS5 writes.
+                store = VectorStore(database_path, config=config)
+                try:
+                    if chunks_allowed:
+                        store.ensure_chunk_schema()
+                    command._ensure_inflight_table(store.connection)
+                finally:
+                    store.close()
+                self._embedding_schema_ready = schema_key
             cached = getattr(self, "_lcm_embedding_provider_cache", None)
             breaker = getattr(cached[1], "breaker", None) if cached else None
 

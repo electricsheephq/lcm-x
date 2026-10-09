@@ -192,6 +192,98 @@ def test_a_new_leaf_and_chunks_get_vectors_without_manual_backfill(
         engine.shutdown()
 
 
+@pytest.mark.parametrize("legacy_inflight", [False, True])
+def test_scheduling_prepares_schema_before_the_background_pass(
+    tmp_path, home, providers, monkeypatch, legacy_inflight
+):
+    engine = _make_engine(tmp_path, home)
+    release_pass = threading.Event()
+    real_pass = lcm_engine.run_incremental_embedding_pass
+
+    def held_pass(*args, **kwargs):
+        assert release_pass.wait(30)
+        return real_pass(*args, **kwargs)
+
+    monkeypatch.setattr(lcm_engine, "run_incremental_embedding_pass", held_pass)
+    try:
+        assert not _rows(engine, "SELECT name FROM sqlite_master WHERE name IN "
+                         "('lcm_chunk_meta', 'lcm_embedding_backfill_inflight')")
+        if legacy_inflight:
+            with sqlite3.connect(engine._config.database_path) as conn:
+                conn.execute(
+                    "CREATE TABLE lcm_embedding_backfill_inflight ("
+                    "embedded_id TEXT, identity_hash TEXT, lease_id TEXT, "
+                    "generation INTEGER, claimed_at REAL, "
+                    "PRIMARY KEY (embedded_id, identity_hash))"
+                )
+                conn.execute(
+                    "INSERT INTO lcm_embedding_backfill_inflight "
+                    "VALUES ('old-id', 'old-identity', 'old-lease', 1, 1)"
+                )
+        node_id = str(engine._dag.add_node(SummaryNode(
+            session_id=SESSION, depth=0, summary="schema preparation leaf",
+            created_at=1.0, latest_at=1.0,
+        )))
+        engine._store.append(SESSION, {"role": "user", "content": FILLER})
+        engine._schedule_embedding_maintenance()
+        scheduled_version = _rows(engine, "PRAGMA schema_version")[0][0]
+        release_pass.set()
+        _drain(engine)
+        assert _rows(engine, "PRAGMA schema_version")[0][0] == scheduled_version
+        assert _summary_vector_ids(engine) == [node_id]
+        assert _chunk_vector_count(engine) > 0
+        if legacy_inflight:
+            assert _rows(engine, "SELECT embedded_id, identity_hash, state FROM "
+                         "lcm_embedding_backfill_inflight") == [
+                ("old-id", "old-identity", "uncertain")
+            ]
+    finally:
+        release_pass.set()
+        engine.shutdown()
+
+
+def test_schema_preparation_retries_and_caches_per_database_and_chunk_policy(
+    tmp_path, home, monkeypatch, caplog
+):
+    engine = _make_engine(tmp_path, home, provider="voyage", register=False)
+    scheduled = []
+    ensured_paths = []
+    real_ensure = command_mod._ensure_inflight_table
+
+    def ensure(conn):
+        ensured_paths.append(conn.execute("PRAGMA database_list").fetchone()[2])
+        if len(ensured_paths) == 1:
+            raise sqlite3.OperationalError("schema setup unavailable")
+        real_ensure(conn)
+
+    monkeypatch.setattr(command_mod, "_ensure_inflight_table", ensure)
+    monkeypatch.setattr(
+        lcm_engine._EMBEDDING_MAINTENANCE_SCHEDULER, "schedule",
+        lambda *args, **kwargs: scheduled.append(args),
+    )
+    try:
+        engine._schedule_embedding_maintenance()
+        assert scheduled == []
+        assert "could not schedule background incremental embedding" in caplog.text
+        engine._schedule_embedding_maintenance()
+        engine._schedule_embedding_maintenance()
+        assert len(ensured_paths) == 2 and len(scheduled) == 2
+        assert _rows(engine, "SELECT name FROM sqlite_master "
+                     "WHERE name='lcm_embedding_profile'")
+        assert not _rows(engine, "SELECT name FROM sqlite_master WHERE name='lcm_chunk_meta'")
+        engine._config.embedding_provider = "ollama"
+        engine._schedule_embedding_maintenance()
+        assert len(ensured_paths) == 3
+        assert _rows(engine, "SELECT name FROM sqlite_master WHERE name='lcm_chunk_meta'")
+        next_path = tmp_path / "next.db"
+        monkeypatch.setattr(engine._dag, "db_path", next_path)
+        engine._schedule_embedding_maintenance()
+        assert len(ensured_paths) == 4 and len(scheduled) == 4
+        assert ensured_paths[-1] == str(next_path)
+    finally:
+        engine.shutdown()
+
+
 def test_b_held_manual_lease_skips_then_next_pass_completes_once(
     tmp_path, home, providers
 ):
