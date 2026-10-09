@@ -196,14 +196,16 @@ therefore reports bounded coverage rather than claiming universal pre-bound sour
 ## New content is embedded automatically
 
 With `LCM_EMBEDDINGS_ENABLED=true` and a registered profile (`/lcm embed warmup`), LCM-X
-embeds new content in the background: after each leaf or condensed summary is published, and
+embeds new content in the background: after each leaf summary is published (condensed summaries
+are not embedding targets, as with `/lcm embed backfill`), and
 once when a session binds. Each pass handles at most one backfill batch per corpus, runs off the
 turn path, and uses the same lease, privacy policy, operation budget and provider timeout as
 `/lcm embed backfill`. If a manual backfill or another process holds the lease, the pass skips;
 the next pass picks up whatever is still unembedded. A manual backfill started while a pass runs
 is refused until the pass ends, as with two manual runs. There is no new setting.
 
-- **Summaries** are embedded with any provider.
+- **Summaries** are embedded with any provider. With a cloud provider this means new summaries
+  are sent to it automatically, one bounded batch per pass, without a manual backfill.
 - **Message chunks** are embedded automatically only with a local provider (fastembed or Ollama).
   On a cloud provider the chunk corpus stays operator-initiated: `--confirm-raw-text` authorizes
   one invocation and is never stored, so run `/lcm embed backfill --corpus chunks --apply

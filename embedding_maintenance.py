@@ -3,7 +3,7 @@
 `/lcm embed backfill` was the only writer of vectors, so a store started with
 none and every summary or chunk published after a manual backfill stayed
 unembedded. The engine now schedules one bounded pass in the background after a
-summary is published and on session bind. The pass runs the backfill core
+leaf summary is published and on session bind. The pass runs the backfill core
 itself (lease, in-flight markers, privacy policy, dtype, budget, provider
 timeout), one batch per corpus, so it can never publish a row twice alongside a
 manual backfill or another process.
@@ -89,7 +89,7 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
             return "no_profile", None  # `/lcm embed warmup` has not run yet
     finally:
         read_conn.close()
-    if breaker is not None and not breaker.allows():
+    if breaker is not None and breaker.is_open():
         return "circuit_open", None  # the query path's breaker is cooling down
     probe = probe_provider_availability(config)
     if not probe["available"]:

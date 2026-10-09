@@ -360,6 +360,12 @@ class EmbeddingCircuitBreaker:
             self._failures = 0
         return current >= self._open_until
 
+    def is_open(self, *, now: float | None = None) -> bool:
+        """Read-only peek: never resets state another thread may have just set."""
+        open_until = self._open_until
+        current = time.monotonic() if now is None else now
+        return bool(open_until) and current < open_until
+
     def record_success(self) -> None:
         self._failures = 0
         self._open_until = 0.0

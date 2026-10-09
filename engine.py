@@ -2438,9 +2438,11 @@ class LCMEngine(
         ``earliest_at``/``latest_at`` coverage span is passed through so a summary
         crossing midnight stales BOTH days, not only its newest (maintainer #388
         blocker 2 / B2).
-        Publication is also the trigger for incremental embedding (#1014).
+        A leaf publication is also the trigger for incremental embedding
+        (#1014); condensed nodes are not embedding targets.
         """
-        self._schedule_embedding_maintenance()
+        if node.depth == 0:
+            self._schedule_embedding_maintenance()
         if not self._config.temporal_rollups_enabled:
             return
         mark_stale_for_published_summary(

@@ -416,3 +416,50 @@ def test_embedding_worker_is_named_for_embeddings_not_rollups(caplog):
     finally:
         release.set()
         scheduler.drain({("db", "embeddings"), ("db-2", "embeddings")}, timeout=5)
+
+
+def test_pass_peeks_the_query_breaker_without_clearing_a_fresh_cooldown(
+    tmp_path, home, providers
+):
+    from hermes_lcm.embedding_provider import EmbeddingCircuitBreaker
+
+    engine = _make_engine(tmp_path, home)
+    try:
+        db_path = engine._config.database_path
+        # Open: the pass skips and the cooldown is untouched.
+        breaker = EmbeddingCircuitBreaker(failure_threshold=1, cooldown_seconds=400.0)
+        breaker.record_failure()
+        opened = (breaker._open_until, breaker._failures)
+        assert maintenance_mod.run_incremental_embedding_pass(
+            db_path, engine._config, breaker=breaker
+        ) == "circuit_open"
+        assert (breaker._open_until, breaker._failures) == opened
+
+        # Expired: the pass runs, but a read-only peek leaves the state for the
+        # query path to reset, so it cannot erase a cooldown a concurrent query
+        # failure sets in between.
+        breaker._open_until = 1.0
+        assert not breaker.is_open()
+        maintenance_mod.run_incremental_embedding_pass(db_path, engine._config, breaker=breaker)
+        assert (breaker._open_until, breaker._failures) == (1.0, opened[1])
+    finally:
+        engine.shutdown()
+
+
+def test_condensed_publication_does_not_schedule_a_pass(tmp_path, home, monkeypatch):
+    engine = _make_engine(tmp_path, home)
+    scheduled = []
+    monkeypatch.setattr(
+        engine, "_schedule_embedding_maintenance", lambda: scheduled.append(True)
+    )
+    try:
+        engine._invalidate_rollups_for_published_node(
+            SummaryNode(session_id=SESSION, depth=1, summary="condensed", created_at=1.0)
+        )
+        assert scheduled == []
+        engine._invalidate_rollups_for_published_node(
+            SummaryNode(session_id=SESSION, depth=0, summary="leaf", created_at=1.0)
+        )
+        assert scheduled == [True]
+    finally:
+        engine.shutdown()
