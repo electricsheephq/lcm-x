@@ -2663,6 +2663,7 @@ def evaluate_question(
     include_rankings: bool = False,
     chunk_provider=None,
     accounting: ProviderAccounting | None = None,
+    candidate_sink: Callable[..., None] | None = None,
 ) -> dict[str, Any]:
     """Ingest one question into a fresh store and score every retrieval arm.
 
@@ -3178,6 +3179,16 @@ def evaluate_question(
             recall_raw, recall_rerank_status, recall_rerank_scores = recall_result
         else:
             recall_raw = recall_result
+        # Explicit evaluation-only export while exact source rows remain open.
+        # The default scorecard never exports transcript text or changes policy.
+        if candidate_sink is not None:
+            candidate_sink(
+                question=question, config=config, store=store, dag=dag,
+                provider=production_summary_provider, tmp_dir=tmp_dir,
+                embeddings_enabled=embeddings_enabled, provider_name=summary_name,
+                chunk_provider=production_chunk_provider, hits=recall_raw,
+                store_id_to_turn=store_id_to_turn, capture_ms=recall_ms,
+            )
         recall_ranked = recall_hit_sessions(recall_raw)
         recall_turns = recall_hit_turn_keys(recall_raw, store_id_to_turn)
 
