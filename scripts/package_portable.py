@@ -10,8 +10,12 @@ import zipfile
 from pathlib import Path
 
 LAUNCHER = """#!/usr/bin/env python3
-import argparse, json, os, subprocess, sys
+import argparse, json, os, shutil, subprocess, sys
 from pathlib import Path
+if sys.version_info < (3,11):
+    runtime=next((shutil.which(x) for x in ("python3.11","python3.12","python3.13","python3.14") if shutil.which(x)),None)
+    if runtime: os.execv(runtime,[runtime,*sys.argv])
+    raise SystemExit("LCM-X requires Python 3.11+; configure the host command with its absolute path")
 p=argparse.ArgumentParser()
 p.add_argument('--config', default=os.environ.get('LCMX_PORTABLE_CONFIG'))
 p.add_argument('host', choices=['claude-code','codex','mcp'])
