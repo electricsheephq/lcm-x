@@ -1,20 +1,15 @@
 """#1013: the product defaults are the deployed configuration.
 
-Each feature that the new defaults turn on (large-output externalization,
-active-replay stubbing, temporal rollups, the threshold full sweep) must run on
-a default install with no extra setup: a fresh store, payloads under the Hermes
-home that holds the LCM database, and rollup maintenance skipping an in-memory
-database.
+Each feature that the new defaults turn on (temporal rollups, the threshold
+full sweep) must run on a default install with no extra setup: a fresh store,
+and rollup maintenance skipping an in-memory database.
 """
 
-import json
 import logging
 import sqlite3
-from pathlib import Path
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-from hermes_lcm.externalize import extract_externalized_ref, load_externalized_payload
 from hermes_lcm.tokens import count_messages_tokens
 
 
@@ -22,19 +17,6 @@ def _default_engine(tmp_path, name="lcm.db"):
     hermes_home = tmp_path / "hermes"
     config = LCMConfig(database_path=str(hermes_home / name))
     return LCMEngine(config=config, hermes_home=str(hermes_home)), hermes_home
-
-
-def _tool_pair(call_id, payload):
-    return [
-        {
-            "role": "assistant",
-            "content": "running tool",
-            "tool_calls": [
-                {"id": call_id, "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
-            ],
-        },
-        {"role": "tool", "tool_call_id": call_id, "content": payload},
-    ]
 
 
 def test_defaults_match_the_deployed_configuration():
@@ -45,54 +27,15 @@ def test_defaults_match_the_deployed_configuration():
     assert config.fresh_tail_max_tokens == 24_000
     assert config.leaf_chunk_tokens == 8_000
     assert config.threshold_full_sweep_enabled is True
-    assert config.large_output_externalization_enabled is True
-    assert config.large_output_active_replay_stubbing_enabled is True
     assert config.temporal_rollups_enabled is True
-    # Unchanged by #1013.
+    # Unchanged by #1013 part 1: externalization stays opt-in pending its role scope.
+    assert config.large_output_externalization_enabled is False
+    assert config.large_output_active_replay_stubbing_enabled is False
     assert config.embeddings_enabled is False
     assert config.survival_fit is True
     assert config.survival_reserve == 0.15
     assert config.large_output_externalization_threshold_chars == 12_000
     assert config.large_output_active_replay_stub_threshold_tokens == 10_000
-
-
-def test_externalization_is_active_by_default_and_writes_under_the_hermes_home(tmp_path):
-    engine, hermes_home = _default_engine(tmp_path)
-    content = "tool-output:" + ("x" * 13_000)
-    try:
-        serialized = engine._serialize_messages(
-            [{"role": "tool", "tool_call_id": "call_default", "content": content}]
-        )
-    finally:
-        engine.shutdown()
-
-    assert "[Externalized tool output" in serialized
-    payload_files = list((hermes_home / "lcm-large-outputs").glob("*.json"))
-    assert len(payload_files) == 1
-    payload = json.loads(payload_files[0].read_text())
-    assert payload["tool_call_id"] == "call_default"
-    assert payload["content"] == content
-
-
-def test_active_replay_stubbing_is_active_by_default_on_a_fresh_store(tmp_path):
-    engine, hermes_home = _default_engine(tmp_path)
-    engine.on_session_start("defaults-stub", conversation_id="defaults-stub-conv", context_length=200_000)
-    payload = "alpha beta gamma delta epsilon " * 2_500  # well over the 10000-token default
-    messages = _tool_pair("big-call", payload)
-    for index in range(26):  # push the big result out of the default 24-message fresh tail
-        messages.append({"role": "user" if index % 2 == 0 else "assistant", "content": f"turn {index}"})
-    try:
-        result = engine._assemble_context({"role": "system", "content": "system"}, messages)
-        stub = next(m for m in result if m.get("role") == "tool" and m.get("tool_call_id") == "big-call")
-        ref = extract_externalized_ref(stub["content"])
-        recovered = load_externalized_payload(ref, config=engine._config, hermes_home=engine._hermes_home)
-    finally:
-        engine.shutdown()
-
-    assert stub["content"].startswith("[Externalized tool output:")
-    assert recovered is not None
-    assert recovered["content"] == payload
-    assert Path(hermes_home / "lcm-large-outputs" / ref).is_file()
 
 
 def test_temporal_rollups_are_active_by_default_on_a_fresh_store(tmp_path):

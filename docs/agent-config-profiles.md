@@ -53,24 +53,22 @@ You get bounded active context, the summary DAG, lossless recovery, and the
 full `lcm_*` tool set at their tested defaults. The defaults are the
 configuration the managed deployment runs: compaction at `0.75` of the window,
 a 24-message fresh tail capped at 24000 tokens, 8000-token leaf chunks, the
-threshold full sweep, large-output externalization with active-replay stubbing,
-and temporal rollups.
+threshold full sweep and temporal rollups.
 
 ## Profile: heavy tool-use coding agent
 
 For agents that run builds, tests, linters, and searches all day. The goal is
 to stop giant tool outputs from monopolizing the prompt while keeping every
-byte recoverable. The defaults already do this; these are the knobs to tune.
+byte recoverable.
 
 ```bash
-# On by default: oversized payloads move out of lcm.db into recoverable files
-# export LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true
+# Externalize oversized payloads out of lcm.db into recoverable files
+export LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true
 
-# On by default: token-heavy tool results in the provider-visible prompt
-# become refs. A new result is stubbed from 10000 tokens; at a compaction,
-# older results outside the fresh tail are stubbed from 2000 tokens
-# (0 = the first-sight value)
-# export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=true
+# Replace token-heavy tool results in the provider-visible prompt with refs
+export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=true
+# A new result is stubbed from 10000 tokens; at a compaction, older results
+# outside the fresh tail are stubbed from 2000 tokens (0 = the first-sight value)
 # export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS=10000
 # export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS=2000
 

@@ -385,9 +385,9 @@ Useful environment variables:
 | `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | unset (`auto`) | Protect provider-bound copies for known cloud embedding providers without rewriting durable data. Set `false` for an explicit raw-cloud opt-out (`privacy:off` vector revision); local providers remain unchanged |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
-| `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `true` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
+| `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
-| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `true` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `false` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders |
@@ -883,8 +883,8 @@ What the main knobs do:
 - `LCM_EXPANSION_CONTEXT_TOKENS` controls how much recovered material
   `lcm_expand_query` may feed to the auxiliary model. It does not change what
   LCM stores.
-- `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true` (the default) helps when large
-  tool outputs, logs, media payloads, or raw JSON blobs dominate token pressure.
+- `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true` helps when large tool outputs,
+  logs, media payloads, or raw JSON blobs dominate token pressure.
 
 Common questions:
 
@@ -901,8 +901,8 @@ per prompt, pick a row from the table above.
 
 **Should I change leaf chunk settings first?**
 
-Usually no. Start with `LCM_CONTEXT_THRESHOLD` and `LCM_FRESH_TAIL_COUNT`; large
-output externalization is on by default. Only tune leaf chunking after checking `lcm_status` and
+Usually no. Start with `LCM_CONTEXT_THRESHOLD`, `LCM_FRESH_TAIL_COUNT`, and large
+output externalization. Only tune leaf chunking after checking `lcm_status` and
 understanding whether your workload is dominated by huge raw backlog passes. If
 you want chunk-sized leaf passes, enable dynamic leaf chunking explicitly.
 
@@ -1000,15 +1000,13 @@ session to `lcm.db`.
 
 ### Large tool-output handling
 
-Externalization for ordinary large tool output is on by default
-(`LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=false` turns it off). When enabled,
+Externalization for ordinary large tool output is opt-in. When enabled,
 oversized tool results are written to plugin-managed JSON files and referenced
 from summaries. They remain inspectable later through
 `lcm_describe(externalized_ref=...)` and `lcm_expand(externalized_ref=...)`.
 
-Active-replay stubbing is on by default, is switched off separately with
-`LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=false`, and requires ordinary
-large-output externalization. Newly ingested textual tool results above the first-sight token threshold (10,000)
+Active-replay stubbing is separately opt-in and requires ordinary large-output
+externalization. Newly ingested textual tool results above the first-sight token threshold (10,000)
 are durably externalized and immediately replaced in provider-visible replay,
 including results in the protected fresh tail. Preflight adopts that replay
 change even if no leaf compaction is eligible. At a compaction, a second historical

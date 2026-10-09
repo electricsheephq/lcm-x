@@ -1,4 +1,4 @@
-"""Focused tests for active-replay tool-result stubbing (on by default since #1013)."""
+"""Focused tests for opt-in active-replay tool-result stubbing."""
 
 import json
 import time
@@ -84,17 +84,12 @@ def externalized_raw_cleanup_messages():
     return original, cleanup
 
 
-def test_active_stubbing_is_default_on_and_off_keeps_results_inline(tmp_path):
-    # #1013: on by default; turning it off keeps an evictable result inline.
-    assert LCMConfig().large_output_active_replay_stubbing_enabled is True
+def test_active_stubbing_is_default_off(tmp_path):
     config = LCMConfig(
         database_path=str(tmp_path / "default-off.db"),
         fresh_tail_count=2,
         large_output_externalization_enabled=True,
         large_output_externalization_threshold_chars=1,
-        large_output_active_replay_stubbing_enabled=False,
-        large_output_active_replay_stub_threshold_tokens=5,
-        large_output_active_replay_stub_aged_threshold_tokens=5,
     )
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
     engine._session_id = "default-off-test"

@@ -792,7 +792,7 @@ class LCMConfig:
     # -- Large tool-output externalization ---
     # When enabled, oversized tool results are written to plugin-managed storage
     # and replaced with compact references in pre-compaction serializer input.
-    large_output_externalization_enabled: bool = True
+    large_output_externalization_enabled: bool = False
     # Character threshold above which tool results are externalized.
     large_output_externalization_threshold_chars: int = 12_000
     # Explicit storage directory for externalized payloads (empty = auto under hermes home).
@@ -800,8 +800,8 @@ class LCMConfig:
     # Replace eligible textual tool results with durable compact refs in
     # provider-visible replay. Current-turn ingest is intercepted immediately;
     # historical assembly separately respects the protected fresh tail. This
-    # requires large-output externalization.
-    large_output_active_replay_stubbing_enabled: bool = True
+    # remains opt-in and requires large-output externalization.
+    large_output_active_replay_stubbing_enabled: bool = False
     # Token-aware active-replay threshold. The character threshold above still
     # controls ordinary ingest externalization; this threshold controls when a
     # provider-visible textual tool result is replaced by its durable ref.

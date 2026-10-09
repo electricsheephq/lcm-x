@@ -785,10 +785,10 @@ class TestConfig:
         assert c.embedding_privacy_enabled is None
         assert c.sensitive_patterns == ["api_key", "bearer_token", "password_assignment", "private_key"]
         assert c.sensitive_patterns_source == "default"
-        assert c.large_output_externalization_enabled is True
+        assert c.large_output_externalization_enabled is False
         assert c.large_output_externalization_threshold_chars == 12_000
         assert c.large_output_externalization_path == ""
-        assert c.large_output_active_replay_stubbing_enabled is True
+        assert c.large_output_active_replay_stubbing_enabled is False
         assert c.large_output_active_replay_stub_threshold_tokens == 10_000
         assert c.large_output_active_replay_stub_aged_threshold_tokens == 2_000
         assert c.large_output_transcript_gc_enabled is False
