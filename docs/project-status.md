@@ -1,6 +1,6 @@
 # LCM-X project state
 
-This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05 and is updated at every release; the latest update is 2026-10-07, for the v0.26.1 GA (a patch on v0.26.0).
+This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05 and is updated at every release; the latest update is 2026-10-10, for the v0.26.2 GA (a patch on v0.26.1).
 
 ## Naming and compatibility
 
@@ -12,13 +12,13 @@ The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#4
 | Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
 | Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
 | Bundled skill | `hermes-lcm` (unchanged) |
-| Latest stable | `v0.26.1@5fc3d1c6800066fec917b4c91bb957d6ea5473bc` (ships `hermes-lcm-x` / `lcm-x`; a patch on `v0.26.0`, cut from `release/v0.26.x`) |
+| Latest stable | `v0.26.2@6800cf45ad05280e6cf6fa9e1ad96c62b7132646` (ships `hermes-lcm-x` / `lcm-x`; a patch on `v0.26.1`, cut from `release/v0.26.x`) |
 
 The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is `v0.26.1` at `5fc3d1c6800066fec917b4c91bb957d6ea5473bc`, a patch on `v0.26.0` (`867eb5872207c1c9ae5fb72df95eae1c57bc2f92`): a delegated child keeps the host's model and window and compacts at the normal threshold (#937). Its gauntlet ran at the `v0.26.1-rc1` tag, and the release notes link the receipts. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
+The latest stable release is `v0.26.2` at `6800cf45ad05280e6cf6fa9e1ad96c62b7132646`, a patch on `v0.26.1` (`5fc3d1c6800066fec917b4c91bb957d6ea5473bc`): user and assistant text is externalized only above 100,000 characters (or about 25,000 tokens), and the stub carries a preview and a read hint (#1016). Its gauntlet ran at the `v0.26.2-rc2` tag, and the release notes link the receipts. GitHub publishes it as a non-prerelease release. Because GitHub reports the tag as mutable, operators and evidence packets must verify the exact SHA rather than trust the tag name alone.
 
 The source snapshot used for this reconciliation is `main@867eb5872207c1c9ae5fb72df95eae1c57bc2f92` (the v0.26.0 GA merge). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 

@@ -121,9 +121,10 @@ copy-paste setups per agent type.
 ## Project status
 
 The latest stable release is
-`v0.26.1@5fc3d1c6800066fec917b4c91bb957d6ea5473bc` (plugin `hermes-lcm-x`, engine
-`lcm-x`; the rename shipped in v0.24.0, #471), a patch on v0.26.0 in which a
-delegated child compacts like its parent (#937). It carries
+`v0.26.2@6800cf45ad05280e6cf6fa9e1ad96c62b7132646` (plugin `hermes-lcm-x`, engine
+`lcm-x`; the rename shipped in v0.24.0, #471), a patch on v0.26.1 in which user and
+assistant text is externalized only above 100,000 characters, with a preview and
+a read hint (#1016). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
 is an independent flag that transforms only the provider-bound copy — see
@@ -137,7 +138,7 @@ separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
 The `main` line identifies itself as `hermes-lcm-x v0.26.0` until the
-first v0.27.0 release candidate bumps it (patch releases such as v0.26.1 are cut from `release/v0.26.x` and carry their own identity). An identity is never a restamp of any past commit's own recorded identity
+first v0.27.0 release candidate bumps it (patch releases such as v0.26.1 and v0.26.2 are cut from `release/v0.26.x` and carry their own identity). An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 The manifest declares 15 tools; runtime discovery advertises 13 by default,
 or 15 with both assertion and adaptive-retrieval flags on.
@@ -1102,7 +1103,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
-- [Current project state](docs/project-status.md) — v0.26.1 stable baseline,
+- [Current project state](docs/project-status.md) — v0.26.2 stable baseline,
   separate main-development identity, active work, and proof boundaries
 - [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
   and judged-QA evaluation contracts, reproduction, and landed result index
@@ -1154,7 +1155,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.26.1` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.26.2` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License
