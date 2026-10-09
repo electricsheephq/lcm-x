@@ -28,6 +28,8 @@ capture/compact/injection/expansion receipts pass, qualify them as MCP-only with
 explicit ingestion. Hook configuration, manifest validation, emulated hook
 payloads or a successful MCP handshake do not establish native qualification.
 No context replacement or universal lossless-compaction claim is permitted.
+Installed-version observations and their exact limits are recorded in
+[portable qualification](portable-qualification.md).
 
 ## Claude plugin bundle dossier
 
@@ -76,3 +78,24 @@ Disable the plugin or remove only its prepared hook/MCP entries; native host
 operation remains available. Retain saved corpora and source transcripts.
 This preparation changes no installed global settings, customer runtime,
 release, service, billing or publication state.
+
+## Prepared tool review cases
+
+Use a new synthetic namespace and explicit session, ingest one fixture through
+the operator CLI, then use the source handle returned by recall. These cases are
+part of the actual-package installation smoke, not invented live credentials.
+
+| Case | Request / expected result |
+| --- | --- |
+| Positive 1 | lcm_recall for the synthetic ticket in session A returns unchanged cited source text. |
+| Positive 2 | lcm_expand of that returned handle reconstructs the identical supporting span. |
+| Positive 3 | lcm_describe for A returns its scoped store/DAG overview. |
+| Positive 4 | lcm_status for A reports baseline scoring, explicit ingestion and no native context replacement. |
+| Positive 5 | A small-token lcm_expand page followed by its next_offset reconstructs the full span without changing characters. |
+| Negative 1 | Expanding A's handle in B fails with reference_corpus_mismatch. |
+| Negative 2 | Adding a filesystem-path argument to a recall tool fails with unsupported_argument. |
+| Negative 3 | Calling an ingestion tool over MCP fails with unknown_tool_or_arguments; writes remain operator/adapter-only. |
+
+A later review dossier must attach the actual receipt/artifact digests and a
+vendor-appropriate demo. Listing metadata, privacy/terms/support URLs and publisher
+eligibility remain owner-supplied fields; no placeholder becomes a public claim.
