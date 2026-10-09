@@ -3971,7 +3971,6 @@ def test_ignore_message_patterns_match_original_suspicious_assistant_before_stor
         fresh_tail_count=10,
         leaf_chunk_tokens=10_000,
         context_threshold=0.95,
-        fresh_tail_max_tokens=0,  # #1013: the quarantine rebind shape needs the pre-#1013 uncapped tail
         large_output_externalization_path=str(tmp_path / "externalized"),
     )
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
@@ -4003,7 +4002,6 @@ def test_ignored_quarantined_assistant_rebind_reconciliation_does_not_duplicate_
         fresh_tail_count=10,
         leaf_chunk_tokens=10_000,
         context_threshold=0.95,
-        fresh_tail_max_tokens=0,  # #1013: the quarantine rebind shape needs the pre-#1013 uncapped tail
         large_output_externalization_path=str(tmp_path / "externalized"),
     )
     messages = [
@@ -4048,7 +4046,6 @@ def test_existing_quarantined_assistant_row_rebinds_after_ignore_pattern_added(t
         fresh_tail_count=10,
         leaf_chunk_tokens=10_000,
         context_threshold=0.95,
-        fresh_tail_max_tokens=0,  # #1013: the quarantine rebind shape needs the pre-#1013 uncapped tail
         large_output_externalization_path=str(tmp_path / "externalized"),
     )
     messages = [
@@ -4245,7 +4242,6 @@ def test_no_system_ignored_quarantined_assistant_rebind_does_not_duplicate_tail(
         fresh_tail_count=10,
         leaf_chunk_tokens=10_000,
         context_threshold=0.95,
-        fresh_tail_max_tokens=0,  # #1013: the quarantine rebind shape needs the pre-#1013 uncapped tail
         large_output_externalization_path=str(tmp_path / "externalized"),
     )
     messages = [
@@ -4321,6 +4317,56 @@ def test_no_system_trailing_ignored_quarantined_assistant_rebind_does_not_duplic
 
     second_rows = second._store.get_session_messages(second.current_session_id)
     assert [row["content"] for row in second_rows] == ["fresh request"]
+
+
+def test_cold_rebind_after_ignored_row_cleanup_replays_the_singleton_turn_once(tmp_path):
+    """#1013: a cleanup that drops an ignored row outside the tail returns a lone user turn.
+
+    Its durable commit proof lets a cold rebind advance over that replay; a later
+    turn with the same text is still a new row."""
+    config = LCMConfig(
+        database_path=str(tmp_path / "lcm.db"),
+        fresh_tail_count=1,
+        leaf_chunk_tokens=10_000,
+        context_threshold=0.95,
+        large_output_externalization_path=str(tmp_path / "externalized"),
+    )
+    messages = [
+        {"role": "assistant", "content": _broken_assistant_output()},
+        {"role": "user", "content": "fresh request"},
+    ]
+
+    def bound_engine():
+        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+        engine._compiled_ignore_message_patterns = [_ContainsBrokenAssistantPattern()]
+        engine.on_session_start(
+            "ignored-cleanup-rebind-session",
+            platform="telegram",
+            conversation_id="ignored-cleanup-rebind-conversation",
+            context_length=10_000,
+        )
+        return engine
+
+    first = bound_engine()
+    first_active = first.compress(messages)
+    assert first_active == [{"role": "user", "content": "fresh request"}]
+    first.shutdown()
+
+    second = bound_engine()
+    second.compress(first_active)
+    assert [row["content"] for row in second._store.get_session_messages(second.current_session_id)] == [
+        "fresh request"
+    ]
+    assert second._last_ingest_reconciliation["action"] == "advanced cursor"
+    second.shutdown()
+
+    third = bound_engine()
+    third.compress(first_active + [{"role": "user", "content": "fresh request"}])
+    assert [row["content"] for row in third._store.get_session_messages(third.current_session_id)] == [
+        "fresh request",
+        "fresh request",
+    ]
+    third.shutdown()
 
 
 def test_only_ignored_quarantined_assistant_rebind_does_not_store_placeholder(tmp_path):
@@ -4578,7 +4624,6 @@ def test_no_system_raw_ignored_quarantined_assistant_rebind_preserves_repeated_t
         fresh_tail_count=10,
         leaf_chunk_tokens=10_000,
         context_threshold=0.95,
-        fresh_tail_max_tokens=0,  # #1013: the quarantine rebind shape needs the pre-#1013 uncapped tail
         large_output_externalization_path=str(tmp_path / "externalized"),
     )
     messages = [

@@ -1555,7 +1555,9 @@ class CompactionMixin:
             # review of #723: the input of refused passes since the last stored leaf, returned if none stores one
             refused_input = (refused_input or (working_messages, pressure_messages,
                                                dropped_replayed_scaffold_messages)) if route_stop else None
-            fresh_tail_start = self._fresh_tail_start(pressure_messages)
+            # #1013: the tail's token cap measures what the active context replays (a quarantined
+            # row as its placeholder), not the raw host text; pressure stays on the raw view.
+            fresh_tail_start = self._fresh_tail_start(working_messages)
 
             # Keep only a real system prompt anchored. Gateway sessions may
             # pass only conversation messages, so index 0 can be an old user
@@ -1636,7 +1638,7 @@ class CompactionMixin:
                 working_messages = [message for index, message in enumerate(working_messages) if index not in drops]
                 pressure_messages = [message for index, message in enumerate(pressure_messages) if index not in drops]
                 candidate_start = leading_anchor_count
-                fresh_tail_start = self._fresh_tail_start(pressure_messages)
+                fresh_tail_start = self._fresh_tail_start(working_messages)
                 # A kept row at or below F has no raw store lineage for a new leaf: return it
                 # raw after the committed summary instead of a pass that cannot publish.
                 if fresh_tail_start <= leading_anchor_count or (resumed_prefix and kept):
@@ -1737,7 +1739,7 @@ class CompactionMixin:
                         + kept_pressure
                         + pressure_messages[fresh_tail_start:]
                     )
-                    fresh_tail_start = self._fresh_tail_start(pressure_messages)
+                    fresh_tail_start = self._fresh_tail_start(working_messages)
                 if drop_dependent_reply_into_tail:
                     tail_scan_start = max(fresh_tail_start, leading_anchor_count)
                     pending_tail_dependents: list[tuple[Dict[str, Any], str]] = []
@@ -2151,7 +2153,7 @@ class CompactionMixin:
 
             if threshold_full_sweep_active:
                 leading_anchor_count = self._leading_anchor_count(working_messages)
-                remaining_fresh_tail_start = self._fresh_tail_start(pressure_messages)
+                remaining_fresh_tail_start = self._fresh_tail_start(working_messages)
                 remaining_raw = working_messages[
                     leading_anchor_count:remaining_fresh_tail_start
                 ]
@@ -2175,7 +2177,7 @@ class CompactionMixin:
                 if (not deferred_maintenance_active) and self.threshold_tokens > 0 and estimated_active_tokens < self.threshold_tokens:
                     break
                 leading_anchor_count = self._leading_anchor_count(working_messages)
-                remaining_fresh_tail_start = self._fresh_tail_start(pressure_messages)
+                remaining_fresh_tail_start = self._fresh_tail_start(working_messages)
                 remaining_raw = working_messages[
                     leading_anchor_count:remaining_fresh_tail_start
                 ]
