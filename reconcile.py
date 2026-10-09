@@ -49,6 +49,7 @@ from .ingest_protection import (
 )
 from .message_content import normalize_content_value, text_content_for_pattern_matching
 from .sanitize import _clean_active_assistant_message
+from .store import _normalize_observed_at
 
 import logging
 
@@ -2235,6 +2236,12 @@ class ReconcileMixin:
             projection, occurrences = self._occurrence_replay_identities(messages, payload)
 
             target = list(payload.get("effective_sha256") or [])
+            stamps = payload.get("filtered_observed_at")
+            if stamps is not None:  # #1013: an ignored-row cleanup proof also binds each row's host timestamp
+                observed = [_normalize_observed_at(m.get("timestamp"))
+                            for m, identity in zip(messages, occurrences) if identity is not None]
+                if None in stamps or len(stamps) != len(target) or observed[:len(stamps)] != list(stamps):
+                    return None
             droppable = list(payload.get("droppable") or [])
             skip_landing = list(payload.get("skip_landing") or [])
             summary_index = payload.get("native_summary_index")

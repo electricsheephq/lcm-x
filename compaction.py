@@ -41,6 +41,7 @@ from .reconcile import (
     _proof_user_identity,
 )
 from .sanitize import _contains_sensitive_redaction
+from .store import _normalize_observed_at
 from .sqlite_util import _is_sqlite_locked_error
 from .survival_fit import _RECOVERY_THRESHOLD_SHARE
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
@@ -771,8 +772,16 @@ class CompactionMixin:
             proof["published"] = self._last_compression_status == "compacted"
             proof["recovery"] = self._last_compression_status == "overflow_recovery"
             # #1013: an output that dropped ignored rows with no leaf is still a rewrite the host
-            # adopts; a cold rebind needs this proof to tell its replay from a new turn.
-            proof["filtered"] = bool(getattr(self, "_compress_dropped_ignored_rows", False))
+            # adopts; a cold rebind needs this proof to tell its replay from a new turn. Same text is
+            # not identity (a gateway may send only a new turn), so the proof binds each row's host
+            # timestamp and is not written when a row has none: an unprovable row is stored again.
+            proof["filtered"] = False
+            if (getattr(self, "_compress_dropped_ignored_rows", False) and self._last_compression_status != "error"
+                    and not (proof["published"] or proof["recovery"])):
+                stamps = [_normalize_observed_at(m.get("timestamp"))
+                          for m, identity in zip(result, output_identities) if identity is not None]
+                if stamps and None not in stamps:
+                    proof["filtered"], proof["filtered_observed_at"] = True, stamps
             self._last_emission_descriptors = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
@@ -885,6 +894,8 @@ class CompactionMixin:
                 ],
                 "emissions": copy.deepcopy(proof.get("emissions") or []),
             }
+            if proof.get("filtered_observed_at") is not None:
+                payload["filtered_observed_at"] = list(proof["filtered_observed_at"])
             if not payload["effective_sha256"]:
                 # Scaffold-only output: bind the proof to the emitted rows (#484 item 11l).
                 payload["scaffold_sha256"] = proof.get("output_sha256_v3", full)
@@ -912,6 +923,7 @@ class CompactionMixin:
     ) -> List[Dict[str, Any]]:
         """Return a replay-safe active view after publication cannot finish."""
         self._store.rollback_pending_write()
+        self._compress_dropped_ignored_rows = False  # #1013: no proof outlives a rolled-back publication
         fallback = active_context
         if recovery_assembly_cap is not None and not context_is_assembled:
             leading_anchor_count = self._leading_anchor_count(active_context)
