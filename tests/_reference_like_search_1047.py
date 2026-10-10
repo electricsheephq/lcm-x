@@ -275,4 +275,3 @@ class ReferenceLikeSearch:
         for result in results:
             result.pop("_fallback_score", None)
         return results[:limit]
-
