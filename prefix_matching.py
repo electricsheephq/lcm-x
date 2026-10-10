@@ -371,6 +371,7 @@ class PrefixMatchingMixin:
             session_id=session_id,
             config=self._config,
             hermes_home=self._hermes_home,
+            context_window_tokens=self._store.get_context_window_tokens(session_id),
         )
         host_uids = self._host_uid_capture(kept, kept, 0, 0, None, (), session_id=session_id)  # v0.26.0 shadow
         store_ids = self._store._append_protected_batch(

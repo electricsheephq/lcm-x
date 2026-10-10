@@ -317,6 +317,7 @@ class MessageStore:
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._ingest_protection_config = ingest_protection_config or LCMConfig(database_path=str(self.db_path))
         self._hermes_home = hermes_home or str(self.db_path.parent)
+        self._context_window_tokens: dict[str, int] = {}  # transient, session-keyed; never LCMConfig/SQLite
         self._conn: Optional[sqlite3.Connection] = None
         # ``self._conn`` is shared across threads (the connection is opened with
         # ``check_same_thread=False``). SQLite's own C-level mutex serializes
@@ -451,6 +452,17 @@ class MessageStore:
 
     # -- Write operations ---------------------------------------------------
 
+    def set_context_window_tokens(self, session_id: str, context_window_tokens: int) -> None:
+        """Mirror the engine's resolved window, retaining late-session ingest isolation."""
+        if session_id:
+            self._context_window_tokens[session_id] = max(0, context_window_tokens)
+
+    def get_context_window_tokens(self, session_id: str) -> int:
+        return self._context_window_tokens.get(session_id, 0)
+
+    def clear_context_windows(self) -> None:
+        self._context_window_tokens.clear()
+
     def append(self, session_id: str, msg: Dict[str, Any],
                token_estimate: int = 0, source: str = "",
                conversation_id: str = "") -> int:
@@ -460,6 +472,7 @@ class MessageStore:
             config=self._ingest_protection_config,
             hermes_home=self._hermes_home,
             session_id=session_id,
+            context_window_tokens=self.get_context_window_tokens(session_id),
         )
         tool_calls = msg.get("tool_calls")
         tc_json = json.dumps(tool_calls) if tool_calls else None
@@ -504,6 +517,7 @@ class MessageStore:
             config=self._ingest_protection_config,
             hermes_home=self._hermes_home,
             session_id=session_id,
+            context_window_tokens=self.get_context_window_tokens(session_id),
         )
         return self._append_protected_batch(
             session_id,

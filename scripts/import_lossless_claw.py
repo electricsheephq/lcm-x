@@ -1039,6 +1039,7 @@ def _insert_import_candidate(
         config=protection_config,
         hermes_home=str(target_path.parent),
         session_id=candidate.target_session_id,
+        context_window_tokens=0,
     )
     tool_calls_json = json.dumps(protected_msg.get("tool_calls")) if protected_msg.get("tool_calls") else None
     # ingested_at = timestamp is what the store's one-time backfill writes; it
