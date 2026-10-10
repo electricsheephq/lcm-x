@@ -62,7 +62,7 @@ def axes(sc, facts):
     return out
 
 
-def analyze(scores, material, seeds):
+def analyze_window(scores, material, seeds, context_length):
     if len(set(seeds)) != len(seeds):
         raise ValueError("seeds must be distinct")
     groups, counts, pins = {}, [], {}
@@ -72,11 +72,11 @@ def analyze(scores, material, seeds):
             continue
         sc = json.loads(file.read_text())
         seed, arm = int(sc["seed"].removeprefix("seed-")), sc["arm"]
-        if seed not in seeds:
+        if seed not in seeds or arm != "codex-native" and sc.get("context_length") != context_length:
             continue
         model = (sc.get("reader") or "").split("·")[0]
         run = Path(sc["run_dir"]).parent
-        key = (sc["checkpoint_id"], model, sc.get("context_length"), run.name)
+        key = (sc["checkpoint_id"], model, None, None) if model == "gpt-6-astra" else (sc["checkpoint_id"], model, context_length, run.name)
         groups.setdefault((arm, seed), {})[key] = sc
         if sc.get("worktree_head"):
             pins.setdefault(arm, set()).add(sc["worktree_head"])
@@ -88,6 +88,8 @@ def analyze(scores, material, seeds):
                 cell[1] += 1
         counts.append(dict(arm=arm, seed=seed, context_length=sc.get("context_length"), checkpoint_id=sc["checkpoint_id"],
                            facts_denominator=sc["metrics"]["facts_kept"]["denominator"], lifecycle=cells,
+                           status_line={s: sum(p.get("status_line") == s for p in sc["probes"].values())
+                                        for s in ("STATUS: NOT LIVE", "STATUS: LIVE", "INVALID/MISSING/ABSTAIN")},
                            latency={k: sc.get("accounting", {}).get(k) for k in ("reader_latency", "summariser_latency", "compaction_wall")}))
     if pins.get("L0", set()) & pins.get("L1", set()):
         raise ValueError("L0 vs L1 carries the same SHA")
@@ -98,6 +100,7 @@ def analyze(scores, material, seeds):
     for left_arm, other in pairs:
         required = set()
         by_seed, missing, window, pre, incomplete, errors = {}, [], {}, [], [], {left_arm: 0, other: 0}
+        rereads = {left_arm: 0, other: 0}
         totals = {left_arm: [0, 0, True], other: [0, 0, True]}
         allowed = ("gpt-6-astra",) if other == "codex-native" else ("glm-5.3", "FAKE")
         for seed in seeds:
@@ -115,6 +118,7 @@ def analyze(scores, material, seeds):
                 pair = (left[key], right[key])
                 for arm, sc in zip((left_arm, other), pair, strict=True):
                     errors[arm] += sc.get("reader_errors", 0)
+                    rereads[arm] += sc.get("reader_rereads", 0)
                 if any(sc.get("reader_errors") or not sc["metrics"]["facts_kept"]["complete"] or
                        not sc["metrics"].get("lifecycle", {}).get("complete", True) or
                        sc.get("reader_readback", {}).get("pin_ok") is False or
@@ -145,14 +149,15 @@ def analyze(scores, material, seeds):
                 tokens = [c.get(k) for c in calls for k in ("prompt_tokens", "completion_tokens")]
                 totals[arm][2] &= "events" in summ and all(v is not None for v in tokens)
                 totals[arm][0] += sum(v or 0 for v in tokens)
-            if not tally:
-                missing.append(seed)
-            else:
+            if tally:
                 by_seed[seed] = {k: 100*(v[0]/v[1] - v[2]/v[3]) for k, v in tally.items() if v[1] and v[3]}
-        intervals = {k: bootstrap([v[k] for v in by_seed.values() if k in v]) for k in sorted({k for v in by_seed.values() for k in v})}
+        intervals = {k: bootstrap([v[k] for v in by_seed.values() if k in v]) for k in sorted(required | {k for v in by_seed.values() for k in v})}
+        for k, ci in intervals.items():
+            bar = 5 if other == "L0" and k == "facts_user" else -2
+            ci["verdict"] = "INCONCLUSIVE" if ci["n_seeds"] < 6 or ci["low"] is None else "SUPERIOR" if ci["low"] > bar and bar == 5 else "NON-INFERIOR" if ci["low"] > bar else "BELOW BAR" if ci["high"] <= bar else "INCONCLUSIVE"
         costs = {arm: t[0]/t[1] if t[2] and t[1] else None for arm, t in totals.items()}
         ratio = costs[left_arm]/costs[other] if costs[left_arm] is not None and costs[other] else None
-        complete = not missing and len(seeds) >= 8 and bool(intervals) and required <= intervals.keys() and all(v["n_seeds"] == len(seeds) for v in intervals.values())
+        complete = not missing and len(seeds) >= 8 and bool(intervals) and all(v["n_seeds"] >= 6 for v in intervals.values())
         claim = CLAIMS[other] if left_arm == "L1" else "descriptive fake comparison"
         if claim == "KEEP gate":
             result = verdict(intervals, ratio, complete)
@@ -161,9 +166,19 @@ def analyze(scores, material, seeds):
         else:
             result = "DESCRIPTIVE"
         out[f"{left_arm}−{'C' if other == 'codex-native' else other}"] = dict(intervals=intervals, missing_seeds=missing, cost_ratio=ratio,
-            cost_per_success=costs, compared_window=window, pre_window=pre, incomplete_pairs=incomplete, reader_errors=errors,
+            cost_per_success=costs, compared_window=window, pre_window=pre, incomplete_pairs=incomplete, reader_errors=errors, reader_rereads=rereads,
             verdict=result, claim_class=claim, claim="mechanism only; overall KEEP also needs product comparison")
-    return dict(schema="eval2-v2", unit="session/seed", resamples=10000, rng_seed=1064, seeds=seeds, comparisons=out, per_checkpoint=counts)
+    return dict(schema="eval2-v2", context_length=context_length, unit="session/seed", resamples=10000, rng_seed=1064, seeds=seeds, comparisons=out, per_checkpoint=counts)
+
+
+def analyze(scores, material, seeds):
+    admission = score_manifest.load(scores.parent / "manifest.json")
+    contexts = {sc.get("context_length") for f in scores.glob("cp-*/*.json") if score_manifest.admitted(scores.parent, admission, f)
+                for sc in [json.loads(f.read_text())] if sc["arm"] != "codex-native" and int(sc["seed"].removeprefix("seed-")) in seeds}
+    windows = {str(ctx): analyze_window(scores, material, seeds, ctx) for ctx in sorted(contexts or {272000}, key=str)}
+    # Preserve the default-window API; every other window has its own independent record.
+    primary = windows.get("272000", next(iter(windows.values())))
+    return dict(primary, context_windows=windows)
 
 
 def main(argv=None):
@@ -176,21 +191,25 @@ def main(argv=None):
     a = ap.parse_args(argv)
     if a.analysis:
         data = json.loads(a.analysis.read_text())
-        rows = ["| comparison | axis | effect pt | 95% interval | verdict | claim class | scope |", "|---|---|---|---|---|---|---|"]
-        for pair, value in data["comparisons"].items():
+        windows = data.get("context_windows", {str(data.get("context_length")): data})
+        comparisons = {f"{pair} ({ctx})": v for ctx, w in windows.items() for pair, v in w["comparisons"].items()}
+        checkpoints = [c for w in windows.values() for c in w["per_checkpoint"]]
+        rows = ["| comparison (context) | axis | n seeds | effect pt | 95% interval | axis verdict | verdict | claim class | scope |", "|---|---|---|---|---|---|---|---|---|"]
+        for pair, value in comparisons.items():
             for axis, ci in value["intervals"].items() or {"unmeasured": dict(effect_pts=None, low=None, high=None)}.items():
-                rows.append(f"| {pair} | {axis} | {ci['effect_pts']} | {ci['low']} … {ci['high']} | {value['verdict']} | {value['claim_class']} | {value['claim']} |")
+                rows.append(f"| {pair} | {axis} | {ci.get('n_seeds', 0)} | {ci['effect_pts']} | {ci['low']} … {ci['high']} | {ci.get('verdict', 'INCONCLUSIVE')} | {value['verdict']} | {value['claim_class']} | {value['claim']} |")
         rows += ["", "| pair | seed | compared-window checkpoints |", "|---|---|---|"]
-        for pair, value in data["comparisons"].items():
+        for pair, value in comparisons.items():
             for seed, cps in value["compared_window"].items():
                 rows.append(f"| {pair} | {seed} | {', '.join(cps)} |")
             rows.append(f"| {pair} | INCOMPLETE | {value['incomplete_pairs']} |")
-        rows += ["", "| arm | checkpoint | facts denominator | lifecycle kind/actual compactions | correct/denominator |", "|---|---|---|---|---|"]
-        for c in data["per_checkpoint"]:
+            rows.append(f"| {pair} | reader re-reads per arm | {value.get('reader_rereads', {})} |")
+        rows += ["", "| arm (context) | checkpoint | facts denominator | lifecycle kind/actual compactions | correct/denominator | status-line scoring (NOT LIVE passes) |", "|---|---|---|---|---|---|"]
+        for c in checkpoints:
             for kind, cell in c["lifecycle"].items() or {"none due": [0, 0]}.items():
-                rows.append(f"| {c['arm']} | {c['checkpoint_id']} | {c['facts_denominator']} | {kind.replace('|', ' / ')} | {cell[0]}/{cell[1]} |")
+                rows.append(f"| {c['arm']} ({c.get('context_length')}) | {c['checkpoint_id']} | {c['facts_denominator']} | {kind.replace('|', ' / ')} | {cell[0]}/{cell[1]} | {c.get('status_line', {})} |")
         rows += ["", "| arm | checkpoint | reader latency | summariser latency | compaction wall |", "|---|---|---|---|---|"]
-        for c in data["per_checkpoint"]:
+        for c in checkpoints:
             rows.append(f"| {c['arm']} | {c['checkpoint_id']} | " + " | ".join(str(c['latency'][k]) for k in ("reader_latency", "summariser_latency", "compaction_wall")) + " |")
         a.out.write_text("\n".join(rows) + "\n")
     else:

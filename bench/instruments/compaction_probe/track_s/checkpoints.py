@@ -58,6 +58,8 @@ def augment(directory, batches, checkpoint=None):
         if ps:
             out.append(dict(b, probes=ps))
     ps = [p for p in due(directory).values() if p["checkpoint_id"] == cp["id"] and p["row_index"] <= cp["row_index"]]
+    ps = [dict(p, text=p["text"] + ' Begin your answer with exactly one line: `STATUS: LIVE` or `STATUS: NOT LIVE`, then explain.')
+          if p["kind"] == "stale_task" else p for p in ps]
     if ps:
         out.append(dict(id=f"S{manifest(directory)['seed']}-BLIFE", text=batches[0]["text"], probes=ps))
     return out

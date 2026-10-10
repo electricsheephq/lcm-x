@@ -37,6 +37,7 @@ def test_real_stale_task_contract(real_seed, reply, expected):
     p = next(p for p in sc.jlines(real_seed / "lifecycle_probes.jsonl") if p["kind"] == "stale_task")
     task = next(r["task"] for r in man["lifecycle"] if r.get("resolution", {}).get("row_id") == p["row_id"])
     repl = p["answer"].split("do ", 1)[1].rstrip(".")
+    reply = ("STATUS: NOT LIVE\n" if expected else "STATUS: LIVE\n") + reply
     assert sc.lifecycle_correct(p, reply.format(task=task, repl=repl), man, facts) is expected
 
 
@@ -77,7 +78,8 @@ def test_latency_distributions_separate():
     assert a["compaction_wall"]["p50"] == 20
 
 
-def test_h_threshold_cooldown_system_and_returned_sections(monkeypatch, tmp_path):
+@pytest.mark.parametrize("tripped,backoff", [(False, False), (True, False), (False, True), (True, True)])
+def test_h_threshold_cooldown_system_and_returned_sections(monkeypatch, tmp_path, tripped, backoff):
     s2 = module(TRACK / "s2/run_s_lcmx.py", monkeypatch, tmp_path)
     monkeypatch.setitem(sys.modules, "run_s_lcmx", s2)
     cc = SimpleNamespace(_LEAN_USER_MESSAGES_HEADING="## User", _LEAN_ANCHOR_HEADING="## Anchors")
@@ -103,6 +105,10 @@ def test_h_threshold_cooldown_system_and_returned_sections(monkeypatch, tmp_path
         engine.real.compression_count += 1
         return [view[0], dict(role="assistant", content="## User\nkept\n## Anchors\nid")]
     engine.real.compress, engine.real.compression_count, engine.real._previous_summary = compress, 0, ""
+    engine.real._ineffective_compression_count = 2 if tripped else 0
+    engine.real._fallback_compression_streak = 0
+    engine.real._structural_no_op_backoff_until = h.time.monotonic() + 600 if backoff else 0
+    engine.real._anti_thrash_recovery_deadline = 0
     run = h.Run.__new__(h.Run)
     run.engine, run.events, run.sysmsg = engine, [], dict(role="system", content="fixture")
     run.man, run.system, run.ntok = dict(continuity=[]), "fixture", len
@@ -111,6 +117,16 @@ def test_h_threshold_cooldown_system_and_returned_sections(monkeypatch, tmp_path
     ev = run.events[0]
     assert ev["threshold_percent"] == .75 and ev["tail_mode"] == "lean"
     assert ev["user_section_bytes"] > 0 and ev["identifier_index_bytes"] > 0
+    assert ev["guard_state_before"]["anti_thrash_tripped"] is tripped
+    assert ev["guard_state_before"]["structural_backoff_active"] is backoff
+    assert ev["would_suppress_compaction"] is (tripped or backoff)
+    assert ev["guard_state_after"]["ineffective_count"] == engine.real._ineffective_compression_count
+    assert engine.real.compression_count == 1  # instrumentation never changes the bypassed behaviour
+    run.dir, run.snaps = tmp_path / "snapshot", []
+    run.dir.mkdir()
+    run.snapshot(dict(id="single-system", row_index=45), view)
+    assert not any(m["role"] == "system" for m in run.snaps[0]["view"])
+    assert len([run.sysmsg] + run.snaps[0]["view"]) == 2
     # Exercise H's checkpoint writer with a mismatched reader, never a real host/model.
     cp = dict(id="CP1", row_index=45)
     monkeypatch.setattr(s2.CP, "select", lambda *a: [cp])

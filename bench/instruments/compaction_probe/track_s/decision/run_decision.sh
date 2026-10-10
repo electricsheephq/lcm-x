@@ -6,12 +6,17 @@
 # 30 (S7 12.9 min ran with the summariser blacked out by the spend guard from row ~240; the guard is off here); -open = plain +
 # tool rounds; S4 = s4/dry-run seed-1 dictation-file plan (87 turns, smoke fit) + probes.
 # A failed or stopped run does not stop the lane: the other arms still run, and the script exits nonzero at the end.
+MULT=${S2_TIMEOUT_MULTIPLIER:-3}
+if ! [[ "$MULT" =~ ^[0-9]{1,9}$ ]] || [ "$((10#$MULT))" -lt 3 ]; then
+  echo "S2_TIMEOUT_MULTIPLIER must be an integer >=3 (at most 9 digits)" >&2; exit 2
+fi
+MULT=$((10#$MULT))
 T=$(cd "$(dirname "$0")/.." && pwd)
 : "${TRACK_S_OUT:?set TRACK_S_OUT}" "${TRACK_S_MATERIAL:?set TRACK_S_MATERIAL}"
 H=$TRACK_S_OUT/decision; mkdir -p "$H/logs"
 run() { local name=$1 est=$2 L pid lim t rc timed_out=0; shift 2; L=$H/logs/$name.log
   echo "start $(date +%s) $(date) est ${est} min" > "$L.wall"
-  perl -e 'setpgrp or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' "$@" > "$L" 2>&1 & pid=$!; echo "pid $pid" >> "$L.wall"; lim=$((est * ${S2_TIMEOUT_MULTIPLIER:-3} * 60)); [ "${S2_TIMEOUT_MULTIPLIER:-3}" -ge 3 ] || return 2; t=0
+  perl -e 'setpgrp or die "setpgrp: $!"; exec @ARGV or die "exec: $!"' "$@" > "$L" 2>&1 & pid=$!; echo "pid $pid" >> "$L.wall"; lim=$((est * MULT * 60)); t=0
   while ps -p $pid > /dev/null 2>&1; do sleep 10; t=$((t + 10))
     if [ $t -ge $lim ]; then
       timed_out=1; kill -TERM -- "-$pid" 2>/dev/null || true

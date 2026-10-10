@@ -280,16 +280,18 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
     (out / "answers").mkdir(exist_ok=True)
     results = []
     batches = batches_for(run.sdir, src["checkpoint"]) if src and "checkpoint" in src else batches_for(run.sdir)
-    for b in batches[: run.args.batches or None]:
+    batches = batches[: run.args.batches or None]
+    for b in batches:  # failed batches append one fresh re-read at this same checkpoint
+        suffix = ".reread" if b.get("reread") else ""
         prompt = b["text"] + "\n" + "\n".join(f"{p['id']}: {p['text']}" for p in b["probes"])
         clone_id = clone_info = answers = err = tools_engine = None
-        meta, attempts = {}, []
+        meta, attempts, reads = {}, [], 0
         if unavailable:
             err = f"UNAVAILABLE: C0 context {ctx_tokens} tokens + reserve > {run.args.reader} window"
         else:
             try:
                 if is_store:  # a fresh clone per batch (db backup + payload dir), opened as an engine
-                    clone_id = f"clones/{b['id']}"
+                    clone_id = f"clones/{b['id']}{suffix}"
                     cdb, chome = clone_store(src_db, src_home, out / clone_id)
                     apply_env(run.arm["env"], chome, cdb)
                     tools_engine = new_engine(run.m, chome, run.sid, run.args.context_length)
@@ -300,10 +302,13 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                 def answered(a):  # as score_s reads it: None or a blank string is unanswered; any other value is an answer
                     return a is not None and (not isinstance(a, str) or bool(a.strip()))
 
-                for attempt in range(2):  # one retry when the final call hits the cap; the first non-empty answer wins
+                for attempt in range(1 if b.get("reread") else 2):  # the cap retry shares the one re-read budget
+                    reads += 1
                     got, meta = R.answer(reader, run.system, view, prompt, tools_engine if is_open else None,
                                          schemas, guidance, run.m.tokens.count_tokens)
                     attempts.append(dict(meta))
+                    if got is None:
+                        raise ValueError("unparseable reader answer")
                     for pid, a in (got or {}).items():
                         if not answered(answers.get(pid)):
                             answers[pid] = a
@@ -316,6 +321,7 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                     err = "READER_TRUNCATED: completion cap 8192 reached"
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"[:400]
+                attempts.append(dict(error=err, reader_calls=[None]))
             finally:
                 if tools_engine is not None:
                     tools_engine.shutdown()
@@ -323,11 +329,14 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
         meta["reader_calls"] = [c for a in attempts for c in a.get("reader_calls") or []]
         meta.update({k: sum(a.get(k) or 0 for a in attempts) for k in ("tool_calls", "tokens_read_back", "wall_s")
                      if any(a.get(k) is not None for a in attempts)})
-        run.reader_calls.append({"batch": b["id"], "calls": meta.get("reader_calls")})
-        (out / "answers" / f"{b['id']}.json").write_text(json.dumps(
+        run.reader_calls.append({"batch": b["id"], "calls": meta.get("reader_calls"), "reread_rows": len(b["probes"]) if b.get("reread") or reads > 1 else 0})
+        (out / "answers" / f"{b['id']}{suffix}.json").write_text(json.dumps(
             {"batch": b["id"], "prompt_chars": len(prompt), "clone": clone_info, "error": err, **meta}, indent=1))
         print(f"  batch {b['id']}: {'ERROR ' + err if err else 'answered ' + str(len(answers or {}))} "
               f"wall {meta.get('wall_s')}s calls {meta.get('tool_calls', 0)}", flush=True)
+        if err and not unavailable and not b.get("reread") and reads < 2:
+            batches.append(dict(b, reread=True))
+            continue
         for p in b["probes"]:
             f, rc, ans = facts.get(p["id"]) or {}, receipts.get(p["id"]), (answers or {}).get(p["id"])
             results.append({
@@ -338,7 +347,7 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                     src["row"] if src else len(run.rows)-1) if p.get("row_index", f.get("row_index")) is not None else None,
                 **{k: f.get(k) for k in ("stale", "placement", "row_role")}, "fact_class": f.get("class"),
                 "answer": ans, "answered": ans is not None, "timed_out": bool(err and "timeout" in err.lower()),
-                "error": err, "status": "UNAVAILABLE" if unavailable else ("ERROR" if err else "OK"),
+                "error": err, "status": "UNAVAILABLE" if unavailable else ("ERROR" if err else "OK"), "reader_rereads": int(bool(b.get("reread") or reads > 1)),
                 "arm": run.arm["name"], "arm_kind": run.arm["kind"], "seed": run.seed, "run": run.args.run,
                 "run_id": run.run_id, "lane": run.args.lane, "reader": run.args.reader,
                 "reader_readback": dict(reader.readback), "batch_id": b["id"], "clone_id": clone_id,

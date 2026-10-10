@@ -37,8 +37,21 @@ class Engine:
 
 
 class Run(S2.Run):
+    def guard_state(self):
+        real, now = self.engine.real, time.time()
+        ineffective, fallback = getattr(real, "_ineffective_compression_count", 0), getattr(real, "_fallback_compression_streak", 0)
+        deadline = getattr(real, "_anti_thrash_recovery_deadline", 0)
+        until = getattr(real, "_structural_no_op_backoff_until", 0)
+        tripped, backoff = ineffective >= 2 or fallback >= 2, until > time.monotonic()
+        # Observe fields only: the host gate mutates/persists recovery state when called.
+        blocked = tripped and (deadline <= 0 or deadline > now)
+        return dict(ineffective_count=ineffective, fallback_streak=fallback, anti_thrash_tripped=tripped,
+                    recovery_deadline=deadline, structural_backoff_until=until, structural_backoff_active=backoff,
+                    would_block=blocked or backoff)
+
     def event(self, view, cur, i, row, forced):
         seam.take()
+        guards = self.guard_state()
         t0, before = time.monotonic(), self.engine.real.compression_count
         new = self.engine.real.compress(copy.deepcopy([self.sysmsg] + view), current_tokens=cur, force=forced, bypass_cooldown=True)
         calls, _ = seam.take()
@@ -50,6 +63,8 @@ class Run(S2.Run):
             threshold_tokens=self.engine.threshold_tokens, threshold_percent=self.engine.real.threshold_percent, tail_mode=self.engine.real.tail_mode,
             summariser_errors=[c.get("exception") or c.get("error") for c in calls if c.get("exception") or c.get("error")],
             skipped_compaction=self.engine.real.compression_count == before,
+            guard_state_before=guards, guard_state_after=self.guard_state(),
+            would_suppress_compaction=not forced and cur >= self.engine.threshold_tokens and guards["would_block"],
             tokens_at_trigger=cur, tokens_after=self.ntok([self.sysmsg] + new), compress_wall_s=time.monotonic() - t0,
             summariser_calls=calls, empty_no_room=None, timing_label="WIRING-ONLY" if forced else "full-stream",
             user_section_bytes=section_bytes(CC._LEAN_USER_MESSAGES_HEADING), identifier_index_bytes=section_bytes(CC._LEAN_ANCHOR_HEADING),
@@ -60,7 +75,7 @@ class Run(S2.Run):
         out = self.dir / f"cp-{cp['id']}"
         out.mkdir()
         self.snaps.append(dict(row=cp["row_index"], checkpoint=cp, dir=out, db=None, home=None,
-                               view=copy.deepcopy([self.sysmsg] + view), n_events=len(self.events)))
+                               view=copy.deepcopy(view), n_events=len(self.events)))
 
 
 def main():

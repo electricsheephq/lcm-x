@@ -1,5 +1,6 @@
 """Frozen Eval-2 amendment regressions, using real schedules and synthetic scores."""
 import hashlib
+import functools
 import importlib.util
 import json
 from pathlib import Path
@@ -12,6 +13,27 @@ from test_eval2 import e
 def write(path, data):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data))
+
+
+@functools.cache
+def first_trigger(material):
+    # Same offline L token estimate and replay gates as probe_window_272k.
+    rows = [json.loads(x) for x in (material / "transcript.jsonl").read_text().splitlines()]
+    checkpoints = {c["row_index"] for c in e.CP.select(material, "lifecycle")}
+    total = 0
+    def count(text):
+        return len(text) // 4 + 1 if text else 0
+    for i, row in enumerate(rows):
+        if row["role"] == "system":
+            continue
+        total += 4 + count(row["content"] or "")
+        for call in row.get("tool_calls") or []:
+            fn = call.get("function", {})
+            total += count(fn.get("name", "")) + count(fn.get("arguments", "")) + 3
+        nxt = rows[i+1] if i+1 < len(rows) else None
+        if total >= 204000 and (nxt is None or nxt["role"] == "assistant" or i in checkpoints):
+            return i
+    raise AssertionError("fixture never compacts")
 
 
 @pytest.fixture(scope="module")
@@ -53,10 +75,10 @@ def observations(root, material, *, pre=False, error=False, same_pin=False, mixe
                                           **{"class": "CORRECT" if arm == "L1" else "MISS"})
                 sc = dict(arm=arm, seed=f"seed-{seed}", reader="glm-5.3", checkpoint_id=cp["id"], probes=ps,
                           context_length=64000 if mixed and arm == "L0" else 272000, worktree_head="a" if same_pin else arm,
-                          behaviour=dict(compactions=int(not pre or n == len(cps)-1)),
+                          behaviour=dict(compactions=int(n == len(cps)-1 if pre else cp["row_index"] >= first_trigger(mat))),
                           accounting=dict(reader_input_tokens=10, reader_output_tokens=2,
                                           successful_probes=1),
-                          run_dir=str(run / f"cp-{cp['id']}"), reader_errors=int(error and arm == "L1" and n == 0),
+                          run_dir=str(run / f"cp-{cp['id']}"), reader_errors=int(error and arm == "L1" and n == len(cps)-1),
                           metrics=dict(facts_kept=dict(complete=True, denominator=count), lifecycle=dict(complete=True)))
                 path = scores / f"cp-{cp['id']}" / f"{arm}.seed-{seed}.json"
                 write(path, sc)
@@ -69,7 +91,7 @@ def test_real_schedule_dominance_reaches_keep(tmp_path, real_material):
     scores = observations(tmp_path, real_material)
     # Equal positive synthetic costs isolate the retention gate.
     result = e.analyze(scores, real_material, list(range(1, 9)))["comparisons"]["L1−L0"]
-    assert all(result["intervals"][k]["n_seeds"] == 8 for k in ("stale_task", "corrected_value", "current_request"))
+    assert {k: result["intervals"][k]["n_seeds"] for k in ("stale_task", "corrected_value", "current_request")} == dict(stale_task=8, corrected_value=7, current_request=8)
     assert result["verdict"] == "KEEP"
     assert not any("|" in k for k in result["intervals"])
 
@@ -87,7 +109,8 @@ def test_reader_errors_exclude_pair_symmetrically(tmp_path, real_material):
     r = e.analyze(scores, real_material, list(range(1, 9)))["comparisons"]["L1−L0"]
     assert len(r["incomplete_pairs"]) == 8
     assert r["reader_errors"] == {"L1": 8, "L0": 0}
-    assert all(len(v) == len(e.CP.select(real_material / f"seed-{seed}", "lifecycle"))-1 for seed, v in r["compared_window"].items())
+    assert all(len(v) == sum(c["row_index"] >= first_trigger(real_material / f"seed-{seed}") for c in
+        e.CP.select(real_material / f"seed-{seed}", "lifecycle"))-1 for seed, v in r["compared_window"].items())
 
 
 def test_identical_product_pins_refused(tmp_path, real_material):
@@ -141,7 +164,7 @@ def test_pool_facts_instead_of_checkpoint_percentages(tmp_path, real_material):
             for f in json.loads((mat / "facts.json").read_text()):
                 if f["id"] in sc["probes"]:
                     sc["probes"][f["id"]]["class"] = "CORRECT" if sc["checkpoint_id"] == last else "MISS"
-                    if f["row_role"] == "user":
+                    if f["row_role"] == "user" and sc["behaviour"]["compactions"]:
                         numerator += sc["checkpoint_id"] == last
                         denominator += 1
             write(path, sc)

@@ -103,8 +103,8 @@ def test_lifecycle_contract_and_scoring_denominators(material, tmp_path):
     assert "stale" not in scored["probes"]
     man, facts = sc.jload(material / "material.manifest.json"), sc.jload(material / "facts.json")
     stale, corrected, current = sc.jlines(material / "lifecycle_probes.jsonl")
-    assert sc.lifecycle_correct(stale, "No; do new-task.", man, facts)
-    assert not sc.lifecycle_correct(stale, "Yes; do old-task.", man, facts)
+    assert sc.lifecycle_correct(stale, "STATUS: NOT LIVE\nNo; do new-task.", man, facts)
+    assert not sc.lifecycle_correct(stale, "STATUS: LIVE\nYes; do old-task.", man, facts)
     assert not sc.lifecycle_correct(stale, "No; do new-task. Also do old-task.", man, facts)
     assert not sc.lifecycle_correct(corrected, corrected["answer"] + " old-alpha", man, facts)
     assert sc.lifecycle_correct(current, "new-task", man, facts)
@@ -145,7 +145,8 @@ def test_per_arm_pins_and_refusal_of_mismatched_or_dirty_fixture(tmp_path, monke
 
 
 @pytest.mark.parametrize("parent_changes", [False, True])
-def test_s4_probes_multiple_checkpoints_and_continues_one_parent(material, monkeypatch, tmp_path, parent_changes):
+@pytest.mark.parametrize("reader_failures", [0, 1, 2])
+def test_s4_probes_multiple_checkpoints_and_continues_one_parent(material, monkeypatch, tmp_path, parent_changes, reader_failures):
     m = module(TRACK / "s4/run_s_codex.py", monkeypatch, tmp_path)
     monkeypatch.setattr(m, "material_dir", lambda seed: material)
     monkeypatch.setattr(m, "setup_home", lambda: dict(login_status="logged_in", auth_copy_sha256_prefix="fake"))
@@ -160,12 +161,17 @@ def test_s4_probes_multiple_checkpoints_and_continues_one_parent(material, monke
     monkeypatch.setattr(m.subprocess, "run", lambda *a, **kw: SimpleNamespace(stdout="fake-version"))
     actual_sha = m.sha
     monkeypatch.setattr(m, "sha", lambda p: "fake" if p.name == "auth.json" else actual_sha(p))
-    replay, forks = [], []
+    replay, forks, tries = [], [], {}
     def cli(cmd, prompt, cwd, stem):
         is_fork = cmd[2] == "fork"
         (forks if is_fork else replay).append(prompt)
         if is_fork and parent_changes:
             parent.write_text("changed-parent")
+        key = (str(stem.parent), prompt)
+        tries[key] = tries.get(key, 0) + 1
+        if is_fork and tries[key] <= reader_failures:
+            return dict(rc=124, thread_id=None, timed_out=True, wall_s=0,
+                        agent_messages=[], tool_items=0, usage={})
         return dict(rc=0, thread_id="child" if is_fork else "parent", timed_out=False, wall_s=0,
                     agent_messages=["{}"] if is_fork else [], tool_items=0, usage={})
     monkeypatch.setattr(m, "run_cli", cli)
@@ -181,3 +187,8 @@ def test_s4_probes_multiple_checkpoints_and_continues_one_parent(material, monke
     cps = list((tmp_path / "output/codex-runs/seed-1/fake").glob("cp-*/summary.json"))
     assert len(cps) == 3 and all(sc.jload(p)["isolation_ok"] for p in cps)
     assert parent.read_text() == "fixture-parent"
+    rows = [r for p in cps for r in sc.jlines(p.parent / "results.jsonl")]
+    assert all(r["status"] == ("ERROR" if reader_failures == 2 else "OK") for r in rows)
+    assert all(r["reader_rereads"] == int(reader_failures > 0) for r in rows)
+    for p in cps:
+        assert sc.jload(p)["reader_rereads"] == sum(r["reader_rereads"] for r in sc.jlines(p.parent / "results.jsonl"))

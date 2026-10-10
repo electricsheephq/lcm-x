@@ -448,6 +448,8 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
             ok = p["id"] not in dups and not r.get("timed_out") and lifecycle_correct(p, r.get("answer"), man, all_facts)
             probes[p["id"]] = dict(**{k: p[k] for k in ("kind", "compaction_horizon", "schedule", "checkpoint_id")},
                                    answer=r.get("answer"), **{"class": "CORRECT" if ok else "MISS" if r else "MISSING"})
+            if p["kind"] == "stale_task":
+                probes[p["id"]]["status_line"] = stale_status(r.get("answer"))
             cell = cells.setdefault(f"{p['kind']}|{p['compaction_horizon']}", [0, 0])
             cell[0] += ok
             cell[1] += 1
@@ -482,7 +484,8 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
             probes[pid].update({"class": "INCOMPLETE", "success": False})
         for value in m.values():
             value.update(value=None, complete=False, status="INCOMPLETE(reader ERROR/TIMEOUT)")
-    return {**(dict(context_length=summ.get("context_length", summ.get("model_context_window")), worktree_head=summ.get("worktree_head"), reader_errors=len(errors))
+    return {**(dict(context_length=summ.get("context_length", summ.get("model_context_window")), worktree_head=summ.get("worktree_head"), reader_errors=len(errors),
+                   reader_rereads=sum(r.get("reader_rereads", 0) for r in all_rows if r.get("arm") == arm))
                if lifecycle or (material / "lifecycle_probes.jsonl").exists() or errors else {}), "schema": "score-s-v1", "checkpoint_id": summ.get("checkpoint_id"), "accounting": accounting(summ, probes),
             "checkpoint_row": summ.get("checkpoint", {}).get("row") if isinstance(
                 summ.get("checkpoint"), dict) else summ.get("checkpoint"), "labels": labels, "summary_blocks": blocks,
@@ -502,21 +505,17 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
             "duplicate_rows": sorted(dups), "probes": probes}
 
 
+def stale_status(answer):
+    first = next((s.strip() for s in answer.splitlines() if s.strip()), "") if isinstance(answer, str) else ""
+    return first if first in ("STATUS: LIVE", "STATUS: NOT LIVE") else "INVALID/MISSING/ABSTAIN"
+
+
 def lifecycle_correct(p, answer, man, facts):
     if p["expect"] != "value" or not isinstance(answer, str) or not answer.strip():
         return False
     a = normalize(answer)
     if p["kind"] == "stale_task":
-        task = next(r["task"] for r in man["lifecycle"] if r.get("resolution", {}).get("row_id") == p["row_id"])
-        answer = answer.replace("’", "'")
-        if any(rx.search(answer) for rx in ABSTAIN_RE):
-            return False
-        replacement = p["answer"].split("do ", 1)[-1].rstrip(".")
-        cancelled = re.search(r"no longer|no need|cancel|superseded|replaced|shouldn't|should not|not\b[^.;]*\banymore|not still|don't do|instead of", answer, re.I)
-        live = re.search(r"\byes\b|(?<!not )(?<!no longer )\b(pending|still to be done)\b", answer, re.I)
-        commands = re.finditer(r"\b(do|run|execute|perform) " + re.escape(task) + r"\b", answer, re.I)
-        live = live or any(not re.search(r"no longer|no need|shouldn't|should not|don't|not still|not to|not.*anymore", answer[:m.start()].rsplit(".", 1)[-1], re.I) for m in commands)
-        return bool(not live and (normalize(replacement) in a or cancelled))
+        return stale_status(answer) == "STATUS: NOT LIVE"
     if p["kind"] == "corrected_value":
         old = next(f["correction_source"]["value"] for f in facts if p["id"] == f["id"] + "-CORRECTION")
         return normalize(p["answer"]) in a and normalize(old) not in a

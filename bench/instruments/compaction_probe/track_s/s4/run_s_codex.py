@@ -546,10 +546,12 @@ def main(a=None, state=None) -> int:
     if (ws / "AGENTS.md").exists():   # host instructions stay in the fork's cwd; the calls/ files do not
         shutil.copy2(ws / "AGENTS.md", pdir / "AGENTS.md")
     results, forks = [], []
-    for b in batches_for(sdir, cp)[: a.batches or None]:
+    batches = batches_for(sdir, cp)[: a.batches or None]
+    for b in batches:  # a failed fork is re-read once from the unchanged checkpoint parent
+        suffix = ".reread" if b.get("reread") else ""
         prompt = ("[probe] Answer from this conversation's memory only; do not run any tool or read any file.\n"
                   + b["text"] + "\n" + "\n".join(f"{p['id']}: {p['text']}" for p in b["probes"]))
-        stem = rdir / "turns" / f"probe-{b['id']}"
+        stem = rdir / "turns" / f"probe-{b['id']}{suffix}"
         res = run_cli(base_cmd("fork", sid, ws, []), prompt, pdir, stem)
         fsid, err = res["thread_id"], None
         rb = host_revoked = None
@@ -563,7 +565,7 @@ def main(a=None, state=None) -> int:
                 err = f"READBACK MISMATCH {rb}"
         if res["tool_items"]:
             err = f"REJECTED: {res['tool_items']} tool/file retrieval item(s) during a context-only probe"
-        if res["rc"] != 0 or not fsid:
+        if res["rc"] != 0 or not fsid or res["timed_out"]:
             err = err or f"fork failed rc {res['rc']}"
         answers = None if err else parse_answers(res["agent_messages"])
         if answers is None and not err:
@@ -571,9 +573,12 @@ def main(a=None, state=None) -> int:
         forks.append({"batch": b["id"], "fork_thread_id": fsid, "readback": rb, "wall_s": res["wall_s"],
                       "tool_items": res["tool_items"], "error": err, "usage": res["usage"],
                       "host_instructions_revoked_in_fork": host_revoked})
-        jdump(rdir / "answers" / f"{b['id']}.json", {"batch": b["id"], "fork": fsid, "messages": res["agent_messages"],
+        jdump(rdir / "answers" / f"{b['id']}{suffix}.json", {"batch": b["id"], "fork": fsid, "messages": res["agent_messages"],
                                                       "error": err})
         print(f"probe {b['id']}: fork {fsid} wall {res['wall_s']}s err {err}", flush=True)
+        if err and not b.get("reread"):
+            batches.append(dict(b, reread=True))
+            continue
         for p in b["probes"]:
             f = facts_by.get(p["id"]) or {}
             ans = (answers or {}).get(p["id"])
@@ -583,7 +588,7 @@ def main(a=None, state=None) -> int:
                 **{k: p[k] for k in ("checkpoint_id", "schedule", "compaction_horizon") if k in p},
                 "stale": f.get("stale"), "placement": f.get("placement"), "row_role": f.get("row_role"),
                 "fact_class": f.get("class"), "answer": ans, "answered": ans is not None,
-                "timed_out": res["timed_out"], "error": err, "status": "ERROR" if err else "OK",
+                "timed_out": res["timed_out"], "error": err, "status": "ERROR" if err else "OK", "reader_rereads": int(bool(b.get("reread"))),
                 "arm": "codex-native", "arm_kind": "hosted, own runtime; pinned reader on fork", "seed": seed,
                 "run": a.run, "run_id": f"codex-native/{seed}/r{a.run}/{sid}", "lane": "codex-cli-subscription",
                 "reader": f"{MODEL}·{EFFORT}", "reader_readback": rb, "batch_id": b["id"], "clone_id": fsid,
@@ -594,6 +599,7 @@ def main(a=None, state=None) -> int:
         for r in results:
             fh.write(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n")
     summary["forks"] = forks
+    summary["reader_rereads"] = sum(r["reader_rereads"] for r in results)
     summary["cp_rollout_sha_after_probes"] = sha(cp_rollout)
     summary["isolation_ok"] = summary["cp_rollout_sha_before_probes"] == summary["cp_rollout_sha_after_probes"]
     summary["continuation"] = cont

@@ -20,7 +20,10 @@ class Reader:
 
     def ask(self, system, view, turns, replies):
         ids = re.findall(r"^([^\s:]+): ", turns[-1], re.M)
-        return json.dumps(dict.fromkeys(ids, "I don't know.")), dict(context_format="FAKE",
+        answers = dict.fromkeys(ids, "I don't know.")
+        for pid in re.findall(r"^([^\s:]+): .*Begin your answer with exactly one line:", turns[-1], re.M):
+            answers[pid] = "STATUS: LIVE\nOffline fixture; no recall claim."
+        return json.dumps(answers), dict(context_format="FAKE",
             usage=dict(prompt_tokens=(len(system) + sum(len(str(m.get('content', ''))) for m in view)
                                       + len(turns[-1])) // 4, completion_tokens=len(ids) * 6,
                        cached_tokens=0, uncached_tokens=(len(system) + sum(len(str(m.get('content', ''))) for m in view)
