@@ -11,8 +11,14 @@ import argparse
 import json
 import os
 import math
+import sys
 from collections import Counter
 from pathlib import Path
+
+if "--eval2" in sys.argv:
+    from eval2 import main
+    main([x for x in sys.argv[1:] if x != "--eval2"])
+    sys.exit(0)
 
 H = Path(os.environ["TRACK_S_OUT"]).resolve() / "decision"
 ARMS = ("LCMX-fleet", "lossless-claw", "lossless-claw-tuned", "codex-native")

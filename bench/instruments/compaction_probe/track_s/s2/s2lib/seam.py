@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib, importlib, importlib.util, os, shutil, subprocess, sys, threading, time, types, uuid  # noqa: E401
 from pathlib import Path
 
-WORKTREE = Path(os.environ["S2_PRODUCT_WORKTREE"]).resolve()
+WORKTREE = Path(os.environ.get("S2_PRODUCT_WORKTREE", ".")).resolve()
 PINNED = os.environ.get("S2_PRODUCT_SHA", "7ed790c84b493395bdc1c929c1ee4d7ea0eaaceb")  # S8: v0.24.8 GA
 HARNESS = Path(__file__).resolve().parents[2] / "harness"
 LOCK = threading.Lock()
@@ -18,8 +18,13 @@ CALLS: list[dict] = []      # every seam call since the last take()
 SUMMARIES: list[dict] = []  # every summarize_with_escalation return since the last take()
 _LANE = {"lane": None}
 
-def load_engine():
+def load_engine(arm=None):
     """Register the worktree as `hermes_lcm` (package __init__ not executed, as the harness and tests do)."""
+    global WORKTREE, PINNED
+    if arm and arm.get("worktree"):
+        WORKTREE, PINNED = Path(arm["worktree"]).resolve(), arm["sha"]
+    if "hermes_lcm" in sys.modules and Path(sys.modules["hermes_lcm"].__path__[0]) != WORKTREE:
+        raise SystemExit("one product pin per process; start a fresh process for each arm")
     head = subprocess.run(["git", "-C", str(WORKTREE), "rev-parse", "HEAD"],
                           capture_output=True, text=True, check=True).stdout.strip()
     if head != PINNED:
@@ -76,7 +81,10 @@ def _wrap_level_recorder(engine_mod):
 def set_lane(name: str, scratch: Path):
     sys.path.insert(0, str(HARNESS))
     lanes = importlib.import_module("lanes")
-    if name == "glm":
+    if name == "fake":
+        from .fakes import SummaryLane
+        lane = SummaryLane()
+    elif name == "glm":
         lane = lanes.get_lane("glm")
     else:
         lane = CodexEffortLane(name, {"codex-sol": "gpt-6.1-sol", "codex-astra": "gpt-6-astra"}[name], scratch)
@@ -99,6 +107,8 @@ def call_llm(**kwargs):
     try:
         if isinstance(lane, CodexEffortLane):
             reply = lane.call_with(system, user, timeout, effort)
+        elif getattr(lane, "fake", False):
+            reply = lane.call(system, user, kwargs.get("max_tokens"))
         else:  # GLM adapter: its module-level socket timeout = the plugin's per-request timeout for this call
             glm = sys.modules["lanes.glm"]
             with LOCK:
@@ -109,7 +119,7 @@ def call_llm(**kwargs):
                     glm.CALL_TIMEOUT_S = saved
         rec.update(reply.meta, reply_chars=len(reply.text or ""))
         return types.SimpleNamespace(choices=[types.SimpleNamespace(
-            message=types.SimpleNamespace(content=reply.text))])
+            message=types.SimpleNamespace(content=reply.text), finish_reason="stop")])
     except Exception as exc:  # recorded, then re-raised so the plugin takes its own L2/L3 path
         rec.update(exception=type(exc).__name__, error=str(exc)[:300])
         raise

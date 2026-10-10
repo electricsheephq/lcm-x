@@ -22,6 +22,8 @@ from pathlib import Path
 sys.dont_write_bytecode = True  # never write __pycache__ into the kit worktree
 KIT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(KIT))
+sys.path.insert(0, str(KIT / "track_s"))
+import checkpoints as CP  # noqa: E402
 import drive_codex as DC  # noqa: E402  (kit; unchanged)
 import parse_rollout as PR  # noqa: E402  (kit; unchanged)
 
@@ -336,11 +338,11 @@ def admission(rows: list[dict], facts: list[dict], items: list[dict]) -> dict:
             "rows": per_row, "facts": fstat}
 
 
-def survival(sid: str, facts: list[dict], man: dict, rdir: Path | None = None, rows: list[dict] = ()) -> list[dict]:
+def survival(sid: str, facts: list[dict], man: dict, rdir: Path | None = None, rows: list[dict] = (), workspace: Path | None = None) -> list[dict]:
     """What the CLI kept at each `compacted` row: readable replacement-history text vs encrypted payload.
     With `rdir` (S6 A2): continuity/event-<i>.json = that text + the host-instruction text the CLI sends (the
     driver-installed workspace/AGENTS.md), i.e. the plain text the next model call receives after event i."""
-    agents = rdir / "workspace" / "AGENTS.md" if rdir else None
+    agents = (workspace or rdir / "workspace") / "AGENTS.md" if workspace or rdir else None
     host = agents.read_text(encoding="utf-8") if agents and agents.exists() else ""
     out, turn, window, last_row = [], 0, None, {r["turn"]: i for i, r in enumerate(rows)}
     for r in jl(rollout_path(sid)):  # S7 D4: the replay turn (driver tag) and the CLI-reported window at each compaction
@@ -369,18 +371,19 @@ def survival(sid: str, facts: list[dict], man: dict, rdir: Path | None = None, r
                                                       for it in hist if isinstance(it, dict))),
                     "encrypted_parts": enc, "plain_chars": len(plain),
                     "facts_verbatim_in_plain_text": sorted(f["id"] for f in facts if f["value"] in plain),
+                    "continuity_host_visible": {c["id"]: c["value"] in plain + "\n" + host for c in man.get("continuity", [])},
                     "continuity_verbatim": {c["id"]: c["value"] in plain for c in man.get("continuity", [])}})
     return out
 
 
 # ---------------------------------------------------------------- probes
-def batches_for(sdir: Path) -> list[dict]:
+def batches_for(sdir: Path, checkpoint=None) -> list[dict]:
     out, cont = jl(sdir / "probe_batches.jsonl"), json.loads((sdir / "continuation.json").read_text())
     out.append({"id": out[0]["id"].rsplit("-", 1)[0] + "-BCONT", "text": out[0]["text"],
                 "probes": [{"id": f"{cont['id']}.{k}", "kind": "continuation_field", "expect": "value", "gold": cont[k],
                             "text": f"For the pending mid-task continuation, what is its `{k}`?"}
                            for k in cont if k not in ("id", "row_id", "row_index", "row_role")]})
-    return out
+    return CP.augment(sdir, out, checkpoint)
 
 
 def parse_answers(msgs: list[str]) -> dict | None:
@@ -388,7 +391,7 @@ def parse_answers(msgs: list[str]) -> dict | None:
         s, e = m.find("{"), m.rfind("}")
         if s >= 0 and e > s:
             try:
-                obj = json.loads(m[s:e + 1])
+                obj = json.loads(m[s:e + 1], strict=False)
                 return obj.get("answer", obj) if isinstance(obj, dict) else None
             except json.JSONDecodeError:
                 continue
@@ -396,7 +399,7 @@ def parse_answers(msgs: list[str]) -> dict | None:
 
 
 # ---------------------------------------------------------------- run
-def main() -> int:
+def main(a=None, state=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--auth-file", required=True, type=Path, help="CLI auth file for the isolated external arm")
     ap.add_argument("--seed", required=True, help="smoke-1 | 1 | 2 | 3")
@@ -407,24 +410,43 @@ def main() -> int:
     ap.add_argument("--batches", type=int, default=0, help="probe only the first N batches (0 = all + BCONT)")
     ap.add_argument("--dictation", choices=("user", "file"), default="user",
                     help="assistant rows: dictated in the user turn (smoked) | read from notes/<row>.md (not smoked)")
-    ap.add_argument("--stop-row", type=int, default=None, help="S8: last material row_index (default: decision checkpoint)")
+    ap.add_argument("--stop-row", default=None, help="v3 row index or v4 manifest checkpoint id")
+    ap.add_argument("--checkpoints", help="v4 ids, all or lifecycle: probe then continue the unchanged parent")
     ap.add_argument("--readmit", action="store_true", help="recompute admission.json from the run's rollout; no calls")
     ap.add_argument("--dry-run", action="store_true", help="commands, home, workspace layout; no model calls")
+    if a is not None:
+        ap.parse_args = lambda: a
     a = ap.parse_args()
     global HOME
     HOME = run_home(a.seed, a.run)
+    if a.checkpoints and state is None:
+        selected = CP.select(material_dir(a.seed), a.checkpoints)
+        state = dict(sid=None, turn_log=[], row=-1)
+        for cp in selected:
+            a.stop_row = cp["id"]
+            if main(a, state):
+                reason = "checkpoint fork changed parent" if state.get("parent_changed") else "checkpoint fork failed"
+                jdump(RUNS / f"seed-{a.seed}" / a.run / "summary.json", dict(state["summary"], status="FAILED", reason=reason))
+                raise SystemExit(f"FAILED: {reason}; replay fallback forbidden")
+        jdump(RUNS / f"seed-{a.seed}" / a.run / "summary.json", dict(state["summary"], replay_mode="one parent", checkpoints=[c["id"] for c in selected]))
+        return 0
     global USER_AUTH
     USER_AUTH = a.auth_file.resolve()
 
     sdir = material_dir(a.seed)
     rows, facts = jl(sdir / "transcript.jsonl"), json.loads((sdir / "facts.json").read_text())
     man = json.loads((sdir / "material.manifest.json").read_text())
-    stop = man["decision_checkpoint"]["row_index"] if a.stop_row is None else a.stop_row
-    rows = [r for i, r in enumerate(rows) if i <= stop and (not a.slice or r["turn"] <= a.slice)]
-    plans = plan_turns(rows, a.dictation)
+    cp = CP.select(sdir, a.stop_row or "decision")[0] if (sdir / "lifecycle_probes.jsonl").exists() else None
+    stop = cp["row_index"] if cp else man["decision_checkpoint"]["row_index"] if a.stop_row is None else int(a.stop_row)
+    effective = max(i for i, r in enumerate(rows) if r["turn"] == rows[stop]["turn"]) if state is not None else stop
+    rows = [r for i, r in enumerate(rows) if i <= effective and (not a.slice or r["turn"] <= a.slice)]
+    plans = plan_turns(rows[(state["row"] + 1) if state else 0:], a.dictation)
     seed = "smoke-seed-1" if a.seed == "smoke-1" else f"seed-{a.seed}"
     rdir = (S4 / "dry-run" / (seed + ("" if a.dictation == "user" else "-dictation-file"))) if a.dry_run \
         else RUNS / seed / str(a.run)
+    root = rdir
+    if state is not None:
+        rdir = root / f"cp-{cp['id']}"
     if a.readmit:   # offline: re-read the rollout (after an extractor fix), no model calls
         summ = json.loads((rdir / "summary.json").read_text())
         recorded = Path((summ.get("home") or {}).get("codex_home") or HOME)  # runs before #951 used one shared home
@@ -433,25 +455,27 @@ def main() -> int:
         adm = admission(rows, facts, items)
         jdump(rdir / "admission.json", adm)
         summ["admission"] = {k: v for k, v in adm.items() if k not in ("rows", "facts")}
-        summ["survival"] = survival(summ["thread_id"], facts, man, rdir, rows)
+        summ["survival"] = survival(summ["thread_id"], facts, man, rdir, rows, root / "workspace")
         jdump(rdir / "summary.json", summ)
         print(json.dumps(summ["admission"], indent=1))
         return 0
     if not a.dry_run and rdir.exists() and any(rdir.iterdir()):
         raise SystemExit(f"refusing to reuse {rdir}")
-    home = setup_home()
+    home = setup_home() if not state or not state["sid"] else state["home"]
     if home.get("login_status") != "logged_in":
         raise SystemExit("STOP: the isolated CODEX_HOME is not authenticated; no run started")
     token_guard(3.0, "start gate")
     print("expiry ok (>= 3h)", flush=True)
     home["token_expiry_gate"] = "expiry ok (>= 3h)"
-    ws = rdir / "workspace"
+    ws = root / "workspace"
     layout = materialise(rows, ws, a.dictation)
     (rdir / "turns").mkdir(parents=True, exist_ok=True)
     summary = {"seed": seed, "run": a.run, "model": MODEL, "effort": EFFORT, "codex_version": subprocess.run(
         [str(codex_bin()), "--version"], capture_output=True, text=True).stdout.strip(), "codex_bin": str(codex_bin()),
         "home": home, "dictation": a.dictation, "rows": len(rows), "turns": len(plans), "stop_row_index": rows[-1]["id"], "checkpoint": stop,
-        "material_sha": man["shas"]["transcript.jsonl"], "workspace": str(ws), "layout": layout,
+        "material_sha": man["shas"]["transcript.jsonl"], "late_corrected_value_checkpoint": CP.late_checkpoint(sdir), "workspace": str(ws), "layout": layout,
+        "material_sha256": sha(sdir / "material.manifest.json"),
+        "checkpoint_row": stop, "effective_row": effective,
         "kit": {"path": str(KIT), "drive_codex_sha": sha(KIT / "drive_codex.py"),
                 "parse_rollout_sha": sha(KIT / "parse_rollout.py")}}
     if a.dry_run:
@@ -470,7 +494,7 @@ def main() -> int:
         return 0
 
     summary["started"] = time.time()
-    sid, turn_log = None, []
+    sid, turn_log = (state["sid"], list(state["turn_log"])) if state else (None, [])
     for p in plans:
         stem = rdir / "turns" / f"turn-{p['turn']:03d}"
         Path(f"{stem}.prompt.txt").write_text(p["prompt"], encoding="utf-8")
@@ -484,6 +508,8 @@ def main() -> int:
             summary.update(status="FAILED", failed_turn=p["turn"])
             break
     summary["thread_id"] = sid
+    if cp:
+        summary.update(checkpoint_id=cp["id"], stop_row_index=stop)
     if a.force_event and summary.get("status") != "FAILED":
         last_in = (PR.parse_rollout(sid, HOME / "sessions")["token_series"] or [{"last_input": 100_000}])[-1]
         limit = max(10_000, int(last_in["last_input"] * 0.6))
@@ -511,7 +537,7 @@ def main() -> int:
     jdump(rdir / "admission.json", adm)
     summary["admission"] = {k: v for k, v in adm.items() if k not in ("rows", "facts")}
     cont = json.loads((sdir / "continuation.json").read_text())
-    summary["survival"] = survival(sid, facts, man, rdir, rows)
+    summary["survival"] = survival(sid, facts, man, rdir, rows, ws)
     summary["cp_rollout_sha_before_probes"] = sha(cp_rollout)
     (rdir / "sessions").mkdir(exist_ok=True)
     shutil.copy2(cp_rollout, rdir / "sessions" / cp_rollout.name)
@@ -524,10 +550,12 @@ def main() -> int:
     if (ws / "AGENTS.md").exists():   # host instructions stay in the fork's cwd; the calls/ files do not
         shutil.copy2(ws / "AGENTS.md", pdir / "AGENTS.md")
     results, forks = [], []
-    for b in batches_for(sdir)[: a.batches or None]:
+    batches = batches_for(sdir, cp)[: a.batches or None]
+    for b in batches:  # a failed fork is re-read once from the unchanged checkpoint parent
+        suffix = ".reread" if b.get("reread") else ""
         prompt = ("[probe] Answer from this conversation's memory only; do not run any tool or read any file.\n"
                   + b["text"] + "\n" + "\n".join(f"{p['id']}: {p['text']}" for p in b["probes"]))
-        stem = rdir / "turns" / f"probe-{b['id']}"
+        stem = rdir / "turns" / f"probe-{b['id']}{suffix}"
         res = run_cli(base_cmd("fork", sid, ws, []), prompt, pdir, stem)
         fsid, err = res["thread_id"], None
         rb = host_revoked = None
@@ -541,7 +569,7 @@ def main() -> int:
                 err = f"READBACK MISMATCH {rb}"
         if res["tool_items"]:
             err = f"REJECTED: {res['tool_items']} tool/file retrieval item(s) during a context-only probe"
-        if res["rc"] != 0 or not fsid:
+        if res["rc"] != 0 or not fsid or res["timed_out"]:
             err = err or f"fork failed rc {res['rc']}"
         answers = None if err else parse_answers(res["agent_messages"])
         if answers is None and not err:
@@ -549,18 +577,22 @@ def main() -> int:
         forks.append({"batch": b["id"], "fork_thread_id": fsid, "readback": rb, "wall_s": res["wall_s"],
                       "tool_items": res["tool_items"], "error": err, "usage": res["usage"],
                       "host_instructions_revoked_in_fork": host_revoked})
-        jdump(rdir / "answers" / f"{b['id']}.json", {"batch": b["id"], "fork": fsid, "messages": res["agent_messages"],
+        jdump(rdir / "answers" / f"{b['id']}{suffix}.json", {"batch": b["id"], "fork": fsid, "messages": res["agent_messages"],
                                                       "error": err})
         print(f"probe {b['id']}: fork {fsid} wall {res['wall_s']}s err {err}", flush=True)
+        if err and not b.get("reread"):
+            batches.append(dict(b, reread=True))
+            continue
         for p in b["probes"]:
             f = facts_by.get(p["id"]) or {}
             ans = (answers or {}).get(p["id"])
             results.append({
                 "schema": "s4-result-v1", "kind": "probe", "probe_id": p["id"], "probe_kind": p["kind"],
-                "expect": p["expect"], "gold": p.get("gold") or f.get("answer") or (traps.get(p["id"]) or {}).get("answer"),
+                "expect": p["expect"], "gold": p.get("gold") or p.get("answer") or f.get("answer") or (traps.get(p["id"]) or {}).get("answer"),
+                **{k: p[k] for k in ("checkpoint_id", "schedule", "compaction_horizon") if k in p},
                 "stale": f.get("stale"), "placement": f.get("placement"), "row_role": f.get("row_role"),
                 "fact_class": f.get("class"), "answer": ans, "answered": ans is not None,
-                "timed_out": res["timed_out"], "error": err, "status": "ERROR" if err else "OK",
+                "timed_out": res["timed_out"], "error": err, "status": "ERROR" if err else "OK", "reader_rereads": int(bool(b.get("reread"))),
                 "arm": "codex-native", "arm_kind": "hosted, own runtime; pinned reader on fork", "seed": seed,
                 "run": a.run, "run_id": f"codex-native/{seed}/r{a.run}/{sid}", "lane": "codex-cli-subscription",
                 "reader": f"{MODEL}·{EFFORT}", "reader_readback": rb, "batch_id": b["id"], "clone_id": fsid,
@@ -571,6 +603,7 @@ def main() -> int:
         for r in results:
             fh.write(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n")
     summary["forks"] = forks
+    summary["reader_rereads"] = sum(r["reader_rereads"] for r in results)
     summary["cp_rollout_sha_after_probes"] = sha(cp_rollout)
     summary["isolation_ok"] = summary["cp_rollout_sha_before_probes"] == summary["cp_rollout_sha_after_probes"]
     summary["continuation"] = cont
@@ -579,10 +612,15 @@ def main() -> int:
                                                                       in p.name for f in forks)]
     summary["auth_copy_sha256_prefix_after"] = sha(HOME / "auth.json")[:12]
     summary["auth_refreshed_in_run"] = summary["auth_copy_sha256_prefix_after"] != home.get("auth_copy_sha256_prefix")
+    summary["reader_calls"] = [dict(batch=f["batch"], calls=[dict(f["usage"], latency_s=f["wall_s"]) if f["usage"] is not None else None]) for f in forks]
     summary["finished"] = time.time()
     if not summary["pin_ok"] or not summary["isolation_ok"] or summary.get("auth_refreshed_in_run", False):
         summary["status"] = "FAILED"
     summary.setdefault("status", "COMPLETED")
+    if state is not None:
+        state.update(parent_changed=not summary["isolation_ok"], summary=summary)
+    if state is not None and summary["status"] == "COMPLETED":
+        state.update(sid=sid, turn_log=turn_log, row=effective, home=home, summary=summary)
     jdump(rdir / "summary.json", summary)
     print(json.dumps({k: summary.get(k) for k in ("status", "thread_id", "pin_ok", "isolation_ok",
                                                   "model_context_window", "history_mode")}, indent=1))
