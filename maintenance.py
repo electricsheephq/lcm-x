@@ -12,8 +12,33 @@ from __future__ import annotations
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
+import os
 import sqlite3
 from typing import Any
+
+
+from .externalize import get_large_output_storage_dir
+
+
+def externalized_payload_inventory(engine) -> dict:
+    """Describe the separate payload directory without creating it or raising."""
+    try:
+        path = get_large_output_storage_dir(engine._config, engine._hermes_home, create=False)
+        files = size = 0
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    try:
+                        if entry.name.endswith(".json") and entry.is_file(follow_symlinks=False):
+                            size += entry.stat(follow_symlinks=False).st_size
+                            files += 1
+                    except OSError:
+                        continue
+        except FileNotFoundError:
+            return {"path": path, "exists": False, "files": 0, "bytes": 0}
+        return {"path": path, "exists": True, "files": files, "bytes": size}
+    except Exception as exc:
+        return {"path": None, "error": str(exc).splitlines()[0][:160] if str(exc) else type(exc).__name__}
 
 
 def flush_engine_connections(engine) -> None:

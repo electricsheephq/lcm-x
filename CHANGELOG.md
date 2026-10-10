@@ -38,6 +38,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: a routine threshold sweep condenses the shallowest eligible depth again, skipping a group the summariser cannot shrink (at most 512 tokens, or within the L3 bound); the heaviest depth applies only when the rendered summary frontier exceeds a quarter of the survival ceiling, survival fit is off with a known window, or no group can shrink, so older summaries keep their detail. (#977)
 - Fix: after a survival fit with projected rows or an unknown projection count, the doctor advises a plugin-only rollback to v0.27.0 or later; older targets require stopping Hermes and moving the database aside to avoid cold-resume duplicates. (#919)
 - Fix: a summary carrier that a survival fit re-forms around a kept user row is no longer stored again as a new row after a Hermes in-place compression boundary, including when the host stamps the carrier or rewrites the current user row at turn end. The fit records the carrier as LCM's emission, and the identity anchor recognises it only when its remainder is exactly that stored row; anything else is still stored. A cold restart after a non-published fit can still store that carrier once. (#1000)
+- Fix: `/lcm backup` and `/lcm rotate apply` name the externalized-payload directory, with its file count and size, to copy with a snapshot that is moved to another host; the SQLite snapshot does not contain those payloads. (#1075)
 
 ## v0.26.2 (user/assistant text externalization floor)
 

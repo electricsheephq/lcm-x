@@ -1123,7 +1123,7 @@ Available commands:
 - `/lcm doctor source` - read-only scan for legacy blank-source rows
 - `/lcm doctor source apply` - backup-first normalization of legacy blank-source rows to `unknown`
 - `/lcm doctor retention` - read-only retention analysis
-- `/lcm backup` - timestamped SQLite backup
+- `/lcm backup` - timestamped SQLite backup. The snapshot holds the database only; copy the externalized payload directory named in the output alongside it when moving a backup to another host.
 - `/lcm rotate` - read-only preview of an in-place tail-preserving compact of the active session
 - `/lcm rotate apply` - backup-first rotate that advances the lifecycle frontier past pre-tail raw messages
 - `/lcm embed warmup` - explicitly prepare the configured provider/model and register its vector dimension

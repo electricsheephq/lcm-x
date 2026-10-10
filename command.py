@@ -61,7 +61,7 @@ from .presets import (
     suggest_preset_for_engine,
     unsupported_runtime_fields_text,
 )
-from .maintenance import backup_database, rotate_backup_database
+from .maintenance import backup_database, externalized_payload_inventory, rotate_backup_database
 from .level3_repair import repair_level3_fragments, scan_level3_fragments
 from .assertion_rebuild import rebuild_assertions
 from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
@@ -990,6 +990,7 @@ def _rotate_apply_text(engine) -> str:
             f"reason: {result.get('reason', 'unknown')}",
             f"rotate_backup_path: {backup['backup_path']}",
             f"rotate_backup_size: {_fmt_size(int(backup['backup_size']))}",
+            *_externalized_payload_lines(engine),
             "note: backup was created before rotate refused; lifecycle state unchanged",
         ])
 
@@ -1001,6 +1002,7 @@ def _rotate_apply_text(engine) -> str:
         f"conversation_id: {result['conversation_id']}",
         f"rotate_backup_path: {backup['backup_path']}",
         f"rotate_backup_size: {_fmt_size(int(backup['backup_size']))}",
+        *_externalized_payload_lines(engine),
         f"total_message_count: {result['total_message_count']}",
         f"fresh_tail_count: {result['fresh_tail_count']}",
         f"fresh_tail_max_tokens: {result['fresh_tail_max_tokens']}",
@@ -2428,6 +2430,23 @@ def _doctor_clean_lifecycle_apply_text(engine) -> str:
     ])
 
 
+def _externalized_payload_lines(engine) -> list[str]:
+    inventory = externalized_payload_inventory(engine)
+    if inventory["path"] is None:
+        return [f"externalized_payload_dir: unavailable ({inventory['error']})"]
+    path = inventory["path"]
+    if not inventory["exists"]:
+        return [f"externalized_payload_dir: absent ({path})"]
+    lines = [
+        f"externalized_payload_dir: {path}",
+        f"externalized_payload_files: {inventory['files']}",
+        f"externalized_payload_size: {_fmt_size(inventory['bytes'])}",
+    ]
+    if inventory["files"] > 0:
+        lines.append("note: externalized payloads are not in the SQLite snapshot; copy externalized_payload_dir with the backup when moving it to another host")
+    return lines
+
+
 def _backup_text(engine) -> str:
     backup = backup_database(engine)
     if not backup["ok"]:
@@ -2444,6 +2463,7 @@ def _backup_text(engine) -> str:
         f"database_path: {backup['db_path']}",
         f"backup_path: {backup['backup_path']}",
         f"backup_size: {_fmt_size(int(backup['backup_size']))}",
+        *_externalized_payload_lines(engine),
         "note: backup created before any future cleanup/apply workflow",
     ])
 
