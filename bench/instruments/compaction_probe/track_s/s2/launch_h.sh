@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 : "${TMPDIR:?}" "${TRACK_S_OUT:?}"
-HERMES_SRC=${HERMES_SRC:-/Users/m1/Codex/lcmx-reliability/hosts/r34.5-0.21.5/src}
+: "${HERMES_SRC:?set HERMES_SRC to the pinned Hermes source checkout (its parent holds venv/)}"
 export HERMES_SRC HERMES_HOME
 HERMES_HOME=$(mktemp -d "$TMPDIR/eval2-h.XXXXXX")
 export HERMES_DISABLE_LAZY_INSTALLS=1 S2_H_SANDBOX=1
