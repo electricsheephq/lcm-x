@@ -37,7 +37,6 @@ from .search_query import (
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
     compute_directness_score,
-    compute_like_fallback_fetch_limit,
     compute_search_fetch_limit,
     contains_risky_fts_ascii,
     count_term_matches,
@@ -1837,7 +1836,6 @@ class MessageStore:
         phrases = extract_quoted_phrases(safe_query)
         if not terms:
             return []
-        fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
 
         where: list[str] = ["content IS NOT NULL"]
         args: list[Any] = []
@@ -1869,7 +1867,6 @@ class MessageStore:
             like_clauses.append("content LIKE ? ESCAPE '\\'")
             args.append(f"%{escape_like(term)}%")
         where.append("(" + " OR ".join(like_clauses) + ")")
-        fetch_limit = compute_like_fallback_fetch_limit(limit, terms, phrases)
         base_args = list(args)
         normalized_sort = normalize_search_sort(sort)
         results: List[Dict[str, Any]] = []
@@ -1963,52 +1960,34 @@ class MessageStore:
 
         if normalized_sort == "recency":
             candidate_cap = compute_search_candidate_cap(limit)
-            offset = 0
-            scanned_rows = 0
-            while True:
-                batch_limit = min(fetch_limit, candidate_cap - scanned_rows)
-                if batch_limit <= 0:
-                    break
-                rows = self._conn.execute(
+            rows = self._conn.execute(
+                f"""SELECT {_MESSAGE_SELECT_COLUMNS}
+                    FROM messages
+                    WHERE {' AND '.join(where)}
+                    {order_by}
+                    LIMIT ? OFFSET ?""",
+                [*base_args, *order_args, candidate_cap, 0],
+            ).fetchall()
+            add_rows(rows)
+            if len(rows) == candidate_cap:
+                boundary_timestamp = rows[-1][8]
+                boundary_role_bias = _message_role_bias(rows[-1][3])
+                window_ids = {row[0] for row in rows}
+                tie_rows = self._conn.execute(
                     f"""SELECT {_MESSAGE_SELECT_COLUMNS}
                         FROM messages
-                        WHERE {' AND '.join(where)}
-                        {order_by}
-                        LIMIT ? OFFSET ?""",
-                    [*base_args, *order_args, batch_limit, offset],
+                        WHERE {' AND '.join(where)} AND timestamp = ?
+                        {order_by}""",
+                    [*base_args, boundary_timestamp, *order_args],
                 ).fetchall()
-                scanned_rows += len(rows)
-                add_rows(rows)
-                offset += len(rows)
-                if len(rows) < batch_limit:
-                    break
-                if scanned_rows >= candidate_cap:
-                    boundary_timestamp = rows[-1][8]
-                    boundary_role_bias = _message_role_bias(rows[-1][3])
-                    while True:
-                        tie_rows = self._conn.execute(
-                            f"""SELECT {_MESSAGE_SELECT_COLUMNS}
-                                FROM messages
-                                WHERE {' AND '.join(where)}
-                                {order_by}
-                                LIMIT ? OFFSET ?""",
-                            [*base_args, *order_args, fetch_limit, offset],
-                        ).fetchall()
-                        if not tie_rows:
-                            break
-                        matching_tie_rows = []
-                        reached_next_primary_group = False
-                        for tie_row in tie_rows:
-                            if tie_row[8] == boundary_timestamp and _message_role_bias(tie_row[3]) == boundary_role_bias:
-                                matching_tie_rows.append(tie_row)
-                            else:
-                                reached_next_primary_group = True
-                                break
-                        add_rows(matching_tie_rows)
-                        if reached_next_primary_group or len(tie_rows) < fetch_limit:
-                            break
-                        offset += len(tie_rows)
-                    break
+                matching_tie_rows = []
+                for tie_row in tie_rows:
+                    if tie_row[0] in window_ids:
+                        continue
+                    if _message_role_bias(tie_row[3]) != boundary_role_bias:
+                        break
+                    matching_tie_rows.append(tie_row)
+                add_rows(matching_tie_rows)
         else:
             # Deterministic relevance/hybrid candidate scan for LIKE fallback.
             # Apply the same coarse score/directness ordering before the hard
@@ -2043,23 +2022,15 @@ class MessageStore:
                 f"{role_bias} ASC, timestamp DESC, store_id DESC"
             )
             candidate_cap = compute_search_candidate_cap(limit)
-            offset = 0
-            while offset < candidate_cap:
-                batch_limit = min(fetch_limit, candidate_cap - offset)
-                rows = self._conn.execute(
-                    f"""SELECT {_MESSAGE_SELECT_COLUMNS}
-                        FROM messages
-                        WHERE {' AND '.join(where)}
-                        {order_by}
-                        LIMIT ? OFFSET ?""",
-                    [*base_args, *order_args, *exact_args, batch_limit, offset],
-                ).fetchall()
-                if not rows:
-                    break
-                add_rows(rows)
-                offset += len(rows)
-                if len(rows) < batch_limit:
-                    break
+            rows = self._conn.execute(
+                f"""SELECT {_MESSAGE_SELECT_COLUMNS}
+                    FROM messages
+                    WHERE {' AND '.join(where)}
+                    {order_by}
+                    LIMIT ? OFFSET ?""",
+                [*base_args, *order_args, *exact_args, candidate_cap, 0],
+            ).fetchall()
+            add_rows(rows)
 
         results.sort(key=lambda result: _fallback_result_sort_key(result, sort))
         for result in results:
