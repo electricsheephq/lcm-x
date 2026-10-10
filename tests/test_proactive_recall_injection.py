@@ -165,8 +165,9 @@ def test_injected_block_is_stripped_before_ingest(tmp_path, provider):
         ({"timestamp": 1704067200}, "stored 2024-01-01 00:00 UTC"),
         ({"event_time": "malformed", "timestamp": 1704067200}, "stored 2024-01-01 00:00 UTC"),
         ({}, "unknown time"),
+        ({"timestamp": 0}, "unknown time"),
     ],
-    ids=["event-time", "stored-time", "malformed-event-time", "unknown-time"],
+    ids=["event-time", "stored-time", "malformed-event-time", "unknown-time", "zero-timestamp"],
 )
 def test_proactive_recall_dates_memory(tmp_path, monkeypatch, provider, time_fields, expected):
     import json

@@ -7837,7 +7837,7 @@ class LCMEngine(
             except (TypeError, ValueError):
                 when = "unknown time"
                 ts = hit.get("timestamp")
-                if ts is not None:
+                if ts:
                     try:
                         when = "stored " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(float(ts)))
                     except (TypeError, ValueError, OSError):
