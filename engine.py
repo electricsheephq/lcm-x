@@ -977,7 +977,7 @@ class LCMEngine(
         that before binding the next session, and the previous session's late suffix must keep its own window."""
         store = getattr(self, "_store", None)
         session_id = getattr(self, "_session_id", "")
-        if store is None:
+        if store is None or not session_id:  # constructor/pre-bind: no session, no window yet
             return 0
         store.set_context_window_tokens(session_id, self.context_length)
         return store.get_context_window_tokens(session_id)
