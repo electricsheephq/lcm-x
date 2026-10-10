@@ -28,6 +28,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scorer"))
 import score_manifest  # noqa: E402
 
+if "--eval2" in sys.argv:
+    from eval2 import main
+    main([x for x in sys.argv[1:] if x != "--eval2"])
+    sys.exit(0)
+
 AP = argparse.ArgumentParser(description=__doc__)
 AP.add_argument("--arms", nargs=2, required=True, metavar=("FIRST", "SECOND"))
 AP.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])

@@ -17,7 +17,9 @@ RUNS = TS / "lcmx-runs"
 DEFAULT_CTX = 272_000  # the engine is told this window; threshold = the arm's LCM_CONTEXT_THRESHOLD x window
 HOST_MODEL = "eval-s2-host"
 sys.path.insert(0, str(S2))
+sys.path.insert(0, str(S2.parent))
 from s2lib import arms as A, reader as R, seam  # noqa: E402
+import checkpoints as CP  # noqa: E402
 
 SUMMARY_RE = re.compile(r"\[[^\[\]\n]*Summary \(d\d+, node \d+\)\]")  # engine.py:5189/7394 summary part header (S7 D7)
 CFG_SKIP = {"config_sources", "config_source_warnings", "ignored_config_yaml_lcm_keys"}
@@ -52,7 +54,9 @@ def new_engine(m, home: Path, sid: str, ctx: int):
 
 def select_rows(sdir: Path, checkpoint: str, slice_n: int | None):
     rows, man = jlines(sdir / "transcript.jsonl"), jload(sdir / "material.manifest.json")
-    if checkpoint == "auto":
+    if (sdir / "lifecycle_probes.jsonl").exists():
+        stop = CP.select(sdir, checkpoint)[-1]["row_index"]
+    elif checkpoint == "auto":
         stop = man["decision_checkpoint"]["row_index"]
     else:
         cps = [c for c in man["checkpoints"] if c["tokens"] >= int(checkpoint)]
@@ -76,6 +80,22 @@ def continuity(man: dict, system: str, view: list[dict]) -> list[dict]:
     return [{"id": c["id"], "present": c["value"] in system or c["value"] in text, "in_view": c["value"] in text,
              "in_system_slot": c["value"] in system} for c in man["continuity"]]
 
+def actual_horizon(events, source, checkpoint):
+    return sum(e.get("is_compaction", False) and source <= e["row_index"] <= checkpoint
+               for e in events if e.get("row_index") is not None)
+
+def carry_room(carry):
+    return carry.get("empty_no_room", "empty_no_room" in carry.values()) if carry else None
+
+def replay_estimate(tokens):
+    return max(60, tokens / float(os.environ.get("S2_REPLAY_TOKENS_PER_SECOND", "333")))
+
+def replay_timeout(tokens, multiplier=None):
+    multiplier = float(multiplier or os.environ.get("S2_TIMEOUT_MULTIPLIER", "3"))
+    if multiplier < 3:
+        raise ValueError("S2 timeout multiplier must be at least 3")
+    return replay_estimate(tokens) * multiplier
+
 class Run:
     def __init__(self, m, arm, seed, args, sdir, rows, man, run_dir):
         self.m, self.arm, self.seed, self.args, self.sdir, self.rows, self.man, self.dir = \
@@ -84,7 +104,9 @@ class Run:
         self.system = "\n".join(r["content"] for r in rows if r["role"] == "system")
         self.sysmsg = {"role": "system", "content": self.system}
         self.events, self.node_event, self.receipts_out, self.gates = [], {}, [], 0
-        self.cps, self.snaps, self.reader_calls = set(args.checkpoints or ()), [], []  # S7 D1
+        selected = CP.select(sdir, args.checkpoints) if args.checkpoints else []
+        self.cps, self.snaps, self.reader_calls = {c["row_index"] for c in selected}, [], []
+        self.selected = selected
         self.ntok = m.tokens.count_messages_tokens
         self.run_id = f"{arm['name']}/{seed}/r{args.run}/{int(time.time())}"
         self.timing_label = "WIRING-ONLY" if (man.get("mode") == "smoke" or args.slice or args.prefix60k) else "decision"
@@ -112,12 +134,17 @@ class Run:
                 self.engine.ingest(view)
                 view = self.event(view, self.ntok([self.sysmsg] + view), i, row, forced=True)
             if i in self.cps:  # S7 D1: store snapshot + receipts/admission as of this row; probes run after the replay
-                self.receipts_out = []
-                adm = self.receipts(upto=i)
-                db, home = clone_store(self.db, self.home, self.dir / f"cp-{i}" / "store")
-                self.snaps.append({"row": i, "dir": self.dir / f"cp-{i}", "db": db, "home": home, "view": list(view),
-                                   "admission": adm, "receipts": list(self.receipts_out), "n_events": len(self.events)})
+                for cp in (c for c in self.selected if c["row_index"] == i):
+                    self.snapshot(cp, view)
         return view
+
+    def snapshot(self, cp, view):
+        self.receipts_out = []
+        adm = self.receipts(upto=cp["row_index"])
+        out = self.dir / f"cp-{cp['id']}"
+        db, home = clone_store(self.db, self.home, out / "store")
+        self.snaps.append(dict(row=cp["row_index"], checkpoint=cp, dir=out, db=db, home=home, view=list(view),
+                               admission=adm, receipts=list(self.receipts_out), n_events=len(self.events)))
 
     def event(self, view, cur, i, row, forced):
         with db_ro(self.db) as c:
@@ -149,6 +176,7 @@ class Run:
               "is_compaction": bool(nodes),  # False = the engine's cleanup-only pass (stub/externalize), no summary
               "timing_label": "WIRING-ONLY" if forced else self.population, "population": self.population,
               "tokens_at_trigger": cur,
+              "threshold_percent": self.engine.threshold_tokens / self.args.context_length, "tail_mode": "lcm-fresh-tail",
               "threshold_tokens": self.engine.threshold_tokens, "rows_before": len(view), "rows_after": len(new),
               "tokens_after": self.ntok([self.sysmsg] + new), "status": self.engine.last_compression_status,
               "noop_reason": self.engine.last_compression_noop_reason, "nodes": nodes, "levels": sums,
@@ -159,6 +187,8 @@ class Run:
               "t_start": t_start, "t_end": t_start + wall, "summariser_calls": calls,
               "continuity": continuity(self.man, self.system, new)}
         self.events.append(ev)
+        carry = getattr(self.engine, "_last_user_carry", None)
+        ev["empty_no_room"] = carry_room(carry) if isinstance(carry, dict) else None
         cdir = self.dir / "continuity"  # S6 A2: the assembled context the next model call receives after this event
         cdir.mkdir(exist_ok=True)
         (cdir / f"event-{n}.json").write_text(json.dumps({"event": n, "row_index": i, "source": "system slot + view "
@@ -225,14 +255,14 @@ def clone_store(src_db: Path, src_home: Path, dst: Path):
         shutil.copytree(src_home / "lcm-large-outputs", dst / "hermes-home" / "lcm-large-outputs")
     return dst / "lcm.db", dst / "hermes-home"
 
-def batches_for(sdir: Path):
+def batches_for(sdir: Path, checkpoint=None):
     out, cont = jlines(sdir / "probe_batches.jsonl"), jload(sdir / "continuation.json")
     out.append({"id": out[0]["id"].rsplit("-", 1)[0] + "-BCONT", "text": out[0]["text"],
                 "added_by": "S2 (continuation.json, scored field by field)", "probes": [
                     {"id": f"{cont['id']}.{k}", "kind": "continuation_field", "expect": "value", "gold": cont[k],
                      "text": f"For the pending mid-task continuation, what is its `{k}`?"}
                     for k in cont if k not in ("id", "row_id", "row_index", "row_role")]})
-    return out
+    return CP.augment(sdir, out, checkpoint)
 
 def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[dict]:
     src_db, src_home, out = (src["db"], src["home"], src["dir"]) if src else (run.db, run.home, run.dir)
@@ -249,16 +279,19 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
     unavailable = run.arm["name"] == "C0" and ctx_tokens + R.ANSWER_RESERVE > R.READER_WINDOW[run.args.reader]
     (out / "answers").mkdir(exist_ok=True)
     results = []
-    for b in batches_for(run.sdir)[: run.args.batches or None]:
+    batches = batches_for(run.sdir, src["checkpoint"]) if src and "checkpoint" in src else batches_for(run.sdir)
+    batches = batches[: run.args.batches or None]
+    for b in batches:  # failed batches append one fresh re-read at this same checkpoint
+        suffix = ".reread" if b.get("reread") else ""
         prompt = b["text"] + "\n" + "\n".join(f"{p['id']}: {p['text']}" for p in b["probes"])
         clone_id = clone_info = answers = err = tools_engine = None
-        meta, attempts = {}, []
+        meta, attempts, reads = {}, [], 0
         if unavailable:
             err = f"UNAVAILABLE: C0 context {ctx_tokens} tokens + reserve > {run.args.reader} window"
         else:
             try:
                 if is_store:  # a fresh clone per batch (db backup + payload dir), opened as an engine
-                    clone_id = f"clones/{b['id']}"
+                    clone_id = f"clones/{b['id']}{suffix}"
                     cdb, chome = clone_store(src_db, src_home, out / clone_id)
                     apply_env(run.arm["env"], chome, cdb)
                     tools_engine = new_engine(run.m, chome, run.sid, run.args.context_length)
@@ -269,10 +302,13 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                 def answered(a):  # as score_s reads it: None or a blank string is unanswered; any other value is an answer
                     return a is not None and (not isinstance(a, str) or bool(a.strip()))
 
-                for attempt in range(2):  # one retry when the final call hits the cap; the first non-empty answer wins
+                for attempt in range(1 if b.get("reread") else 2):  # the cap retry shares the one re-read budget
+                    reads += 1
                     got, meta = R.answer(reader, run.system, view, prompt, tools_engine if is_open else None,
                                          schemas, guidance, run.m.tokens.count_tokens)
                     attempts.append(dict(meta))
+                    if got is None:
+                        raise ValueError("unparseable reader answer")
                     for pid, a in (got or {}).items():
                         if not answered(answers.get(pid)):
                             answers[pid] = a
@@ -285,6 +321,8 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                     err = "READER_TRUNCATED: completion cap 8192 reached"
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"[:400]
+                if hasattr(exc, "reader_calls"):
+                    attempts.append(dict(error=err, reader_calls=exc.reader_calls))
             finally:
                 if tools_engine is not None:
                     tools_engine.shutdown()
@@ -292,19 +330,25 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
         meta["reader_calls"] = [c for a in attempts for c in a.get("reader_calls") or []]
         meta.update({k: sum(a.get(k) or 0 for a in attempts) for k in ("tool_calls", "tokens_read_back", "wall_s")
                      if any(a.get(k) is not None for a in attempts)})
-        run.reader_calls.append({"batch": b["id"], "calls": meta.get("reader_calls")})
-        (out / "answers" / f"{b['id']}.json").write_text(json.dumps(
+        run.reader_calls.append({"batch": b["id"], "calls": meta.get("reader_calls"), "reread_rows": len(b["probes"]) if b.get("reread") or reads > 1 else 0})
+        (out / "answers" / f"{b['id']}{suffix}.json").write_text(json.dumps(
             {"batch": b["id"], "prompt_chars": len(prompt), "clone": clone_info, "error": err, **meta}, indent=1))
         print(f"  batch {b['id']}: {'ERROR ' + err if err else 'answered ' + str(len(answers or {}))} "
               f"wall {meta.get('wall_s')}s calls {meta.get('tool_calls', 0)}", flush=True)
+        if err and not unavailable and not b.get("reread") and reads < 2:
+            batches.append(dict(b, reread=True))
+            continue
         for p in b["probes"]:
             f, rc, ans = facts.get(p["id"]) or {}, receipts.get(p["id"]), (answers or {}).get(p["id"])
             results.append({
                 "schema": "s2-result-v1", "kind": "probe", "probe_id": p["id"], "probe_kind": p["kind"],
-                "expect": p["expect"], "gold": p.get("gold") or f.get("answer") or (traps.get(p["id"]) or {}).get("answer"),
+                "expect": p["expect"], "gold": p.get("gold") or p.get("answer") or f.get("answer") or (traps.get(p["id"]) or {}).get("answer"),
+                **{k: p[k] for k in ("checkpoint_id", "schedule", "compaction_horizon") if k in p},
+                "actual_compactions": actual_horizon(run.events, p.get("row_index", f.get("row_index")),
+                    src["row"] if src else len(run.rows)-1) if p.get("row_index", f.get("row_index")) is not None else None,
                 **{k: f.get(k) for k in ("stale", "placement", "row_role")}, "fact_class": f.get("class"),
                 "answer": ans, "answered": ans is not None, "timed_out": bool(err and "timeout" in err.lower()),
-                "error": err, "status": "UNAVAILABLE" if unavailable else ("ERROR" if err else "OK"),
+                "error": err, "status": "UNAVAILABLE" if unavailable else ("ERROR" if err else "OK"), "reader_rereads": int(bool(b.get("reread") or reads > 1)),
                 "arm": run.arm["name"], "arm_kind": run.arm["kind"], "seed": run.seed, "run": run.args.run,
                 "run_id": run.run_id, "lane": run.args.lane, "reader": run.args.reader,
                 "reader_readback": dict(reader.readback), "batch_id": b["id"], "clone_id": clone_id,
@@ -322,23 +366,23 @@ def main():
     ap.add_argument("--arm", required=True, help="arm name ('ALL' with --dry-run)")
     ap.add_argument("--seed", required=True, help="1|2|3|smoke-1")
     ap.add_argument("--run", default="1", help="run id (1|2, or a labelled id such as smoke-m-1)")
-    ap.add_argument("--lane", choices=("glm", "codex-sol", "codex-astra"), default="glm")
-    ap.add_argument("--reader", choices=("astra-low", "glm"), default="glm")
+    ap.add_argument("--lane", choices=("glm", "codex-sol", "codex-astra", "fake"), default="glm")
+    ap.add_argument("--reader", choices=("astra-low", "glm", "fake"), default="glm")
     ap.add_argument("--slice", type=int, default=None, help="stop after this turn (smoke: 10)")
     ap.add_argument("--checkpoint", default="auto", help="auto (r4 F1 decision checkpoint) | <tokens>")
-    ap.add_argument("--checkpoints", type=lambda v: [int(x) for x in v.split(",")], default=None,
-                    help="S7 D1: row indexes probed from store snapshots (cp-<row>/); the replay stops at the last")
+    ap.add_argument("--checkpoints", default=None, help="manifest ids or lifecycle for v4; comma-separated rows for v3")
     ap.add_argument("--context-length", type=int, default=DEFAULT_CTX)
     ap.add_argument("--batches", type=int, default=0, help="answer only the first N batches (0 = all)")
     ap.add_argument("--dry-run", action="store_true", help="print effective config per arm; no model calls")
     ap.add_argument("--prefix60k", action="store_true", help="S6 A3: replay to the frozen prefix60k row, the arm's "
                     "own compaction fires once there (LCM_ABSOLUTE_THRESHOLD_TOKENS = view tokens at that gate); no probes")
     args = ap.parse_args()
-    m = seam.load_engine()
+    arm = A.resolve(args.arm) if args.arm != "ALL" else None
+    m = seam.load_engine(arm)
     sdir = MATERIAL / ("smoke-seed-1" if args.seed == "smoke-1" else f"seed-{args.seed}")
     rows, man, stop = select_rows(sdir, args.checkpoint, args.slice)
     if args.checkpoints:  # the replay runs to the last checkpoint row (row 304 = the end of the seed material)
-        stop = max(args.checkpoints)
+        stop = max(c["row_index"] for c in CP.select(sdir, args.checkpoints))
         rows = jlines(sdir / "transcript.jsonl")[:stop + 1]
     if args.prefix60k:  # the frozen row (prefix60k.py); never recomputed here
         stop = jload(sdir / "prefix60k.json")["freeze_row_index"]
@@ -352,7 +396,7 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     summary = {"arm": arm, "seed": seed, "run": args.run, "lane": args.lane, "reader": args.reader,
                "worktree": str(seam.WORKTREE), "worktree_head": seam.PINNED, "context_length": args.context_length,
-               "stop_row_index": stop, "slice": args.slice, "checkpoint": args.checkpoint,
+               "stop_row_index": stop, "slice": args.slice, "checkpoint": args.checkpoint, "late_corrected_value_checkpoint": CP.late_checkpoint(sdir),
                "fleet_keys_excluded": A.FLEET_EXCLUDED, "harness_overrides": A.HARNESS_OVERRIDES, "started": time.time(),
                "material_sha256": hashlib.sha256((sdir / "material.manifest.json").read_bytes()).hexdigest(),
                "population": "prefix60k" if args.prefix60k else "full-stream"}
@@ -373,7 +417,8 @@ def main():
     if is_store:
         seam.set_lane(args.lane, run_dir / "lane-scratch")
         run.engine = new_engine(m, run.home, run.sid, args.context_length)
-        summary["threshold_tokens"] = run.engine.threshold_tokens
+        summary.update(threshold_tokens=run.engine.threshold_tokens, threshold_percent=run.engine.threshold_tokens / args.context_length,
+                       tail_mode="lcm-fresh-tail", timeout_s=replay_timeout(man["decision_checkpoint"]["tokens"]))
         t0 = time.monotonic()
         view = run.replay()
         summary["replay_wall_s"] = round(time.monotonic() - t0, 2)
@@ -392,7 +437,10 @@ def main():
         summary.update(status="DONE", finished=time.time(), prefix60k=getattr(run, "p60", None))
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
         return print(f"wrote {run_dir}/summary.json (prefix60k: {len(run.events)} event(s), no probes)")
-    reader = R.GLMReader() if args.reader == "glm" else R.AstraLowReader(run_dir / "reader-scratch")
+    reader = None if args.reader == "fake" else R.GLMReader() if args.reader == "glm" else R.AstraLowReader(run_dir / "reader-scratch")
+    if args.reader == "fake":
+        from s2lib.fakes import Reader
+        reader = Reader()
     for cp in run.snaps if is_store else ():  # S7 D1: one scorer-shaped directory per checkpoint
         run.receipts_out, run.reader_calls = cp["receipts"], []
         sha0, res = sha(cp["db"]), probe(run, cp["view"], reader, is_store, cp)
@@ -407,6 +455,7 @@ def main():
         (cp["dir"] / "assembled_context.json").write_text(json.dumps({"system": run.system, "view": cp["view"]}))
         (cp["dir"] / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in res))
         (cp["dir"] / "summary.json").write_text(json.dumps({**summary, "stop_row_index": cp["row"], "checkpoint": cp["row"],
+            **({"checkpoint_id": cp["checkpoint"]["id"]} if "checkpoint" in cp and isinstance(cp["checkpoint"]["id"], str) else {}),
             "events": evs, "receipts": cp["receipts"], "admission": cp["admission"], "reader_calls": run.reader_calls,
             "final_context": {"rows": len(cp["view"]), "tokens": run.ntok([run.sysmsg] + cp["view"])}, "summary_blocks": res[0]["summary_blocks"] if res else None,
             "store_summaries": db_ro(cp["db"]).execute("SELECT COUNT(*) FROM summary_nodes").fetchone()[0],
@@ -415,7 +464,7 @@ def main():
         print(f"wrote {cp['dir']} ({len(res)} rows)", flush=True)
     if run.snaps:
         summary.setdefault("status", "DONE")
-        summary.update(finished=time.time(), checkpoints=[c["row"] for c in run.snaps])
+        summary.update(finished=time.time(), checkpoints=[c.get("checkpoint", {"id": c["row"]})["id"] for c in run.snaps])
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
         return 1 if summary["status"] == "FAILED" else 0
     results = probe(run, view, reader, is_store)

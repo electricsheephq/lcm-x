@@ -35,6 +35,7 @@ class GLMReader:
         self.readback = {"model": None, "effort": "n/a (glm-5.3 lane sends no effort input)"}
 
     def _post(self, msgs):
+        self.request_prompt = json.dumps(msgs, ensure_ascii=True)
         req = urllib.request.Request(self._glm.URL, method="POST", data=json.dumps(
             {"model": self._glm.MODEL, "messages": msgs, "max_tokens": 8192}).encode(),
             headers={"Content-Type": "application/json", "Authorization": "Bearer " + self._k})
@@ -72,8 +73,8 @@ class AstraLowReader:
         base = self.scratch / uuid.uuid4().hex[:12]
         (work := base / "work").mkdir(parents=True)
         prompt, out = base / "prompt.txt", base / "last.txt"
-        prompt.write_text("Answer from the conversation below only; use no shell or file tools.\n\n"
-                          + flatten(system, view) + convo)
+        self.request_prompt = "Answer from the conversation below only; use no shell or file tools.\n\n" + flatten(system, view) + convo
+        prompt.write_text(self.request_prompt)
         cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-m", self.MODEL,
                "-c", f"model_reasoning_effort={self.EFFORT}", "--output-last-message", str(out), "-"]
         with prompt.open() as stdin:
@@ -93,7 +94,7 @@ class AstraLowReader:
 def parse_json_obj(text: str):
     t = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.M).strip()
     try:
-        return json.JSONDecoder().raw_decode(t[t.index("{"):])[0]
+        return json.JSONDecoder(strict=False).raw_decode(t[t.index("{"):])[0]
     except (ValueError, json.JSONDecodeError):
         return None
 
@@ -104,9 +105,19 @@ def answer(reader, system, view, batch_prompt, tools_engine=None, schemas=None, 
     """One batch answer -> (answers|None, meta). With `tools_engine` the reader may call the public tools; calls,
     tokens read back and wall are attributed to the BATCH (labelled, not divided)."""
     t0 = time.monotonic()
-    meta = {"tool_calls": 0, "tool_log": [], "tokens_read_back": 0, "runaway_guard_hit": False}
+    meta = {"tool_calls": 0, "tool_log": [], "tokens_read_back": 0, "runaway_guard_hit": False, "reader_calls": []}
+    def ask(turns, replies):
+        reader.request_prompt = flatten(system, view) + "\n" + json.dumps(_convo(turns, replies), ensure_ascii=False)
+        try:
+            return reader.ask(system, view, turns, replies)
+        except Exception as exc:
+            meta["reader_calls"].append(dict(prompt_tokens=count_tokens(reader.request_prompt), completion_tokens=0, estimated=True))
+            exc.reader_calls = list(meta["reader_calls"])
+            raise
     if tools_engine is None:
-        text, info = reader.ask(system, view, [batch_prompt], [])
+        text, info = ask([batch_prompt], [])
+        if info.get("usage") is not None:
+            info["usage"].setdefault("latency_s", time.monotonic() - t0)
         meta.update(info, wall_s=round(time.monotonic() - t0, 2), raw_reply=text, reader_calls=[info.get("usage")])
         return _answers(parse_json_obj(text)), meta
     turns, replies = [("You may search the compacted conversation history with these tools before answering:\n"
@@ -115,7 +126,7 @@ def answer(reader, system, view, batch_prompt, tools_engine=None, schemas=None, 
                          "with ONLY {\"answer\": {<probe id>: <answer string>}}.\n\n" + batch_prompt)], []
     meta["reader_calls"] = []  # S7 D7: per-call usage (prompt/completion tokens as the lane reports them)
     while True:
-        text, info = reader.ask(system, view, turns, replies)
+        text, info = ask(turns, replies)
         meta["reader_calls"].append(info.get("usage"))
         obj = parse_json_obj(text)
         if not (isinstance(obj, dict) and obj.get("tool")):
@@ -124,7 +135,7 @@ def answer(reader, system, view, batch_prompt, tools_engine=None, schemas=None, 
         if meta["tool_calls"] >= RUNAWAY_GUARD:
             meta["runaway_guard_hit"] = True
             turns.append("Tool budget exhausted (20 calls). Reply now with ONLY {\"answer\": {...}}.")
-            text, info = reader.ask(system, view, turns, replies)
+            text, info = ask(turns, replies)
             meta["reader_calls"].append(info.get("usage"))
             break
         meta["tool_calls"] += 1

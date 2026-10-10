@@ -7,6 +7,12 @@ import tempfile
 SCHEMA = "track-s-score-manifest-v2"
 
 
+def summariser_usage(summary):
+    calls = [{**c, **(c.get("usage") or {})} for e in summary.get("events", []) for c in e.get("summariser_calls", [])]
+    return dict(events_present="events" in summary,
+                calls=[{k: c.get(k) for k in ("prompt_tokens", "completion_tokens")} for c in calls])
+
+
 def load(path):
     if not path.exists():
         return None

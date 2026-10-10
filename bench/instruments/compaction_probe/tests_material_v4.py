@@ -102,6 +102,21 @@ def test_requirement_4_traps_share_real_template_and_sibling(material):
         bias(material, traps=traps)
 
 
+def test_missing_lifecycle_probe_is_rejected(material):
+    probes = read(material, "lifecycle_probes.jsonl")
+    with pytest.raises(ValueError, match="lifecycle probe coverage"):
+        bias(material, probes=probes[1:])
+
+
+def test_duplicate_trap_class_is_rejected(material):
+    traps = read(material, "traps.json")
+    # Still a valid, unplanted sibling/template; only diversity is broken.
+    traps[0] = dict(traps[1], id=traps[0]["id"],
+                    probe=traps[1]["probe"].replace("-annex", "-other-annex"))
+    with pytest.raises(ValueError, match="trap diversity"):
+        bias(material, traps=traps)
+
+
 @pytest.mark.parametrize("seed,smoke", [(i, False) for i in range(1, 9)] + [(9, True)])
 def test_requirement_5_eight_independent_seeds_and_full_smoke(tmp_path, seed, smoke):
     gen.generate(seed, tmp_path, v4=True, smoke=smoke)
