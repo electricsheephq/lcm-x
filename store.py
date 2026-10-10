@@ -1973,21 +1973,16 @@ class MessageStore:
                 boundary_timestamp = rows[-1][8]
                 boundary_role_bias = _message_role_bias(rows[-1][3])
                 window_ids = {row[0] for row in rows}
+                # Only the boundary role-bias group can continue the window, so SQL filters on it and the
+                # rows stream; other roles sharing the timestamp are never materialized (#1047 review).
                 tie_rows = self._conn.execute(
                     f"""SELECT {_MESSAGE_SELECT_COLUMNS}
                         FROM messages
-                        WHERE {' AND '.join(where)} AND timestamp = ?
+                        WHERE {' AND '.join(where)} AND timestamp = ? AND ({role_bias}) = ?
                         {order_by}""",
-                    [*base_args, boundary_timestamp, *order_args],
-                ).fetchall()
-                matching_tie_rows = []
-                for tie_row in tie_rows:
-                    if tie_row[0] in window_ids:
-                        continue
-                    if _message_role_bias(tie_row[3]) != boundary_role_bias:
-                        break
-                    matching_tie_rows.append(tie_row)
-                add_rows(matching_tie_rows)
+                    [*base_args, boundary_timestamp, boundary_role_bias, *order_args],
+                )
+                add_rows([tie_row for tie_row in tie_rows if tie_row[0] not in window_ids])
         else:
             # Deterministic relevance/hybrid candidate scan for LIKE fallback.
             # Apply the same coarse score/directness ordering before the hard

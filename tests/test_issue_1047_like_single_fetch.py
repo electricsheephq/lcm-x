@@ -118,5 +118,7 @@ def test_like_query_count(corpus, sort, expected_count):
     assert "LIMIT 520 OFFSET 0" in queries[0]
     if sort == "recency":
         assert "AND timestamp = 1600000000.0" in queries[1]
+        # Only the boundary role-bias group can continue the window; other roles are never fetched.
+        assert "AND (CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END) = " in queries[1]
         assert "OFFSET" not in queries[1]
         assert "LIMIT" not in queries[1]
