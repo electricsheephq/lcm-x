@@ -55,3 +55,33 @@ def load_cli():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+import pytest  # noqa: E402
+
+_MAINTENANCE_SCHEDULERS = ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER")
+
+
+def _wait_scheduler_idle(scheduler, timeout: float) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout
+    with scheduler._condition:
+        while (scheduler._queued_keys or scheduler._active_keys or scheduler._follow_up_key) and \
+                time.monotonic() < deadline:
+            scheduler._condition.wait(max(0.0, deadline - time.monotonic()))
+
+
+@pytest.fixture(autouse=True)
+def _drain_background_maintenance(monkeypatch):
+    """#1013 part B: temporal rollups are on by default, and their worker is process-wide.
+
+    A job a test schedules must finish inside that test, while its fakes are still installed;
+    otherwise it runs during a later test and calls that test's monkeypatched provider.
+    """
+    yield
+    engine = sys.modules.get("hermes_lcm.engine")
+    for name in _MAINTENANCE_SCHEDULERS:
+        scheduler = getattr(engine, name, None)
+        if scheduler is not None:
+            _wait_scheduler_idle(scheduler, timeout=5.0)
