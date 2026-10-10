@@ -103,10 +103,16 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
 
     read_conn = command._embedding_read_connection(db_path)
     try:
-        if command._embedding_current_profile(read_conn) is None:
-            return "no_profile", None  # `/lcm embed warmup` has not run yet
+        no_profile = command._embedding_current_profile(read_conn) is None
     finally:
         read_conn.close()
+    if no_profile:
+        provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+        if provider not in {"fastembed", "fast-embed"}:
+            return "no_profile", None  # `/lcm embed warmup` has not run yet
+        result = command._embedding_register_profiles(config, db_path, allow_download=False)
+        if isinstance(result, str):
+            return "auto_register_unavailable", result
     if breaker is not None and breaker.is_open():
         return "circuit_open", None  # the query path's breaker is cooling down
     probe = probe_provider_availability(config)
