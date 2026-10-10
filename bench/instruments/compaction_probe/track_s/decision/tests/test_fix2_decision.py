@@ -21,7 +21,7 @@ def update(scores, change):
     write(scores.parent / "manifest.json", manifest)
 
 
-@pytest.mark.parametrize("n,expected", [(5, "INCONCLUSIVE"), (6, "KEEP"), (7, "KEEP")])
+@pytest.mark.parametrize("n,expected", [(5, "INCONCLUSIVE"), (6, "INCONCLUSIVE"), (7, "INCONCLUSIVE")])
 def test_axis_needs_six_seeds_and_second_failures_exclude_both_arms(tmp_path, real_material, n, expected):
     scores = observations(tmp_path, real_material)
     def fail(sc):

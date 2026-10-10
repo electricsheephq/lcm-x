@@ -329,6 +329,12 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     cont_state = jload(material / "continuation.json")
     batches = jlines(material / "probe_batches.jsonl")
     man = jload(material / "material.manifest.json")
+    if (material / "lifecycle_probes.jsonl").exists():
+        source_rows = jlines(material / "transcript.jsonl")
+        for c in man.get("continuity", []):
+            c["row_index"] = c.get("first_presentation_row_index", min(
+                (i for i, r in enumerate(source_rows) if c["value"] in (r.get("content") or "")),
+                default=c.get("row_index", 0)))
     summ = jload(run_dir / "summary.json") if (run_dir / "summary.json").exists() else {}
     lifecycle = []
     if (material / "lifecycle_probes.jsonl").exists():
@@ -495,7 +501,7 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
             "run_id": rows[0].get("run_id") if rows else None, "material": str(material), "run_dir": str(run_dir),
             "runtime": run["runtime"], "writer": run["writer"], "reader": run.get("reader"), "provenance": run.get("provenance"),
             "reader_readback": summ.get("reader_readback") or (rows[0].get("reader_readback") if rows else {}) or {},
-            "population": run.get("population", "full-stream"), "host_instruction_presence": host_presence,
+            "beyond_declared": summ.get("beyond_declared", {}), "population": run.get("population", "full-stream"), "host_instruction_presence": host_presence,
             "store_backed": run["store_backed"], "smoke": man.get("mode") == "smoke", "kit_rule": KIT, "metrics": m,
             "behaviour": {"compactions": len(comp),
                           "events": [{k: e.get(k) for k in ("label", "turn", "tokens", "wall_s", "timing", "compaction", "publication_s")}

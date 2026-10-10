@@ -376,6 +376,20 @@ def survival(sid: str, facts: list[dict], man: dict, rdir: Path | None = None, r
     return out
 
 
+def beyond_declared(rows, facts, stop, survival=(), continuity=()):
+    """Turn-end replay exposure beyond the declared fact-admission horizon; IDs/counts only."""
+    indices = [i for i in range(len(rows)) if i > stop]
+    extra = set(indices)
+    return dict(count=len(indices), row_indices=indices,
+                facts=[f["id"] for f in facts if f.get("row_index") in extra],
+                corrections=[f["id"] for f in facts if f.get("correction_source") and
+                             (f.get("row_index") in extra or f["correction_source"].get("row_index") in extra)],
+                continuity=[c["id"] for c in continuity if c.get("first_presentation_row_index", min(
+                    (i for i, r in enumerate(rows) if c["value"] in (r.get("content") or "")),
+                    default=c.get("row_index", 0))) in extra],
+                compactions=[e["window_number"] for e in survival if e.get("turn_last_row_index") in extra])
+
+
 # ---------------------------------------------------------------- probes
 def batches_for(sdir: Path, checkpoint=None) -> list[dict]:
     out, cont = jl(sdir / "probe_batches.jsonl"), json.loads((sdir / "continuation.json").read_text())
@@ -456,6 +470,7 @@ def main(a=None, state=None) -> int:
         jdump(rdir / "admission.json", adm)
         summ["admission"] = {k: v for k, v in adm.items() if k not in ("rows", "facts")}
         summ["survival"] = survival(summ["thread_id"], facts, man, rdir, rows, root / "workspace")
+        summ["beyond_declared"] = beyond_declared(rows, facts, stop, summ["survival"], man.get("continuity", []))
         jdump(rdir / "summary.json", summ)
         print(json.dumps(summ["admission"], indent=1))
         return 0
@@ -475,7 +490,7 @@ def main(a=None, state=None) -> int:
         "home": home, "dictation": a.dictation, "rows": len(rows), "turns": len(plans), "stop_row_index": rows[-1]["id"], "checkpoint": stop,
         "material_sha": man["shas"]["transcript.jsonl"], "late_corrected_value_checkpoint": CP.late_checkpoint(sdir), "workspace": str(ws), "layout": layout,
         "material_sha256": sha(sdir / "material.manifest.json"),
-        "checkpoint_row": stop, "effective_row": effective,
+        "checkpoint_row": stop, "effective_row": effective, "beyond_declared": beyond_declared(rows, facts, stop, continuity=man.get("continuity", [])),
         "kit": {"path": str(KIT), "drive_codex_sha": sha(KIT / "drive_codex.py"),
                 "parse_rollout_sha": sha(KIT / "parse_rollout.py")}}
     if a.dry_run:
@@ -538,6 +553,7 @@ def main(a=None, state=None) -> int:
     summary["admission"] = {k: v for k, v in adm.items() if k not in ("rows", "facts")}
     cont = json.loads((sdir / "continuation.json").read_text())
     summary["survival"] = survival(sid, facts, man, rdir, rows, ws)
+    summary["beyond_declared"] = beyond_declared(rows, facts, stop, summary["survival"], man.get("continuity", []))
     summary["cp_rollout_sha_before_probes"] = sha(cp_rollout)
     (rdir / "sessions").mkdir(exist_ok=True)
     shutil.copy2(cp_rollout, rdir / "sessions" / cp_rollout.name)
