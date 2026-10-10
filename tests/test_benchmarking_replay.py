@@ -100,6 +100,10 @@ def test_config_from_policy_pins_pre_1013_defaults_policy_does_not_carry(tmp_pat
 
     assert config.fresh_tail_max_tokens == 0
     assert config.threshold_full_sweep_enabled is False
+    # #1013 part B: policy@v1 keeps the feature-off defaults it does not carry.
+    assert config.large_output_externalization_enabled is False
+    assert config.large_output_active_replay_stubbing_enabled is False
+    assert config.temporal_rollups_enabled is False
 
 
 def test_replay_above_threshold_compresses_and_reports_canary_recall(tmp_path):

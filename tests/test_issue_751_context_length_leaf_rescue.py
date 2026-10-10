@@ -84,7 +84,9 @@ def _state(engine, calls):
 @pytest.mark.parametrize("sweep", [False, True], ids=["no-sweep", "sweep"])
 def test_t1_context_length_refusal_retries_a_smaller_chunk_and_writes_a_leaf(tmp_path, monkeypatch, caplog, sweep):
     calls = _install_provider(monkeypatch)
-    engine = _engine(tmp_path, sweep=sweep)
+    # #1013 part B: foreground rescue excludes background rollup circuit logs/calls.
+    engine = _engine(tmp_path, sweep=sweep, large_output_externalization_enabled=False,
+                     large_output_active_replay_stubbing_enabled=False, temporal_rollups_enabled=False)
     view = _view()
     try:
         _compress(engine, view, caplog)
@@ -95,6 +97,24 @@ def test_t1_context_length_refusal_retries_a_smaller_chunk_and_writes_a_leaf(tmp
         assert nodes[0].summary.startswith("Older turns T0")
         assert RETRY_LINE in caplog.text
         assert CIRCUIT_LINE not in caplog.text and engine._summary_route_available()
+    finally:
+        engine.shutdown()
+
+
+def test_part_b_on_path_leaf_rescue_keeps_foreground_route_open(tmp_path, monkeypatch, caplog):
+    # #1013 part B: a separate rollup circuit does not invalidate successful foreground rescue.
+    _install_provider(monkeypatch)
+    engine = _engine(tmp_path, sweep=True, large_output_externalization_enabled=True,
+                     large_output_active_replay_stubbing_enabled=True, temporal_rollups_enabled=True)
+    view = _view()
+    try:
+        _compress(engine, view, caplog)
+        nodes = engine._dag.get_session_nodes("S", limit=1000)
+        assert len(engine._store.get_session_messages("S", limit=1000)) == len(view)
+        assert nodes and nodes[0].summary.startswith("Older turns T0")
+        assert "deterministic truncation" not in nodes[0].summary
+        assert RETRY_LINE in caplog.text
+        assert engine._summary_route_available()
     finally:
         engine.shutdown()
 

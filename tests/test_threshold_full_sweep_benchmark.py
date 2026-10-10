@@ -1,7 +1,10 @@
 """Tests for the scrubbed threshold full-sweep benchmark."""
 
 import importlib.util
+from functools import partial
 from pathlib import Path
+
+from hermes_lcm.config import LCMConfig
 
 
 SCRIPT_PATH = Path(__file__).resolve().parents[1] / "scripts" / "benchmark_threshold_full_sweep.py"
@@ -15,7 +18,12 @@ def _load_script():
     return module
 
 
-def test_threshold_full_sweep_benchmark_is_scrubbed_and_compares_atomic_publication():
+def test_threshold_full_sweep_benchmark_is_scrubbed_and_compares_atomic_publication(monkeypatch):
+    # #1013 part B: protection tests cover the off path (owner scope ban)
+    monkeypatch.setattr("hermes_lcm.config.LCMConfig", partial(
+        LCMConfig, large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False, temporal_rollups_enabled=False,
+    ))
     report = _load_script().run_benchmark(
         historical_messages=8,
         fresh_tail_messages=2,
