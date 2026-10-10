@@ -53,7 +53,8 @@ def observe_breaker(monkeypatch, breaker):
 
 @pytest.fixture
 def engine(tmp_path, request):
-    part_b_on = getattr(request, "param", True)
+    # #1013 part B: provider-count fixtures; background rollup builds would add calls mid-test.
+    part_b_on = getattr(request, "param", False)
     instance = LCMEngine(config=LCMConfig(
         database_path=str(tmp_path / "lcm.db"), fresh_tail_count=2,
         leaf_chunk_tokens=400, dynamic_leaf_chunk_max=1000,
