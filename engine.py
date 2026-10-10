@@ -627,6 +627,7 @@ class LCMEngine(
         # post-compaction ingest can be verified instead of trusted by position.
         self._compress_commit_proof: Optional[Dict[str, Any]] = None
         self._last_emission_descriptors: Optional[Dict[str, Any]] = None
+        self._carry_head_emission: Optional[Dict[str, Any]] = None  # #659: what the last compress() emitted as its head
         self._last_ingest_reconciliation: Dict[str, Any] = {
             "action": "none",
             "reason": "not run",
@@ -3831,6 +3832,9 @@ class LCMEngine(
                 self._last_compacted_store_id = state.current_frontier_store_id
         self._clear_pending_reset_boundary()
         self._compression_boundary_ingest_pending = can_reassign
+        if can_reassign and (emitted := getattr(self, "_carry_head_emission", None)) and \
+                emitted.get("session_id") == source_session_id:
+            emitted["session_id"] = session_id  # #659: the emitted head's evidence follows its rotation
         self._compression_boundary_active_placeholder_digest_budget = boundary_placeholder_budget
         self._compression_boundary_active_placeholder_digest_ordinals = boundary_placeholder_ordinals
         if (
@@ -5629,6 +5633,28 @@ class LCMEngine(
             return content
         return content[:pos]
 
+    def _record_carry_head_emission(self, result) -> None:
+        """#659: process-local evidence of the carry-bearing head compress() emitted, bound to this session: its
+        sha256 and the row that followed it. Lost on restart; the head then stores whole."""
+        rows = [m for m in result if isinstance(m, dict) and m.get("role") != "system"] if isinstance(result, list) else []
+        head = rows[0].get("content") if rows and rows[0].get("role") == "user" else None
+        self._carry_head_emission = {
+            **self._emission_binding(), "sha256": hashlib.sha256(head.encode("utf-8")).hexdigest(),
+            "next": self._public_compression_row(rows[1]) if len(rows) > 1 else None,
+        } if isinstance(head, str) and self._without_user_carry(head) != head else None
+
+    def _emitted_carry_head_index(self, messages, emitted) -> Optional[int]:
+        """#659: the first non-system row, only when it is the emitted head byte for byte AND re-sent inside a
+        window: followed by the row LCM emitted after it, or by a later user row. A lone row is a new occurrence."""
+        rows = [(i, m) for i, m in enumerate(messages) if m.get("role") != "system"] if emitted else []
+        if not rows or not isinstance(content := rows[0][1].get("content"), str) or \
+                hashlib.sha256(content.encode("utf-8")).hexdigest() != emitted["sha256"]:
+            return None
+        rest = [m for _i, m in rows[1:]]
+        if rest and (self._public_compression_row(rest[0]) == emitted["next"] or any(m.get("role") == "user" for m in rest)):
+            return rows[0][0]
+        return None
+
     def _user_carry_lineage(self) -> list[str]:
         """#659: the bound session and ALL its recorded compression predecessors, nearest first. Unbounded (a
         cycle stops the walk): a packet emitted before a hop limit must stay recognised after it. A recorded
@@ -5947,6 +5973,11 @@ class LCMEngine(
             )
             return self._redact_active_replay_messages(messages)
 
+        emitted_carry_head = None  # #659: spent by the first pending ingest that sees a non-system row, on every exit
+        if self._compression_boundary_ingest_pending and any(m.get("role") != "system" for m in messages):
+            emitted_carry_head, self._carry_head_emission = getattr(self, "_carry_head_emission", None), None
+            if emitted_carry_head and not self._emission_proof_matches_binding(emitted_carry_head, self._emission_binding()):
+                emitted_carry_head = None
         self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
@@ -6455,8 +6486,8 @@ class LCMEngine(
                     )
                 active_replay_messages[absolute_idx] = stubbed_message
 
-        if compression_boundary_ingest_pending:  # #659: only the rotated head LCM emitted stores as base does
-            head = next((i for i, m in enumerate(messages) if m.get("role") != "system"), None)
+        head = self._emitted_carry_head_index(messages, emitted_carry_head)
+        if compression_boundary_ingest_pending and head is not None:  # #659: only LCM's emitted head stores as base does
             protected_messages = [
                 {**m, "content": self._without_user_carry(m["content"])}
                 if idx == head and m.get("role") == "user" and isinstance(m.get("content"), str) else m

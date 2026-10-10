@@ -632,6 +632,7 @@ class CompactionMixin:
                 # #651: no leaf, and neither rows nor tokens fell; #922 keeps the turn-paced hold.
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
             self._record_compress_commit_proof(messages, result)
+            self._record_carry_head_emission(result)
             if self._compress_commit_proof is None:  # #1000: no proof recorded the fit's carrier
                 self._bind_survival_fit_emission(messages, result)
             self._host_uid_record_engine(result)
