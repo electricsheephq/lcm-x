@@ -43,7 +43,7 @@ def test_axes_include_source_roles_identifiers_and_lifecycle():
                         "c": dict(kind="stale_task", compaction_horizon=3, **{"class": "CORRECT"})},
                  metrics={"facts_kept": {}})
     assert e.axes(score, facts) == dict(facts_all=[True, False], facts_user=[True], facts_tool=[False],
-                                       facts_tool_middle=[False], identifier=[True], **{"stale_task|3": [True]})
+                                       facts_tool_middle=[False], identifier=[True], stale_task=[True])
 
 
 def test_eight_seed_pairs_require_every_manifest_checkpoint_and_admitted_score(tmp_path):
@@ -61,12 +61,13 @@ def test_eight_seed_pairs_require_every_manifest_checkpoint_and_admitted_score(t
         (mat / "lifecycle_probes.jsonl").write_text(json.dumps(dict(id="life", probe_token_position=20000)) + "\n")
         for arm in ("L0", "L1"):
             run = tmp_path / "runs" / arm / f"seed-{seed}" / "d1-r1"
-            write(run / "summary.json", dict(accounting=dict(cost_tokens_per_successful_task=1)))
+            write(run / "summary.json", dict(events=[]))
             for cp in cps:
                 ps = {f["id"]: {"class": "CORRECT" if arm == "L1" else "MISS"} for f in facts}
                 if cp == cps[0]:
                     ps["life"] = dict(kind="stale_task", compaction_horizon=1, **{"class": "CORRECT"})
                 sc = dict(arm=arm, seed=f"seed-{seed}", reader="glm-5.3", checkpoint_id=cp["id"], probes=ps,
+                          behaviour=dict(compactions=1), accounting=dict(reader_input_tokens=1, reader_output_tokens=1, successful_probes=1),
                           run_dir=str(run / f"cp-{cp['id']}"), metrics=dict(facts_kept=dict(complete=True, denominator=6),
                           lifecycle=dict(complete=True, by_kind_horizon={})))
                 path = scores / f"cp-{cp['id']}" / f"{arm}.seed-{seed}.d1-r1.json"

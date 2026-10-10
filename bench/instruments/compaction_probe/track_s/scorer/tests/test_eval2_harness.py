@@ -136,6 +136,7 @@ def test_per_arm_pins_and_refusal_of_mismatched_or_dirty_fixture(tmp_path, monke
     pins = dict(L0=dict(worktree=str(product), sha=sha), L1=dict(worktree=str(product), sha="0" * 40))
     monkeypatch.setenv("S2_ARM_PINS", json.dumps(pins))
     assert m.A.resolve("L0")["sha"] == sha and m.A.resolve("L1")["sha"] == "0" * 40
+    monkeypatch.delitem(sys.modules, "hermes_lcm", raising=False)
     with pytest.raises(SystemExit, match="!= pinned"):
         m.seam.load_engine(m.A.resolve("L1"))
     (product / "fixture.py").write_text("x = 2\n")
@@ -143,7 +144,8 @@ def test_per_arm_pins_and_refusal_of_mismatched_or_dirty_fixture(tmp_path, monke
         m.seam.load_engine(m.A.resolve("L0"))
 
 
-def test_s4_probes_multiple_checkpoints_and_continues_one_parent(material, monkeypatch, tmp_path):
+@pytest.mark.parametrize("parent_changes", [False, True])
+def test_s4_probes_multiple_checkpoints_and_continues_one_parent(material, monkeypatch, tmp_path, parent_changes):
     m = module(TRACK / "s4/run_s_codex.py", monkeypatch, tmp_path)
     monkeypatch.setattr(m, "material_dir", lambda seed: material)
     monkeypatch.setattr(m, "setup_home", lambda: dict(login_status="logged_in", auth_copy_sha256_prefix="fake"))
@@ -162,11 +164,18 @@ def test_s4_probes_multiple_checkpoints_and_continues_one_parent(material, monke
     def cli(cmd, prompt, cwd, stem):
         is_fork = cmd[2] == "fork"
         (forks if is_fork else replay).append(prompt)
+        if is_fork and parent_changes:
+            parent.write_text("changed-parent")
         return dict(rc=0, thread_id="child" if is_fork else "parent", timed_out=False, wall_s=0,
                     agent_messages=["{}"] if is_fork else [], tool_items=0, usage={})
     monkeypatch.setattr(m, "run_cli", cli)
     args = SimpleNamespace(checkpoints="lifecycle", stop_row=None, seed="1", run="fake", auth_file=tmp_path / "auth.json",
                            slice=0, dictation="user", dry_run=False, readmit=False, force_event=False, batches=0)
+    if parent_changes:
+        with pytest.raises(SystemExit, match="FAILED: checkpoint fork changed parent; replay fallback forbidden"):
+            m.main(args)
+        assert args.run == "fake" and len(replay) == 5
+        return
     assert m.main(args) == 0
     assert len(replay) == 12 and forks
     cps = list((tmp_path / "output/codex-runs/seed-1/fake").glob("cp-*/summary.json"))

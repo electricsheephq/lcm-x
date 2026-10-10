@@ -56,6 +56,9 @@ def all_arms() -> list[str]:
 def resolve(arm: str) -> dict:
     """{name, base, open, kind, env|None, note, unsupported|None}"""
     pins = json.loads(os.environ.get("S2_ARM_PINS", "{}"))  # {arm: {worktree, sha}}; supplied by the orchestrator
+    if arm.removesuffix("-open") in ("L0", "L1", "L1-H", "L1-noptr", "H") and not all(
+            pins.get(arm.removesuffix("-open"), {}).get(k) for k in ("worktree", "sha")):
+        raise SystemExit(f"Eval-2 requires S2_ARM_PINS entry for {arm}")
     if arm == "H":
         return dict(name=arm, base=arm, open=False, kind="builtin", env={}, note="Hermes default lean", unsupported=None,
                     **pins.get(arm, {}))

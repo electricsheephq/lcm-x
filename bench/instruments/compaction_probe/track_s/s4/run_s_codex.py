@@ -424,21 +424,11 @@ def main(a=None, state=None) -> int:
         for cp in selected:
             a.stop_row = cp["id"]
             if main(a, state):
-                cost = sum(c["tokens"] for c in selected) / selected[-1]["tokens"]
-                if not state.get("parent_changed") or cost > 4:
-                    raise SystemExit(f"STOP: checkpoint fork failed or changed parent; per-checkpoint replay cost estimate {cost:.2f}x")
-                a.run += "-replay"
-                for target in selected:
-                    a.stop_row = target["id"]
-                    replay_state = dict(sid=None, turn_log=[], row=-1, replay_each=True)
-                    if main(a, replay_state):
-                        return 1
-                jdump(RUNS / f"seed-{a.seed}" / a.run / "summary.json", dict(replay_state["summary"], replay_mode="per-checkpoint", replay_cost_estimate=cost))
-                return 0
+                reason = "checkpoint fork changed parent" if state.get("parent_changed") else "checkpoint fork failed"
+                jdump(RUNS / f"seed-{a.seed}" / a.run / "summary.json", dict(state["summary"], status="FAILED", reason=reason))
+                raise SystemExit(f"FAILED: {reason}; replay fallback forbidden")
         jdump(RUNS / f"seed-{a.seed}" / a.run / "summary.json", dict(state["summary"], replay_mode="one parent", checkpoints=[c["id"] for c in selected]))
         return 0
-    if state and state.get("replay_each"):
-        HOME = run_home(a.seed, a.run + "-" + a.stop_row)
     global USER_AUTH
     USER_AUTH = a.auth_file.resolve()
 
@@ -618,7 +608,7 @@ def main(a=None, state=None) -> int:
         summary["status"] = "FAILED"
     summary.setdefault("status", "COMPLETED")
     if state is not None:
-        state["parent_changed"] = not summary["isolation_ok"]
+        state.update(parent_changed=not summary["isolation_ok"], summary=summary)
     if state is not None and summary["status"] == "COMPLETED":
         state.update(sid=sid, turn_log=turn_log, row=stop, home=home, summary=summary)
     jdump(rdir / "summary.json", summary)

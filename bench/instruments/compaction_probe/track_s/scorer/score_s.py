@@ -284,6 +284,7 @@ def adapt_s4(run_dir: Path, rows, arm):
     surv, cf = {s.get("window_number"): s for s in summ.get("survival", [])}, cont_files(run_dir)
     events = [{"label": f"native compaction window {c.get('window_number')} (rollout line {c.get('line_no')})",
                "turn": (surv.get(c.get("window_number")) or {}).get("turn"),  # S7 D4 (None on runs before the writer change)
+               "row_index": (surv.get(c.get("window_number")) or {}).get("turn_last_row_index"),
                "tokens": c.get("prev_token_count_input"), "compaction": True, "timing": timing,
                "wall_s": c["stall_ms"] / 1000 if c.get("stall_ms") is not None else None, "summariser_s": [],
                "route_failed": False, "levels": [], "cont": (surv.get(c.get("window_number")) or {}).get("continuity_verbatim", {}),
@@ -342,12 +343,17 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     run = detect(run_dir, all_rows)(run_dir, rows, arm) if (run_dir / "summary.json").exists() else {
         "runtime": "unknown", "writer": None, "rows": [], "events": [], "run_status": "UNRUN", "store_backed": False,
         "admission_missing": [], "receipts": {}, "gaps": ["summary.json missing"], "label_map": {}}
+    errors = {r["id"] for r in run["rows"] if (r["row_status"] in ("ERROR", "TIMEOUT") or r["timed_out"]) and
+              ((material / "lifecycle_probes.jsonl").exists() or "READER_TRUNCATED" not in (r["error"] or ""))}
     capped = {b for b, calls in reader_calls(run_dir) if final_capped(calls)}
     # only unanswered probes of a capped batch are excluded; an admission-proven loss stays a loss
     truncated = {r["id"] for r in run["rows"] if (r["answer"] is None or isinstance(r["answer"], str) and not r["answer"].strip()) and
                  ((r["row_status"] == "ERROR" and "READER_TRUNCATED" in (r["error"] or "")) or r["batch"] in capped)}
     truncated -= set(run["admission_missing"])
+    truncated |= errors
     base = [("INCOMPLETE", f"READER_TRUNCATED: {len(truncated)} probes excluded: {sorted(truncated)}")] if truncated else []
+    if errors:
+        base.append(("INCOMPLETE", f"reader ERROR/TIMEOUT: {len(errors)} rows"))
     if run["run_status"] not in ("DONE", "COMPLETED"):
         base.append(("UNRUN", f"run status {run['run_status']}"))
     if not rows:
@@ -449,6 +455,10 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
                                 base + ([("INCOMPLETE", "scheduled lifecycle probes missing")] if missing(p["id"] for p in lifecycle) else []),
                                 denominator=len(lifecycle), by_kind_horizon=cells)
     m["continuity"] = continuity(run, man)
+    if (material / "lifecycle_probes.jsonl").exists() and "final_continuity" in summ:
+        sources = {c["id"]: c.get("row_index", 0) for c in man.get("continuity", [])}
+        m["continuity"]["checkpoint_grid"] = [dict(item=c["id"], strict=c["present"]) for c in summ["final_continuity"]
+                                               if sources[c["id"]] <= stop]
     m["level3"] = level3(run)
     m["latency"] = latency(run)
     m["recall"] = recall(run, man, all_facts, by_id, probes, base, lost)
@@ -461,7 +471,19 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     calls = [c for b in summ.get("reader_calls") or [] for c in b.get("calls") or [] if c]
     usage = {"calls": len(calls), "prompt_tokens": sum(c.get("prompt_tokens") or 0 for c in calls),
              "completion_tokens": sum(c.get("completion_tokens") or 0 for c in calls), "source": "summary.json reader_calls (per call)"}
-    return {"schema": "score-s-v1", "checkpoint_id": summ.get("checkpoint_id"), "accounting": accounting(summ, probes),
+    if (material / "lifecycle_probes.jsonl").exists():
+        sources = {p["id"]: p["row_index"] for p in all_facts + lifecycle}
+        sources.update({f"{cont_state['id']}.{k}": cont_state.get("row_index") for k in cont_state if k not in CONT_META})
+        for pid, p in probes.items():
+            p["actual_compactions"] = sum(e["compaction"] and sources[pid] <= e["row_index"] <= stop
+                for e in run["events"] if e.get("row_index") is not None) if sources.get(pid) is not None else None
+    if errors:
+        for pid in errors & probes.keys():
+            probes[pid].update({"class": "INCOMPLETE", "success": False})
+        for value in m.values():
+            value.update(value=None, complete=False, status="INCOMPLETE(reader ERROR/TIMEOUT)")
+    return {**(dict(context_length=summ.get("context_length", summ.get("model_context_window")), worktree_head=summ.get("worktree_head"), reader_errors=len(errors))
+               if lifecycle or (material / "lifecycle_probes.jsonl").exists() or errors else {}), "schema": "score-s-v1", "checkpoint_id": summ.get("checkpoint_id"), "accounting": accounting(summ, probes),
             "checkpoint_row": summ.get("checkpoint", {}).get("row") if isinstance(
                 summ.get("checkpoint"), dict) else summ.get("checkpoint"), "labels": labels, "summary_blocks": blocks,
             "reader_usage": usage if calls else None, "arm": arm, "seed": material.name, "run": (rows[0].get("run") if rows else None),
@@ -486,8 +508,15 @@ def lifecycle_correct(p, answer, man, facts):
     a = normalize(answer)
     if p["kind"] == "stale_task":
         task = next(r["task"] for r in man["lifecycle"] if r.get("resolution", {}).get("row_id") == p["row_id"])
-        return bool(re.search(r"\b(" + re.escape(p["answer"].split(";")[0]) + r"|cancelled|canceled|superseded)\b", answer, re.I)) and not bool(
-            re.search(r"\b(yes|still to be done)\b|(?<!not )(?<!don't )\b(do|run|execute|perform) " + re.escape(task) + r"\b", answer, re.I))
+        answer = answer.replace("’", "'")
+        if any(rx.search(answer) for rx in ABSTAIN_RE):
+            return False
+        replacement = p["answer"].split("do ", 1)[-1].rstrip(".")
+        cancelled = re.search(r"no longer|no need|cancel|superseded|replaced|shouldn't|should not|not\b[^.;]*\banymore|not still|don't do|instead of", answer, re.I)
+        live = re.search(r"\byes\b|(?<!not )(?<!no longer )\b(pending|still to be done)\b", answer, re.I)
+        commands = re.finditer(r"\b(do|run|execute|perform) " + re.escape(task) + r"\b", answer, re.I)
+        live = live or any(not re.search(r"no longer|no need|shouldn't|should not|don't|not still|not to|not.*anymore", answer[:m.start()].rsplit(".", 1)[-1], re.I) for m in commands)
+        return bool(not live and (normalize(replacement) in a or cancelled))
     if p["kind"] == "corrected_value":
         old = next(f["correction_source"]["value"] for f in facts if p["id"] == f["id"] + "-CORRECTION")
         return normalize(p["answer"]) in a and normalize(old) not in a
@@ -513,7 +542,11 @@ def accounting(summ, probes):
     room = [e.get("empty_no_room") for e in events]
     return dict(task_unit="seed replay", compactions_per_task=len(events) if "events" in summ else len(summ.get("compactions", [])), reader_input_tokens=total(reader, "prompt_tokens"),
                 reader_cached_tokens=total(reader, "cached_tokens"), reader_uncached_tokens=total(reader, "uncached_tokens"),
-                latency=stats([c.get("latency_s") for c in reader + summary]),
+                reader_output_tokens=total(reader, "completion_tokens"),
+                summariser_input_tokens=total(summary, "prompt_tokens"), summariser_output_tokens=total(summary, "completion_tokens"),
+                reader_latency=stats([c.get("latency_s") for c in reader]),
+                summariser_latency=stats([c.get("latency_s") for c in summary]),
+                compaction_wall=stats([e.get("compress_wall_s") for e in events]),
                 empty_replies=sum(p.get("answer") is None or isinstance(p.get("answer"), str) and not p["answer"].strip() for p in probes.values()
                                   if p.get("class") != "MISSING"),
                 zero_room_rate=sum(room) / len(room) if room and all(x is not None for x in room) else None,
@@ -527,6 +560,9 @@ def continuity(run, man):
     grid, iss = [], []
     for i, e in enumerate(run["events"]):
         for it in items:
+            source = next(c.get("row_index") for c in man["continuity"] if c["id"] == it)
+            if source is not None and (e.get("row_index") is None or source > e["row_index"]):
+                continue
             strict, txt = e["cont"].get(it), e.get("text")
             diag = diag_present(values[it], txt) if txt is not None else True if strict else (
                 diag_present(values[it], e["final_text"]) if e.get("final_text") else None)

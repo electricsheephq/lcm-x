@@ -80,6 +80,22 @@ def continuity(man: dict, system: str, view: list[dict]) -> list[dict]:
     return [{"id": c["id"], "present": c["value"] in system or c["value"] in text, "in_view": c["value"] in text,
              "in_system_slot": c["value"] in system} for c in man["continuity"]]
 
+def actual_horizon(events, source, checkpoint):
+    return sum(e.get("is_compaction", False) and source <= e["row_index"] <= checkpoint
+               for e in events if e.get("row_index") is not None)
+
+def carry_room(carry):
+    return carry.get("empty_no_room", "empty_no_room" in carry.values()) if carry else None
+
+def replay_estimate(tokens):
+    return max(60, tokens / float(os.environ.get("S2_REPLAY_TOKENS_PER_SECOND", "333")))
+
+def replay_timeout(tokens, multiplier=None):
+    multiplier = float(multiplier or os.environ.get("S2_TIMEOUT_MULTIPLIER", "3"))
+    if multiplier < 3:
+        raise ValueError("S2 timeout multiplier must be at least 3")
+    return replay_estimate(tokens) * multiplier
+
 class Run:
     def __init__(self, m, arm, seed, args, sdir, rows, man, run_dir):
         self.m, self.arm, self.seed, self.args, self.sdir, self.rows, self.man, self.dir = \
@@ -160,6 +176,7 @@ class Run:
               "is_compaction": bool(nodes),  # False = the engine's cleanup-only pass (stub/externalize), no summary
               "timing_label": "WIRING-ONLY" if forced else self.population, "population": self.population,
               "tokens_at_trigger": cur,
+              "threshold_percent": self.engine.threshold_tokens / self.args.context_length, "tail_mode": "lcm-fresh-tail",
               "threshold_tokens": self.engine.threshold_tokens, "rows_before": len(view), "rows_after": len(new),
               "tokens_after": self.ntok([self.sysmsg] + new), "status": self.engine.last_compression_status,
               "noop_reason": self.engine.last_compression_noop_reason, "nodes": nodes, "levels": sums,
@@ -171,7 +188,7 @@ class Run:
               "continuity": continuity(self.man, self.system, new)}
         self.events.append(ev)
         carry = getattr(self.engine, "_last_user_carry", None)
-        ev["empty_no_room"] = carry.get("empty_no_room", "empty_no_room" in carry.values()) if isinstance(carry, dict) else None
+        ev["empty_no_room"] = carry_room(carry) if isinstance(carry, dict) else None
         cdir = self.dir / "continuity"  # S6 A2: the assembled context the next model call receives after this event
         cdir.mkdir(exist_ok=True)
         (cdir / f"event-{n}.json").write_text(json.dumps({"event": n, "row_index": i, "source": "system slot + view "
@@ -317,6 +334,8 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                 "schema": "s2-result-v1", "kind": "probe", "probe_id": p["id"], "probe_kind": p["kind"],
                 "expect": p["expect"], "gold": p.get("gold") or p.get("answer") or f.get("answer") or (traps.get(p["id"]) or {}).get("answer"),
                 **{k: p[k] for k in ("checkpoint_id", "schedule", "compaction_horizon") if k in p},
+                "actual_compactions": actual_horizon(run.events, p.get("row_index", f.get("row_index")),
+                    src["row"] if src else len(run.rows)-1) if p.get("row_index", f.get("row_index")) is not None else None,
                 **{k: f.get(k) for k in ("stale", "placement", "row_role")}, "fact_class": f.get("class"),
                 "answer": ans, "answered": ans is not None, "timed_out": bool(err and "timeout" in err.lower()),
                 "error": err, "status": "UNAVAILABLE" if unavailable else ("ERROR" if err else "OK"),
@@ -388,7 +407,8 @@ def main():
     if is_store:
         seam.set_lane(args.lane, run_dir / "lane-scratch")
         run.engine = new_engine(m, run.home, run.sid, args.context_length)
-        summary["threshold_tokens"] = run.engine.threshold_tokens
+        summary.update(threshold_tokens=run.engine.threshold_tokens, threshold_percent=run.engine.threshold_tokens / args.context_length,
+                       tail_mode="lcm-fresh-tail", timeout_s=replay_timeout(man["decision_checkpoint"]["tokens"]))
         t0 = time.monotonic()
         view = run.replay()
         summary["replay_wall_s"] = round(time.monotonic() - t0, 2)
