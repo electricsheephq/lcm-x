@@ -7200,7 +7200,7 @@ class TestMessageFiltering:
         pytest.param(True, marks=pytest.mark.xfail(
             strict=True, raises=AssertionError,
             reason="#1053: with externalization + active-replay stubbing on, the literal is stored twice")),
-    ], ids=["default", "externalization-on"])
+    ], ids=["externalization-off", "externalization-on"])
     def test_new_placeholder_literal_after_rollover_is_stored_losslessly(self, tmp_path, externalized):
         db_path = tmp_path / "lcm_msg_ignore_placeholder_rollover_new_literal.db"
         first = LCMEngine(
