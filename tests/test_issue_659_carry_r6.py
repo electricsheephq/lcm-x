@@ -8,10 +8,12 @@ carried again: carry eligibility reads stored rows through a read-only view, sto
 
 import json
 import re
+from pathlib import Path
 
 import pytest
 
 import hermes_lcm.engine as engine_module
+import hermes_lcm.externalize as lcm_externalize
 import hermes_lcm.tools as lcm_tools
 import tests.test_issue_659_user_carry_packet as carry_packet
 from tests.test_issue_659_carry_r4 import _generated
@@ -281,3 +283,116 @@ def test_unverified_genuine_row_is_carried(make, shape):
     parts = engine._user_carry_parts([], "user", [], [], [], [], [], None, None)
     _rendered, ids = _carried([{"role": "user", "content": SEP.join(parts)}])
     assert not verified and head["store_id"] in ids
+
+
+# REVIEW6b probes (r6b-review-probes/test_r6b_delta.py): a placeholder whose payload cannot be loaded, or whose
+# payload belongs to a session outside the lineage, is not a verified carry and stays eligible for the carry.
+
+
+def _base_holds(engine, row):
+    """The pre-R6 predicate (f484484e): a verified carry block somewhere after a separator in the stored text."""
+    content = engine_module.normalize_content_value(row.get("content")) or ""
+    return any(engine._verified_generated_suffix_end(content, m.start()) > m.start()
+               for m in re.finditer(re.escape(SEP + CARRY), content))
+
+
+def _source(engine, session="P0", text="SOURCE USER WORDS"):
+    sid = engine._store.append(session, {"role": "user", "content": text}, conversation_id="conv")
+    return engine._store.get_batch([sid])[sid]
+
+
+def _child(engine):
+    engine.on_session_start("P1", platform="cli", context_length=128000, conversation_id="conv",
+                            boundary_reason="compression", old_session_id="P0")
+
+
+def _payload(engine, content, session="P0"):
+    result = lcm_externalize.externalize_ingest_payload(content, role="user", session_id=session,
+                                                        config=engine._config, hermes_home=engine._hermes_home)
+    assert result and result["path"].exists()
+    return result
+
+
+def _carry_parts(engine, row):
+    engine._last_compacted_store_id = row["store_id"]
+    engine._user_carry_cache = None
+    return _carried([{"role": "user", "content": SEP.join(
+        engine._user_carry_parts([], "user", [], [], [], [], [], None, None))}])
+
+
+@pytest.mark.parametrize("failure", ["missing", "denied", "invalid-json", "invalid-utf8", "empty"])
+def test_failed_payload_load_falls_back_without_crashing(make, monkeypatch, failure):
+    """R6b: an unreadable payload leaves the placeholder unverified and carried, never a crash; a verified carry
+    in the placeholder row itself is still judged."""
+    engine = make(session="P0", temporal_rollups_enabled=False)
+    block = engine_module._render_user_carry([_source(engine)])
+    p = _payload(engine, block)
+    if failure == "missing":  # a basename that was never written; no payload is deleted
+        placeholder = p["placeholder"].replace(p["path"].name, "not-written.json")
+    else:
+        placeholder = p["placeholder"]
+    if failure == "denied":
+        original = Path.read_text
+
+        def denied(path, *args, **kw):
+            if path == p["path"]:
+                raise PermissionError("synthetic denied payload read")
+            return original(path, *args, **kw)
+
+        monkeypatch.setattr(Path, "read_text", denied)
+    elif failure == "invalid-json":
+        p["path"].write_text("{")
+    elif failure == "invalid-utf8":
+        p["path"].write_bytes(b"\xff\xfe")
+    elif failure == "empty":
+        data = json.loads(p["path"].read_text())
+        data["content"] = ""
+        p["path"].write_text(json.dumps(data))
+    _child(engine)
+    row = _source(engine, "P1", placeholder)
+    base_verified = _base_holds(engine, row)
+    with monkeypatch.context() as m:
+        m.setattr(engine, "_holds_verified_user_carry", lambda r: _base_holds(engine, r))
+        _, base_ids = _carry_parts(engine, row)
+    assert not base_verified and row["store_id"] in base_ids
+    errors = {}
+    verified = selected = None
+    try:
+        verified = engine._holds_verified_user_carry(row)
+    except Exception as exc:
+        errors["predicate"] = {"type": type(exc).__name__, "message": str(exc)}
+    try:
+        _, ids = _carry_parts(engine, row)
+        selected = row["store_id"] in ids
+    except Exception as exc:
+        errors["carry_reader"] = {"type": type(exc).__name__, "message": str(exc)}
+    assert not errors, "unreadable payload must leave the placeholder eligible without a crash"
+    assert verified is False and selected
+    assert len(placeholder + SEP + block) <= 512
+    assert engine._holds_verified_user_carry({**row, "content": placeholder + SEP + block})
+
+
+@pytest.mark.parametrize("content_source", ["foreign-ids", "lineage-ids"])
+def test_foreign_payload_cannot_verify(make, monkeypatch, content_source):
+    """R6b: a payload owned by a session outside the lineage cannot verify the placeholder, even when it holds a
+    copied valid in-lineage carry block; the placeholder stays carried."""
+    engine = make(session="P0", temporal_rollups_enabled=False)
+    own = _source(engine)
+    engine.on_session_start("FOREIGN", platform="cli", context_length=128000, conversation_id="conv")
+    foreign = _source(engine, "FOREIGN", "FOREIGN USER WORDS")
+    block = engine_module._render_user_carry([foreign if content_source == "foreign-ids" else own])
+    p = _payload(engine, block, "FOREIGN")
+    engine.on_session_start("P0", platform="cli", context_length=128000, conversation_id="conv")
+    _child(engine)
+    row = _source(engine, "P1", p["placeholder"])
+    lineage = engine._user_carry_lineage()
+    assert "FOREIGN" not in lineage and set(lineage) == {"P1", "P0"}
+    assert lcm_tools._get_externalized_payload(engine, p["path"].name) is None
+    base_verified = _base_holds(engine, row)
+    with monkeypatch.context() as m:
+        m.setattr(engine, "_holds_verified_user_carry", lambda r: _base_holds(engine, r))
+        _, base_ids = _carry_parts(engine, row)
+    assert not base_verified and row["store_id"] in base_ids
+    verified = engine._holds_verified_user_carry(row)
+    _, ids = _carry_parts(engine, row)
+    assert not verified and row["store_id"] in ids, "an out-of-lineage payload must not suppress the row"
