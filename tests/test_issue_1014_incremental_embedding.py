@@ -980,3 +980,37 @@ def test_1063_g_registration_provider_released_before_backfill(
         assert refs and alive_at_backfill == [[False]]
     finally:
         engine._close_storage()
+
+
+def test_1063_h_partial_registration_is_completed_by_the_next_pass(
+    tmp_path, home, local_fastembed,
+):
+    engine = _local_engine(tmp_path, home)
+    try:
+        engine._dag.add_node(SummaryNode(
+            session_id=SESSION, depth=0, summary="partial registration summary",
+            created_at=1.0, latest_at=1.0,
+        ))
+        engine._store.append(SESSION, {"role": "user", "content": FILLER})
+        maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config,
+        )
+        # A first pass that committed only the summary profile (the chunk
+        # registration failed or the process exited between the two commits).
+        conn = sqlite3.connect(engine._config.database_path)
+        try:
+            conn.execute("DELETE FROM lcm_embedding_profile WHERE task = 'chunk'")
+            conn.commit()
+        finally:
+            conn.close()
+        assert sorted(task for task, _active, _ in _profiles(engine)) == ["summary"]
+        outcome = maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config,
+        )
+        print(f"H: outcome={outcome}; profiles={_profiles(engine)}")
+        assert sorted((task, active) for task, active, _ in _profiles(engine)) == [
+            ("chunk", 1), ("summary", 1),
+        ]
+        assert "chunks=refused" not in outcome
+    finally:
+        engine._close_storage()

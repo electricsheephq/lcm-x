@@ -101,14 +101,17 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
     from . import command  # lazy: command imports most of the plugin
     from .embedding_provider import probe_provider_availability
 
+    provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+    local = provider in {"fastembed", "fast-embed"}
     read_conn = command._embedding_read_connection(db_path)
     try:
         no_profile = command._embedding_current_profile(read_conn) is None
+        # Registration commits each profile separately; finish a partial one.
+        no_profile = no_profile or (local and command._chunk_current_profile(read_conn) is None)
     finally:
         read_conn.close()
     if no_profile:
-        provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
-        if provider not in {"fastembed", "fast-embed"}:
+        if not local:
             return "no_profile", None  # `/lcm embed warmup` has not run yet
         result = command._embedding_register_profiles(config, db_path, allow_download=False)
         if isinstance(result, str):
