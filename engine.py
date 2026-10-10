@@ -7947,14 +7947,19 @@ class LCMEngine(
                     own_results_start = len(kept_tail_reversed)
                     while own_results_start and kept_tail_reversed[own_results_start - 1].get("role") == "tool":
                         own_results_start -= 1
-                    own_result_ids = {
+                    # Count, don't collapse: the sanitizer pairs each call occurrence separately.
+                    unmatched_results = Counter(
                         str(r.get("tool_call_id") or "").strip()
                         for r in kept_tail_reversed[own_results_start:]
-                    }
-                    missing_ids = [
-                        call_id for call_id in (_tool_call_id(tc) for tc in msg["tool_calls"])
-                        if call_id and call_id not in own_result_ids
-                    ]
+                    )
+                    missing_ids = []
+                    for call_id in (_tool_call_id(tc) for tc in msg["tool_calls"]):
+                        if not call_id:
+                            continue
+                        if unmatched_results[call_id]:
+                            unmatched_results[call_id] -= 1
+                        else:
+                            missing_ids.append(call_id)
                     if missing_ids:
                         msg_tokens += count_messages_tokens(
                             [self._missing_tool_result_stub(call_id) for call_id in missing_ids])

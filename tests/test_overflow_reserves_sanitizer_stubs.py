@@ -184,3 +184,15 @@ def test_no_warning_when_no_objective_was_assembled(make_engine, caplog):  # noq
 
     assert OBJECTIVE not in view(out)
     assert WARNING not in caplog.text
+
+
+def test_repeated_call_id_reserves_one_stub_per_unmatched_occurrence(make_engine):  # noqa: F811
+    """Two `same` calls with one `same` result: the sanitizer stubs the second occurrence."""
+    engine = make_engine(large_output_active_replay_stubbing_enabled=False)
+    nodes = add_summaries(engine)
+    tail = [assistant_calls("same", "same"), result("same")]
+    cap = full_cap(engine, nodes, tail)
+    out = assemble(engine, tail, cap)
+
+    assert OBJECTIVE in view(out)
+    assert count_messages_tokens(out) <= cap
