@@ -91,7 +91,7 @@ def test_real_schedule_dominance_reaches_keep(tmp_path, real_material):
     scores = observations(tmp_path, real_material)
     # Equal positive synthetic costs isolate the retention gate.
     result = e.analyze(scores, real_material, list(range(1, 9)))["comparisons"]["L1−L0"]
-    assert {k: result["intervals"][k]["n_seeds"] for k in ("stale_task", "corrected_value", "current_request")} == dict(stale_task=8, corrected_value=7, current_request=8)
+    assert {k: result["intervals"][k]["n_seeds"] for k in ("stale_task", "corrected_value", "current_request")} == dict(stale_task=8, corrected_value=8, current_request=8)
     assert result["verdict"] == "KEEP"
     assert not any("|" in k for k in result["intervals"])
 

@@ -26,14 +26,15 @@ def bootstrap(deltas, resamples=10000, rng_seed=1064):
 
 def verdict(intervals, cost_ratio=None, complete=True):
     """KEEP requires every lower bound; KILL requires a failing upper bound. Crossing a bar is inconclusive."""
-    if not complete or "facts_user" not in intervals or any(v.get("low") is None for v in intervals.values()) or cost_ratio is None:
+    if not complete or "facts_user" not in intervals:
         return "INCONCLUSIVE"
-    if cost_ratio > 1.10:
+    covered = {k: v for k, v in intervals.items() if v.get("n_seeds", 8) >= 6 and v.get("low") is not None}
+    if cost_ratio is not None and cost_ratio > 1.10:
         return "KILL"
     bars = {k: 5 if k == "facts_user" else -2 for k in intervals}
-    if any(v["high"] <= bars[k] for k, v in intervals.items()):
+    if any(v["high"] <= bars[k] for k, v in covered.items()):
         return "KILL"
-    return "KEEP" if all(v["low"] > bars[k] for k, v in intervals.items()) else "INCONCLUSIVE"
+    return "KEEP" if cost_ratio is not None and len(covered) == len(intervals) and all(v["low"] > bars[k] for k, v in covered.items()) else "INCONCLUSIVE"
 
 
 def axes(sc, facts):
@@ -76,7 +77,7 @@ def analyze_window(scores, material, seeds, context_length):
             continue
         model = (sc.get("reader") or "").split("·")[0]
         run = Path(sc["run_dir"]).parent
-        key = (sc["checkpoint_id"], model, None, None) if model == "gpt-6-astra" else (sc["checkpoint_id"], model, context_length, run.name)
+        key = (sc["checkpoint_id"], model, None if model == "gpt-6-astra" else context_length, run.name)
         groups.setdefault((arm, seed), {})[key] = sc
         if sc.get("worktree_head"):
             pins.setdefault(arm, set()).add(sc["worktree_head"])
@@ -106,6 +107,13 @@ def analyze_window(scores, material, seeds, context_length):
         for seed in seeds:
             left = {k: v for k, v in groups.get((left_arm, seed), {}).items() if k[1] in allowed}
             right = {k: v for k, v in groups.get((other, seed), {}).items() if k[1] in allowed}
+            if other == "codex-native":
+                references = right
+                right = {}
+                for key in left:
+                    matches = [v for k, v in references.items() if k[:2] == key[:2]]
+                    if key in references or len(matches) == 1:
+                        right[key] = references[key] if key in references else matches[0]
             required.update(p["kind"] for p in CP.due(material / f"seed-{seed}").values() if p.get("kind"))
             expected = {c["id"] for c in CP.select(material / f"seed-{seed}", "lifecycle")}
             if not left or left.keys() != right.keys() or {k[0] for k in left} != expected:
@@ -157,12 +165,13 @@ def analyze_window(scores, material, seeds, context_length):
             ci["verdict"] = "INCONCLUSIVE" if ci["n_seeds"] < 6 or ci["low"] is None else "SUPERIOR" if ci["low"] > bar and bar == 5 else "NON-INFERIOR" if ci["low"] > bar else "BELOW BAR" if ci["high"] <= bar else "INCONCLUSIVE"
         costs = {arm: t[0]/t[1] if t[2] and t[1] else None for arm, t in totals.items()}
         ratio = costs[left_arm]/costs[other] if costs[left_arm] is not None and costs[other] else None
-        complete = not missing and len(seeds) >= 8 and bool(intervals) and all(v["n_seeds"] >= 6 for v in intervals.values())
+        complete = not missing and len(seeds) >= 8 and bool(intervals)
+        covered = complete and all(v["n_seeds"] >= 6 and v["low"] is not None for v in intervals.values())
         claim = CLAIMS[other] if left_arm == "L1" else "descriptive fake comparison"
         if claim == "KEEP gate":
             result = verdict(intervals, ratio, complete)
         elif other in ("H", "codex-native") and left_arm == "L1":
-            result = "NON-INFERIOR" if complete and all(v["low"] > -2 for v in intervals.values()) else "BELOW FLOOR" if complete and any(v["high"] <= -2 for v in intervals.values()) else "INCONCLUSIVE"
+            result = "NON-INFERIOR" if covered and all(v["low"] > -2 for v in intervals.values()) else "BELOW FLOOR" if covered and any(v["high"] <= -2 for v in intervals.values()) else "INCONCLUSIVE"
         else:
             result = "DESCRIPTIVE"
         out[f"{left_arm}−{'C' if other == 'codex-native' else other}"] = dict(intervals=intervals, missing_seeds=missing, cost_ratio=ratio,
@@ -194,10 +203,18 @@ def main(argv=None):
         windows = data.get("context_windows", {str(data.get("context_length")): data})
         comparisons = {f"{pair} ({ctx})": v for ctx, w in windows.items() for pair, v in w["comparisons"].items()}
         checkpoints = [c for w in windows.values() for c in w["per_checkpoint"]]
+        statuses = {}
+        for ctx, window in windows.items():
+            for c in window["per_checkpoint"]:
+                cell = statuses.setdefault((c["arm"], ctx), {"STATUS: LIVE": 0, "STATUS: NOT LIVE": 0})
+                for status in cell:
+                    cell[status] += c.get("status_line", {}).get(status, 0)
         rows = ["| comparison (context) | axis | n seeds | effect pt | 95% interval | axis verdict | verdict | claim class | scope |", "|---|---|---|---|---|---|---|---|---|"]
         for pair, value in comparisons.items():
             for axis, ci in value["intervals"].items() or {"unmeasured": dict(effect_pts=None, low=None, high=None)}.items():
                 rows.append(f"| {pair} | {axis} | {ci.get('n_seeds', 0)} | {ci['effect_pts']} | {ci['low']} … {ci['high']} | {ci.get('verdict', 'INCONCLUSIVE')} | {value['verdict']} | {value['claim_class']} | {value['claim']} |")
+        rows += ["", "| arm (context) | LIVE answers | NOT LIVE answers | claim class |", "|---|---|---|---|"]
+        rows += [f"| {arm} ({ctx}) | {v['STATUS: LIVE']} | {v['STATUS: NOT LIVE']} | descriptive only |" for (arm, ctx), v in statuses.items()]
         rows += ["", "| pair | seed | compared-window checkpoints |", "|---|---|---|"]
         for pair, value in comparisons.items():
             for seed, cps in value["compared_window"].items():

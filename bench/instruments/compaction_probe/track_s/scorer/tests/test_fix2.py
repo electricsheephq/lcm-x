@@ -45,7 +45,8 @@ LIVE_TEXT = ["Yes.", "{task} is still pending.", "It still needs to be done, alo
 @pytest.mark.parametrize("reply,expected", [("\n STATUS: NOT LIVE\n" + x, True) for x in PASS_TEXT] +
     [("STATUS: LIVE\n" + x, False) for x in LIVE_TEXT] + [(x, False) for x in
     ["No; do {repl}.", "I don't know.", "No.", "No information about {task}.", "STATUS: UNKNOWN",
-     "STATUS: NOT LIVE; cancelled", "Explanation first.\nSTATUS: NOT LIVE", "STATUS: LIVE\nSTATUS: NOT LIVE", "", None]] +
+     "Explanation first.\nSTATUS: NOT LIVE", "STATUS: LIVE\nSTATUS: NOT LIVE", "", None]] +
+    [("STATUS: NOT LIVE; cancelled", True)] +
     [("STATUS: NOT LIVE\nSTATUS: LIVE", True)])
 def test_review2_stale_adversarial_status_lines(real_seed, reply, expected):
     man, facts = sc.jload(real_seed / "material.manifest.json"), sc.jload(real_seed / "facts.json")

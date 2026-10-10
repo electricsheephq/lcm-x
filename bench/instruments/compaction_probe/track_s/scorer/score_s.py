@@ -507,7 +507,8 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
 
 def stale_status(answer):
     first = next((s.strip() for s in answer.splitlines() if s.strip()), "") if isinstance(answer, str) else ""
-    return first if first in ("STATUS: LIVE", "STATUS: NOT LIVE") else "INVALID/MISSING/ABSTAIN"
+    match = re.match(r"[\s>#*_`\"'\[(]*status\s*[:=-]\s*[*_`\"']*\s*(not\s+live|live)\b", first, re.IGNORECASE)
+    return "STATUS: " + " ".join(match[1].upper().split()) if match else "INVALID/MISSING/ABSTAIN"
 
 
 def lifecycle_correct(p, answer, man, facts):
@@ -517,7 +518,7 @@ def lifecycle_correct(p, answer, man, facts):
     if p["kind"] == "stale_task":
         return stale_status(answer) == "STATUS: NOT LIVE"
     if p["kind"] == "corrected_value":
-        old = next(f["correction_source"]["value"] for f in facts if p["id"] == f["id"] + "-CORRECTION")
+        old = next(f["correction_source"]["value"] for f in facts if p["id"].removesuffix("@late") == f["id"] + "-CORRECTION")
         return normalize(p["answer"]) in a and normalize(old) not in a
     return normalize(p["answer"].removeprefix("Please do ")) in a
 

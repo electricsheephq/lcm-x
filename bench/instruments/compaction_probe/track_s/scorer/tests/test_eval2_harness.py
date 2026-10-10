@@ -24,8 +24,9 @@ def material(tmp_path):
     facts[0]["correction_source"] = dict(value="old-alpha", row_index=0)
     fx.wj(mat / "facts.json", facts)
     cps = [dict(id=f"S1-CP{n * 20000}", row_index=i, tokens=n * 20000) for n, i in ((1, 4), (2, 8), (3, 11))]
+    cps.append(dict(id="S1-CP340000", row_index=11, tokens=340000))
     man = sc.jload(mat / "material.manifest.json")
-    man.update(seed=1, checkpoints=cps, decision_checkpoint=cps[-1], material_version="track-s-v4",
+    man.update(seed=1, checkpoints=cps, decision_checkpoint=cps[-2], material_version="track-s-v4",
                lifecycle=[dict(task="old-task", resolution=dict(row_id="R2"))], shas={"transcript.jsonl": "fake"})
     fx.wj(mat / "material.manifest.json", man)
     batches = sc.jlines(mat / "probe_batches.jsonl")
@@ -56,7 +57,7 @@ def module(path, monkeypatch, tmp_path):
 
 
 def test_checkpoint_ids_and_first_after_schedule(material):
-    assert [c["id"] for c in cp.select(material, "lifecycle")] == ["S1-CP20000", "S1-CP40000", "S1-CP60000"]
+    assert [c["id"] for c in cp.select(material, "lifecycle")] == ["S1-CP20000", "S1-CP40000", "S1-CP60000", "S1-CP340000"]
     assert cp.select(material, "CP40000") == cp.select(material, "S1-CP40000")
     assert cp.due(material)["stale"]["schedule"] == "exact"
     assert cp.due(material)["X-F0-CORRECTION"]["schedule"] == "first_after"
@@ -185,9 +186,11 @@ def test_s4_probes_multiple_checkpoints_and_continues_one_parent(material, monke
     assert m.main(args) == 0
     assert len(replay) == 12 and forks
     cps = list((tmp_path / "output/codex-runs/seed-1/fake").glob("cp-*/summary.json"))
-    assert len(cps) == 3 and all(sc.jload(p)["isolation_ok"] for p in cps)
+    assert len(cps) == 4 and all(sc.jload(p)["isolation_ok"] for p in cps)
     assert parent.read_text() == "fixture-parent"
     rows = [r for p in cps for r in sc.jlines(p.parent / "results.jsonl")]
+    assert sum(r["probe_id"].endswith("@late") for r in rows) == 1
+    assert all(sc.jload(p)["late_corrected_value_checkpoint"]["id"] == "S1-CP340000" for p in cps)
     assert all(r["status"] == ("ERROR" if reader_failures == 2 else "OK") for r in rows)
     assert all(r["reader_rereads"] == int(reader_failures > 0) for r in rows)
     for p in cps:

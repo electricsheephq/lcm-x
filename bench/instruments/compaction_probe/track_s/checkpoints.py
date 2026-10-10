@@ -11,6 +11,14 @@ def manifest(directory):
     return json.loads((Path(directory) / "material.manifest.json").read_text())
 
 
+def late_checkpoint(directory):
+    if not (Path(directory) / "lifecycle_probes.jsonl").exists():
+        return None
+    cps = manifest(directory)["checkpoints"]
+    return next((c for c in cps if c["id"].endswith("-CP340000")), None) or next(
+        c for c in sorted(cps, key=lambda c: c["row_index"]) if c["row_index"] >= 141)
+
+
 def due(directory):
     man = manifest(directory)
     out = {}
@@ -20,6 +28,10 @@ def due(directory):
             raise ValueError(f"no checkpoint after lifecycle probe {p['id']}")
         out[p["id"]] = dict(p, checkpoint_id=cp["id"], checkpoint_row=cp["row_index"],
                              schedule="exact" if cp["tokens"] == p["probe_token_position"] else "first_after")
+        if p.get("kind") == "corrected_value":
+            late = late_checkpoint(directory)
+            out[p["id"] + "@late"] = dict(p, id=p["id"] + "@late", checkpoint_id=late["id"],
+                checkpoint_row=late["row_index"], schedule="late_reask")
     return out
 
 

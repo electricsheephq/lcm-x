@@ -93,7 +93,7 @@ class AstraLowReader:
 def parse_json_obj(text: str):
     t = re.sub(r"^```(?:json)?|```$", "", (text or "").strip(), flags=re.M).strip()
     try:
-        return json.JSONDecoder().raw_decode(t[t.index("{"):])[0]
+        return json.JSONDecoder(strict=False).raw_decode(t[t.index("{"):])[0]
     except (ValueError, json.JSONDecodeError):
         return None
 

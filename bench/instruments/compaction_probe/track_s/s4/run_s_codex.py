@@ -390,7 +390,7 @@ def parse_answers(msgs: list[str]) -> dict | None:
         s, e = m.find("{"), m.rfind("}")
         if s >= 0 and e > s:
             try:
-                obj = json.loads(m[s:e + 1])
+                obj = json.loads(m[s:e + 1], strict=False)
                 return obj.get("answer", obj) if isinstance(obj, dict) else None
             except json.JSONDecodeError:
                 continue
@@ -471,7 +471,7 @@ def main(a=None, state=None) -> int:
     summary = {"seed": seed, "run": a.run, "model": MODEL, "effort": EFFORT, "codex_version": subprocess.run(
         [str(codex_bin()), "--version"], capture_output=True, text=True).stdout.strip(), "codex_bin": str(codex_bin()),
         "home": home, "dictation": a.dictation, "rows": len(rows), "turns": len(plans), "stop_row_index": rows[-1]["id"], "checkpoint": stop,
-        "material_sha": man["shas"]["transcript.jsonl"], "workspace": str(ws), "layout": layout,
+        "material_sha": man["shas"]["transcript.jsonl"], "late_corrected_value_checkpoint": CP.late_checkpoint(sdir), "workspace": str(ws), "layout": layout,
         "kit": {"path": str(KIT), "drive_codex_sha": sha(KIT / "drive_codex.py"),
                 "parse_rollout_sha": sha(KIT / "parse_rollout.py")}}
     if a.dry_run:

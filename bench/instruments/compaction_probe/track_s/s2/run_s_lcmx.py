@@ -395,7 +395,7 @@ def main():
     run_dir.mkdir(parents=True, exist_ok=True)
     summary = {"arm": arm, "seed": seed, "run": args.run, "lane": args.lane, "reader": args.reader,
                "worktree": str(seam.WORKTREE), "worktree_head": seam.PINNED, "context_length": args.context_length,
-               "stop_row_index": stop, "slice": args.slice, "checkpoint": args.checkpoint,
+               "stop_row_index": stop, "slice": args.slice, "checkpoint": args.checkpoint, "late_corrected_value_checkpoint": CP.late_checkpoint(sdir),
                "fleet_keys_excluded": A.FLEET_EXCLUDED, "harness_overrides": A.HARNESS_OVERRIDES, "started": time.time(),
                "material_sha256": hashlib.sha256((sdir / "material.manifest.json").read_bytes()).hexdigest(),
                "population": "prefix60k" if args.prefix60k else "full-stream"}
