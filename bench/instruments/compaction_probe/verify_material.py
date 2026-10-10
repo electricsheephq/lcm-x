@@ -105,11 +105,13 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
     if v4:
         check(total >= trigger and spans >= events, "v4 token/event floor")
         check(total - prefix[last_item] >= 20000, "tail missing")
+        check(max(r["turn"] for r in rows) == manifest["params"]["turns"], "v4 turn horizon")
         if smoke:
             suffix = manifest["smoke_suffix"]
             source(suffix)
             check(suffix["row_index"] > last_item and suffix["action"] == "force_compaction_after_row" and
                   suffix["timing_population"] == "WIRING-ONLY", "event-producing smoke suffix")
+            check(manifest["decision_checkpoint"]["row_index"] >= suffix["row_index"], "smoke replay excludes the suffix")
     elif not smoke:
         check(prefix[last_item] < trigger, "scored item presented after slowest trigger")
         check(total >= max(400000, trigger + 20000), "total/tail token floor")

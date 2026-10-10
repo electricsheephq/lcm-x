@@ -401,11 +401,16 @@ SCENES = (
 )
 
 
-def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 17000,
+def generate(seed: int, out_dir: Path, turns: int | None = None, tokens_per_turn: int | None = None,
              placements: bool = False, classes12: bool = False, min_tokens: int = 244800,
              min_events: int = 2, smoke: bool = False, v4: bool = False) -> dict[str, Any]:
     if v4:
-        return _generate_v4(seed, out_dir, turns, tokens_per_turn, min_tokens, min_events, smoke)
+        if turns not in (None, V4_STEPS) or tokens_per_turn is not None:
+            raise ValueError(f"v4 has a fixed {V4_STEPS}-step horizon sized by --min-tokens/--min-events; "
+                             "omit --turns and --tokens-per-turn")
+        return _generate_v4(seed, out_dir, min_tokens, min_events, smoke)
+    turns = 35 if turns is None else turns
+    tokens_per_turn = 17000 if tokens_per_turn is None else tokens_per_turn
     if not placements and not classes12:
         return _generate_legacy(seed, out_dir, turns, tokens_per_turn)
     if not placements or not classes12:
@@ -595,10 +600,13 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
 
 
 
-def _generate_v4(seed, out_dir, turns, tokens_per_turn, min_tokens, min_events, smoke):
+V4_STEPS = 90
+
+
+def _generate_v4(seed, out_dir, min_tokens, min_events, smoke):
     """Independent values and interleaved source roles across a full offline horizon."""
-    if turns < 10 or tokens_per_turn <= 0 or min_tokens <= 0 or min_events < 2:
-        raise ValueError("require turns >= 10, positive token budgets, min-events >= 2")
+    if min_tokens <= 0 or min_events < 2:
+        raise ValueError("require positive --min-tokens and --min-events >= 2")
     count, rng = token_counter(), random.Random(seed ^ 0x5634)
     rows, facts, lifecycle, probes, continuity = [], [], [], [], []
     grams, used = {}, set()
@@ -661,7 +669,8 @@ def _generate_v4(seed, out_dir, turns, tokens_per_turn, min_tokens, min_events, 
             early = next(i for i, other in schedule.items() if i < 30 and not other["stale"] and
                          other["row_role"] == f["row_role"])
             schedule[slot], schedule[early] = schedule[early], f
-    user_middle = [f for f in facts if f["row_role"] == "user"][:8]
+    # Drawn from the shuffled pool, so middle placement is independent of class.
+    user_middle = rng.sample(groups["user"], 8)
     for f in user_middle:
         f["placement"] = "middle"
     corrected = [f for i, f in sorted(schedule.items()) if i < 88 and
@@ -675,16 +684,20 @@ def _generate_v4(seed, out_dir, turns, tokens_per_turn, min_tokens, min_events, 
     continuity.append(statement(f"S{seed}-CONT-host_instruction",
                                 "Preserve chronology and answer from stated values.", "system"))
     # Full smoke also meets the token floor; the forced event remains wiring-only.
-    chars = max(28000, (min_events + 2) * min_tokens * 4 // 90,
-                turns * tokens_per_turn * 4 // 90)
-    for step in range(90):
+    # Spread the post-supersession spans over the steps after the latest stale
+    # source (~4 chars/token, 5% margin) so token thirds stay balanced; the tail
+    # below tops up any residual tokenizer difference.
+    after = V4_STEPS - 1 - max(slot for slot, f in schedule.items() if f["stale"])
+    chars = max(28000, (min_events + 2) * min_tokens * 4 // V4_STEPS,
+                min_events * min_tokens * 4 * 21 // (20 * after))
+    for step in range(V4_STEPS):
         f = schedule.get(step)
         if f and f["stale"]:
             f["stale_source"] = statement(f["id"] + "-OLD", f"Initial {f['fixture']}: {f['stale']}.")
         for role, size in (("user", chars // 3), ("tool", chars // 3), ("assistant", chars // 3)):
             target = f if f and f["row_role"] == role else None
             size = max(size, 100004 if target and target["class"] == "file_change" and
-                       target["placement"] == "middle" else 8000)
+                       target["placement"] == "middle" and role == "tool" else 8000)
             body = filler(size)
             if target:
                 initial = value(target["class"]) if target in corrected else target["value"]
@@ -742,7 +755,15 @@ def _generate_v4(seed, out_dir, turns, tokens_per_turn, min_tokens, min_events, 
                        expect="value", answer=current["value"], row_index=current["row_index"], row_id=current["row_id"]))
     presented = sum(count(r["content"]) for r in rows)
     add("user", "Continue with the current request, keeping the active constraint.")
-    add("assistant", filler(80004))
+    # As in v3, size the tail from the latest supersession so every accepted
+    # --min-events value leaves that many full spans plus the 20k tail after it.
+    counts = [count(r["content"]) for r in rows]
+    supersession = max(sum(counts[:f["row_index"] + 1]) for f in facts if f["stale"])
+    need = supersession + 20000 + min_events * min_tokens - sum(counts)
+    tail = filler(80004)
+    while count(tail) < need:
+        tail += filler(80004)
+    add("assistant", tail)
     suffix = None
     if smoke:
         suffix = statement(f"S{seed}-SMOKE-EVENT", "Final wiring-only compaction checkpoint.")
@@ -754,6 +775,10 @@ def _generate_v4(seed, out_dir, turns, tokens_per_turn, min_tokens, min_events, 
         while cumulative >= boundary:
             checkpoints.append(dict(id=f"S{seed}-CP{boundary}", tokens=cumulative, row_index=i))
             boundary += 20000
+    decision = checkpoints[-1]
+    if suffix and decision["row_index"] < suffix["row_index"]:
+        # The replay stops at the decision checkpoint; it must reach the forced-event row.
+        decision = dict(id=f"S{seed}-CP-SMOKE", tokens=prefix[suffix["row_index"]], row_index=suffix["row_index"])
     for i, p in enumerate(probes):
         h = (1, 3, 5)[i % 3]
         p.update(compaction_horizon=h, source_token_position=prefix[p["row_index"]],
@@ -763,7 +788,8 @@ def _generate_v4(seed, out_dir, turns, tokens_per_turn, min_tokens, min_events, 
                        status="scheduled", runtime_row_id=None) for f in facts]
     targets = [dict(id=f["id"], kind="ancestry", row_id=f["row_id"], row_index=f["row_index"],
                     stale_source=f["stale_source"], required_events=min_events) for f in facts if f["stale"]]
-    external = next(f for f in facts if f["class"] == "file_change" and f["placement"] == "middle")
+    external = next(f for f in facts if f["class"] == "file_change" and f["placement"] == "middle" and
+                    f["row_role"] == "tool")
     targets.append(dict(id=external["id"], kind="externalization", row_id=external["row_id"], row_index=external["row_index"]))
     traps = []
     for c in rng.sample(range(12), 5):
@@ -776,11 +802,11 @@ def _generate_v4(seed, out_dir, turns, tokens_per_turn, min_tokens, min_events, 
     rng.shuffle(flat)
     batches = [dict(id=f"S{seed}-B{k // 10}", probes=flat[k:k + 10], text=BATCH_INSTRUCTION) for k in range(0, 65, 10)]
     manifest = dict(seed=seed, material_version="track-s-v4", mode="smoke" if smoke else "decision",
-                    tokenizer="repo-count_tokens:offline-char-estimate", params=dict(turns=turns,
-                    tokens_per_turn=tokens_per_turn, min_tokens=min_tokens, min_events=min_events),
+                    tokenizer="repo-count_tokens:offline-char-estimate", params=dict(turns=V4_STEPS,
+                    tokens_per_turn=None, min_tokens=min_tokens, min_events=min_events),
                     continuity=continuity, lifecycle=lifecycle, default_leaf_tokens=8000, checkpoints=checkpoints,
                     receipt_targets=targets, smoke_suffix=suffix, presented_tokens=presented,
-                    planned_trigger_spans=min_events, decision_checkpoint=checkpoints[-1],
+                    planned_trigger_spans=min_events, decision_checkpoint=decision,
                     proof_boundary="Offline fresh-token planning; compactions and all runtime receipts remain untested.")
     out_dir.mkdir(parents=True, exist_ok=True)
     names = []
@@ -803,8 +829,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--turns", type=int, default=35)
-    parser.add_argument("--tokens-per-turn", type=int, default=17000)
+    parser.add_argument("--turns", type=int, default=None, help="v3/legacy only (default 35); v4 is fixed at 90")
+    parser.add_argument("--tokens-per-turn", type=int, default=None, help="v3/legacy only (default 17000)")
     parser.add_argument("--placements", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--classes12", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--min-tokens", type=int, default=244800)

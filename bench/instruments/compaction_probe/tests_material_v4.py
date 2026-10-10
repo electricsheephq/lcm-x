@@ -93,7 +93,29 @@ def test_requirement_5_eight_independent_seeds_and_full_smoke(tmp_path, seed, sm
     assert result["status"] == "PASS" and result["tokens"] >= 244800
     assert result["bias_receipts"]["user_facts"] == 22
     assert result["planned_post_supersession_trigger_spans"] >= 2
-    assert read(tmp_path, "material.manifest.json")["material_version"] == "track-s-v4"
+    manifest = read(tmp_path, "material.manifest.json")
+    assert manifest["material_version"] == "track-s-v4"
+    assert manifest["params"]["turns"] == max(r["turn"] for r in read(tmp_path, "transcript.jsonl")) == 90
+    if smoke:
+        assert manifest["decision_checkpoint"]["row_index"] == manifest["smoke_suffix"]["row_index"]
+
+
+def test_v4_middle_user_placement_is_not_class_ordered(material):
+    middle = {f["class"] for f in read(material, "facts.json") if f["row_role"] == "user" and f["placement"] == "middle"}
+    assert middle != set(gen.CLASSES[:4])
+
+
+def test_v4_rejects_a_turn_count_it_would_ignore(tmp_path):
+    for kwargs in (dict(turns=35), dict(turns=10), dict(tokens_per_turn=17000)):
+        with pytest.raises(ValueError, match="fixed 90-step horizon"):
+            gen.generate(1, tmp_path, v4=True, **kwargs)
+    with pytest.raises(ValueError, match="fixed 90-step horizon"):
+        gen.main(["--seed", "1", "--out-dir", str(tmp_path), "--v4", "--turns", "10"])
+
+
+def test_v4_non_default_min_events_meets_its_own_floor(tmp_path):
+    gen.generate(1, tmp_path, v4=True, min_tokens=60000, min_events=10)
+    assert verifier.verify(tmp_path)["planned_post_supersession_trigger_spans"] >= 10
 
 
 @pytest.mark.parametrize("path", ["v3", "legacy"])
