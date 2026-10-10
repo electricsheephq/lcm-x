@@ -26,24 +26,28 @@ def bootstrap(deltas, resamples=10000, rng_seed=1064):
 
 def verdict(intervals, cost_ratio=None, complete=True):
     """KEEP requires every lower bound; KILL requires a failing upper bound. Crossing a bar is inconclusive."""
-    if not complete or "facts_user" not in intervals:
+    if "facts_user" not in intervals:
         return "INCONCLUSIVE"
     covered = {k: v for k, v in intervals.items() if v.get("n_seeds", 8) >= 6 and v.get("low") is not None}
-    if cost_ratio is not None and cost_ratio > 1.10:
-        return "KILL"
     bars = {k: 5 if k == "facts_user" else -2 for k in intervals}
     if any(v["high"] <= bars[k] for k, v in covered.items()):
+        return "KILL"
+    if not complete:
+        return "INCONCLUSIVE"
+    if cost_ratio is not None and cost_ratio > 1.10:
         return "KILL"
     return "KEEP" if cost_ratio is not None and len(covered) == len(intervals) and all(v["low"] > bars[k] for k, v in covered.items()) else "INCONCLUSIVE"
 
 
-def axes(sc, facts, continuity_excluded=()):
+def axes(sc, facts, continuity_excluded=(), fact_classes=False):
     out = {}
     for f in facts:
         p = sc["probes"].get(f["id"])
         if p is None:
             continue  # future-source facts have no score at this checkpoint
         keys = ["facts_all", f"facts_{f['row_role']}"]
+        if fact_classes:
+            keys.append(f"fact_class_{f['class']}")
         if f["row_role"] == "tool":
             keys.append(f"facts_tool_{f['placement']}")
         if f["class"] in ("name", "path", "build_id", "prefix", "file_change"):
@@ -80,9 +84,16 @@ def analyze_window(scores, material, seeds, context_length):
             continue
         sc = json.loads(file.read_text())
         seed, arm = int(sc["seed"].removeprefix("seed-")), sc["arm"]
-        if seed not in seeds or arm != "codex-native" and sc.get("context_length") != context_length:
+        if seed not in seeds:
             continue
         model = (sc.get("reader") or "").split("·")[0]
+        if model != "FAKE" and arm in ("L0", "L1", "L1-H", "L1-noptr"):
+            head = sc.get("worktree_head")
+            if not isinstance(head, str) or not head.strip():
+                raise ValueError(f"{arm}: every real score requires non-empty worktree_head")
+            pins.setdefault(arm, set()).add(head)
+        if arm != "codex-native" and sc.get("context_length") != context_length:
+            continue
         run = Path(sc["run_dir"]).parent
         admitted_usage = sc.get("summariser_usage")
         summary_file = run / "summary.json"
@@ -91,8 +102,6 @@ def analyze_window(scores, material, seeds, context_length):
             raise ValueError(f"admitted summariser usage missing or disagrees: {run}")
         key = (sc["checkpoint_id"], model, None if model == "gpt-6-astra" else context_length, run.name)
         groups.setdefault((arm, seed), {})[key] = sc
-        if sc.get("worktree_head"):
-            pins.setdefault(arm, set()).add(sc["worktree_head"])
         cells = {}
         for p in sc["probes"].values():
             if p.get("kind") and p["class"] != "INCOMPLETE":
@@ -104,6 +113,9 @@ def analyze_window(scores, material, seeds, context_length):
                            status_line={s: sum(p.get("status_line") == s for p in sc["probes"].values())
                                         for s in ("STATUS: NOT LIVE", "STATUS: LIVE", "INVALID/MISSING/ABSTAIN")},
                            latency={k: sc.get("accounting", {}).get(k) for k in ("reader_latency", "summariser_latency", "compaction_wall")}))
+    for arm, heads in pins.items():
+        if len(heads) != 1:
+            raise ValueError(f"{arm}: exactly one worktree_head required across all seeds/windows; found {len(heads)}")
     if pins.get("L0", set()) & pins.get("L1", set()):
         raise ValueError("L0 vs L1 carries the same SHA")
     out = {}
@@ -115,7 +127,7 @@ def analyze_window(scores, material, seeds, context_length):
         by_seed, missing, window, pre, incomplete, errors = {}, [], {}, [], [], {left_arm: 0, other: 0}
         rereads = {left_arm: 0, other: 0}
         totals = {left_arm: [0, 0, True], other: [0, 0, True]}
-        seen, summary_seen, exclusions = set(), set(), set()
+        seen, summary_seen, exclusions, horizon_exclusions = set(), set(), set(), []
         estimated = {left_arm: 0, other: 0}
         allowed = ("gpt-6-astra",) if other == "codex-native" else ("glm-5.3", "FAKE")
         for seed in seeds:
@@ -136,6 +148,8 @@ def analyze_window(scores, material, seeds, context_length):
             tally, run_usage = {}, {}
             window[str(seed)] = []
             facts = json.loads((material / f"seed-{seed}" / "facts.json").read_text())
+            if other == "H" and left_arm == "L1":
+                required.update(f"fact_class_{f['class']}" for f in facts)
             for key in sorted(left):
                 pair = (left[key], right[key])
                 excluded = {g["item"] for g in right[key]["metrics"].get("continuity", {}).get("grid", [])
@@ -145,6 +159,20 @@ def analyze_window(scores, material, seeds, context_length):
                 for arm, sc in zip((left_arm, other), pair, strict=True):
                     errors[arm] += sc.get("reader_errors", 0)
                     rereads[arm] += sc.get("reader_rereads", 0)
+                if all(sc.get("behaviour", {}).get("compactions", 0) >= 1 for sc in pair):
+                    for arm, sc in zip((left_arm, other), pair, strict=True):
+                        identity = (arm, str(Path(sc["run_dir"]).resolve()))
+                        if identity in seen:
+                            continue
+                        seen.add(identity)
+                        usage, total = sc.get("accounting", {}), totals[arm]
+                        estimated[arm] += usage.get("reader_estimated_attempts", 0)
+                        tokens = [usage.get(k) for k in ("reader_input_tokens", "reader_output_tokens")]
+                        total[2] &= all(v is not None for v in tokens)
+                        total[0] += sum(v or 0 for v in tokens)
+                        total[1] += usage.get("successful_probes", 0)
+                        root = Path(sc["run_dir"]).parent / "summary.json"
+                        run_usage[(arm, str(root.resolve()))] = sc["summariser_usage"]
                 if any(sc.get("reader_errors") or not sc["metrics"]["facts_kept"]["complete"] or
                        not sc["metrics"].get("lifecycle", {}).get("complete", True) or
                        sc.get("reader_readback", {}).get("pin_ok") is False or
@@ -154,26 +182,17 @@ def analyze_window(scores, material, seeds, context_length):
                 if not all(sc.get("behaviour", {}).get("compactions", 0) >= 1 for sc in pair):
                     pre.append(dict(seed=seed, checkpoint=key[0], axes=[axes(sc, facts, excluded) for sc in pair]))
                     continue
+                beyond = right[key].get("beyond_declared", {})
+                if other == "codex-native" and any(beyond.get(k) for k in ("facts", "corrections", "compactions")):
+                    horizon_exclusions.append(dict(seed=seed, checkpoint=key[0], beyond_declared=beyond))
+                    continue
                 window[str(seed)].append(key[0])
-                a, b = (axes(sc, facts, excluded) for sc in pair)
+                a, b = (axes(sc, facts, excluded, fact_classes=other == "H" and left_arm == "L1") for sc in pair)
                 for k in a.keys() & b.keys():
                     cell = tally.setdefault(k, [0, 0, 0, 0])
                     for i, values in enumerate((a[k], b[k])):
                         cell[2*i] += sum(values)
                         cell[2*i+1] += len(values)
-                for arm, sc in zip((left_arm, other), pair, strict=True):
-                    identity = (arm, str(Path(sc["run_dir"]).resolve()))
-                    if identity in seen:
-                        continue
-                    seen.add(identity)
-                    usage, total = sc.get("accounting", {}), totals[arm]
-                    estimated[arm] += usage.get("reader_estimated_attempts", 0)
-                    tokens = [usage.get(k) for k in ("reader_input_tokens", "reader_output_tokens")]
-                    total[2] &= all(v is not None for v in tokens)
-                    total[0] += sum(v or 0 for v in tokens)
-                    total[1] += usage.get("successful_probes", 0)
-                    root = Path(sc["run_dir"]).parent / "summary.json"
-                    run_usage[(arm, str(root.resolve()))] = sc["summariser_usage"]
             for identity, usage in run_usage.items():
                 if identity in summary_seen:
                     continue
@@ -190,7 +209,7 @@ def analyze_window(scores, material, seeds, context_length):
             ci["verdict"] = "INCONCLUSIVE" if ci["n_seeds"] < 6 or ci["low"] is None else "SUPERIOR" if ci["low"] > bar and bar == 5 else "NON-INFERIOR" if ci["low"] > bar else "BELOW BAR" if ci["high"] <= bar else "INCONCLUSIVE"
         costs = {arm: t[0]/t[1] if t[2] and t[1] else None for arm, t in totals.items()}
         ratio = costs[left_arm]/costs[other] if costs[left_arm] is not None and costs[other] else None
-        complete = not missing and len(seeds) >= 8 and bool(intervals)
+        complete = not missing and not incomplete and len(seeds) >= 8 and bool(intervals)
         covered = complete and all(v["n_seeds"] >= 6 and v["low"] is not None for v in intervals.values())
         claim = CLAIMS[other] if left_arm == "L1" else "descriptive fake comparison"
         if claim == "KEEP gate":
@@ -201,7 +220,7 @@ def analyze_window(scores, material, seeds, context_length):
             result = "DESCRIPTIVE"
         out[f"{left_arm}−{'C' if other == 'codex-native' else other}"] = dict(intervals=intervals, missing_seeds=missing, cost_ratio=ratio,
             cost_per_success=costs, compared_window=window, pre_window=pre, incomplete_pairs=incomplete, reader_errors=errors, reader_rereads=rereads,
-            reader_estimated_attempts=estimated, continuity_exclusions=sorted(exclusions),
+            reader_estimated_attempts=estimated, continuity_exclusions=sorted(exclusions), horizon_exclusions=horizon_exclusions,
             verdict=result, claim_class=claim, claim="mechanism only; overall KEEP also needs product comparison")
     return dict(schema="eval2-v2", context_length=context_length, unit="session/seed", resamples=10000, rng_seed=1064, seeds=seeds, comparisons=out, per_checkpoint=counts)
 
@@ -248,6 +267,7 @@ def main(argv=None):
             rows.append(f"| {pair} | INCOMPLETE | {value['incomplete_pairs']} |")
             rows.append(f"| {pair} | reader re-reads per arm | {value.get('reader_rereads', {})} |")
             rows.append(f"| {pair} | cost ratio / estimated attempts per arm | {value.get('cost_ratio')} / {value.get('reader_estimated_attempts', {})} |")
+            rows.append(f"| {pair} | beyond-declared exclusions | {value.get('horizon_exclusions', [])} |")
             rows.append(f"| {pair} | continuity excluded (host-visible receipt absent) | {value.get('continuity_exclusions', [])} |")
         rows += ["", "| arm (context) | checkpoint | facts denominator | lifecycle kind/actual compactions | correct/denominator | status-line scoring (NOT LIVE passes) |", "|---|---|---|---|---|---|"]
         for c in checkpoints:

@@ -24,7 +24,9 @@ spec.loader.exec_module(e)
 ])
 def test_verdict(intervals, cost, expected):
     assert e.verdict(intervals, cost) == expected
-    assert e.verdict(intervals, cost, complete=False) == "INCONCLUSIVE"
+    assert e.verdict(intervals, cost, complete=False) == (
+        "KILL" if "facts_user" in intervals and any(v["high"] <= (5 if k == "facts_user" else -2)
+                                                   for k, v in intervals.items()) else "INCONCLUSIVE")
 
 
 def test_bootstrap_resamples_sessions_with_fixed_rng():
@@ -66,7 +68,7 @@ def test_eight_seed_pairs_require_every_manifest_checkpoint_and_admitted_score(t
                 ps = {f["id"]: {"class": "CORRECT" if arm == "L1" else "MISS"} for f in facts}
                 if cp == cps[0]:
                     ps["life"] = dict(kind="stale_task", compaction_horizon=1, **{"class": "CORRECT"})
-                sc = dict(arm=arm, seed=f"seed-{seed}", reader="glm-5.3", checkpoint_id=cp["id"], probes=ps,
+                sc = dict(arm=arm, seed=f"seed-{seed}", reader="glm-5.3", worktree_head=arm, checkpoint_id=cp["id"], probes=ps,
                           behaviour=dict(compactions=1), accounting=dict(reader_input_tokens=1, reader_output_tokens=1, successful_probes=1),
                           summariser_usage=dict(events_present=True, calls=[]), run_dir=str(run / f"cp-{cp['id']}"), metrics=dict(facts_kept=dict(complete=True, denominator=6),
                           lifecycle=dict(complete=True, by_kind_horizon={})))

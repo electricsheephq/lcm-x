@@ -28,7 +28,7 @@ def paired(root, *, host=True, right_arm="codex-native"):
         tokens = 20 if arm == "L1" else 30
         write(run / "summary.json", dict(events=[dict(summariser_calls=[dict(usage=dict(prompt_tokens=tokens, completion_tokens=0))])]))
         grid = [dict(item=HOST, strict=arm == "L1"), dict(item="active", strict=True)]
-        sc = dict(arm=arm, seed="seed-1", reader="gpt-6-astra", reader_readback=dict(effort="low", pin_ok=True),
+        sc = dict(arm=arm, worktree_head=arm, seed="seed-1", reader="gpt-6-astra", reader_readback=dict(effort="low", pin_ok=True),
                   context_length=272000, checkpoint_id=cp["id"], run_dir=str(run / f"cp-{cp['id']}"),
                   probes={"fact": {"class": "CORRECT"}}, behaviour=dict(compactions=1), summariser_usage=usage(tokens),
                   accounting=dict(reader_input_tokens=20 if arm == "L1" else 10, reader_output_tokens=0,

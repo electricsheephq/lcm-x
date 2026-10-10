@@ -32,7 +32,7 @@ if [[ "$1" = eval2* ]]; then
     est=$("$PY" -c 'import json,math,os,sys; m=json.load(open(sys.argv[1])); print(math.ceil(max(60,m["decision_checkpoint"]["tokens"]/float(os.environ.get("S2_REPLAY_TOKENS_PER_SECOND","333")))/60))' "$TRACK_S_MATERIAL/seed-$N/material.manifest.json")
     if [ "$1" = eval2-c ]; then
       run "s2-L1-d$N-astra" "$est" "$PY" -B "$T/s2/run_s_lcmx.py" --arm L1 --reader astra-low --seed "$N" --run "d$N-astra" --checkpoints lifecycle || status=1
-      run "s4-codex-native-d$N-astra" 160 "$PY" -B "$T/s4/run_s_codex.py" --seed "$N" --run "d$N-astra" --auth-file "${CODEX_AUTH:?}" --checkpoints lifecycle || status=1
+      run "s4-codex-native-d$N-astra" 160 "$PY" -B "$T/s4/run_s_codex.py" --seed "$N" --run "d$N-astra" --auth-file "${CODEX_AUTH:?}" --dictation file --checkpoints lifecycle || status=1
       continue
     fi
     for arm in L0 L1 L1-H L1-noptr H; do
