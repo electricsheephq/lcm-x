@@ -101,12 +101,22 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
     from . import command  # lazy: command imports most of the plugin
     from .embedding_provider import probe_provider_availability
 
+    provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+    local = provider in {"fastembed", "fast-embed"}
     read_conn = command._embedding_read_connection(db_path)
     try:
-        if command._embedding_current_profile(read_conn) is None:
-            return "no_profile", None  # `/lcm embed warmup` has not run yet
+        no_profile = command._embedding_current_profile(read_conn) is None
+        # Registration commits each profile separately; finish a partial one.
+        no_profile = no_profile or (local and command._chunk_current_profile(read_conn) is None)
     finally:
         read_conn.close()
+    if no_profile:
+        if not local:
+            return "no_profile", None  # `/lcm embed warmup` has not run yet
+        result = command._embedding_register_profiles(config, db_path, allow_download=False)
+        if isinstance(result, str):
+            return "auto_register_unavailable", result
+        del result  # release the probe models before the backfill loads its own
     if breaker is not None and breaker.is_open():
         return "circuit_open", None  # the query path's breaker is cooling down
     probe = probe_provider_availability(config)
