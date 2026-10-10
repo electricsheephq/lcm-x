@@ -7938,6 +7938,21 @@ class LCMEngine(
                             for r in pending_results
                         ]
                         pending_tokens = count_messages_tokens(pending_results)
+                elif msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    # The final sanitizer inserts a plain stub for each call whose result is not
+                    # in the kept tail. Reserve them here too, or a full summary budget overflows
+                    # after sanitizing and the over-cap pass drops the preserved objective first.
+                    kept_result_ids = {
+                        str(r.get("tool_call_id") or "").strip()
+                        for r in kept_tail_reversed if r.get("role") == "tool"
+                    }
+                    missing_ids = [
+                        call_id for call_id in (_tool_call_id(tc) for tc in msg["tool_calls"])
+                        if call_id and call_id not in kept_result_ids
+                    ]
+                    if missing_ids:
+                        msg_tokens += count_messages_tokens(
+                            [self._missing_tool_result_stub(call_id) for call_id in missing_ids])
                 if used + tail_token_total + pending_tokens + msg_tokens > assembly_cap:
                     if (
                         stub_over_cap_tool_results
@@ -8225,6 +8240,11 @@ class LCMEngine(
             and anchor_part is not None
             and count_messages_tokens(result) > assembly_cap
         ):
+            logger.warning(
+                "LCM assembly: %d token(s) over the cap after sanitizing; dropping the preserved user "
+                "objective from the active context as a last resort (the store keeps it)",
+                count_messages_tokens(result) - assembly_cap,
+            )
             trimmed_result: list[Dict[str, Any]] = []
             for msg in result:
                 content = normalize_content_value(msg.get("content")) or ""
