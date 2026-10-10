@@ -8,12 +8,15 @@ unless a test says so.
 
 from __future__ import annotations
 
+import gc
 import json
 import io
 import logging
 import sqlite3
 import threading
+import time
 import urllib.error
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -174,6 +177,176 @@ def _add_leaf(engine, text):
     node_id = engine._dag.add_node(node)
     engine._invalidate_rollups_for_published_node(engine._dag.get_node(node_id))
     return str(node_id)
+
+
+# #1063 exercises the real FastembedProvider cached-only construction path.
+@pytest.fixture
+def local_fastembed(monkeypatch):
+    calls = []
+    state = {"cached": True}
+
+    class Model:
+        def query_embed(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+
+        embed = query_embed
+
+    def construct(self, *, allow_download):
+        calls.append(allow_download)
+        if not state["cached"]:
+            raise provider_mod.ProviderNotWarmedUp("offline fake model is not cached")
+        return Model()
+
+    monkeypatch.setattr(provider_mod.FastembedProvider, "_construct", construct)
+    monkeypatch.setattr(
+        provider_mod, "probe_provider_availability",
+        lambda _config: {"available": True, "detail": "offline fake"},
+    )
+    return calls, state
+
+
+def _local_engine(tmp_path, home, provider="fastembed"):
+    engine = _make_engine(tmp_path, home, provider=provider, register=False)
+    engine._config.embedding_model = "BAAI/bge-small-en-v1.5"
+    return engine
+
+
+def _profiles(engine):
+    try:
+        return _rows(engine, "SELECT task, active, identity_hash FROM lcm_embedding_profile")
+    except sqlite3.OperationalError:
+        return []
+
+
+@pytest.mark.parametrize("provider", ["fastembed", "fast-embed"])
+def test_1063_a_first_pass_registers_and_embeds(tmp_path, home, local_fastembed, provider):
+    engine = _local_engine(tmp_path, home, provider)
+    try:
+        node_id = str(engine._dag.add_node(SummaryNode(
+            session_id=SESSION, depth=0, summary="first cached local summary",
+            created_at=1.0, latest_at=1.0,
+        )))
+        engine._store.append(SESSION, {"role": "user", "content": FILLER})
+        outcome = maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config,
+        )
+        print(f"A: outcome={outcome}; profiles={len(_profiles(engine))}")
+        assert "summaries=complete:1" in outcome
+        assert _summary_vector_ids(engine) == [node_id]
+        assert _chunk_vector_count(engine) > 0
+        assert sorted((task, active) for task, active, _ in _profiles(engine)) == [
+            ("chunk", 1), ("summary", 1),
+        ]
+        assert local_fastembed[0] and not any(local_fastembed[0])
+    finally:
+        engine._close_storage()
+
+
+def test_1063_b_uncached_warns_once_retries_and_preserves_ingest(
+    tmp_path, home, local_fastembed, monkeypatch, caplog,
+):
+    calls, state = local_fastembed
+    state["cached"] = False
+    monkeypatch.setattr(maintenance_mod, "_FAILURE_WARNED", False)
+    engine = _local_engine(tmp_path, home)
+    try:
+        with caplog.at_level(logging.DEBUG, logger=maintenance_mod.__name__):
+            engine.on_session_start(SESSION, platform="cli", context_length=200000)
+            _drain(engine)
+            engine._store.append(SESSION, {"role": "user", "content": FILLER})
+            node_id = _add_leaf(engine, "uncached local summary")
+            _drain(engine)
+        last, _ = maintenance_mod.incremental_embedding_state(engine._config.database_path)
+        print(f"B: outcome={last[1]}; construct_allow_download={calls}")
+        assert last[1] == "auto_register_unavailable"
+        assert calls == [False, False]
+        assert _profiles(engine) == []
+        assert [r.levelno for r in caplog.records if r.name == maintenance_mod.__name__] == [
+            logging.WARNING, logging.DEBUG,
+        ]
+        assert _rows(engine, "SELECT COUNT(*) FROM messages")[0][0] > 0
+        assert "auto_register_unavailable" in handle_lcm_command("status", engine)
+        state["cached"] = True
+        engine._schedule_embedding_maintenance()
+        _drain(engine)
+        assert _summary_vector_ids(engine) == [node_id]
+        assert not any(calls)
+    finally:
+        engine._close_storage()
+
+
+@pytest.mark.parametrize("provider", ["voyage", "ollama"])
+def test_1063_c_other_providers_still_require_warmup(
+    tmp_path, home, monkeypatch, provider,
+):
+    monkeypatch.setenv("VOYAGE_API_KEY", "offline-placeholder")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("no-profile non-FastEmbed pass must not call a provider")
+
+    monkeypatch.setattr(command_mod, "resolve_provider", forbidden)
+    monkeypatch.setattr(provider_mod, "probe_provider_availability", forbidden)
+    engine = _make_engine(tmp_path, home, provider=provider, register=False)
+    try:
+        assert maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config,
+        ) == "no_profile"
+        assert _profiles(engine) == []
+    finally:
+        engine._close_storage()
+
+
+WARMUP_1063_READY = (
+    "LCM embedding warmup\nstatus: ready\ndownload: ready (about 130 MB)\n"
+    "provider: fastembed\nmodel: BAAI/bge-small-en-v1.5\ndim: 2\n"
+    "chunk_model: BAAI/bge-small-en-v1.5\nchunk_dim: 2\n"
+    "chunk_probe: shared summary probe\ndtype: float32\n"
+    "privacy_revision: (local)\ncost_note: local model; no per-call API charge"
+)
+WARMUP_1063_ERROR = (
+    "LCM embedding warmup\nstatus: error\nerror: offline fake model is not cached"
+)
+
+
+@pytest.mark.parametrize("cached", [True, False])
+def test_1063_d_warmup_bytes_match_base(tmp_path, home, local_fastembed, cached):
+    calls, state = local_fastembed
+    state["cached"] = cached
+    engine = _local_engine(tmp_path, home)
+    try:
+        text = command_mod._embedding_warmup_text(engine)
+        print(f"D cached={cached}: {json.dumps(text)}")
+        assert text == (WARMUP_1063_READY if cached else WARMUP_1063_ERROR)
+        assert calls == ([False] if cached else [False, True])
+        if cached:
+            assert engine._lcm_embedding_provider_cache[1].provider_id == "fastembed"
+    finally:
+        engine._close_storage()
+
+
+@pytest.mark.parametrize("auto_first", [True, False])
+def test_1063_e_manual_and_auto_share_identities(tmp_path, home, local_fastembed, auto_first):
+    engine = _local_engine(tmp_path, home)
+    try:
+        def auto():
+            outcome = maintenance_mod.run_incremental_embedding_pass(
+                engine._config.database_path, engine._config,
+            )
+            assert outcome != "no_profile"
+
+        def manual():
+            assert command_mod._embedding_warmup_text(engine) == WARMUP_1063_READY
+
+        (auto if auto_first else manual)()
+        first = _profiles(engine)
+        (manual if auto_first else auto)()
+        assert _profiles(engine) == first
+        assert sorted((task, active) for task, active, _ in first) == [
+            ("chunk", 1), ("summary", 1),
+        ]
+        assert len({identity for _, _, identity in first}) == 2
+    finally:
+        engine._close_storage()
 
 
 def test_a_new_leaf_and_chunks_get_vectors_without_manual_backfill(
@@ -744,3 +917,100 @@ def test_every_accepted_local_provider_spelling_allows_automatic_chunks(spelling
     resolved = provider_mod.resolve_provider(config)
     assert resolved.provider_id in {"fastembed", "ollama"}
     assert maintenance_mod._automatic_chunks_allowed(config, command_mod)
+
+
+def test_1063_f_slow_cached_load_is_outside_the_query_deadline(
+    tmp_path, home, local_fastembed, monkeypatch,
+):
+    calls, _state = local_fastembed
+    construct = provider_mod.FastembedProvider._construct
+
+    def slow_construct(self, *, allow_download):
+        time.sleep(0.3)  # a cold page cache can make the first ONNX load slow
+        return construct(self, allow_download=allow_download)
+
+    monkeypatch.setattr(provider_mod.FastembedProvider, "_construct", slow_construct)
+    engine = _local_engine(tmp_path, home)
+    engine._config.embedding_query_timeout_s = 0.1
+    try:
+        engine._dag.add_node(SummaryNode(
+            session_id=SESSION, depth=0, summary="slow cached local summary",
+            created_at=1.0, latest_at=1.0,
+        ))
+        outcome = maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config,
+        )
+        print(f"F: outcome={outcome}; construct_allow_download={calls}")
+        assert sorted(task for task, _active, _ in _profiles(engine)) == ["chunk", "summary"]
+        assert not any(calls)
+    finally:
+        engine._close_storage()
+
+
+def test_1063_g_registration_provider_released_before_backfill(
+    tmp_path, home, local_fastembed, monkeypatch,
+):
+    register = command_mod._embedding_register_profiles
+    backfill = command_mod._embedding_backfill_summary_run
+    refs, alive_at_backfill = [], []
+
+    def tracking_register(*args, **kwargs):
+        result = register(*args, **kwargs)
+        if not isinstance(result, str):
+            refs.append(weakref.ref(result["provider"]))
+        return result
+
+    def tracking_backfill(*args, **kwargs):
+        gc.collect()
+        alive_at_backfill.append([ref() is not None for ref in refs])
+        return backfill(*args, **kwargs)
+
+    monkeypatch.setattr(command_mod, "_embedding_register_profiles", tracking_register)
+    monkeypatch.setattr(command_mod, "_embedding_backfill_summary_run", tracking_backfill)
+    engine = _local_engine(tmp_path, home)
+    try:
+        engine._dag.add_node(SummaryNode(
+            session_id=SESSION, depth=0, summary="released provider summary",
+            created_at=1.0, latest_at=1.0,
+        ))
+        maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config,
+        )
+        print(f"G: registration provider alive at backfill={alive_at_backfill}")
+        assert refs and alive_at_backfill == [[False]]
+    finally:
+        engine._close_storage()
+
+
+def test_1063_h_partial_registration_is_completed_by_the_next_pass(
+    tmp_path, home, local_fastembed,
+):
+    engine = _local_engine(tmp_path, home)
+    try:
+        engine._dag.add_node(SummaryNode(
+            session_id=SESSION, depth=0, summary="partial registration summary",
+            created_at=1.0, latest_at=1.0,
+        ))
+        engine._store.append(SESSION, {"role": "user", "content": FILLER})
+        maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config,
+        )
+        # A first pass that committed only the summary profile (the chunk
+        # registration failed or the process exited between the two commits).
+        conn = sqlite3.connect(engine._config.database_path)
+        try:
+            conn.execute("DELETE FROM lcm_embedding_profile WHERE task = 'chunk'")
+            conn.commit()
+        finally:
+            conn.close()
+        assert sorted(task for task, _active, _ in _profiles(engine)) == ["summary"]
+        outcome = maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config,
+        )
+        print(f"H: outcome={outcome}; profiles={_profiles(engine)}")
+        assert sorted((task, active) for task, active, _ in _profiles(engine)) == [
+            ("chunk", 1), ("summary", 1),
+        ]
+        assert "chunks=refused" not in outcome
+    finally:
+        engine._close_storage()

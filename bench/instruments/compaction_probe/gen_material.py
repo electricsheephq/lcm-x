@@ -401,9 +401,16 @@ SCENES = (
 )
 
 
-def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 17000,
+def generate(seed: int, out_dir: Path, turns: int | None = None, tokens_per_turn: int | None = None,
              placements: bool = False, classes12: bool = False, min_tokens: int = 244800,
-             min_events: int = 2, smoke: bool = False) -> dict[str, Any]:
+             min_events: int = 2, smoke: bool = False, v4: bool = False) -> dict[str, Any]:
+    if v4:
+        if turns not in (None, V4_STEPS) or tokens_per_turn is not None:
+            raise ValueError(f"v4 has a fixed {V4_STEPS}-step horizon sized by --min-tokens/--min-events; "
+                             "omit --turns and --tokens-per-turn")
+        return _generate_v4(seed, out_dir, min_tokens, min_events, smoke)
+    turns = 35 if turns is None else turns
+    tokens_per_turn = 17000 if tokens_per_turn is None else tokens_per_turn
     if not placements and not classes12:
         return _generate_legacy(seed, out_dir, turns, tokens_per_turn)
     if not placements or not classes12:
@@ -592,16 +599,245 @@ def generate(seed: int, out_dir: Path, turns: int = 35, tokens_per_turn: int = 1
     return manifest
 
 
+
+V4_STEPS = 90
+
+
+def _generate_v4(seed, out_dir, min_tokens, min_events, smoke):
+    """Independent values and interleaved source roles across a full offline horizon."""
+    if min_tokens <= 0 or min_events < 2:
+        raise ValueError("require positive --min-tokens and --min-events >= 2")
+    count, rng = token_counter(), random.Random(seed ^ 0x5634)
+    rows, facts, lifecycle, probes, continuity = [], [], [], [], []
+    grams, used = {}, set()
+
+    def value(cls):
+        while True:
+            words = rng.sample(VALUE_WORDS, rng.randrange(2, 5))
+            parts = [rng.choice((str.lower, str.upper, str.title))(w) for w in words]
+            parts.insert(rng.randrange(len(parts) + 1), str(rng.randrange(10000, 10**9)))
+            parts.append(rng.choice(("MiB", "rows", "kg", "ms", "jobs", "bytes")))
+            rng.shuffle(parts)
+            text = rng.choice(("-", "/", " ", "_", ":", ".")).join(parts)
+            fragments = {text.casefold()[i:i + 6] for i in range(len(text) - 5)}
+            if text not in used and not fragments & grams.get(cls, set()):
+                used.add(text)
+                grams.setdefault(cls, set()).update(fragments)
+                return text
+
+    def add(role, text, call=None):
+        i = len(rows)
+        rows.append(dict(id=f"S{seed}-R{i:05d}", turn=step + 1, role=role, content=text,
+                         tool_call_id=call, ts=float(seed * 10000 + i)))
+        return dict(row_index=i, row_id=rows[-1]["id"], row_role=role)
+
+    def filler(chars):
+        return "".join(rng.choice(SCENES).format(n=f"{seed}:{rng.getrandbits(64):016x}")
+                       for _ in range(chars // 140 + 1))[:chars]
+
+    def statement(item, text, role="user"):
+        return dict(id=item, value=text, **add(role, f"[{item}] {text}"))
+
+    groups = {role: [] for role in ("user", "assistant", "tool")}
+    for c, cls in enumerate(CLASSES):
+        for k in range(5):
+            val = value(cls)
+            role = "tool" if k in (2, 3) or c == 10 else "assistant" if k == 1 else "user"
+            fixture = f"{rng.choice(VALUE_WORDS)}-{rng.randrange(100000, 1000000)}"
+            f = dict(id=f"S{seed}-F{c:02d}-{k}", fixture=fixture, **{"class": cls}, value=val,
+                     answer=val, stale=value(cls) if c == 6 else None, row_role=role,
+                     placement=("head", "head", "middle", "tail", "tail")[k],
+                     probe=f"What is the current {cls.replace('_', ' ')} for fixture {fixture}?")
+            groups[role].append(f)
+            facts.append(f)
+    schedule = {}
+    for group in groups.values():
+        rng.shuffle(group)
+    # Stratify each source role, including user facts, across all three thirds.
+    for third in range(3):
+        users = groups["user"][third::3]
+        for j, f in enumerate(users):
+            schedule[third * 30 + 3 + j * 3] = f
+        group = [f for role in ("assistant", "tool") for f in groups[role][third::3]]
+        rng.shuffle(group)
+        available = [i for i in range(third * 30, (third + 1) * 30) if i not in schedule]
+        for j, f in enumerate(group):
+            schedule[available[int((j + .5) * len(available) / len(group))]] = f
+    # Supersession sources need two full fresh-token spans after their update.
+    for slot, f in list(schedule.items()):
+        if f["stale"] and slot >= 30:
+            early = next(i for i, other in schedule.items() if i < 30 and not other["stale"] and
+                         other["row_role"] == f["row_role"])
+            schedule[slot], schedule[early] = schedule[early], f
+    # Drawn from the shuffled pool, so middle placement is independent of class.
+    user_middle = rng.sample(groups["user"], 8)
+    for f in user_middle:
+        f["placement"] = "middle"
+    # A corrected fact must not also be a supersession fact: its pre-correction
+    # value would be a second obsolete value the stale-rate scorer never sees.
+    corrected = [f for i, f in sorted(schedule.items()) if i < 88 and not f["stale"] and
+                 f["row_role"] == "user" and f not in user_middle][:3]
+    correction_steps = {}
+    request_names = [f"check-{n}" for n in rng.sample(range(100000, 1000000), 6)]
+    starts = {5: 0, 10: 1, 15: 2, 20: 3, 25: 4, 45: 5}
+    ends = {12: (0, "completed", None), 18: (1, "cancelled", 2),
+            27: (2, "superseded", 3), 35: (3, "completed", None), 50: (4, "cancelled", 5)}
+    step = 0
+    continuity.append(statement(f"S{seed}-CONT-host_instruction",
+                                "Preserve chronology and answer from stated values.", "system"))
+    # Full smoke also meets the token floor; the forced event remains wiring-only.
+    # Spread the post-supersession spans over the steps after the latest stale
+    # source (~4 chars/token, 5% margin) so token thirds stay balanced; the tail
+    # below tops up any residual tokenizer difference.
+    after = V4_STEPS - 1 - max(slot for slot, f in schedule.items() if f["stale"])
+    chars = max(28000, (min_events + 2) * min_tokens * 4 // V4_STEPS,
+                min_events * min_tokens * 4 * 21 // (20 * after))
+    for step in range(V4_STEPS):
+        f = schedule.get(step)
+        if f and f["stale"]:
+            f["stale_source"] = statement(f["id"] + "-OLD", f"Initial {f['fixture']}: {f['stale']}.")
+        for role, size in (("user", chars // 3), ("tool", chars // 3), ("assistant", chars // 3)):
+            target = f if f and f["row_role"] == role else None
+            size = max(size, 100004 if target and target["class"] == "file_change" and
+                       target["placement"] == "middle" and role == "tool" else 8000)
+            body = filler(size)
+            if target:
+                initial = value(target["class"]) if target in corrected else target["value"]
+                line = f"[{target['id']}; fixture {target['fixture']}] Current {target['class']}: {initial}.\n"
+                offset = {"head": 0, "middle": size // 2, "tail": size}[target["placement"]]
+                body = body[:offset] + line + body[offset:]
+            call = f"S{seed}-CALL{len(rows):05d}" if role == "tool" else None
+            if call:
+                add("assistant", f"Read the fixture for {call}.", call)
+                rows[-1]["tool_calls"] = [dict(id=call, type="function", function=dict(
+                    name="read_material", arguments=json.dumps({"path": f"fixtures/{call}.txt"})))]
+            source = add(role, body, call)
+            if target:
+                target.update(source, turn=step + 1, char_offset=body.index(initial))
+                if target in corrected:
+                    target["correction_source"] = dict(source, value=initial)
+                    correction_steps.setdefault(step + 1, []).append(target)
+        for target in correction_steps.get(step, []):
+            source = statement(target["id"], f"Use {target['value']}.")
+            target.update({k: v for k, v in source.items() if k not in ("id", "value")}, placement="head", turn=step + 1,
+                          char_offset=rows[-1]["content"].index(target["value"]))
+            probes.append(dict(id=target["id"] + "-CORRECTION", kind="corrected_value",
+                               text=target["probe"], expect="value", answer=target["value"], **{k: v for k, v in source.items() if k not in ("id", "value")}))
+        if step in starts:
+            i = starts[step]
+            source = statement(f"S{seed}-REQUEST-{i}", f"Please do {request_names[i]}.")
+            lifecycle.append(dict(**source, task=request_names[i], status="pending", replacement=None))
+        if step in ends:
+            i, status, replacement = ends[step]
+            task = request_names[i]
+            text = (f"Completed {task}." if status == "completed" else
+                    f"Drop {task}, don't do it; do {request_names[replacement]}." if status == "cancelled" else
+                    f"Instead of {task} do {request_names[replacement]}.")
+            source = statement(f"S{seed}-RESOLUTION-{i}", text, "assistant" if status == "completed" else "user")
+            lifecycle[i].update(status=status, replacement=request_names[replacement] if replacement is not None else None,
+                                resolution=source)
+            if replacement is not None:
+                probes.append(dict(id=f"S{seed}-STALE-{i}", kind="stale_task", expect="value",
+                                   text=f"Is {task} still to be done?", answer=f"No; do {request_names[replacement]}.",
+                                   **{k: v for k, v in source.items() if k not in ("id", "value")}))
+        if step in (45, 75):
+            for kind, text in (("current_request", f"Please do {request_names[5]}."),
+                               ("active_constraint", "Keep source fixtures read-only; write audit results only.")):
+                item = statement(f"S{seed}-CONT-{kind}", text)
+                if step == 45:
+                    continuity.append(item)
+                else:
+                    previous = next(c for c in continuity if c["id"] == item["id"])
+                    previous.update(item)
+    state = dict(id=f"S{seed}-STATE", next_action=request_names[5], status="pending",
+                 path=f"fixtures/seed-{seed}/rollback.json", decision_id=f"S{seed}-F06-4")
+    state.update(add("assistant", f"[{state['id']}] Continuation: " + json.dumps(state, sort_keys=True)))
+    current = next(c for c in continuity if c["id"].endswith("current_request"))
+    probes.append(dict(id=f"S{seed}-CURRENT", kind="current_request", text="What is the user asking now?",
+                       expect="value", answer=current["value"], row_index=current["row_index"], row_id=current["row_id"]))
+    presented = sum(count(r["content"]) for r in rows)
+    add("user", "Continue with the current request, keeping the active constraint.")
+    # As in v3, size the tail from the latest supersession so every accepted
+    # --min-events value leaves that many full spans plus the 20k tail after it.
+    counts = [count(r["content"]) for r in rows]
+    supersession = max(sum(counts[:f["row_index"] + 1]) for f in facts if f["stale"])
+    need = supersession + 20000 + min_events * min_tokens - sum(counts)
+    tail = filler(80004)
+    while count(tail) < need:
+        tail += filler(80004)
+    add("assistant", tail)
+    suffix = None
+    if smoke:
+        suffix = statement(f"S{seed}-SMOKE-EVENT", "Final wiring-only compaction checkpoint.")
+        suffix.update(action="force_compaction_after_row", timing_population="WIRING-ONLY", runtime_event_required=True)
+    cumulative, checkpoints, boundary, prefix = 0, [], 20000, []
+    for i, r in enumerate(rows):
+        cumulative += count(r["content"])
+        prefix.append(cumulative)
+        while cumulative >= boundary:
+            checkpoints.append(dict(id=f"S{seed}-CP{boundary}", tokens=cumulative, row_index=i))
+            boundary += 20000
+    decision = checkpoints[-1]
+    if suffix and decision["row_index"] < suffix["row_index"]:
+        # The replay stops at the decision checkpoint; it must reach the forced-event row.
+        decision = dict(id=f"S{seed}-CP-SMOKE", tokens=prefix[suffix["row_index"]], row_index=suffix["row_index"])
+    for i, p in enumerate(probes):
+        h = (1, 3, 5)[i % 3]
+        p.update(compaction_horizon=h, source_token_position=prefix[p["row_index"]],
+                 probe_token_position=prefix[p["row_index"]] + h * 8000)
+    admissions = [dict(id=f["id"], value=f["value"], row_id=f["row_id"], row_index=f["row_index"],
+                       role=f["row_role"], tool_call_id=rows[f["row_index"]]["tool_call_id"],
+                       status="scheduled", runtime_row_id=None) for f in facts]
+    targets = [dict(id=f["id"], kind="ancestry", row_id=f["row_id"], row_index=f["row_index"],
+                    stale_source=f["stale_source"], required_events=min_events) for f in facts if f["stale"]]
+    external = next(f for f in facts if f["class"] == "file_change" and f["placement"] == "middle" and
+                    f["row_role"] == "tool")
+    targets.append(dict(id=external["id"], kind="externalization", row_id=external["row_id"], row_index=external["row_index"]))
+    traps = []
+    for c in rng.sample(range(12), 5):
+        sibling = next(f for f in facts if f["class"] == CLASSES[c])
+        fixture = sibling["fixture"] + "-annex"
+        traps.append(dict(id=f"S{seed}-F{c:02d}-5", probe=sibling["probe"].replace(sibling["fixture"], fixture),
+                          answer="ABSTAIN", **{"class": CLASSES[c]}, sibling_id=sibling["id"]))
+    flat = [dict(id=f["id"], kind="canary", text=f["probe"], expect="value") for f in facts]
+    flat += [dict(id=t["id"], kind="trap", text=t["probe"], expect="ABSTAIN") for t in traps]
+    rng.shuffle(flat)
+    batches = [dict(id=f"S{seed}-B{k // 10}", probes=flat[k:k + 10], text=BATCH_INSTRUCTION) for k in range(0, 65, 10)]
+    manifest = dict(seed=seed, material_version="track-s-v4", mode="smoke" if smoke else "decision",
+                    tokenizer="repo-count_tokens:offline-char-estimate", params=dict(turns=V4_STEPS,
+                    tokens_per_turn=None, min_tokens=min_tokens, min_events=min_events),
+                    continuity=continuity, lifecycle=lifecycle, default_leaf_tokens=8000, checkpoints=checkpoints,
+                    receipt_targets=targets, smoke_suffix=suffix, presented_tokens=presented,
+                    planned_trigger_spans=min_events, decision_checkpoint=decision,
+                    proof_boundary="Offline fresh-token planning; compactions and all runtime receipts remain untested.")
+    out_dir.mkdir(parents=True, exist_ok=True)
+    names = []
+    for name, payload in (("facts.json", facts), ("canaries.json", facts), ("traps.json", traps),
+                          ("continuation.json", state), ("admission.manifest.json", admissions),
+                          ("transcript.jsonl", rows), ("turns.jsonl", [dict(turn=r["turn"], text=r["content"],
+                           role=r["role"], id=r["id"], tool_call_id=r["tool_call_id"], tool_calls=r.get("tool_calls", [])) for r in rows]),
+                          ("probes.jsonl", flat), ("probe_batches.jsonl", batches), ("lifecycle_probes.jsonl", probes)):
+        if name.endswith(".jsonl"):
+            (out_dir / name).write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in payload), encoding="utf-8")
+        else:
+            _json_write(out_dir / name, payload)
+        names.append(name)
+    manifest["shas"] = {name: _sha256(out_dir / name) for name in sorted(names)}
+    _json_write(out_dir / "material.manifest.json", manifest)
+    return manifest
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--seed", type=int, required=True)
     parser.add_argument("--out-dir", type=Path, required=True)
-    parser.add_argument("--turns", type=int, default=35)
-    parser.add_argument("--tokens-per-turn", type=int, default=17000)
+    parser.add_argument("--turns", type=int, default=None, help="v3/legacy only (default 35); v4 is fixed at 90")
+    parser.add_argument("--tokens-per-turn", type=int, default=None, help="v3/legacy only (default 17000)")
     parser.add_argument("--placements", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--classes12", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--min-tokens", type=int, default=244800)
     parser.add_argument("--min-events", type=int, default=2)
+    parser.add_argument("--v4", action="store_true")
     parser.add_argument("--smoke", action="store_true", help="ten-turn prefix plus forced-event wiring suffix")
     return parser
 
@@ -609,7 +845,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     generate(args.seed, args.out_dir, args.turns, args.tokens_per_turn,
-             args.placements, args.classes12, args.min_tokens, args.min_events, args.smoke)
+             args.placements, args.classes12, args.min_tokens, args.min_events, args.smoke, args.v4)
     return 0
 
 
