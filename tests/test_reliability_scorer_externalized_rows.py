@@ -127,8 +127,13 @@ def test_ingest_placeholder_resolves_and_missing_payload_is_a_deficit(tmp_path):
     assert externalized.INGEST_PREFIX in stored and stored != original
     rows, numbers, ids = externalized.resolve([(7, "S0", "user", stored, None, None)], home)
     assert rows[0][3] == original and ids == {7} and numbers["resolved"] == 1 and numbers["deficit_rows"] == 0
-    for path in (home / externalize.DEFAULT_LARGE_OUTPUT_DIRNAME).iterdir():
-        path.unlink()
+    payload_path = next((home / externalize.DEFAULT_LARGE_OUTPUT_DIRNAME).iterdir())
+    raw = json.loads(payload_path.read_text())
+    for broken in ({k: v for k, v in raw.items() if k != "content"}, {**raw, "content": None}):
+        payload_path.write_text(json.dumps(broken))
+        rows, numbers, _ = externalized.resolve([(7, "S0", "user", stored, None, None)], home)
+        assert rows == [] and numbers["reasons"] == {"missing_ingest_payload": 1}
+    payload_path.unlink()
     rows, numbers, ids = externalized.resolve([(7, "S0", "user", stored, None, None)], home)
     assert rows == [] and numbers["reasons"] == {"missing_ingest_payload": 1} and numbers["deficit_rows"] == 1
 

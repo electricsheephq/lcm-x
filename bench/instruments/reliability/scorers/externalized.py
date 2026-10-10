@@ -45,15 +45,26 @@ def _restore_ingest(row: tuple, config, home: Path) -> tuple[tuple, bool]:
     lost = []
 
     def expand(match: re.Match) -> str:
-        payload = externalize.load_externalized_payload(match.group(1).strip(), config=config, hermes_home=str(home))
+        ref = match.group(1).strip()
+        try:
+            payload = externalize.load_externalized_payload(ref, config=config, hermes_home=str(home))
+        except (ValueError, OSError, TypeError, AttributeError):  # e.g. a non-string content field
+            payload = None
         if payload is None:
-            lost.append(match.group(1))
+            lost.append(ref)
             return match.group(0)
         owner = payload.get("session_id") or ""
-        if payload.get("kind") != "ingest_payload" or (row[1] and owner and owner != row[1]) \
-                or not isinstance(payload.get("content"), str):
+        if payload.get("kind") != "ingest_payload" or (row[1] and owner and owner != row[1]):
             return match.group(0)
-        return payload["content"]
+        try:  # the product reader defaults an absent content field to ''; read the stored field itself
+            path = externalize.get_large_output_storage_dir(config, hermes_home=str(home), create=False) / ref
+            content = json.loads(path.read_text(encoding="utf-8")).get("content")
+        except (ValueError, OSError, AttributeError):
+            content = None
+        if not isinstance(content, str):  # this row's own payload, but its content is unusable
+            lost.append(ref)
+            return match.group(0)
+        return content
 
     text = INGEST_RE.sub(expand, row[3])
     return (*row[:3], text, *row[4:]), not lost
