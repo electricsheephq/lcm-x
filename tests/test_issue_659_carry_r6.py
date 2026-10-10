@@ -6,9 +6,13 @@ then the emitted window) storage equals base. A carry-bearing head stored whole 
 carried again: carry eligibility reads stored rows through a read-only view, storage keeps the bytes.
 """
 
+import json
+import re
+
 import pytest
 
 import hermes_lcm.engine as engine_module
+import hermes_lcm.tools as lcm_tools
 import tests.test_issue_659_user_carry_packet as carry_packet
 from tests.test_issue_659_carry_r4 import _generated
 from tests.test_issue_659_user_carry_packet import CARRY, SEP, _compact, _history, _host_merge, _tools
@@ -188,3 +192,92 @@ def test_a_first_new_only_quote_is_stored_whole_after_any_lead(make, lead):
     first = [] if lead == "two-rotations" else [{"role": lead, "content": "FIRST ROW"}]
     engine.ingest([*first, {"role": "user", "content": pure}, {"role": "assistant", "content": "ok"}])
     assert ("user", pure) in _rows(engine)
+
+
+def _carried(out):
+    """(rendered text of the output, every store id named by a carry header in it)."""
+    text = "\n".join(str(m.get("content") or "") for m in out)
+    ids = set()
+    for header in engine_module._USER_CARRY_HEADER_RE.finditer(text):
+        ids.update(int(i) for i in header.group(1).split(", "))
+    return text, ids
+
+
+@pytest.mark.parametrize("defaults", [False, True])
+@pytest.mark.parametrize("shape", ["glued", "merged-user", "middle", "prefixed", "externalized",
+                                   "large-emitted-head", "block-at-start"])
+def test_stored_head_is_not_recarried(make, monkeypatch, defaults, shape):
+    """REVIEW6 nesting probes: a verified carry stored whole (at row start, glued, quoted, externalized, or as a
+    large emitted head) stays recoverable through lcm_expand and is never carried again over three no-proof
+    rotations; the packet never nests and stays within budget."""
+    engine = make(session="P0", temporal_rollups_enabled=False, large_output_externalization_enabled=defaults,
+                  large_output_active_replay_stubbing_enabled=defaults)
+    if shape == "large-emitted-head":
+        large_summary = "Ordinary summarized history. " * 3800
+        monkeypatch.setattr(engine_module, "summarize_with_escalation", lambda **kw: (large_summary, 1))
+    _out, pure = _generated(engine)
+    if shape == "large-emitted-head":
+        assert len(pure) > 100000 and CARRY in pure
+    block = pure[pure.index(SEP + CARRY) + len(SEP):]
+    text = {
+        "glued": pure + "\n\nNEW REAL REQUEST",
+        "merged-user": pure + "\n\nFIRST USER TURN\n\nSECOND USER TURN",
+        "middle": "MY QUOTATION" + SEP + pure + "\n\nMY SUFFIX TEXT",
+        "prefixed": "MY QUOTATION" + SEP + pure,
+        "externalized": ("Ordinary human document paragraph. " * 3500) + SEP + pure + "\n\nMY SUFFIX TEXT",
+        "large-emitted-head": pure,
+        "block-at-start": block + "\n\nMY SUFFIX TEXT",
+    }[shape]
+    _rotate(engine)
+    window = [{"role": "user", "content": text}, {"role": "assistant", "content": "answer"}]
+    active = engine._ingest_messages(window)
+    head = engine._store.get_session_messages("P1")[0]
+    sid = head["store_id"]
+    ext = head["content"].startswith("[Externalized payload:")
+    recovered = json.loads(lcm_tools.lcm_expand({"store_id": sid, "max_tokens": 1000000}, engine=engine)).get("content")
+    if ext:
+        refs = re.findall(r";\s*ref=([^;\]\s]+)", head["content"])
+        assert refs
+        recovered = json.loads(lcm_tools.lcm_expand({"externalized_ref": refs[0], "max_tokens": 1000000},
+                                                    engine=engine)).get("content")
+    assert recovered == text, "every submitted byte is recoverable through lcm_expand"
+    cycles = []  # three no-proof rotations with real compress output; each new head retained whole
+    for cycle in range(1, 4):
+        history = [*active, *_new_turns(cycle), {"role": "user", "content": f"latest {cycle}"},
+                   {"role": "assistant", "content": "ok"}]
+        out2 = _compact(engine, history)
+        rendered, ids = _carried(out2)
+        cycles.append({"head_id_carried": sid in ids, "carry_blocks": rendered.count(CARRY),
+                       "delivered": engine._last_user_carry})
+        if cycle < 3:
+            engine.on_session_start(f"P{cycle + 1}", platform="cli", context_length=128000, conversation_id="conv",
+                                    boundary_reason="compression", old_session_id=f"P{cycle}")
+            active = engine._ingest_messages(out2)
+    assert not any(c["head_id_carried"] for c in cycles), "whole-stored verified carry head must never be selected"
+    assert all(c["carry_blocks"] <= 1 for c in cycles), "the carry packet must not nest"
+    assert all(c["delivered"]["delivered_tokens"] <= c["delivered"]["budget_tokens"] for c in cycles)
+
+
+@pytest.mark.parametrize("shape", ["plain", "malformed-header", "changed-id", "edited-body", "separator-only",
+                                   "manifest-only"])
+def test_unverified_genuine_row_is_carried(make, shape):
+    """REVIEW6 false positives: a genuine user row that is not a verified carry block is still carried."""
+    engine = make(session="P0", temporal_rollups_enabled=False)
+    _out, pure = _generated(engine)
+    text = {
+        "plain": "REAL USER: instructions after the compaction",
+        "malformed-header": "REAL USER" + SEP + CARRY + ": mine]",
+        "changed-id": "REAL USER" + SEP + pure.replace("store ids 1,", "store ids 999999,"),
+        "edited-body": "REAL USER" + SEP + pure.replace("REQ-0:", "EDITED-0:"),
+        "separator-only": "REAL USER" + SEP + "unrelated text",
+        "manifest-only": "REAL USER" + SEP + "[Summary parts omitted for space: MY OWN TEXT]",
+    }[shape]
+    _rotate(engine)
+    engine._ingest_messages([{"role": "user", "content": text}, {"role": "assistant", "content": "answer"}])
+    head = engine._store.get_session_messages("P1")[0]
+    verified = engine._holds_verified_user_carry(head)
+    engine._last_compacted_store_id = head["store_id"]
+    engine._user_carry_cache = None
+    parts = engine._user_carry_parts([], "user", [], [], [], [], [], None, None)
+    _rendered, ids = _carried([{"role": "user", "content": SEP.join(parts)}])
+    assert not verified and head["store_id"] in ids
