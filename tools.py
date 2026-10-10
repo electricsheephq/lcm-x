@@ -8765,6 +8765,8 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "expansion_model": engine._config.expansion_model or "(summary model)",
             "expansion_reasoning_effort": engine._config.expansion_reasoning_effort or "(task default)",
         },
+        # #659: the last assembly's carry packet (budget_tokens, delivered_tokens, empty_no_room, entries).
+        "user_carry": dict(getattr(engine, "_last_user_carry", None) or {}),
         "proactive_recall": {
             "enabled": bool(getattr(engine._config, "proactive_recall_enabled", False)),
             "min_score": getattr(engine._config, "proactive_recall_min_score", 0.0),

@@ -950,6 +950,19 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def load_user_rows_before(self, session_ids: List[str], before_store_id: int,
+                              limit: int) -> List[Dict[str, Any]]:
+        """#659: one page of the sessions' user rows below ``before_store_id``, newest first."""
+        if not session_ids or limit <= 0:
+            return []
+        rows = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
+               WHERE session_id IN ({",".join("?" * len(session_ids))}) AND role = 'user' AND store_id < ?
+               ORDER BY store_id DESC LIMIT ?""",
+            (*session_ids, int(before_store_id), int(limit)),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
     def find_session_rows_by_content(self, session_id: str, role: str, content: str,
                                      end_store_id: int, limit: int = 8) -> List[Dict[str, Any]]:
         """This session's ``role`` rows at or before ``end_store_id`` whose content is exactly ``content``."""

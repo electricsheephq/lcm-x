@@ -113,7 +113,8 @@ def test_newer_real_user_wins_over_carried_scaffold(engine):
     assert engine._latest_user_context_anchor([*first, newer], [newer]) is None
     second = engine.compress([*first, newer, *_round(50), *_round(51)])
     assert second[0]["content"].partition(SEPARATOR)[0] == PREFIX + "\n" + newer["content"]
-    assert PROMPT not in second[0]["content"]
+    # #659: the older request may come back only as verbatim history in the carry packet, never as the objective.
+    assert PROMPT not in second[0]["content"].partition("[Earlier user messages in this session")[0]
 
 
 def test_assistant_only_tail_does_not_invent_objective(engine):

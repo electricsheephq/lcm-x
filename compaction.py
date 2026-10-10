@@ -544,7 +544,10 @@ class CompactionMixin:
         selected: list[Dict[str, Any]] = []
         used = 0
         for msg in candidate_raw:
-            msg_tokens = count_message_tokens(msg)
+            # #659: a carrier costs the leaf only its glued row; the generated prefix (summaries and the carry
+            # packet, up to 15% of the window) is regenerated, never summarised, so it must not fill the chunk.
+            rest = self._generated_context_carrier_remainder(msg)
+            msg_tokens = count_message_tokens(msg if rest is None else {**msg, "content": rest})
             if used + msg_tokens > working_leaf_chunk_tokens and selected:
                 break
             selected.append(msg)
