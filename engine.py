@@ -7938,7 +7938,37 @@ class LCMEngine(
                             for r in pending_results
                         ]
                         pending_tokens = count_messages_tokens(pending_results)
+                own_results_start: Optional[int] = None
+                if not stub_over_cap_tool_results and msg.get("role") == "assistant" and msg.get("tool_calls"):
+                    # The final sanitizer inserts a plain stub for each call whose result is not
+                    # in this turn's own result group (the tool rows right after it). Reserve them
+                    # too, or a full summary budget overflows after sanitizing and the over-cap
+                    # pass drops the preserved objective first (#1048).
+                    own_results_start = len(kept_tail_reversed)
+                    while own_results_start and kept_tail_reversed[own_results_start - 1].get("role") == "tool":
+                        own_results_start -= 1
+                    # Count, don't collapse: the sanitizer pairs each call occurrence separately.
+                    unmatched_results = Counter(
+                        str(r.get("tool_call_id") or "").strip()
+                        for r in kept_tail_reversed[own_results_start:]
+                    )
+                    missing_ids = []
+                    for call_id in (_tool_call_id(tc) for tc in msg["tool_calls"]):
+                        if not call_id:
+                            continue
+                        if unmatched_results[call_id]:
+                            unmatched_results[call_id] -= 1
+                        else:
+                            missing_ids.append(call_id)
+                    if missing_ids:
+                        msg_tokens += count_messages_tokens(
+                            [self._missing_tool_result_stub(call_id) for call_id in missing_ids])
                 if used + tail_token_total + pending_tokens + msg_tokens > assembly_cap:
+                    if own_results_start is not None and own_results_start < len(kept_tail_reversed):
+                        # The turn is rejected: its kept results would be orphans the final
+                        # sanitizer drops, so stop charging them to the tail budget.
+                        tail_token_total -= sum(count_message_tokens(r) for r in kept_tail_reversed[own_results_start:])
+                        del kept_tail_reversed[own_results_start:]
                     if (
                         stub_over_cap_tool_results
                         and msg.get("role") == "tool"
@@ -8225,6 +8255,13 @@ class LCMEngine(
             and anchor_part is not None
             and count_messages_tokens(result) > assembly_cap
         ):
+            if any(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX in (normalize_content_value(m.get("content")) or "")
+                   for m in result):
+                logger.warning(
+                    "LCM assembly: %d token(s) over the cap after sanitizing; dropping the preserved user "
+                    "objective from the active context as a last resort (the store keeps it)",
+                    count_messages_tokens(result) - assembly_cap,
+                )
             trimmed_result: list[Dict[str, Any]] = []
             for msg in result:
                 content = normalize_content_value(msg.get("content")) or ""
