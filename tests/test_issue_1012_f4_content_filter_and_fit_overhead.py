@@ -164,6 +164,7 @@ def test_content_filter_records_provenance_without_any_circuit_event(monkeypatch
 
 
 def test_fit_remembers_largest_compress_overhead_and_rebind_resets(tmp_path, monkeypatch):
+    _provider(monkeypatch)
     window = 65_536
     engine = _engine(tmp_path, window=window, context_threshold=0.95)
     try:
