@@ -5642,6 +5642,11 @@ class LCMEngine(
         store (a carry-bearing head stored whole on a no-proof path, or a user's paste) keeps its bytes in storage,
         identity and the lcm tools; it is only never carried again, so the carry never nests."""
         content = normalize_content_value(row.get("content")) or ""
+        if len(content) <= 512 and (refs := extract_all_externalized_payload_refs(content)):
+            # An externalized row is judged by the content its payload holds, not by its placeholder.
+            payload = load_externalized_payload(refs[0], config=self._config, hermes_home=self._hermes_home)
+            content = str((payload or {}).get("content") or content)
+        content = "\n\n---\n\n" + content  # a carry block may also open the row
         return any(self._verified_generated_suffix_end(content, m.start()) > m.start()
                    for m in re.finditer(re.escape("\n\n---\n\n" + _USER_CARRY_PREFIX), content))
 
