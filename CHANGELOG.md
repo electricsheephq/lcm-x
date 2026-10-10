@@ -45,6 +45,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: a summariser content-filter rejection (HTTP 400 `contentFilter`) of one leaf chunk is no longer counted as a route failure, so it no longer opens the summary route's circuit. That chunk gets the deterministic level-3 leaf and its rows stay in the store. The survival fit reserves the largest host overhead seen for the conversation, so the host's turn-start preflight no longer fails a request that fits. (#1012)
 - Fix: the LIKE fallback search fetches its candidate window in one query instead of re-scoring the whole match set for every page; on a 767K-message CJK store the old path took 146 s. Results and their order are unchanged. (#1047)
 - Bench: before scoring B1 and B2, the reliability scorer resolves externalized rows with the product's own reader, and it counts a failed resolution as a loss, so the reliability gate can judge configurations that run with externalization on. (#1056)
+- Fix: `/lcm backup` and `/lcm rotate apply` name the externalized-payload directory, with its file count and size, to copy with a snapshot that is moved to another host; the SQLite snapshot does not contain those payloads. (#1075)
 
 ## v0.26.2 (user/assistant text externalization floor)
 
