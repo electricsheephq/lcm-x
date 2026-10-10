@@ -28,6 +28,7 @@ from .db_bootstrap import (
     load_integrity_failed,
     remediate_interim_schema_stamp,
     repair_external_content_fts,
+    sqlite_wal_reset_affected,
 )
 from .diagnostics import (
     _has_lifecycle_fragmentation,
@@ -1939,6 +1940,7 @@ def _doctor_text(engine) -> str:
     doctor_status = "issues-found" if integrity != "ok" or issues else (
         "action-recommended" if recommended_actions else "ok"
     )
+    wal_reset_affected = sqlite_wal_reset_affected()
     lines = [
         "LCM doctor",
         f"status: {doctor_status}",
@@ -1957,6 +1959,9 @@ def _doctor_text(engine) -> str:
         f"schema_missing_tables: {', '.join(schema_missing_tables) or '(none)'}",
         f"schema_existing_tables: {', '.join(schema_existing_tables) or '(none)'}",
         f"journal_mode: {journal_mode}; sqlite_mmap_bytes={sqlite_mmap_bytes}",
+        f"sqlite_library: {sqlite3.sqlite_version} (WAL-reset bug: {'affected' if wal_reset_affected else 'not affected'})",
+        *(["sqlite_wal_reset_advice: upgrade Python/SQLite to 3.51.3+; see https://sqlite.org/wal.html#walresetbug"]
+          if wal_reset_affected and journal_mode.lower() == "wal" else []),
         f"quick_check: {quick_check}",
         f"sqlite_integrity: {integrity}",
         f"messages_total: {total_messages}",
