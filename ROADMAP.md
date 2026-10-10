@@ -30,7 +30,7 @@ The leading systems no longer rely on one lossy summary. They stack four layers,
 | 4. Lossless, searchable history | Let the agent recover anything exactly | `lcm_recall`, `lcm_grep`, `lcm_expand` and `lcm_describe` over the lossless store; stemmed full-text recall (#1035); local semantic recall for managed deployments (#1014, #1063) | v0.27.0 |
 
 **Why layer 3 comes first.** On Track S (checkpoint 304, LCM-X v0.24.8 against Codex native compaction), Codex kept 132/132 facts stated by the user against LCM-X's 75/132, and 27/72 facts from the middle of long tool outputs against 0/72. LCM-X was ahead on assistant facts (+20) and on the head and tail of tool outputs (+21). The Codex arm was read by a different reader model in that run.
-- The tool-middle gap was the summariser input clip, fixed by #611: 42/72 middle facts now reach leaf summaries.
+- The tool-middle gap starts at the summariser input clip, which #611 addresses: 42/72 middle facts now reach leaf summaries, up from 0/72. That is a leaf-level result; whether those facts survive rollups and assembly for the same reader is measured end to end by Eval-2.
 - The user-fact gap is the missing verbatim user carry; #611 does not change it. In an offline screen with the same reader, the carry packet raised user-row facts by 50.8 points with no losses (#659). Eval-2 decides ([#1064](https://github.com/electricsheephq/lcm-x/issues/1064)).
 
 **Never below Hermes built-in.**
