@@ -68,8 +68,8 @@ def test_provenance_failure_rolls_back_message_batch(
 
 
 def test_late_session_end_suffix_commits_scaffold_provenance(tmp_path, monkeypatch) -> None:
-    # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-    monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+    # #1055: force externalization for this fixture independently of the bound window.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
     engine = LCMEngine(
         config=LCMConfig(
             database_path=str(tmp_path / "issue-3-late-end.db"),
@@ -105,8 +105,8 @@ def test_late_session_end_suffix_commits_scaffold_provenance(tmp_path, monkeypat
 def test_externalized_user_scaffold_keeps_original_occurrence_provenance(
     tmp_path, monkeypatch,
 ) -> None:
-    # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-    monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+    # #1055: force externalization for this fixture independently of the bound window.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
     engine = LCMEngine(
         config=LCMConfig(
             database_path=str(tmp_path / "issue-3-externalized.db"),

@@ -597,8 +597,8 @@ def test_profile_rebind_clears_old_auxiliary_session_state(tmp_path):
 
 
 def test_config_database_path_profile_rebind_updates_externalization_home(tmp_path, monkeypatch):
-    # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-    monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+    # #1055: force externalization for this fixture independently of the bound window.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
     home_a = tmp_path / "profile-a"
     home_b = tmp_path / "profile-b"
     config = LCMConfig(
@@ -8268,8 +8268,8 @@ class TestMessageFiltering:
     def test_user_copied_externalized_placeholder_after_ignored_externalized_row_is_not_filtered(
         self, tmp_path, monkeypatch
     ):
-        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_externalized_literal_copy.db"
         hermes_home = tmp_path / "hermes-externalized-literal-copy"
         first = LCMEngine(
@@ -8332,8 +8332,8 @@ class TestMessageFiltering:
             second.shutdown()
 
     def test_prior_externalized_placeholder_scan_pages_past_default_limit(self, tmp_path, monkeypatch):
-        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_externalized_prior_scan_pages.db"
         hermes_home = tmp_path / "hermes-externalized-prior-scan-pages"
         engine = LCMEngine(
@@ -8372,8 +8372,8 @@ class TestMessageFiltering:
     def test_duplicate_stored_externalized_rows_ignored_by_current_filter_are_all_filtered(
         self, tmp_path, monkeypatch
     ):
-        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_duplicate_externalized_replay.db"
         hermes_home = tmp_path / "hermes-duplicate-externalized-replay"
         first = LCMEngine(
@@ -8637,8 +8637,8 @@ class TestMessageFiltering:
             engine.shutdown()
 
     def test_active_externalized_stub_without_store_id_is_filtered_after_ignore_added(self, tmp_path, monkeypatch):
-        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_externalized_active_stub.db"
         hermes_home = tmp_path / "hermes-externalized-active-stub"
         first = LCMEngine(
@@ -9732,8 +9732,8 @@ class TestMessageFiltering:
             second.shutdown()
 
     def test_preflight_ambiguous_generated_placeholder_still_requests_externalization_cleanup(self, tmp_path, monkeypatch):
-        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_preflight_placeholder_externalize_cleanup.db"
         first = LCMEngine(
             config=LCMConfig(
