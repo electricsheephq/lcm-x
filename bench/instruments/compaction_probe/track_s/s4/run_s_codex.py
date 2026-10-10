@@ -474,6 +474,7 @@ def main(a=None, state=None) -> int:
         [str(codex_bin()), "--version"], capture_output=True, text=True).stdout.strip(), "codex_bin": str(codex_bin()),
         "home": home, "dictation": a.dictation, "rows": len(rows), "turns": len(plans), "stop_row_index": rows[-1]["id"], "checkpoint": stop,
         "material_sha": man["shas"]["transcript.jsonl"], "late_corrected_value_checkpoint": CP.late_checkpoint(sdir), "workspace": str(ws), "layout": layout,
+        "material_sha256": sha(sdir / "material.manifest.json"),
         "checkpoint_row": stop, "effective_row": effective,
         "kit": {"path": str(KIT), "drive_codex_sha": sha(KIT / "drive_codex.py"),
                 "parse_rollout_sha": sha(KIT / "parse_rollout.py")}}

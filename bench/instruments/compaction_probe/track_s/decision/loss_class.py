@@ -59,10 +59,10 @@ def classify_loss(score: dict) -> dict:
     for fid in lost:
         f, v = facts[fid], normalize(facts[fid]["value"])
         rec = {"id": fid, "placement": f["placement"], "class": f["class"], "answer_class": score["probes"].get(fid, {}).get("class")}
-        if fid not in score["probes"] or score["probes"][fid].get("class") in ("INCOMPLETE", "MISSING"):
-            rec["loss"] = "incomplete"
-        elif fid in admitted_lost:
+        if fid in admitted_lost:
             rec["loss"] = "not-admitted"
+        elif fid not in score["probes"] or score["probes"][fid].get("class") in ("INCOMPLETE", "MISSING"):
+            rec["loss"] = "incomplete"
         elif data is None:
             rec["loss"] = "unclassified (no store / reader view recorded)"
         else:

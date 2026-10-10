@@ -79,29 +79,43 @@ def main():
     manifest = score_manifest.load(manifest_path) or {"schema": score_manifest.SCHEMA, "entries": {}}
     done = []
     for n in args.seeds:
+        material_digest = None
         for arm, label, rdir, cps in runs(n, args):
             if args.arms and arm not in args.arms:
                 continue
             name = f"{arm}.seed-{n}.{label}.json"
+            lane = "s2" if arm.startswith("LCMX") or arm in ("L0", "L1", "L1-H", "L1-noptr", "H") else "s4" if arm == "codex-native" else "s1"
+            receipt = args.logs / f"{lane}-{arm}-{label}.log.wall"
+            receipt_ok = receipt.exists() and re.findall(r"^exit (\d+) end", receipt.read_text(), re.M) == ["0"]
+            if v4 and not receipt_ok:
+                continue  # missing/failed runs are never measured as completed
+            if v4:
+                mat = args.material / f"seed-{n}"
+                if material_digest is None:
+                    for source, expected in jload(mat / "material.manifest.json").get("shas", {}).items():
+                        path = mat / source
+                        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                            raise ValueError(f"material file digest mismatch or absent: {path}")
+                    material_digest = hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest()
+                for sub in cps.values():
+                    if sub is None or not (rdir / sub / "summary.json").exists():
+                        continue
+                    recorded = jload(rdir / sub / "summary.json")
+                    if recorded.get("material_sha256") != material_digest:
+                        raise ValueError(f"material digest mismatch or absent: {rdir / sub} material_sha256")
+                    if arm == "codex-native" and recorded.get("material_sha") != hashlib.sha256((mat / "transcript.jsonl").read_bytes()).hexdigest():
+                        raise ValueError(f"material digest mismatch or absent: {rdir / sub} material_sha")
             manifest["entries"] = {k: v for k, v in manifest["entries"].items() if Path(k).name != name}
             score_manifest.write_atomic(manifest_path, manifest)
             for population in ("scores", "loss"):
                 for directory in (args.out / population).glob("cp-*"):
                     (directory / name).unlink(missing_ok=True)
-            lane = "s2" if arm.startswith("LCMX") or arm in ("L0", "L1", "L1-H", "L1-noptr", "H") else "s4" if arm == "codex-native" else "s1"
-            receipt = args.logs / f"{lane}-{arm}-{label}.log.wall"
-            if not receipt.exists() or re.findall(r"^exit (\d+) end", receipt.read_text(), re.M) != ["0"]:
-                continue  # missing/failed runs are never measured as completed
+            if not receipt_ok:
+                continue  # retain legacy v3 stale-score removal
             run_calls, run_probes = [], {}
             for cp, sub in cps.items():
                 if sub is None or not (rdir / sub / "summary.json").exists():
                     continue
-                if v4:
-                    recorded = jload(rdir / sub / "summary.json")
-                    field, source = ("material_sha", "transcript.jsonl") if arm == "codex-native" else ("material_sha256", "material.manifest.json")
-                    digest = hashlib.sha256((args.material / f"seed-{n}" / source).read_bytes()).hexdigest()
-                    if recorded.get(field) != digest:
-                        raise ValueError(f"material digest mismatch or absent: {rdir / sub} {field}")
                 out = score(args.material / f"seed-{n}", rdir / sub, arm)
                 if v4:
                     out["summariser_usage"] = score_manifest.summariser_usage(jload(rdir / "summary.json"))

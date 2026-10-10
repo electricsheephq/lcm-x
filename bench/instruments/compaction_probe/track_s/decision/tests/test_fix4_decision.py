@@ -117,6 +117,8 @@ def test_f8_material_admission_and_f3_usage_snapshot(tmp_path, monkeypatch, arm,
     (mat / "lifecycle_probes.jsonl").write_text("")
     (mat / "transcript.jsonl").write_text("synthetic transcript")
     summ = dict(events=[])
+    if arm == "codex-native":
+        summ["material_sha256"] = hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest()
     if digest_state != "absent":
         summ[field] = hashlib.sha256((mat / source).read_bytes()).hexdigest() if digest_state == "valid" else "0" * 64
     write(run / "cp-fixture/summary.json", summ)
