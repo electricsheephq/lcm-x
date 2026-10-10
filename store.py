@@ -17,7 +17,7 @@ import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Collection, Dict, List, Optional
+from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
 
 from .db_bootstrap import (
     select_conversation_range,
@@ -1942,7 +1942,7 @@ class MessageStore:
                 f"({directness_expr}) DESC, store_id DESC"
             )
 
-        def add_rows(rows: list[sqlite3.Row]) -> None:
+        def add_rows(rows: Iterable[sqlite3.Row]) -> None:
             for row in rows:
                 result = self._row_to_dict(row)
                 content = result.get("content") or ""
@@ -1982,7 +1982,7 @@ class MessageStore:
                         {order_by}""",
                     [*base_args, boundary_timestamp, boundary_role_bias, *order_args],
                 )
-                add_rows([tie_row for tie_row in tie_rows if tie_row[0] not in window_ids])
+                add_rows(tie_row for tie_row in tie_rows if tie_row[0] not in window_ids)
         else:
             # Deterministic relevance/hybrid candidate scan for LIKE fallback.
             # Apply the same coarse score/directness ordering before the hard

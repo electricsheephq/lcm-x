@@ -122,3 +122,48 @@ def test_like_query_count(corpus, sort, expected_count):
         assert "AND (CASE role WHEN 'user' THEN 0 WHEN 'assistant' THEN 1 WHEN 'tool' THEN 2 ELSE 1 END) = " in queries[1]
         assert "OFFSET" not in queries[1]
         assert "LIMIT" not in queries[1]
+
+
+def test_tie_continuation_streams_its_cursor(corpus):
+    """The boundary group is converted row by row as the cursor yields, never materialized first (#1047 review)."""
+    class Counting:
+        def __init__(self, cursor):
+            self.cursor, self.fetched = cursor, 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            row = next(self.cursor)
+            self.fetched += 1
+            return row
+
+        def __getattr__(self, name):
+            return getattr(self.cursor, name)
+
+    class Conn:
+        def __init__(self, conn):
+            self.conn, self.cursors = conn, []
+
+        def execute(self, *args):
+            self.cursors.append(Counting(self.conn.execute(*args)))
+            return self.cursors[-1]
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
+    original_conn, original_row = corpus._conn, corpus._row_to_dict
+    conn, seen = Conn(original_conn), []
+
+    def record(row):
+        seen.append((len(conn.cursors), conn.cursors[-1].fetched))
+        return original_row(row)
+
+    corpus._conn, corpus._row_to_dict = conn, record
+    try:
+        corpus._search_like("记忆", limit=26, sort="recency")
+    finally:
+        corpus._conn, corpus._row_to_dict = original_conn, original_row
+    tie = [fetched for cursors, fetched in seen if cursors == 2]
+    assert len(conn.cursors) == 2 and len(tie) > 1
+    assert tie == sorted(set(tie)), "each tie row is converted as soon as the cursor yields it"
