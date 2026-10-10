@@ -46,6 +46,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Fix: the LIKE fallback search fetches its candidate window in one query instead of re-scoring the whole match set for every page; on a 767K-message CJK store the old path took 146 s. Results and their order are unchanged. (#1047)
 - Bench: before scoring B1 and B2, the reliability scorer resolves externalized rows with the product's own reader, and it counts a failed resolution as a loss, so the reliability gate can judge configurations that run with externalization on. (#1056)
 - Fix: `/lcm backup` and `/lcm rotate apply` name the externalized-payload directory, with its file count and size, to copy with a snapshot that is moved to another host; the SQLite snapshot does not contain those payloads. (#1075)
+- Fix: proactive recall dates a memory by the host's event time when the host recorded it, marks LCM's write time as `stored` when available, and shows `[unknown time]` when neither timestamp is usable, instead of presenting the write time as the event date. (#1008)
 
 ## v0.26.2 (user/assistant text externalization floor)
 

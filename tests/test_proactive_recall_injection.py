@@ -158,6 +158,32 @@ def test_injected_block_is_stripped_before_ingest(tmp_path, provider):
     assert strip_injected_context_blocks(msg["content"]).strip() == ""
 
 
+@pytest.mark.parametrize(
+    "time_fields, expected",
+    [
+        ({"event_time": "2026-01-02T03:04:05Z", "timestamp": 1704067200}, "2026-01-02 03:04 UTC"),
+        ({"timestamp": 1704067200}, "stored 2024-01-01 00:00 UTC"),
+        ({"event_time": "malformed", "timestamp": 1704067200}, "stored 2024-01-01 00:00 UTC"),
+        ({}, "unknown time"),
+        ({"timestamp": 0}, "unknown time"),
+    ],
+    ids=["event-time", "stored-time", "malformed-event-time", "unknown-time", "zero-timestamp"],
+)
+def test_proactive_recall_dates_memory(tmp_path, monkeypatch, provider, time_fields, expected):
+    import json
+
+    engine = _make_engine(tmp_path)
+    hit = {"snippet": "useful older context", "score": 0.016, "from_current_session": False, **time_fields}
+    monkeypatch.setattr(lcm_tools, "lcm_recall", lambda *a, **k: json.dumps({"hits": [hit]}))
+
+    msg = engine._build_proactive_recall_message(_tail(), "user", set())
+
+    assert msg is not None
+    assert f"- [{expected}] useful older context" in msg["content"]
+    if "event_time" in time_fields and time_fields["event_time"] != "malformed":
+        assert "2024-01-01" not in msg["content"]
+
+
 # ── Inert / byte-identical postures ──
 
 
