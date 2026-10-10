@@ -31,7 +31,7 @@ def _write_fake(home, monkeypatch, pid, reason=SLOW):
 def test_overlapping_processes_keep_the_survivor(tmp_path, monkeypatch, exits_first):
     _write_fake(tmp_path, monkeypatch, 101)
     _write_fake(tmp_path, monkeypatch, 202, SLOT)
-    assert len(list(tmp_path.glob("lcm-x-not-active.*.json"))) == 2
+    assert len(list(tmp_path.joinpath(*records.RECORD_DIR).glob("lcm-x-not-active.*.json"))) == 2
     monkeypatch.setattr(records.os, "kill", lambda pid, signal: None)
     starts = {101: "start-101", 202: "start-202"}
     monkeypatch.setattr(records, "_process_start", starts.get)
@@ -42,7 +42,7 @@ def test_overlapping_processes_keep_the_survivor(tmp_path, monkeypatch, exits_fi
     notice = records.inactive_record_notice(tmp_path)
     assert f"process {survivor}" in notice
     assert f"process {exits_first}" not in notice
-    assert not (tmp_path / f"lcm-x-not-active.{exits_first}.json").exists()
+    assert not (tmp_path.joinpath(*records.RECORD_DIR) / f"lcm-x-not-active.{exits_first}.json").exists()
 
 
 @pytest.mark.parametrize("filename", ["lcm-x-not-active.json", "lcm-x-not-active.101.json"])
@@ -105,7 +105,7 @@ def test_doctor_without_record_passes(engine):
     assert payload["overall"] == "healthy"
 
 
-@pytest.mark.parametrize("fallback", [False, True], ids=["registrar", "hook-table"])
+@pytest.mark.parametrize("fallback", [False, True], ids=["registrar", "no-registrar"])
 def test_slot_conflict_hook_does_not_write_and_diagnostics_answer(tmp_path, monkeypatch, fallback):
     _install_host(monkeypatch, tmp_path)
     monkeypatch.setenv("LCM_ENABLE_SLASH_COMMAND", "1")
@@ -128,7 +128,8 @@ def test_slot_conflict_hook_does_not_write_and_diagnostics_answer(tmp_path, monk
         conn = ctx.offered._store.connection
         before = conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0]
         assert before == 0
-        for hook in ctx.hooks["post_llm_call"]:
+        assert bool(ctx.hooks.get("post_llm_call")) is (not fallback)
+        for hook in ctx.hooks.get("post_llm_call", []):
             hook(session_id="s-696", conversation_id="c-696", conversation_history=[
                 {"role": "user", "content": "a saved turn"},
                 {"role": "assistant", "content": "a reply"},
@@ -138,6 +139,6 @@ def test_slot_conflict_hook_does_not_write_and_diagnostics_answer(tmp_path, monk
         assert json.loads(ctx.tools["lcm_doctor"]({}))["overall"] == "warnings"
         assert "inactive_process" in ctx.commands["lcm"]("doctor")
         assert conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == before
-        assert Path(tmp_path / f"lcm-x-not-active.{os.getpid()}.json").exists()
+        assert Path(tmp_path.joinpath(*records.RECORD_DIR) / f"lcm-x-not-active.{os.getpid()}.json").exists()
     finally:
         ctx.offered.shutdown()

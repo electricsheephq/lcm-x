@@ -9,7 +9,7 @@ FTS-only exactly as before.
 | Option | Cost | Signup | Install | Best for |
 |---|---|---|---|---|
 | Voyage AI | free tier (200M tokens for the voyage-4 group), then ~$0.02–0.12 per million tokens | yes (no credit card) | none | best quality, zero local footprint |
-| fastembed | $0 | no | `pip install fastembed` (ONNX, no torch) | local default — no accounts, no daemon |
+| fastembed | $0 | no | `pip install "fastembed>=0.8.0,<1.0"` (ONNX, no torch) | local default — no accounts, no daemon |
 | Ollama | $0 | no | Ollama app/daemon | you already run Ollama |
 | OpenAI-compatible | provider pricing | yes (per provider) | none | reuse an existing `/v1/embeddings` service (SiliconFlow, llama.cpp, vLLM) |
 
@@ -68,7 +68,7 @@ worker slots).
 external service — just a pip package.
 
 ```bash
-pip install fastembed          # or: pip install -r requirements-semantic.txt
+pip install "fastembed>=0.8.0,<1.0"          # or: pip install -r requirements-semantic.txt
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=fastembed
 export LCM_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5   # 384-dim, compact and quick on CPU
@@ -92,7 +92,7 @@ Pre-seed a read-only cache: `warmup` cannot download into it.
 and pulls in no Python packages of its own). `hermes update` can build a **new** environment under
 `installs/<id>/environments/<hash>/venv`. It carries over the dependencies Hermes itself records
 (its extras and the dependencies plugins declare), but a package installed by hand with
-`pip install fastembed` is not recorded, so **a hand-installed embedding dependency can be dropped
+`pip install "fastembed>=0.8.0,<1.0"` is not recorded, so **a hand-installed embedding dependency can be dropped
 by a host update**.
 
 Nothing about your LCM data changes when this happens — the store stays lossless and existing

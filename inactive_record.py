@@ -1,8 +1,9 @@
 """Record of a Hermes process in which LCM-X did not become active (#622).
 
-``register()`` leaves a per-process JSON file under the Hermes home (not in
-lcm.db: the store open may be the slow part). Diagnostic surfaces report it
-while the recorded process lives. Standalone: no package imports.
+``register()`` leaves a per-process JSON file under Hermes home
+``plugin-data/hermes-lcm-x/`` (not in lcm.db: the store open may be slow).
+Diagnostic surfaces report it while the process lives; legacy root files are
+also read and cleaned for one release. Standalone: no package imports.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import tempfile
 import time
 from pathlib import Path
 
+RECORD_DIR = ("plugin-data", "hermes-lcm-x")
 RECORD_NAME = "lcm-x-not-active.{pid}.json"
 LEGACY_RECORD_NAME = "lcm-x-not-active.json"
 
@@ -35,7 +37,7 @@ def _process_start(pid: int) -> str | None:
 
 def write_inactive_record(hermes_home, *, elapsed_s: float, reason: str) -> None:
     """Atomically write this process's record; one file per process."""
-    home = Path(hermes_home)
+    home = Path(hermes_home).joinpath(*RECORD_DIR)
     home.mkdir(parents=True, exist_ok=True)
     pid = os.getpid()
     name = RECORD_NAME.format(pid=pid)
@@ -68,11 +70,14 @@ def inactive_record_notice(hermes_home) -> str | None:
         return None
     home = Path(hermes_home)
     try:
-        paths = sorted(home.glob(RECORD_NAME.format(pid="*")))
+        paths = sorted(home.joinpath(*RECORD_DIR).glob(RECORD_NAME.format(pid="*")))
+        # legacy root location; remove in v0.28.0 (#1080)
+        paths.extend(sorted(home.glob(RECORD_NAME.format(pid="*"))))
+        paths.append(home / LEGACY_RECORD_NAME)
     except OSError:
         return None
     notices = []
-    for path in [*paths, home / LEGACY_RECORD_NAME]:
+    for path in paths:
         try:
             content = path.read_bytes()
         except OSError:
