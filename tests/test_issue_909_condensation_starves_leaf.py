@@ -44,7 +44,10 @@ def make_engine(tmp_path):
     engines = []
 
     def build(**overrides):
-        settings = dict(database_path=str(tmp_path / "lcm.db"), fresh_tail_count=2, leaf_chunk_tokens=400,
+        # #1013 part B: foreground-only providers/clocks exclude automatic rollup calls
+        settings = dict(large_output_externalization_enabled=False,
+                        large_output_active_replay_stubbing_enabled=False, temporal_rollups_enabled=False,
+                        database_path=str(tmp_path / "lcm.db"), fresh_tail_count=2, leaf_chunk_tokens=400,
                         context_threshold=0.001, threshold_full_sweep_enabled=True,
                         max_assembly_tokens=100_000, l3_truncate_tokens=2, condensation_fanin=2,
                         foreground_soft_seconds=0)
@@ -79,7 +82,12 @@ def _frontier(engine):
 @pytest.mark.parametrize("unchanged_frontier", [False, True], ids=["shrunk", "unchanged"])
 def test_stored_condensation_then_estimate_refused_leaf_is_partial_without_a_hold(
         make_engine, monkeypatch, clock, unchanged_frontier):
-    engine = make_engine(foreground_hard_seconds=100)
+    engine = make_engine(foreground_hard_seconds=100,
+        # #1013 part B: foreground leaf-reserve timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     _frontier(engine)
     if unchanged_frontier:
         monkeypatch.setattr(engine, "_summary_frontier_tokens", lambda: 2000)
@@ -106,7 +114,12 @@ def test_stored_condensation_then_estimate_refused_leaf_is_partial_without_a_hol
 
 def test_slow_rejected_condensation_is_budget_cut_and_the_reserved_leaf_is_stored(
         make_engine, monkeypatch, clock):
-    engine = make_engine(summary_timeout_ms=300_000)
+    engine = make_engine(summary_timeout_ms=300_000,
+        # #1013 part B: foreground leaf-reserve timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     source_ids = _frontier(engine)
     calls = []
     condensation_calls = 0
@@ -148,7 +161,12 @@ def test_slow_rejected_condensation_is_budget_cut_and_the_reserved_leaf_is_store
 
 
 def test_less_than_minimum_condensation_time_skips_to_the_leaf(make_engine, monkeypatch, clock):
-    engine = make_engine(summary_timeout_ms=300_000)
+    engine = make_engine(summary_timeout_ms=300_000,
+        # #1013 part B: foreground leaf-reserve timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     _frontier(engine)
     calls = []
     prepare = engine._prepare_retained_user_anchor
@@ -202,7 +220,12 @@ def test_held_replay_cleanup_is_adopted_without_a_summariser_call(make_engine, m
 
 
 def test_sweep_ranks_oldest_group_and_avoids_light_group_stall(make_engine, monkeypatch, clock):
-    engine = make_engine()
+    engine = make_engine(
+        # #1013 part B: foreground leaf-reserve timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     ids = []
     for index, (depth, token_count) in enumerate([(0, 1), (0, 1), (0, 10_000), (1, 1_000), (1, 1_000)]):
         ids.append(engine._dag.add_node(SummaryNode(

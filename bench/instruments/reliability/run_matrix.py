@@ -23,7 +23,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(REPO))
 from bench.instruments.reliability import cells as C, controls as CT, hosts as H, plugin_tree, report  # noqa: E402
-from bench.instruments.reliability.scorers import bars  # noqa: E402
+from bench.instruments.reliability.scorers import bars, externalized  # noqa: E402
 
 PROBE = Path(__file__).with_name("probe.py")
 PHASES = [chr(c) for c in range(ord("A"), ord("Z") + 1)]
@@ -86,6 +86,10 @@ def release_scratch(scratch: Path, d: Path, rec: dict, keep_dbs: str, keep_home:
     try:
         if keeps_dbs(keep_dbs, rec) and (scratch / "db").is_dir():
             shutil.move(scratch / "db", d / "db")
+            payloads = scratch / "hermes-home" / externalized.PAYLOAD_DIRNAME
+            if not keep_home and payloads.is_dir():  # a re-score resolves externalized rows from here (#1056)
+                (d / "hermes-home").mkdir(exist_ok=True)
+                shutil.move(payloads, d / "hermes-home" / payloads.name)
         if keep_home and (scratch / "hermes-home").is_dir():
             shutil.move(scratch / "hermes-home", d / "hermes-home")
     except OSError as exc:  # shutil.Error included

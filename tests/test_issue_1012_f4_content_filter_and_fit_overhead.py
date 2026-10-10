@@ -55,6 +55,7 @@ def _engine(tmp_path, window=200_000, **overrides):
               "leaf_chunk_tokens": 800, "dynamic_leaf_chunk_enabled": False,
               "context_threshold": 0.001, "threshold_full_sweep_enabled": False,
               "l3_truncate_tokens": 128, "summary_circuit_breaker_failure_threshold": 2,
+              "temporal_rollups_enabled": False,  # the fake provider's call sequence is compaction-only
               **overrides}
     engine = LCMEngine(config=LCMConfig(**config), hermes_home=str(tmp_path / "home"))
     engine.on_session_start("S", platform="telegram", context_length=window, conversation_id="conv")

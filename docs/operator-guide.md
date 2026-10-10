@@ -248,9 +248,11 @@ Chunk pages use the same apply command with `--corpus chunks` and
 `--confirm-raw-text`; `--corpus both --apply` likewise requires
 `--confirm-raw-text` on every apply command. Until every selected corpus
 finishes, semantic coverage is degraded and FTS remains the fallback.
-Assertion, query-view, trajectory, rollup, and embedding families remain
+Assertion, query-view, trajectory, and embedding families remain
 additive/default-off and create derived state only when their workflows are
-invoked. If you later enable one of those stores, keep the pre-upgrade cold set
+invoked. Temporal rollups are on by default from v0.27.0: the first session
+bind creates the rollup tables and schedules background maintenance; set
+`LCM_TEMPORAL_ROLLUPS_ENABLED=false` to opt out. If you later enable one of those stores, keep the pre-upgrade cold set
 as the downgrade path rather than mixing old code with newly created sidecars.
 
 Cloud embeddings are a separate operator decision. Provider-bound copies are protected
@@ -406,7 +408,7 @@ Useful environment variables:
 | `LCM_EXPANSION_CONTEXT_TOKENS` | `32000` | Context budget used by the auxiliary LLM for `lcm_expand_query` |
 | `LCM_SUMMARY_TIMEOUT_MS` | `60000` | Timeout for one summarization call |
 | `LCM_SUMMARY_PROMPT_VERSION` | `1` | Summariser prompt version: `1` (original prompts) or `2` (opt-in v2 prompts); other values fall back to `1` with a config warning. See [Summary prompt version](#summary-prompt-version) |
-| `LCM_TEMPORAL_ROLLUPS_ENABLED` | `false` | Enable derived UTC day/week/month summary rollups and their maintenance hooks |
+| `LCM_TEMPORAL_ROLLUPS_ENABLED` | `true` | Enable derived UTC day/week/month summary rollups and their maintenance hooks |
 | `LCM_ROLLUP_DAILY_TARGET_TOKENS` | `5000` | Target size for daily rollup summarization |
 | `LCM_ROLLUP_DAILY_MAX_TOKENS` | `15000` | Hard token ceiling for a daily rollup |
 | `LCM_ROLLUP_AGGREGATE_MAX_TOKENS` | `20000` | Hard token ceiling for weekly and monthly rollups |
@@ -561,8 +563,8 @@ Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
 ### Temporal rollup operations
 
-Temporal rollups are opt-in. Set `LCM_TEMPORAL_ROLLUPS_ENABLED=true`, tune the
-four `LCM_ROLLUP_*` controls above if needed, and restart Hermes. Rollup periods
+Temporal rollups are on by default. Set `LCM_TEMPORAL_ROLLUPS_ENABLED=false`
+to opt out; tune the four `LCM_ROLLUP_*` controls above if needed, and restart Hermes. Rollup periods
 are UTC calendar periods. Enabling the feature creates its tables lazily; a
 disabled install creates no rollup tables and leaves the core schema untouched,
 so a base build still opens the database.

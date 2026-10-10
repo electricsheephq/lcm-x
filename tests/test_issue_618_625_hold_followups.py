@@ -66,7 +66,10 @@ def summaries(monkeypatch):
 
 
 def _engine(tmp_path, context_length: int = 200_000, **config) -> LCMEngine:
-    settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
+    # #1013 part B: foreground-only providers/clocks exclude automatic rollup calls
+    settings = {"large_output_externalization_enabled": False,
+                "large_output_active_replay_stubbing_enabled": False, "temporal_rollups_enabled": False,
+                "fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000,
                 "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
@@ -389,7 +392,12 @@ def _sweep_off_engine(tmp_path, **config) -> LCMEngine:
 
 def test_stop_line_names_the_soft_target_stop_of_a_sweep_off_condensation(tmp_path, monkeypatch, clock, caplog):
     """The state of test_issue_605_sweep_off_forced_f2 (U7, the condensation refused after a slow leaf)."""
-    engine = _sweep_off_engine(tmp_path)
+    engine = _sweep_off_engine(tmp_path,
+        # #1013 part B: foreground hold timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     provider = _Provider(clock, 40.0)
     monkeypatch.setattr(escalation, "_invoke_summary_llm", provider)
     for _ in range(8):
