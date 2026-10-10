@@ -82,6 +82,10 @@ model's query-specific encoding (distinct from document encoding) so query/passa
 preserved. When `LCM_EMBEDDINGS_ENABLED=false`, `warmup` is inert: it does not resolve a provider,
 download a model, create embedding tables, or create the configured database.
 
+The model runs with 2 threads. To load it from another cache, for example one shared, read-only
+cache for several profiles, set fastembed's own `FASTEMBED_CACHE_PATH` (default `~/.cache/fastembed`).
+Pre-seed a read-only cache: `warmup` cannot download into it.
+
 ### A host update can remove fastembed
 
 `fastembed` lives in the virtualenv that runs Hermes, not in LCM-X (which is installed by symlink
