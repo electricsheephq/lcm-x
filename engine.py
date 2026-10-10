@@ -970,11 +970,17 @@ class LCMEngine(
             raise
         self._publish_ingest_context_window()
 
-    def _publish_ingest_context_window(self) -> None:
+    def _publish_ingest_context_window(self) -> int:
+        """Mirror the bound session's effective window for its late writes, and return it.
+
+        Published on bind and on each of the session's own protections, never from update_model(): Hermes calls
+        that before binding the next session, and the previous session's late suffix must keep its own window."""
         store = getattr(self, "_store", None)
         session_id = getattr(self, "_session_id", "")
-        if store is not None and session_id:
-            store.set_context_window_tokens(session_id, self.context_length)
+        if store is None:
+            return 0
+        store.set_context_window_tokens(session_id, self.context_length)
+        return store.get_context_window_tokens(session_id)
 
     def _close_storage(self) -> None:
         """Best-effort close of currently bound SQLite helpers."""
@@ -1208,7 +1214,6 @@ class LCMEngine(
                 self._runtime_context_threshold(model=model, provider=provider)
             )
             self.threshold_percent = self.context_threshold
-            self._publish_ingest_context_window()
             return True
         self.raw_context_length = parsed_context_length
         effective_context_length, cap, reason = self._effective_context_length(
@@ -1246,7 +1251,6 @@ class LCMEngine(
             # intermediate ratio on later recomputes; absolute still wins
             # above, but disabling auto-raise keeps status/percent honest.
             self._config.codex_gpt55_autoraise_enabled = False
-        self._publish_ingest_context_window()
         return True
 
     def _session_metadata_matches_active_runtime(
@@ -6330,7 +6334,7 @@ class LCMEngine(
             config=self._config,
             hermes_home=self._hermes_home,
             tool_name_hints=[tool_result_names.get(idx, "") for idx, _msg in messages_to_store_with_index],
-            context_window_tokens=self._store.get_context_window_tokens(self._session_id),
+            context_window_tokens=self._publish_ingest_context_window(),
         )
         recovery_tool_result_indices = self._active_replay_recovery_tool_result_indices(
             active_replay_messages

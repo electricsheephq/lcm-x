@@ -256,7 +256,31 @@ def test_effective_provider_cap_and_clear_are_mirrored(engine_factory):
     engine.ingest([{"role": "user", "content": _text()}])
     assert is_externalized_placeholder(_rows(engine)[0]["content"])
     engine.update_model("fixture-model", 0)
+    assert engine._store.get_context_window_tokens(SESSION) == 272_000  # until the session's next protection
+    engine.ingest([{"role": "user", "content": _text()}, {"role": "assistant", "content": "ok"}])
     assert engine._store.get_context_window_tokens(SESSION) == 0
+
+
+def test_update_model_before_the_next_session_keeps_the_previous_sessions_window(engine_factory):
+    engine = engine_factory(LARGE)
+    history = [{"role": "user", "content": "original session opening"}]
+    engine.ingest(history)
+    engine.update_model("next-model", SMALL)  # Hermes resolves the next session's model before binding it
+    assert engine._store.get_context_window_tokens(SESSION) == LARGE
+    engine.on_session_start("next", platform="cli", conversation_id="next", context_length=SMALL, model="next-model")
+    assert engine._store.get_context_window_tokens("next") == SMALL
+    engine.on_session_end(SESSION, history + [{"role": "assistant", "content": _assistant_text()}])
+    assert len(_rows(engine)) == 2 and not is_externalized_placeholder(_rows(engine)[-1]["content"])
+
+
+def test_in_session_model_change_applies_to_the_next_protection(engine_factory):
+    engine = engine_factory(LARGE)
+    history = [{"role": "user", "content": "opening"}]
+    engine.ingest(history)
+    engine.update_model("smaller-model", SMALL)
+    engine.ingest(history + [{"role": "assistant", "content": _assistant_text()}])
+    assert is_externalized_placeholder(_rows(engine)[-1]["content"])
+    assert engine._store.get_context_window_tokens(SESSION) == SMALL
 
 
 def test_clone_and_shared_config_window_isolation(tmp_path, engine_factory):
