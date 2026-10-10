@@ -13,6 +13,7 @@ import hermes_lcm.survival_fit as survival_fit
 import hermes_lcm.tokens as tokens
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.dag import SummaryNode
 
 PAD = " alpha beta gamma delta epsilon" * 40
 SUMMARY = "Earlier ordinary turns.\nExpand for details about: ordinary turns"
@@ -358,5 +359,39 @@ def test_different_conversation_rebind_clears_peak(tmp_path):
         engine.on_session_start("S2", platform="telegram", context_length=65_536, conversation_id="other")
         assert engine._survival_overhead_observation is None
         assert engine._survival_fit_budget(view, counted + 2600) == int(65_536 * 0.85) - 2600
+    finally:
+        engine.shutdown()
+
+
+def test_content_filtered_condensation_group_progresses_at_level_3(tmp_path, monkeypatch):
+    """A filtered condensation group is written at level 3 instead of staying on the frontier."""
+    calls = _provider(monkeypatch)
+    engine = _engine(tmp_path, condensation_fanin=2, l3_truncate_tokens=8)
+    try:
+        for index in range(2):
+            text = f"[X] group {index}{PAD}"
+            engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary=text,
+                                             token_count=escalation.count_tokens(text), source_token_count=0,
+                                             source_ids=[], source_type="messages", created_at=index))
+        assert engine._fit_can_rescue(False)
+        assert engine._maybe_condense(force_overflow=False) == 1
+        condensed = [node for node in engine._dag.get_session_nodes("S") if node.depth == 1]
+        assert len(condensed) == 1
+        assert engine._dag.get_node_provenance(condensed[0].node_id)["escalation_level"] == 3
+        assert calls and all("[X]" in call for call in calls)
+        assert engine._summary_circuit_breaker.allows("")
+        assert engine._summary_circuit_breaker._failures.get("<task-default>", 0) == 0
+    finally:
+        engine.shutdown()
+
+
+def test_profile_reset_clears_overhead_peak(tmp_path):
+    engine = _engine(tmp_path, window=65_536)
+    try:
+        view = [{"role": "user", "content": "ordinary turn", "timestamp": 1.0}]
+        engine._survival_fit_budget(view, tokens.count_messages_tokens(view) + 12_500)
+        assert engine._survival_overhead_observation == ("conv", 12_500)
+        engine._reset_profile_runtime_state()
+        assert engine._survival_overhead_observation is None
     finally:
         engine.shutdown()

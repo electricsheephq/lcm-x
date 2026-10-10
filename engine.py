@@ -1005,6 +1005,7 @@ class LCMEngine(
         """Clear process-local session state that cannot cross profile homes."""
         # R6-4: survival-fit warnings belong to the store they were raised on.
         self._survival_fit_pending_warning, self._survival_fit_warned = None, set()
+        self._survival_overhead_observation = None  # #1012 F4: an overhead peak never crosses profile homes
         self.emit_automatic_compaction_status = False
         if self._adaptive_retrieval is not None:
             self._adaptive_retrieval.clear()
@@ -7329,7 +7330,9 @@ class LCMEngine(
                {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
             verbatim_small_source=True,  # #605 F2
         )
-        if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow):
+        # #1012 F4: a content-filtered group keeps its level 3 truncation, so condensation progresses
+        if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow) and \
+                not provenance.get("content_filter_error"):
             raise SummaryResultRejected("summary result rejected at level 3")  # a truncation, not the whole text
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
