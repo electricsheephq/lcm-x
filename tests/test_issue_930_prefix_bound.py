@@ -35,6 +35,7 @@ def engine(tmp_path):
         max_assembly_tokens=0,
         reserve_tokens_floor=0,
         condensation_fanin=4,
+        temporal_rollups_enabled=False,
     ))
     instance.on_session_start("issue-930", context_length=128_000)
     try:

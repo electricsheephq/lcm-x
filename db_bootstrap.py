@@ -22,6 +22,15 @@ from typing import Iterable, Sequence
 from .config import sqlite_mmap_size
 
 logger = logging.getLogger(__name__)
+_wal_reset_warned = False  # no lock: a rare duplicate warning beats a lock a forked child could inherit held
+
+
+def sqlite_wal_reset_affected(version_info=None) -> bool:
+    """Whether the linked SQLite version lacks the WAL-reset fix/backports."""
+    v = sqlite3.sqlite_version_info if version_info is None else version_info
+    return ((3, 7, 0) <= v < (3, 51, 3)
+            and not (3, 50, 7) <= v < (3, 51, 0)
+            and not (3, 44, 6) <= v < (3, 45, 0))
 
 
 class SchemaVersionTooNewError(RuntimeError):
@@ -133,6 +142,16 @@ def configure_connection(conn: sqlite3.Connection) -> None:
     """
     conn.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
     _execute_wal_conversion_with_lock_retry(conn)
+    global _wal_reset_warned
+    if not _wal_reset_warned and sqlite_wal_reset_affected():
+        _wal_reset_warned = True
+        logger.warning(
+            "LCM-X: the linked SQLite %s has the WAL-reset bug "
+            "(https://sqlite.org/wal.html#walresetbug), which can rarely corrupt "
+            "a WAL database written by several connections; upgrade to a Python "
+            "whose SQLite is 3.51.3 or newer (or 3.50.7+ on the 3.50 branch, 3.44.6+ on the 3.44 branch).",
+            sqlite3.sqlite_version,
+        )
     conn.execute("PRAGMA synchronous=FULL")
     conn.execute("PRAGMA wal_autocheckpoint=500")
     conn.execute("PRAGMA journal_size_limit=67108864")
