@@ -1,11 +1,8 @@
-"""#659 round 5: a rotated head is normalised only on positive evidence that it is the head LCM emitted.
+"""#659 round 5 probes: a lone user turn that quotes, or equals, the emitted context is stored whole.
 
-Ported from the fourth cross-model review's probes (R4-N1): a pending compression boundary alone is not occurrence
-provenance. A lone user turn that quotes, or equals, the emitted context is stored whole; the emitted head re-sent
-inside its window still stores in base shape (F1).
+Ported from the fourth cross-model review's probes (R4-N1). Round 6 removed storage normalisation altogether: every
+user row is stored as submitted unless the base commit proof consumes it (tests/test_issue_659_carry_r6.py).
 """
-
-import hashlib
 
 import pytest
 
@@ -122,7 +119,9 @@ def test_host_merged_emitted_window_stores_the_new_turn_and_no_carry(make):
 
 
 @pytest.mark.parametrize("empty_first", [False, True])
-def test_emitted_window_then_new_turn_stores_the_base_head(make, empty_first):
+def test_no_proof_emitted_window_then_new_turn_stores_the_head_whole(make, empty_first):
+    """Round 6: with no session end there is no commit proof, so the emitted head is stored as submitted (871
+    bytes, carry included). Base stores its own 125-byte head here: an intentional, recorded deviation."""
     engine = make(session="P0")
     out, pure = _generated(engine)
     assert out[0]["content"] == pure
@@ -132,5 +131,5 @@ def test_emitted_window_then_new_turn_stores_the_base_head(make, empty_first):
     engine.ingest([*out, {"role": "user", "content": "NEW REQUEST"}])
     rows = [r["content"] for r in engine._store.get_session_messages("P1")]
     heads = [r.encode("utf-8") for r in rows if r.startswith("[Recent Summary")]
-    assert [(hashlib.sha256(h).hexdigest(), len(h)) for h in heads] == [BASE_HEADS["summary"]]
-    assert "NEW REQUEST" in rows and not any(CARRY in r for r in rows)
+    assert heads == [pure.encode("utf-8")] and len(heads[0]) == 871 != BASE_HEADS["summary"][1]
+    assert "NEW REQUEST" in rows

@@ -1,7 +1,8 @@
-"""#659 round 4: carry normalisation is bound to the occurrence LCM emitted, never to content shape.
+"""#659 round 4 probes: a new user copy of the emitted context is the user's, byte for byte.
 
 Ported from the third cross-model review's probes (R3-N1 lossless user copy, R3-N2 replay identity), with the
-controls it kept green: F1 storage bytes, the #922 objective-only guard and legacy conversation ids.
+controls it kept green: the #922 objective-only guard and legacy conversation ids. Round 6 stores a no-proof
+rotated head whole (no storage normalisation), a recorded F1 deviation from base.
 """
 
 import hashlib
@@ -30,7 +31,10 @@ def _generated(engine, objective=False):
 
 @pytest.mark.parametrize("hops", [1, 2, 32, 33])
 @pytest.mark.parametrize("kind", ["summary", "objective"])
-def test_rotated_head_is_stored_byte_identical_to_base(make, hops, kind):
+def test_no_proof_rotated_head_is_stored_whole_a_recorded_deviation_from_base(make, hops, kind):
+    """Round 6: the head arrives without its emitted window or a session end, so no commit proof applies and it is
+    stored as submitted, carry included. Base stores BASE_HEADS here; this F1 deviation is intentional. On the
+    commit-proof path storage equals base (test_issue_659_carry_r6)."""
     engine = make(session="P0")
     _out, pure = _generated(engine, objective=kind == "objective")
     assert CARRY in pure
@@ -41,9 +45,8 @@ def test_rotated_head_is_stored_byte_identical_to_base(make, hops, kind):
                    {"role": "assistant", "content": "ok"}])
     rows = engine._store.get_session_messages(f"P{hops}")
     heads = [r for r in rows if "[Recent Summary" in r["content"]]
-    assert len(rows) == 3 and len(heads) == 1 and not any(CARRY in r["content"] for r in rows)
-    stored = heads[0]["content"].encode("utf-8")
-    assert (hashlib.sha256(stored).hexdigest(), len(stored)) == BASE_HEADS[kind]
+    assert len(rows) == 3 and len(heads) == 1 and heads[0]["content"].encode("utf-8") == pure.encode("utf-8")
+    assert (hashlib.sha256(pure.encode("utf-8")).hexdigest(), len(pure.encode("utf-8"))) != BASE_HEADS[kind]
 
 
 @pytest.mark.parametrize("kind", ["summary", "objective"])

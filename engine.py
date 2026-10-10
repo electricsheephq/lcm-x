@@ -627,7 +627,6 @@ class LCMEngine(
         # post-compaction ingest can be verified instead of trusted by position.
         self._compress_commit_proof: Optional[Dict[str, Any]] = None
         self._last_emission_descriptors: Optional[Dict[str, Any]] = None
-        self._carry_head_emission: Optional[Dict[str, Any]] = None  # #659: what the last compress() emitted as its head
         self._last_ingest_reconciliation: Dict[str, Any] = {
             "action": "none",
             "reason": "not run",
@@ -3832,9 +3831,6 @@ class LCMEngine(
                 self._last_compacted_store_id = state.current_frontier_store_id
         self._clear_pending_reset_boundary()
         self._compression_boundary_ingest_pending = can_reassign
-        if can_reassign and (emitted := getattr(self, "_carry_head_emission", None)) and \
-                emitted.get("session_id") == source_session_id:
-            emitted["session_id"] = session_id  # #659: the emitted head's evidence follows its rotation
         self._compression_boundary_active_placeholder_digest_budget = boundary_placeholder_budget
         self._compression_boundary_active_placeholder_digest_ordinals = boundary_placeholder_ordinals
         if (
@@ -5620,40 +5616,13 @@ class LCMEngine(
         glued = self._generated_context_carrier_remainder(message)
         return message if glued is None else {**message, "content": glued}
 
-    def _without_user_carry(self, content: str) -> str:
-        """#659: ``content`` without a verified carry part and manifest that end a verified summary run, i.e. the
-        base-shape scaffold; anything unverified or glued behind it stays. Only the rotated head LCM emitted stores in this form."""
-        pos = min((i for i in (content.find("\n\n---\n\n" + p) for p in (_USER_CARRY_PREFIX, _OMITTED_SUMMARIES_PREFIX))
-                   if i >= 0), default=-1)
-        if pos < 0 or (end := self._verified_generated_suffix_end(content, pos)) != len(content):
-            return content  # only a pure scaffold head; a composite or authored nesting is content, kept whole
-        starts = [0, *(m.end() for m in re.finditer("\n\n---\n\n", content[:pos]))]
-        if not any(self._LCM_SUMMARY_PART_HEADER_RE.match(content, s)
-                   and self._verified_lcm_summary_prefix_end(content[s:]) == end - s for s in starts):
-            return content
-        return content[:pos]
-
-    def _record_carry_head_emission(self, result) -> None:
-        """#659: process-local evidence of the carry-bearing head compress() emitted, bound to this session: its
-        sha256 and the row that followed it. Lost on restart; the head then stores whole."""
-        rows = [m for m in result if isinstance(m, dict) and m.get("role") != "system"] if isinstance(result, list) else []
-        head = rows[0].get("content") if rows and rows[0].get("role") == "user" else None
-        self._carry_head_emission = {
-            **self._emission_binding(), "sha256": hashlib.sha256(head.encode("utf-8")).hexdigest(),
-            "next": self._public_compression_row(rows[1]) if len(rows) > 1 else None,
-        } if isinstance(head, str) and self._without_user_carry(head) != head else None
-
-    def _emitted_carry_head_index(self, messages, emitted) -> Optional[int]:
-        """#659: the first non-system row, only when it is the emitted head byte for byte AND re-sent inside a
-        window: followed by the row LCM emitted after it, or by a later user row. A lone row is a new occurrence."""
-        rows = [(i, m) for i, m in enumerate(messages) if m.get("role") != "system"] if emitted else []
-        if not rows or not isinstance(content := rows[0][1].get("content"), str) or \
-                hashlib.sha256(content.encode("utf-8")).hexdigest() != emitted["sha256"]:
-            return None
-        rest = [m for _i, m in rows[1:]]
-        if rest and (self._public_compression_row(rest[0]) == emitted["next"] or any(m.get("role") == "user" for m in rest)):
-            return rows[0][0]
-        return None
+    def _holds_verified_user_carry(self, row: Dict[str, Any]) -> bool:
+        """#659: a read-only view for carry eligibility. A stored row holding a carry part that re-renders from the
+        store (a carry-bearing head stored whole on a no-proof path, or a user's paste) keeps its bytes in storage,
+        identity and the lcm tools; it is only never carried again, so the carry never nests."""
+        content = normalize_content_value(row.get("content")) or ""
+        return any(self._verified_generated_suffix_end(content, m.start()) > m.start()
+                   for m in re.finditer(re.escape("\n\n---\n\n" + _USER_CARRY_PREFIX), content))
 
     def _user_carry_lineage(self) -> list[str]:
         """#659: the bound session and ALL its recorded compression predecessors, nearest first. Unbounded (a
@@ -5973,11 +5942,6 @@ class LCMEngine(
             )
             return self._redact_active_replay_messages(messages)
 
-        emitted_carry_head = None  # #659: spent by the first pending ingest that sees a non-system row, on every exit
-        if self._compression_boundary_ingest_pending and any(m.get("role") != "system" for m in messages):
-            emitted_carry_head, self._carry_head_emission = getattr(self, "_carry_head_emission", None), None
-            if emitted_carry_head and not self._emission_proof_matches_binding(emitted_carry_head, self._emission_binding()):
-                emitted_carry_head = None
         self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
@@ -6486,12 +6450,6 @@ class LCMEngine(
                     )
                 active_replay_messages[absolute_idx] = stubbed_message
 
-        head = self._emitted_carry_head_index(messages, emitted_carry_head)
-        if compression_boundary_ingest_pending and head is not None:  # #659: only LCM's emitted head stores as base does
-            protected_messages = [
-                {**m, "content": self._without_user_carry(m["content"])}
-                if idx == head and m.get("role") == "user" and isinstance(m.get("content"), str) else m
-                for (idx, _msg), m in zip(messages_to_store_with_index, protected_messages)]
         estimates = [count_message_tokens(m) for m in protected_messages]
         store_ids = self._store._append_protected_batch(
             self._session_id,
@@ -8029,9 +7987,10 @@ class LCMEngine(
                     excerpt = (int(row["store_id"]), (low + 1) // 2, len(text) - low // 2)
                 return False
 
-            def real(row) -> bool:  # an LCM scaffold or host-merged carrier stored as user-authored is never carried
+            def real(row) -> bool:  # an LCM scaffold, host-merged carrier or verified carry block is never carried
                 return (self._is_durable_real_user_row(row) and not self._is_verified_replay_scaffold_message(row)
-                        and self._generated_context_carrier_remainder(row) is None)
+                        and self._generated_context_carrier_remainder(row) is None
+                        and not self._holds_verified_user_carry(row))
 
             def scan(newest=True):  # the lineage's real user rows of this conversation, a page at a time
                 cursor = boundary + 1 if newest else 0

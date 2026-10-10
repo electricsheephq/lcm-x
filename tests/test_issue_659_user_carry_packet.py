@@ -364,9 +364,10 @@ def test_f5_a_profile_rebind_drops_the_packet_cache(make, tmp_path):
 
 @pytest.mark.parametrize("head_kind", ["summary", "objective"])
 @pytest.mark.parametrize("hops", [1, 33])
-def test_r2_f1_a_rotated_child_stores_the_base_shape_head(make, hops, head_kind):
-    """Storing a replayed scaffold head in a rotation child is pre-existing (base ce186095 does it); the packet
-    must not change what is stored: the head minus its carry part and manifest, charged at that size."""
+def test_r2_f1_a_no_proof_rotated_child_stores_the_head_whole(make, hops, head_kind):
+    """Storing a replayed scaffold head in a rotation child is pre-existing (base ce186095 does it). With no commit
+    proof (no session end, no emitted window) round 6 stores it as submitted, carry included, charged at that size:
+    a recorded deviation from base's carry-free head. A replay of it still maps back."""
     engine = make(session="P0")
     ending = ([{"role": "user", "content": "ACTIVE request"}, *_tools(70), *_tools(71)] if head_kind == "objective"
               else [{"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
@@ -380,8 +381,8 @@ def test_r2_f1_a_rotated_child_stores_the_base_shape_head(make, hops, head_kind)
     engine.ingest([head, {"role": "user", "content": "new request"}, {"role": "assistant", "content": "ok"}])
     stored = engine._store.get_session_messages(f"P{hops}")
     heads = [r for r in stored if "[Recent Summary" in r["content"]]
-    assert [r["content"] for r in heads] == [base_shape] and not any(CARRY in r["content"] for r in stored)
-    assert heads[0]["token_estimate"] == count_message_tokens({"role": "user", "content": base_shape})
+    assert [r["content"] for r in heads] == [head["content"]] != [base_shape]
+    assert heads[0]["token_estimate"] == count_message_tokens(head)
     engine.ingest([head, {"role": "user", "content": "new request"}, {"role": "assistant", "content": "ok"},
                    {"role": "user", "content": "next"}])  # the replayed head maps back: nothing re-stored
     assert len(engine._store.get_session_messages(f"P{hops}")) == len(stored) + 1
