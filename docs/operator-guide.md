@@ -1178,6 +1178,10 @@ known-good `*-rotate-latest.sqlite3` snapshot survives idempotent retries.
 
 ## Embedding backfill
 
+FastEmbed runs its model with 2 threads. `FASTEMBED_CACHE_PATH` selects a model cache,
+including a shared, read-only cache. Pre-seed a read-only cache because
+`/lcm embed warmup` cannot download into it.
+
 Embedding backfill is opt-in and dry-run-first. Configure and warm the model
 before applying any work:
 

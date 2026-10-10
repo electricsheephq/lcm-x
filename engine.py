@@ -683,6 +683,7 @@ class LCMEngine(
         self.emit_automatic_compaction_status = False
         # #582 survival fit: the failure reason of this compress(), the last fit, and the one-shot warning.
         self._survival_fit_reason: Optional[str] = None
+        self._survival_overhead_observation = None  # #1012 F4: (bound conversation key, largest overhead)
         self._last_survival_fit: Optional[Dict[str, Any]] = None
         self._survival_fit_pending_warning: Optional[tuple[str, str]] = None  # (conversation key, text)
         self._survival_fit_warned: set = set()
@@ -1004,6 +1005,7 @@ class LCMEngine(
         """Clear process-local session state that cannot cross profile homes."""
         # R6-4: survival-fit warnings belong to the store they were raised on.
         self._survival_fit_pending_warning, self._survival_fit_warned = None, set()
+        self._survival_overhead_observation = None  # #1012 F4: an overhead peak never crosses profile homes
         self.emit_automatic_compaction_status = False
         if self._adaptive_retrieval is not None:
             self._adaptive_retrieval.clear()
@@ -2238,6 +2240,7 @@ class LCMEngine(
                     attempt_chunk = rescue_chunk
                     continue
                 self._last_leaf_summary_model = provenance.get("model", "")
+                self._last_leaf_content_filter_error = bool(provenance.get("content_filter_error"))
                 # #652: no fragment; #947: a clipped source returned unchanged by the level-3 fallback is a fragment too
                 self._last_leaf_level_3_verbatim = level == 3 and not clipped and summary_text == serialized
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
@@ -2401,6 +2404,9 @@ class LCMEngine(
         conversation_id: str | None = None,
     ) -> None:
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
+        if getattr(self, "_survival_overhead_observation", None) is not None and \
+                self._survival_overhead_observation[0] != state.conversation_id:
+            self._survival_overhead_observation = None
         self._conversation_id = state.conversation_id
         self._lcm_session_last_conversation_id[session_id] = state.conversation_id
         self._last_compacted_store_id = state.current_frontier_store_id
@@ -7324,7 +7330,9 @@ class LCMEngine(
                {"deadline": deadline} if deadline is not None else {}),  # #666/#605: every attempt
             verbatim_small_source=True,  # #605 F2
         )
-        if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow):
+        # #1012 F4: a content-filtered group keeps its level 3 truncation, so condensation progresses
+        if level == 3 and summary_text != combined_text and self._fit_can_rescue(force_overflow) and \
+                not provenance.get("content_filter_error"):
             raise SummaryResultRejected("summary result rejected at level 3")  # a truncation, not the whole text
         earliest_at, latest_at = self._dag.get_source_time_window(
             [node.node_id for node in nodes]
