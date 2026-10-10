@@ -175,7 +175,7 @@ claim that Hermes core has no persisted record of pre-compression history.
 
 ### Prerequisites
 
-- Hermes Agent
+- Hermes Agent 0.21.3 or later (`requires_hermes` in `plugin.yaml`; LCM-X needs the plugin `register_hook` API)
 - Python 3.11+
 - No required third-party runtime dependencies
 
