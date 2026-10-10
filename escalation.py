@@ -126,6 +126,23 @@ def is_summary_context_length_error(exc: BaseException | None) -> bool:
     return any(token in message for token in _CONTEXT_LENGTH_ERROR_TOKENS)
 
 
+def is_summary_content_filter_error(exc: BaseException | None) -> bool:
+    """#1012 F4: an HTTP 400 refusing this chunk's content, not a route failure."""
+    if exc is None or isinstance(exc, TimeoutError):
+        return False
+    response = getattr(exc, "response", None)
+    status = getattr(exc, "status_code", None) or getattr(response, "status_code", None)
+    message = " ".join(str(value) for value in (
+        exc, getattr(exc, "body", ""), getattr(response, "text", ""),
+    )).lower()
+    if status is None and (match := _STATUS_IN_MESSAGE_RE.search(message)):
+        status = int(match.group(1))
+    return status == 400 and (
+        any(token in message for token in ("contentfilter", "content_filter", "content_policy_violation"))
+        or (re.search(r"\b1301\b", message) is not None and "sensitive" in message)
+    )
+
+
 def _accepts_route_info(call_llm) -> bool:
     """#682: whether the host's ``call_llm`` names a ``route_info`` parameter; inspected once per function."""
     cached = _route_info_support.get(id(call_llm))
@@ -1051,6 +1068,9 @@ def _invoke_summary_llm_chain(
                 logger.warning("LLM summarization failed: %s", error)
             else:
                 circuit_breaker.record_config_error(route_key, route=route, error=error, sent_model=candidate_model)
+        elif result is None and is_summary_content_filter_error(error):
+            if provenance is not None:  # the filtered chunk must not open the route's circuit
+                provenance["content_filter_error"] = True
         elif result is None and context_length_rescue and is_summary_context_length_error(error):
             if provenance is not None:  # #751: the chunk is too large for this route; the caller shrinks it
                 provenance["context_length_error"] = True

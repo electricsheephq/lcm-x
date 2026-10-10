@@ -1264,6 +1264,8 @@ class CompactionMixin:
                 force=force,
             )
         self._rebind_after_unadopted_compaction_commit()
+        # #1012 F4: observe foreground passes only, after classification and rebinding.
+        self._survival_host_overhead(messages, current_tokens)
 
         # ``current_tokens`` is optional in the ContextEngine contract. After a
         # yield-aware preflight, use the current active messages as the
@@ -1964,6 +1966,7 @@ class CompactionMixin:
 
                 step_started = time.monotonic() if threshold_full_sweep_active else 0.0
                 self._last_leaf_level_3_verbatim = False
+                self._last_leaf_content_filter_error = False
                 try:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
                     if threshold_full_sweep_active:
@@ -1996,7 +1999,8 @@ class CompactionMixin:
                         sweep_step_done("summariser", step_started)
                 # #652: no truncated level 3 leaf while the fit can rescue; the backlog stays. A level 3 that
                 # is the whole source (it already fits the truncation budget) loses nothing and is written.
-                if _level == 3 and self._fit_can_rescue(force_overflow) and not self._last_leaf_level_3_verbatim:
+                if _level == 3 and self._fit_can_rescue(force_overflow) and not (
+                        self._last_leaf_level_3_verbatim or self._last_leaf_content_filter_error):
                     sweep_stop_reason = "summary_result_rejected"
                     break
             anchor_claimed_ids = sorted({  # #436 R4: only claims whose text the summarizer actually read
