@@ -7196,7 +7196,7 @@ class TestMessageFiltering:
             second.shutdown()
 
     @pytest.mark.xfail(strict=True, raises=AssertionError,
-                       reason="#1013 part B: on-path defect, see <issue placeholder: rollover-placeholder-duplicate>")
+                       reason="#1013 part B: on-path defect, see #1053")
     def test_new_placeholder_literal_after_rollover_is_stored_losslessly(self, tmp_path):
         db_path = tmp_path / "lcm_msg_ignore_placeholder_rollover_new_literal.db"
         first = LCMEngine(
