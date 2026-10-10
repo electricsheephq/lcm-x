@@ -37,7 +37,7 @@ def verdict(intervals, cost_ratio=None, complete=True):
     return "KEEP" if cost_ratio is not None and len(covered) == len(intervals) and all(v["low"] > bars[k] for k, v in covered.items()) else "INCONCLUSIVE"
 
 
-def axes(sc, facts):
+def axes(sc, facts, continuity_excluded=()):
     out = {}
     for f in facts:
         p = sc["probes"].get(f["id"])
@@ -59,7 +59,14 @@ def axes(sc, facts):
     for k in ("continuity", "continuation", "trap_abstention", "stale_rate"):
         v = sc["metrics"].get(k, {}).get("value")
         if v is not None:
-            out[k] = list({g["item"]: bool(g["strict"]) for g in sc["metrics"][k].get("checkpoint_grid", sc["metrics"][k]["grid"])}.values()) if k == "continuity" else [1 - v if k == "stale_rate" else v]
+            if k == "continuity":
+                grid = {g["item"]: bool(g["strict"]) for g in sc["metrics"][k].get("checkpoint_grid", sc["metrics"][k]["grid"])
+                        if g["item"] not in continuity_excluded}
+                if sc.get("arm") == "codex-native":
+                    grid.update({it: present for it, present in sc.get("host_instruction_presence", {}).items() if present is not None and it in grid})
+                out[k] = list(grid.values())
+            else:
+                out[k] = [1 - v if k == "stale_rate" else v]
     return out
 
 
@@ -77,6 +84,11 @@ def analyze_window(scores, material, seeds, context_length):
             continue
         model = (sc.get("reader") or "").split("·")[0]
         run = Path(sc["run_dir"]).parent
+        admitted_usage = sc.get("summariser_usage")
+        summary_file = run / "summary.json"
+        current = score_manifest.summariser_usage(json.loads(summary_file.read_text())) if summary_file.exists() else None
+        if admitted_usage is None or admitted_usage != current:
+            raise ValueError(f"admitted summariser usage missing or disagrees: {run}")
         key = (sc["checkpoint_id"], model, None if model == "gpt-6-astra" else context_length, run.name)
         groups.setdefault((arm, seed), {})[key] = sc
         if sc.get("worktree_head"):
@@ -103,6 +115,8 @@ def analyze_window(scores, material, seeds, context_length):
         by_seed, missing, window, pre, incomplete, errors = {}, [], {}, [], [], {left_arm: 0, other: 0}
         rereads = {left_arm: 0, other: 0}
         totals = {left_arm: [0, 0, True], other: [0, 0, True]}
+        seen, summary_seen, exclusions = set(), set(), set()
+        estimated = {left_arm: 0, other: 0}
         allowed = ("gpt-6-astra",) if other == "codex-native" else ("glm-5.3", "FAKE")
         for seed in seeds:
             left = {k: v for k, v in groups.get((left_arm, seed), {}).items() if k[1] in allowed}
@@ -124,6 +138,10 @@ def analyze_window(scores, material, seeds, context_length):
             facts = json.loads((material / f"seed-{seed}" / "facts.json").read_text())
             for key in sorted(left):
                 pair = (left[key], right[key])
+                excluded = {g["item"] for g in right[key]["metrics"].get("continuity", {}).get("grid", [])
+                            if other == "codex-native" and g["item"].endswith("host_instruction") and
+                            right[key].get("host_instruction_presence", {}).get(g["item"]) is None}
+                exclusions.update(excluded)
                 for arm, sc in zip((left_arm, other), pair, strict=True):
                     errors[arm] += sc.get("reader_errors", 0)
                     rereads[arm] += sc.get("reader_rereads", 0)
@@ -134,28 +152,35 @@ def analyze_window(scores, material, seeds, context_length):
                     incomplete.append(dict(seed=seed, checkpoint=key[0]))
                     continue
                 if not all(sc.get("behaviour", {}).get("compactions", 0) >= 1 for sc in pair):
-                    pre.append(dict(seed=seed, checkpoint=key[0], axes=[axes(sc, facts) for sc in pair]))
+                    pre.append(dict(seed=seed, checkpoint=key[0], axes=[axes(sc, facts, excluded) for sc in pair]))
                     continue
                 window[str(seed)].append(key[0])
-                a, b = (axes(sc, facts) for sc in pair)
+                a, b = (axes(sc, facts, excluded) for sc in pair)
                 for k in a.keys() & b.keys():
                     cell = tally.setdefault(k, [0, 0, 0, 0])
                     for i, values in enumerate((a[k], b[k])):
                         cell[2*i] += sum(values)
                         cell[2*i+1] += len(values)
                 for arm, sc in zip((left_arm, other), pair, strict=True):
+                    identity = (arm, str(Path(sc["run_dir"]).resolve()))
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
                     usage, total = sc.get("accounting", {}), totals[arm]
+                    estimated[arm] += usage.get("reader_estimated_attempts", 0)
                     tokens = [usage.get(k) for k in ("reader_input_tokens", "reader_output_tokens")]
                     total[2] &= all(v is not None for v in tokens)
                     total[0] += sum(v or 0 for v in tokens)
                     total[1] += usage.get("successful_probes", 0)
                     root = Path(sc["run_dir"]).parent / "summary.json"
-                    run_usage[(arm, str(root))] = root
-            for (arm, _), root in run_usage.items():
-                summ = json.loads(root.read_text()) if root.exists() else {}
-                calls = [{**c, **(c.get("usage") or {})} for ev in summ.get("events", []) for c in ev.get("summariser_calls", [])]
-                tokens = [c.get(k) for c in calls for k in ("prompt_tokens", "completion_tokens")]
-                totals[arm][2] &= "events" in summ and all(v is not None for v in tokens)
+                    run_usage[(arm, str(root.resolve()))] = sc["summariser_usage"]
+            for identity, usage in run_usage.items():
+                if identity in summary_seen:
+                    continue
+                summary_seen.add(identity)
+                arm = identity[0]
+                tokens = [c[k] for c in usage["calls"] for k in ("prompt_tokens", "completion_tokens")]
+                totals[arm][2] &= usage["events_present"] and all(v is not None for v in tokens)
                 totals[arm][0] += sum(v or 0 for v in tokens)
             if tally:
                 by_seed[seed] = {k: 100*(v[0]/v[1] - v[2]/v[3]) for k, v in tally.items() if v[1] and v[3]}
@@ -176,6 +201,7 @@ def analyze_window(scores, material, seeds, context_length):
             result = "DESCRIPTIVE"
         out[f"{left_arm}−{'C' if other == 'codex-native' else other}"] = dict(intervals=intervals, missing_seeds=missing, cost_ratio=ratio,
             cost_per_success=costs, compared_window=window, pre_window=pre, incomplete_pairs=incomplete, reader_errors=errors, reader_rereads=rereads,
+            reader_estimated_attempts=estimated, continuity_exclusions=sorted(exclusions),
             verdict=result, claim_class=claim, claim="mechanism only; overall KEEP also needs product comparison")
     return dict(schema="eval2-v2", context_length=context_length, unit="session/seed", resamples=10000, rng_seed=1064, seeds=seeds, comparisons=out, per_checkpoint=counts)
 
@@ -221,6 +247,8 @@ def main(argv=None):
                 rows.append(f"| {pair} | {seed} | {', '.join(cps)} |")
             rows.append(f"| {pair} | INCOMPLETE | {value['incomplete_pairs']} |")
             rows.append(f"| {pair} | reader re-reads per arm | {value.get('reader_rereads', {})} |")
+            rows.append(f"| {pair} | cost ratio / estimated attempts per arm | {value.get('cost_ratio')} / {value.get('reader_estimated_attempts', {})} |")
+            rows.append(f"| {pair} | continuity excluded (host-visible receipt absent) | {value.get('continuity_exclusions', [])} |")
         rows += ["", "| arm (context) | checkpoint | facts denominator | lifecycle kind/actual compactions | correct/denominator | status-line scoring (NOT LIVE passes) |", "|---|---|---|---|---|---|"]
         for c in checkpoints:
             for kind, cell in c["lifecycle"].items() or {"none due": [0, 0]}.items():

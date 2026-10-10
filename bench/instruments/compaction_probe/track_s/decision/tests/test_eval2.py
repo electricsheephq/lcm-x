@@ -68,7 +68,7 @@ def test_eight_seed_pairs_require_every_manifest_checkpoint_and_admitted_score(t
                     ps["life"] = dict(kind="stale_task", compaction_horizon=1, **{"class": "CORRECT"})
                 sc = dict(arm=arm, seed=f"seed-{seed}", reader="glm-5.3", checkpoint_id=cp["id"], probes=ps,
                           behaviour=dict(compactions=1), accounting=dict(reader_input_tokens=1, reader_output_tokens=1, successful_probes=1),
-                          run_dir=str(run / f"cp-{cp['id']}"), metrics=dict(facts_kept=dict(complete=True, denominator=6),
+                          summariser_usage=dict(events_present=True, calls=[]), run_dir=str(run / f"cp-{cp['id']}"), metrics=dict(facts_kept=dict(complete=True, denominator=6),
                           lifecycle=dict(complete=True, by_kind_horizon={})))
                 path = scores / f"cp-{cp['id']}" / f"{arm}.seed-{seed}.d1-r1.json"
                 write(path, sc)
@@ -94,8 +94,8 @@ def test_v4_loss_classification_excludes_future_unscored_sources(tmp_path):
     spec = importlib.util.spec_from_file_location("loss_class", Path(__file__).resolve().parents[1] / "loss_class.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    (tmp_path / "facts.json").write_text(json.dumps([dict(id=f, value=f, placement="head", **{"class": "limit"})
-                                                   for f in ("past", "future")]))
+    (tmp_path / "facts.json").write_text(json.dumps([dict(id=f, value=f, row_index=i * 8, placement="head", **{"class": "limit"})
+                                                   for i, f in enumerate(("past", "future"))]))
     (tmp_path / "lifecycle_probes.jsonl").write_text("")
     scored = dict(run_dir=str(tmp_path / "run"), material=str(tmp_path), arm="L0", seed="seed-1", run="r1",
                   checkpoint_row=4, probes={"past": {"class": "MISS"}}, metrics={"facts_kept": {}})

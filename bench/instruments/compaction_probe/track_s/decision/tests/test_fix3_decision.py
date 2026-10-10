@@ -58,7 +58,7 @@ def test_astra_runs_do_not_overwrite_and_codex_can_pair_different_names(tmp_path
         for p in sc["probes"].values():
             p["class"] = "CORRECT"
         if sc["arm"] == "L0":
-            sc.update(arm="codex-native", context_length=258400)
+            sc.update(arm="codex-native", context_length=258400, summariser_usage=dict(events_present=True, calls=[]))
             sc["run_dir"] = sc["run_dir"].replace("/r1/", "/reference/")
             write(Path(sc["run_dir"]).parent / "summary.json", dict(events=[]))
     update(scores, astra)
@@ -68,6 +68,7 @@ def test_astra_runs_do_not_overwrite_and_codex_can_pair_different_names(tmp_path
         if sc["arm"] != "L1":
             continue
         sc["run_dir"] = sc["run_dir"].replace("/r1/", "/r2/")
+        sc["summariser_usage"] = dict(events_present=True, calls=[])
         for p in sc["probes"].values():
             p["class"] = "MISS"
         target = path.with_name(path.stem + ".r2.json")

@@ -96,8 +96,15 @@ def main():
             for cp, sub in cps.items():
                 if sub is None or not (rdir / sub / "summary.json").exists():
                     continue
+                if v4:
+                    recorded = jload(rdir / sub / "summary.json")
+                    field, source = ("material_sha", "transcript.jsonl") if arm == "codex-native" else ("material_sha256", "material.manifest.json")
+                    digest = hashlib.sha256((args.material / f"seed-{n}" / source).read_bytes()).hexdigest()
+                    if recorded.get(field) != digest:
+                        raise ValueError(f"material digest mismatch or absent: {rdir / sub} {field}")
                 out = score(args.material / f"seed-{n}", rdir / sub, arm)
                 if v4:
+                    out["summariser_usage"] = score_manifest.summariser_usage(jload(rdir / "summary.json"))
                     run_calls += jload(rdir / sub / "summary.json").get("reader_calls", [])
                     run_probes.update({f"{cp}/{pid}": p for pid, p in out["probes"].items()})
                 if arm.startswith("LCMX"):

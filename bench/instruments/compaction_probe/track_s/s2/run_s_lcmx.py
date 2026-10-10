@@ -321,7 +321,8 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
                     err = "READER_TRUNCATED: completion cap 8192 reached"
             except Exception as exc:
                 err = f"{type(exc).__name__}: {exc}"[:400]
-                attempts.append(dict(error=err, reader_calls=[None]))
+                if hasattr(exc, "reader_calls"):
+                    attempts.append(dict(error=err, reader_calls=exc.reader_calls))
             finally:
                 if tools_engine is not None:
                     tools_engine.shutdown()

@@ -46,6 +46,7 @@ def test_64k_never_changes_272k_and_is_reported_separately(tmp_path, real_materi
     for path in list(scores.glob("cp-*/*.json")):
         sc = json.loads(path.read_text())
         sc["context_length"] = 64000
+        sc["summariser_usage"] = dict(events_present=True, calls=[])
         sc["run_dir"] = sc["run_dir"].replace("/r1/", "/64k/")
         for p in sc["probes"].values():
             p["class"] = "MISS" if sc["arm"] == "L1" else "CORRECT"
@@ -70,7 +71,7 @@ def test_codex_pairs_seed_checkpoint_despite_own_window_and_run_name(tmp_path, r
         sc["reader"] = "gpt-6-astra"
         sc["reader_readback"] = dict(effort="low", pin_ok=True)
         if sc["arm"] == "L0":
-            sc.update(arm="codex-native", context_length=258400)
+            sc.update(arm="codex-native", context_length=258400, summariser_usage=dict(events_present=True, calls=[]))
             sc["run_dir"] = sc["run_dir"].replace("/r1/", "/codex-reference/")
             write(Path(sc["run_dir"]).parent / "summary.json", dict(events=[]))
     update(scores, codex)

@@ -78,7 +78,7 @@ def observations(root, material, *, pre=False, error=False, same_pin=False, mixe
                           behaviour=dict(compactions=int(n == len(cps)-1 if pre else cp["row_index"] >= first_trigger(mat))),
                           accounting=dict(reader_input_tokens=10, reader_output_tokens=2,
                                           successful_probes=1),
-                          run_dir=str(run / f"cp-{cp['id']}"), reader_errors=int(error and arm == "L1" and n == len(cps)-1),
+                          summariser_usage=dict(events_present=True, calls=[dict(prompt_tokens=10, completion_tokens=2)]), run_dir=str(run / f"cp-{cp['id']}"), reader_errors=int(error and arm == "L1" and n == len(cps)-1),
                           metrics=dict(facts_kept=dict(complete=True, denominator=count), lifecycle=dict(complete=True)))
                 path = scores / f"cp-{cp['id']}" / f"{arm}.seed-{seed}.json"
                 write(path, sc)
@@ -143,6 +143,7 @@ def test_cost_window_with_whole_run_summariser_tokens(tmp_path, real_material):
         # Reader cost 12, 10 successful window tasks. Both summary calls cost 12,
         # including a call before the window: (12 + 24) / 10 == 3.6.
         sc["accounting"]["successful_probes"] = 10
+        sc["summariser_usage"]["calls"] *= 2
         write(path, sc)
         manifest["entries"][str(path.relative_to(scores.parent))]["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
         write(Path(sc["run_dir"]).parent / "summary.json", dict(events=[dict(summariser_calls=[dict(usage=dict(prompt_tokens=10, completion_tokens=2))])] * 2))

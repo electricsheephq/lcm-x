@@ -338,11 +338,11 @@ def admission(rows: list[dict], facts: list[dict], items: list[dict]) -> dict:
             "rows": per_row, "facts": fstat}
 
 
-def survival(sid: str, facts: list[dict], man: dict, rdir: Path | None = None, rows: list[dict] = ()) -> list[dict]:
+def survival(sid: str, facts: list[dict], man: dict, rdir: Path | None = None, rows: list[dict] = (), workspace: Path | None = None) -> list[dict]:
     """What the CLI kept at each `compacted` row: readable replacement-history text vs encrypted payload.
     With `rdir` (S6 A2): continuity/event-<i>.json = that text + the host-instruction text the CLI sends (the
     driver-installed workspace/AGENTS.md), i.e. the plain text the next model call receives after event i."""
-    agents = rdir / "workspace" / "AGENTS.md" if rdir else None
+    agents = (workspace or rdir / "workspace") / "AGENTS.md" if workspace or rdir else None
     host = agents.read_text(encoding="utf-8") if agents and agents.exists() else ""
     out, turn, window, last_row = [], 0, None, {r["turn"]: i for i, r in enumerate(rows)}
     for r in jl(rollout_path(sid)):  # S7 D4: the replay turn (driver tag) and the CLI-reported window at each compaction
@@ -371,6 +371,7 @@ def survival(sid: str, facts: list[dict], man: dict, rdir: Path | None = None, r
                                                       for it in hist if isinstance(it, dict))),
                     "encrypted_parts": enc, "plain_chars": len(plain),
                     "facts_verbatim_in_plain_text": sorted(f["id"] for f in facts if f["value"] in plain),
+                    "continuity_host_visible": {c["id"]: c["value"] in plain + "\n" + host for c in man.get("continuity", [])},
                     "continuity_verbatim": {c["id"]: c["value"] in plain for c in man.get("continuity", [])}})
     return out
 
@@ -437,7 +438,8 @@ def main(a=None, state=None) -> int:
     man = json.loads((sdir / "material.manifest.json").read_text())
     cp = CP.select(sdir, a.stop_row or "decision")[0] if (sdir / "lifecycle_probes.jsonl").exists() else None
     stop = cp["row_index"] if cp else man["decision_checkpoint"]["row_index"] if a.stop_row is None else int(a.stop_row)
-    rows = [r for i, r in enumerate(rows) if i <= stop and (not a.slice or r["turn"] <= a.slice)]
+    effective = max(i for i, r in enumerate(rows) if r["turn"] == rows[stop]["turn"]) if state is not None else stop
+    rows = [r for i, r in enumerate(rows) if i <= effective and (not a.slice or r["turn"] <= a.slice)]
     plans = plan_turns(rows[(state["row"] + 1) if state else 0:], a.dictation)
     seed = "smoke-seed-1" if a.seed == "smoke-1" else f"seed-{a.seed}"
     rdir = (S4 / "dry-run" / (seed + ("" if a.dictation == "user" else "-dictation-file"))) if a.dry_run \
@@ -453,7 +455,7 @@ def main(a=None, state=None) -> int:
         adm = admission(rows, facts, items)
         jdump(rdir / "admission.json", adm)
         summ["admission"] = {k: v for k, v in adm.items() if k not in ("rows", "facts")}
-        summ["survival"] = survival(summ["thread_id"], facts, man, rdir, rows)
+        summ["survival"] = survival(summ["thread_id"], facts, man, rdir, rows, root / "workspace")
         jdump(rdir / "summary.json", summ)
         print(json.dumps(summ["admission"], indent=1))
         return 0
@@ -472,6 +474,7 @@ def main(a=None, state=None) -> int:
         [str(codex_bin()), "--version"], capture_output=True, text=True).stdout.strip(), "codex_bin": str(codex_bin()),
         "home": home, "dictation": a.dictation, "rows": len(rows), "turns": len(plans), "stop_row_index": rows[-1]["id"], "checkpoint": stop,
         "material_sha": man["shas"]["transcript.jsonl"], "late_corrected_value_checkpoint": CP.late_checkpoint(sdir), "workspace": str(ws), "layout": layout,
+        "checkpoint_row": stop, "effective_row": effective,
         "kit": {"path": str(KIT), "drive_codex_sha": sha(KIT / "drive_codex.py"),
                 "parse_rollout_sha": sha(KIT / "parse_rollout.py")}}
     if a.dry_run:
@@ -533,7 +536,7 @@ def main(a=None, state=None) -> int:
     jdump(rdir / "admission.json", adm)
     summary["admission"] = {k: v for k, v in adm.items() if k not in ("rows", "facts")}
     cont = json.loads((sdir / "continuation.json").read_text())
-    summary["survival"] = survival(sid, facts, man, rdir, rows)
+    summary["survival"] = survival(sid, facts, man, rdir, rows, ws)
     summary["cp_rollout_sha_before_probes"] = sha(cp_rollout)
     (rdir / "sessions").mkdir(exist_ok=True)
     shutil.copy2(cp_rollout, rdir / "sessions" / cp_rollout.name)
@@ -616,7 +619,7 @@ def main(a=None, state=None) -> int:
     if state is not None:
         state.update(parent_changed=not summary["isolation_ok"], summary=summary)
     if state is not None and summary["status"] == "COMPLETED":
-        state.update(sid=sid, turn_log=turn_log, row=stop, home=home, summary=summary)
+        state.update(sid=sid, turn_log=turn_log, row=effective, home=home, summary=summary)
     jdump(rdir / "summary.json", summary)
     print(json.dumps({k: summary.get(k) for k in ("status", "thread_id", "pin_ok", "isolation_ok",
                                                   "model_context_window", "history_mode")}, indent=1))

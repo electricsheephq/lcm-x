@@ -461,6 +461,8 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
         sources = {c["id"]: c.get("row_index", 0) for c in man.get("continuity", [])}
         m["continuity"]["checkpoint_grid"] = [dict(item=c["id"], strict=c["present"]) for c in summ["final_continuity"]
                                                if sources[c["id"]] <= stop]
+    host_presence = {c["id"]: c["value"] in run["events"][-1]["text"] if run["events"] and run["events"][-1].get("text") is not None else None
+                     for c in man.get("continuity", []) if c["id"].endswith("host_instruction")}
     m["level3"] = level3(run)
     m["latency"] = latency(run)
     m["recall"] = recall(run, man, all_facts, by_id, probes, base, lost)
@@ -493,7 +495,7 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
             "run_id": rows[0].get("run_id") if rows else None, "material": str(material), "run_dir": str(run_dir),
             "runtime": run["runtime"], "writer": run["writer"], "reader": run.get("reader"), "provenance": run.get("provenance"),
             "reader_readback": summ.get("reader_readback") or (rows[0].get("reader_readback") if rows else {}) or {},
-            "population": run.get("population", "full-stream"),
+            "population": run.get("population", "full-stream"), "host_instruction_presence": host_presence,
             "store_backed": run["store_backed"], "smoke": man.get("mode") == "smoke", "kit_rule": KIT, "metrics": m,
             "behaviour": {"compactions": len(comp),
                           "events": [{k: e.get(k) for k in ("label", "turn", "tokens", "wall_s", "timing", "compaction", "publication_s")}
@@ -543,6 +545,7 @@ def accounting(summ, probes):
     return dict(task_unit="seed replay", compactions_per_task=len(events) if "events" in summ else len(summ.get("compactions", [])), reader_input_tokens=total(reader, "prompt_tokens"),
                 reader_cached_tokens=total(reader, "cached_tokens"), reader_uncached_tokens=total(reader, "uncached_tokens"),
                 reader_output_tokens=total(reader, "completion_tokens"),
+                reader_estimated_attempts=sum(bool(c.get("estimated")) for c in reader),
                 summariser_input_tokens=total(summary, "prompt_tokens"), summariser_output_tokens=total(summary, "completion_tokens"),
                 reader_latency=stats([c.get("latency_s") for c in reader]),
                 summariser_latency=stats([c.get("latency_s") for c in summary]),
