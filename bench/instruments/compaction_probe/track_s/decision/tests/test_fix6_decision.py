@@ -127,7 +127,7 @@ def test_item4_s2_h_reset_reader_calls_inside_checkpoint_loop(path):
 
 
 @pytest.mark.parametrize("regression", [False, True])
-def test_item7_failed_pair_blocks_keep_but_not_covered_kill(tmp_path, regression):
+def test_item7_failed_pair_blocks_keep_and_covered_kill(tmp_path, regression):
     scores, material = fixture(tmp_path)
     def change(sc):
         if regression and sc["arm"] == "L1":
@@ -140,7 +140,7 @@ def test_item7_failed_pair_blocks_keep_but_not_covered_kill(tmp_path, regression
     modify(scores, change)
     result = comparison(scores, material)
     assert result["intervals"]["facts_user"]["n_seeds"] == 8
-    assert result["verdict"] == ("KILL" if regression else "INCONCLUSIVE")
+    assert result["verdict"] == "INCONCLUSIVE"
     assert result["incomplete_pairs"] == [dict(seed=1, checkpoint="S1-CP20")]
 
 

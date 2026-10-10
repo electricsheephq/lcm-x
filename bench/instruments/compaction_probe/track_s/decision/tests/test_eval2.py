@@ -24,9 +24,7 @@ spec.loader.exec_module(e)
 ])
 def test_verdict(intervals, cost, expected):
     assert e.verdict(intervals, cost) == expected
-    assert e.verdict(intervals, cost, complete=False) == (
-        "KILL" if "facts_user" in intervals and any(v["high"] <= (5 if k == "facts_user" else -2)
-                                                   for k, v in intervals.items()) else "INCONCLUSIVE")
+    assert e.verdict(intervals, cost, complete=False) == "INCONCLUSIVE"
 
 
 def test_bootstrap_resamples_sessions_with_fixed_rng():

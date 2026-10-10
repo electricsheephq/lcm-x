@@ -26,14 +26,12 @@ def bootstrap(deltas, resamples=10000, rng_seed=1064):
 
 def verdict(intervals, cost_ratio=None, complete=True):
     """KEEP requires every lower bound; KILL requires a failing upper bound. Crossing a bar is inconclusive."""
-    if "facts_user" not in intervals:
+    if not complete or "facts_user" not in intervals:
         return "INCONCLUSIVE"
     covered = {k: v for k, v in intervals.items() if v.get("n_seeds", 8) >= 6 and v.get("low") is not None}
     bars = {k: 5 if k == "facts_user" else -2 for k in intervals}
     if any(v["high"] <= bars[k] for k, v in covered.items()):
         return "KILL"
-    if not complete:
-        return "INCONCLUSIVE"
     if cost_ratio is not None and cost_ratio > 1.10:
         return "KILL"
     return "KEEP" if cost_ratio is not None and len(covered) == len(intervals) and all(v["low"] > bars[k] for k, v in covered.items()) else "INCONCLUSIVE"
@@ -159,6 +157,10 @@ def analyze_window(scores, material, seeds, context_length):
                 for arm, sc in zip((left_arm, other), pair, strict=True):
                     errors[arm] += sc.get("reader_errors", 0)
                     rereads[arm] += sc.get("reader_rereads", 0)
+                beyond = right[key].get("beyond_declared", {})
+                if other == "codex-native" and any(beyond.get(k) for k in ("facts", "corrections", "compactions", "continuity")):
+                    horizon_exclusions.append(dict(seed=seed, checkpoint=key[0], beyond_declared=beyond))
+                    continue
                 if all(sc.get("behaviour", {}).get("compactions", 0) >= 1 for sc in pair):
                     for arm, sc in zip((left_arm, other), pair, strict=True):
                         identity = (arm, str(Path(sc["run_dir"]).resolve()))
@@ -181,10 +183,6 @@ def analyze_window(scores, material, seeds, context_length):
                     continue
                 if not all(sc.get("behaviour", {}).get("compactions", 0) >= 1 for sc in pair):
                     pre.append(dict(seed=seed, checkpoint=key[0], axes=[axes(sc, facts, excluded) for sc in pair]))
-                    continue
-                beyond = right[key].get("beyond_declared", {})
-                if other == "codex-native" and any(beyond.get(k) for k in ("facts", "corrections", "compactions")):
-                    horizon_exclusions.append(dict(seed=seed, checkpoint=key[0], beyond_declared=beyond))
                     continue
                 window[str(seed)].append(key[0])
                 a, b = (axes(sc, facts, excluded, fact_classes=other == "H" and left_arm == "L1") for sc in pair)

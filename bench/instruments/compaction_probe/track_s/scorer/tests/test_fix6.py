@@ -42,7 +42,7 @@ def test_item1_runner_records_extra_source_rows_and_scorer_keeps_declared_fact_c
     run = root / "cp-S1-CP20000"
     summ = sc.jload(run / "summary.json")
     beyond = summ["beyond_declared"]
-    assert beyond == dict(count=1, row_indices=[5], facts=["X-F5"], corrections=[], compactions=[])
+    assert beyond == dict(count=1, row_indices=[5], facts=["X-F5"], corrections=[], compactions=[], continuity=[])
     scored = sc.score(material, run, "codex-native")
     assert scored["beyond_declared"] == beyond
     assert scored["checkpoint_row"] == 4 and "X-F5" not in scored["probes"]
@@ -57,7 +57,7 @@ def test_item1_beyond_declared_classifies_facts_corrections_compactions(monkeypa
     survival = [dict(window_number=1, turn_last_row_index=0), dict(window_number=2, turn_last_row_index=3)]
     result = m.beyond_declared(rows, facts, 0, survival)
     assert result == dict(count=3, row_indices=[1, 2, 3], facts=["corrected"],
-                          corrections=["corrected"], compactions=[2])
+                          corrections=["corrected"], compactions=[2], continuity=[])
 
 
 def test_item4_s4_reader_calls_are_checkpoint_local(checkpoint_run):
