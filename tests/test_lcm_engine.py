@@ -7195,9 +7195,13 @@ class TestMessageFiltering:
         finally:
             second.shutdown()
 
-    @pytest.mark.xfail(strict=True, raises=AssertionError,
-                       reason="#1013 part B: on-path defect, see #1053")
-    def test_new_placeholder_literal_after_rollover_is_stored_losslessly(self, tmp_path):
+    @pytest.mark.parametrize("externalized", [
+        False,
+        pytest.param(True, marks=pytest.mark.xfail(
+            strict=True, raises=AssertionError,
+            reason="#1053: with externalization + active-replay stubbing on, the literal is stored twice")),
+    ], ids=["default", "externalization-on"])
+    def test_new_placeholder_literal_after_rollover_is_stored_losslessly(self, tmp_path, externalized):
         db_path = tmp_path / "lcm_msg_ignore_placeholder_rollover_new_literal.db"
         first = LCMEngine(
             config=LCMConfig(
@@ -7207,6 +7211,8 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                large_output_externalization_enabled=externalized,
+                large_output_active_replay_stubbing_enabled=externalized,
             )
         )
         first.on_session_start(

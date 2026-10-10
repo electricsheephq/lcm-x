@@ -63,11 +63,9 @@ byte recoverable.
 
 ```bash
 # Externalize oversized payloads out of lcm.db into recoverable files
-# Default true; kept explicit for older versions.
 export LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true
 
 # Replace token-heavy tool results in the provider-visible prompt with refs
-# Default true; kept explicit for older versions.
 export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=true
 # A new result is stubbed from 10000 tokens; at a compaction, older results
 # outside the fresh tail are stubbed from 2000 tokens (0 = the first-sight value)

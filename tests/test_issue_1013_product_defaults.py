@@ -23,10 +23,11 @@ def test_defaults_match_the_deployed_configuration():
     assert config.fresh_tail_max_tokens == 24_000
     assert config.leaf_chunk_tokens == 8_000
     assert config.threshold_full_sweep_enabled is True
-    # #1013 part B: externalization, active-replay stubbing and rollups match the deployed defaults.
+    # #1013 part B: rollups match the deployed default. Externalization and active-replay stubbing
+    # stay opt-in until #1055 (window-aware floor) and #1056 (scorer) land (#1013 part C).
     assert config.temporal_rollups_enabled is True
-    assert config.large_output_externalization_enabled is True
-    assert config.large_output_active_replay_stubbing_enabled is True
+    assert config.large_output_externalization_enabled is False
+    assert config.large_output_active_replay_stubbing_enabled is False
     assert config.embeddings_enabled is False
     assert config.survival_fit is True
     assert config.survival_reserve == 0.15
@@ -35,7 +36,7 @@ def test_defaults_match_the_deployed_configuration():
 
 
 def test_part_b_env_false_overrides_the_deployed_defaults(tmp_path, monkeypatch):
-    # #1013 part B: explicit environment opt-outs still override all three defaults.
+    # #1013 part B: explicit environment values override the defaults (rollups off; the opt-in pair stays off).
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes"))
     monkeypatch.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", "false")
     monkeypatch.setenv("LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED", "false")
