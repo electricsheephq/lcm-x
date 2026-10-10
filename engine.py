@@ -450,7 +450,8 @@ def _summary_part_text(node) -> str:
 
 # #659: the user-message carry packet and the omitted-summary manifest follow the summary parts. Both are
 # re-rendered from the store/DAG to be recognised, like summary parts. The budget is one complete request
-# under half the window (a code constant, not a config key), and never more than min(64k, 15% of the window).
+# under half the window (a code constant, not a config key; never above 2/3 of the compaction threshold),
+# and never more than min(64k, 15% of the window).
 _USER_CARRY_TARGET_SHARE, _USER_CARRY_WINDOW_SHARE, _USER_CARRY_MAX_TOKENS = 0.50, 0.15, 64_000
 _USER_CARRY_PREFIX = "[Earlier user messages in this session, verbatim, for reference only"
 _USER_CARRY_HEADER_RE = re.compile(re.escape(_USER_CARRY_PREFIX) + r" \(store ids ([\d, ]+?)(?:; excerpt (\d+):(\d+)-(\d+))?\)")
@@ -469,7 +470,7 @@ def _render_user_carry(rows, excerpt=None) -> str:
             a, b = excerpt[1], excerpt[2]
             text = (f"{text[:a]}\n[... excerpt: chars {a}-{b} of {len(text)} omitted; recover them with "
                     f"lcm_expand store_id={store_id} content_offset={a} ...]\n{text[b:]}")
-        parts.append(f"[Earlier user message, store {store_id}]\n{text}")
+        parts.append(f"[Earlier user message, store {store_id}]\n{text.rstrip()}")  # hosts strip trailing space
     return "\n\n".join(parts)
 
 
@@ -7935,8 +7936,10 @@ class LCMEngine(
                                                   max(int(self.last_prompt_tokens or 0), self._last_gate_tokens))
                    + (max(0, int(self._config.proactive_recall_budget_tokens or 0))
                       if self._config.proactive_recall_enabled and self._config.embeddings_enabled else 0))
-            budget = max(0, min(_USER_CARRY_MAX_TOKENS, int(window * _USER_CARRY_WINDOW_SHARE),
-                                int(window * _USER_CARRY_TARGET_SHARE) - est))
+            target = int(window * _USER_CARRY_TARGET_SHARE)
+            if int(self.threshold_tokens or 0) > 0:  # the default's headroom (50% under a 75% threshold) under any
+                target = min(target, int(self.threshold_tokens) * 2 // 3)  # threshold, or the carry re-triggers
+            budget = max(0, min(_USER_CARRY_MAX_TOKENS, int(window * _USER_CARRY_WINDOW_SHARE), target - est))
             chosen, excerpt, used = [], None, 60
 
             def take(row) -> bool:  # False: the budget is spent (this row may be its one excerpt)

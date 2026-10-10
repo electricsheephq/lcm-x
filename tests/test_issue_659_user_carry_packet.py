@@ -27,11 +27,9 @@ def make(tmp_path, monkeypatch):
                         lambda **kwargs: ("Synthetic summary of earlier turns.\nExpand for details about: turns", 1))
     built = []
 
-    def build(session="S", window=32_000, home=None, **overrides):
-        # A low threshold drains every row outside the fresh tail into leaves, so the boundary is explicit.
+    def build(session="S", window=128_000, home=None, **overrides):
         config = LCMConfig(database_path=str((home or tmp_path) / "lcm.db"), fresh_tail_count=4,
                            fresh_tail_max_tokens=2000, leaf_chunk_tokens=4000, threshold_full_sweep_enabled=True,
-                           context_threshold=0.1,
                            large_output_externalization_path=str((home or tmp_path) / "externalized"))
         for key, value in overrides.items():
             setattr(config, key, value)
@@ -63,6 +61,11 @@ def _history(n, size=1000):
     return [row for i in range(n) for row in _turn(i, size=size)]
 
 
+def _compact(engine, messages):
+    """A forced compaction: every row outside the fresh tail goes into leaves, so the boundary is explicit."""
+    return engine.compress(messages, force=True)
+
+
 def _generated(engine, result):
     """(row, carry part) for the row holding the carry packet, else (None, "")."""
     for row in result:
@@ -81,7 +84,7 @@ def _status(engine):
 def test_active_entry_stays_first_and_is_not_repeated_in_the_carry(make):
     engine = make()
     active = "ACTIVE: refactor the parser and keep the public API."
-    out = engine.compress([*_history(6), {"role": "user", "content": active},
+    out = _compact(engine, [*_history(6), {"role": "user", "content": active},
                            *(row for i in range(50, 56) for row in _tools(i))])
     row, carry = _generated(engine, out)
     assert row is out[0] and row["content"].startswith(OBJECTIVE + "\n" + active + SEP)
@@ -97,7 +100,7 @@ def test_origin_is_pinned_across_compactions_and_selection_is_newest_first(make,
     messages = []
     for cycle in range(3):
         start = cycle * 6
-        messages = engine.compress([*messages, *(row for i in range(start, start + 6) for row in _turn(i)),
+        messages = _compact(engine, [*messages, *(row for i in range(start, start + 6) for row in _turn(i)),
                                     {"role": "user", "content": f"latest {cycle}"}, {"role": "assistant", "content": "ok"}])
         _, carry = _generated(engine, messages)
         assert "REQ-0:" in carry and "REQ-2:" not in carry  # the lineage origin is charged first
@@ -108,7 +111,7 @@ def test_repeated_identical_requests_are_both_carried(make):
     engine = make()
     repeat = "REPEAT: run the full suite again."
     messages = [*_turn(0, repeat), *_turn(1), *_turn(2, repeat), *_turn(3), *_history(8)[-16:]]
-    _, carry = _generated(engine, engine.compress(messages))
+    _, carry = _generated(engine, _compact(engine, messages))
     assert carry.count(repeat) == 2
     ids = re.findall(r"\[Earlier user message, store (\d+)\]", carry)
     assert len(ids) == len(set(ids))
@@ -120,7 +123,7 @@ def test_one_excerpt_at_the_aggregate_boundary_resolves_through_expand_and_exter
     big = "BIG-HEAD " + "alpha " * 900 + DATA_URI + " " + "omega " * 900 + "BIG-TAIL"
     messages = [*_turn(0), *_turn(1), *_turn(2, big), *_history(6)[-12:],
                 {"role": "user", "content": "latest small request"}, {"role": "assistant", "content": "ok"}]
-    _, carry = _generated(engine, engine.compress(messages))
+    _, carry = _generated(engine, _compact(engine, messages))
     assert carry.count("[... excerpt:") == 1 and "BIG-HEAD" in carry and "BIG-TAIL" in carry
     marker = re.search(r"chars (\d+)-(\d+) of (\d+) omitted; recover them with lcm_expand store_id=(\d+) "
                        r"content_offset=(\d+)", carry)
@@ -153,15 +156,15 @@ def test_compact_host_merge_reload_compact_stores_no_carry_text(make, tmp_path, 
     engine = make()
     ending = ([{"role": "user", "content": "TAIL-USER: one more thing."}] if tail_users else []) + [
         *_tools(90, 50), {"role": "assistant", "content": "tail reply"}]
-    out = engine.compress([*_history(8), *ending])
+    out = _compact(engine, [*_history(8), *ending])
     assert _generated(engine, out)[1]
     if tail_users:
         assert out[1]["content"] == "TAIL-USER: one more thing."  # merges onto the summary at the host
     host = _host_merge([*out, *_turn(200, "AFTER-RELOAD: next request.", 50)])
     engine.shutdown()
     reloaded = make()
-    second = reloaded.compress([*host, *_history(14)[-24:]])
-    third = reloaded.compress([*second, *_turn(300, size=50)])
+    second = _compact(reloaded, [*host, *_history(14)[-24:]])
+    third = _compact(reloaded, [*second, *_turn(300, size=50)])
     assert third
     rows = reloaded._store._conn.execute("SELECT content FROM messages WHERE role = 'user'").fetchall()
     contents = [row[0] for row in rows]
@@ -174,7 +177,7 @@ def test_tool_heavy_mid_turn_carrier_and_summary_rows_stay_scaffold(make):
     engine = make()
     latest = [{"role": "user", "content": "LATEST: first tail user."}, {"role": "assistant", "content": "a"},
               {"role": "user", "content": "SECOND: next tail user."}, {"role": "assistant", "content": "b"}]
-    out = engine.compress([*_history(8), *latest])
+    out = _compact(engine, [*_history(8), *latest])
     row, carry = _generated(engine, out)
     assert carry and row is out[0]
     # LCM's own carrier: the generated prefix (summaries, carry) glued to the first tail user row.
@@ -189,10 +192,10 @@ def test_tool_heavy_mid_turn_carrier_and_summary_rows_stay_scaffold(make):
 def test_identity_of_non_generated_rows_is_unchanged(make, tmp_path, monkeypatch):
     with_carry = make(home=tmp_path / "a")
     messages = [*_history(8), {"role": "user", "content": "ACTIVE request."}, *_tools(70), *_tools(71)]
-    first = with_carry.compress([dict(m) for m in messages])
+    first = _compact(with_carry, [dict(m) for m in messages])
     without = make(home=tmp_path / "b")
     monkeypatch.setattr(LCMEngine, "_user_carry_parts", lambda self, *args: [])
-    second = without.compress([dict(m) for m in messages])
+    second = _compact(without, [dict(m) for m in messages])
     assert _generated(with_carry, first)[1] and not _generated(without, second)[1]
     assert first[1:] == second[1:]
     assert [with_carry._message_replay_identity(m) for m in first[1:]] == [
@@ -201,25 +204,25 @@ def test_identity_of_non_generated_rows_is_unchanged(make, tmp_path, monkeypatch
 
 def test_packet_bytes_hold_until_the_next_compaction(make):
     engine = make()
-    out = engine.compress([*_history(8), {"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
+    out = _compact(engine, [*_history(8), {"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
     _, carry = _generated(engine, out)
     boundary = engine._last_compacted_store_id
     again = engine._assemble_context(None, [*out[1:], *_tools(80, 50)])  # the tail grew; no new compaction
     assert engine._last_compacted_store_id == boundary and _generated(engine, again)[1] == carry
-    later = engine.compress([*out, *_history(20)[-48:]])
+    later = _compact(engine, [*out, *_history(20)[-48:]])
     assert engine._last_compacted_store_id > boundary
     assert _generated(engine, later)[1] != carry and "REQ-15:" in _generated(engine, later)[1]
 
 
 def test_status_reports_budget_and_empty_no_room(make, monkeypatch):
     engine = make()
-    engine.compress([*_history(8), {"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
+    _compact(engine, [*_history(8), {"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
     status = _status(engine)
     assert status["budget_tokens"] > 0 and status["delivered_tokens"] > 0 and status["empty_no_room"] is False
     monkeypatch.setattr(engine_module, "_USER_CARRY_TARGET_SHARE", 0.0, raising=False)
     other = make(session="T")
     active = "ACTIVE: still the current request."
-    out = other.compress([*_history(8), {"role": "user", "content": active}, *_tools(60), *_tools(61)])
+    out = _compact(other, [*_history(8), {"role": "user", "content": active}, *_tools(60), *_tools(61)])
     assert _status(other) == {**_status(other), "budget_tokens": 0, "delivered_tokens": 0, "empty_no_room": True}
     assert not _generated(other, out)[1] and out[0]["content"].startswith(OBJECTIVE + "\n" + active)
 
@@ -230,32 +233,33 @@ def _loop(engine, turns=200):
         # Long user turns, so the carry fills its budget and every compaction re-pays it.
         messages = [*messages, *_turn(i, f"TASK-{i}: complete step {i} of the plan. " + "context " * 300, 1500)]
         if count_messages_tokens(messages) >= engine.threshold_tokens:
-            messages = engine.compress(messages)
+            messages = engine.compress(messages)  # the host's automatic threshold compaction
             compactions += 1
             sizes.append(count_messages_tokens(messages))
             assert sizes[-1] < engine.threshold_tokens, (i, sizes[-1])  # no compact-grow loop
     return compactions, sizes
 
 
-def test_no_compact_grow_loop_on_a_200_turn_tool_heavy_replay(make, monkeypatch, capsys):
+@pytest.mark.parametrize("threshold", [0.75, 0.2])  # a low threshold caps the target at 2/3 of it
+def test_no_compact_grow_loop_on_a_200_turn_tool_heavy_replay(make, monkeypatch, capsys, threshold):
     window = 64_000
-    carried = make(session="L1", window=window, context_threshold=0.75, leaf_chunk_tokens=8000)
+    carried = make(session="L1", window=window, context_threshold=threshold, leaf_chunk_tokens=8000)
     with_carry, sizes = _loop(carried)
     delivered = _status(carried)["delivered_tokens"]
     monkeypatch.setattr(LCMEngine, "_user_carry_parts", lambda self, *args: [])
-    baseline, _ = _loop(make(session="L0", window=window, context_threshold=0.75, leaf_chunk_tokens=8000))
+    baseline, _ = _loop(make(session="L0", window=window, context_threshold=threshold, leaf_chunk_tokens=8000))
     with capsys.disabled():
-        print(f"\n#659 loop: 200 tasks, compactions with carry={with_carry} ({with_carry / 200:.3f}/task), "
+        print(f"\n#659 loop (threshold {threshold}): 200 tasks, compactions with carry={with_carry} ({with_carry / 200:.3f}/task), "
               f"without={baseline} ({baseline / 200:.3f}/task), max post-compaction={max(sizes)} tokens, "
               f"last carry={delivered} tokens, threshold={carried.threshold_tokens}")
     assert delivered > 0
-    assert max(sizes) <= int(window * 0.5) + 6000  # the target plus the bounded fresh tail
+    assert max(sizes) <= min(int(window * 0.5), carried.threshold_tokens * 2 // 3) + 6000  # target + fresh tail
     assert with_carry <= 2 * baseline + 2
 
 
 def test_recogniser_rejects_forged_foreign_and_non_user_entries(make, tmp_path):
     engine = make()
-    out = engine.compress([*_history(8), {"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
+    out = _compact(engine, [*_history(8), {"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
     row, carry = _generated(engine, out)
     content = row["content"][:engine._verified_lcm_summary_prefix_end(row["content"])]
     assert engine._is_verified_replay_scaffold_message({"role": "user", "content": content})
@@ -273,12 +277,12 @@ def test_recogniser_rejects_forged_foreign_and_non_user_entries(make, tmp_path):
 
 def test_rotation_carries_the_parent_lineage(make):
     engine = make(session="P")
-    out = engine.compress([*_history(8), {"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
+    out = _compact(engine, [*_history(8), {"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
     engine.on_session_end("P", out)
     engine.on_session_start("C", platform="cli", context_length=128_000, conversation_id="conv",
                             boundary_reason="compression", old_session_id="P")
     assert engine._user_carry_lineage() == ["C", "P"]
-    child = engine.compress([*out, *(row for i in range(20, 32) for row in _turn(i, f"CHILD-{i}: child request."))])
+    child = _compact(engine, [*out, *(row for i in range(20, 32) for row in _turn(i, f"CHILD-{i}: child request."))])
     row, carry = _generated(engine, child)
     assert "REQ-0:" in carry and "CHILD-20:" in carry  # the lineage root's origin and the child's own rows
     assert carry.index("REQ-0:") < carry.index("CHILD-20:")  # chronological
