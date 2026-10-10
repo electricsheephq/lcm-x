@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 from collections import Counter
 from pathlib import Path
 
@@ -26,7 +27,8 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
 
     rows = [json.loads(line) for line in (directory / "transcript.jsonl").read_text().splitlines()]
     facts, manifest, state = load("facts.json"), load("material.manifest.json"), load("continuation.json")
-    check(manifest.get("material_version") == _gen.MATERIAL_VERSION, "material version mismatch")
+    v4 = manifest.get("material_version") == "track-s-v4"
+    check(v4 or manifest.get("material_version") == _gen.MATERIAL_VERSION, "material version mismatch")
     admissions = load("admission.manifest.json")
     count = _gen.token_counter()
     counts = [count(r["content"]) for r in rows]
@@ -52,7 +54,7 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
                   calls[0].get("type") == "function" and
                   calls[0].get("function", {}).get("name") == "read_material", "tool call metadata mismatch")
     check(Counter(f["class"] for f in facts) == Counter({c: 5 for c in _gen.CLASSES}), "12 classes x 5 required")
-    for cls in _gen.CLASSES:
+    for cls in (() if v4 else _gen.CLASSES):
         check(Counter(f["placement"] for f in facts if f["class"] == cls) ==
               Counter(head=2, middle=1, tail=2), f"placement coverage mismatch: {cls}")
     check(len({f["id"] for f in facts}) == 60, "60 unique fact ids required")
@@ -73,7 +75,9 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
         placement = f["placement"]
         check(placement in ("head", "middle", "tail"), "invalid placement")
         if placement == "middle":
-            check(row["role"] == "tool" and len(text) > 2800 and start >= 2000 and end <= len(text) - 800,
+            check((v4 and row["role"] == "user" and count(text) >= 2000 and
+                   .3 <= start / len(text) <= .7) or
+                  (row["role"] == "tool" and len(text) > 2800 and start >= 2000 and end <= len(text) - 800),
                   f"outside clip zone {f['id']}")
         else:
             check(end <= 2000 if placement == "head" else start >= len(text) - 800,
@@ -98,7 +102,15 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
     check(prefix[last_item] == manifest["presented_tokens"], "presentation checkpoint mismatch")
     supersession = max(prefix[f["row_index"]] for f in facts if f["stale"])
     spans = (total - supersession - 20000) // trigger
-    if not smoke:
+    if v4:
+        check(total >= trigger and spans >= events, "v4 token/event floor")
+        check(total - prefix[last_item] >= 20000, "tail missing")
+        if smoke:
+            suffix = manifest["smoke_suffix"]
+            source(suffix)
+            check(suffix["row_index"] > last_item and suffix["action"] == "force_compaction_after_row" and
+                  suffix["timing_population"] == "WIRING-ONLY", "event-producing smoke suffix")
+    elif not smoke:
         check(prefix[last_item] < trigger, "scored item presented after slowest trigger")
         check(total >= max(400000, trigger + 20000), "total/tail token floor")
         check(spans >= events, "insufficient post-supersession trigger spans")
@@ -145,15 +157,97 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
                                    for r in rows], "turn projection mismatch")
     for name, digest in manifest["shas"].items():
         check(_gen._sha256(directory / name) == digest, f"digest mismatch: {name}")
-    return dict(status="PASS", mode=manifest["mode"], rows=len(rows), tokens=total,
+    biases = _verify_v4(rows, facts, traps, manifest, lines("lifecycle_probes.jsonl"), prefix, count, check) if v4 else {}
+    return dict(bias_receipts=biases, status="PASS", mode=manifest["mode"], rows=len(rows), tokens=total,
                 decision_checkpoint_tokens=prefix[manifest["decision_checkpoint"]["row_index"]],
                 decision_checkpoint_rows=manifest["decision_checkpoint"]["row_index"] + 1,
                 tool_result_token_share=round(sum(n for n, r in zip(counts, rows) if r["role"] == "tool") / total, 6),
                 results_over_12000_chars=sum(r["role"] == "tool" and len(r["content"]) > 12000 for r in rows),
                 class_placement_role=dict(sorted(Counter(f"{f['class']}|{f['placement']}|{f['row_role']}" for f in facts).items())),
-                planned_post_supersession_trigger_spans=spans if not smoke else None,
+                planned_post_supersession_trigger_spans=spans if v4 or not smoke else None,
                 tokenizer=manifest["tokenizer"], runtime_receipts="UNTESTED: events, ancestry, externalization, admission",
-                smoke_exemptions="full horizon, tail and natural event spans" if smoke else None)
+                smoke_exemptions="full horizon, tail and natural event spans" if smoke and not v4 else None)
+
+
+
+def _verify_v4(rows, facts, traps, manifest, probes, prefix, count, check):
+    guesses, shared = {}, {}
+    for cls in _gen.CLASSES:
+        values = [f["value"] for f in facts if f["class"] == cls]
+        fragments = Counter(g for v in values for g in {v.casefold()[i:i + 6] for i in range(len(v) - 5)})
+        shared[cls] = max(fragments.values(), default=0) / len(values)
+        check(shared[cls] <= .2, f"shared value substring: {cls}")
+        hits = 0
+        for i, value in enumerate(values):
+            others = values[:i] + values[i + 1:]
+            prediction = os.path.commonprefix(others) + os.path.commonprefix([v[::-1] for v in others])[::-1]
+            hits += prediction == value
+        guesses[cls] = dict(exact=hits, total=len(values), rate=hits / len(values))
+        check(guesses[cls]["rate"] <= .02, f"guessable values: {cls}")
+    user_indices = [i for i, r in enumerate(rows) if r["role"] == "user"]
+    users = [f for f in facts if f["row_role"] == "user"]
+    histogram = Counter(min(2, user_indices.index(f["row_index"]) * 3 // len(user_indices)) for f in users)
+    row_histogram = Counter(min(2, f["row_index"] * 3 // len(rows)) for f in users)
+    token_histogram = Counter(min(2, prefix[f["row_index"]] * 3 // prefix[-1]) for f in users)
+    check(all(.25 <= histogram[i] / len(users) <= .4 for i in range(3)), "user-third placement bias")
+    check(all(.25 <= h[i] / len(users) <= .4 for h in (row_histogram, token_histogram) for i in range(3)),
+          "transcript-third placement bias")
+    middle = sum(f["placement"] == "middle" and count(rows[f["row_index"]]["content"]) >= 2000 and
+                 .3 <= f["char_offset"] / len(rows[f["row_index"]]["content"]) <= .7 for f in users)
+    check(middle / len(users) >= .2, "long user middle coverage")
+    check(Counter(f["row_role"] for f in facts) == Counter(user=22, assistant=11, tool=27), "v3 role mix")
+    requests = manifest["lifecycle"]
+    statuses = Counter(r["status"] for r in requests)
+    check(len(requests) >= 6 and all(statuses[s] for s in ("completed", "cancelled", "superseded", "pending")),
+          "request lifecycle coverage")
+    for r in requests:
+        check(r["task"] in rows[r["row_index"]]["content"] and r["row_id"] == rows[r["row_index"]]["id"], "request source")
+        if r["status"] != "pending":
+            resolution = r["resolution"]
+            text = rows[resolution["row_index"]]["content"]
+            check(resolution["row_index"] > r["row_index"] and r["task"] in text, "request resolution")
+            check((r["status"] == "completed" and "Completed " in text) or
+                  (r["status"] == "cancelled" and "don't do it" in text and r["replacement"] in text) or
+                  (r["status"] == "superseded" and "Instead of " in text and r["replacement"] in text), "request status text")
+    kinds = Counter(p["kind"] for p in probes)
+    check(set(kinds) == {"stale_task", "corrected_value", "current_request"}, "lifecycle probe kinds")
+    check({p["compaction_horizon"] for p in probes} == {1, 3, 5} and manifest["default_leaf_tokens"] == 8000,
+          "lifecycle horizon coverage")
+    for p in probes:
+        index = p["row_index"]
+        check(p["row_id"] == rows[index]["id"] and p["source_token_position"] == prefix[index] and
+              p["probe_token_position"] - prefix[index] == p["compaction_horizon"] * manifest["default_leaf_tokens"] and
+              p["probe_token_position"] <= prefix[-1], "lifecycle token horizon")
+        if p["kind"] == "corrected_value":
+            f = next(f for f in facts if p["id"] == f["id"] + "-CORRECTION")
+            old = f["correction_source"]
+            check(old["row_index"] < index and old["value"] != f["value"] and
+                  old["value"] in rows[old["row_index"]]["content"] and
+                  count(rows[index]["content"]) <= 20 and p["answer"] == f["value"], "short correction")
+        elif p["kind"] == "stale_task":
+            r = next(r for r in requests if r.get("resolution", {}).get("row_id") == p["row_id"])
+            check(p["answer"] == f"No; do {r['replacement']}.", "stale-task answer")
+        else:
+            current = next(c for c in manifest["continuity"] if c["id"].endswith("current_request"))
+            check(p["answer"] == current["value"] and p["row_id"] == current["row_id"], "current request answer")
+    for c in manifest["continuity"]:
+        if c["id"].endswith("host_instruction"):
+            continue
+        positions = [i for i, r in enumerate(rows) if c["id"] in r["content"] and c["value"] in r["content"]]
+        check(len(positions) >= 2 and .3 <= positions[0] / len(rows) <= .7 and positions[-1] > positions[0],
+              "mid-session continuity/restatement")
+    by_id = {f["id"]: f for f in facts}
+    for trap in traps:
+        sibling = by_id[trap["sibling_id"]]
+        name = trap["probe"].split("for fixture ", 1)[1][:-1]
+        check(trap["class"] == sibling["class"] and
+              trap["probe"].replace(name, "{entity}") == sibling["probe"].replace(sibling["fixture"], "{entity}"),
+              "trap template mismatch")
+    return dict(guessability=guesses, max_shared_sixgram_fraction=shared,
+                placement_histogram=dict(histogram), transcript_row_histogram=dict(row_histogram),
+                token_placement_histogram=dict(token_histogram),
+                user_facts=len(users), long_user_middle=middle, lifecycle_counts=dict(statuses),
+                lifecycle_probe_counts=dict(kinds), trap_template_check="PASS", traps=len(traps))
 
 
 def main(argv=None):
