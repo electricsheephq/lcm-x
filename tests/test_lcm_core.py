@@ -2631,8 +2631,12 @@ class TestMessageStore:
             store._conn.set_trace_callback(None)
 
         assert len(results) == 2
+        # #1047: the LIKE fallback fetches its candidate window in one bounded query.
+        from hermes_lcm.search_query import compute_search_candidate_cap
+
+        cap = compute_search_candidate_cap(2)
         assert any(
-            "FROM messages" in statement and "content LIKE" in statement and "LIMIT 20" in statement
+            "FROM messages" in statement and "content LIKE" in statement and f"LIMIT {cap}" in statement
             for statement in traced
         )
 
