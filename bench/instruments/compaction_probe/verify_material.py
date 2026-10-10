@@ -202,6 +202,9 @@ def _verify_v4(rows, facts, traps, manifest, probes, prefix, count, check):
     statuses = Counter(r["status"] for r in requests)
     check(len(requests) >= 6 and all(statuses[s] for s in ("completed", "cancelled", "superseded", "pending")),
           "request lifecycle coverage")
+    check(len({r["task"] for r in requests}) == len(requests) and
+          all(r["replacement"] != r["task"] for r in requests), "request lifecycle identity")
+    check(not any(f["stale"] and "correction_source" in f for f in facts), "corrected fact also superseded")
     for r in requests:
         check(r["task"] in rows[r["row_index"]]["content"] and r["row_id"] == rows[r["row_index"]]["id"], "request source")
         if r["status"] != "pending":

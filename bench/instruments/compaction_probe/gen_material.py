@@ -673,10 +673,12 @@ def _generate_v4(seed, out_dir, min_tokens, min_events, smoke):
     user_middle = rng.sample(groups["user"], 8)
     for f in user_middle:
         f["placement"] = "middle"
-    corrected = [f for i, f in sorted(schedule.items()) if i < 88 and
+    # A corrected fact must not also be a supersession fact: its pre-correction
+    # value would be a second obsolete value the stale-rate scorer never sees.
+    corrected = [f for i, f in sorted(schedule.items()) if i < 88 and not f["stale"] and
                  f["row_role"] == "user" and f not in user_middle][:3]
     correction_steps = {}
-    request_names = [f"check-{rng.randrange(100000, 1000000)}" for _ in range(6)]
+    request_names = [f"check-{n}" for n in rng.sample(range(100000, 1000000), 6)]
     starts = {5: 0, 10: 1, 15: 2, 20: 3, 25: 4, 45: 5}
     ends = {12: (0, "completed", None), 18: (1, "cancelled", 2),
             27: (2, "superseded", 3), 35: (3, "completed", None), 50: (4, "cancelled", 5)}

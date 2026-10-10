@@ -78,6 +78,22 @@ def test_requirement_3_request_lifecycle_corrections_and_horizons(material):
         bias(material, probes=probes)
 
 
+def test_v4_lifecycle_tasks_are_distinct_and_corrections_are_not_stale(material):
+    manifest = read(material, "material.manifest.json")
+    tasks = [r["task"] for r in manifest["lifecycle"]]
+    assert len(set(tasks)) == len(tasks)
+    assert not any(f["stale"] and "correction_source" in f for f in read(material, "facts.json"))
+    collided = json.loads(json.dumps(manifest))
+    collided["lifecycle"][1]["task"] = collided["lifecycle"][0]["task"]
+    with pytest.raises(ValueError, match="request lifecycle identity"):
+        bias(material, manifest=collided)
+    facts = read(material, "facts.json")
+    stale = next(f for f in facts if f["stale"])
+    stale["correction_source"] = dict(row_index=0, value="x")
+    with pytest.raises(ValueError, match="corrected fact also superseded"):
+        bias(material, facts=facts)
+
+
 def test_requirement_4_traps_share_real_template_and_sibling(material):
     assert verifier.verify(material)["bias_receipts"]["trap_template_check"] == "PASS"
     traps = read(material, "traps.json")
