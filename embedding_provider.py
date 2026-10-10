@@ -74,6 +74,7 @@ _VOYAGE_CONTEXT_REQUEST_TOKEN_BUDGET = int(
 _MAX_ATTEMPTS = 3
 _RETRY_AFTER_BUDGET_S = 60.0
 _DEFAULT_FASTEMBED_CACHE = Path.home() / ".cache" / "fastembed"
+_FASTEMBED_THREADS = 2
 _LOCAL_EMBED_MAX_WORKERS = 4
 _LOCAL_EMBED_WORKER_SLOTS = threading.BoundedSemaphore(_LOCAL_EMBED_MAX_WORKERS)
 
@@ -1791,7 +1792,9 @@ class FastembedProvider(_ResilientProvider):
         self._model_id = str(model).strip()
         if not self._model_id:
             raise ValueError("FastEmbed embedding model must not be empty")
-        self.cache_dir = Path(cache_dir) if cache_dir is not None else _DEFAULT_FASTEMBED_CACHE
+        if cache_dir is None:
+            cache_dir = os.environ.get("FASTEMBED_CACHE_PATH", "").strip() or _DEFAULT_FASTEMBED_CACHE
+        self.cache_dir = Path(cache_dir)
         self.timeout = float(timeout)
         self._model: Any = None
         self._dim = 0
@@ -1815,6 +1818,7 @@ class FastembedProvider(_ResilientProvider):
             return text_embedding(
                 model_name=self.model_id,
                 cache_dir=str(self.cache_dir),
+                threads=_FASTEMBED_THREADS,
                 local_files_only=not allow_download,
             )
         except Exception as exc:
