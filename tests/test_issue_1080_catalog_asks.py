@@ -61,9 +61,9 @@ def test_missing_register_hook_leaves_private_host_hooks_unchanged(tmp_path, mon
     try:
         module.register(ctx)
         assert manager._hooks == before
-        assert caplog.text.count(
-            "host has no register_hook; per-turn ingest hook not registered"
-        ) == 1
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING
+                    and "the per-turn ingest hook is not registered" in r.getMessage()]
+        assert len(warnings) == 1  # visible, not debug-only (#1081 review)
     finally:
         if ctx.offered is not None:
             ctx.offered.shutdown()
