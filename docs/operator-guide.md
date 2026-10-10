@@ -248,9 +248,11 @@ Chunk pages use the same apply command with `--corpus chunks` and
 `--confirm-raw-text`; `--corpus both --apply` likewise requires
 `--confirm-raw-text` on every apply command. Until every selected corpus
 finishes, semantic coverage is degraded and FTS remains the fallback.
-Assertion, query-view, trajectory, rollup, and embedding families remain
+Assertion, query-view, trajectory, and embedding families remain
 additive/default-off and create derived state only when their workflows are
-invoked. If you later enable one of those stores, keep the pre-upgrade cold set
+invoked. Temporal rollups are on by default from v0.27.0: the first session
+bind creates the rollup tables and schedules background maintenance; set
+`LCM_TEMPORAL_ROLLUPS_ENABLED=false` to opt out. If you later enable one of those stores, keep the pre-upgrade cold set
 as the downgrade path rather than mixing old code with newly created sidecars.
 
 Cloud embeddings are a separate operator decision. Provider-bound copies are protected

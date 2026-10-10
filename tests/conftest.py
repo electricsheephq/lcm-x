@@ -62,7 +62,7 @@ import pytest  # noqa: E402
 _MAINTENANCE_SCHEDULERS = ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER")
 
 
-def _wait_scheduler_idle(scheduler, timeout: float) -> None:
+def _wait_scheduler_idle(scheduler, timeout: float) -> bool:
     import time
 
     deadline = time.monotonic() + timeout
@@ -70,6 +70,7 @@ def _wait_scheduler_idle(scheduler, timeout: float) -> None:
         while (scheduler._queued_keys or scheduler._active_keys or scheduler._follow_up_key) and \
                 time.monotonic() < deadline:
             scheduler._condition.wait(max(0.0, deadline - time.monotonic()))
+        return not (scheduler._queued_keys or scheduler._active_keys or scheduler._follow_up_key)
 
 
 @pytest.fixture(autouse=True)
@@ -83,5 +84,6 @@ def _drain_background_maintenance(monkeypatch):
     engine = sys.modules.get("hermes_lcm.engine")
     for name in _MAINTENANCE_SCHEDULERS:
         scheduler = getattr(engine, name, None)
-        if scheduler is not None:
-            _wait_scheduler_idle(scheduler, timeout=5.0)
+        if scheduler is not None and not _wait_scheduler_idle(scheduler, timeout=30.0):
+            # Fail closed: a job still running here would call a later test's fakes.
+            pytest.fail(f"{name} still had background work 30 s after the test ended")

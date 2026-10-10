@@ -169,6 +169,7 @@ class StressRun:
         db_path = self.sandbox_dir / case / "lcm.db"
         hermes_home.mkdir(parents=True, exist_ok=True)
         cfg = LCMConfig(
+            temporal_rollups_enabled=False,  # deterministic stubs cover compaction only (#1013 part B)
             database_path=str(db_path),
             fresh_tail_count=overrides.pop("fresh_tail_count", 8),
             leaf_chunk_tokens=overrides.pop("leaf_chunk_tokens", 240),
@@ -840,6 +841,7 @@ def _case_lifecycle_soak_and_profile_rebinds(run: StressRun) -> None:
     conversation_id = "conv-lifecycle-soak"
     current_session = "lifecycle-session-000"
     cfg = LCMConfig(
+        temporal_rollups_enabled=False,  # deterministic stubs cover compaction only (#1013 part B)
         database_path=str(db_path),
         fresh_tail_count=5,
         leaf_chunk_tokens=120,
@@ -1118,6 +1120,7 @@ def _profile_rebind_probe(run: StressRun, case: str) -> dict[str, Any]:
     profile_a = root / "profile-a"
     profile_b = root / "profile-b"
     cfg = LCMConfig(
+        temporal_rollups_enabled=False,  # deterministic stubs cover compaction only (#1013 part B)
         fresh_tail_count=3,
         leaf_chunk_tokens=40,
         context_threshold=0.50,
