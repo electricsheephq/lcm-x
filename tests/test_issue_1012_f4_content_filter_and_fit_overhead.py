@@ -203,7 +203,7 @@ def test_fit_remembers_largest_compress_overhead_and_rebind_resets(tmp_path, mon
         engine.shutdown()
 
 
-def test_session_end_keeps_capped_overhead_and_window_cap_still_applies(tmp_path):
+def test_session_end_keeps_peak_overhead_and_window_cap_still_applies(tmp_path):
     engine = _engine(tmp_path, window=65_536)
     try:
         view = [{"role": "user", "content": "ordinary turn", "timestamp": 1.0}]
@@ -211,9 +211,26 @@ def test_session_end_keeps_capped_overhead_and_window_cap_still_applies(tmp_path
         assert engine._survival_fit_budget(view, counted + 50_000, window_cap=20_000) == 7000
         assert engine._survival_fit_budget(view, counted + 2600) == int(65_536 * 0.85) - 32_768
         engine.on_session_end("unrelated", [])
-        assert engine._survival_overhead_observation == ("conv", 32_768)
+        assert engine._survival_overhead_observation == ("conv", 50_000)
         engine.on_session_end("S", view)
-        assert engine._survival_overhead_observation == ("conv", 32_768)
+        assert engine._survival_overhead_observation == ("conv", 50_000)
+        assert engine._survival_fit_budget(view, counted + 2600) == int(65_536 * 0.85) - 32_768
+    finally:
+        engine.shutdown()
+
+
+def test_smaller_window_does_not_erase_peak_for_later_larger_window(tmp_path):
+    """Same conversation, 65,536 -> 16,384 -> 65,536: the half-window cap applies per fit, not to the stored peak."""
+    engine = _engine(tmp_path, window=65_536)
+    try:
+        view = [{"role": "user", "content": "ordinary turn", "timestamp": 1.0}]
+        counted = tokens.count_messages_tokens(view)
+        assert engine._survival_fit_budget(view, counted + 32_768) == int(65_536 * 0.85) - 32_768
+        engine.on_session_start("S2", platform="telegram", context_length=16_384, conversation_id="conv")
+        assert engine.context_length == 16_384
+        assert engine._survival_fit_budget(view, counted + 2600) == int(16_384 * 0.85) - 8192
+        engine.on_session_start("S3", platform="telegram", context_length=65_536, conversation_id="conv")
+        assert engine.context_length == 65_536
         assert engine._survival_fit_budget(view, counted + 2600) == int(65_536 * 0.85) - 32_768
     finally:
         engine.shutdown()

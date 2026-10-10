@@ -115,13 +115,11 @@ class SurvivalFitMixin:
         overhead = max(0, int(observed_tokens or 0) - counted)
         key = str(getattr(self, "_conversation_id", "") or getattr(self, "_session_id", "") or "")
         previous = getattr(self, "_survival_overhead_observation", None)
-        window = int(getattr(self, "context_length", 0) or 0)
-        if key:
+        if key:  # the stored peak stays uncapped: a later, larger window must not under-reserve
             overhead = max(overhead, previous[1] if previous and previous[0] == key else 0)
-        overhead = min(window // 2, overhead) if window > 0 else overhead
-        if key:
             self._survival_overhead_observation = (key, overhead)
-        return overhead
+        window = int(getattr(self, "context_length", 0) or 0)
+        return min(window // 2, overhead) if window > 0 else overhead
 
     def _survival_fit_args(self, messages, observed_tokens, reason: str, recovery: bool, *,
                            automatic: bool = False) -> Dict[str, Any]:
