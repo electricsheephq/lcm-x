@@ -47,6 +47,7 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 - Bench: before scoring B1 and B2, the reliability scorer resolves externalized rows with the product's own reader, and it counts a failed resolution as a loss, so the reliability gate can judge configurations that run with externalization on. (#1056)
 - Fix: `/lcm backup` and `/lcm rotate apply` name the externalized-payload directory, with its file count and size, to copy with a snapshot that is moved to another host; the SQLite snapshot does not contain those payloads. (#1075)
 - Fix: proactive recall dates a memory by the host's event time when the host recorded it, marks LCM's write time as `stored` when available, and shows `[unknown time]` when neither timestamp is usable, instead of presenting the write time as the event date. (#1008)
+- Change: the not-active marker (#622) moves from the Hermes home root to `plugin-data/hermes-lcm-x/` (old root files are still reported and cleaned for this release); the optional `fastembed` dependency is bounded to `>=0.8.0,<1.0`; and the plugin no longer falls back to writing the host's private hook table when `register_hook` is missing. (#1080)
 
 ## v0.26.2 (user/assistant text externalization floor)
 

@@ -1621,6 +1621,9 @@ def test_post_llm_hook_resolves_registered_active_clone_without_host_context_com
         def __init__(self):
             self.engine = None
 
+        def register_hook(self, name, callback):
+            manager._hooks.setdefault(name, []).append(callback)
+
         def register_context_engine(self, engine):
             self.engine = engine
 
@@ -1678,6 +1681,9 @@ def test_post_llm_hook_keeps_ingest_binding_stable_during_concurrent_rebind(
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / "hermes_home"))
 
     class _CtxNoTool:
+        def register_hook(self, name, callback):
+            manager._hooks.setdefault(name, []).append(callback)
+
         def register_context_engine(self, engine):
             self.engine = engine
 
@@ -1769,6 +1775,9 @@ def test_post_llm_hook_ignores_stale_registered_clone_after_rebind(monkeypatch, 
             def __init__(self):
                 self.engine = None
 
+            def register_hook(self, name, callback):
+                manager._hooks.setdefault(name, []).append(callback)
+
             def register_context_engine(self, engine):
                 self.engine = engine
 
@@ -1837,6 +1846,9 @@ def test_post_llm_hook_prefers_active_lcm_clone(monkeypatch, tmp_path):
     class _CtxNoTool:
         def __init__(self):
             self.engine = None
+
+        def register_hook(self, name, callback):
+            manager._hooks.setdefault(name, []).append(callback)
 
         def register_context_engine(self, engine):
             self.engine = engine
@@ -1917,6 +1929,9 @@ def test_post_llm_hook_does_not_rebind_live_singleton_on_exact_alias_miss(monkey
     class _CtxNoTool:
         def __init__(self):
             self.engine = None
+
+        def register_hook(self, name, callback):
+            manager._hooks.setdefault(name, []).append(callback)
 
         def register_context_engine(self, engine):
             self.engine = engine
