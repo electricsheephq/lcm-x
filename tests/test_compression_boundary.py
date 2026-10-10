@@ -1182,7 +1182,7 @@ def test_scaffold_only_proof_does_not_skip_a_new_row_quoting_the_summary(tmp_pat
         scaffold_before = _raw_scaffold_rows(resumed)
         resumed.ingest(list(compressed) + [quoted])
         stored = [c for (c,) in resumed._store._conn.execute("SELECT content FROM messages")]
-        assert stored.count(block) == 1
+        assert stored.count(resumed._without_user_carry(block)) == 1  # #659: stored in base shape, no carry
         assert _raw_scaffold_rows(resumed) == scaffold_before + 1  # only the quoted row
     finally:
         resumed.shutdown()
