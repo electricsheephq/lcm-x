@@ -144,3 +144,18 @@ def test_unreadable_payload_entries_are_reported(engine, monkeypatch):
     assert "externalized_payload_files: 0" in output
     assert "externalized_payload_unreadable: 1 (not counted above)" in output
     assert "note: externalized payloads are not in the SQLite snapshot" in output
+
+
+def test_scan_error_keeps_the_resolved_path(engine, monkeypatch):
+    # A directory-scan failure still names the payload directory (#1077 review).
+    path = get_large_output_storage_dir(engine._config, engine._hermes_home, create=True)
+
+    def deny(p):
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(maintenance.os, "scandir", deny)
+    output = handle_lcm_command("backup", engine)
+
+    assert f"externalized_payload_dir: {path}" in output
+    assert "externalized_payload_scan: unavailable (permission denied)" in output
+    assert "note: externalized payloads are not in the SQLite snapshot" in output

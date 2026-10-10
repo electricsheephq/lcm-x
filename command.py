@@ -2438,6 +2438,12 @@ def _externalized_payload_lines(engine) -> list[str]:
     path = inventory["path"]
     if not inventory["exists"]:
         return [f"externalized_payload_dir: absent ({path})"]
+    if inventory.get("scan_error"):
+        return [
+            f"externalized_payload_dir: {path}",
+            f"externalized_payload_scan: unavailable ({inventory['scan_error']})",
+            "note: externalized payloads are not in the SQLite snapshot; copy externalized_payload_dir with the backup when moving it to another host",
+        ]
     lines = [
         f"externalized_payload_dir: {path}",
         f"externalized_payload_files: {inventory['files']}",
