@@ -80,6 +80,7 @@ def test_g1_manifest_digest_required_for_every_arm(admission, arm, state):
 
 @pytest.mark.parametrize("refusal", ["later_digest", "receipt"])
 def test_g2_refused_run_preserves_previous_outputs_byte_for_byte(admission, refusal):
+    """A digest refusal keeps the previous outputs; a failed run removes its stale scores (never measured)."""
     m, _, run, out, receipt, calls = admission("L1")
     name = "L1.seed-1.fixture.json"
     manifest = dict(schema=m.score_manifest.SCHEMA, entries={})
@@ -100,6 +101,11 @@ def test_g2_refused_run_preserves_previous_outputs_byte_for_byte(admission, refu
     else:
         receipt.write_text("exit 1 end\n")
         m.main()
+        after = {p.relative_to(out) for p in out.rglob("*") if p.is_file()}
+        assert not any(p.name == name for p in after)
+        assert not json.loads((out / "manifest.json").read_text())["entries"]
+        assert not calls
+        return
     after = {p.relative_to(out): p.read_bytes() for p in out.rglob("*") if p.is_file()}
     assert {p: after.get(p) for p in before} == before
     assert not calls

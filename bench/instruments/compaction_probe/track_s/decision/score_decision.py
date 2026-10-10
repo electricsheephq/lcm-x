@@ -87,9 +87,7 @@ def main():
             lane = "s2" if arm.startswith("LCMX") or arm in ("L0", "L1", "L1-H", "L1-noptr", "H") else "s4" if arm == "codex-native" else "s1"
             receipt = args.logs / f"{lane}-{arm}-{label}.log.wall"
             receipt_ok = receipt.exists() and re.findall(r"^exit (\d+) end", receipt.read_text(), re.M) == ["0"]
-            if v4 and not receipt_ok:
-                continue  # missing/failed runs are never measured as completed
-            if v4:
+            if v4 and receipt_ok:  # validate before touching outputs, so a refusal keeps the previous scores
                 mat = args.material / f"seed-{n}"
                 if material_digest is None:
                     for source, expected in jload(mat / "material.manifest.json").get("shas", {}).items():
@@ -111,7 +109,7 @@ def main():
                 for directory in (args.out / population).glob("cp-*"):
                     (directory / name).unlink(missing_ok=True)
             if not receipt_ok:
-                continue  # retain legacy v3 stale-score removal
+                continue  # missing/failed runs are never measured as completed; their stale scores are removed above
             run_calls, run_probes = [], {}
             for cp, sub in cps.items():
                 if sub is None or not (rdir / sub / "summary.json").exists():
