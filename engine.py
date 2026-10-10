@@ -15,6 +15,7 @@ import math
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -789,6 +790,7 @@ class LCMEngine(
         self._proactive_recall_privacy_warned = False
         # #659: the last carry packet, keyed so a reassembly with no new compaction reuses its bytes.
         self._user_carry_cache: Optional[tuple] = None
+        self._user_carry_lineage_memo: Optional[tuple] = None
         self._last_user_carry: Dict[str, Any] = {}
         self._last_ingest_error = ""
         self._last_ingest_error_time: float = 0
@@ -1044,6 +1046,9 @@ class LCMEngine(
         # R6-4: survival-fit warnings belong to the store they were raised on.
         self._survival_fit_pending_warning, self._survival_fit_warned = None, set()
         self._survival_overhead_observation = None  # #1012 F4: an overhead peak never crosses profile homes
+        # #659: the carry packet and its lineage belong to the store they were read from.
+        self._user_carry_cache = self._user_carry_lineage_memo = None
+        self._last_user_carry = {}
         self.emit_automatic_compaction_status = False
         if self._adaptive_retrieval is not None:
             self._adaptive_retrieval.clear()
@@ -3001,18 +3006,16 @@ class LCMEngine(
         *,
         stop_after: int = 2,
         after_store_id: int = 0,
-        session_id: str = "",
     ) -> List[Dict[str, Any]]:
         """Return up to ``stop_after`` durable prompt-bearing user occurrences."""
-        session_id = session_id or self._session_id
-        if not session_id or stop_after <= 0:
+        if not self._session_id or stop_after <= 0:
             return []
         durable_users: List[Dict[str, Any]] = []
         cursor_store_id = max(0, int(after_store_id))
         try:
             while len(durable_users) < stop_after:
                 rows = self._store.load_session_page(
-                    session_id,
+                    self._session_id,
                     after_store_id=cursor_store_id,
                     limit=1000,
                     roles=["user"],
@@ -5609,9 +5612,18 @@ class LCMEngine(
         return (self._verified_generated_suffix_end(content, pos), node_ids) if node_ids else (None, [])
 
     def _user_carry_lineage(self) -> list[str]:
-        """#659: the bound session and its recorded compression predecessors (bounded, nearest first)."""
-        session_id = str(self._session_id or "")
-        return [session_id, *self._rotation_predecessor_session_ids(session_id)] if session_id else []
+        """#659: the bound session and ALL its recorded compression predecessors, nearest first. Unbounded (a
+        cycle stops the walk): a packet emitted before a hop limit must stay recognised after it. A recorded
+        chain never changes, so a non-empty one is memoised per store and session."""
+        key = (str(self._store.db_path), str(self._session_id or ""))
+        if not key[1]:
+            return []
+        if self._user_carry_lineage_memo and self._user_carry_lineage_memo[0] == key:
+            return self._user_carry_lineage_memo[1]
+        chain = [key[1], *self._rotation_predecessor_session_ids(key[1], max_hops=sys.maxsize)]
+        if len(chain) > 1:
+            self._user_carry_lineage_memo = (key, chain)
+        return chain
 
     def _verified_generated_suffix_end(self, content: str, pos: int) -> int:
         """#659: after verified summary parts, an optional carry part then an optional manifest, each kept only
@@ -5624,7 +5636,9 @@ class LCMEngine(
                 rows, lineage = self._store.get_batch(ids), set(self._user_carry_lineage())
             except Exception:
                 return pos
-            if all(rows.get(i, {}).get("role") == "user" and rows[i].get("session_id") in lineage for i in ids):
+            conversation = (str(self._conversation_id or ""), "")
+            if all(rows.get(i, {}).get("role") == "user" and rows[i].get("session_id") in lineage
+                   and str(rows[i].get("conversation_id") or "") in conversation for i in ids):
                 rendered = _render_user_carry([rows[i] for i in ids], excerpt)
                 if content.startswith(rendered, pos + 7):
                     pos += 7 + len(rendered)
@@ -7748,6 +7762,9 @@ class LCMEngine(
                 return []
             if any(message == selected for selected in selected_tail_messages):
                 return []
+            if (glued := self._generated_context_carrier_remainder(message)) is not None:
+                # #659: a host-merged carrier's request is its glued row, never LCM's summaries and carry.
+                message = {**message, "content": glued}
             return [self._build_preserved_objective_summary_part(message)]
         return []
 
@@ -7925,7 +7942,7 @@ class LCMEngine(
         boundary, lineage, window = int(self._last_compacted_store_id or 0), self._user_carry_lineage(), \
             int(self.context_length or 0)
         active = anchor_part[len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1:] if anchor_part else None
-        key = (self._session_id, boundary, active, tuple(frontier))
+        key = (str(self._store.db_path), self._conversation_id, self._session_id, boundary, active, tuple(frontier))
         if self._user_carry_cache is not None and self._user_carry_cache[0] == key:
             text, diagnostics = self._user_carry_cache[1:]
         else:
@@ -7960,12 +7977,14 @@ class LCMEngine(
                     excerpt = (int(row["store_id"]), (low + 1) // 2, len(text) - low // 2)
                 return False
 
-            def real(row) -> bool:  # an LCM scaffold a rotation child stored as user-authored is never carried
-                return self._is_durable_real_user_row(row) and not self._is_verified_replay_scaffold_message(row)
+            def real(row) -> bool:  # an LCM scaffold or host-merged carrier stored as user-authored is never carried
+                return (self._is_durable_real_user_row(row) and not self._is_verified_replay_scaffold_message(row)
+                        and self._generated_context_carrier_remainder(row) is None)
 
-            def newest_first():
-                cursor = boundary + 1
-                while page := self._store.load_user_rows_before(lineage, cursor, 200):
+            def scan(newest=True):  # the lineage's real user rows of this conversation, a page at a time
+                cursor = boundary + 1 if newest else 0
+                while page := self._store.load_lineage_user_rows(lineage, self._conversation_id, cursor, 200,
+                                                                 newest_first=newest):
                     yield from (row for row in page if real(row))
                     if len(page) < 200:
                         return
@@ -7975,12 +7994,11 @@ class LCMEngine(
                 content = normalize_content_value(row.get("content")) or ""
                 return active is not None and active in (content, strip_injected_context_blocks(content))
 
-            rows = newest_first() if budget > 0 and boundary > 0 and lineage else iter(())
+            rows = scan() if budget > 0 and boundary > 0 and lineage else iter(())
             head = list(itertools.islice(rows, 200))  # the active entry's own row: the newest one with its text
             skip = {next((int(row["store_id"]) for row in head if is_active(row)), 0)}
             rows = itertools.chain(head, rows)
-            origin = next(iter(self._durable_real_user_messages(stop_after=1, session_id=lineage[-1])), None) \
-                if budget > 0 and lineage else None
+            origin = next(scan(newest=False), None) if budget > 0 and boundary > 0 and lineage else None
             going = True
             if (origin is not None and real(origin) and 0 < int(origin["store_id"]) <= boundary
                     and int(origin["store_id"]) not in skip):

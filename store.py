@@ -950,16 +950,17 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
-    def load_user_rows_before(self, session_ids: List[str], before_store_id: int,
-                              limit: int) -> List[Dict[str, Any]]:
-        """#659: one page of the sessions' user rows below ``before_store_id``, newest first."""
+    def load_lineage_user_rows(self, session_ids: List[str], conversation_id: str, cursor: int, limit: int, *,
+                               newest_first: bool = True) -> List[Dict[str, Any]]:
+        """#659: one page of the sessions' user rows of ``conversation_id`` (or of none), past ``cursor``."""
         if not session_ids or limit <= 0:
             return []
+        op, order = ("<", "DESC") if newest_first else (">", "ASC")
         rows = self._conn.execute(
             f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
-               WHERE session_id IN ({",".join("?" * len(session_ids))}) AND role = 'user' AND store_id < ?
-               ORDER BY store_id DESC LIMIT ?""",
-            (*session_ids, int(before_store_id), int(limit)),
+               WHERE session_id IN ({",".join("?" * len(session_ids))}) AND conversation_id IN (?, '')
+                 AND role = 'user' AND store_id {op} ? ORDER BY store_id {order} LIMIT ?""",
+            (*session_ids, _normalize_conversation_id_value(conversation_id), int(cursor), int(limit)),
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 

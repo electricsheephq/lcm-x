@@ -485,7 +485,7 @@ class CompactionMixin:
         if force_overflow:
             return True, "forced overflow recovery", 0
 
-        raw_tokens_outside_tail = count_messages_tokens(candidate_raw)
+        raw_tokens_outside_tail = self._raw_leaf_tokens(candidate_raw)
         if allow_partial_leaf:
             return True, "eligible partial threshold-sweep leaf", raw_tokens_outside_tail
         if self._config.dynamic_leaf_chunk_enabled:
@@ -536,6 +536,13 @@ class CompactionMixin:
             working = min(ceiling, working * 2)
         return working
 
+    def _raw_leaf_tokens(self, messages: List[Dict[str, Any]]) -> int:
+        """#659: raw leaf backlog cost. A carrier counts only its glued row: its generated prefix (summaries and
+        the carry packet, up to 15% of the window) is regenerated, never summarised (leaf input strips it)."""
+        rests = [self._generated_context_carrier_remainder(msg) for msg in messages]
+        return sum(count_message_tokens(msg if rest is None else {**msg, "content": rest})
+                   for msg, rest in zip(messages, rests))
+
     def _select_oldest_leaf_chunk(
         self,
         candidate_raw: List[Dict[str, Any]],
@@ -544,10 +551,7 @@ class CompactionMixin:
         selected: list[Dict[str, Any]] = []
         used = 0
         for msg in candidate_raw:
-            # #659: a carrier costs the leaf only its glued row; the generated prefix (summaries and the carry
-            # packet, up to 15% of the window) is regenerated, never summarised, so it must not fill the chunk.
-            rest = self._generated_context_carrier_remainder(msg)
-            msg_tokens = count_message_tokens(msg if rest is None else {**msg, "content": rest})
+            msg_tokens = self._raw_leaf_tokens([msg])
             if used + msg_tokens > working_leaf_chunk_tokens and selected:
                 break
             selected.append(msg)
@@ -1833,7 +1837,7 @@ class CompactionMixin:
                 break
 
             pressure_candidate_raw = pressure_messages[leading_anchor_count:fresh_tail_start]
-            raw_tokens_outside_tail = count_messages_tokens(pressure_candidate_raw)
+            raw_tokens_outside_tail = self._raw_leaf_tokens(pressure_candidate_raw)
             if hidden_backlog:
                 to_compact = []
             elif threshold_full_sweep_active:
@@ -2205,7 +2209,7 @@ class CompactionMixin:
                 pressure_remaining_raw = pressure_messages[
                     leading_anchor_count:remaining_fresh_tail_start
                 ]
-                remaining_raw_tokens = count_messages_tokens(pressure_remaining_raw)
+                remaining_raw_tokens = self._raw_leaf_tokens(pressure_remaining_raw)
                 remaining_threshold = self._working_leaf_chunk_tokens(remaining_raw_tokens)
                 if remaining_raw_tokens < remaining_threshold:
                     if not (deferred_maintenance_active and critical_budget_pressure):

@@ -288,3 +288,73 @@ def test_rotation_carries_the_parent_lineage(make):
     assert carry.index("REQ-0:") < carry.index("CHILD-20:")  # chronological
     assert engine._is_verified_replay_scaffold_message(
         {"role": "user", "content": row["content"][:engine._verified_lcm_summary_prefix_end(row["content"])]})
+
+
+# -- cross-model review of e7dfb1a1 (F1-F5): each repro is a regression ---------------------------------
+
+def test_f1_a_packet_emitted_before_a_33rd_rotation_is_still_scaffold(make):
+    engine = make(session="P0")
+    out = _compact(engine, [*_history(8), {"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
+    row, _ = _generated(engine, out)
+    pure = {"role": "user", "content": row["content"][:engine._verified_lcm_summary_prefix_end(row["content"])]}
+    for i in range(1, 34):
+        engine.on_session_start(f"P{i}", platform="cli", context_length=128_000, conversation_id="conv",
+                                boundary_reason="compression", old_session_id=f"P{i - 1}")
+    assert engine._user_carry_lineage()[-1] == "P0" and engine._is_verified_replay_scaffold_message(pure)
+    assert engine._latest_user_context_anchor([pure], []) is None  # #84: never the objective
+    glued = {"role": "user", "content": pure["content"] + "\n\nNEW request"}
+    assert engine._generated_context_carrier_remainder(glued) == "NEW request"  # the packet is not a real row
+
+
+def test_f2_a_host_merged_carrier_is_an_objective_only_by_its_glued_row(make):
+    engine = make()
+    tail = [{"role": "user", "content": "FIRST active request"}, {"role": "user", "content": "SECOND active request"},
+            *_tools(70, 50)]
+    merged = _host_merge(_compact(engine, [*_history(8), *tail]))
+    anchor = engine._latest_user_context_anchor([merged[0]], [])
+    assert CARRY not in anchor and "[Recent Summary" not in anchor
+    text = _compact(engine, [*merged, *_tools(71, 5000), *_tools(72, 5000)])[0]["content"]
+    assert text.startswith(OBJECTIVE) and text.count(CARRY) == 1
+    assert text.find("SECOND active request") < text.find(CARRY)
+
+
+def test_f3_leaf_admission_counts_a_carrier_by_its_glued_row(make):
+    engine = make(threshold_full_sweep_enabled=False, fresh_tail_pressure_yield_enabled=False)
+    history = [row for i in range(8) for row in _turn(i, f"OLD-{i} " + "history " * 1000)]
+    out = _compact(engine, [*history, {"role": "user", "content": "current short request"}, *_tools(70, 50),
+                            {"role": "assistant", "content": "a"}])
+    row, carry = _generated(engine, _host_merge(out))
+    assert carry
+    rest = [{"role": "assistant", "content": "small raw reply"}, *_tools(80), *_tools(81)]
+    glued = {**row, "content": engine._generated_context_carrier_remainder(row)}
+    assert engine._leaf_compaction_candidate_status_once([row, *rest]) == \
+        engine._leaf_compaction_candidate_status_once([glued, *rest])
+
+
+def test_f4_a_new_conversation_on_the_same_session_id_carries_nothing_of_the_old_one(make):
+    engine = make()
+    ending = [{"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}]
+    _compact(engine, [*_history(8), *ending])
+    engine.on_session_start("S", platform="cli", context_length=128_000, conversation_id="new-conv")
+    fresh = [{**m, "content": m["content"].replace("REQ-", "NEW-")} for m in _history(8)]
+    _, carry = _generated(engine, _compact(engine, [*fresh, *ending]))
+    assert "NEW-0" in carry and "REQ-" not in carry
+
+
+def test_f5_a_profile_rebind_drops_the_packet_cache(make, tmp_path):
+    make()  # the offline estimator and fake summariser
+    engine = LCMEngine(config=LCMConfig(fresh_tail_count=4, fresh_tail_max_tokens=2000, leaf_chunk_tokens=4000,
+                                        threshold_full_sweep_enabled=True), hermes_home=str(tmp_path / "profile-a"))
+    try:
+        ending = [{"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}]
+        engine.on_session_start("S", platform="cli", context_length=128_000, conversation_id="conv",
+                                hermes_home=str(tmp_path / "profile-a"))
+        assert "REQ-0" in _generated(engine, _compact(engine, [*_history(8), *ending]))[1]
+        engine.on_session_start("S", platform="cli", context_length=128_000, conversation_id="conv",
+                                hermes_home=str(tmp_path / "profile-b"))
+        assert engine._user_carry_cache is None
+        fresh = [{**m, "content": m["content"].replace("REQ-", "NEW-")} for m in _history(8)]
+        emitted = "\n".join(m.get("content", "") for m in _compact(engine, [*fresh, *ending]))
+        assert "REQ-0" not in emitted and "NEW-0" in emitted
+    finally:
+        engine.shutdown()
