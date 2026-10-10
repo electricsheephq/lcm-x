@@ -63,7 +63,7 @@ def test_warning_once_per_process(tmp_path, monkeypatch, caplog, affected, concu
             f"LCM-X: the linked SQLite {sqlite3.sqlite_version} has the WAL-reset bug "
             "(https://sqlite.org/wal.html#walresetbug), which can rarely corrupt "
             "a WAL database written by several connections; upgrade to a Python "
-            "whose SQLite is 3.51.3 or newer (or 3.50.7+ / 3.44.6+ backports)."
+            "whose SQLite is 3.51.3 or newer (or 3.50.7+ on the 3.50 branch, 3.44.6+ on the 3.44 branch)."
         )
     else:
         assert caplog.records == []

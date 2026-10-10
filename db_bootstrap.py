@@ -149,7 +149,7 @@ def configure_connection(conn: sqlite3.Connection) -> None:
             "LCM-X: the linked SQLite %s has the WAL-reset bug "
             "(https://sqlite.org/wal.html#walresetbug), which can rarely corrupt "
             "a WAL database written by several connections; upgrade to a Python "
-            "whose SQLite is 3.51.3 or newer (or 3.50.7+ / 3.44.6+ backports).",
+            "whose SQLite is 3.51.3 or newer (or 3.50.7+ on the 3.50 branch, 3.44.6+ on the 3.44 branch).",
             sqlite3.sqlite_version,
         )
     conn.execute("PRAGMA synchronous=FULL")
