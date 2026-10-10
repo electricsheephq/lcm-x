@@ -32,6 +32,7 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.inactive_record import RECORD_NAME
 
+RECORD_DIR = ("plugin-data", "hermes-lcm-x")
 REPO_ROOT = Path(__file__).resolve().parent.parent
 BACKFILL_STEP = "messages_ingested_at_backfill_v1"
 ACTIVE_LINE = "LCM plugin loaded — lossless context management active"
@@ -194,7 +195,7 @@ def test_t1_abandoned_load_logs_one_error_and_writes_record(tmp_path, monkeypatc
     assert "LCM plugin loaded" not in caplog.text
     assert "Path B" not in caplog.text
 
-    record = json.loads((home / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
+    record = json.loads((home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
     assert set(record) == {"pid", "process_start", "elapsed_s", "reason", "written_at"}
     assert record["pid"] == os.getpid()
     assert record["elapsed_s"] >= 0.8
@@ -216,7 +217,7 @@ def test_t2_fast_load_logs_active_line_with_load_time(tmp_path, monkeypatch, cap
     assert ctx._manager._context_engine is ctx.offered
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert "NOT active" not in caplog.text
-    assert not (home / RECORD_NAME.format(pid=os.getpid())).exists()
+    assert not (home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).exists()
     active = [r.getMessage() for r in caplog.records if ACTIVE_LINE in r.getMessage()]
     assert len(active) == 1
     assert re.search(r"\(load \d+\.\d\d s\)$", active[0]), active[0]
@@ -243,7 +244,7 @@ def test_t3_other_engine_in_slot_logs_warning_not_error(tmp_path, monkeypatch, c
     assert "_OtherEngine" in warnings[0]
     assert "load_timeout_seconds" not in warnings[0]
     assert "LCM plugin loaded" not in caplog.text
-    record = json.loads((home / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
+    record = json.loads((home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
     assert "_OtherEngine" in record["reason"]
 
 
@@ -289,7 +290,7 @@ def test_t4_record_reported_while_pid_alive_and_dropped_after(tmp_path):
         status = json.loads(lcm_tools.lcm_status({}, engine=engine))
         assert "inactive_process" not in status
         assert "was not active in process" not in handle_lcm_command("doctor", engine)
-        assert not (home / RECORD_NAME.format(pid=child.pid)).exists()
+        assert not (home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=child.pid)).exists()
     finally:
         engine.shutdown()
 
@@ -308,7 +309,7 @@ def test_t5_unknown_host_shape_is_treated_as_active(tmp_path, monkeypatch, caplo
 
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING and "LCM-X is NOT" in r.getMessage()]
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert not (home / RECORD_NAME.format(pid=os.getpid())).exists()
+    assert not (home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).exists()
     active = [r.getMessage() for r in caplog.records if ACTIVE_LINE in r.getMessage()]
     assert len(active) == 1
     assert re.search(r"\(load \d+\.\d\d s\)$", active[0]), active[0]
@@ -530,7 +531,7 @@ def test_b1_abandonment_during_the_active_line_is_still_reported(tmp_path, monke
     errors = [r.getMessage() for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1, errors
     assert "LCM-X is NOT active in this process" in errors[0]
-    record = json.loads((home / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
+    record = json.loads((home.joinpath(*RECORD_DIR) / RECORD_NAME.format(pid=os.getpid())).read_text(encoding="utf-8"))
     assert "plugins.load_timeout_seconds" in record["reason"]
 
 

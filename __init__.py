@@ -846,10 +846,7 @@ def register(ctx):
         if callable(register_hook):
             register_hook("post_llm_call", _on_post_llm_call)
         else:
-            # Hosts without ctx.register_hook: append to the manager's hook
-            # table directly (the same list register_hook appends to).
-            from hermes_cli.plugins import get_plugin_manager as _get_pm
-            _get_pm()._hooks.setdefault("post_llm_call", []).append(_on_post_llm_call)
+            logger.debug("host has no register_hook; per-turn ingest hook not registered")
         logger.debug("LCM registered post_llm_call hook for per-turn ingest")
     except Exception as exc:
         logger.debug("LCM could not register post_llm_call hook: %s", exc)
