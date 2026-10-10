@@ -8024,6 +8024,7 @@ class LCMEngine(
 
         retained_generated_context_parts: list[str] = []
         summary_message: Optional[Dict[str, Any]] = None
+        kept_indexes: list[int] = []
         if summary_parts:
             if (
                 summary_budget is None
@@ -8212,6 +8213,11 @@ class LCMEngine(
         self._mint_assembled_engine_uids(result, emission_candidates, summary_message, carried_tail,
                                          proactive_msg, generated_context_row, tail_selected)
         result.extend(tail_selected)
+        assembly_marker = uuid.uuid4().hex
+        for index, candidate in enumerate(emission_candidates):
+            candidate["row"]["_lcm_assembly_generated"] = (assembly_marker, index)
+        if proactive_msg is not None and retained_user_msg is None:
+            proactive_msg["_lcm_assembly_generated"] = (assembly_marker, -1)
 
         # ── Active-context cleanup / tool-pair guardrail ──
         # Drop assistant turns that carry only blank/internal structured content,
@@ -8220,11 +8226,91 @@ class LCMEngine(
         if leading_msg is None:
             while result and result[0].get("role") in {"assistant", "tool"}:
                 result = result[1:]
-        if (
-            assembly_cap is not None
-            and anchor_part is not None
-            and count_messages_tokens(result) > assembly_cap
-        ):
+        trimmed_overflow = assembly_cap is not None and count_messages_tokens(result) > assembly_cap
+        if trimmed_overflow:
+            separator = "\n\n---\n\n"
+
+            def replace_generated_text(old: str, new: str) -> None:
+                # Sanitization may copy/merge the carrier or leave a structured
+                # folded tail. Replace only its generated prefix, preserving
+                # the tail's shape and all provider/host metadata.
+                def replace(value):
+                    nonlocal replaced
+                    if isinstance(value, str):
+                        if not replaced and old in value:
+                            replaced = True
+                            return value.replace(old, new, 1)
+                        return value
+                    if isinstance(value, list):
+                        return [replace(item) for item in value]
+                    if isinstance(value, dict):
+                        return {key: replace(value) for key, value in value.items()}
+                    return value
+
+                for msg in result:
+                    marker = msg.get("_lcm_assembly_generated")
+                    if isinstance(marker, tuple) and marker[:1] == (assembly_marker,):
+                        replaced = False
+                        msg["content"] = replace(msg.get("content"))
+                for candidate in emission_candidates:
+                    candidate["span"] = candidate["span"].replace(old, new, 1)
+
+            dropped_count = 0
+            for index in sorted(kept_indexes, key=lambda i: (part_keys[i][0], -i), reverse=True):
+                if count_messages_tokens(result) <= assembly_cap:
+                    break
+                if part_keys[index][1] is None:
+                    continue
+                part = summary_parts[index]
+                # Locate the separator inside the generated span, never in a
+                # historical tail that happens to contain the same text.
+                for candidate in emission_candidates:
+                    span = candidate["span"]
+                    if part not in span:
+                        continue
+                    trimmed = span.replace(separator + part, "", 1)
+                    if trimmed == span:
+                        trimmed = span.replace(part + separator, "", 1)
+                    if trimmed == span:
+                        trimmed = span.replace(part, "", 1)
+                    replace_generated_text(span, trimmed)
+                    break
+                else:
+                    continue
+                kept_indexes.remove(index)
+                active_summary_node_ids.discard(part_keys[index][1])
+                dropped_count += 1
+                # A removed node must be eligible for recall again. Replace the
+                # old block in place (including folded carriers), or insert a
+                # newly eligible block immediately below the summary prefix.
+                recalled = self._build_proactive_recall_message(
+                    proactive_query_messages, summary_role, active_summary_node_ids,
+                ) if persist else None
+                if proactive_msg is not None:
+                    replace_generated_text(proactive_msg["content"], recalled["content"] if recalled else "")
+                elif recalled is not None:
+                    if retained_user_msg is not None and emission_candidates:
+                        span = emission_candidates[0]["span"]
+                        suffix = separator if folded_original_tail is not None else ""
+                        prefix = span.removesuffix(suffix) if suffix else span
+                        replace_generated_text(span, prefix + separator + recalled["content"] + suffix)
+                    else:
+                        recalled["_lcm_assembly_generated"] = (assembly_marker, -1)
+                        result.insert(len(result) - len(tail_selected), recalled)
+                proactive_msg = recalled
+
+            if dropped_count and kept_indexes:
+                last_part = summary_parts[kept_indexes[-1]]
+                notice = (f"[{dropped_count} older summary part(s) omitted for space; "
+                          "use lcm_grep or lcm_expand to recover them]")
+                before_notice = copy.deepcopy(result)
+                span = next(candidate["span"] for candidate in emission_candidates if last_part in candidate["span"])
+                replace_generated_text(span, span.replace(last_part, last_part + separator + notice, 1))
+                if count_messages_tokens(result) > assembly_cap:
+                    result = before_notice
+                    for candidate in emission_candidates:
+                        candidate["span"] = candidate["span"].replace(separator + notice, "", 1)
+        if assembly_cap is not None and anchor_part is not None and count_messages_tokens(result) > assembly_cap:
             trimmed_result: list[Dict[str, Any]] = []
             for msg in result:
                 content = normalize_content_value(msg.get("content")) or ""
@@ -8240,6 +8326,42 @@ class LCMEngine(
                     trimmed["content"] = "\n\n---\n\n".join(parts)
                     trimmed_result.append(trimmed)
             result = self._sanitize_active_context_messages(trimmed_result)
+            for candidate in emission_candidates:
+                candidate["span"] = "\n\n---\n\n".join(
+                    part for part in candidate["span"].split("\n\n---\n\n")
+                    if not part.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
+                )
+        if trimmed_overflow:
+            # Bind generated identities only after overflow changed the parts;
+            # under-cap assemblies retain main's bookkeeping and payload writes.
+            final_candidates = []
+            for index, candidate in enumerate(emission_candidates):
+                span = self._sanitize_active_preserved_objective_message({
+                    "role": candidate["row"]["role"], "content": candidate["span"],
+                })["content"]
+                row = next((msg for msg in result if span.strip() and msg.get("_lcm_assembly_generated") == (assembly_marker, index)
+                            and span in (normalize_content_value(msg.get("content")) or "")), None)
+                if row is None:
+                    continue
+                candidate.update(span=span, row=row, full_identity=_emission_identity(row))
+                if candidate["kind"] != "carrier":
+                    candidate["kind"] = "objective" if span.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) else "summary"
+                final_candidates.append(candidate)
+                if candidate is summary_candidate:
+                    summary_message = {"role": row["role"], "content": span.removesuffix("\n\n")} if carried_tail else row
+                elif generated_context_row is not None:
+                    generated_context_row = row
+            emission_candidates = final_candidates
+            if summary_candidate not in emission_candidates:
+                summary_message = carried_tail = None
+            if proactive_msg is not None:
+                proactive_msg = next((msg for msg in result if isinstance(marker := msg.get("_lcm_assembly_generated"), tuple)
+                                      and marker[:1] == (assembly_marker,) and proactive_msg["content"] in (normalize_content_value(msg.get("content")) or "")), None)
+            self._mint_assembled_engine_uids(result, emission_candidates, summary_message, carried_tail,
+                                             proactive_msg, generated_context_row, [])
+        for msg in result:
+            if isinstance(marker := msg.get("_lcm_assembly_generated"), tuple) and marker[:1] == (assembly_marker,):
+                msg.pop("_lcm_assembly_generated", None)
         if not persist:
             return result
 
@@ -8272,7 +8394,7 @@ class LCMEngine(
         consecutive-user merge would (no other tail key: it would replay the sidecar)."""
         if not identity_emit_enabled():
             return
-        carrier = result[-1] if carried_tail is not None else None
+        carrier = next((candidate["row"] for candidate in candidates if candidate["kind"] == "carrier"), None) if carried_tail is not None else None
         specs: dict = {}
         if summary_message is not None:
             content = summary_message["content"]
