@@ -107,16 +107,16 @@ Core capabilities:
 - **Diagnostics** - runtime health, database checks, optional `/lcm` slash
   commands, backup-first repair/rotate paths
 
-Beyond the core loop, three opt-in (default-off) feature families extend LCM
+Beyond the core loop, three feature families extend LCM
 from a compression layer into a memory system: **large-output externalization
 and context-budget controls** (giant tool results move to recoverable refs
 instead of crowding the prompt), **temporal memory** (day/week/month rollups
 plus natural-time recall through `lcm_recent`), and **semantic retrieval**
-(embedding-backed `lcm_grep` semantic/hybrid modes with Voyage,
+(opt-in embedding-backed `lcm_grep` semantic/hybrid modes with Voyage,
 OpenAI-compatible endpoints, Ollama, or in-process FastEmbed). See the
 [Feature overview](docs/features-overview.md) for what each family does and
 why, and [Agent configuration profiles](docs/agent-config-profiles.md) for
-copy-paste setups per agent type.
+copy-paste setups per agent type. Externalization and temporal rollups are on by default.
 
 ## Project status
 
@@ -615,9 +615,9 @@ assistant even when doing so exceeds a configured bound.
 | `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | unset (`auto`) | Protect provider-bound copies for known cloud embedding providers without rewriting durable data. Set `false` for an explicit raw-cloud opt-out (`privacy:off` vector revision); local providers remain unchanged |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
-| `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
+| `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `true` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
-| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `false` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `true` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders |
@@ -877,12 +877,12 @@ session to `lcm.db`.
 
 Storage-boundary payload guard contract: LCM prevents media-ish inline payloads from being written into plugin-local SQLite rows at the storage boundary.
 
-Externalization for ordinary large tool output is opt-in. When enabled,
+Externalization for ordinary large tool output is on by default. When enabled,
 oversized tool results are written to plugin-managed JSON files and referenced
 from summaries. They remain inspectable through
 `lcm_describe(externalized_ref=...)` and `lcm_expand(externalized_ref=...)`.
 
-Active-replay stubbing is a second, independently opt-in replay policy. When
+Active-replay stubbing is a second replay policy, on by default. When
 both externalization and active-replay stubbing are enabled, newly ingested
 textual tool results above the first-sight token threshold (10,000) are durably externalized and
 replaced immediately in provider-visible replay, including results in the
@@ -909,7 +909,7 @@ the target and the backlog rows left. Recovery attempts, forced overflow and cal
 below the threshold never take this exit; when the cuts miss the target the
 compaction runs as before.
 
-The storage-boundary payload guard is separate from that opt-in. LCM always
+The storage-boundary payload guard is separate from that configurable policy. LCM always
 scans messages at the store boundary before writing `messages.content` or
 `messages.tool_calls` to SQLite. Inline `data:*;base64,...` payloads and
 conservative long base64-looking runs are replaced with compact placeholders and

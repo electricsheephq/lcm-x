@@ -63,9 +63,11 @@ byte recoverable.
 
 ```bash
 # Externalize oversized payloads out of lcm.db into recoverable files
+# Default true; kept explicit for older versions.
 export LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true
 
 # Replace token-heavy tool results in the provider-visible prompt with refs
+# Default true; kept explicit for older versions.
 export LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED=true
 # A new result is stubbed from 10000 tokens; at a compaction, older results
 # outside the fresh tail are stubbed from 2000 tokens (0 = the first-sight value)
@@ -94,6 +96,7 @@ and "have we talked about this before?".
 
 ```bash
 # Time-indexed memory: day/week/month rollups + the lcm_recent tool
+# Default true; kept explicit for older versions.
 export LCM_TEMPORAL_ROLLUPS_ENABLED=true
 
 # Meaning-based recall: semantic + hybrid lcm_grep over summaries
@@ -124,6 +127,7 @@ No bytes leave the machine. Pair with a local Hermes auxiliary model so
 summarization is local too.
 
 ```bash
+# Default true; kept explicit for older versions.
 export LCM_TEMPORAL_ROLLUPS_ENABLED=true
 
 export LCM_EMBEDDINGS_ENABLED=true

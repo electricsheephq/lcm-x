@@ -155,7 +155,12 @@ def _compaction_fixture(tmp_path: Path, monkeypatch) -> dict:
     engine = LCMEngine(config=LCMConfig(
         fresh_tail_count=2, leaf_chunk_tokens=400, context_threshold=0.001,
         threshold_full_sweep_enabled=True, max_assembly_tokens=1_000_000,
-        database_path=str(tmp_path / "lcm.db")))
+        database_path=str(tmp_path / "lcm.db"),
+        # #1013 part B: fixture covers the feature-off mechanism
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    ))
     engine.on_session_start("S", platform="telegram", context_length=2_000_000, conversation_id="conv")
     try:
         engine.ingest(view)

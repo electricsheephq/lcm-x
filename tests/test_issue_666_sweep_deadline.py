@@ -92,7 +92,10 @@ def test_d2_no_deadline_keeps_the_timeouts_and_level_3(monkeypatch, clock):
 # -- D3: the reviewer's case, end to end ----------------------------------------------------------------------
 
 def _engine(tmp_path, **config) -> LCMEngine:
-    settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
+    # #1013 part B: foreground-only providers/clocks exclude automatic rollup calls
+    settings = {"large_output_externalization_enabled": False,
+                "large_output_active_replay_stubbing_enabled": False, "temporal_rollups_enabled": False,
+                "fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000,
                 "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
@@ -125,7 +128,12 @@ def _compress(engine, view, caplog):
 
 def test_d3_slow_failing_routes_stay_inside_the_sweep_deadline(tmp_path, monkeypatch, clock, caplog):
     # #605 F2: the condensation groups are over a lowered level 3 bound, so each one calls the slow routes.
-    engine = _engine(tmp_path, summary_fallback_models=["fallback-a"], l3_truncate_tokens=2)
+    engine = _engine(tmp_path, summary_fallback_models=["fallback-a"], l3_truncate_tokens=2,
+        # #1013 part B: foreground fake-clock budget excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     route = _SlowFailingRoute(clock)
     monkeypatch.setattr(escalation, "_invoke_summary_llm", route)
     _depth_0_nodes(engine, 6)

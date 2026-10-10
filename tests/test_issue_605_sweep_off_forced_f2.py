@@ -72,7 +72,10 @@ def _provider(monkeypatch, clock, seconds: float | None = 30.0, fail: bool = Fal
 def _engine(tmp_path, context_length: int = 200_000, **config) -> LCMEngine:
     # l3_truncate_tokens under every source unless a test sets it: those cells time model calls, so no source
     # takes the no-call verbatim path (F2) of one within the level 3 bound.
-    settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
+    # #1013 part B: foreground-only providers/clocks exclude automatic rollup calls
+    settings = {"large_output_externalization_enabled": False,
+                "large_output_active_replay_stubbing_enabled": False, "temporal_rollups_enabled": False,
+                "fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": False, "max_assembly_tokens": 100_000, "l3_truncate_tokens": 2,
                 "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
@@ -204,7 +207,12 @@ def test_u7_the_sweep_off_leaf_never_takes_more_than_40_percent_of_the_window(tm
 
 
 def test_u7_maybe_condense_is_refused_by_the_soft_target_after_a_slow_leaf(tmp_path, monkeypatch, clock):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     provider = _provider(monkeypatch, clock, seconds=40.0)  # the leaf ends at +40; a 40 s condensation at +80
     for _ in range(8):
         engine._foreground_estimates.record_call("", 40.0)

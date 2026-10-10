@@ -792,7 +792,7 @@ class LCMConfig:
     # -- Large tool-output externalization ---
     # When enabled, oversized tool results are written to plugin-managed storage
     # and replaced with compact references in pre-compaction serializer input.
-    large_output_externalization_enabled: bool = False
+    large_output_externalization_enabled: bool = True
     # Character threshold above which tool results are externalized.
     large_output_externalization_threshold_chars: int = 12_000
     # Explicit storage directory for externalized payloads (empty = auto under hermes home).
@@ -800,8 +800,8 @@ class LCMConfig:
     # Replace eligible textual tool results with durable compact refs in
     # provider-visible replay. Current-turn ingest is intercepted immediately;
     # historical assembly separately respects the protected fresh tail. This
-    # remains opt-in and requires large-output externalization.
-    large_output_active_replay_stubbing_enabled: bool = False
+    # is on by default and requires large-output externalization.
+    large_output_active_replay_stubbing_enabled: bool = True
     # Token-aware active-replay threshold. The character threshold above still
     # controls ordinary ingest externalization; this threshold controls when a
     # provider-visible textual tool result is replaced by its durable ref.
@@ -1023,8 +1023,8 @@ class LCMConfig:
     empty_lifecycle_gc_max_age_hours: float | None = 24.0
 
     # -- Temporal rollups ---
-    # Disabled by default; the engine's ingest/build hooks are flag-gated.
-    temporal_rollups_enabled: bool = False
+    # Enabled by default; the engine's ingest/build hooks are flag-gated.
+    temporal_rollups_enabled: bool = True
     rollup_daily_target_tokens: int = 5_000
     rollup_daily_max_tokens: int = 15_000
     rollup_aggregate_max_tokens: int = 20_000

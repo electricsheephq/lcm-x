@@ -451,7 +451,7 @@ def test_cursor_state_is_per_scope(rollup_store):
 def test_temporal_rollup_config_defaults_are_inert():
     config = LCMConfig()
 
-    assert config.temporal_rollups_enabled is False
+    assert config.temporal_rollups_enabled is True  # #1013 part B: deployed default
     assert config.rollup_daily_target_tokens == 5_000
     assert config.rollup_daily_max_tokens == 15_000
     assert config.rollup_aggregate_max_tokens == 20_000

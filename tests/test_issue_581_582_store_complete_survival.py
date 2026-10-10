@@ -518,7 +518,12 @@ def test_e_survival_fit_after_a_lock_after_commit(tmp_path, summaries, host_esti
 
 def test_f_newest_turn_over_budget_is_projected(tmp_path, summaries, host_estimator):
     """The newest user turn alone is over the window: a bounded projection, never empty, raw rows intact."""
-    engine = _engine(tmp_path, context_length=WINDOW)
+    engine = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     call = {"id": "call_big", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
     big = {"role": "tool", "tool_call_id": "call_big", "content": "row " * 12_000}
     view = [*_long_view(4), {"role": "user", "content": "[N] newest", "timestamp": 99.0},
@@ -533,6 +538,34 @@ def test_f_newest_turn_over_budget_is_projected(tmp_path, summaries, host_estima
         assert result[-1]["content"] != big["content"] and result[-1]["tool_call_id"] == "call_big"
         stored = [r for r in _rows(engine) if r["role"] == "tool" and r["content"] == big["content"]]
         assert len(stored) == 1  # the raw row stays stored verbatim
+    finally:
+        engine.shutdown()
+
+
+def test_part_b_on_path_keeps_newest_objective_and_durable_tool_data(tmp_path, summaries, host_estimator):
+    from hermes_lcm.externalize import extract_externalized_ref, load_externalized_payload
+
+    # #1013 part B: a durable externalized result need not take the survival projection path.
+    engine = _engine(tmp_path, context_length=WINDOW, large_output_externalization_enabled=True,
+                     large_output_active_replay_stubbing_enabled=True, temporal_rollups_enabled=True)
+    call = {"id": "call_big", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
+    big = {"role": "tool", "tool_call_id": "call_big", "content": "row " * 12_000}
+    view = [*_long_view(4), {"role": "user", "content": "[N] newest", "timestamp": 99.0},
+            {"role": "assistant", "content": "", "tool_calls": [call]}, big]
+    try:
+        engine.ingest(view)
+        engine._lifecycle.stage_compaction_publication = lambda *a, **k: (_ for _ in ()).throw(
+            LifecyclePublicationConflictError("injected"))
+        result = engine.compress(view, current_tokens=host_estimator(view))
+        assert host_estimator(result) <= TARGET
+        assert any(row.get("content") == "[N] newest" for row in result)
+        stored = [row for row in _rows(engine) if row["role"] == "tool" and row.get("tool_call_id") == "call_big"]
+        assert len(stored) == 1
+        ref = extract_externalized_ref(stored[0]["content"])
+        assert ref
+        payload = load_externalized_payload(ref, config=engine._config, hermes_home=engine._hermes_home)
+        assert payload and payload["content"] == big["content"]
+        assert result[-1]["tool_call_id"] == big["tool_call_id"]
     finally:
         engine.shutdown()
 
@@ -674,7 +707,12 @@ def test_r3b_a_fitted_list_resumes_cold_without_new_rows(tmp_path, summaries, ho
     """R3-B (Q3, Q2): the host adopts the fitted list (a projected newest user row and the reply after it;
     a projected tool row; a list-content system slot carrying the notice) and a cold process resumes it:
     only the new turn is stored, never the notice, never the earlier reply again."""
-    engine = _engine(tmp_path, context_length=WINDOW)
+    engine = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     view = view_of()
     try:
         engine.ingest(view)
@@ -685,7 +723,12 @@ def test_r3b_a_fitted_list_resumes_cold_without_new_rows(tmp_path, summaries, ho
         engine.on_session_end("S", fitted)
     finally:
         engine.shutdown()
-    cold = _engine(tmp_path, context_length=WINDOW)
+    cold = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:
         new = _turn("NEW", 500.0)
         cold.ingest([*fitted, *new])
@@ -846,7 +889,12 @@ def test_rc2_a_new_reply_after_a_projected_user_row_is_stored(tmp_path, summarie
 
 def _projected_tool_fit(tmp_path, host_estimator, **patches):
     """The big-tool view fitted after an injected conflict: (fitted list, its projected tool message)."""
-    engine = _engine(tmp_path, context_length=WINDOW)
+    engine = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     view = _big_tool_view()
     engine.ingest(view)
     _conflicted(engine)
@@ -872,7 +920,12 @@ def test_r4_b_a_new_message_never_takes_a_projected_rows_identity(tmp_path, summ
     before = len(_rows(engine))
     engine.on_session_end("S", fitted)
     engine.shutdown()
-    cold = _engine(tmp_path, context_length=WINDOW)
+    cold = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:
         cold.ingest([new if m is projected else m for m in fitted])
         added = _rows(cold)[before:]
@@ -892,7 +945,12 @@ def test_r4_b_a_failed_metadata_write_never_stores_a_projection(tmp_path, summar
     engine, fitted, _projected = _projected_tool_fit(tmp_path, host_estimator, write_metadata_json=refuse)
     before = len(_rows(engine))
     engine.shutdown()
-    cold = _engine(tmp_path, context_length=WINDOW)
+    cold = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:
         new = _turn("NEW", 500.0)
         cold.ingest([*fitted, *new])
@@ -1036,7 +1094,12 @@ def test_r6_1_a_restamped_copy_of_an_unstamped_sources_projection_is_that_row(tm
     before = len(_rows(engine))
     engine.on_session_end("S", fitted)
     engine.shutdown()
-    cold = _engine(tmp_path, context_length=WINDOW)
+    cold = _engine(tmp_path, context_length=WINDOW,
+        # #1013 part B: survival projection fixtures cover the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:
         restamped = [{**m, "timestamp": 500.0} if m is projected else m for m in fitted]
         full = [*restamped, *_turn("NEW", 900.0)]
