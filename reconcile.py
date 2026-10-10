@@ -884,7 +884,8 @@ class ReconcileMixin:
         watch, overrides = self._host_rewrite_state()
         reuse = bool(extract_externalized_ref(stored))  # reuse the raw payload: no second file
         protected = {"content": stored} if reuse else protect_messages_for_ingest(
-            [message], config=self._config, hermes_home=self._hermes_home, session_id=self._session_id
+            [message], config=self._config, hermes_home=self._hermes_home, session_id=self._session_id,
+            context_window_tokens=self._publish_ingest_context_window(),
         )[0]
         content = normalize_content_value(protected.get("content")) or ""
         if _has_lossy_sensitive_redaction(content) or _has_lossy_sensitive_redaction(stored):

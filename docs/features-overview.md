@@ -9,10 +9,11 @@ embedding provider setup see [Embeddings setup](embeddings-setup.md).
 From v0.24.0 the installed plugin is `hermes-lcm-x` and the runtime engine is
 `lcm-x` (#471); the bundled skill keeps the name `hermes-lcm`.
 
-**Defaults.** The fresh-tail token cap and the threshold full sweep (family 1)
-are on by default, because the managed deployment runs them on every profile.
-The other features ship default-off until an operator opts in with an
-environment variable. Each family keeps its data out of the core schema
+**Defaults.** The fresh-tail token cap, the threshold full sweep (family 1), and
+temporal rollups (family 2) are on by default, matching the managed deployment.
+Large-output externalization and active-replay stubbing stay opt-in for now (the
+managed deployment turns them on), and semantic retrieval stays default-off until
+an operator opts in with an environment variable. Each family keeps its data out of the core schema
 until first use, so a disabled install stays readable by older builds.
 
 ## The one-paragraph mental model
@@ -94,7 +95,7 @@ on exactly these seams): build tokens carry non-reusable nonces, late or
 superseded builders cannot overwrite newer state, deleted sources stale every
 covered period, and multi-target rebuild seeding is atomic.
 
-Key switches: `LCM_TEMPORAL_ROLLUPS_ENABLED` (+ `LCM_ROLLUP_*` tuning).
+Key switches: `LCM_TEMPORAL_ROLLUPS_ENABLED` (default `true`; + `LCM_ROLLUP_*` tuning).
 
 ## Family 3 — Semantic retrieval (embeddings + hybrid search)
 

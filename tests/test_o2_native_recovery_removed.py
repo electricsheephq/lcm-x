@@ -115,8 +115,8 @@ def test_t3_warning_once_per_process(tmp_path, monkeypatch, caplog):
 
 
 def test_user_replay_externalization_ignores_flag(tmp_path, monkeypatch):
-    # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-    monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+    # #1055: force externalization for this fixture independently of the bound window.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
     for enabled in (False, True):
         home = tmp_path / str(enabled)
         home.mkdir()

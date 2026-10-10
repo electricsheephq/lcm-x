@@ -113,6 +113,9 @@ def _config_from_policy(policy: LCMPolicy, database_path: Path):
         # silently change existing policy@v1 runs.
         fresh_tail_max_tokens=0,
         threshold_full_sweep_enabled=False,
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
         database_path=str(database_path),
     )
 

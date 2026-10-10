@@ -48,10 +48,11 @@ GENERIC_BASE64 = DATA_PAYLOAD * 2
 GENERIC_BASE64URL = base64.urlsafe_b64encode(bytes(range(256)) * 40).decode("ascii")
 
 
-def _engine(tmp_path: Path) -> LCMEngine:
+def _engine(tmp_path: Path, **overrides) -> LCMEngine:
     config = LCMConfig(
         database_path=str(tmp_path / "lcm.db"),
         large_output_externalization_path=str(tmp_path / "externalized"),
+        **overrides,
     )
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
     engine.on_session_start(
@@ -773,7 +774,12 @@ def test_externalized_payload_reassignment_fsyncs_replacement(tmp_path, monkeypa
 
 
 def test_ingest_externalizes_plain_data_uri_user_content_before_sqlite_write(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
 
     engine._ingest_messages([{"role": "user", "content": "see image " + DATA_URI}])
 
@@ -794,7 +800,12 @@ def test_ingest_externalizes_plain_data_uri_user_content_before_sqlite_write(tmp
 
 
 def test_ingest_preserves_trailing_text_after_data_uri(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
 
     engine._ingest_messages([{"role": "user", "content": DATA_URI + " please analyze this"}])
 
@@ -839,7 +850,12 @@ def test_ingest_externalizes_medium_data_uri_with_hyphenated_parameter_value(tmp
 
 
 def test_ingest_externalizes_structured_image_url_data_uri_before_sqlite_write(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     message = {
         "role": "user",
         "content": [
@@ -938,7 +954,12 @@ def test_ingest_externalizes_embedded_generic_long_base64_run(tmp_path):
 
 
 def test_ingest_externalizes_data_uri_and_generic_base64_in_same_text(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
 
     engine._ingest_messages([{"role": "user", "content": f"image {DATA_URI} blob {GENERIC_BASE64} done"}])
 
@@ -982,7 +1003,12 @@ def test_ingest_does_not_mutate_input_message(tmp_path):
 
 
 def test_ingest_preserves_provider_active_context_while_protecting_storage(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     message = {
         "role": "user",
         "content": [
@@ -1002,7 +1028,12 @@ def test_ingest_preserves_provider_active_context_while_protecting_storage(tmp_p
 
 
 def test_tool_result_ingest_preserves_active_context_while_protecting_storage(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     message = {"role": "tool", "tool_call_id": "call_media", "content": "tool saw " + DATA_URI}
 
     active = engine._ingest_messages([deepcopy(message)])
@@ -1081,7 +1112,12 @@ def test_engine_ingest_does_not_double_externalize_existing_externalized_payload
 
 
 def test_ingest_keeps_scanning_after_existing_placeholder_prefix(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     engine._store.append(engine.current_session_id, {"role": "user", "content": DATA_URI})
     _store_id, placeholder, _tool_calls = _single_message_row(engine, role="user")
     first_ref = _extract_ref(placeholder)
@@ -1298,7 +1334,12 @@ def test_restart_replay_does_not_skip_changed_duplicate_key_tool_argument_payloa
 def test_ingest_preserves_inline_payload_when_externalization_fails(tmp_path, monkeypatch):
     from hermes_lcm import ingest_protection
 
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     monkeypatch.setattr(ingest_protection, "externalize_ingest_payload", lambda *args, **kwargs: None)
 
     engine._store.append(engine.current_session_id, {"role": "user", "content": DATA_URI})
@@ -1342,7 +1383,12 @@ def test_ingest_leaves_normal_media_reference_inline(tmp_path):
 
 
 def test_ingest_externalizes_tool_result_data_uri_before_sqlite_write(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
 
     engine._ingest_messages([{"role": "tool", "tool_call_id": "call_media", "content": "tool saw " + DATA_URI}])
 
@@ -1806,7 +1852,11 @@ def _create_lossless_source(db_path: Path):
         conn.close()
 
 
-def test_import_lossless_claw_externalizes_legacy_data_uri_content(tmp_path):
+def test_import_lossless_claw_externalizes_legacy_data_uri_content(tmp_path, monkeypatch):
+    # #1013 part B: protection tests cover the off path (owner scope ban)
+    monkeypatch.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", "false")
+    monkeypatch.setenv("LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED", "false")
+    monkeypatch.setenv("LCM_TEMPORAL_ROLLUPS_ENABLED", "false")
     importer = _load_importer_module()
     source_db = tmp_path / "source.db"
     target_db = tmp_path / "target.db"
@@ -1839,7 +1889,12 @@ def test_import_lossless_claw_externalizes_legacy_data_uri_content(tmp_path):
     assert "data:image" not in content
     ref = _extract_ref(content)
     engine = LCMEngine(
-        config=LCMConfig(database_path=str(target_db)),
+        config=LCMConfig(database_path=str(target_db),
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
+        ),
         hermes_home=str(tmp_path),
     )
     engine.on_session_start("openclaw-lcm:agent:repro:legacy-session", platform="import", context_length=200_000)
@@ -1848,6 +1903,10 @@ def test_import_lossless_claw_externalizes_legacy_data_uri_content(tmp_path):
 
 
 def test_import_lossless_claw_respects_externalization_path_env(tmp_path, monkeypatch):
+    # #1013 part B: protection tests cover the off path (owner scope ban)
+    monkeypatch.setenv("LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED", "false")
+    monkeypatch.setenv("LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED", "false")
+    monkeypatch.setenv("LCM_TEMPORAL_ROLLUPS_ENABLED", "false")
     importer = _load_importer_module()
     source_db = tmp_path / "source.db"
     target_db = tmp_path / "target.db"
@@ -1873,7 +1932,12 @@ def test_import_lossless_claw_respects_externalization_path_env(tmp_path, monkey
     ref = _extract_ref(content)
     assert (custom_externalized / ref).exists()
     engine = LCMEngine(
-        config=LCMConfig(database_path=str(target_db), large_output_externalization_path=str(custom_externalized)),
+        config=LCMConfig(database_path=str(target_db), large_output_externalization_path=str(custom_externalized),
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
+        ),
         hermes_home=str(tmp_path),
     )
     engine.on_session_start("openclaw-lcm:agent:repro:legacy-session", platform="import", context_length=200_000)
@@ -3532,6 +3596,11 @@ def test_quarantined_assistant_output_does_not_enter_summaries_or_active_context
         leaf_chunk_tokens=100,
         context_threshold=0.10,
         large_output_externalization_path=str(tmp_path / "externalized"),
+
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
     )
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
     engine.on_session_start(
@@ -3571,6 +3640,11 @@ def test_quarantined_assistant_output_does_not_enter_summaries_or_active_context
         leaf_chunk_tokens=100,
         context_threshold=0.10,
         large_output_externalization_path=str(tmp_path / "externalized"),
+
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
     )
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
     engine.on_session_start(
@@ -3663,6 +3737,11 @@ def test_dynamic_quarantined_assistant_pressure_continues_after_first_leaf_pass(
         dynamic_leaf_chunk_max=100,
         context_threshold=0.10,
         large_output_externalization_path=str(tmp_path / "externalized"),
+
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
     )
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
     engine.on_session_start(
@@ -4804,7 +4883,12 @@ def test_no_system_filtered_non_quarantine_rebind_preserves_repeated_tail_delta(
 
 
 def test_legitimate_long_assistant_report_is_not_quarantined(tmp_path):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: protection tests cover the off path (owner scope ban)
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     report = _legitimate_long_report()
     assert len(report) > 70_000
 

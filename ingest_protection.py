@@ -82,15 +82,19 @@ _NON_TOOL_EXTERNALIZATION_FLOOR_CHARS = 100_000
 _NON_TOOL_EXTERNALIZATION_FLOOR_TOKENS = 25_000
 
 
-def _non_tool_text_over_floor(text: str, config) -> bool:
-    if len(text) > _NON_TOOL_EXTERNALIZATION_FLOOR_CHARS:
+def _non_tool_text_over_floor(text: str, config, *, context_window_tokens: int | None = 0) -> bool:
+    # #1055: use the bound effective window; unknown windows retain #1016's floor.
+    window_floor = (max(0, context_window_tokens or 0) + 9) // 10
+    char_floor = max(_NON_TOOL_EXTERNALIZATION_FLOOR_CHARS, 4 * window_floor)
+    token_floor = max(_NON_TOOL_EXTERNALIZATION_FLOOR_TOKENS, window_floor)
+    if len(text) > char_floor:
         return True
     # Count tokens only where externalization could apply (enabled, over the configured threshold).
     if not getattr(config, "large_output_externalization_enabled", False):
         return False
     if len(text) <= int(getattr(config, "large_output_externalization_threshold_chars", 0) or 0):
         return False
-    return count_tokens(text) >= _NON_TOOL_EXTERNALIZATION_FLOOR_TOKENS
+    return count_tokens(text) >= token_floor
 
 
 def _externalization_kind_for_message(message: Dict[str, Any]) -> str:
@@ -2655,6 +2659,8 @@ def protect_message_for_ingest(
     hermes_home: str = "",
     session_id: str = "",
     tool_name_hint: str = "",
+    *,
+    context_window_tokens: int | None = 0,
 ) -> Dict[str, Any]:
     """Return a copy of ``message`` safe to persist in SQLite.
 
@@ -2784,7 +2790,9 @@ def protect_message_for_ingest(
                     externalized = {"placeholder": placeholder}
             kind = _externalization_kind_for_message(msg)
             if externalized is None and (
-                kind != "raw_payload" or _non_tool_text_over_floor(normalized_content, config)
+                kind != "raw_payload" or _non_tool_text_over_floor(
+                    normalized_content, config, context_window_tokens=context_window_tokens,
+                )
             ):
                 externalized = maybe_externalize_payload(
                     normalized_content,
@@ -2906,6 +2914,8 @@ def protect_messages_for_ingest(
     hermes_home: str = "",
     session_id: str = "",
     tool_name_hints: List[str] | None = None,
+    *,
+    context_window_tokens: int | None = 0,
 ) -> List[Dict[str, Any]]:
     return [
         protect_message_for_ingest(
@@ -2914,6 +2924,7 @@ def protect_messages_for_ingest(
             hermes_home=hermes_home,
             session_id=session_id,
             tool_name_hint=(tool_name_hints or [])[index] if index < len(tool_name_hints or []) else "",
+            context_window_tokens=context_window_tokens,
         )
         for index, message in enumerate(messages)
     ]

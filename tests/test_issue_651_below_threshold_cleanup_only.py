@@ -115,7 +115,12 @@ def test_t1_below_threshold_automatic_compress_writes_no_leaf_and_still_ingests(
 
 
 def test_t1_the_handoff_needs_the_preflight_request_and_its_own_tokens_below_threshold(tmp_path, summaries):
-    engine, view, rough = _maintenance_engine(tmp_path)
+    engine, view, rough = _maintenance_engine(tmp_path,
+        # #1013 part B: deferred leaf fixture covers the unstubbed path
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:  # the host observed the threshold after all: a normal pass, not cleanup-only
         engine.compress(view, current_tokens=engine.threshold_tokens)
         assert summaries and _leaves(engine) >= 1

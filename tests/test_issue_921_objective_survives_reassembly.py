@@ -22,7 +22,7 @@ PROMPT = "Keep this sole request verbatim: café, 日本語.\n  indented detail\
 
 
 @pytest.fixture
-def engine(tmp_path, monkeypatch):
+def engine(tmp_path, monkeypatch, request):
     # Use the supported offline estimator: approximately 4.6k/20k tokens,
     # independent of an optional tokenizer or a tokenizer download.
     monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
@@ -31,6 +31,7 @@ def engine(tmp_path, monkeypatch):
         engine_module, "summarize_with_escalation",
         lambda **kwargs: ("Synthetic tool-round summary; no verbatim user text.", 1),
     )
+    part_b_on = getattr(request, "param", False)
     instance = LCMEngine(config=LCMConfig(
         database_path=str(tmp_path / "lcm.db"),
         fresh_tail_count=4,
@@ -38,6 +39,11 @@ def engine(tmp_path, monkeypatch):
         leaf_chunk_tokens=8000,
         threshold_full_sweep_enabled=True,
         context_threshold=0.35,  # #1013: the rounds are sized to cross the pre-#1013 threshold
+
+        # #1013 part B: fixture covers the feature-off mechanism
+        large_output_externalization_enabled=part_b_on,
+        large_output_active_replay_stubbing_enabled=part_b_on,
+        temporal_rollups_enabled=part_b_on,
     ), hermes_home=str(tmp_path / "home"))
     instance.on_session_start("S", platform="cli", context_length=128_000)
     try:
@@ -120,6 +126,38 @@ def test_assistant_only_tail_does_not_invent_objective(engine):
     messages = [{"role": "assistant", "content": "An assistant-only continuation."}]
     assert engine._latest_user_context_anchor(messages, []) is None
     assert engine.compress(messages) == messages
+
+
+@pytest.mark.parametrize("prompt", [
+    PROMPT,
+    "  preserve whitespace\t\n日本語 café  " + PROMPT,
+    PROMPT + SEPARATOR + "Keep the instruction after this Markdown rule.\n日本語 café\t  ",
+    PROMPT + SEPARATOR + "[Recent Summary (d0, node 1)]\nquoted output\n[Expand for details: quoted]",
+])
+@pytest.mark.parametrize("engine", [True], indirect=True)
+def test_part_b_on_path_keeps_objective_bytes_through_reassembly_and_rotation(engine, prompt):
+    # #1013 part B: assert objective preservation independently of the scaffold mechanism.
+    messages = [{"role": "user", "content": prompt, "timestamp": 1.0}]
+    for index in range(5):
+        messages.extend(_round(index))
+    assembled = engine.compress(messages)
+    for index in range(5, 8):
+        objective_rows = [row for row in assembled if row.get("role") == "user"
+                          and prompt in str(row.get("content", ""))]
+        assert len(objective_rows) == 1
+        assert objective_rows[0]["content"].encode("utf-8").count(prompt.encode("utf-8")) == 1
+        continued = [*assembled, *_round(index)]
+        assembled = engine.compress(continued)
+        # Stubbing can replace the result text; the active call/result identity stays paired.
+        assert assembled[-2]["tool_calls"][0]["id"] == assembled[-1]["tool_call_id"] == f"call_{index}"
+    engine.on_session_start("S2", platform="cli", context_length=128_000,
+                            boundary_reason="compression", old_session_id="S")
+    assembled = engine.compress([*assembled, *_round(8)])
+    assert sum(prompt in str(row.get("content", "")) for row in assembled if row.get("role") == "user") == 1
+    newer = {"role": "user", "content": "The newer request is now the current objective.", "timestamp": 100.0}
+    assert engine._latest_user_context_anchor([*assembled, newer], []) == PREFIX + "\n" + newer["content"]
+    result = engine.compress([*assembled, newer, *_round(9)])
+    assert any(newer["content"] in str(row.get("content", "")) for row in result if row.get("role") == "user")
 
 
 def test_carried_objective_part_is_byte_identical(engine):

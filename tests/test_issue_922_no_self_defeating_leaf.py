@@ -12,23 +12,29 @@ import hermes_lcm.survival_fit as survival_fit
 import hermes_lcm.tokens as tokens
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.externalize import extract_externalized_ref, load_externalized_payload
 from hermes_lcm.tokens import count_message_tokens, count_messages_tokens
 
 
 @pytest.fixture
-def engine(tmp_path, monkeypatch):
+def engine(tmp_path, monkeypatch, request):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     monkeypatch.delenv("LCM_DATABASE_PATH", raising=False)
     monkeypatch.setattr(survival_fit, "_host_estimate", lambda messages: None)
     monkeypatch.setattr(tokens, "count_tokens", lambda text: len(text) // 4 if text else 0)
     summarize = Mock(return_value=("Earlier tool work.\nExpand for details about: tool results", 1))
     monkeypatch.setattr(engine_module, "summarize_with_escalation", summarize)
+    part_b_on = getattr(request, "param", False)
     instance = LCMEngine(config=LCMConfig(
         database_path=str(tmp_path / "lcm.db"), context_threshold=0.12,
         fresh_tail_count=4, fresh_tail_max_tokens=2000,
         threshold_full_sweep_enabled=True, fresh_tail_pressure_yield_enabled=False,
-        embeddings_enabled=False, temporal_rollups_enabled=False,
+        embeddings_enabled=False, temporal_rollups_enabled=part_b_on,
         empty_lifecycle_gc_enabled=False,
+
+        # #1013 part B: fixture covers the feature-off mechanism
+        large_output_externalization_enabled=part_b_on,
+        large_output_active_replay_stubbing_enabled=part_b_on,
     ), hermes_home=str(tmp_path))
     instance.on_session_start("issue-922", conversation_id="sole-user", context_length=128_000)
     try:
@@ -85,6 +91,26 @@ def test_cell_no_leaf_no_growth_no_rejection(engine, monkeypatch):
     assert instance._compression_block_reason() == "cooldown:lcm_objective_only"
     assert not instance.should_compress(count_messages_tokens(result))
     assert instance._store.get_session_count(instance._session_id) == 3
+
+
+@pytest.mark.parametrize("engine", [True], indirect=True)
+def test_part_b_on_path_preserves_objective_and_tool_data_without_growth(engine):
+    instance, summarize = engine
+    # #1013 part B: free stubbing can avoid an objective-only hold while preserving its invariant.
+    messages = _cell()
+    original = deepcopy(messages)
+    result = _host_anti_growth(instance, messages)
+    assert messages == original
+    assert result[0]["content"] == original[0]["content"]
+    assert count_messages_tokens(result) <= count_messages_tokens(original)
+    assert not instance._dag.get_session_nodes(instance._session_id)
+    summarize.assert_not_called()
+    assert instance._store.get_session_count(instance._session_id) == 3
+    ref = extract_externalized_ref(result[-1]["content"])
+    assert ref
+    payload = load_externalized_payload(ref, config=instance._config, hermes_home=instance._hermes_home)
+    assert payload and payload["content"] == original[-1]["content"]
+    assert result[-2]["tool_calls"][0]["id"] == result[-1]["tool_call_id"] == original[-1]["tool_call_id"]
 
 
 def test_objective_only_writes_leaf_when_anchor_exceeds_assembly_cap(engine):

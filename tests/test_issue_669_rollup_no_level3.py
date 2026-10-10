@@ -159,7 +159,12 @@ def test_r2_verbatim_level_3_is_stored_as_before(parts, monkeypatch, caplog):
 # -- R3: no build while the summary route stop applies ------------------------------------------------------
 
 def test_r3_refused_route_starts_no_build_and_no_provider_call(tmp_path, monkeypatch, caplog):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: explicit maintenance excludes automatically scheduled rollups
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     provider = _provider(monkeypatch, ACCEPTED)
     store = RollupStore(engine._dag.db_path)
     try:
