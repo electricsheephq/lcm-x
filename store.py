@@ -604,6 +604,92 @@ class MessageStore:
                 operation_name="message_store.append_protected_batch",
             )
 
+    def append_source_event(self, session_id: str, messages: List[Dict[str, Any]],
+                            *, identity: str, digest: str, source_metadata: Dict[str, Any],
+                            checkpoint_key: str = "", checkpoint: Dict[str, Any] | None = None,
+                            source: str = "portable") -> Dict[str, Any]:
+        """Append a protected source event and its receipt/checkpoint atomically.
+
+        Portable capture owns a dedicated corpus. Identity is host event identity,
+        not content equality. A repeated digest is idempotent; a changed digest
+        appends a version and leaves every prior row and receipt reachable.
+        No caller transaction is committed or rolled back by this operation.
+        """
+        if not session_id or not identity or not digest:
+            raise ValueError("session, source identity and digest are required")
+        if checkpoint_key and not checkpoint_key.startswith("portable:checkpoint:"):
+            raise ValueError("checkpoint key must be portable-scoped")
+        protected = protect_messages_for_ingest(
+            messages, config=self._ingest_protection_config,
+            hermes_home=self._hermes_home, session_id=session_id,
+        )
+        # Envelopes are retained as protected JSON, not an unguarded metadata copy.
+        envelope = protect_message_for_ingest(
+            {"role": "unknown", "content": json.dumps(source_metadata, ensure_ascii=False)},
+            config=self._ingest_protection_config,
+            hermes_home=self._hermes_home, session_id=session_id,
+        )["content"]
+        event_key = "portable:event:" + identity
+        conn = self._conn
+        if conn is None:
+            raise RuntimeError("MessageStore connection is closed")
+
+        def metadata(key: str, value: Any) -> None:
+            conn.execute(
+                "INSERT INTO metadata(key,value) VALUES(?,?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, json.dumps(value, ensure_ascii=False, sort_keys=True)),
+            )
+
+        def write() -> Dict[str, Any]:
+            # Acquire the write reservation before reading the event ledger, so
+            # independent capture processes cannot both append the same event.
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute("SELECT value FROM metadata WHERE key=?", (event_key,)).fetchone()
+            receipt = json.loads(row[0]) if row else {"identity": identity, "versions": []}
+            prior = next((v for v in receipt["versions"] if v["digest"] == digest), None)
+            if prior is not None:
+                result = {"status": "duplicate", "store_ids": prior["store_ids"],
+                          "version": prior["version"]}
+            else:
+                version = len(receipt["versions"]) + 1
+                ids = []
+                for index, msg in enumerate(protected):
+                    ts = time.time()
+                    observed_at = _normalize_observed_at(msg.get("timestamp"))
+                    calls = msg.get("tool_calls")
+                    cur = conn.execute(
+                        "INSERT INTO messages (session_id,source,conversation_id,role,content,"
+                        "tool_call_id,tool_calls,tool_name,timestamp,token_estimate,pinned,"
+                        "ingested_at,observed_at,observed_at_source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (session_id, _normalize_source_value(source), session_id,
+                         msg.get("role", "unknown"), _normalize_content_value(msg.get("content")),
+                         msg.get("tool_call_id"), json.dumps(calls) if calls else None,
+                         msg.get("tool_name"), ts, 0, 0, ts, observed_at,
+                         "host_message_timestamp" if observed_at is not None else None),
+                    )
+                    store_id = int(cur.lastrowid)
+                    ids.append(store_id)
+                    metadata(f"portable:row:{store_id}", {
+                        "identity": identity, "digest": digest, "version": version,
+                        "part_index": index, "source_metadata": envelope,
+                    })
+                receipt["versions"].append({"digest": digest, "version": version,
+                                            "store_ids": ids, "source_metadata": envelope})
+                metadata(event_key, receipt)
+                result = {"status": "conflict" if version > 1 else "appended",
+                          "store_ids": ids, "version": version}
+            if checkpoint_key:
+                metadata(checkpoint_key, checkpoint or {})
+            return result
+
+        with self._write_lock:
+            if conn.in_transaction:
+                raise RuntimeError("source event append requires its own transaction")
+            return _run_sqlite_write_with_snapshot_retry(
+                conn, write, operation_name="message_store.append_source_event",
+            )
+
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
         if not old_session_id or not new_session_id or old_session_id == new_session_id:
