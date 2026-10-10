@@ -24,19 +24,21 @@ def externalized_payload_inventory(engine) -> dict:
     """Describe the separate payload directory without creating it or raising."""
     try:
         path = get_large_output_storage_dir(engine._config, engine._hermes_home, create=False)
-        files = size = 0
+        files = size = unreadable = 0
         try:
             with os.scandir(path) as entries:
                 for entry in entries:
+                    if not entry.name.endswith(".json"):
+                        continue
                     try:
-                        if entry.name.endswith(".json") and entry.is_file(follow_symlinks=False):
+                        if entry.is_file(follow_symlinks=False):
                             size += entry.stat(follow_symlinks=False).st_size
                             files += 1
                     except OSError:
-                        continue
+                        unreadable += 1  # reported, so a partial count never reads as complete
         except FileNotFoundError:
-            return {"path": path, "exists": False, "files": 0, "bytes": 0}
-        return {"path": path, "exists": True, "files": files, "bytes": size}
+            return {"path": path, "exists": False, "files": 0, "bytes": 0, "unreadable": 0}
+        return {"path": path, "exists": True, "files": files, "bytes": size, "unreadable": unreadable}
     except Exception as exc:
         return {"path": None, "error": str(exc).splitlines()[0][:160] if str(exc) else type(exc).__name__}
 

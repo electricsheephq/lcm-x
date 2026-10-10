@@ -968,6 +968,7 @@ def _rotate_apply_text(engine) -> str:
             f"previous_frontier_store_id: {pre['current_frontier_store_id']}",
             f"new_frontier_store_id: {pre['new_frontier_store_id']}",
             f"reason: {pre.get('reason', 'no_change')}",
+            *_externalized_payload_lines(engine),
             "note: rotate is a no-op; rolling backup was not written so the previous rotate-latest snapshot is preserved",
         ]
         return "\n".join(lines)
@@ -2442,7 +2443,9 @@ def _externalized_payload_lines(engine) -> list[str]:
         f"externalized_payload_files: {inventory['files']}",
         f"externalized_payload_size: {_fmt_size(inventory['bytes'])}",
     ]
-    if inventory["files"] > 0:
+    if inventory["unreadable"]:
+        lines.append(f"externalized_payload_unreadable: {inventory['unreadable']} (not counted above)")
+    if inventory["files"] or inventory["unreadable"]:
         lines.append("note: externalized payloads are not in the SQLite snapshot; copy externalized_payload_dir with the backup when moving it to another host")
     return lines
 

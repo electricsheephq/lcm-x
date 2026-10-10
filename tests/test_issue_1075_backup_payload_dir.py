@@ -97,3 +97,50 @@ def test_inventory_resolution_error_is_unavailable(engine, monkeypatch):
     assert "status: ok" in output
     assert "externalized_payload_dir: unavailable (outside allowed base)" in output
     assert "externalized_payload_files:" not in output
+
+
+def test_rotate_preflight_noop_names_payload_directory(engine, monkeypatch):
+    # The idempotent no-op returns before any backup; it still names the payload directory (#1077 review).
+    original = engine.rotate_active_session
+
+    def rotate(*, apply):
+        result = original(apply=False)
+        result.update(ok=True, noop=True, reason="test")
+        return result
+
+    monkeypatch.setattr(engine, "rotate_active_session", rotate)
+    output = handle_lcm_command("rotate apply", engine)
+
+    assert "rolling backup was not written" in output
+    assert f"externalized_payload_dir: absent ({_payload_dir(engine)})" in output
+
+
+def test_unreadable_payload_entries_are_reported(engine, monkeypatch):
+    # An entry whose metadata cannot be read is reported, and keeps the copy note (#1077 review).
+    path = get_large_output_storage_dir(engine._config, engine._hermes_home, create=True)
+    (path / "unreadable_abcdef123456_x.json").write_text("{}")
+    real_scandir = maintenance.os.scandir
+
+    class Entry:
+        def __init__(self, entry):
+            self.name = entry.name
+
+        def is_file(self, follow_symlinks=True):
+            raise OSError("stale handle")
+
+    class Entries:
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __enter__(self):
+            return [Entry(e) for e in self.inner.__enter__()]
+
+        def __exit__(self, *exc):
+            return self.inner.__exit__(*exc)
+
+    monkeypatch.setattr(maintenance.os, "scandir", lambda p: Entries(real_scandir(p)))
+    output = handle_lcm_command("backup", engine)
+
+    assert "externalized_payload_files: 0" in output
+    assert "externalized_payload_unreadable: 1 (not counted above)" in output
+    assert "note: externalized payloads are not in the SQLite snapshot" in output
