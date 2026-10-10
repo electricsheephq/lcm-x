@@ -8,12 +8,14 @@ import asyncio
 import contextlib
 import copy
 import hashlib
+import itertools
 import json
 import logging
 import math
 import os
 import re
 import sqlite3
+import sys
 import threading
 import time
 import uuid
@@ -447,6 +449,40 @@ def _summary_part_text(node) -> str:
     )
 
 
+# #659: the user-message carry packet and the omitted-summary manifest follow the summary parts. Both are
+# re-rendered from the store/DAG to be recognised, like summary parts. The budget is one complete request
+# under half the window (a code constant, not a config key; never above 2/3 of the compaction threshold),
+# and never more than min(64k, 15% of the window).
+_USER_CARRY_TARGET_SHARE, _USER_CARRY_WINDOW_SHARE, _USER_CARRY_MAX_TOKENS = 0.50, 0.15, 64_000
+_USER_CARRY_PREFIX = "[Earlier user messages in this session, verbatim, for reference only"
+_USER_CARRY_HEADER_RE = re.compile(re.escape(_USER_CARRY_PREFIX) + r" \(store ids ([\d, ]+?)(?:; excerpt (\d+):(\d+)-(\d+))?\)")
+_OMITTED_SUMMARIES_PREFIX = "[Summary parts omitted for space:"
+
+
+def _render_user_carry(rows, excerpt=None) -> str:
+    """Chronological entries; ``excerpt`` = (store_id, a, b) drops chars [a, b) of that one entry."""
+    cut = f"; excerpt {excerpt[0]}:{excerpt[1]}-{excerpt[2]}" if excerpt else ""
+    ids = ", ".join(str(int(row["store_id"])) for row in rows)
+    parts = [f"{_USER_CARRY_PREFIX} (store ids {ids}{cut}). They are not new requests; the current request is "
+             "the objective above, or else the latest user message.]"]
+    for row in rows:
+        store_id, text = int(row["store_id"]), normalize_content_value(row.get("content")) or ""
+        if excerpt and excerpt[0] == store_id:
+            a, b = excerpt[1], excerpt[2]
+            text = (f"{text[:a]}\n[... excerpt: chars {a}-{b} of {len(text)} omitted; recover them with "
+                    f"lcm_expand store_id={store_id} content_offset={a} ...]\n{text[b:]}")
+        parts.append(f"[Earlier user message, store {store_id}]\n{text.rstrip()}")  # hosts strip trailing space
+    return "\n\n".join(parts)
+
+
+def _render_omitted_summaries(nodes, more: int = 0) -> str:
+    def when(ts):
+        return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(float(ts))) if ts else "unknown time"
+    items = "; ".join(f"node {n.node_id} (d{n.depth}, {when(n.earliest_at)} to {when(n.latest_at)})" for n in nodes)
+    return (f"{_OMITTED_SUMMARIES_PREFIX} {items}{f' (+{more} more)' if more else ''}. "
+            "Recover them with lcm_expand node_id=<id> or lcm_grep.]")
+
+
 def _normalize_total_compactions(value: Any) -> int:
     """Return a persisted compaction total only when it is a valid counter."""
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
@@ -752,6 +788,10 @@ class LCMEngine(
         self._proactive_recall_timeout_count = 0
         self._proactive_recall_privacy_error_count = 0
         self._proactive_recall_privacy_warned = False
+        # #659: the last carry packet, keyed so a reassembly with no new compaction reuses its bytes.
+        self._user_carry_cache: Optional[tuple] = None
+        self._user_carry_lineage_memo: Optional[tuple] = None
+        self._last_user_carry: Dict[str, Any] = {}
         self._last_ingest_error = ""
         self._last_ingest_error_time: float = 0
         # Cooldown timestamp to prevent compression cascade after boundary skip.
@@ -1020,6 +1060,9 @@ class LCMEngine(
         # R6-4: survival-fit warnings belong to the store they were raised on.
         self._survival_fit_pending_warning, self._survival_fit_warned = None, set()
         self._survival_overhead_observation = None  # #1012 F4: an overhead peak never crosses profile homes
+        # #659: the carry packet and its lineage belong to the store they were read from.
+        self._user_carry_cache = self._user_carry_lineage_memo = None
+        self._last_user_carry = {}
         self.emit_automatic_compaction_status = False
         if self._adaptive_retrieval is not None:
             self._adaptive_retrieval.clear()
@@ -2964,6 +3007,14 @@ class LCMEngine(
             and payload.get("kind") == "user-authored-scaffold"
         )
 
+    def _is_durable_real_user_row(self, row: Dict[str, Any]) -> bool:
+        """A stored prompt-bearing user row: not blank, not ignored, not unproven scaffold."""
+        content = normalize_content_value(row.get("content")) or ""
+        if not content.strip() or self._matches_ignore_message_patterns(row, stored_row=True):
+            return False
+        return not (self._is_scaffold_shaped_user_message(row)
+                    and not self._has_real_user_scaffold_provenance(int(row.get("store_id") or 0)))
+
     def _durable_real_user_messages(
         self,
         *,
@@ -2986,18 +3037,8 @@ class LCMEngine(
                 if not rows:
                     break
                 for row in rows:
-                    store_id = int(row.get("store_id") or 0)
-                    cursor_store_id = max(cursor_store_id, store_id)
-                    content = normalize_content_value(row.get("content")) or ""
-                    if (
-                        not content.strip()
-                        or self._matches_ignore_message_patterns(row, stored_row=True)
-                    ):
-                        continue
-                    if (
-                        self._is_scaffold_shaped_user_message(row)
-                        and not self._has_real_user_scaffold_provenance(store_id)
-                    ):
+                    cursor_store_id = max(cursor_store_id, int(row.get("store_id") or 0))
+                    if not self._is_durable_real_user_row(row):
                         continue
                     durable_users.append(row)
                     if len(durable_users) >= stop_after:
@@ -5589,7 +5630,74 @@ class LCMEngine(
                 pos += 7
                 continue
             break
-        return (pos, node_ids) if node_ids else (None, [])
+        return (self._verified_generated_suffix_end(content, pos), node_ids) if node_ids else (None, [])
+
+    def _objective_source(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """#659: a host-merged carrier's request is its glued row, never LCM's summaries and carry."""
+        glued = self._generated_context_carrier_remainder(message)
+        return message if glued is None else {**message, "content": glued}
+
+    def _holds_verified_user_carry(self, row: Dict[str, Any]) -> bool:
+        """#659: a read-only view for carry eligibility. A stored row holding a carry part that re-renders from the
+        store (a carry-bearing head stored whole on a no-proof path, or a user's paste) keeps its bytes in storage,
+        identity and the lcm tools; it is only never carried again, so the carry never nests."""
+        content = normalize_content_value(row.get("content")) or ""
+        if len(content) <= 512 and (refs := extract_all_externalized_payload_refs(content)):
+            # An externalized row is judged by its payload when this lineage owns it (as lcm_expand requires);
+            # an unreadable or foreign payload leaves it judged by its placeholder.
+            try:
+                payload = load_externalized_payload(refs[0], config=self._config, hermes_home=self._hermes_home)
+            except Exception:
+                payload = None
+            owner = str((payload or {}).get("session_id") or "")
+            if payload and (not owner or owner in self._user_carry_lineage()):
+                content = str(payload.get("content") or content)
+        content = "\n\n---\n\n" + content  # a carry block may also open the row
+        return any(self._verified_generated_suffix_end(content, m.start()) > m.start()
+                   for m in re.finditer(re.escape("\n\n---\n\n" + _USER_CARRY_PREFIX), content))
+
+    def _user_carry_lineage(self) -> list[str]:
+        """#659: the bound session and ALL its recorded compression predecessors, nearest first. Unbounded (a
+        cycle stops the walk): a packet emitted before a hop limit must stay recognised after it. A recorded
+        chain never changes, so a non-empty one is memoised per store and session."""
+        key = (str(self._store.db_path), str(self._session_id or ""))
+        if not key[1]:
+            return []
+        if self._user_carry_lineage_memo and self._user_carry_lineage_memo[0] == key:
+            return self._user_carry_lineage_memo[1]
+        chain = [key[1], *self._rotation_predecessor_session_ids(key[1], max_hops=sys.maxsize)]
+        if len(chain) > 1:
+            self._user_carry_lineage_memo = (key, chain)
+        return chain
+
+    def _verified_generated_suffix_end(self, content: str, pos: int) -> int:
+        """#659: after verified summary parts, an optional carry part then an optional manifest, each kept only
+        when re-rendered from the store/DAG byte for byte; anything else stays content."""
+        if content.startswith("\n\n---\n\n" + _USER_CARRY_PREFIX, pos) and (
+                header := _USER_CARRY_HEADER_RE.match(content, pos + 7)):
+            ids = [int(value) for value in header.group(1).split(", ")]
+            excerpt = tuple(int(value) for value in header.group(2, 3, 4)) if header.group(2) else None
+            try:
+                rows, lineage = self._store.get_batch(ids), set(self._user_carry_lineage())
+            except Exception:
+                return pos
+            conversation = (str(self._conversation_id or ""), "")
+            if all(rows.get(i, {}).get("role") == "user" and rows[i].get("session_id") in lineage
+                   and str(rows[i].get("conversation_id") or "") in conversation for i in ids):
+                rendered = _render_user_carry([rows[i] for i in ids], excerpt)
+                if content.startswith(rendered, pos + 7):
+                    pos += 7 + len(rendered)
+        if content.startswith("\n\n---\n\n" + _OMITTED_SUMMARIES_PREFIX, pos):
+            line = content[pos + 7:].split("\n", 1)[0]
+            more = re.search(r" \(\+(\d+) more\)\. Recover", line)
+            try:
+                nodes = [self._dag.get_node(int(i)) for i in re.findall(r"node (\d+) \(d", line)]
+            except Exception:
+                return pos
+            if nodes and all(n is not None and n.session_id == self._session_id for n in nodes) and content.startswith(
+                    _render_omitted_summaries(nodes, int(more.group(1)) if more else 0), pos + 7):
+                pos += 7 + len(_render_omitted_summaries(nodes, int(more.group(1)) if more else 0))
+        return pos
 
     def _generated_context_carrier_remainder(self, msg: Dict[str, Any]) -> Optional[str]:
         """Return the real row glued behind a verified LCM summary prefix, else None.
@@ -7700,7 +7808,7 @@ class LCMEngine(
                 return []
             if any(message == selected for selected in selected_tail_messages):
                 return []
-            return [self._build_preserved_objective_summary_part(message)]
+            return [self._build_preserved_objective_summary_part(self._objective_source(message))]
         return []
 
     @staticmethod
@@ -7858,6 +7966,101 @@ class LCMEngine(
     def _wrap_relevant_memories(header: str, lines: List[str]) -> str:
         body = "\n".join([header, *lines])
         return f"<relevant-memories>\n{body}\n</relevant-memories>"
+
+    def _user_carry_parts(self, result, summary_role, parts, omitted_ids, frontier, tail_selected, overhead_source,
+                          summary_budget, anchor_part) -> list[str]:
+        """#659: the omitted-summary manifest, then the carry packet, to follow the kept summary parts.
+
+        Carry = real user rows at or below the compaction boundary across the session lineage, the lineage
+        origin charged first, then newest first under one complete-request budget; whole rows, except the one
+        that crosses the budget. Its bytes are reused until the boundary, frontier or active entry changes."""
+        def tokens(items):
+            return count_message_tokens({"role": summary_role, "content": "\n\n---\n\n".join(items)})
+        added: list[str] = []
+        if omitted_ids:  # Design 5: never more than the cap the kept parts were chosen under
+            nodes = [n for n in (self._dag.get_node(i) for i in omitted_ids[:12]) if n is not None]
+            manifest = _render_omitted_summaries(nodes, len(omitted_ids) - len(nodes)) if nodes else ""
+            if manifest and (summary_budget is None or tokens([*parts, manifest]) <= summary_budget):
+                added.append(manifest)
+        boundary, lineage, window = int(self._last_compacted_store_id or 0), self._user_carry_lineage(), \
+            int(self.context_length or 0)
+        active = anchor_part[len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1:] if anchor_part else None
+        key = (str(self._store.db_path), self._conversation_id, self._session_id, boundary, active, tuple(frontier))
+        if self._user_carry_cache is not None and self._user_carry_cache[0] == key:
+            text, diagnostics = self._user_carry_cache[1:]
+        else:
+            est = (count_messages_tokens(result) + tokens([*parts, *added])
+                   + max(count_messages_tokens(tail_selected),
+                         count_messages_tokens(self._sanitize_tool_pairs(list(tail_selected))))
+                   + self._survival_host_overhead(overhead_source,
+                                                  max(int(self.last_prompt_tokens or 0), self._last_gate_tokens))
+                   + (max(0, int(self._config.proactive_recall_budget_tokens or 0))
+                      if self._config.proactive_recall_enabled and self._config.embeddings_enabled else 0))
+            target = int(window * _USER_CARRY_TARGET_SHARE)
+            if int(self.threshold_tokens or 0) > 0:  # the default's headroom (50% under a 75% threshold) under any
+                target = min(target, int(self.threshold_tokens) * 2 // 3)  # threshold, or the carry re-triggers
+            budget = max(0, min(_USER_CARRY_MAX_TOKENS, int(window * _USER_CARRY_WINDOW_SHARE), target - est))
+            chosen, excerpt, used = [], None, 60
+
+            def take(row) -> bool:  # False: the budget is spent (this row may be its one excerpt)
+                nonlocal used, excerpt
+                text = normalize_content_value(row.get("content")) or ""
+                cost = count_tokens(text) + 16
+                if used + cost <= budget:
+                    chosen.append(row)
+                    used += cost
+                    return True
+                low, high, room = 0, max(0, len(text) - 1), budget - used - 60
+                while low < high:  # the most chars whose head + tail fit the room
+                    mid = (low + high + 1) // 2
+                    low, high = (mid, high) if count_tokens(text[:(mid + 1) // 2] + text[len(text) - mid // 2:]) \
+                        <= room else (low, mid - 1)
+                if low > 0:
+                    chosen.append(row)
+                    excerpt = (int(row["store_id"]), (low + 1) // 2, len(text) - low // 2)
+                return False
+
+            def real(row) -> bool:  # an LCM scaffold, host-merged carrier or verified carry block is never carried
+                return (self._is_durable_real_user_row(row) and not self._is_verified_replay_scaffold_message(row)
+                        and self._generated_context_carrier_remainder(row) is None
+                        and not self._holds_verified_user_carry(row))
+
+            def scan(newest=True):  # the lineage's real user rows of this conversation, a page at a time
+                cursor = boundary + 1 if newest else 0
+                while page := self._store.load_lineage_user_rows(lineage, self._conversation_id, cursor, 200,
+                                                                 newest_first=newest):
+                    yield from (row for row in page if real(row))
+                    if len(page) < 200:
+                        return
+                    cursor = int(page[-1]["store_id"])
+
+            def is_active(row) -> bool:
+                content = normalize_content_value(row.get("content")) or ""
+                return active is not None and active in (content, strip_injected_context_blocks(content))
+
+            rows = scan() if budget > 0 and boundary > 0 and lineage else iter(())
+            head = list(itertools.islice(rows, 200))  # the active entry's own row: the newest one with its text
+            skip = {next((int(row["store_id"]) for row in head if is_active(row)), 0)}
+            rows = itertools.chain(head, rows)
+            origin = next(scan(newest=False), None) if budget > 0 and boundary > 0 and lineage else None
+            going = True
+            if (origin is not None and real(origin) and 0 < int(origin["store_id"]) <= boundary
+                    and int(origin["store_id"]) not in skip):
+                skip.add(int(origin["store_id"]))
+                going = take(origin)
+            for row in rows if going else ():
+                if int(row["store_id"]) not in skip and not take(row):
+                    break
+            chosen.sort(key=lambda row: int(row["store_id"]))
+            text = _render_user_carry(chosen, excerpt) if chosen else ""
+            diagnostics = {"budget_tokens": budget, "empty_no_room": budget <= 0, "entries": len(chosen),
+                           "excerpt_store_id": excerpt[0] if excerpt else None}
+            self._user_carry_cache = (key, text, diagnostics)
+        # The cap is hard: a reused packet that no longer fits under it is left out of this assembly.
+        if text and (summary_budget is None or tokens([*parts, *added, text]) <= summary_budget):
+            added.insert(0, text)
+        self._last_user_carry = {**diagnostics, "delivered_tokens": tokens([text]) if added[:1] == [text] else 0}
+        return added
 
     @payload_lookup_scope()
     def _assemble_context(
@@ -8146,6 +8349,14 @@ class LCMEngine(
             selected_parts = [summary_parts[i] for i in kept_indexes]
             active_summary_node_ids.update(
                 part_keys[i][1] for i in kept_indexes if part_keys[i][1] is not None)
+            if not stub_over_cap_tool_results and active_summary_node_ids:  # #659 (Q7: never on forced recovery)
+                selected_parts += self._user_carry_parts(
+                    result, summary_role, selected_parts,
+                    [key[1] for i, key in enumerate(part_keys) if key[1] is not None and i not in kept_indexes],
+                    [key[1] for key in part_keys if key[1] is not None], tail_selected,
+                    [*([system_msg] if system_msg is not None else []),
+                     *([retained_user_msg] if retained_user_msg is not None else []), *anchor_source],
+                    summary_budget, selected_parts[0] if part_keys[kept_indexes[0]] == (-1, None) else None)
             if selected_parts:
                 combined = "\n\n---\n\n".join(selected_parts)
                 if retained_user_msg is not None:
@@ -8280,6 +8491,8 @@ class LCMEngine(
         if leading_msg is None:
             while result and result[0].get("role") in {"assistant", "tool"}:
                 result = result[1:]
+        # Known limit (#659 Q2): this last resort still drops the objective when sanitizing pushes the result
+        # over the cap. The carry packet is budgeted inside the cap above, so it is never the cause.
         if (
             assembly_cap is not None
             and anchor_part is not None

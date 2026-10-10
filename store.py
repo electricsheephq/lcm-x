@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
 
 from .db_bootstrap import (
+    owned_conversation_clause,
     select_conversation_range,
     ExternalContentFtsSpec,
     add_column_if_missing,
@@ -961,6 +962,21 @@ class MessageStore:
                )
                ORDER BY store_id""",
             (session_id, end_store_id, limit),
+        ).fetchall()
+        return [self._row_to_dict(r) for r in rows]
+
+    def load_lineage_user_rows(self, session_ids: List[str], conversation_id: str, cursor: int, limit: int, *,
+                               newest_first: bool = True) -> List[Dict[str, Any]]:
+        """#659: one page of the sessions' user rows of ``conversation_id`` (or of none), past ``cursor``."""
+        if not session_ids or limit <= 0:
+            return []
+        op, order = ("<", "DESC") if newest_first else (">", "ASC")
+        owned, owned_args = owned_conversation_clause(self._conn, conversation_id)  # legacy NULL/padded ids too
+        rows = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
+               WHERE session_id IN ({",".join("?" * len(session_ids))}) AND {owned}
+                 AND role = 'user' AND store_id {op} ? ORDER BY store_id {order} LIMIT ?""",
+            (*session_ids, *owned_args, int(cursor), int(limit)),
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 

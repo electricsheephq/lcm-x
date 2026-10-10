@@ -588,7 +588,10 @@ def test_dd_plan_ii_a_carrier_headed_composite_is_its_stored_rows(tmp_path, summ
         engine.ingest(live)
         pre, live = list(live), engine.compress(live)
         head = next(m["content"] for m in live if str(m.get("content")).startswith("[Recent Summary"))
-        head = head if carrier == "verified" else head.replace("Earlier", "Edited", 1)
+        # #659: the forged head drops the carry packet too; with it the stored bytes outgrow the #899 summariser
+        # floor under leaf_chunk_tokens=1, and this test is about claims, not about clipping.
+        head = head if carrier == "verified" else head.partition(
+            "\n\n---\n\n[Earlier user messages")[0].replace("Earlier", "Edited", 1)
         engine.on_session_end("P", pre)
         engine.on_session_start("C", boundary_reason="compression", old_session_id="P", platform="cli",
                                 context_length=200_000, conversation_id="conv")

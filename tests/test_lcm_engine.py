@@ -11604,7 +11604,8 @@ class TestEngineCompress:
 
         anchor_content = next(content for content in result_contents if latest_request in content)
         assert anchor_content.startswith("[Current user objective preserved from compacted history]")
-        assert stale_request not in "\n".join(result_contents)
+        # #659: the stale request may return only as verbatim history in the carry packet, never as the objective.
+        assert stale_request not in "\n".join(result_contents).partition("[Earlier user messages in this session")[0]
         assert result_contents.index(anchor_content) < result_contents.index("I will inspect notifier handling.")
 
     def test_compress_preserves_inline_interstitial_request_between_injected_blocks(self, tmp_path, monkeypatch):
