@@ -845,9 +845,9 @@ def register(ctx):
         register_hook = getattr(ctx, "register_hook", None)
         if callable(register_hook):
             register_hook("post_llm_call", _on_post_llm_call)
+            logger.debug("LCM registered post_llm_call hook for per-turn ingest")
         else:
             logger.debug("host has no register_hook; per-turn ingest hook not registered")
-        logger.debug("LCM registered post_llm_call hook for per-turn ingest")
     except Exception as exc:
         logger.debug("LCM could not register post_llm_call hook: %s", exc)
 
