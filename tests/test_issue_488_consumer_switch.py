@@ -125,8 +125,7 @@ def test_identical_authored_summary_after_the_emitted_one_is_content(tmp_path, m
     try:
         projection, identities = engine._occurrence_replay_identities(host, engine._active_emission_proof())
         assert projection.entries[-1].generated_span == block
-        # #659: full identity is the stored, base-shape form (no carry part or manifest)
-        assert identities[-1] is not None and identities[-1][1] == engine._without_user_carry(block)
+        assert identities[-1] is not None and identities[-1][1] == block
     finally:
         engine.shutdown()
 
@@ -506,8 +505,7 @@ def test_malformed_output_occurrence_declines_the_descriptor(tmp_path, monkeypat
         host = [dict(m) for m in compressed]
         projection, identities = engine._occurrence_replay_identities(host, engine._active_emission_proof())
         assert projection.entries[0].generated_span is None
-        # #659: full identity is the stored, base-shape form (no carry part or manifest)
-        assert identities[0] is not None and identities[0][1] == engine._without_user_carry(block)
+        assert identities[0] is not None and identities[0][1] == block
         engine.ingest(host + [_turn(13)[1]])
     finally:
         engine.shutdown()

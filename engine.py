@@ -5618,7 +5618,7 @@ class LCMEngine(
 
     def _without_user_carry(self, content: str) -> str:
         """#659: ``content`` without a verified carry part and manifest that end a verified summary run, i.e. the
-        base-shape scaffold; anything unverified or glued behind it stays. Stored rows and replay identities use this form."""
+        base-shape scaffold; anything unverified or glued behind it stays. Only the rotated head LCM emitted stores in this form."""
         pos = min((i for i in (content.find("\n\n---\n\n" + p) for p in (_USER_CARRY_PREFIX, _OMITTED_SUMMARIES_PREFIX))
                    if i >= 0), default=-1)
         if pos < 0 or (end := self._verified_generated_suffix_end(content, pos)) != len(content):
@@ -6455,9 +6455,12 @@ class LCMEngine(
                     )
                 active_replay_messages[absolute_idx] = stubbed_message
 
-        protected_messages = [  # #659: a scaffold row stores as base does: no carry part, no manifest
-            {**m, "content": self._without_user_carry(m["content"])}
-            if m.get("role") == "user" and isinstance(m.get("content"), str) else m for m in protected_messages]
+        if compression_boundary_ingest_pending:  # #659: only the rotated head LCM emitted stores as base does
+            head = next((i for i, m in enumerate(messages) if m.get("role") != "system"), None)
+            protected_messages = [
+                {**m, "content": self._without_user_carry(m["content"])}
+                if idx == head and m.get("role") == "user" and isinstance(m.get("content"), str) else m
+                for (idx, _msg), m in zip(messages_to_store_with_index, protected_messages)]
         estimates = [count_message_tokens(m) for m in protected_messages]
         store_ids = self._store._append_protected_batch(
             self._session_id,
