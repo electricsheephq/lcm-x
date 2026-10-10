@@ -597,8 +597,8 @@ def test_profile_rebind_clears_old_auxiliary_session_state(tmp_path):
 
 
 def test_config_database_path_profile_rebind_updates_externalization_home(tmp_path, monkeypatch):
-    # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-    monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+    # #1055: force externalization for this fixture independently of the bound window.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
     home_a = tmp_path / "profile-a"
     home_b = tmp_path / "profile-b"
     config = LCMConfig(
@@ -6534,6 +6534,11 @@ class TestMessageFiltering:
             ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
             sensitive_patterns_enabled=True,
             sensitive_patterns=["api_key"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured_texts: list[str] = []
 
@@ -6597,6 +6602,11 @@ class TestMessageFiltering:
             ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
             sensitive_patterns_enabled=True,
             sensitive_patterns=["api_key"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured: dict[str, str] = {}
 
@@ -6622,6 +6632,11 @@ class TestMessageFiltering:
             "lcm_msg_ignore_placeholder_no_patterns.db",
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured.clear()
         second.compress(
@@ -6889,6 +6904,11 @@ class TestMessageFiltering:
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
                 threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         first.on_session_start(
@@ -6925,6 +6945,11 @@ class TestMessageFiltering:
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
                 threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         try:
@@ -6959,6 +6984,11 @@ class TestMessageFiltering:
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
                 threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         engine.on_session_start(
@@ -7025,6 +7055,11 @@ class TestMessageFiltering:
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
                 threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         first.on_session_start(
@@ -7059,6 +7094,11 @@ class TestMessageFiltering:
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
                 threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         try:
@@ -7098,6 +7138,11 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         first.on_session_start(
@@ -7125,6 +7170,11 @@ class TestMessageFiltering:
                 database_path=str(db_path),
                 fresh_tail_count=10,
                 leaf_chunk_tokens=10,
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         try:
@@ -7145,7 +7195,13 @@ class TestMessageFiltering:
         finally:
             second.shutdown()
 
-    def test_new_placeholder_literal_after_rollover_is_stored_losslessly(self, tmp_path):
+    @pytest.mark.parametrize("externalized", [
+        False,
+        pytest.param(True, marks=pytest.mark.xfail(
+            strict=True, raises=AssertionError,
+            reason="#1053: with externalization + active-replay stubbing on, the literal is stored twice")),
+    ], ids=["default", "externalization-on"])
+    def test_new_placeholder_literal_after_rollover_is_stored_losslessly(self, tmp_path, externalized):
         db_path = tmp_path / "lcm_msg_ignore_placeholder_rollover_new_literal.db"
         first = LCMEngine(
             config=LCMConfig(
@@ -7155,6 +7211,8 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                large_output_externalization_enabled=externalized,
+                large_output_active_replay_stubbing_enabled=externalized,
             )
         )
         first.on_session_start(
@@ -7210,6 +7268,11 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         first.on_session_start(
@@ -7238,6 +7301,11 @@ class TestMessageFiltering:
                 database_path=str(db_path),
                 fresh_tail_count=10,
                 leaf_chunk_tokens=10,
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         try:
@@ -8200,8 +8268,8 @@ class TestMessageFiltering:
     def test_user_copied_externalized_placeholder_after_ignored_externalized_row_is_not_filtered(
         self, tmp_path, monkeypatch
     ):
-        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_externalized_literal_copy.db"
         hermes_home = tmp_path / "hermes-externalized-literal-copy"
         first = LCMEngine(
@@ -8264,8 +8332,8 @@ class TestMessageFiltering:
             second.shutdown()
 
     def test_prior_externalized_placeholder_scan_pages_past_default_limit(self, tmp_path, monkeypatch):
-        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_externalized_prior_scan_pages.db"
         hermes_home = tmp_path / "hermes-externalized-prior-scan-pages"
         engine = LCMEngine(
@@ -8304,8 +8372,8 @@ class TestMessageFiltering:
     def test_duplicate_stored_externalized_rows_ignored_by_current_filter_are_all_filtered(
         self, tmp_path, monkeypatch
     ):
-        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_duplicate_externalized_replay.db"
         hermes_home = tmp_path / "hermes-duplicate-externalized-replay"
         first = LCMEngine(
@@ -8569,8 +8637,8 @@ class TestMessageFiltering:
             engine.shutdown()
 
     def test_active_externalized_stub_without_store_id_is_filtered_after_ignore_added(self, tmp_path, monkeypatch):
-        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_externalized_active_stub.db"
         hermes_home = tmp_path / "hermes-externalized-active-stub"
         first = LCMEngine(
@@ -8807,6 +8875,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         dependent_reply = "dependent reply from ignored turn"
 
@@ -8942,6 +9015,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         repeated_reply = "same assistant reply text"
         first_result = engine.compress(
@@ -8980,6 +9058,11 @@ class TestMessageFiltering:
             fresh_tail_count=2,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         repeated_reply = "same assistant reply text"
         captured_texts: list[str] = []
@@ -9249,6 +9332,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured_texts: list[str] = []
 
@@ -9279,6 +9367,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         dependent_reply = "dependent assistant reply after ignored turn"
         continuation = "assistant continuation derived from ignored turn"
@@ -9321,6 +9414,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         dependent_reply = "dependent assistant reply carried in active tail"
         continuation = "fresh tail continuation derived from ignored turn"
@@ -9366,6 +9464,11 @@ class TestMessageFiltering:
                 leaf_chunk_tokens=10,
                 ignore_message_patterns=["SECRET"],
                 threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         engine.on_session_start(
@@ -9512,6 +9615,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         messages = [
             {"role": "user", "content": "SECRET ignored backlog " + "x" * 4000},
@@ -9624,8 +9732,8 @@ class TestMessageFiltering:
             second.shutdown()
 
     def test_preflight_ambiguous_generated_placeholder_still_requests_externalization_cleanup(self, tmp_path, monkeypatch):
-        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
-        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_preflight_placeholder_externalize_cleanup.db"
         first = LCMEngine(
             config=LCMConfig(
@@ -10128,6 +10236,11 @@ class TestMessageFiltering:
             "lcm_msg_quarantine_placeholder_literal_compaction.db",
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured: dict[str, str] = {}
         placeholder = (
@@ -10161,6 +10274,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["^Cronjob Response:"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured: dict[str, str] = {}
         placeholder = (
@@ -21709,6 +21827,10 @@ class TestDeferredMaintenanceDebt:
         assert compressed == [messages[0], messages[-1]]
 
     def test_critical_budget_pressure_continues_dynamic_catchup_after_first_pass(self, engine, monkeypatch):
+        # #1013 part B: deferred catchup covers the feature-off leaf mechanism
+        engine._config.large_output_externalization_enabled = False
+        engine._config.large_output_active_replay_stubbing_enabled = False
+        engine._config.temporal_rollups_enabled = False
         engine._config.leaf_chunk_tokens = 50
         engine._config.dynamic_leaf_chunk_enabled = True
         engine._config.dynamic_leaf_chunk_max = 50

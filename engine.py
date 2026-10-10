@@ -1008,6 +1008,19 @@ class LCMEngine(
         except Exception:
             self._close_storage()
             raise
+        self._publish_ingest_context_window()
+
+    def _publish_ingest_context_window(self) -> int:
+        """Mirror the bound session's effective window for its late writes, and return it.
+
+        Published on bind and on each of the session's own protections, never from update_model(): Hermes calls
+        that before binding the next session, and the previous session's late suffix must keep its own window."""
+        store = getattr(self, "_store", None)
+        session_id = getattr(self, "_session_id", "")
+        if store is None or not session_id:  # constructor/pre-bind: no session, no window yet
+            return 0
+        store.set_context_window_tokens(session_id, self.context_length)
+        return store.get_context_window_tokens(session_id)
 
     def _close_storage(self) -> None:
         """Best-effort close of currently bound SQLite helpers."""
@@ -1043,6 +1056,7 @@ class LCMEngine(
 
     def _reset_profile_runtime_state(self) -> None:
         """Clear process-local session state that cannot cross profile homes."""
+        self._store.clear_context_windows()
         # R6-4: survival-fit warnings belong to the store they were raised on.
         self._survival_fit_pending_warning, self._survival_fit_warned = None, set()
         self._survival_overhead_observation = None  # #1012 F4: an overhead peak never crosses profile homes
@@ -3305,6 +3319,13 @@ class LCMEngine(
             self._lifecycle.clear_debt(self._conversation_id)
 
     def _apply_session_start_metadata(self, session_id: str, kwargs: Dict[str, Any]) -> None:
+        try:
+            self._apply_session_start_runtime_metadata(session_id, kwargs)
+        finally:
+            # Publish after every metadata path, including rejected stale/invalid inputs.
+            self._publish_ingest_context_window()
+
+    def _apply_session_start_runtime_metadata(self, session_id: str, kwargs: Dict[str, Any]) -> None:
         self._session_id = session_id
         self._session_platform = str(kwargs.get("platform") or "")
         self._refresh_session_filters()
@@ -6410,6 +6431,7 @@ class LCMEngine(
             config=self._config,
             hermes_home=self._hermes_home,
             tool_name_hints=[tool_result_names.get(idx, "") for idx, _msg in messages_to_store_with_index],
+            context_window_tokens=self._publish_ingest_context_window(),
         )
         recovery_tool_result_indices = self._active_replay_recovery_tool_result_indices(
             active_replay_messages

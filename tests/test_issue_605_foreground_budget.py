@@ -80,7 +80,10 @@ def _provider(monkeypatch, clock, default=30.0, **seconds) -> _Provider:
 def _engine(tmp_path, **config) -> LCMEngine:
     # l3_truncate_tokens under every leaf and condensation source here: these cells time model calls, so none
     # takes the no-call verbatim path (F2, PR 2) of a source within the level 3 bound.
-    settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
+    # #1013 part B: foreground-only providers/clocks exclude automatic rollup calls
+    settings = {"large_output_externalization_enabled": False,
+                "large_output_active_replay_stubbing_enabled": False, "temporal_rollups_enabled": False,
+                "fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000, "l3_truncate_tokens": 2,
                 "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
@@ -189,7 +192,12 @@ def test_a_oversized_frontier_ends_by_60_and_no_leaf_starts_past_the_soft_target
     near +87, so the compaction stops at +58 with no leaf. (r2 asserted one condensation and a leaf ending by +58;
     the r1 half-budget split admitted condensations at +0 and +29 and a first leaf ending at +87.) #909's leaf
     reserve makes the next condensation hit its reduced hard budget; the leaf still hits the soft target."""
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     for _ in range(8):  # 29 s walls (30 s would sit on the 60 s boundary with the real clock's slack)
         engine._foreground_estimates.record_call("", 29.0)
     provider = _provider(monkeypatch, clock, default=29.0)
@@ -213,7 +221,12 @@ def _condensations(engine) -> list:
 
 
 def test_r21_a_31s_estimates_and_3s_pre_work_condense_once_and_refuse_the_leaf(tmp_path, monkeypatch, clock, caplog):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     for _ in range(8):
         engine._foreground_estimates.record_call("", 31.0)
     provider = _provider(monkeypatch, clock, default=31.0)
@@ -251,7 +264,12 @@ def test_r21_b_15s_estimates_condense_then_store_a_leaf_by_60(tmp_path, monkeypa
 
 
 def test_r21_c_a_frontier_under_its_target_keeps_r2(tmp_path, monkeypatch, clock, caplog):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     provider = _provider(monkeypatch, clock, default=29.0)
     for index in range(3):  # 390 tokens: at or below the 400 token target
         engine._dag.add_node(SummaryNode(session_id="S", depth=0, summary=f"group {index}", token_count=130,
@@ -269,7 +287,12 @@ def test_r21_c_a_frontier_under_its_target_keeps_r2(tmp_path, monkeypatch, clock
 
 
 def test_r21_d_a_failed_condensation_leaves_rule_1_to_the_first_leaf(tmp_path, monkeypatch, clock, caplog):
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     provider = _provider(monkeypatch, clock, default=30.0)
     real = provider.__call__
 
@@ -318,7 +341,12 @@ def test_r3_b_a_stored_condensation_whose_frontier_did_not_fall_arms_no_hold(
         tmp_path, monkeypatch, clock, caplog):
     """#909: a stored condensation is progress even if the frontier token count does not fall; the #651
     no-progress hold must agree with the partial-progress classification."""
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     for _ in range(8):
         engine._foreground_estimates.record_call("", 31.0)
     _provider(monkeypatch, clock, default=31.0)
@@ -505,7 +533,12 @@ def test_one_info_stop_line_per_compaction_whose_seconds_add_up(tmp_path, monkey
     # Count simulated time, with positive bookkeeping ticks independent of serialization CPU time.
     ticks = iter(i / 100_000 for i in range(100_000))
     monkeypatch.setattr(clock, "_real", lambda: next(ticks))
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path,
+        # #1013 part B: foreground timing excludes background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     _provider(monkeypatch, clock, default=25.0)
     _advance_on(monkeypatch, engine, "_prepare_retained_user_anchor", clock, 3.0)
     try:

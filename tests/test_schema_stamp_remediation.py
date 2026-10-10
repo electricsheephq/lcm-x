@@ -678,13 +678,18 @@ def test_remediate_noop_when_version_supported(tmp_path):
 # --- /lcm doctor repair schema-stamp command path --------------------------
 
 
-def _healthy_engine(tmp_path: Path) -> LCMEngine:
-    config = LCMConfig(database_path=str(tmp_path / "lcm.db"))
+def _healthy_engine(tmp_path: Path, **overrides) -> LCMEngine:
+    config = LCMConfig(database_path=str(tmp_path / "lcm.db"), **overrides)
     return LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
 
 
 def test_doctor_repair_schema_stamp_dry_run_and_apply(tmp_path):
-    engine = _healthy_engine(tmp_path)
+    engine = _healthy_engine(tmp_path,
+        # #1013 part B: early-schema fixture needs feature tables absent
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     db_path = Path(engine._store.db_path)
     # Add early-variant feature tables + stamp ahead of the ladder to simulate
     # an interim build, then drive the operator-facing command path.

@@ -2978,16 +2978,16 @@ def _resolve_store_dim(config, provider_dim: int, override: int | None = None) -
     return store_dim
 
 
-def _embedding_warmup_text(engine) -> str:
-    """Warm and dimension-lock both summary and chunk vector profiles."""
+def _embedding_register_profiles(config, db_path, *, allow_download: bool) -> str | dict[str, Any]:
+    """Register both profiles; return probe metadata and the unchanged warmup text."""
     try:
-        if not bool(getattr(engine._config, "embeddings_enabled", False)):
+        if not bool(getattr(config, "embeddings_enabled", False)):
             return (
                 "LCM embedding warmup\n"
                 "status: disabled\n"
                 "error: embeddings are disabled; set LCM_EMBEDDINGS_ENABLED=true"
             )
-        provider = resolve_provider(engine._config)
+        provider = resolve_provider(config)
         if provider is None:
             return (
                 "LCM embedding warmup\n"
@@ -2999,20 +2999,23 @@ def _embedding_warmup_text(engine) -> str:
         privacy_revision = ""
         warmup_text = "warmup"
         if embedding_provider_requires_privacy(provider.provider_id):
-            privacy_revision = embedding_privacy_revision(engine._config)
+            privacy_revision = embedding_privacy_revision(config)
             warmup_text, _revision, _changed = protect_embedding_text(
                 warmup_text,
-                engine._config,
+                config,
                 expected_revision=privacy_revision,
             )
             validate_embedding_privacy_dispatch(
                 [warmup_text],
-                engine._config,
+                config,
                 expected_revision=privacy_revision,
             )
 
         if provider.provider_id == FastembedProvider.provider_id:
-            vector = provider.warmup()
+            if not allow_download:
+                # Load the cached model outside the query deadline, as warmup() does.
+                provider._ensure_local()
+            vector = provider.warmup() if allow_download else provider.embed_query(warmup_text)
             progress = (
                 f"download: ready ({fastembed_download_size_note(provider.model_id)})"
             )
@@ -3029,8 +3032,8 @@ def _embedding_warmup_text(engine) -> str:
         dim = len(vector)
         if dim < 1:
             raise ValueError("provider returned an empty warmup embedding")
-        storage_dtype = _resolve_storage_dtype(engine._config)
-        store_dim = _resolve_store_dim(engine._config, dim)
+        storage_dtype = _resolve_storage_dtype(config)
+        store_dim = _resolve_store_dim(config, dim)
         chunk_model = default_chunk_model(provider.provider_id, provider.model_id)
         chunk_provider = provider
         chunk_dim = dim
@@ -3038,7 +3041,7 @@ def _embedding_warmup_text(engine) -> str:
         chunk_privacy_revision = privacy_revision
         if chunk_model != provider.model_id:
             chunk_config = dataclasses.replace(
-                engine._config,
+                config,
                 embedding_provider=provider.provider_id,
                 embedding_model=chunk_model,
             )
@@ -3049,16 +3052,16 @@ def _embedding_warmup_text(engine) -> str:
             chunk_privacy_revision = ""
             if embedding_provider_requires_privacy(chunk_provider.provider_id):
                 chunk_privacy_revision = embedding_privacy_revision(
-                    engine._config
+                    config
                 )
                 chunk_warmup_text, _revision, _changed = protect_embedding_text(
                     chunk_warmup_text,
-                    engine._config,
+                    config,
                     expected_revision=chunk_privacy_revision,
                 )
                 validate_embedding_privacy_dispatch(
                     [chunk_warmup_text],
-                    engine._config,
+                    config,
                     expected_revision=chunk_privacy_revision,
                 )
             chunk_vector = chunk_provider.embed_query(chunk_warmup_text)
@@ -3066,8 +3069,8 @@ def _embedding_warmup_text(engine) -> str:
             if chunk_dim < 1:
                 raise ValueError("chunk provider returned an empty warmup embedding")
             chunk_progress = "probe: complete"
-        chunk_store_dim = _resolve_store_dim(engine._config, chunk_dim)
-        store = VectorStore(engine._store.db_path, config=engine._config)
+        chunk_store_dim = _resolve_store_dim(config, chunk_dim)
+        store = VectorStore(db_path, config=config)
         try:
             store.register_profile(
                 provider.model_id,
@@ -3089,16 +3092,16 @@ def _embedding_warmup_text(engine) -> str:
         # Semantic search caches provider instances by configured provider and
         # model. Replace any pre-warmup instance (which may have an open
         # breaker) with the provider that just completed warmup successfully.
-        engine._lcm_embedding_provider_cache = (
+        provider_cache = (
             (
-                str(getattr(engine._config, "embedding_provider", "") or "")
+                str(getattr(config, "embedding_provider", "") or "")
                 .strip()
                 .lower(),
-                str(getattr(engine._config, "embedding_model", "") or "").strip(),
+                str(getattr(config, "embedding_model", "") or "").strip(),
             ),
             provider,
         )
-        return "\n".join([
+        text = "\n".join([
             "LCM embedding warmup",
             "status: ready",
             progress,
@@ -3112,12 +3115,30 @@ def _embedding_warmup_text(engine) -> str:
             f"privacy_revision: {privacy_revision or '(local)'}",
             f"cost_note: {cost_note}",
         ])
+        return {
+            "provider": provider, "chunk_provider": chunk_provider,
+            "dim": store_dim, "chunk_dim": chunk_store_dim, "dtype": storage_dtype,
+            "privacy_revision": privacy_revision, "chunk_privacy_revision": chunk_privacy_revision,
+            "progress": progress, "chunk_progress": chunk_progress, "text": text,
+            "provider_cache": provider_cache,
+        }
     except Exception as exc:
         return "\n".join([
             "LCM embedding warmup",
             "status: error",
             f"error: {exc}",
         ])
+
+
+def _embedding_warmup_text(engine) -> str:
+    """Warm and dimension-lock both summary and chunk vector profiles."""
+    try:
+        result = _embedding_register_profiles(engine._config, engine._store.db_path, allow_download=True)
+        if isinstance(result, dict):
+            engine._lcm_embedding_provider_cache = result["provider_cache"]
+        return result["text"] if isinstance(result, dict) else result
+    except Exception as exc:
+        return "\n".join(["LCM embedding warmup", "status: error", f"error: {exc}"])
 
 
 def _embedding_read_connection(db_path: str | Path) -> sqlite3.Connection:

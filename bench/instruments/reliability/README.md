@@ -73,6 +73,11 @@ the host reported `interrupted`. Any other assistant row is surplus.
   what the host held per attempt after its ACP strip and consecutive-user merge (a crashed prompt folded
   into the next composite counts once).
   B2 strips assistant edges too; Phase C alone uses exact assistant bytes (see `RELEASE-READINESS-V1`).
+  Externalized rows are recognized and loaded by the product's own predicate and payload reader,
+  using the cell's isolated Hermes home. B1 tags and B2 keys use the original content (with B2's
+  existing edge-whitespace rule; tool-result hashes remain exact). Missing/unreadable payloads or
+  absent content are real deficits and fail B2; `numbers.B2.externalized` reports resolved/unresolved
+  counts, loss reasons and up to 10 store ids, separately from ordinary deficits.
 - **Host-parity licence (D-A, DESIGN-436 REVISION 2 P-HOST; `scorers/host_parity.py`).** A stored USER-row surplus
   of a B2 key (or a B1 user tag) in lineage L is licensed only up to what the cell's own host state.db holds in L:
   `min(surplus, host_count - expected)`, floored at 0. host_count is what one host view holds: the most ACTIVE rows

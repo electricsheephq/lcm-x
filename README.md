@@ -107,16 +107,16 @@ Core capabilities:
 - **Diagnostics** - runtime health, database checks, optional `/lcm` slash
   commands, backup-first repair/rotate paths
 
-Beyond the core loop, three opt-in (default-off) feature families extend LCM
+Beyond the core loop, three feature families extend LCM
 from a compression layer into a memory system: **large-output externalization
 and context-budget controls** (giant tool results move to recoverable refs
 instead of crowding the prompt), **temporal memory** (day/week/month rollups
 plus natural-time recall through `lcm_recent`), and **semantic retrieval**
-(embedding-backed `lcm_grep` semantic/hybrid modes with Voyage,
+(opt-in embedding-backed `lcm_grep` semantic/hybrid modes with Voyage,
 OpenAI-compatible endpoints, Ollama, or in-process FastEmbed). See the
 [Feature overview](docs/features-overview.md) for what each family does and
 why, and [Agent configuration profiles](docs/agent-config-profiles.md) for
-copy-paste setups per agent type.
+copy-paste setups per agent type. Temporal rollups are on by default; large-output externalization stays opt-in.
 
 ## Project status
 

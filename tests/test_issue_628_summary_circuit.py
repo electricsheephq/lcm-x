@@ -78,7 +78,10 @@ def _provider(monkeypatch, *script) -> _Provider:
 
 
 def _engine(tmp_path, context_length: int = 200_000, **config) -> LCMEngine:
-    settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
+    # #1013 part B: foreground-only providers/clocks exclude automatic rollup calls
+    settings = {"large_output_externalization_enabled": False,
+                "large_output_active_replay_stubbing_enabled": False, "temporal_rollups_enabled": False,
+                "fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000,
                 "database_path": str(tmp_path / "lcm.db"), **config}
     engine = LCMEngine(config=LCMConfig(**settings))
@@ -472,7 +475,12 @@ def test_condensation_rechecks_route_before_every_depth(tmp_path, monkeypatch, l
     """#605 F2: each group is within the level 3 bound, so it is written verbatim with no call (it was: two
     rejected calls whose counts 5 and 6 opened the route); the route now opens after the depth 0 pass. A group
     stored whole needs no route, so the depth 1 group is written forced or not (#628 follow-up)."""
-    engine = _engine(tmp_path, condensation_fanin=2, threshold_full_sweep_enabled=False)
+    engine = _engine(tmp_path, condensation_fanin=2, threshold_full_sweep_enabled=False,
+        # #1013 part B: foreground circuit counts exclude background rollup calls
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     provider = _provider(monkeypatch, "reject")  # never shorter than its source
     _condensation_state(engine)
     real = engine._condense_summary_nodes

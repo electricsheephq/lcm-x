@@ -264,7 +264,12 @@ def test_t4_passes_that_are_not_automatic_threshold_passes_are_unchanged(tmp_pat
 def test_d1_a_capped_leaf_then_the_exit_fit_drops_no_uncovered_turn(tmp_path, monkeypatch, summaries):
     """Turns 1-20 large, 21-60 small, turn 61 huge: the first threshold pass (turn 61, ~56.8k observed) stores one
     leaf capped at 40% of the window; rc1 and e965c62e then cut turns 18-19, which no summary covers."""
-    engine = _engine(tmp_path, monkeypatch)
+    engine = _engine(tmp_path, monkeypatch,
+        # #1013 part B: tag-only exit-fit fixture inspects inline rows
+        large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False,
+        temporal_rollups_enabled=False,
+    )
     try:
         fits: list = []
         live, last_compress_turn = _drive(
@@ -272,6 +277,32 @@ def test_d1_a_capped_leaf_then_the_exit_fit_drops_no_uncovered_turn(tmp_path, mo
         assert last_compress_turn == 61 and _nodes(engine) and summaries
         assert not [fit for fit in fits if _exit_fit_dropped_uncovered(fit)], fits
         assert _stranded(engine, live, 62) == []
+    finally:
+        engine.shutdown()
+
+
+def test_part_b_on_path_keeps_the_externalized_newest_turn_reachable(tmp_path, monkeypatch, summaries):
+    from hermes_lcm.externalize import extract_externalized_ref, load_externalized_payload
+
+    # #1013 part B: the tag-only stranded-row helper cannot see inside a durable payload reference.
+    engine = _engine(tmp_path, monkeypatch, large_output_externalization_enabled=True,
+                     large_output_active_replay_stubbing_enabled=True, temporal_rollups_enabled=True)
+    try:
+        fits = []
+        live, last_compress_turn = _drive(
+            engine, 61, size=lambda turn: 250 if turn <= 20 else (2 if turn <= 60 else 4500), fits=fits)
+        assert last_compress_turn == 61
+        assert not [fit for fit in fits if _exit_fit_dropped_uncovered(fit)], fits
+        expected = _user(61, 4500)["content"]
+        found = []
+        for row in live:
+            ref = extract_externalized_ref(str(row.get("content", "")))
+            if ref:
+                payload = load_externalized_payload(ref, config=engine._config, hermes_home=engine._hermes_home)
+                if payload and payload["content"] == expected:
+                    found.append(ref)
+        assert len(found) == 1
+        assert _stranded(engine, live, 61) == []  # every earlier turn is still live or covered
     finally:
         engine.shutdown()
 

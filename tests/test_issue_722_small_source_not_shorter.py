@@ -52,12 +52,19 @@ def observe_breaker(monkeypatch, breaker):
 
 
 @pytest.fixture
-def engine(tmp_path):
+def engine(tmp_path, request):
+    # #1013 part B: provider-count fixtures; background rollup builds would add calls mid-test.
+    part_b_on = getattr(request, "param", False)
     instance = LCMEngine(config=LCMConfig(
         database_path=str(tmp_path / "lcm.db"), fresh_tail_count=2,
         leaf_chunk_tokens=400, dynamic_leaf_chunk_max=1000,
         context_threshold=0.025, threshold_full_sweep_enabled=False,
         max_assembly_tokens=100_000, summary_model="m1", condensation_fanin=2,
+
+        # #1013 part B: fixture covers the feature-off mechanism
+        large_output_externalization_enabled=part_b_on,
+        large_output_active_replay_stubbing_enabled=part_b_on,
+        temporal_rollups_enabled=part_b_on,
     ))
     instance.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
     try:
@@ -133,6 +140,7 @@ def test_empty_small_result_still_rejects(monkeypatch, caplog):
     assert INFO not in caplog.text
 
 
+@pytest.mark.parametrize("engine", [False], indirect=True)
 def test_maybe_condense_stores_small_combined_source_whole(engine, monkeypatch, caplog):
     calls = provider(monkeypatch, LONG_RESULT)
     events = observe_breaker(monkeypatch, engine._summary_circuit_breaker)
@@ -172,6 +180,7 @@ def test_first_not_shorter_result_stops_fallback_chain(monkeypatch):
     assert calls == ["m1"] and provenance == {"model": "deterministic"}
 
 
+@pytest.mark.parametrize("engine", [False], indirect=True)
 def test_second_automatic_compaction_does_not_retry_chunk(engine, monkeypatch, caplog):
     calls = provider(monkeypatch, LONG_RESULT)
     view, _, _ = compact_leaf(engine, monkeypatch, caplog)

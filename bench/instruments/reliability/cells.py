@@ -51,7 +51,9 @@ ISSUE_TRANSPORTS = {861: ("acp-process",)}
 
 # #1013 changed the product defaults; a cell sized for the earlier trigger pins the old values here.
 PRE_1013_DEFAULTS = {"LCM_CONTEXT_THRESHOLD": "0.35", "LCM_FRESH_TAIL_COUNT": "32", "LCM_FRESH_TAIL_MAX_TOKENS": "0",
-                     "LCM_LEAF_CHUNK_TOKENS": "20000", "LCM_THRESHOLD_FULL_SWEEP_ENABLED": "false"}
+                     "LCM_LEAF_CHUNK_TOKENS": "20000", "LCM_THRESHOLD_FULL_SWEEP_ENABLED": "false",
+                     "LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED": "false",
+                     "LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED": "false", "LCM_TEMPORAL_ROLLUPS_ENABLED": "false"}
 
 
 def tight(window: int) -> dict:
