@@ -49,6 +49,8 @@ def load(run: Path):
 def classify_loss(score: dict) -> dict:
     run, mat = Path(score["run_dir"]), Path(score["material"])
     facts = {f["id"]: f for f in json.loads((mat / "facts.json").read_text())}
+    if (mat / "lifecycle_probes.jsonl").exists():
+        facts = {fid: f for fid, f in facts.items() if fid in score["probes"]}
     admitted_lost = set(score["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids") or [])
     lost = [fid for fid, f in facts.items() if fid in admitted_lost or
             score["probes"].get(fid, {}).get("class") not in ("CORRECT", "READER_TRUNCATED")]

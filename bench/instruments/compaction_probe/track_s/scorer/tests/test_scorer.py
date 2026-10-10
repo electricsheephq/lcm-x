@@ -16,6 +16,25 @@ def run_score(mat, run, arm):
     return sc.score(mat, run, arm)["metrics"]
 
 
+def test_v4_checkpoint_denominator_excludes_future_sources(mat, tmp_path):
+    facts = sc.jload(mat / "facts.json")
+    for i, fact in enumerate(facts):
+        fact["row_index"] = i * 3
+    fx.wj(mat / "facts.json", facts)
+    man = sc.jload(mat / "material.manifest.json")
+    cp = dict(id="S1-CP20000", row_index=6, tokens=20000)
+    man.update(material_version="track-s-v4", checkpoints=[cp], decision_checkpoint=cp)
+    fx.wj(mat / "material.manifest.json", man)
+    fx.wl(mat / "lifecycle_probes.jsonl", [])
+    run = fx.s2_run(tmp_path)
+    summary = sc.jload(run / "summary.json")
+    summary.update(stop_row_index=6, checkpoint_id="S1-CP20000")
+    fx.wj(run / "summary.json", summary)
+    scored = sc.score(mat, run, "LCMX-a")
+    assert scored["metrics"]["facts_kept"]["denominator"] == 3
+    assert not {f["id"] for f in facts[3:]} & scored["probes"].keys()
+
+
 @pytest.mark.parametrize("explicit_error", [False, True])
 def test_reader_truncation_excluded_from_probe_metrics(mat, tmp_path, explicit_error):
     excluded = {"X-F1", "X-F2", "X-T0", "X-STATE.next_action"}

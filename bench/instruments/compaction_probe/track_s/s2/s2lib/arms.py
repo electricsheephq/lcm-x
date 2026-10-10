@@ -1,5 +1,7 @@
 """Arm registry: every arm is a set of the engine's own `LCM_*` env inputs (config.py ENV_FIELD_SPECS), never a patch."""
 from __future__ import annotations
+import json
+import os
 
 # The managed fleet policy (PCS scripts/rollout-lcm-x-profile.sh `desired`, lines 198-205 of pcs-golden-build-e528dd53),
 # minus temporal rollups (FLEET_EXCLUDED; labelled). LCM_NATIVE_RECOVERY=false matches the fleet default (S8). Timeout 60 s = the engine default, set explicitly so config.json shows it.
@@ -46,12 +48,17 @@ BASE_ARMS = {
 BASE_ARMS["LCMX-fleet-v2"] = ({"LCM_SUMMARY_PROMPT_VERSION": "2"}, "fleet + summariser prompt v2 (#646)")
 CONTROLS = {"C0": "no compaction: the full admitted transcript as context; UNAVAILABLE when it does not fit the reader",
             "C1": "tail only: the last LCM_FRESH_TAIL_COUNT (24) rows of the stream, no summaries, no store"}
+BASE_ARMS.update({n: ({}, "Eval-2 pinned product arm; ablations live in the pin") for n in ("L0", "L1", "L1-H", "L1-noptr")})
 
 def all_arms() -> list[str]:
     return [a for b in BASE_ARMS for a in (b, b + "-open")] + list(CONTROLS)
 
 def resolve(arm: str) -> dict:
     """{name, base, open, kind, env|None, note, unsupported|None}"""
+    pins = json.loads(os.environ.get("S2_ARM_PINS", "{}"))  # {arm: {worktree, sha}}; supplied by the orchestrator
+    if arm == "H":
+        return dict(name=arm, base=arm, open=False, kind="builtin", env={}, note="Hermes default lean", unsupported=None,
+                    **pins.get(arm, {}))
     if arm in CONTROLS:
         return {"name": arm, "base": arm, "open": False, "kind": "control", "env": dict(FLEET), "note": CONTROLS[arm],
                 "unsupported": None}
@@ -60,4 +67,5 @@ def resolve(arm: str) -> dict:
         raise SystemExit(f"unknown arm {arm}; known: {', '.join(all_arms())}")
     delta, note = BASE_ARMS[base]
     return {"name": arm, "base": base, "open": is_open, "kind": "open" if is_open else "plain",
-            "env": None if delta is None else {**FLEET, **delta}, "note": note, "unsupported": UNSUPPORTED.get(base)}
+            "env": None if delta is None else {**FLEET, **delta}, "note": note, "unsupported": UNSUPPORTED.get(base),
+            **pins.get(base, {})}

@@ -215,7 +215,15 @@ def _verify_v4(rows, facts, traps, manifest, probes, prefix, count, check):
                   (r["status"] == "cancelled" and "don't do it" in text and r["replacement"] in text) or
                   (r["status"] == "superseded" and "Instead of " in text and r["replacement"] in text), "request status text")
     kinds = Counter(p["kind"] for p in probes)
-    check(set(kinds) == {"stale_task", "corrected_value", "current_request"}, "lifecycle probe kinds")
+    expected_sources = {(f["id"] + "-CORRECTION", f["row_id"], "corrected_value") for f in facts if "correction_source" in f}
+    expected_sources.update((r["id"].replace("REQUEST", "STALE"), r["resolution"]["row_id"], "stale_task")
+                            for r in requests if r["status"] in ("cancelled", "superseded"))
+    current = next(c for c in manifest["continuity"] if c["id"].endswith("current_request"))
+    expected_sources.add((f"S{manifest['seed']}-CURRENT", current["row_id"], "current_request"))
+    check(kinds == Counter(stale_task=3, corrected_value=3, current_request=1) and
+          len({p["id"] for p in probes}) == 7 and
+          {(p["id"], p["row_id"], p["kind"]) for p in probes} == expected_sources and
+          all(p["expect"] == "value" for p in probes), "lifecycle probe coverage")
     check({p["compaction_horizon"] for p in probes} == {1, 3, 5} and manifest["default_leaf_tokens"] == 8000,
           "lifecycle horizon coverage")
     for p in probes:
@@ -242,6 +250,7 @@ def _verify_v4(rows, facts, traps, manifest, probes, prefix, count, check):
         check(len(positions) >= 2 and .3 <= positions[0] / len(rows) <= .7 and positions[-1] > positions[0],
               "mid-session continuity/restatement")
     by_id = {f["id"]: f for f in facts}
+    check(len({t["class"] for t in traps}) == len({t["sibling_id"] for t in traps}) == 5, "trap diversity")
     for trap in traps:
         sibling = by_id[trap["sibling_id"]]
         name = trap["probe"].split("for fixture ", 1)[1][:-1]

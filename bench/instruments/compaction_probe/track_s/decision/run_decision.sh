@@ -7,7 +7,7 @@
 # tool rounds; S4 = s4/dry-run seed-1 dictation-file plan (87 turns, smoke fit) + probes.
 # A failed or stopped run does not stop the lane: the other arms still run, and the script exits nonzero at the end.
 T=$(cd "$(dirname "$0")/.." && pwd)
-: "${TRACK_S_OUT:?set TRACK_S_OUT}" "${TRACK_S_MATERIAL:?set TRACK_S_MATERIAL}" "${S2_PRODUCT_WORKTREE:?set S2_PRODUCT_WORKTREE}"
+: "${TRACK_S_OUT:?set TRACK_S_OUT}" "${TRACK_S_MATERIAL:?set TRACK_S_MATERIAL}"
 H=$TRACK_S_OUT/decision; mkdir -p "$H/logs"
 run() { local name=$1 est=$2 L pid lim t rc timed_out=0; shift 2; L=$H/logs/$name.log
   echo "start $(date +%s) $(date) est ${est} min" > "$L.wall"
@@ -20,7 +20,23 @@ run() { local name=$1 est=$2 L pid lim t rc timed_out=0; shift 2; L=$H/logs/$nam
     fi; done
   rc=0; wait "$pid" || rc=$?; [ "$timed_out" = 0 ] || rc=124
   echo "exit $rc end $(date +%s) $(date)" >> "$L.wall"; return "$rc"; }
-PY=${PYTHON:-python3}; N=$2; LC_WORKTREE=${3:-}; CODEX_AUTH=${4:-}; CP="--checkpoints 176,304"
+PY=${PYTHON:-python3}; N=${2:-}; LC_WORKTREE=${3:-}; CODEX_AUTH=${4:-}; CP="--checkpoints 176,304"
+if [[ "$1" = eval2* ]]; then
+  status=0
+  for N in ${2:-1 2 3 4 5 6 7 8}; do
+    if [ "$1" = eval2-c ]; then
+      run "s2-L1-d$N-astra" 30 "$PY" -B "$T/s2/run_s_lcmx.py" --arm L1 --reader astra-low --seed "$N" --run "d$N-astra" --checkpoints lifecycle || status=1
+      run "s4-codex-native-d$N-astra" 160 "$PY" -B "$T/s4/run_s_codex.py" --seed "$N" --run "d$N-astra" --auth-file "${CODEX_AUTH:?}" --checkpoints lifecycle || status=1
+      continue
+    fi
+    for arm in L0 L1 L1-H L1-noptr H; do
+      driver=("$PY" -B "$T/s2/run_s_lcmx.py" --arm "$arm")
+      [ "$arm" != H ] || driver=(bash "$T/s2/launch_h.sh")
+      run "s2-$arm-d$N-r1" 30 "${driver[@]}" --seed "$N" --run "d$N-r1" --checkpoints lifecycle || status=1
+    done
+  done
+  exit "$status"
+fi
 case "$1" in
 glm)
 status=0

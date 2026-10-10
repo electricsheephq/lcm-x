@@ -107,6 +107,8 @@ def answer(reader, system, view, batch_prompt, tools_engine=None, schemas=None, 
     meta = {"tool_calls": 0, "tool_log": [], "tokens_read_back": 0, "runaway_guard_hit": False}
     if tools_engine is None:
         text, info = reader.ask(system, view, [batch_prompt], [])
+        if info.get("usage") is not None:
+            info["usage"].setdefault("latency_s", time.monotonic() - t0)
         meta.update(info, wall_s=round(time.monotonic() - t0, 2), raw_reply=text, reader_calls=[info.get("usage")])
         return _answers(parse_json_obj(text)), meta
     turns, replies = [("You may search the compacted conversation history with these tools before answering:\n"
