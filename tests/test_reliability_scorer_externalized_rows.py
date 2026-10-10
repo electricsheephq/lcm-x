@@ -122,8 +122,10 @@ def test_ingest_placeholder_resolves_and_missing_payload_is_a_deficit(tmp_path):
 
     home = tmp_path / "hermes-home"
     original = "see this: data:image/png;base64," + base64.b64encode(b"LCM ingest payload " * 900).decode()
-    stored = protect_message_for_ingest({"role": "user", "content": original}, LCMConfig(), hermes_home=str(home),
-                                        session_id="S0")["content"]
+    # The ingest-protection placeholder path: large-output externalization (default on, #1013 part C) off.
+    stored = protect_message_for_ingest({"role": "user", "content": original},
+                                        LCMConfig(large_output_externalization_enabled=False),
+                                        hermes_home=str(home), session_id="S0")["content"]
     assert externalized.INGEST_PREFIX in stored and stored != original
     rows, numbers, ids = externalized.resolve([(7, "S0", "user", stored, None, None)], home)
     assert rows[0][3] == original and ids == {7} and numbers["resolved"] == 1 and numbers["deficit_rows"] == 0
@@ -136,6 +138,22 @@ def test_ingest_placeholder_resolves_and_missing_payload_is_a_deficit(tmp_path):
     payload_path.unlink()
     rows, numbers, ids = externalized.resolve([(7, "S0", "user", stored, None, None)], home)
     assert rows == [] and numbers["reasons"] == {"missing_ingest_payload": 1} and numbers["deficit_rows"] == 1
+
+
+def test_default_config_media_payload_placeholder_resolves(tmp_path):
+    # #1013 part C: with the defaults, a user data URI is stored as a large-output media_payload
+    # reference; the scorer must resolve it (otherwise the default would recreate #1056).
+    from hermes_lcm import ingest_protection
+    from hermes_lcm.config import LCMConfig
+    from bench.instruments.reliability.scorers import externalized
+
+    home = tmp_path / "hermes-home"
+    original = "see this: data:image/png;base64," + base64.b64encode(b"LCM ingest payload " * 900).decode()
+    stored = ingest_protection.protect_message_for_ingest({"role": "user", "content": original}, LCMConfig(),
+                                                          hermes_home=str(home), session_id="S0")["content"]
+    assert stored != original and "kind=media_payload" in stored
+    rows, numbers, ids = externalized.resolve([(7, "S0", "user", stored, None, None)], home)
+    assert rows[0][3] == original and ids == {7} and numbers["resolved"] == 1 and numbers["deficit_rows"] == 0
 
 
 def test_mismatch_diagnostic_skips_unscored_roles_and_groups():

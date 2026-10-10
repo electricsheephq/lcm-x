@@ -516,13 +516,14 @@ def test_e_survival_fit_after_a_lock_after_commit(tmp_path, summaries, host_esti
         engine.shutdown()
 
 
-def test_f_newest_turn_over_budget_is_projected(tmp_path, summaries, host_estimator):
+@pytest.mark.parametrize("rollups", [False, True], ids=["unstubbed", "rollups-only"])
+def test_f_newest_turn_over_budget_is_projected(tmp_path, summaries, host_estimator, rollups):
     """The newest user turn alone is over the window: a bounded projection, never empty, raw rows intact."""
     engine = _engine(tmp_path, context_length=WINDOW,
-        # #1013 part B: survival projection fixtures cover the unstubbed path
+        # #1013: survival projection fixtures cover the unstubbed path, with and without rollups
         large_output_externalization_enabled=False,
         large_output_active_replay_stubbing_enabled=False,
-        temporal_rollups_enabled=False,
+        temporal_rollups_enabled=rollups,
     )
     call = {"id": "call_big", "type": "function", "function": {"name": "read_file", "arguments": "{}"}}
     big = {"role": "tool", "tool_call_id": "call_big", "content": "row " * 12_000}
