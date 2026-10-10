@@ -1,6 +1,8 @@
 """Hermetic B1/B2 externalized-row regression, using the existing scorer fixture unchanged."""
 from __future__ import annotations
 
+import base64
+import os
 import json
 
 import pytest
@@ -46,7 +48,7 @@ def test_resolved_payload_matches_raw_key(tmp_path, role):
     b2 = out["numbers"]["B2"]
     assert b2["deficit_rows"] == b2["surplus_rows"] == b2["tool_missing_rows"] == b2["tool_surplus_rows"] == 0
     assert b2["externalized"] == {"resolved": 1, "unresolved": 0, "deficit_rows": 0,
-                                   "reasons": {}, "store_ids": [], "deficits": []}
+                                   "reasons": {}, "store_ids": [], "deficits": [], "content_mismatch_rows": 0, "content_mismatch": []}
     from bench.instruments.reliability.scorers import externalized
     resolved, _, _ = externalized.resolve([(store_id, "S0", role,
         externalize._build_externalized_placeholder({"ref": "fixture-payload.json"}), None, None)], d / "hermes-home")
@@ -54,12 +56,14 @@ def test_resolved_payload_matches_raw_key(tmp_path, role):
 
 
 @pytest.mark.parametrize("role", ["user", "assistant", "tool"])
-def test_one_byte_corruption_is_externalized_deficit(tmp_path, role):
+def test_one_byte_corruption_fails_b2_and_is_named(tmp_path, role):
     out, _, _, store_id = externalized_cell(tmp_path, role=role, failure="corrupted")
     assert out["verdict"] == "FAIL" and "B2" in out["failed_bars"]
-    ext = out["numbers"]["B2"]["externalized"]
-    assert ext["resolved"] == 1 and ext["unresolved"] == 0 and ext["deficit_rows"] == 1
-    assert ext["reasons"] == {"content_mismatch": 1} and ext["store_ids"] == [store_id]
+    b2 = out["numbers"]["B2"]
+    assert b2["deficit_rows"] + b2["tool_missing_rows"] == 1  # ordinary B2 accounting fails the wrong bytes
+    ext = b2["externalized"]
+    assert ext["resolved"] == 1 and ext["unresolved"] == 0 and ext["deficit_rows"] == 0 and ext["reasons"] == {}
+    assert ext["content_mismatch_rows"] == 1 and [m["store_id"] for m in ext["content_mismatch"]] == [store_id]
 
 
 @pytest.mark.parametrize("failure,reason", [("missing", "missing_payload_file"), ("json", "unreadable_payload"),
@@ -69,7 +73,7 @@ def test_unresolved_payload_fails_with_reason(tmp_path, failure, reason):
     assert out["verdict"] == "FAIL" and "B2" in out["failed_bars"]
     ext = out["numbers"]["B2"]["externalized"]
     assert ext == {"resolved": 0, "unresolved": 1, "deficit_rows": 1, "reasons": {reason: 1},
-                   "store_ids": [store_id], "deficits": [{"store_id": store_id, "reason": reason}]}
+                   "store_ids": [store_id], "deficits": [{"store_id": store_id, "reason": reason}], "content_mismatch_rows": 0, "content_mismatch": []}
 
 
 def test_plain_existing_fixture_is_unchanged(tmp_path):
@@ -78,7 +82,8 @@ def test_plain_existing_fixture_is_unchanged(tmp_path):
     assert out["numbers"]["B2"]["deficit_rows"] == out["numbers"]["B2"]["surplus_rows"] == 0
     # Drop only the newly added diagnostics; compare the entire result with the original row reader.
     ext = out["numbers"]["B2"].pop("externalized")
-    assert ext == {"resolved": 0, "unresolved": 0, "deficit_rows": 0, "reasons": {}, "store_ids": [], "deficits": []}
+    assert ext == {"resolved": 0, "unresolved": 0, "deficit_rows": 0, "reasons": {}, "store_ids": [], "deficits": [],
+                   "content_mismatch_rows": 0, "content_mismatch": []}
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(bars.externalized, "resolve", lambda rows, home: (rows, dict(ext), set()))
         plain = bars.score({"id": "t", "tool_plan": [], "native_recovery": False, "min_compactions": 2,
@@ -96,3 +101,62 @@ def test_resolved_user_edges_keep_b2_normalization(tmp_path):
     cell = {"bars": ["B1", "B2"], "min_compactions": 2}
     scored = bars.score(cell, d)
     assert scored["verdict"] == out["verdict"] == "PASS"
+
+
+def test_operator_base_dir_does_not_reach_the_cell(tmp_path, monkeypatch):
+    elsewhere = tmp_path / "operator-base"
+    monkeypatch.setenv("LCM_HERMES_BASE_DIR", str(elsewhere))
+    out, _, _, _ = externalized_cell(tmp_path)
+    assert out["verdict"] == "PASS" and out["numbers"]["B2"]["externalized"]["resolved"] == 1
+    assert os.environ["LCM_HERMES_BASE_DIR"] == str(elsewhere)
+
+
+def test_ingest_placeholder_resolves_and_missing_payload_is_a_deficit(tmp_path):
+    from hermes_lcm import ingest_protection
+    from hermes_lcm.config import LCMConfig
+    from bench.instruments.reliability.scorers import externalized
+
+    assert externalized.INGEST_RE.pattern == ingest_protection._INGEST_PLACEHOLDER_RE.pattern
+    assert externalized.INGEST_PREFIX == ingest_protection._EXTERNALIZED_PLACEHOLDER_PREFIX
+    protect_message_for_ingest = ingest_protection.protect_message_for_ingest
+
+    home = tmp_path / "hermes-home"
+    original = "see this: data:image/png;base64," + base64.b64encode(b"LCM ingest payload " * 900).decode()
+    stored = protect_message_for_ingest({"role": "user", "content": original}, LCMConfig(), hermes_home=str(home),
+                                        session_id="S0")["content"]
+    assert externalized.INGEST_PREFIX in stored and stored != original
+    rows, numbers, ids = externalized.resolve([(7, "S0", "user", stored, None, None)], home)
+    assert rows[0][3] == original and ids == {7} and numbers["resolved"] == 1 and numbers["deficit_rows"] == 0
+    for path in (home / externalize.DEFAULT_LARGE_OUTPUT_DIRNAME).iterdir():
+        path.unlink()
+    rows, numbers, ids = externalized.resolve([(7, "S0", "user", stored, None, None)], home)
+    assert rows == [] and numbers["reasons"] == {"missing_ingest_payload": 1} and numbers["deficit_rows"] == 1
+
+
+def test_mismatch_diagnostic_skips_unscored_roles_and_groups():
+    from bench.instruments.reliability.scorers import externalized
+
+    numbers = {"content_mismatch_rows": 0, "content_mismatch": []}
+    per = {"G": ([("user", "hello")], [])}
+    rows = [(1, "G", "system", "a resolved system prompt", None, None),
+            (2, "OTHER", "user", "a resolved row from an unrelated session", None, None),
+            (3, "G", "user", "hello", None, None)]
+    externalized.mismatches(numbers, rows, {1, 2, 3}, per, lambda session: session, set(), set(), None)
+    assert numbers == {"content_mismatch_rows": 0, "content_mismatch": []}
+
+
+def test_kept_db_copy_keeps_its_payloads_for_a_rescore(tmp_path):
+    from bench.instruments.reliability import run_matrix
+
+    scratch, d = tmp_path / "scratch", tmp_path / "cell"
+    (scratch / "db").mkdir(parents=True)
+    (scratch / "db" / "lcm.db").write_text("db")
+    payloads = scratch / "hermes-home" / externalize.DEFAULT_LARGE_OUTPUT_DIRNAME
+    payloads.mkdir(parents=True)
+    (payloads / "p.json").write_text("{}")
+    (scratch / "hermes-home" / "config.yaml").write_text("x")
+    d.mkdir()
+    run_matrix.release_scratch(scratch, d, {"verdict": "PASS"}, "all", False)
+    assert (d / "db" / "lcm.db").exists() and not scratch.exists()
+    assert (d / "hermes-home" / externalize.DEFAULT_LARGE_OUTPUT_DIRNAME / "p.json").exists()
+    assert not (d / "hermes-home" / "config.yaml").exists()
