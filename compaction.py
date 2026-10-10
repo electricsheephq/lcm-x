@@ -561,7 +561,6 @@ class CompactionMixin:
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
         self._compress_forced_overflow = False
-        self._survival_host_overhead(messages, current_tokens)  # #1012 F4: observe even a below-ceiling pass
         budget = self._foreground_budget = self._new_foreground_budget()  # #605 K1: the clock starts here
         returned = None
         try:
@@ -1265,6 +1264,8 @@ class CompactionMixin:
                 force=force,
             )
         self._rebind_after_unadopted_compaction_commit()
+        # #1012 F4: observe foreground passes only, after classification and rebinding.
+        self._survival_host_overhead(messages, current_tokens)
 
         # ``current_tokens`` is optional in the ContextEngine contract. After a
         # yield-aware preflight, use the current active messages as the

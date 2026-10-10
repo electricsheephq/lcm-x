@@ -4164,8 +4164,6 @@ class LCMEngine(
         with self._exclusive_lifecycle("end"):
             if self._stable_use_closed:
                 return
-            if session_id == self._session_id:
-                self._survival_overhead_observation = None
             self._on_session_end_unlocked(session_id, messages)
 
     def _on_session_end_unlocked(

@@ -55,7 +55,7 @@ def _engine(tmp_path, window=200_000, **overrides):
               "context_threshold": 0.001, "threshold_full_sweep_enabled": False,
               "l3_truncate_tokens": 128, "summary_circuit_breaker_failure_threshold": 2,
               **overrides}
-    engine = LCMEngine(config=LCMConfig(**config))
+    engine = LCMEngine(config=LCMConfig(**config), hermes_home=str(tmp_path / "home"))
     engine.on_session_start("S", platform="telegram", context_length=window, conversation_id="conv")
     return engine
 
@@ -203,7 +203,7 @@ def test_fit_remembers_largest_compress_overhead_and_rebind_resets(tmp_path, mon
         engine.shutdown()
 
 
-def test_session_end_clears_overhead_and_window_cap_still_applies(tmp_path):
+def test_session_end_keeps_capped_overhead_and_window_cap_still_applies(tmp_path):
     engine = _engine(tmp_path, window=65_536)
     try:
         view = [{"role": "user", "content": "ordinary turn", "timestamp": 1.0}]
@@ -211,8 +211,134 @@ def test_session_end_clears_overhead_and_window_cap_still_applies(tmp_path):
         assert engine._survival_fit_budget(view, counted + 50_000, window_cap=20_000) == 7000
         assert engine._survival_fit_budget(view, counted + 2600) == int(65_536 * 0.85) - 32_768
         engine.on_session_end("unrelated", [])
-        assert engine._survival_overhead_observation == ("conv", 50_000)
+        assert engine._survival_overhead_observation == ("conv", 32_768)
         engine.on_session_end("S", view)
+        assert engine._survival_overhead_observation == ("conv", 32_768)
+        assert engine._survival_fit_budget(view, counted + 2600) == int(65_536 * 0.85) - 32_768
+    finally:
+        engine.shutdown()
+
+
+def test_commit_sequence_preserves_peak_for_next_fit(tmp_path, monkeypatch, caplog):
+    """(a) Hermes in-place commit callbacks must retain the conversation peak."""
+    _provider(monkeypatch)
+    window = 65_536
+    engine = _engine(tmp_path, window=window)
+    try:
+        view = _view()
+        counted = tokens.count_messages_tokens(view)
+        engine.ingest(view)
+        compressed = engine.compress(view, current_tokens=counted + 12_500)
+        assert engine._last_compression_status == "compacted"
+        assert engine._compress_commit_proof is not None
+        with caplog.at_level("INFO"):
+            engine.on_session_end("S", view)
+        assert "as a compaction commit" in caplog.text
+        engine.on_session_start("S", platform="telegram", context_length=window,
+                                boundary_reason="compression", old_session_id="S",
+                                conversation_id="conv")
+        # Keep this an ordinary ceiling fit, below the summarisation threshold.
+        engine.threshold_tokens = window
+        large = list(compressed)
+        for i in range(20):
+            large.extend([
+                {"role": "user", "content": "a" * 5400, "timestamp": float(i + 10)},
+                {"role": "assistant", "content": "b" * 5400},
+            ])
+        counted = tokens.count_messages_tokens(large)
+        assert counted + 2600 >= int(window * (1 - engine._config.survival_reserve))
+        budgets = []
+        real_budget = engine._survival_fit_budget
+
+        def record_budget(*args, **kwargs):
+            budget = real_budget(*args, **kwargs)
+            budgets.append(budget)
+            return budget
+
+        monkeypatch.setattr(engine, "_survival_fit_budget", record_budget)
+        fitted = engine.compress(large, current_tokens=counted + 2600)
+        expected = int(window * (1 - engine._config.survival_reserve)) - 12_500
+        assert budgets and set(budgets) == {expected}
+        assert tokens.count_messages_tokens(fitted) <= expected
+        assert len(fitted) < len(large)
+    finally:
+        engine.shutdown()
+
+
+def test_skipped_boundary_same_conversation_preserves_peak(tmp_path):
+    """(b) Exercise the mismatched-predecessor boundary's real generic reset."""
+    engine = _engine(tmp_path, window=65_536, context_threshold=0.95)
+    try:
+        view = [{"role": "user", "content": "ordinary turn", "timestamp": 1.0}]
+        counted = tokens.count_messages_tokens(view)
+        engine.compress(view, current_tokens=counted + 12_500)
+        engine.on_session_start("S2", platform="telegram", context_length=65_536,
+                                boundary_reason="compression", old_session_id="unrelated",
+                                conversation_id="conv")
+        assert engine._last_boundary_skip_time > 0
+        assert engine._conversation_id == "conv"
+        assert engine._survival_fit_budget(view, counted + 2600) == int(65_536 * 0.85) - 12_500
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("mode", ["auxiliary", "stateless", "late_auxiliary"])
+def test_bypassed_compress_does_not_observe_foreground_overhead(tmp_path, mode):
+    """(c) Real calling-agent markers drive thread-local and late classification."""
+    engine = _engine(tmp_path, window=65_536, context_threshold=0.95,
+                     stateless_session_patterns=["child"] if mode == "stateless" else [])
+
+    class CallingAgent:
+        session_id = "child"
+        _parent_session_id = "S"
+        _memory_write_origin = "assistant_tool"
+        _memory_write_context = "foreground"
+        log_prefix = ""
+        enabled_toolsets = {"terminal", "file", "web"}
+
+        def __init__(self):
+            self.engine = engine
+
+        def start(self):
+            self.engine.on_session_start(self.session_id, platform="cli", conversation_id="child-conv")
+
+        def compress(self, view, observed):
+            result = self.engine.compress(view, current_tokens=observed)
+            assert self.engine._bypasses_lcm_context_management()
+            return result
+
+    try:
+        view = [{"role": "user", "content": "ordinary foreground", "timestamp": 1.0}]
+        counted = tokens.count_messages_tokens(view)
+        engine.compress(view, current_tokens=counted + 12_500)
+        agent = CallingAgent()
+        if mode == "auxiliary":
+            agent._memory_write_origin = agent._memory_write_context = "background_review"
+        agent.start()
+        previous = engine._survival_overhead_observation
+        if mode == "late_auxiliary":
+            agent._memory_write_origin = agent._memory_write_context = "background_review"
+        agent.compress(view, counted + 50_000)
+        assert engine._survival_overhead_observation == previous
+        if mode == "auxiliary":
+            assert previous == ("conv", 12_500)
+        else:
+            # These starts actually bind another conversation, so (d) clears
+            # the old peak; the bypassed compress must leave it unobserved.
+            assert previous is None
+        assert engine._store.get_session_count("child") == 0
+    finally:
+        engine.shutdown()
+
+
+def test_different_conversation_rebind_clears_peak(tmp_path):
+    """(d) A different conversation must not inherit the old peak."""
+    engine = _engine(tmp_path, window=65_536, context_threshold=0.95)
+    try:
+        view = [{"role": "user", "content": "ordinary turn", "timestamp": 1.0}]
+        counted = tokens.count_messages_tokens(view)
+        engine.compress(view, current_tokens=counted + 12_500)
+        engine.on_session_start("S2", platform="telegram", context_length=65_536, conversation_id="other")
         assert engine._survival_overhead_observation is None
         assert engine._survival_fit_budget(view, counted + 2600) == int(65_536 * 0.85) - 2600
     finally:

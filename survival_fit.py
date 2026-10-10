@@ -115,11 +115,13 @@ class SurvivalFitMixin:
         overhead = max(0, int(observed_tokens or 0) - counted)
         key = str(getattr(self, "_conversation_id", "") or getattr(self, "_session_id", "") or "")
         previous = getattr(self, "_survival_overhead_observation", None)
+        window = int(getattr(self, "context_length", 0) or 0)
         if key:
             overhead = max(overhead, previous[1] if previous and previous[0] == key else 0)
+        overhead = min(window // 2, overhead) if window > 0 else overhead
+        if key:
             self._survival_overhead_observation = (key, overhead)
-        window = int(getattr(self, "context_length", 0) or 0)
-        return min(window // 2, overhead) if window > 0 else overhead
+        return overhead
 
     def _survival_fit_args(self, messages, observed_tokens, reason: str, recovery: bool, *,
                            automatic: bool = False) -> Dict[str, Any]:
@@ -153,12 +155,13 @@ class SurvivalFitMixin:
     def _survival_fit(self, messages, result, observed_tokens, reason: str, *, after_exception: bool = False,
                       window_cap: Optional[int] = None, request_cap: Optional[int] = None):
         """``result``, or the fitted list when ``result`` is over the survival budget."""
+        if not self._session_id or self._bypasses_lcm_context_management():
+            return result
         exit_fit = reason.startswith("exit_fit:")
         # #668: an exit fit's budget without the exit cap; a list over it is a session at risk, not headroom
         window_budget = self._survival_fit_budget(messages, observed_tokens) if exit_fit else None
         budget = self._survival_fit_budget(messages, observed_tokens, window_cap, request_cap)
-        if budget is None or not isinstance(result, list) or not result or not self._session_id or \
-                self._bypasses_lcm_context_management():
+        if budget is None or not isinstance(result, list) or not result:
             return result
         before = self._survival_measure(result)
         if before <= budget:
