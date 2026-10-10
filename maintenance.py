@@ -12,8 +12,40 @@ from __future__ import annotations
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
+import os
 import sqlite3
 from typing import Any
+
+
+from .externalize import get_large_output_storage_dir
+
+
+def externalized_payload_inventory(engine) -> dict:
+    """Describe the separate payload directory without creating it or raising."""
+    def reason(exc):
+        return str(exc).splitlines()[0][:160] if str(exc) else type(exc).__name__
+    try:
+        path = get_large_output_storage_dir(engine._config, engine._hermes_home, create=False)
+    except Exception as exc:
+        return {"path": None, "error": reason(exc)}
+    files = size = unreadable = 0
+    try:
+        with os.scandir(path) as entries:
+            for entry in entries:
+                if not entry.name.endswith(".json"):
+                    continue
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        size += entry.stat(follow_symlinks=False).st_size
+                        files += 1
+                except OSError:
+                    unreadable += 1  # reported, so a partial count never reads as complete
+    except FileNotFoundError:
+        return {"path": path, "exists": False, "files": 0, "bytes": 0, "unreadable": 0}
+    except Exception as exc:
+        # The path is known; only the scan failed, so keep naming it (#1077 review).
+        return {"path": path, "exists": True, "files": 0, "bytes": 0, "unreadable": 0, "scan_error": reason(exc)}
+    return {"path": path, "exists": True, "files": files, "bytes": size, "unreadable": unreadable}
 
 
 def flush_engine_connections(engine) -> None:

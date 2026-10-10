@@ -19,6 +19,7 @@ import time
 import uuid
 from collections import Counter, deque
 from contextlib import contextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -7830,11 +7831,17 @@ class LCMEngine(
         )
         rendered_lines: list[str] = []
         for hit in surviving[:3]:
-            ts = hit.get("timestamp") or 0
+            # #1008: prefer the host's event time; label LCM's write time as stored.
             try:
-                when = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(float(ts))) if ts else "unknown time"
-            except (TypeError, ValueError, OSError):
+                when = datetime.strptime(hit.get("event_time"), "%Y-%m-%dT%H:%M:%SZ").strftime("%Y-%m-%d %H:%M UTC")
+            except (TypeError, ValueError):
                 when = "unknown time"
+                ts = hit.get("timestamp")
+                if ts:
+                    try:
+                        when = "stored " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(float(ts)))
+                    except (TypeError, ValueError, OSError):
+                        pass
             snippet = (hit.get("snippet") or "").strip().replace("\n", " ")
             expand = hit.get("expand_hint") or ""
             line = f"- [{when}] {snippet}"

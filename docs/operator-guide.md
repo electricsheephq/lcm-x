@@ -389,9 +389,9 @@ Useful environment variables:
 | `LCM_SENSITIVE_PATTERNS_ENABLED` | `false` | Opt in to durable deterministic redaction before LCM storage, FTS indexing, summarization, active replay, and externalized ingest payloads; it does not control cloud embedding privacy |
 | `LCM_EMBEDDING_PRIVACY_ENABLED` | unset (`auto`) | Protect provider-bound copies for known cloud embedding providers without rewriting durable data. Set `false` for an explicit raw-cloud opt-out (`privacy:off` vector revision); local providers remain unchanged |
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
-| `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `false` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
+| `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `true` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
-| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `false` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `true` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders |
@@ -433,7 +433,7 @@ Useful environment variables:
 | `LCM_RERANK_MODEL` | `rerank-2.5-lite` | Voyage reranker model used by `lcm_recall`; set `rerank-2.5` for the quality-oriented model |
 | `LCM_RECALL_FTS_ANCHOR` | `true` | With two or more `lcm_recall` arms, keep the full-text arm's best match in the ranked window when fusion pushed it out (at most one session displaced; the hit keeps its own score). Reported under `provenance.fts_anchor` (`fired`, `position`, `delivered`). Embeddings-off output is unchanged; an `fts` weight of `0` turns it off; `false` restores the previous order. Managed (evaOS fleet) profiles can set it only after a provisioning release adds it to the environment allowlist. See [retrieval tools](retrieval-tools.md#fts-anchor-slot-lcm_recall_fts_anchor) |
 | `LCM_EMBEDDING_BACKFILL_BATCH_SIZE` | `32` | Documents claimed per backfill batch (`/lcm embed backfill` and state/chunk backfill). Non-positive or non-integer values fall back to the default. The effective value also clamps to the provider request-item ceiling — the lower of `LCM_EMBEDDING_MAX_BATCH_ITEMS` (normalized like the provider: non-positive means 1) and 1000 — so the dry-run estimate always matches real request splits |
-| `LCM_PROACTIVE_RECALL_ENABLED` | `false` | Opt in to proactive memory injection: at assembly, embed the newest user message and inject one budget-capped "relevant memories" block (needs `LCM_EMBEDDINGS_ENABLED`). Default-off keeps assembly byte-identical |
+| `LCM_PROACTIVE_RECALL_ENABLED` | `false` | Opt in to proactive memory injection: at assembly, embed the newest user message and inject one budget-capped "relevant memories" block (needs `LCM_EMBEDDINGS_ENABLED`). Dates use the host's event time, or are marked `stored` when only LCM's write time is known. Default-off keeps assembly byte-identical |
 | `LCM_PROACTIVE_RECALL_MIN_SCORE` | `0.01` | Relevance floor for an injected memory on the RRF/composite scale (a top-of-arm hit is ~0.016). Reranking changes candidate order only and does not replace this score with Voyage's incompatible `0..1` relevance score |
 | `LCM_PROACTIVE_RECALL_BUDGET_TOKENS` | `500` | Hard token budget for the single injected block (1-3 items) |
 | `LCM_PROACTIVE_RECALL_PROVIDER` | empty | Embedding-provider override for the injection query only (e.g. keep a local `fastembed` provider offline even when search uses `voyage`). Empty reuses the main provider. The override provider must have embedded the corpus for its arms to return hits |
@@ -894,7 +894,7 @@ What the main knobs do:
 - `LCM_EXPANSION_CONTEXT_TOKENS` controls how much recovered material
   `lcm_expand_query` may feed to the auxiliary model. It does not change what
   LCM stores.
-- `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED=true` helps when large tool outputs,
+- Large-output externalization is on by default and helps when large tool outputs,
   logs, media payloads, or raw JSON blobs dominate token pressure.
 
 Common questions:
@@ -1011,12 +1011,12 @@ session to `lcm.db`.
 
 ### Large tool-output handling
 
-Externalization for ordinary large tool output is opt-in. When enabled,
+Externalization for ordinary large tool output is on by default. When enabled,
 oversized tool results are written to plugin-managed JSON files and referenced
 from summaries. They remain inspectable later through
 `lcm_describe(externalized_ref=...)` and `lcm_expand(externalized_ref=...)`.
 
-Active-replay stubbing is separately opt-in and requires ordinary large-output
+Active-replay stubbing is on by default and requires ordinary large-output
 externalization. Newly ingested textual tool results above the first-sight token threshold (10,000)
 are durably externalized and immediately replaced in provider-visible replay,
 including results in the protected fresh tail. Preflight adopts that replay
@@ -1051,7 +1051,7 @@ only bounded snippets plus recovery metadata. See the
 [retrieval tools reference](retrieval-tools.md#searching-externalized-payloads)
 for the exact contract.
 
-The storage-boundary payload guard is separate from that opt-in. LCM always
+The storage-boundary payload guard is separate from that configurable policy. LCM always
 scans messages at the store boundary before writing `messages.content` or
 `messages.tool_calls` to SQLite. Inline `data:*;base64,...` payloads and
 conservative long base64-looking runs are replaced with compact placeholders and
@@ -1123,7 +1123,7 @@ Available commands:
 - `/lcm doctor source` - read-only scan for legacy blank-source rows
 - `/lcm doctor source apply` - backup-first normalization of legacy blank-source rows to `unknown`
 - `/lcm doctor retention` - read-only retention analysis
-- `/lcm backup` - timestamped SQLite backup
+- `/lcm backup` - timestamped SQLite backup. The snapshot holds the database only; copy the externalized payload directory named in the output alongside it when moving a backup to another host.
 - `/lcm rotate` - read-only preview of an in-place tail-preserving compact of the active session
 - `/lcm rotate apply` - backup-first rotate that advances the lifecycle frontier past pre-tail raw messages
 - `/lcm embed warmup` - explicitly prepare the configured provider/model and register its vector dimension

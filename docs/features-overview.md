@@ -9,11 +9,10 @@ embedding provider setup see [Embeddings setup](embeddings-setup.md).
 From v0.24.0 the installed plugin is `hermes-lcm-x` and the runtime engine is
 `lcm-x` (#471); the bundled skill keeps the name `hermes-lcm`.
 
-**Defaults.** The fresh-tail token cap, the threshold full sweep (family 1), and
-temporal rollups (family 2) are on by default, matching the managed deployment.
-Large-output externalization and active-replay stubbing stay opt-in for now (the
-managed deployment turns them on), and semantic retrieval stays default-off until
-an operator opts in with an environment variable. Each family keeps its data out of the core schema
+**Defaults.** Large-output externalization, active-replay stubbing, the fresh-tail
+token cap, the threshold full sweep (family 1), and temporal rollups (family 2)
+are on by default, matching the managed deployment. Semantic retrieval stays
+default-off until an operator opts in with an environment variable. Each family keeps its data out of the core schema
 until first use, so a disabled install stays readable by older builds.
 
 ## The one-paragraph mental model
@@ -70,8 +69,8 @@ Failure posture: externalization is fail-open (if a write fails, the provider
 still receives the original inline payload — nothing is dropped), and every
 replaced payload keeps a lossless recovery path via its ref.
 
-Key switches: `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED`,
-`LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (+ threshold vars),
+Key switches: `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` (default `true`),
+`LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` (default `true`; + threshold vars),
 `LCM_FRESH_TAIL_MAX_TOKENS` (default `24000`), `LCM_THRESHOLD_FULL_SWEEP_ENABLED`
 (default `true`).
 Full table: [Operator guide → Configuration](operator-guide.md#configuration).
