@@ -20,7 +20,7 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from . import chronology, drain, host_parity, multiset, summary, tool_calls, tool_groups, host_rewrite
+from . import chronology, drain, externalized, host_parity, multiset, summary, tool_calls, tool_groups, host_rewrite
 
 ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 
@@ -216,8 +216,10 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     plugin = cell.get("plugin") or (json.loads((cell_dir / "cell.json").read_text()).get("plugin")
                                     if (cell_dir / "cell.json").exists() else None) or {}
     host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"))
+    b2_full, ext, ext_ids = externalized.resolve(full, db_dir.parent / "hermes-home")
+    b2_stored = [r[:4] for r in b2_full]
     per = {g: (expected_items([a for a in atts if attempt_group(a, group) == g], notices),
-               [r for r in stored if group(r[1]) == g]) for g in groups}
+               [r for r in b2_stored if group(r[1]) == g]) for g in groups}
     applicable = [b for b in cell.get("bars") or ALL_BARS
                   if (b != "B6" or cell.get("tool_plan")) and (b != "B7" or cell.get("native_recovery"))
                   and (b != "B5" or cell.get("min_compactions", 5) > 0)]
@@ -274,9 +276,11 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
             if a["turn"] in recovery_turns and tool_calls.completed(a) and d.get("ok") and d.get("recovery_result_sha256") \
                     and d.get("id") in {c["id"] for c in a["tool_issues"]} - {s["id"] for s in a["tool_seen"]}:
                 bound["expected"][(attempt_group(a, group), "tool", d["id"], d["recovery_result_sha256"])] += 1
-    tools = tool_calls.compare(bound["expected"], bound["loose"], tool_calls.stored_keys(full, group))
+    tools = tool_calls.compare(bound["expected"], bound["loose"], tool_calls.stored_keys(b2_full, group))
+    externalized.mismatches(ext, b2_full, ext_ids, per, group, bound["expected"], bound["loose"], host)
+    numbers["B2"]["externalized"] = ext
     numbers["B2"].update(tools)
-    if tools["tool_missing_rows"] or tools["tool_surplus_rows"]:
+    if tools["tool_missing_rows"] or tools["tool_surplus_rows"] or ext["deficit_rows"]:
         failed["B2"] = dict(numbers["B2"])
     if any(m["verdict"] != "PASS" for m in b2_parts.values()):
         bad = {g: m for g, m in b2_parts.items() if m["verdict"] != "PASS"}
