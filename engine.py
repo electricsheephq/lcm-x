@@ -683,6 +683,7 @@ class LCMEngine(
         self.emit_automatic_compaction_status = False
         # #582 survival fit: the failure reason of this compress(), the last fit, and the one-shot warning.
         self._survival_fit_reason: Optional[str] = None
+        self._survival_overhead_observation = None  # #1012 F4: (bound conversation key, largest overhead)
         self._last_survival_fit: Optional[Dict[str, Any]] = None
         self._survival_fit_pending_warning: Optional[tuple[str, str]] = None  # (conversation key, text)
         self._survival_fit_warned: set = set()
@@ -2238,6 +2239,7 @@ class LCMEngine(
                     attempt_chunk = rescue_chunk
                     continue
                 self._last_leaf_summary_model = provenance.get("model", "")
+                self._last_leaf_content_filter_error = bool(provenance.get("content_filter_error"))
                 # #652: no fragment; #947: a clipped source returned unchanged by the level-3 fallback is a fragment too
                 self._last_leaf_level_3_verbatim = level == 3 and not clipped and summary_text == serialized
                 return attempt_chunk, source_tokens, summary_text, level, attempt_number
@@ -2401,6 +2403,9 @@ class LCMEngine(
         conversation_id: str | None = None,
     ) -> None:
         state = self._lifecycle.bind_session(session_id, conversation_id=conversation_id)
+        if getattr(self, "_survival_overhead_observation", None) is not None and \
+                self._survival_overhead_observation[0] != state.conversation_id:
+            self._survival_overhead_observation = None
         self._conversation_id = state.conversation_id
         self._lcm_session_last_conversation_id[session_id] = state.conversation_id
         self._last_compacted_store_id = state.current_frontier_store_id
@@ -4159,6 +4164,8 @@ class LCMEngine(
         with self._exclusive_lifecycle("end"):
             if self._stable_use_closed:
                 return
+            if session_id == self._session_id:
+                self._survival_overhead_observation = None
             self._on_session_end_unlocked(session_id, messages)
 
     def _on_session_end_unlocked(

@@ -561,6 +561,7 @@ class CompactionMixin:
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
         self._compress_forced_overflow = False
+        self._survival_host_overhead(messages, current_tokens)  # #1012 F4: observe even a below-ceiling pass
         budget = self._foreground_budget = self._new_foreground_budget()  # #605 K1: the clock starts here
         returned = None
         try:
@@ -1964,6 +1965,7 @@ class CompactionMixin:
 
                 step_started = time.monotonic() if threshold_full_sweep_active else 0.0
                 self._last_leaf_level_3_verbatim = False
+                self._last_leaf_content_filter_error = False
                 try:
                     summary_kwargs: dict[str, Any] = {"focus_topic": focus_topic}
                     if threshold_full_sweep_active:
@@ -1996,7 +1998,8 @@ class CompactionMixin:
                         sweep_step_done("summariser", step_started)
                 # #652: no truncated level 3 leaf while the fit can rescue; the backlog stays. A level 3 that
                 # is the whole source (it already fits the truncation budget) loses nothing and is written.
-                if _level == 3 and self._fit_can_rescue(force_overflow) and not self._last_leaf_level_3_verbatim:
+                if _level == 3 and self._fit_can_rescue(force_overflow) and not (
+                        self._last_leaf_level_3_verbatim or self._last_leaf_content_filter_error):
                     sweep_stop_reason = "summary_result_rejected"
                     break
             anchor_claimed_ids = sorted({  # #436 R4: only claims whose text the summarizer actually read

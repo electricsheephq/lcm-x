@@ -101,21 +101,23 @@ class SurvivalFitMixin:
         if _positive_int(window_cap):  # #608: the size of a request the provider rejected
             window = min(window, window_cap)
         reserve = min(0.9, max(0.0, float(getattr(self._config, "survival_reserve", 0.15) or 0.0)))
-        counted = _host_estimate(messages)
-        counted = count_messages_tokens(messages) if counted is None else counted
         # system prompt + tools the host adds; more than half the window is a stale or synthetic observation
-        overhead = min(window // 2, max(0, int(observed_tokens or 0) - counted))
+        overhead = min(window // 2, self._survival_host_overhead(messages, observed_tokens))
         ceiling = int(window * (1 - reserve))
         if _positive_int(request_cap):  # #608: a recovery attempt's request under the compaction threshold
             ceiling = min(ceiling, request_cap)
         return max(1, ceiling - overhead)
 
     def _survival_host_overhead(self, messages, observed_tokens) -> int:
-        """The host overhead ``_survival_fit_budget`` subtracts: the host's observed count less the list's own
-        measure, at most half the window (#671: the stub-first exit measures with it)."""
+        """Largest observed overhead for this binding, capped at half the window (#1012 F4, #671)."""
         counted = _host_estimate(messages)
         counted = count_messages_tokens(messages) if counted is None else counted
         overhead = max(0, int(observed_tokens or 0) - counted)
+        key = str(getattr(self, "_conversation_id", "") or getattr(self, "_session_id", "") or "")
+        previous = getattr(self, "_survival_overhead_observation", None)
+        if key:
+            overhead = max(overhead, previous[1] if previous and previous[0] == key else 0)
+            self._survival_overhead_observation = (key, overhead)
         window = int(getattr(self, "context_length", 0) or 0)
         return min(window // 2, overhead) if window > 0 else overhead
 
