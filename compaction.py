@@ -1802,7 +1802,7 @@ class CompactionMixin:
                 and candidate_raw[0].get("role") == "user"
                 and self._latest_user_context_anchor(
                     anchor_source_messages, working_messages[fresh_tail_start:]
-                ) == (anchor := self._build_preserved_objective_summary_part(candidate_raw[0]))
+                ) == (anchor := self._build_preserved_objective_summary_part(self._objective_source(candidate_raw[0])))
                 and (
                     # Forced-overflow recovery assembles under the smaller recovery cap.
                     (cap := recovery_assembly_cap if recovery_assembly_cap is not None

@@ -11,7 +11,7 @@ import hermes_lcm.tokens as tokens
 import hermes_lcm.tools as lcm_tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-from hermes_lcm.tokens import count_messages_tokens
+from hermes_lcm.tokens import count_message_tokens, count_messages_tokens
 
 OBJECTIVE = "[Current user objective preserved from compacted history]"
 CARRY = "[Earlier user messages in this session, verbatim, for reference only"
@@ -358,3 +358,61 @@ def test_f5_a_profile_rebind_drops_the_packet_cache(make, tmp_path):
         assert "REQ-0" not in emitted and "NEW-0" in emitted
     finally:
         engine.shutdown()
+
+
+# -- second cross-model review of 05719e62 -----------------------------------------------------------------
+
+@pytest.mark.parametrize("head_kind", ["summary", "objective"])
+@pytest.mark.parametrize("hops", [1, 33])
+def test_r2_f1_a_rotated_child_stores_the_base_shape_head(make, hops, head_kind):
+    """Storing a replayed scaffold head in a rotation child is pre-existing (base ce186095 does it); the packet
+    must not change what is stored: the head minus its carry part and manifest, charged at that size."""
+    engine = make(session="P0")
+    ending = ([{"role": "user", "content": "ACTIVE request"}, *_tools(70), *_tools(71)] if head_kind == "objective"
+              else [{"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
+    row, carry = _generated(engine, _compact(engine, [*_history(8), *ending]))
+    assert carry and row["content"].startswith(OBJECTIVE if head_kind == "objective" else "[Recent Summary")
+    head = {"role": "user", "content": row["content"][:engine._verified_lcm_summary_prefix_end(row["content"])]}
+    base_shape = head["content"][:head["content"].index(SEP + CARRY)]
+    for i in range(1, hops + 1):
+        engine.on_session_start(f"P{i}", platform="cli", context_length=128_000, conversation_id="conv",
+                                boundary_reason="compression", old_session_id=f"P{i - 1}")
+    engine.ingest([head, {"role": "user", "content": "new request"}, {"role": "assistant", "content": "ok"}])
+    stored = engine._store.get_session_messages(f"P{hops}")
+    heads = [r for r in stored if "[Recent Summary" in r["content"]]
+    assert [r["content"] for r in heads] == [base_shape] and not any(CARRY in r["content"] for r in stored)
+    assert heads[0]["token_estimate"] == count_message_tokens({"role": "user", "content": base_shape})
+    engine.ingest([head, {"role": "user", "content": "new request"}, {"role": "assistant", "content": "ok"},
+                   {"role": "user", "content": "next"}])  # the replayed head maps back: nothing re-stored
+    assert len(engine._store.get_session_messages(f"P{hops}")) == len(stored) + 1
+
+
+@pytest.mark.parametrize("legacy", ["", None, " \t\n", " conv "])
+def test_r2_legacy_conversation_ids_keep_carry_coverage(make, legacy):
+    engine = make()
+    out = _compact(engine, [*_history(8), {"role": "user", "content": "latest"}, {"role": "assistant", "content": "ok"}])
+    assert "REQ-0:" in _generated(engine, out)[1]
+    engine._store.connection.execute("UPDATE messages SET conversation_id = ?", (legacy,))
+    engine._store.connection.commit()
+    engine.shutdown()
+    resumed = make()  # a cold bind runs the store's legacy conversation-id probe
+    packet = _generated(resumed, resumed._assemble_context(None, [*out[1:], *_tools(80, 50)]))[1]
+    assert "REQ-0:" in packet and resumed._last_user_carry["entries"] == 8
+
+
+def test_r2_a_glued_objective_only_backlog_is_the_922_no_op(make, tmp_path):
+    results = []
+    for name in ("carrier", "glued"):
+        engine = make(home=tmp_path / name, threshold_full_sweep_enabled=False,
+                      fresh_tail_pressure_yield_enabled=False, fresh_tail_max_tokens=12000)
+        current = "CURRENT request " + "specific work " * 1600
+        out = _compact(engine, [*_history(8), {"role": "user", "content": current}, *_tools(70, 50),
+                                {"role": "assistant", "content": "a"}])
+        row, carry = _generated(engine, _host_merge(out))
+        assert carry and engine._generated_context_carrier_remainder(row) == current
+        row = {**row, "content": current} if name == "glued" else row
+        before = engine.compression_count
+        _compact(engine, [row, *_tools(80, 50), *_tools(81, 50)])
+        results.append((engine.compression_count - before, engine._objective_only_noop,
+                        engine._last_compression_status))
+    assert results[0] == results[1] == (0, True, "noop")

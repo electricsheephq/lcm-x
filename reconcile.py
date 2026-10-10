@@ -907,6 +907,8 @@ class ReconcileMixin:
     ) -> tuple[str, str, str, str, str]:
         role = str(msg.get("role") or "unknown")
         content = normalize_content_value(msg.get("content")) or ""
+        if role == "user" and callable(without_carry := getattr(self, "_without_user_carry", None)):
+            content = without_carry(content)  # #659: a scaffold's identity is its base shape (stored that way)
         source = None if stored_row else self._survival_projection_source(msg, role, content)
         if source is not None:  # #582: a survival-fit projection is its source row, never a new occurrence
             return self._message_replay_identity(source, stored_row=True, strip_carrier=strip_carrier)

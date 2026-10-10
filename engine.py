@@ -5611,6 +5611,24 @@ class LCMEngine(
             break
         return (self._verified_generated_suffix_end(content, pos), node_ids) if node_ids else (None, [])
 
+    def _objective_source(self, message: Dict[str, Any]) -> Dict[str, Any]:
+        """#659: a host-merged carrier's request is its glued row, never LCM's summaries and carry."""
+        glued = self._generated_context_carrier_remainder(message)
+        return message if glued is None else {**message, "content": glued}
+
+    def _without_user_carry(self, content: str) -> str:
+        """#659: ``content`` without a verified carry part and manifest that end a verified summary run, i.e. the
+        base-shape scaffold; anything unverified or glued behind it stays. Stored rows and replay identities use this form."""
+        pos = min((i for i in (content.find("\n\n---\n\n" + p) for p in (_USER_CARRY_PREFIX, _OMITTED_SUMMARIES_PREFIX))
+                   if i >= 0), default=-1)
+        if pos < 0 or (end := self._verified_generated_suffix_end(content, pos)) != len(content):
+            return content  # only a pure scaffold head; a composite or authored nesting is content, kept whole
+        starts = [0, *(m.end() for m in re.finditer("\n\n---\n\n", content[:pos]))]
+        if not any(self._LCM_SUMMARY_PART_HEADER_RE.match(content, s)
+                   and self._verified_lcm_summary_prefix_end(content[s:]) == end - s for s in starts):
+            return content
+        return content[:pos]
+
     def _user_carry_lineage(self) -> list[str]:
         """#659: the bound session and ALL its recorded compression predecessors, nearest first. Unbounded (a
         cycle stops the walk): a packet emitted before a hop limit must stay recognised after it. A recorded
@@ -6437,6 +6455,9 @@ class LCMEngine(
                     )
                 active_replay_messages[absolute_idx] = stubbed_message
 
+        protected_messages = [  # #659: a scaffold row stores as base does: no carry part, no manifest
+            {**m, "content": self._without_user_carry(m["content"])}
+            if m.get("role") == "user" and isinstance(m.get("content"), str) else m for m in protected_messages]
         estimates = [count_message_tokens(m) for m in protected_messages]
         store_ids = self._store._append_protected_batch(
             self._session_id,
@@ -7762,10 +7783,7 @@ class LCMEngine(
                 return []
             if any(message == selected for selected in selected_tail_messages):
                 return []
-            if (glued := self._generated_context_carrier_remainder(message)) is not None:
-                # #659: a host-merged carrier's request is its glued row, never LCM's summaries and carry.
-                message = {**message, "content": glued}
-            return [self._build_preserved_objective_summary_part(message)]
+            return [self._build_preserved_objective_summary_part(self._objective_source(message))]
         return []
 
     @staticmethod
