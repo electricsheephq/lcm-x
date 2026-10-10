@@ -48,7 +48,9 @@ BASE_ARMS = {
 BASE_ARMS["LCMX-fleet-v2"] = ({"LCM_SUMMARY_PROMPT_VERSION": "2"}, "fleet + summariser prompt v2 (#646)")
 CONTROLS = {"C0": "no compaction: the full admitted transcript as context; UNAVAILABLE when it does not fit the reader",
             "C1": "tail only: the last LCM_FRESH_TAIL_COUNT (24) rows of the stream, no summaries, no store"}
-BASE_ARMS.update({n: ({}, "Eval-2 pinned product arm; ablations live in the pin") for n in ("L0", "L1", "L1-H", "L1-noptr")})
+# Eval-2 arms run the fleet's actual stub threshold (10000, the product default); FLEET keeps 6000 for v3 comparability.
+BASE_ARMS.update({n: ({"LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS": "10000"},
+                      "Eval-2 pinned product arm; ablations live in the pin") for n in ("L0", "L1", "L1-H", "L1-noptr")})
 
 def all_arms() -> list[str]:
     return [a for b in BASE_ARMS for a in (b, b + "-open")] + list(CONTROLS)
