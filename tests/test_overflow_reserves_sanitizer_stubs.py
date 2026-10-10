@@ -12,7 +12,7 @@ import logging
 
 import hermes_lcm.engine as lcm_engine
 from hermes_lcm.dag import SummaryNode
-from hermes_lcm.tokens import count_messages_tokens
+from hermes_lcm.tokens import count_message_tokens, count_messages_tokens
 from tests.test_active_tool_stubbing import make_engine as make_engine  # noqa: F401 (fixture)
 from tests.test_active_tool_stubbing import tool_pair
 
@@ -121,14 +121,25 @@ def test_reused_call_id_counts_only_this_turns_results(make_engine):  # noqa: F8
 
 
 def test_rejected_turn_releases_its_kept_results(make_engine):  # noqa: F811
-    """A turn rejected by the reservation stops charging its already-kept results to the tail."""
+    """A turn rejected by the reservation stops charging its already-kept result to the tail.
+
+    The result fits on its own and is kept first (newest-first walk); its turn plus the stub for
+    the missing call does not fit. Charged as an orphan, it would starve the objective.
+    """
     engine = make_engine(large_output_active_replay_stubbing_enabled=False, fresh_tail_count=10)
     engine._pending_context_anchor_messages = [{"role": "user", "content": OBJECTIVE}]
-    big = {"role": "tool", "tool_call_id": "kept", "content": "payload " * 300}
-    tail = [assistant_calls("kept", "missing"), big]
-    objective_part = engine._build_preserved_objective_summary_part({"role": "user", "content": OBJECTIVE})
-    # Room for the system row, the objective and the stub, but not the whole turn.
-    cap = count_messages_tokens([SYSTEM, {"role": "user", "content": objective_part}]) + 40
+    objective_msg = {"role": "user", "content": engine._build_preserved_objective_summary_part(
+        {"role": "user", "content": OBJECTIVE})}
+    base = count_messages_tokens([SYSTEM, objective_msg])
+    objective_tokens = base - count_messages_tokens([SYSTEM])
+    words = 1
+    while count_message_tokens({"role": "tool", "tool_call_id": "kept", "content": "payload " * words}) \
+            < objective_tokens + 10:
+        words += 1
+    kept = {"role": "tool", "tool_call_id": "kept", "content": "payload " * words}
+    tail = [assistant_calls("kept", "missing"), kept]
+    cap = base + 20  # the kept result fits alone; the whole turn and its stub do not
+    assert count_messages_tokens([SYSTEM, kept]) <= cap
     out = assemble(engine, tail, cap)
 
     assert OBJECTIVE in view(out)
