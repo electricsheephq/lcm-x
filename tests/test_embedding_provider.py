@@ -436,6 +436,7 @@ def test_fastembed_not_warmed_never_downloads(monkeypatch, tmp_path):
     assert FakeFastembedModel.constructions == [{
         "model_name": "local-model",
         "cache_dir": str(tmp_path),
+        "threads": 2,
         "local_files_only": True,
     }]
 
@@ -463,6 +464,7 @@ def test_fastembed_warmup_prefers_cached_model_without_download(monkeypatch, tmp
     assert CachedFastembedModel.constructions == [{
         "model_name": "cached-model",
         "cache_dir": str(tmp_path),
+        "threads": 2,
         "local_files_only": True,
     }]
 
