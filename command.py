@@ -3012,6 +3012,9 @@ def _embedding_register_profiles(config, db_path, *, allow_download: bool) -> st
             )
 
         if provider.provider_id == FastembedProvider.provider_id:
+            if not allow_download:
+                # Load the cached model outside the query deadline, as warmup() does.
+                provider._ensure_local()
             vector = provider.warmup() if allow_download else provider.embed_query(warmup_text)
             progress = (
                 f"download: ready ({fastembed_download_size_note(provider.model_id)})"

@@ -8,12 +8,15 @@ unless a test says so.
 
 from __future__ import annotations
 
+import gc
 import json
 import io
 import logging
 import sqlite3
 import threading
+import time
 import urllib.error
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -914,3 +917,66 @@ def test_every_accepted_local_provider_spelling_allows_automatic_chunks(spelling
     resolved = provider_mod.resolve_provider(config)
     assert resolved.provider_id in {"fastembed", "ollama"}
     assert maintenance_mod._automatic_chunks_allowed(config, command_mod)
+
+
+def test_1063_f_slow_cached_load_is_outside_the_query_deadline(
+    tmp_path, home, local_fastembed, monkeypatch,
+):
+    calls, _state = local_fastembed
+    construct = provider_mod.FastembedProvider._construct
+
+    def slow_construct(self, *, allow_download):
+        time.sleep(0.3)  # a cold page cache can make the first ONNX load slow
+        return construct(self, allow_download=allow_download)
+
+    monkeypatch.setattr(provider_mod.FastembedProvider, "_construct", slow_construct)
+    engine = _local_engine(tmp_path, home)
+    engine._config.embedding_query_timeout_s = 0.1
+    try:
+        engine._dag.add_node(SummaryNode(
+            session_id=SESSION, depth=0, summary="slow cached local summary",
+            created_at=1.0, latest_at=1.0,
+        ))
+        outcome = maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config,
+        )
+        print(f"F: outcome={outcome}; construct_allow_download={calls}")
+        assert sorted(task for task, _active, _ in _profiles(engine)) == ["chunk", "summary"]
+        assert not any(calls)
+    finally:
+        engine._close_storage()
+
+
+def test_1063_g_registration_provider_released_before_backfill(
+    tmp_path, home, local_fastembed, monkeypatch,
+):
+    register = command_mod._embedding_register_profiles
+    backfill = command_mod._embedding_backfill_summary_run
+    refs, alive_at_backfill = [], []
+
+    def tracking_register(*args, **kwargs):
+        result = register(*args, **kwargs)
+        if not isinstance(result, str):
+            refs.append(weakref.ref(result["provider"]))
+        return result
+
+    def tracking_backfill(*args, **kwargs):
+        gc.collect()
+        alive_at_backfill.append([ref() is not None for ref in refs])
+        return backfill(*args, **kwargs)
+
+    monkeypatch.setattr(command_mod, "_embedding_register_profiles", tracking_register)
+    monkeypatch.setattr(command_mod, "_embedding_backfill_summary_run", tracking_backfill)
+    engine = _local_engine(tmp_path, home)
+    try:
+        engine._dag.add_node(SummaryNode(
+            session_id=SESSION, depth=0, summary="released provider summary",
+            created_at=1.0, latest_at=1.0,
+        ))
+        maintenance_mod.run_incremental_embedding_pass(
+            engine._config.database_path, engine._config,
+        )
+        print(f"G: registration provider alive at backfill={alive_at_backfill}")
+        assert refs and alive_at_backfill == [[False]]
+    finally:
+        engine._close_storage()

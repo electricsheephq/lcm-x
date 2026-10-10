@@ -113,6 +113,7 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
         result = command._embedding_register_profiles(config, db_path, allow_download=False)
         if isinstance(result, str):
             return "auto_register_unavailable", result
+        del result  # release the probe models before the backfill loads its own
     if breaker is not None and breaker.is_open():
         return "circuit_open", None  # the query path's breaker is cooling down
     probe = probe_provider_availability(config)
