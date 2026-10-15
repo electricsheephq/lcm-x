@@ -1006,6 +1006,72 @@ LCM_LOAD_SESSION = {
     },
 }
 
+
+def recall_guidance_schemas(variant: str = "v1") -> dict:
+    """One import-free description selector for Hermes and read-only readers."""
+    if variant != "v2":
+        return {"lcm_recall": LCM_RECALL, "lcm_load_session": LCM_LOAD_SESSION}
+    recall = {
+        **LCM_RECALL,
+        "description": LCM_RECALL["description"] + " " + (
+            "For questions that combine or compare facts from several conversations (totals, "
+            "lists, changes over time, 'how many', 'which ... first'), first check "
+            "`provenance.answer_ready.sessions_delivered` and `more_available`. "
+            "If more may exist, call again with `exclude_session_ids` set to the sessions you have read, "
+            "or raise `min_sessions`. Read around a hit with its `session_hint`. "
+            "Stop when every part of the question is supported by a cited span, or "
+            "when a call returns no new sessions; then say what you could not find."
+        ),
+    }
+    recall["parameters"] = {
+        **LCM_RECALL["parameters"],
+        "properties": {
+            **LCM_RECALL["parameters"]["properties"],
+            "min_sessions": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 10,
+                "description": (
+                    "Rank-only session floor in the first limit candidates (0 disables). "
+                    "When omitted, uses LCM_RECALL_MIN_SESSIONS (default 0). "
+                    "Verification and response limits still govern delivery."
+                ),
+            },
+        },
+    }
+    load = {
+        **LCM_LOAD_SESSION,
+        "description": LCM_LOAD_SESSION["description"].replace(
+            "Use this after session_search or lcm_grep has identified a session_id "
+            "that already exists in lcm.db.",
+            "Use this after lcm_recall, session_search or lcm_grep has identified a session_id "
+            "that already exists in lcm.db; "
+            "pass anchor_store_id to read the conversation around one hit.",
+        ),
+    }
+    load["parameters"] = {
+        **LCM_LOAD_SESSION["parameters"],
+        "properties": {
+            **LCM_LOAD_SESSION["parameters"]["properties"],
+            "anchor_store_id": {
+                "type": "integer",
+                "description": "Optional exact message anchor belonging to session_id; returns its surrounding window.",
+            },
+            "before": {
+                "type": "integer",
+                "default": 6,
+                "description": "Rows before the anchor, clamped to 0..40; used only with anchor_store_id.",
+            },
+            "after": {
+                "type": "integer",
+                "default": 12,
+                "description": "Rows after the anchor, clamped to 0..40; used only with anchor_store_id.",
+            },
+        },
+    }
+    return {"lcm_recall": recall, "lcm_load_session": load}
+
+
 LCM_DESCRIBE = {
     "name": "lcm_describe",
     "description": (

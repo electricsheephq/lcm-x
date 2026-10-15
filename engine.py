@@ -120,15 +120,14 @@ from .schemas import (
     LCM_EXPAND_QUERY,
     LCM_GREP,
     LCM_INSPECT,
-    LCM_LOAD_SESSION,
     LCM_COMPUTE,
     LCM_COMPILE_EVIDENCE,
     LCM_EVIDENCE_PACK,
     LCM_QUERY_STATE,
-    LCM_RECALL,
     LCM_RECENT,
     LCM_RETRIEVE,
     LCM_STATUS,
+    recall_guidance_schemas,
 )
 from .sanitize import (
     _clean_active_assistant_message,
@@ -4848,16 +4847,17 @@ class LCMEngine(
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         disabled = self._omitted_tool_names()
+        guidance = recall_guidance_schemas(getattr(self._config, "recall_guidance", "v1"))
         schemas = [
             LCM_GREP,
-            LCM_RECALL,
+            guidance["lcm_recall"],
             LCM_QUERY_STATE,
             LCM_COMPUTE,
             LCM_COMPILE_EVIDENCE,
             LCM_EVIDENCE_PACK,
             LCM_RETRIEVE,
             LCM_RECENT,
-            LCM_LOAD_SESSION,
+            guidance["lcm_load_session"],
             LCM_DESCRIBE,
             LCM_EXPAND,
             LCM_EXPAND_QUERY,
@@ -4928,6 +4928,11 @@ class LCMEngine(
         }
         handler = handlers.get(name)
         if handler:
+            if name == "lcm_recall":
+                options = {key: kwargs[key] for key in (
+                    "min_sessions", "session_hints", "recall_guidance"
+                ) if key in kwargs}
+                return handler(args, engine=self, **options)
             return handler(args, engine=self)
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
@@ -7787,6 +7792,9 @@ class LCMEngine(
                 # relevance floor below filters the 6 hits without refill, so an
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
+                min_sessions=0,
+                session_hints=False,
+                recall_guidance="v1",
             )
             payload = json.loads(raw)
         except EmbeddingPrivacyPolicyError as exc:

@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Add: opt-in recall levers under evaluation for v0.28: session breadth (`LCM_RECALL_MIN_SESSIONS=0`), session-window hints (`LCM_RECALL_SESSION_HINTS=false`), and shared multi-session tool guidance plus continuation signals (`LCM_RECALL_GUIDANCE=v1`; opt in with `v2`). All effects default off; recall output under defaults is unchanged. `lcm_load_session` also accepts an exact anchor and bounded before/after windows, with existing cursor paging. (#1188)
+
 ## v0.27.0 (summary quality)
 
 - Fix: survival fit can mark short stored tool rows when head projections cannot fit, and the default summary-prefix bound preserves the user objective for survival fitting. (#1220, #1221; rc6)

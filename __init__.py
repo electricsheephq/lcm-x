@@ -233,6 +233,9 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
             "scope_bias": 0.0,
             "include_occurrence_time": True,
         },
+        min_sessions=0,
+        session_hints=False,
+        recall_guidance="v1",
     )
     recalled = json.loads(raw) if isinstance(raw, str) else raw
     hits = recalled.get("hits") if isinstance(recalled, dict) else None
@@ -304,7 +307,8 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
                 baseline_refs=baseline_refs,
                 question_as_of=question_date,
                 retrieve=lambda recall_args: active_engine.handle_tool_call(
-                    "lcm_recall", recall_args
+                    "lcm_recall", recall_args,
+                    min_sessions=0, session_hints=False, recall_guidance="v1",
                 ),
                 enabled=True,
                 render_baseline_context=baseline_was_internal,
@@ -514,14 +518,13 @@ def register(ctx):
     )
     from .schemas import (
         LCM_GREP,
-        LCM_RECALL,
+        recall_guidance_schemas,
         LCM_QUERY_STATE,
         LCM_COMPUTE,
         LCM_COMPILE_EVIDENCE,
         LCM_EVIDENCE_PACK,
         LCM_RETRIEVE,
         LCM_RECENT,
-        LCM_LOAD_SESSION,
         LCM_DESCRIBE,
         LCM_EXPAND,
         LCM_EXPAND_QUERY,
@@ -683,16 +686,17 @@ def register(ctx):
     # names through the plugin registry (Path A) on message-blind hosts would
     # shadow Path B and lose current-turn ingest, so the Path B fallback is the
     # expected healthy behavior there.
+    guidance = recall_guidance_schemas(getattr(engine._config, "recall_guidance", "v1"))
     _TOOLS = [
         ("lcm_grep", LCM_GREP, "🔍"),
-        ("lcm_recall", LCM_RECALL, "🧠"),
+        ("lcm_recall", guidance["lcm_recall"], "🧠"),
         ("lcm_query_state", LCM_QUERY_STATE, "🧾"),
         ("lcm_compute", LCM_COMPUTE, "🧮"),
         ("lcm_compile_evidence", LCM_COMPILE_EVIDENCE, "🧷"),
         ("lcm_evidence_pack", LCM_EVIDENCE_PACK, "📦"),
         ("lcm_retrieve", LCM_RETRIEVE, "🧭"),
         ("lcm_recent", LCM_RECENT, "🕒"),
-        ("lcm_load_session", LCM_LOAD_SESSION, "📋"),
+        ("lcm_load_session", guidance["lcm_load_session"], "📋"),
         ("lcm_describe", LCM_DESCRIBE, "📊"),
         ("lcm_expand", LCM_EXPAND, "🔎"),
         ("lcm_expand_query", LCM_EXPAND_QUERY, "❓"),

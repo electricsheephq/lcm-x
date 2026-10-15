@@ -87,6 +87,15 @@ The manifest continues to declare all 15 tools.
 
 ### Recall ranking
 
+The #1188 levers are under evaluation for v0.28 and default off:
+`LCM_RECALL_MIN_SESSIONS=0` (integer 0..10; per-call `min_sessions` overrides
+the environment default), `LCM_RECALL_SESSION_HINTS=false` (`answer_ready`
+session-window hints), and `LCM_RECALL_GUIDANCE=v1` (use `v2` for multi-session
+tool descriptions and continuation signals). Proactive recall and the pre-answer
+baseline opt out explicitly. For example, an isolated evaluation can set
+`LCM_RECALL_MIN_SESSIONS=4 LCM_RECALL_SESSION_HINTS=true LCM_RECALL_GUIDANCE=v2`.
+Default recall output remains unchanged; these settings do not assert quality gains.
+
 - `LCM_RECALL_ARM_WEIGHTS` (default `fts=0.5,summary=1.0,chunk=1.0`): per-arm RRF weights for `lcm_recall`; see `docs/retrieval-tools.md`.
 - `LCM_RECALL_FTS_ANCHOR` (default `true`, #950): with two or more arms, keeps the full-text arm's best match inside the `lcm_recall` ranked window when fusion pushed it out (at most one session displaced). The hit keeps its own score; `provenance.fts_anchor = {fired, position, delivered}` reports the move and whether the anchored hit is in the returned hits after `answer_ready` selection and the response cap (`delivered` is `null` when the anchor did not fire). Embeddings-off output is unchanged, and an `fts` weight of `0` turns it off. It is inert for `limit` below `4` (displacing one of three or fewer hits costs more than it gains; frozen in #950), and proactive recall does not use it. Set `false` to restore the previous order. Managed (evaOS fleet) profiles can set it only after a provisioning release adds it to the environment allowlist.
 
