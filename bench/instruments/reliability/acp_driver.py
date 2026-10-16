@@ -207,9 +207,10 @@ class RotationKiller(threading.Thread):
             self.event = {"parent_session_id": self.baseline, "child_session_id": current, "child_rows_at_detect": rows,
                           "missed_rotations": self.missed, "killed": kill}
             if kill:
+                self.event["kill_monotonic_ns"] = time.monotonic_ns()
+                self.client.kill()
                 if self.on_kill:
                     self.on_kill(self.event)
-                self.client.kill()
 
     def run(self) -> None:
         while not self.stop.is_set() and self.event is None:

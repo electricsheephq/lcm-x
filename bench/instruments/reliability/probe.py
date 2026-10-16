@@ -40,7 +40,7 @@ ANCHORS = {  # shape -> (host file, text on the cited line)
     "user_merge": ("agent/agent_runtime_helpers.py", "def _merge_consecutive_users"),
     "orphan_drop": ("agent/agent_runtime_helpers.py", "def _drop_stray_tool_results"),
     "rotation_start": ("agent/conversation_compression.py", "def _notify_context_engine_compression_complete"),
-    "rotation_end": ("agent/conversation_compression.py", "agent.commit_memory_session(messages)"),
+    "rotation_end": ("agent/conversation_compression.py", "agent.commit_memory_session("),  # r34.10 passes original_messages
     "session_transition": ("run_agent.py", "def _transition_context_engine_session"),
     "summary_aborted": ("agent/context_compressor.py", '"summary_generation_aborted"'),
     "cron_agent": ("cron/scheduler.py", 'platform="cron"'),

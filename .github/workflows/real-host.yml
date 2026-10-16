@@ -1,0 +1,81 @@
+name: Real Hermes host
+
+# Non-required check; the owner decides whether to require it after rollout.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: real-host-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  real-host:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [floor-0.21.3, r34.10-0.21.5, ref-0.21.5]
+    env:
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # PluginManager identity tests archive the legacy GA commit.
+
+      - name: Set up Python (harness)
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install harness dependencies
+        run: pip install uv==0.11.26 pytest numpy
+
+      # ci.py prep recreates its venv; it does not support prepared-host cache reuse.
+      - name: Prepare the pinned Hermes tree
+        run: nice -n 19 python -m bench.instruments.reliability.ci prep --host "${{ matrix.host }}" --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
+
+      - name: Export prepared host paths
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          hosts = json.loads((Path(os.environ["RUNNER_TEMP"]) / "hosts.json").read_text())
+          host = hosts["hosts"]["${{ matrix.host }}"]
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"FASTEMBED_CACHE_PATH={os.environ['RUNNER_TEMP']}/fastembed-empty\n")
+              env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}\n")
+              env.write(f"LCM_REAL_HERMES_SRC={host['src']}\n")
+              env.write(f"PYTHONPATH={os.environ['GITHUB_WORKSPACE']}:{host['src']}\n")
+          PY
+
+      - name: Run real-host regressions
+        # LCM_REAL_HERMES_LONG stays unset; the long soak is a separate gate.
+        run: |
+          nice -n 19 python -m pytest -p no:cacheprovider -q -ra \
+            tests/test_issue_524_gen2_replay.py \
+            tests/test_issue_559_tool_group_boundary.py \
+            tests/test_issue_631_not_a_pm_member.py \
+            tests/test_real_plugin_manager_identity.py \
+            tests/test_real_host_bypass_cooldown_wire.py \
+            tests/test_real_turn_loop_acp_override.py \
+            tests/test_real_plugin_manager_compaction.py \
+            tests/test_host_stub_parity.py \
+            --junitxml=real-host-results.xml
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: real-host-${{ matrix.host }}
+          path: real-host-results.xml
+          if-no-files-found: warn

@@ -1,5 +1,5 @@
 {
-  "comment": "Pinned CI hosts for .github/workflows/reliability-nightly.yml (ci.py prep). upstream-main is bumped by a weekly PR, never floating. upstream-uid is upstream after its message-uid change (message uids and the P8 flush seams); upstream-main stays before it, where the host archive copies uncovered rows behind the running turn.",
+  "comment": "Pinned CI hosts for the reliability-nightly and real-host workflows (ci.py prep). upstream-main is bumped by a weekly PR, never floating. upstream-uid is upstream after its message-uid change (message uids and the P8 flush seams); upstream-main stays before it, where the host archive copies uncovered rows behind the running turn.",
   "hosts": {
     "ref-0.21.5": {
       "repo": "NousResearch/hermes-agent",
@@ -9,10 +9,10 @@
       "extras": "acp,edge-tts,bedrock,vertex,anthropic",
       "pins": ["agent-client-protocol==0.9.0", "pip==24.0"]
     },
-    "customer-0.21.2": {
+    "r34.10-0.21.5": {
       "repo": "electricsheephq/evaOS-hermes-desktop-app-adapter",
-      "sha": "2d10969e7d6fab477c4aa4f7e4c9e4df1f524e9a",
-      "hermes_version": "0.21.2",
+      "sha": "99afd82c64b3124452e28e2536de027eecf0a17e",
+      "hermes_version": "0.21.5",
       "python_version": "3.11",
       "extras": "acp,edge-tts,bedrock,vertex,anthropic",
       "pins": ["agent-client-protocol==0.9.0", "pip==24.0"]

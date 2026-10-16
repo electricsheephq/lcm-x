@@ -26,7 +26,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        host: [ref-0.21.5, floor-0.21.3, r34.4-0.21.5, upstream-main, upstream-uid]
+        # Keep r34.4 alongside r34.10 for one release to retain comparison coverage.
+        host: [ref-0.21.5, floor-0.21.3, r34.4-0.21.5, r34.10-0.21.5, upstream-main, upstream-uid]
     env:
       OUT: ${{ github.workspace }}/reliability-out
     steps:

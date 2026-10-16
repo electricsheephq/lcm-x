@@ -3,6 +3,7 @@ guard, chronology and the process-cell plumbing. No Hermes: the ACP peer is a ti
 from __future__ import annotations
 
 import http.client
+import io
 import json
 import os
 import signal
@@ -284,15 +285,91 @@ def test_accounting_matches_requests_to_scripted_steps(tmp_path):
     assert not PC.accounting(tmp_path, [events[0], rotation_kill])["ok"]
 
 
+@pytest.mark.parametrize("intervals,kills,unexpected", [
+    ([(10, 30)], [20], []),  # its own in-flight truncation
+    ([(2_000_000_030, 2_000_000_040)], [20], [1]),  # request started well after the kill
+    ([(25, 40)], [20], []),  # its handler thread stamped the start just after the kill
+    ([(10, 15)], [20], [1]),  # client had already disconnected
+    ([(10, 30), (40, 60)], [20, 50], []),
+    ([(10, 30), (10, 30)], [20], [2]),  # one kill cannot license two requests
+    ([(1, 5), (10, 30)], [20], [1]),  # unrelated first record cannot steal the match
+    ([(10, 60), (10, 30)], [20, 50], []),  # earliest-ending interval gets the first kill
+    ([(10, 30)], [], [1]),
+    ([(None, None)], [20], [1]),  # old logs do not establish a match
+    ([(10, 30)], [None], [1]),
+])
+def test_accounting_correlates_truncated_requests_with_crashes(tmp_path, intervals, kills, unexpected):
+    for rid, (start, end) in enumerate(intervals, 1):
+        PC.append(tmp_path / "provider-requests.jsonl", {
+            "rid": rid, "method": "POST", "path": "/v1/chat/completions", "role": None,
+            "truncated": [1, 100], "receive_start_ns": start, "receive_end_ns": end,
+        })
+    events = [{"phase": "A", "event": "crash", "kill_monotonic_ns": kill} for kill in kills]
+    acct = PC.accounting(tmp_path, events)
+    assert acct["ok"] is (not unexpected)
+    assert acct["truncated_requests"] == list(range(1, len(intervals) + 1))
+    assert acct["unexpected_requests"] == [{"rid": rid, "route": "truncated"} for rid in unexpected]
+
+
+def test_provider_records_the_truncated_body_receive_interval(tmp_path, monkeypatch):
+    handlers = []
+
+    def server(_address, handler):
+        handlers.append(handler)
+        return types.SimpleNamespace(server_address=("127.0.0.1", 0), serve_forever=lambda: None)
+
+    monkeypatch.setattr(FP, "ThreadingHTTPServer", server)
+    clock = iter([10, 30])
+    monkeypatch.setattr(FP.time, "monotonic_ns", lambda: next(clock))
+    provider = FP.FakeProvider(tmp_path / "provider-requests.jsonl")
+    handler = handlers[0].__new__(handlers[0])
+    handler.path = "/v1/chat/completions"
+    handler.headers = {"Content-Length": "100"}
+    handler.rfile = io.BytesIO(b"{")
+    handler.do_POST()
+    record, = PC.read_jsonl(provider.log_path)
+    assert record["truncated"] == [1, 100]
+    assert (record["receive_start_ns"], record["receive_end_ns"]) == (10, 30)
+    assert PC.accounting(tmp_path, [{"event": "crash", "kill_monotonic_ns": 20}])["ok"]
+
+
+def test_compaction_crash_records_the_signal_time_and_original_phase(monkeypatch):
+    fired, records = set(), []
+    run = types.SimpleNamespace(fired=fired, phase="A")
+    kind = "crash_after_compaction_before_reply"
+
+    def kill():
+        assert kind in fired  # ProcessGone can now be classified as an injected crash
+        assert records, "the crash is recorded before the signal, while the phase is still A"
+        run.phase = "B"
+
+    def fire(*args, **kwargs):
+        fired.add(args[0])
+        records.append((args, kwargs))
+
+    run.proc = types.SimpleNamespace(kill=kill)
+    run.fire = fire
+    monkeypatch.setattr(PC.time, "monotonic_ns", lambda: 20)
+    PC.ProcessCell.crash(run, 7)
+    assert records == [((kind, 7), {"phase": "A", "kill_monotonic_ns": 20})]
+
+
 def test_rotation_killer_skips_a_lost_race_and_kills_on_the_next_empty_child(tmp_path, monkeypatch):
     states = iter([("S1", 5), ("S2", 3), ("S3", 0)])  # baseline, child already has rows (lost race), empty child
     monkeypatch.setattr(AD, "rotation_probe", lambda *_: next(states))
+    monkeypatch.setattr(AD.time, "monotonic_ns", lambda: 20)
     killed, fired = [], []
-    killer = AD.RotationKiller(types.SimpleNamespace(kill=lambda: killed.append(1)), tmp_path / "lcm.db", "c", fired.append)
+
+    def on_kill(event):
+        assert killed  # record the event after the actual signal, not before log I/O
+        fired.append(event)
+
+    killer = AD.RotationKiller(types.SimpleNamespace(kill=lambda: killed.append(1)), tmp_path / "lcm.db", "c", on_kill)
     killer.check(kill=True)
     assert killer.event is None and killer.baseline == "S2" and not killed
     killer.check(kill=True)
     assert killed and fired[0]["child_session_id"] == "S3" and fired[0]["missed_rotations"] == 1 and fired[0]["killed"]
+    assert fired[0]["kill_monotonic_ns"] == 20
 
 
 def test_plugins_root_symlink_or_escape_is_refused_before_any_cache_write(tmp_path):
