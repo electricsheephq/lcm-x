@@ -43,6 +43,7 @@ What we are building and why: [VISION.md](VISION.md). What ships when:
 - [Recall skill and policy](#recall-skill-and-policy)
 - [Configuration](#configuration)
 - [Retrieval contract](#retrieval-contract)
+- [Use LCM-X memory from Claude Code (read-only)](#use-lcm-x-memory-from-claude-code-read-only)
 - [OpenClaw/lossless-claw import](#openclawlossless-claw-import)
 - [Troubleshooting](#troubleshooting)
 - [Architecture](#architecture)
@@ -975,6 +976,44 @@ Carried-over summary nodes can become current-session content after `/new`, but
 their source eligibility still comes from descendant raw messages. Expanding a
 carried-over current-session node recovers the original raw message sources even
 when those sources still belong to a previous session.
+
+## Use LCM-X memory from Claude Code (read-only)
+
+`scripts/lcm_x_mcp.py` is a stdio MCP server over one Hermes profile's LCM-X
+store. It serves `lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session` and
+`lcm_describe` with the same schemas and outputs as inside Hermes. Run it with the
+Hermes venv Python (3.10 or newer):
+
+```bash
+claude mcp add lcm-x -- <hermes-venv-python> <plugin_dir>/scripts/lcm_x_mcp.py \
+  --store <path/to/lcm.db> --hermes-home <HERMES_HOME>
+```
+
+- **Reads only.** The store is opened read-only, with a fresh connection per tool
+  call; the server never migrates, repairs, backfills, checkpoints or creates
+  tables, so Hermes stays the only writer, and Hermes' new rows show up on the next
+  call. It also reads the profile's externalized payload files and the `LCM_*`
+  lines of `<HERMES_HOME>/.env` (no other key in that file).
+- **No active session.** `lcm_grep` defaults to `session_scope='all'`, a `node_id`
+  without `session_id` resolves in the node's own session, and externalized
+  payloads resolve from any session of the store.
+- **Flags.** Every result starts with `store_uuid` and a `reader` object.
+  `reader.degraded` lists `embedding_identity_mismatch` or `provider_unavailable`
+  when vectors are off and only full text answers; vectors are used only when the
+  locally cached embedding model matches the store's active identity in full, and
+  cloud providers are never called. `reader.tokenizer` is `estimate` until the
+  tokenizer has loaded. `reader.capabilities` shows optional tables the store
+  lacks. Ids may be sent bare or as `<store_uuid>:<id>`; another store's prefix
+  is refused.
+- **Offline.** If Hermes is stopped and the store's `-wal`/`-shm` coordination files
+  are gone, a call returns a `store_offline` error without opening the store (so the
+  reader never creates those files), and the next call retries. A reader that opens
+  in the instant the agent stops may recreate the two empty coordination files; the
+  agent's next start handles them. A store stamped newer than the plugin, or below
+  schema v5, is refused with `schema_refused`.
+
+See the [operator guide](docs/operator-guide.md#use-lcm-x-memory-from-claude-code-read-only)
+for details.
 
 ## OpenClaw/lossless-claw import
 

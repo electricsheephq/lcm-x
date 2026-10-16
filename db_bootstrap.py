@@ -16,6 +16,7 @@ import shutil
 import sqlite3
 import threading
 import time
+import uuid
 from contextlib import closing, contextmanager
 from typing import Iterable, Sequence
 
@@ -2426,6 +2427,38 @@ def mark_migration_step_complete(conn: sqlite3.Connection, step_name: str) -> No
     )
 
 
+STORE_UUID_METADATA_KEY = "store_uuid"
+
+
+def ensure_store_uuid(conn: sqlite3.Connection) -> None:
+    """Stamp a stable per-store id once (#1192); readers outside Hermes qualify ids with it.
+
+    The SELECT keeps a steady-state open free of write locks (#622); the INSERT runs
+    once per store, and OR IGNORE makes a racing second writer a no-op. Not a
+    schema-version step: older builds simply ignore the extra metadata row.
+    """
+    if conn.execute(
+        "SELECT 1 FROM metadata WHERE key = ?", (STORE_UUID_METADATA_KEY,)
+    ).fetchone():
+        return
+    conn.execute(
+        "INSERT OR IGNORE INTO metadata(key, value) VALUES(?, ?)",
+        (STORE_UUID_METADATA_KEY, uuid.uuid4().hex),
+    )
+
+
+def read_store_uuid(conn: sqlite3.Connection) -> str:
+    """Return the stamped store_uuid, or '' when absent; never creates anything."""
+    if not conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='metadata'"
+    ).fetchone():
+        return ""
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?", (STORE_UUID_METADATA_KEY,)
+    ).fetchone()
+    return str(row[0] or "") if row else ""
+
+
 def set_schema_version(conn: sqlite3.Connection, version: int = SCHEMA_VERSION) -> None:
     ensure_metadata_table(conn)
     conn.execute(
@@ -3649,6 +3682,8 @@ def run_versioned_migrations(conn: sqlite3.Connection) -> None:
     if current_version < 5:
         mark_migration_step_complete(conn, "v5_message_conversation_id")
         current_version = 5
+
+    ensure_store_uuid(conn)
 
     # NOTE: the opt-in temporal-rollup tables are deliberately NOT created here.
     # Creating them would advance the core schema for every install (even with

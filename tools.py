@@ -174,6 +174,28 @@ def _session_expand_hint(node_id: int, session_id: str) -> str:
     return f"lcm_expand(node_id={node_id}, session_id={session_id!r})"
 
 
+def _reader_any_session(engine: "LCMEngine") -> bool:
+    """True only on the read-only ``lcm-x mcp`` reader's engine (#1192).
+
+    The reader has no current session and serves one store the local user owns, so
+    its externalized-payload lookups may reach any session of that store. Hermes'
+    engine never sets the attribute; the identity check keeps a mock engine (whose
+    auto-attributes are truthy) on today's session-scoped behaviour.
+    """
+    return getattr(engine, "_reader_any_session", False) is True
+
+
+def _engine_vector_store_cls(engine: "LCMEngine") -> Any:
+    """The KNN backend class: this module's ``VectorStore`` unless the engine binds one (#1192).
+
+    Resolved at call time through the module namespace, so tests that monkeypatch
+    ``tools.VectorStore`` still govern the backend. Only the read-only reader binds
+    ``_vector_store_cls`` (its constructor never writes the store).
+    """
+    bound = getattr(engine, "_vector_store_cls", None)
+    return bound if isinstance(bound, type) else VectorStore
+
+
 def _get_externalized_payload(
     engine: "LCMEngine",
     ref: str,
@@ -183,6 +205,8 @@ def _get_externalized_payload(
     payload = load_externalized_payload(ref, config=engine._config, hermes_home=engine._hermes_home)
     if payload is None:
         return None
+    if _reader_any_session(engine):
+        return payload
     payload_session_id = payload.get("session_id") or ""
     allowed = allowed_session_ids
     if not allowed:
@@ -4146,7 +4170,8 @@ def _lcm_grep_semantic(
 
     def _run_knn() -> Any:
         # VectorStore is resolved through this module's namespace so tests that
-        # monkeypatch ``tools.VectorStore`` continue to govern the KNN backend.
+        # monkeypatch ``tools.VectorStore`` continue to govern the KNN backend;
+        # the read-only reader binds its own class on the engine (#1192).
         return run_knn(
             engine,
             query_vector=query_vector,
@@ -4157,7 +4182,7 @@ def _lcm_grep_semantic(
             until=time_to,
             conversation_ids=knn_conversation_ids,
             source=source,
-            vector_store_cls=VectorStore,
+            vector_store_cls=_engine_vector_store_cls(engine),
         )
 
     try:
@@ -5553,7 +5578,7 @@ def _lcm_recall_summary_arm(
             until=None,
             conversation_ids=candidate_session_ids,
             source=None,
-            vector_store_cls=VectorStore,
+            vector_store_cls=_engine_vector_store_cls(engine),
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
             **_lcm_recall_scan_bounds(engine),
         ),
@@ -5627,7 +5652,7 @@ def _lcm_recall_chunk_arm(
             until=None,
             conversation_ids=candidate_session_ids,
             source=None,
-            vector_store_cls=VectorStore,
+            vector_store_cls=_engine_vector_store_cls(engine),
             scan_rows=max(1, int(getattr(engine._config, "recall_scan_rows", 25_000))),
             **_lcm_recall_scan_bounds(engine),
         ),
@@ -7297,7 +7322,9 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
         if refs:
             result["externalized_refs"] = refs
             result["externalized_ref"] = refs[0]
-            if bool(engine_session_id) and stored_session_id == engine_session_id:
+            if (
+                bool(engine_session_id) and stored_session_id == engine_session_id
+            ) or _reader_any_session(engine):
                 payload_summaries = []
                 for ref in refs:
                     payload = _get_externalized_payload(engine, ref)

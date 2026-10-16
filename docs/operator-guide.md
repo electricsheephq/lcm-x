@@ -1353,6 +1353,81 @@ existing float32 corpus without re-registering and re-running
 migration path (computing sign-bits/quantization from already-stored float32
 vectors, no provider re-call) is planned but not yet built.
 
+## Use LCM-X memory from Claude Code (read-only)
+
+`scripts/lcm_x_mcp.py` (`lcm-x mcp`) lets Claude Code read a Hermes profile's
+LCM-X memory while Hermes keeps running. It is a stdio MCP server over ONE store
+and serves five tools with their production schemas and outputs: `lcm_recall`,
+`lcm_grep`, `lcm_expand`, `lcm_load_session` and `lcm_describe`.
+
+Register it with the Hermes venv Python (3.10 or newer; an older interpreter
+exits with one line saying so):
+
+```bash
+claude mcp add lcm-x -- <hermes-venv-python> <plugin_dir>/scripts/lcm_x_mcp.py \
+  --store <path/to/lcm.db> --hermes-home <HERMES_HOME> [--log-dir <dir>]
+```
+
+`--store` is the profile's `lcm.db` (it can live outside `HERMES_HOME` when
+`LCM_DATABASE_PATH` moves it). `--hermes-home` is that profile's home: the server
+resolves externalized payloads against it and reads its configuration from it.
+
+What it reads:
+
+- the store, opened `mode=ro` with a new connection for each tool call, so no read
+  snapshot outlives a call and Hermes' WAL checkpoints keep progressing;
+- the profile's externalized payload files (read only, never created);
+- `<HERMES_HOME>/.env`, of which it parses only `LCM_*` lines and
+  `FASTEMBED_CACHE_PATH`. Provider API keys and every other line are never read
+  into the server, logged or forwarded. The `LCM_*` settings of the shell that
+  started the server are ignored, including `LCM_HERMES_BASE_DIR`.
+  `LCM_DISABLED_TOOLS` from the profile hides those tools.
+
+What it never does: write the store. It runs no migrations, FTS repair or
+integrity scan, stem backfill, embedding-table creation, marker write or
+checkpoint, and it never goes through Hermes' tool dispatch (which ingests).
+The test suite runs a full five-tool sweep under a SQLite authorizer on every
+connection the server opens and requires zero main-database writes.
+
+Behaviour without an active session:
+
+- `lcm_grep` defaults to `session_scope='all'` (or `'session'` when a `session_id`
+  is given);
+- `lcm_expand`/`lcm_describe` with a `node_id` but no `session_id` resolve the
+  node in its own session;
+- externalized payloads (by `externalized_ref`, or attached to a `store_id`
+  expansion) resolve from any session of the store.
+
+Result flags. Every result is the production JSON object prefixed with
+`store_uuid` and a `reader` object:
+
+| Field | Meaning |
+| --- | --- |
+| `store_uuid` | The store's id. Hermes writes it once to the store's metadata (no schema-version change). A store Hermes has not opened since upgrading gets an id derived from the file's identity, with `store_uuid_source: derived`. |
+| `reader.degraded` | `embedding_identity_mismatch`: the store's active embedding identity (provider, model, revision, dimension, dtype) differs from the reader's model. `provider_unavailable`: no local model is cached (the server never downloads one), or the profile uses a cloud provider, which the reader never calls. Either way only full text answers. |
+| `reader.tokenizer` | `estimate` while the tokenizer is not loaded (the server waits up to 30 s at start); content cut by token budget can then differ from Hermes' cut. |
+| `reader.capabilities` | Optional parts of the store: FTS indexes, the stem index, embeddings, chunk vectors, the summary provenance sidecar, lifecycle state. A missing one degrades that feature instead of failing the call. |
+
+Ids in tool arguments (`store_id`, `node_id`, `session_id`, `externalized_ref`,
+`after_store_id`, and the entries of `seen_refs`, `exclude_session_ids` and
+`externalized_refs`) may be bare or prefixed `<store_uuid>:`. A prefix naming
+another store is refused with a `foreign_store` error.
+
+Errors:
+
+- `store_offline`: the store is in WAL mode and its `-wal` or `-shm` file is gone
+  (Hermes stopped on a system that removes them). The server checks this from the
+  database header before opening and does not open the store, because a read-only
+  open would recreate the files. Start Hermes; the next call retries. Residual race:
+  a reader that opens in the instant the agent stops may recreate the two empty
+  coordination files; the agent's next start handles them.
+- `schema_refused`: the store is stamped newer than this plugin, is below schema
+  v5, or lacks a required core table. Nothing is opened for write.
+
+Logs go to `lcm-x-mcp-<pid>.log` under `--log-dir` (default `$TMPDIR`): one
+metadata line per call (tool, argument hash, latency, size); the server itself
+never logs argument text or `.env` values. Stdout carries only protocol lines.
+
 ## Import and backfill
 
 ### Historical tool-output sidecars

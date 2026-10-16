@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- New: `scripts/lcm_x_mcp.py` (`lcm-x mcp`), a read-only stdio MCP server for Claude Code over one Hermes store. It serves `lcm_recall`, `lcm_grep`, `lcm_expand`, `lcm_load_session` and `lcm_describe` with their production schemas and outputs, opens the store read-only per call and never writes it; results carry `store_uuid` and degraded-mode flags. Hermes now writes a `store_uuid` metadata row once per store (no schema-version change); its tool behaviour is otherwise unchanged. (#1192)
+
 ## v0.27.0 (summary quality)
 
 - Fix: survival fit can mark short stored tool rows when head projections cannot fit, and the default summary-prefix bound preserves the user objective for survival fitting. (#1220, #1221; rc6)
