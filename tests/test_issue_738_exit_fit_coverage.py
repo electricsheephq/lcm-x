@@ -204,6 +204,8 @@ _SWEEP_ON_RC1 = {
 
 @pytest.mark.parametrize("cell", sorted(_SWEEP_ON_RC1))
 def test_t3_sweep_on_output_is_byte_identical_to_rc1(tmp_path, monkeypatch, summaries, cell):
+    # The pre-#659 golden bytes exclude carry; r7 can now deliver one on this formerly no-room path.
+    monkeypatch.setattr(lcm_engine, "_USER_CARRY_HEADROOM_SHARE", 0.0)
     engine = _engine(tmp_path, monkeypatch, sweep=True)
     try:
         outputs: list = []
@@ -214,6 +216,8 @@ def test_t3_sweep_on_output_is_byte_identical_to_rc1(tmp_path, monkeypatch, summ
             engine.ingest(view)
             engine._start_sweep_budget_hold()  # rc4: this unchanged fit-only pin belongs to #608 only
             outputs.append(engine.compress(view, current_tokens=engine._survival_measure(view) + 800))
+        # The held-ceiling no-op never assembles carry; every assembled packet has zero budget.
+        assert engine._last_user_carry.get("budget_tokens", 0) == 0
         assert _digest(engine, outputs) == _SWEEP_ON_RC1[cell]
     finally:
         engine.shutdown()

@@ -133,7 +133,10 @@ def test_t3_steer_survives_a_later_forced_compaction(tmp_path, summaries):
             engine.ingest(host)
         live = engine.compress(host)
         assert engine._last_compression_status == "compacted"
-        assert not any(STEER_TEXT in str(message.get("content") or "") for message in live)
+        # #659: the steer is a real user row, so it may come back only as verbatim history in the carry packet.
+        assert not any(STEER_TEXT in str(message.get("content") or "").partition("[Earlier user messages")[0]
+                       for message in live)
+        assert sum(str(message.get("content") or "").count(STEER_TEXT) for message in live) <= 1
         assert len(_steer_rows(engine)) == 1
         grep = json.loads(engine.handle_tool_call("lcm_grep", {"query": "staging database"}))
         hits = [hit for hit in grep.get("results", []) if hit.get("role") == "user"]

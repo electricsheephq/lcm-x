@@ -422,7 +422,10 @@ def test_covered_row_duplicating_a_tail_row_loses_nothing(tmp_path, monkeypatch)
     engine, provider, committed, out, _t = _resumed(tmp_path, monkeypatch, messages)
     try:
         assert out == committed and engine._store.get_session_count(SID) == 142
-        text = "\n".join(str(m.get("content") or "") for m in out)
+        # #659: the covered copy may also come back as verbatim history in the carry packet; count outside it.
+        contents = [str(m.get("content") or "") for m in out]
+        text = "\n".join(c[:c.find("\n\n---\n\n[Earlier user messages")] + c[engine._verified_lcm_summary_prefix_end(c):]
+                         if "\n\n---\n\n[Earlier user messages" in c else c for c in contents)
         assert text.count(messages[2]["content"]) == 1, "the tail copy stays; the covered copy is summarized"
         assert all(str(m["content"]) in text for m in messages[110:] if m.get("content"))
     finally:

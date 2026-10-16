@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+import hermes_lcm.engine as engine_module
 from hermes_lcm import host_uid_emit as emit
 from hermes_lcm.config import host_message_uid_mode
 from hermes_lcm.host_uid_emit import IDENTITY_KEYS
@@ -62,6 +63,8 @@ def _without_uids(messages):
 
 @pytest.mark.parametrize("reader", sorted(ROLLBACK_READERS))
 def test_persisted_shadow_uids_are_inert_to_rollback_reader(tmp_path, monkeypatch, reader):
+    # This pre-carry rollback control had no packet under the old target; isolate UID behavior as before.
+    monkeypatch.setattr(engine_module, "_USER_CARRY_HEADROOM_SHARE", 0.0)
     root = Path(__file__).resolve().parents[1]
     commit = ROLLBACK_READERS[reader]
     try:
@@ -92,6 +95,7 @@ def test_persisted_shadow_uids_are_inert_to_rollback_reader(tmp_path, monkeypatc
                    tool_call_id="rollback-call", _tool_call_uid="host-result"))
     try:
         emitted = _compress(engine, host)
+        assert engine._last_user_carry["budget_tokens"] == 0
         engine_uids = {row[0] for row in engine._store._conn.execute(
             "SELECT uid FROM host_uid_bindings WHERE kind = 'engine'")}
         minted = [row for row in emitted if row.get("message_uid") in engine_uids]
