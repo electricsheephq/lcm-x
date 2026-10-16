@@ -1,0 +1,260 @@
+name: Invariants nightly
+on:
+  schedule:
+    - cron: "53 4 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths: ["tests/invariants/**", ".github/workflows/invariants-nightly.yml"]
+permissions: {contents: read}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  # One job per state machine (TestCase class) and per file of plain tests, so each stays far below the job timeout as
+  # machines are added. The shard list is collected, so a new machine gets its own job without editing this file.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.collect.outputs.shards }}
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with: {persist-credentials: false}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with: {python-version: "3.12"}
+      - run: pip install pytest numpy hypothesis==6.141.1
+      # keep identical to ci.yml's stub step
+      - name: Stub hermes-agent ABC
+        run: |
+          mkdir -p agent
+          cat > agent/__init__.py <<'STUB'
+          STUB
+          cat > agent/context_engine.py <<'STUB'
+          """Dependency-free ContextEngine contract shared by the pinned hosts."""
+          import copy
+          import json
+          from abc import ABC, abstractmethod
+
+          class ContextEngine(ABC):
+              last_prompt_tokens = 0
+              last_completion_tokens = 0
+              last_total_tokens = 0
+              threshold_tokens = 0
+              context_length = 0
+              compression_count = 0
+              threshold_percent = 0.75
+              protect_first_n = 3
+              protect_last_n = 6
+              emit_automatic_compaction_status = True
+
+              def __init__(self, **kwargs):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+
+              @property
+              @abstractmethod
+              def name(self):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def update_from_response(self, usage):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def should_compress(self, prompt_tokens=None):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def compress(self, messages, current_tokens=None, focus_topic=None, force=False, memory_context=""):
+                  raise NotImplementedError
+
+              def should_compress_info(self, prompt_tokens=None):
+                  return self.should_compress(prompt_tokens), None
+
+              def should_compress_preflight(self, messages):
+                  return False
+
+              def get_automatic_compaction_status_message(self, *, phase, default_message, **context):
+                  return default_message if self.emit_automatic_compaction_status else None
+
+              def on_session_start(self, session_id, **kwargs):
+                  pass
+
+              def on_session_end(self, session_id, messages):
+                  pass
+
+              def on_session_reset(self):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+                  self.last_completion_tokens = 0
+                  self.last_total_tokens = 0
+
+              def get_tool_schemas(self):
+                  return []
+
+              def handle_tool_call(self, name, args, **kwargs):
+                  return json.dumps({"error": f"Unknown context engine tool: {name}"})
+
+              def get_status(self):
+                  last_prompt = max(self.last_prompt_tokens, 0)
+                  return {
+                      "last_prompt_tokens": last_prompt,
+                      "threshold_tokens": self.threshold_tokens,
+                      "context_length": self.context_length,
+                      "usage_percent": min(100, last_prompt / self.context_length * 100) if self.context_length else 0,
+                      "compression_count": self.compression_count,
+                  }
+
+              def clone_for_agent(self):
+                  return copy.deepcopy(self)
+
+              def update_model(self, model, context_length, base_url="", api_key="", provider="", api_mode=""):
+                  # Host threshold resolution imports its compressor; keep this
+                  # unit-test fallback dependency-free. LCMEngine overrides it.
+                  self.context_length = context_length
+          STUB
+
+      - name: Collect shards
+        id: collect
+        run: |
+          python -m pytest tests/invariants --co -q -p no:randomly > "$RUNNER_TEMP/collect.txt"
+          python3 - "$RUNNER_TEMP/collect.txt" >> "$GITHUB_OUTPUT" <<'PY'
+          import json, sys
+          shards = []
+          for line in open(sys.argv[1]):
+              parts = line.strip().split("::")
+              at = parts[0].find("tests/invariants/")
+              if len(parts) < 2 or at < 0:
+                  continue
+              parts[0] = parts[0][at:]  # node ids may carry a rootdir prefix
+              key = "::".join(parts[:2]) if parts[1][:1].isupper() else parts[0]
+              if key not in shards:
+                  shards.append(key)
+          assert shards, "no invariant tests collected"
+          print("shards=" + json.dumps(shards))
+          PY
+  invariants:
+    needs: plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: ${{ github.event_name == 'pull_request' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    env:
+      PYTHONPATH: ${{ github.workspace }}
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with: {persist-credentials: false}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with: {python-version: "3.12"}
+      - run: pip install pytest numpy hypothesis==6.141.1
+      # keep identical to ci.yml's stub step
+      - name: Stub hermes-agent ABC
+        run: |
+          mkdir -p agent
+          cat > agent/__init__.py <<'STUB'
+          STUB
+          cat > agent/context_engine.py <<'STUB'
+          """Dependency-free ContextEngine contract shared by the pinned hosts."""
+          import copy
+          import json
+          from abc import ABC, abstractmethod
+
+          class ContextEngine(ABC):
+              last_prompt_tokens = 0
+              last_completion_tokens = 0
+              last_total_tokens = 0
+              threshold_tokens = 0
+              context_length = 0
+              compression_count = 0
+              threshold_percent = 0.75
+              protect_first_n = 3
+              protect_last_n = 6
+              emit_automatic_compaction_status = True
+
+              def __init__(self, **kwargs):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+
+              @property
+              @abstractmethod
+              def name(self):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def update_from_response(self, usage):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def should_compress(self, prompt_tokens=None):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def compress(self, messages, current_tokens=None, focus_topic=None, force=False, memory_context=""):
+                  raise NotImplementedError
+
+              def should_compress_info(self, prompt_tokens=None):
+                  return self.should_compress(prompt_tokens), None
+
+              def should_compress_preflight(self, messages):
+                  return False
+
+              def get_automatic_compaction_status_message(self, *, phase, default_message, **context):
+                  return default_message if self.emit_automatic_compaction_status else None
+
+              def on_session_start(self, session_id, **kwargs):
+                  pass
+
+              def on_session_end(self, session_id, messages):
+                  pass
+
+              def on_session_reset(self):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+                  self.last_completion_tokens = 0
+                  self.last_total_tokens = 0
+
+              def get_tool_schemas(self):
+                  return []
+
+              def handle_tool_call(self, name, args, **kwargs):
+                  return json.dumps({"error": f"Unknown context engine tool: {name}"})
+
+              def get_status(self):
+                  last_prompt = max(self.last_prompt_tokens, 0)
+                  return {
+                      "last_prompt_tokens": last_prompt,
+                      "threshold_tokens": self.threshold_tokens,
+                      "context_length": self.context_length,
+                      "usage_percent": min(100, last_prompt / self.context_length * 100) if self.context_length else 0,
+                      "compression_count": self.compression_count,
+                  }
+
+              def clone_for_agent(self):
+                  return copy.deepcopy(self)
+
+              def update_model(self, model, context_length, base_url="", api_key="", provider="", api_mode=""):
+                  # Host threshold resolution imports its compressor; keep this
+                  # unit-test fallback dependency-free. LCMEngine overrides it.
+                  self.context_length = context_length
+          STUB
+
+      - name: Run nightly invariants
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          set +e
+          LCM_HYPOTHESIS_PROFILE=nightly python -m pytest "$SHARD" -q -rx -p no:randomly 2>&1 | tee "$RUNNER_TEMP/invariants-pytest.log"
+          result=${PIPESTATUS[0]}
+          { echo "$SHARD"; tail -n 1 "$RUNNER_TEMP/invariants-pytest.log"; echo "pytest exit code: $result"; } >> "$GITHUB_STEP_SUMMARY"
+          exit "$result"
+      - name: Preserve Hypothesis examples on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with: {name: "invariants-hypothesis-${{ strategy.job-index }}", path: .hypothesis, include-hidden-files: true}
