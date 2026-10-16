@@ -468,3 +468,235 @@ def test_known_open_exclusions_track_their_strict_xfails():
                    for mark in parameter.marks if mark.name == "xfail" and mark.kwargs.get("strict"))
     xfailed = {int(found.group(1)) for reason in reasons if (found := re.match(r"#(\d+)", reason))}
     assert set(KNOWN_OPEN) <= xfailed, (set(KNOWN_OPEN) - xfailed)
+
+
+@pytest.mark.parametrize("in_place", [True, False], ids=["in-place", "rotation"])
+def test_host_merge_replay_resume_append(in_place):
+    from tests.invariants.test_exactly_once_machine import HostMergeMachine
+
+    machine = HostMergeMachine()
+    try:
+        for _ in range(3):
+            machine.new_turn("alpha", False, 0, False, "lookup")
+        ledger = deepcopy(machine.occurrences)
+        machine.host_merge(in_place)
+        assert machine.occurrences == ledger
+        assert machine.host[0].get("_merged_turn_prefix")
+        machine.exactly_once()
+        machine.new_turn("same text", False, 0, False, "lookup")
+        machine.exactly_once()
+        machine.replay()
+        machine.exactly_once()
+        machine.cold_resume()
+        machine.exactly_once()
+        machine.new_turn("βeta", True, 1, False, "inspect")
+        machine.exactly_once()
+    finally:
+        machine.teardown()
+
+
+def test_gateway_reset_retains_deliveries_across_fresh_engines():
+    from tests.invariants.test_exactly_once_machine import GatewayResetMachine
+
+    machine = GatewayResetMachine()
+    try:
+        for _ in range(3):
+            machine.new_turn("alpha", False, 0, False, "lookup")
+        machine.compress()
+        machine.exactly_once()
+        for _ in range(2):
+            ledger = deepcopy(machine.occurrences)
+            old_engine = machine.engine
+            machine.reset()
+            assert machine.engine is not old_engine
+            assert machine.host == []
+            assert machine.occurrences == ledger
+            assert machine.engine.current_conversation_id == "identity-conversation"
+            machine.exactly_once()
+            for _ in range(2):
+                machine.new_turn("alpha", False, 0, False, "lookup")
+                machine.exactly_once()
+            machine.compress()
+            machine.exactly_once()
+            machine.replay()
+            machine.exactly_once()
+            machine.cold_resume()
+            machine.exactly_once()
+    finally:
+        machine.teardown()
+
+
+class CliResetReplayStored(AssertionError):
+    """Only the exact #1306 stale-owner or skipped-delivery row shapes."""
+
+
+def assert_cli_reset_occurrences(ledgers, stored, old, new, start):
+    errors = []
+    for conversation, ledger in ledgers.items():
+        rows = stored[conversation]
+        try:
+            assert_occurrences(ledger, rows)
+            assert all(row["session_id"] == conversation for row in rows), "session ownership"
+        except AssertionError as error:
+            errors.append(f"{conversation}: {error}")
+    if not errors:
+        return
+    # #1306 leaves the ended conversation intact. Alpha/beta can be ingested
+    # there by the failed compress; gamma is skipped. The hooks can also skip
+    # every post-/new delivery. No partial loss, duplicate or reorder qualifies.
+    actual_old = list(map(identity, stored[old]))
+    expected_old = list(map(identity, ledgers[old]))
+    before_compress = list(map(identity, ledgers[new][:-2]))
+    if (not start and not stored[new]
+            and all(row["session_id"] == old for row in stored[old])
+            and actual_old in (expected_old, expected_old + before_compress)):
+        raise CliResetReplayStored("\n".join(errors))
+    raise AssertionError("\n".join(errors))
+
+
+@pytest.mark.parametrize("post_new_count", [0, 4])
+def test_cli_reset_classifier_accepts_only_named_shapes(post_new_count):
+    ledgers = {"old": [{"role": "user", "content": "before"}],
+               "new": [{"role": "user", "content": str(i)} for i in range(6)]}
+    stored = {"old": [dict(row, session_id="old") for row in
+                      ledgers["old"] + ledgers["new"][:post_new_count]], "new": []}
+    with pytest.raises(CliResetReplayStored):
+        assert_cli_reset_occurrences(ledgers, stored, "old", "new", False)
+
+
+@pytest.mark.parametrize("corruption", ["old-loss", "old-duplicate", "old-order", "partial-new-loss",
+                                        "new-row", "wrong-owner", "explicit-start"])
+def test_cli_reset_classifier_rejects_other_mismatches(corruption, monkeypatch):
+    ledgers = {"old": [{"role": "user", "content": "before"}],
+               "new": [{"role": "user", "content": str(i)} for i in range(6)]}
+    stored = {"old": [dict(row, session_id="old") for row in
+                      ledgers["old"] + ledgers["new"][:4]], "new": []}
+    if corruption == "old-loss":
+        stored["old"].pop(0)
+    elif corruption == "old-duplicate":
+        stored["old"].insert(0, stored["old"][0])
+    elif corruption == "old-order":
+        stored["old"].reverse()
+    elif corruption == "partial-new-loss":
+        stored["old"].pop()
+    elif corruption == "new-row":
+        stored["new"].append(dict(ledgers["new"][-1], session_id="new"))
+    elif corruption == "wrong-owner":
+        stored["old"][-1]["session_id"] = "new"
+    checked = []
+    oracle = assert_occurrences
+
+    def check(ledger, rows):
+        checked.append(ledger)
+        oracle(ledger, rows)
+
+    monkeypatch.setattr(sys.modules[__name__], "assert_occurrences", check)
+    with pytest.raises(AssertionError) as caught:
+        assert_cli_reset_occurrences(ledgers, stored, "old", "new", corruption == "explicit-start")
+    assert type(caught.value) is AssertionError
+    assert checked == list(ledgers.values())
+
+
+@pytest.mark.parametrize("start", [
+    pytest.param(False, id="bare-new", marks=pytest.mark.xfail(
+        strict=True, reason="#1306: CLI /new keeps LCM bound to the ended session",
+        raises=CliResetReplayStored)),
+    pytest.param(True, id="explicit-start-control"),
+])
+def test_cli_new_post_llm_compress_replay(start, caplog, monkeypatch):
+    """Real CLI: two turns, /new, two turns, unchanged /compress, final turn.
+
+    Deliveries belong to the host's persisted session, even when LCM writes
+    them elsewhere. The control supplies only the missing start after /new.
+    """
+    import importlib.util
+    import hermes_lcm
+
+    # conftest exposes submodules without executing the plugin entry point.
+    spec = importlib.util.spec_from_file_location("hermes_lcm", hermes_lcm.__file__)
+    plugin = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(plugin)
+    from hermes_lcm.config import LCMConfig
+    from hermes_lcm.engine import LCMEngine
+    from hermes_lcm import plugin_identity
+    import sqlite3
+
+    def start_cli(machine):
+        RotationMachine._publish_host_session(machine, "identity-session")
+        engine = LCMEngine(config=LCMConfig(database_path=str(machine.home / "lcm.db"),
+                                           fresh_tail_count=2, leaf_chunk_tokens=64),
+                           hermes_home=str(machine.home / "home"))
+        engine.on_session_start("identity-session", platform="cli", context_length=8192)
+        return engine
+
+    monkeypatch.setattr(ExactlyOnceMachine, "start_engine", start_cli)
+    machine = ExactlyOnceMachine()
+    prototype = None
+    try:
+        config = machine.engine._config
+        old, new = "identity-session", "identity-reset-1"
+        hooks, engines = {}, []
+        machine.patch.setattr(LCMConfig, "from_env", classmethod(lambda cls: config))
+        machine.patch.setenv("HERMES_HOME", str(machine.home / "home"))
+        machine.patch.setattr(plugin_identity, "load_hermes_config", lambda: {})
+        machine.patch.setattr(plugin, "_warn_if_embedding_provider_unavailable", lambda config: None)
+        plugin.register(types.SimpleNamespace(register_context_engine=engines.append,
+                                              register_hook=lambda name, hook: hooks.update({name: hook})))
+        prototype = engines[0]
+        ledgers = {old: [], new: []}
+
+        def turn(session, text):
+            batch = [machine.stamp({"role": "user", "content": text}),
+                     machine.stamp({"role": "assistant", "content": f"answer {text}"})]
+            machine.host.extend(batch)
+            ledgers[session].extend(deepcopy(batch))
+            # CLI passes the session ID, no gateway key or context_compressor.
+            hooks["post_llm_call"](session_id=session, conversation_history=machine.host, platform="cli")
+
+        for text in ("before-one", "before-two"):
+            turn(old, text)
+        machine.engine.on_session_end(old, machine.host)
+        with sqlite3.connect(machine.home / "home" / "state.db") as connection:
+            connection.execute("UPDATE sessions SET end_reason = 'new_session' WHERE id = ?", (old,))
+            connection.execute("INSERT INTO sessions VALUES (?, NULL, NULL)", (new,))
+        machine.host = []
+        machine.engine.on_session_reset()
+        if start:
+            machine.engine.on_session_start(new, platform="cli", context_length=8192)
+        caplog.clear()
+        for text in ("alpha", "beta"):
+            turn(new, text)
+        if not start:
+            assert "resident_engine_conflict" in caplog.text
+            assert machine.engine._store.connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 4
+        previous = deepcopy(machine.host)
+        compressed = machine.engine.compress(machine.host, current_tokens=machine.engine.threshold_tokens + 1,
+                                             force=True)
+        if start:
+            assert machine.engine._last_compression_status == "compacted"
+            assert compressed != previous
+            machine.engine.on_session_end(new, previous)
+            machine.engine.on_session_start(new, platform="cli", boundary_reason="compression", old_session_id=new)
+            machine.host = compressed
+        else:
+            assert machine.engine._last_compression_status == "error"
+            assert machine.engine._survival_fit_reason == "lifecycle_binding_changed"
+            assert compressed == previous
+            assert machine.host == previous
+            # Real CLI sees unchanged output and skips both boundary hooks.
+        caplog.clear()
+        turn(new, "gamma")
+        if not start:
+            assert "resident_engine_conflict" in caplog.text
+        stored = {}
+        for conversation in ledgers:
+            cursor = machine.engine._store.connection.execute(
+                "SELECT role, content, tool_call_id, tool_calls, session_id FROM messages "
+                "WHERE conversation_id = ? ORDER BY store_id", (conversation,))
+            stored[conversation] = [dict(zip((column[0] for column in cursor.description), row))
+                                    for row in cursor.fetchall()]
+        assert_cli_reset_occurrences(ledgers, stored, old, new, start)
+    finally:
+        if prototype is not None:
+            prototype.shutdown()
+        machine.teardown()

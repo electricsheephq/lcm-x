@@ -3,7 +3,9 @@
 RecoveryMachine also generates host recovery fits, with larger delivered rows
 and a small context window; the original machine keeps its input distribution.
 RotationMachine adds the host's compress/end/start commit with fresh child
-sessions, checking the ledger across the whole conversation.
+sessions, checking the ledger across the whole conversation. HostMergeMachine
+adds post-adoption role repair; GatewayResetMachine adds gateway /new with
+a fresh engine and the same conversation key. CLI bare /new has a seed only.
 
 The ledger records deliveries, not distinct text. The host view can archive its
 last exchange on retry; the ledger must retain both exchanges. Compression
@@ -416,3 +418,159 @@ class RotationMachine(ExactlyOnceMachine):
 
 TestRotation = RotationMachine.TestCase
 TestRotation.settings = PROFILE
+
+
+def merge_host_users(messages):
+    """Fleet role repair, restricted to this generator's LCM (not native) rows.
+
+    agent/agent_runtime_helpers.py:553-594: LCM's summary prefixes are not
+    native handoffs recognized by split_user_originated_turn. This generator
+    emits no native handoffs, steer rows, or API sidecars.
+    """
+    merged = []
+    for message in messages:
+        previous = merged[-1] if merged else None
+        if (previous is not None and previous.get("role") == message.get("role") == "user"
+                and isinstance(previous.get("content", ""), str)
+                and isinstance(message.get("content", ""), str)):
+            prefix, incoming = previous.get("content", ""), message.get("content", "")
+            content = prefix + "\n\n" + incoming if prefix and incoming else prefix or incoming
+            previous["content"] = content
+            if prefix and incoming:
+                previous["_merged_turn_prefix"] = prefix + "\n\n"
+            if content != prefix:
+                previous.pop("_db_persisted", None)
+        else:
+            merged.append(message)
+    return merged
+
+
+class HostMergeMachine(RotationMachine):
+    """Repair role alternation after adoption and before the next ingest.
+
+    Fleet: conversation_compression.py:3673-3683, 3445-3451, 2555-2559;
+    turn_iteration_prep.py:203 -> agent_runtime_helpers.py:553-594.
+    """
+
+    @rule(text=TEXT, structured=st.booleans(), tool_count=st.integers(0, 3),
+          retry=st.booleans(), tool_name=st.sampled_from(("lookup", "inspect")))
+    def new_turn(self, text, structured, tool_count, retry, tool_name):
+        delivered = len(self.occurrences)
+        super().new_turn(text, structured, tool_count, retry, tool_name)
+        for occurrence in self.occurrences[delivered:]:
+            occurrence["session_id"] = self.session_id
+
+    def rows(self):
+        rows = super().rows()
+        # Let the occurrence oracle diagnose missing or extra rows first.
+        if len(rows) == len(self.occurrences):
+            assert [row["session_id"] for row in rows] == [
+                occurrence["session_id"] for occurrence in self.occurrences
+            ], "session ownership"
+        return rows
+
+    @precondition(lambda self: bool(self.host))
+    @rule(in_place=st.booleans())
+    def host_merge(self, in_place):
+        if not in_place:
+            before = len(self.session_ids)
+            self.rotate()
+            if len(self.session_ids) == before:
+                return
+        else:
+            previous = deepcopy(self.host)
+            compressed = self.engine.compress(self.host, current_tokens=self.engine.threshold_tokens + 1, force=True)
+            if self.engine._last_compression_status == "sanitized" and compressed != previous:
+                self.stale_proof = True
+            elif self.engine._last_compression_status == "compacted":
+                self.stale_proof = False
+            def stripped(rows):
+                return [{k: v for k, v in row.items() if k != "_db_persisted"} for row in rows]
+
+            if compressed == previous or stripped(compressed) == stripped(previous):
+                self.host = previous
+                return
+            self.engine.on_session_end(self.session_id, previous)
+            self.engine.on_session_start(self.session_id, platform="cli", conversation_id="identity-conversation",
+                                         boundary_reason="compression", old_session_id=self.session_id)
+            self.host = compressed
+        self.host = merge_host_users(self.host)
+
+
+TestHostMerge = HostMergeMachine.TestCase
+TestHostMerge.settings = PROFILE
+
+
+class GatewayResetMachine(ExactlyOnceMachine):
+    """Gateway /new ends/shuts down the old engine, then builds a fresh one.
+
+    Fleet: gateway/slash_commands_session.py:174-184; run_agent.py:906-917,
+    977-989; agent_init.py:1886,2106-2111. The gateway key survives /new,
+    so every delivery remains in the same conversation's occurrence ledger.
+    """
+
+    def __init__(self):
+        self.session_id = "identity-session"
+        self.session_ids = [self.session_id]
+        super().__init__()
+
+    def start_engine(self):
+        engine = LCMEngine(config=LCMConfig(database_path=str(self.home / "lcm.db"),
+                                            fresh_tail_count=2, leaf_chunk_tokens=16),
+                           hermes_home=str(self.home / "home"))
+        engine.on_session_start(self.session_id, platform="telegram", conversation_id="identity-conversation", context_length=200_000)
+        return engine
+
+    @rule(text=TEXT, structured=st.booleans(), tool_count=st.integers(0, 3),
+          retry=st.booleans(), tool_name=st.sampled_from(("lookup", "inspect")))
+    def new_turn(self, text, structured, tool_count, retry, tool_name):
+        delivered = len(self.occurrences)
+        super().new_turn(text, structured, tool_count, retry, tool_name)
+        for occurrence in self.occurrences[delivered:]:
+            occurrence["session_id"] = self.session_id
+
+    def rows(self):
+        cur = self.engine._store.connection.execute(
+            "SELECT role, content, tool_call_id, tool_calls, session_id FROM messages "
+            "WHERE conversation_id = ? ORDER BY store_id", ("identity-conversation",))
+        rows = [dict(zip((c[0] for c in cur.description), r)) for r in cur.fetchall()]
+        if len(rows) == len(self.occurrences):  # a lost or extra row is the oracle's to report, with its diagnosis
+            assert [r["session_id"] for r in rows] == [r["session_id"] for r in self.occurrences], "session ownership"
+        others = self.engine._store.connection.execute(
+            "SELECT count(*) FROM messages WHERE conversation_id != ?", ("identity-conversation",)).fetchone()[0]
+        assert others == 0, others
+        return rows
+
+    @precondition(lambda self: bool(self.host))
+    @rule()
+    def compress(self):
+        previous = deepcopy(self.host)
+        compressed = self.engine.compress(self.host, current_tokens=self.engine.threshold_tokens + 1, force=True)
+        if self.engine._last_compression_status == "sanitized" and compressed != previous:
+            self.stale_proof = True
+        elif self.engine._last_compression_status == "compacted":
+            self.stale_proof = False
+        def strip(rows):
+            return [{k: v for k, v in row.items() if k != "_db_persisted"} for row in rows]
+
+        if compressed == previous or strip(compressed) == strip(previous):
+            self.host = previous
+            return
+        self.engine.on_session_end(self.session_id, previous)
+        self.engine.on_session_start(self.session_id, platform="telegram", conversation_id="identity-conversation",
+                                     boundary_reason="compression", old_session_id=self.session_id)
+        self.host = compressed
+
+    @rule()
+    def reset(self):
+        self.engine.on_session_end(self.session_id, deepcopy(self.host))
+        self.engine.shutdown()
+        self.session_id = f"identity-reset-{len(self.session_ids)}"
+        self.session_ids.append(self.session_id)
+        self.host = []
+        self.stale_proof = False
+        self.engine = self.start_engine()
+
+
+TestGatewayReset = GatewayResetMachine.TestCase
+TestGatewayReset.settings = PROFILE
