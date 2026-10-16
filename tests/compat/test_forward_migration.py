@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from tests.compat import codec_adapter
-from tests.compat.helpers import config_for, run_old
+from tests.compat.helpers import FLEET_POLICY, config_for, run_old
 
 # One source for both sides: the old writer's reader and the current reader hash the same fields.
 DIGEST = r'''
@@ -18,16 +18,15 @@ def message_digest(rows):
     return _hashlib.sha256(json.dumps(fields, sort_keys=True, default=str).encode()).hexdigest()
 '''
 
-WRITE_AND_READ = DIGEST + r'''
+WRITE_AND_READ = f"fleet_policy = {FLEET_POLICY!r}\n" + DIGEST + r'''
 if mode == "write":
     options.update(fresh_tail_count=4, leaf_chunk_tokens=1000, large_output_externalization_enabled=True)
     if data == "fleet":
-        options.update(leaf_chunk_tokens=8000, threshold_full_sweep_enabled=True,
-                       large_output_externalization_enabled=True,
-                       large_output_externalization_threshold_chars=12000,
-                       large_output_active_replay_stubbing_enabled=True,
-                       large_output_active_replay_stub_threshold_tokens=10000,
-                       large_output_active_replay_stub_aged_threshold_tokens=2000)
+        # The managed fleet profile policy.
+        options.update(fleet_policy)
+from hermes_lcm import command, rollup_builder
+from datetime import datetime, timezone
+rollup_builder.summarize_with_escalation = lambda *args, **kwargs: ("Synthetic daily rollup.", 1)
 engine = LCMEngine(config=LCMConfig(**options), hermes_home=home)
 try:
     if mode == "write":
@@ -58,6 +57,12 @@ try:
                          for n in range(6)])
             engine.compress(view, current_tokens=100_000, force=True)
             assert engine._dag.get_session_nodes(session), "healthy fake summary must produce a DAG"
+            if engine._config.temporal_rollups_enabled:
+                assert engine.drain_rollup_maintenance(timeout=10)
+                node = engine._dag.get_session_nodes(session)[0]
+                day = datetime.fromtimestamp(node.earliest_at or node.created_at, timezone.utc).date()
+                result = command.handle_lcm_command(f"rollups rebuild day {day}", engine)
+                assert "status: complete" in result, result
         # Exercise the old survival fit separately from successful compaction;
         # all durable message writes still go through public ingest/compress.
         engine.on_session_start("survival", platform="cli", context_length=2000, conversation_id="survival-conv")
@@ -123,6 +128,9 @@ def test_previous_ga_forward_migration(tmp_path, old_tree, host_root, monkeypatc
     old = old_tree("v0.26.2")
     original = run_old(old, tmp_path, host_root, WRITE_AND_READ, mode="write", data=overlay)
     before = snapshot(tmp_path)
+    if overlay == "fleet":
+        assert before[1].get("lcm_rollups", (0, ""))[0] > 0
+        assert before[1].get("lcm_rollup_sources", (0, ""))[0] > 0
     assert before[1]["messages"][0] == sum(original["counts"].values()) and before[-1]
     # Keep the asynchronous derived-index backfill out of the reopen comparison.
     monkeypatch.setattr(db_bootstrap, "dispatch_background_stem_backfill", lambda *args: None)

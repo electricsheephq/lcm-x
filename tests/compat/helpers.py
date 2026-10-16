@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import sys
+from typing import Any
 
 from tests.compat import codec_adapter
 
@@ -24,12 +25,28 @@ CASES = tuple(f"{form}-{variant}" for form in FORMS for variant in VARIANTS) + (
 )
 
 
-def config_for(directory, **overrides):
+FLEET_POLICY = {
+    "context_threshold": 0.75,
+    "fresh_tail_count": 24,
+    "fresh_tail_max_tokens": 24000,
+    "leaf_chunk_tokens": 8000,
+    "threshold_full_sweep_enabled": True,
+    "large_output_externalization_enabled": True,
+    "large_output_externalization_threshold_chars": 12000,
+    "large_output_active_replay_stubbing_enabled": True,
+    "large_output_active_replay_stub_threshold_tokens": 10000,
+    "temporal_rollups_enabled": True,
+}
+
+
+def config_for(directory: Path, **overrides: Any) -> Any:
     from hermes_lcm.config import LCMConfig
 
-    return LCMConfig(database_path=str(directory / "lcm.db"), embeddings_enabled=False,
-                     temporal_rollups_enabled=False,
-                     large_output_externalization_path=str(directory / "payloads"), **overrides)
+    options = dict(database_path=str(directory / "lcm.db"), embeddings_enabled=False,
+                   temporal_rollups_enabled=False,
+                   large_output_externalization_path=str(directory / "payloads"))
+    options.update(overrides)
+    return LCMConfig(**options)
 
 
 def open_engine(directory):
@@ -148,7 +165,8 @@ options = dict(database_path=db, embeddings_enabled=False, temporal_rollups_enab
 '''
 
 
-def run_old(old, directory, host_root, script, mode="read", data=""):
+def run_old(old: Path, directory: Path, host_root: Path, script: str,
+            mode: str = "read", data: str = "") -> Any:
     env = {key: value for key, value in os.environ.items() if not key.startswith("LCM_")}
     env.update(HERMES_HOME=str(directory / "home"), PYTHONDONTWRITEBYTECODE="1")
     result = subprocess.run(
