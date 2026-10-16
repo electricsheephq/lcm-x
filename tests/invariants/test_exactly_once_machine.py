@@ -2,10 +2,12 @@
 
 RecoveryMachine also generates host recovery fits, with larger delivered rows
 and a small context window; the original machine keeps its input distribution.
+RotationMachine adds the host's compress/end/start commit with fresh child
+sessions, checking the ledger across the whole conversation.
 
 The ledger records deliveries, not distinct text. The host view can archive its
 last exchange on retry; the ledger must retain both exchanges. Compression
-changes only the host view. No rotation, host sanitization or arbitrary prefix
+changes only the host view. No host sanitization or arbitrary prefix
 rewrite is generated here. Cold resume excludes only a changed, sanitized
 compression output whose durable proof is stale (#1286), until a compacted pass.
 """
@@ -15,6 +17,7 @@ from collections import Counter
 from copy import deepcopy
 import json
 import os
+import sqlite3
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -92,7 +95,6 @@ def reprojected_user_input(aliases, host, operation):
 
 
 KNOWN_OPEN[503] = reprojected_user_input
-
 
 def ambiguous_unstamped_tool_window_259(host, ledger):
     """#259 permits duplication of an unproven, truncated tool-only window.
@@ -343,3 +345,74 @@ class RecoveryMachine(ExactlyOnceMachine):
 
 TestRecovery = RecoveryMachine.TestCase
 TestRecovery.settings = PROFILE
+
+
+class RotationMachine(ExactlyOnceMachine):
+    """The same occurrence ledger across the host's compression session chain."""
+
+    def __init__(self):
+        self.session_id = "identity-session"
+        self.session_ids = [self.session_id]
+        super().__init__()
+
+    def _publish_host_session(self, child, parent=None):
+        """Publish the host ancestry atomically, before LCM sees the child."""
+        home = self.home / "home"
+        home.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(home / "state.db")
+        try:
+            with connection:
+                connection.execute("CREATE TABLE IF NOT EXISTS sessions "
+                                   "(id TEXT PRIMARY KEY, parent_session_id TEXT, end_reason TEXT)")
+                if parent is not None:
+                    connection.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = ?", (parent,))
+                connection.execute("INSERT INTO sessions VALUES (?, ?, NULL)", (child, parent))
+        finally:
+            connection.close()
+
+    def start_engine(self):
+        if not (self.home / "home" / "state.db").exists():
+            self._publish_host_session(self.session_id)
+        engine = LCMEngine(config=LCMConfig(database_path=str(self.home / "lcm.db"),
+                                          fresh_tail_count=2, leaf_chunk_tokens=16),
+                           hermes_home=str(self.home / "home"))
+        engine.on_session_start(self.session_id, platform="cli", conversation_id="identity-conversation",
+                                context_length=200_000)
+        return engine
+
+    def rows(self):
+        cursor = self.engine._store.connection.execute(
+            "SELECT role, content, tool_call_id, tool_calls, session_id FROM messages "
+            "WHERE conversation_id = ? ORDER BY store_id", ("identity-conversation",))
+        rows = [dict(zip((column[0] for column in cursor.description), row)) for row in cursor.fetchall()]
+        assert all(row["session_id"] in self.session_ids for row in rows)
+        return rows
+
+    @precondition(lambda self: bool(self.host))
+    @rule()
+    def rotate(self):
+        previous = deepcopy(self.host)
+        compressed = self.engine.compress(self.host, current_tokens=self.engine.threshold_tokens + 1, force=True)
+        if self.engine._last_compression_status == "sanitized" and compressed != previous:
+            self.stale_proof = True
+        elif self.engine._last_compression_status == "compacted":
+            self.stale_proof = False
+        # Hermes rejects candidates unchanged even after removing its DB marker.
+        def without_persisted(rows):
+            return [{key: value for key, value in row.items() if key != "_db_persisted"} for row in rows]
+
+        if compressed == previous or without_persisted(compressed) == without_persisted(previous):
+            self.host = previous
+            return
+        self.engine.on_session_end(self.session_id, previous)
+        child = f"identity-session-{len(self.session_ids)}"
+        self._publish_host_session(child, self.session_id)
+        self.engine.on_session_start(child, platform="cli", conversation_id="identity-conversation",
+                                     boundary_reason="compression", old_session_id=self.session_id)
+        self.session_id = child
+        self.session_ids.append(child)
+        self.host = compressed
+
+
+TestRotation = RotationMachine.TestCase
+TestRotation.settings = PROFILE

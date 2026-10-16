@@ -1,4 +1,4 @@
-"""Occurrence seeds for compress, recovery, #1179 retries and #1286 stale proofs."""
+"""Occurrence seeds for compress, recovery, rotation, retries and stale proofs."""
 from copy import deepcopy
 import re
 import sys
@@ -11,7 +11,8 @@ from hypothesis import settings, strategies as st
 from hypothesis.stateful import invariant, rule, run_state_machine_as_test
 
 from tests.invariants.test_exactly_once_machine import (
-    KNOWN_OPEN, PROFILE, REPROJECTED_USER, ExactlyOnceMachine, RecoveryMachine, assert_occurrences, identity,
+    KNOWN_OPEN, PROFILE, REPROJECTED_USER,
+    ExactlyOnceMachine, RecoveryMachine, RotationMachine, assert_occurrences, identity,
 )
 
 
@@ -208,6 +209,126 @@ def test_recover_replay_resume_append(text):
 
 class ReprojectedUserStored(AssertionError):
     """Only the extra user projection after a repeat fit misbinds its source."""
+
+
+@pytest.mark.parametrize("marker_only", [False, True], ids=["equal-copy", "persisted-marker"])
+def test_rotation_no_progress_fires_no_hooks(marker_only):
+    machine = RotationMachine()
+    try:
+        machine.new_turn("alpha", False, 0, False, "lookup")
+        previous = deepcopy(machine.host)
+
+        def unchanged(messages, **kwargs):
+            machine.engine._last_compression_status = "sanitized"
+            return [dict(row, _db_persisted=True) for row in messages] if marker_only else deepcopy(messages)
+
+        def unexpected_hook(*args, **kwargs):
+            pytest.fail("unchanged compression must not fire session hooks")
+
+        machine.patch.setattr(machine.engine, "compress", unchanged)
+        machine.patch.setattr(machine.engine, "on_session_end", unexpected_hook)
+        machine.patch.setattr(machine.engine, "on_session_start", unexpected_hook)
+        machine.rotate()
+        assert machine.host == previous
+        assert machine.session_ids == ["identity-session"]
+        assert machine.stale_proof == marker_only
+        machine.exactly_once()
+    finally:
+        machine.teardown()
+
+
+@pytest.mark.parametrize("turns", [1, 2], ids=["no-rewrite", "published-control"])
+def test_rotation_without_rewrite_preserves_occurrences(turns):
+    machine = RotationMachine()
+    try:
+        for _ in range(turns):
+            machine.new_turn("alpha", False, 0, False, "lookup")
+        machine.rotate()
+        assert len(machine.session_ids) == turns
+        machine.exactly_once()
+        machine.cold_resume()
+        machine.exactly_once()
+    finally:
+        machine.teardown()
+
+
+@pytest.mark.parametrize("resume", [True, False], ids=["cold-control", "warm-audit"])
+def test_rotation_warm_audit_preserves_tail(resume):
+    machine = RotationMachine()
+    try:
+        for _ in range(2):
+            machine.new_turn("alpha", False, 0, False, "lookup")
+        machine.rotate()
+        assert machine.engine._last_compression_status == "compacted"
+        assert machine.engine._identity_anchor_chain() == ["identity-session"]
+        machine.exactly_once()
+        if resume:
+            machine.cold_resume()
+            machine.exactly_once()
+        machine.replay()
+        machine.exactly_once()
+    finally:
+        machine.teardown()
+
+
+@pytest.mark.parametrize("condense", [False, True], ids=["published-control", "sanitized"])
+def test_rotation_stale_proof_preserves_tail(condense):
+    """Host ancestry keeps rotated sanitized output exact; #1286 is in-place."""
+    machine = RotationMachine()
+    try:
+        for count in (1, 1, 0):
+            machine.new_turn("alpha", False, count, False, "lookup")
+        if condense:
+            machine.compress()
+        machine.rotate()
+        assert machine.stale_proof == condense
+        machine.exactly_once()
+        # Bypass the inherited #1286 cold guard to prove this rotation control.
+        machine.engine.shutdown()
+        machine.engine = machine.start_engine()
+        machine.engine.ingest(machine.host)
+        machine.exactly_once()
+    finally:
+        machine.teardown()
+
+
+def test_rotation_cold_resume_then_repeated_compress():
+    """TIME-1: T(0) T(1) O K C C, with committed host ancestry."""
+    machine = RotationMachine()
+    try:
+        for count in (0, 1):
+            machine.new_turn("alpha", False, count, False, "lookup")
+            machine.exactly_once()
+        for operation in (machine.rotate, machine.cold_resume, machine.compress, machine.compress):
+            operation()
+            machine.exactly_once()
+    finally:
+        machine.teardown()
+
+
+def test_rotation_resume_replay_append_compress():
+    machine = RotationMachine()
+    try:
+        for _ in range(2):
+            for text in ("alpha", "same text"):
+                machine.new_turn(text, False, 0, False, "lookup")
+                machine.exactly_once()
+            ledger = deepcopy(machine.occurrences)
+            machine.rotate()
+            assert machine.engine._last_compression_status == "compacted"
+            assert machine.occurrences == ledger
+            machine.exactly_once()
+            machine.cold_resume()
+            assert machine.engine._session_id == machine.session_ids[-1]
+            machine.exactly_once()
+            machine.replay()
+            machine.exactly_once()
+        machine.new_turn("βeta", True, 1, False, "inspect")
+        machine.exactly_once()
+        machine.compress()
+        machine.exactly_once()
+    finally:
+        machine.teardown()
 
 
 @pytest.mark.parametrize("recoveries", [
