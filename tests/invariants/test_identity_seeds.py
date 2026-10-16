@@ -695,6 +695,11 @@ def test_cli_new_post_llm_compress_replay(start, caplog, monkeypatch):
                 "WHERE conversation_id = ? ORDER BY store_id", (conversation,))
             stored[conversation] = [dict(zip((column[0] for column in cursor.description), row))
                                     for row in cursor.fetchall()]
+        # A row under any other conversation is a new failure, never the #1306 shape the xfail names.
+        outside = machine.engine._store.connection.execute(
+            "SELECT COUNT(*) FROM messages WHERE conversation_id IS NULL OR conversation_id NOT IN "
+            f"({', '.join('?' * len(ledgers))})", tuple(ledgers)).fetchone()[0]
+        assert outside == 0, f"{outside} rows stored outside the host's conversations"
         assert_cli_reset_occurrences(ledgers, stored, old, new, start)
     finally:
         if prototype is not None:
