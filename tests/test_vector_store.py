@@ -1001,13 +1001,13 @@ def test_no_profile_or_vectors_returns_none_coverage(tmp_path):
 
 def test_embedding_config_defaults_are_inert_and_read_environment(monkeypatch):
     defaults = LCMConfig()
-    assert defaults.embeddings_enabled is False
+    assert defaults.embeddings_enabled is True  # #1186: local recall on by default
     assert defaults.embedding_bounded_scan_rows == 2_000
 
-    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "true")
+    monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
     monkeypatch.setenv("LCM_EMBEDDING_BOUNDED_SCAN_ROWS", "123")
     configured = LCMConfig.from_env()
-    assert configured.embeddings_enabled is True
+    assert configured.embeddings_enabled is False
     assert configured.embedding_bounded_scan_rows == 123
 
     store = VectorStore(":memory:")

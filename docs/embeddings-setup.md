@@ -1,15 +1,25 @@
 # Embeddings setup — free and local options
 
-Semantic and hybrid retrieval are **opt-in** and need an embedding provider. You have three good
-options, two of which cost nothing. If you configure nothing, nothing changes — retrieval stays
-FTS-only exactly as before.
+Local semantic and hybrid retrieval are **on by default** (#1186): with nothing configured, LCM-X
+uses fastembed with `BAAI/bge-small-en-v1.5`. `plugin.yaml` declares `fastembed==0.8.0`, so Hermes
+installs it and keeps it across updates. On the first start the model (about 130 MB) downloads on a
+background thread; no turn waits for it, and recall uses full text (`degraded: true`) until it is
+ready. To turn semantic retrieval off, set `LCM_EMBEDDINGS_ENABLED=false`: retrieval is then
+FTS-only, as before. The other providers below are explicit choices, and each needs its own
+`LCM_EMBEDDING_MODEL`: the default model applies only to fastembed.
+
+**Offline hosts.** If the download fails, LCM-X logs one warning naming `/lcm doctor`, keeps
+serving full-text recall, and does not retry until the next start. The doctor's
+`embedding_provider_health` check shows `readiness: model: unavailable(<reason>)` with the summary
+coverage. Pre-seed the model cache (`FASTEMBED_CACHE_PATH`) or run `/lcm embed warmup` once the host
+is online.
 
 ## TL;DR
 
 | Option | Cost | Signup | Install | Best for |
 |---|---|---|---|---|
 | Voyage AI | free tier (200M tokens for the voyage-4 group), then ~$0.02–0.12 per million tokens | yes (no credit card) | none | best quality, zero local footprint |
-| fastembed | $0 | no | `pip install "fastembed>=0.8.0,<1.0"` (ONNX, no torch) | local default — no accounts, no daemon |
+| fastembed | $0 | no | none: declared in `plugin.yaml` (ONNX, no torch) | the default — no accounts, no daemon |
 | Ollama | $0 | no | Ollama app/daemon | you already run Ollama |
 | OpenAI-compatible | provider pricing | yes (per provider) | none | reuse an existing `/v1/embeddings` service (SiliconFlow, llama.cpp, vLLM) |
 
@@ -67,17 +77,19 @@ worker slots).
 [fastembed](https://github.com/qdrant/fastembed) runs ONNX models on CPU with no PyTorch and no
 external service — just a pip package.
 
+This is the default configuration; the explicit form is:
+
 ```bash
-pip install "fastembed>=0.8.0,<1.0"          # or: pip install -r requirements-semantic.txt
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=fastembed
 export LCM_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5   # 384-dim, compact and quick on CPU
-/lcm embed warmup     # downloads the model ONCE, explicitly (a few hundred MB incl. onnxruntime)
-/lcm embed backfill --apply
+/lcm embed warmup     # optional: downloads the model now instead of in the background
+/lcm embed backfill --apply   # optional: the background passes catch up on their own
 ```
 
-The model download happens **only** during `warmup` — never lazily during a query or an agent turn.
-If you skip warmup, semantic search simply stays off and the tools tell you why. Queries use the
+The model downloads only through the warmup path: once per process start on a background thread
+when it is not cached, or when you run `/lcm embed warmup` — never during a query or an agent turn.
+Until it is ready, semantic search stays off and the tools tell you why. Queries use the
 model's query-specific encoding (distinct from document encoding) so query/passage asymmetry is
 preserved. When `LCM_EMBEDDINGS_ENABLED=false`, `warmup` is inert: it does not resolve a provider,
 download a model, create embedding tables, or create the configured database.
@@ -93,7 +105,8 @@ and pulls in no Python packages of its own). `hermes update` can build a **new**
 `installs/<id>/environments/<hash>/venv`. It carries over the dependencies Hermes itself records
 (its extras and the dependencies plugins declare), but a package installed by hand with
 `pip install "fastembed>=0.8.0,<1.0"` is not recorded, so **a hand-installed embedding dependency can be dropped
-by a host update**.
+by a host update**. Since #1186 `plugin.yaml` declares `fastembed==0.8.0`, so a Hermes that installs
+plugin-declared dependencies records it; the manual install below is a fallback.
 
 Nothing about your LCM data changes when this happens — the store stays lossless and existing
 vectors are untouched — but new content stops being embedded and semantic retrieval quietly falls
@@ -199,17 +212,20 @@ therefore reports bounded coverage rather than claiming universal pre-bound sour
 
 ## New content is embedded automatically
 
-With `LCM_EMBEDDINGS_ENABLED=true` and a registered profile (`/lcm embed warmup`), LCM-X
+With `LCM_EMBEDDINGS_ENABLED=true` and a registered profile (`/lcm embed warmup`, or with fastembed
+the background prepare), LCM-X
 embeds new content in the background: after each leaf summary is published (condensed summaries
 are not embedding targets, as with `/lcm embed backfill`), and
-once when a session binds. Each pass handles at most one backfill batch per corpus, runs off the
+once when a session binds. Each pass drains the backlog batch by batch for up to 20 seconds, then
+stops; the next pass resumes, so an existing store reaches full coverage over several passes
+without re-embedding a row that already has a vector. Passes run off the
 turn path, and uses the same lease, privacy policy, operation budget and provider timeout as
 `/lcm embed backfill`. If a manual backfill or another process holds the lease, the pass skips;
 the next pass picks up whatever is still unembedded. A manual backfill started while a pass runs
 is refused until the pass ends, as with two manual runs. There is no new setting.
 
 - **Summaries** are embedded with any provider. With a cloud provider this means new summaries
-  are sent to it automatically, one bounded batch per pass, without a manual backfill.
+  are sent to it automatically, in bounded batches, without a manual backfill.
 - **Message chunks** are embedded automatically only with fastembed, or with Ollama whose
   `LCM_OLLAMA_BASE_URL` host is loopback (`localhost`, `127.0.0.0/8`, `::1`). Each pass takes new
   messages first, then older history newest first, one bounded batch at a time, so its cost follows

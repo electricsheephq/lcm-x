@@ -85,6 +85,7 @@ def _run_mode(
         large_output_externalization_threshold_chars=12_000,
         large_output_active_replay_stubbing_enabled=enabled,
         large_output_active_replay_stub_threshold_tokens=stub_threshold_tokens,
+        embeddings_enabled=False,  # pre-#1186 default: measure stubbing only
     )
     engine = LCMEngine(config=config, hermes_home=str(hermes_home))
     engine.on_session_start(

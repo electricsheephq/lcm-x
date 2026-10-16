@@ -79,7 +79,7 @@ from .chunking import (
     group_by_store_id,
     normalize_content_policy,
 )
-from .embedding_maintenance import incremental_embedding_state
+from .embedding_maintenance import incremental_embedding_state, note_local_model_present
 from .embedding_provider import (
     EmbeddedDocumentBatch,
     EmbeddingProviderError,
@@ -2007,6 +2007,9 @@ def _doctor_text(engine) -> str:
         if isinstance(detail, str):
             suffix = f" {detail}"
         lines.append(f"embedding_provider_health: {embedding_check['status']}{suffix}")
+        readiness = detail.get("readiness") if isinstance(detail, dict) else None
+        if readiness:
+            lines.append(f"embedding_readiness: {readiness}")  # #1186: model state and coverage
     if issues:
         lines.append(f"issues: {', '.join(issues)}")
     else:
@@ -3169,6 +3172,7 @@ def _embedding_warmup_text(engine) -> str:
         result = _embedding_register_profiles(engine._config, engine._store.db_path, allow_download=True)
         if isinstance(result, dict):
             engine._lcm_embedding_provider_cache = result["provider_cache"]
+            note_local_model_present(engine._config)
         return result["text"] if isinstance(result, dict) else result
     except Exception as exc:
         return "\n".join(["LCM embedding warmup", "status: error", f"error: {exc}"])

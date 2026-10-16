@@ -11,8 +11,9 @@ From v0.24.0 the installed plugin is `hermes-lcm-x` and the runtime engine is
 
 **Defaults.** Large-output externalization, active-replay stubbing, the fresh-tail
 token cap, the threshold full sweep (family 1), and temporal rollups (family 2)
-are on by default, matching the managed deployment. Semantic retrieval stays
-default-off until an operator opts in with an environment variable. Each family keeps its data out of the core schema
+are on by default, matching the managed deployment. Local semantic retrieval
+(fastembed, `BAAI/bge-small-en-v1.5`) is also on by default (#1186); `LCM_EMBEDDINGS_ENABLED=false`
+turns it off. Each family keeps its data out of the core schema
 until first use, so a disabled install stays readable by older builds.
 
 ## The one-paragraph mental model

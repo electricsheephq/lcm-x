@@ -870,6 +870,20 @@ def test_a_summary_failure_does_not_starve_the_chunk_corpus(
         engine.shutdown()
 
 
+def _one_chunk_batch_per_trigger(monkeypatch):
+    """#1186: a controlled clock in which one chunk batch spends a trigger's whole budget."""
+    clock = [0.0]
+    real_chunk_run = command_mod._chunk_backfill_run
+
+    def chunk_run(*args, **kwargs):
+        clock[0] += 1.0
+        return real_chunk_run(*args, **kwargs)
+
+    monkeypatch.setattr(maintenance_mod, "_CATCH_UP_BUDGET_S", 0.5)
+    monkeypatch.setattr(maintenance_mod, "time", SimpleNamespace(monotonic=lambda: clock[0], time=time.time))
+    monkeypatch.setattr(command_mod, "_chunk_backfill_run", chunk_run)
+
+
 def test_automatic_chunk_discovery_is_bounded_by_new_messages_not_the_store(
     tmp_path, home, providers, monkeypatch
 ):
@@ -882,6 +896,7 @@ def test_automatic_chunk_discovery_is_bounded_by_new_messages_not_the_store(
         "chunk_message",
         lambda *args, **kwargs: calls.append(args[0]) or real_chunk_message(*args, **kwargs),
     )
+    _one_chunk_batch_per_trigger(monkeypatch)
     try:
         for index in range(600):
             engine._store.append(SESSION, {"role": "user", "content": f"old {index} {FILLER}"})
@@ -1019,8 +1034,9 @@ def test_1063_h_partial_registration_is_completed_by_the_next_pass(
 
 
 def test_automatic_chunks_take_new_messages_before_history_and_history_newest_first(
-    tmp_path, home, providers
+    tmp_path, home, providers, monkeypatch
 ):
+    _one_chunk_batch_per_trigger(monkeypatch)
     engine = _make_engine(tmp_path, home)
     db_path = engine._config.database_path
     try:

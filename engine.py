@@ -2379,7 +2379,7 @@ class LCMEngine(
             database_path = Path(raw_database_path).resolve()
             config = copy.deepcopy(self._config)
             from . import command
-            from .embedding_maintenance import _automatic_chunks_allowed
+            from .embedding_maintenance import _automatic_chunks_allowed, start_local_model_prepare
             from .vector_store import VectorStore
 
             chunks_allowed = _automatic_chunks_allowed(config, command)
@@ -2396,6 +2396,8 @@ class LCMEngine(
                     finally:
                         store.close()
                     _EMBEDDING_SCHEMA_READY.add(schema_key)
+            # #1186: once per process, prepare an uncached local model off the user's turn.
+            start_local_model_prepare(database_path, config)
             cached = getattr(self, "_lcm_embedding_provider_cache", None)
             breaker = getattr(cached[1], "breaker", None) if cached else None
 

@@ -99,7 +99,9 @@ and "have we talked about this before?".
 # Default true; kept explicit for older versions.
 export LCM_TEMPORAL_ROLLUPS_ENABLED=true
 
-# Meaning-based recall: semantic + hybrid lcm_grep over summaries
+# Meaning-based recall: semantic + hybrid lcm_grep over summaries.
+# On by default with local fastembed (#1186); this profile picks Voyage instead.
+# LCM_EMBEDDINGS_ENABLED=false turns semantic recall off.
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=voyage          # or: fastembed / ollama (below)
 export LCM_EMBEDDING_MODEL=voyage-4-lite
@@ -130,9 +132,13 @@ summarization is local too.
 # Default true; kept explicit for older versions.
 export LCM_TEMPORAL_ROLLUPS_ENABLED=true
 
+# The default since #1186; kept explicit for older versions.
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=fastembed       # in-process ONNX, CPU-friendly
-# Default model downloads ~90–130 MB once at warmup (bge-small / MiniLM class)
+export LCM_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5
+# The model (~130 MB) downloads once, in the background on the first start or at
+# /lcm embed warmup. Air-gapped: pre-seed FASTEMBED_CACHE_PATH; until then recall
+# uses full text and /lcm doctor reports the model unavailable.
 
 # Or, if you run Ollama on a verified loopback endpoint:
 # export LCM_EMBEDDING_PROVIDER=ollama

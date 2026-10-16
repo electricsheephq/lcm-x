@@ -92,6 +92,7 @@ def _build_engine(case: SteadyStateCase, run_dir: Path):
         fresh_tail_count=8,
         leaf_chunk_tokens=100_000,
         context_threshold=0.99,
+        embeddings_enabled=False,  # pre-#1186 default: no background embedding or model download
     )
     if case.ignore_message_patterns:
         setattr(config, "ignore_message_patterns", list(case.ignore_message_patterns))

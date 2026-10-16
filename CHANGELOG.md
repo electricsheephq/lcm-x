@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Change (defaults): local semantic recall is on by default: `LCM_EMBEDDINGS_ENABLED` defaults to `true` with `LCM_EMBEDDING_PROVIDER=fastembed` and `LCM_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5`, and `plugin.yaml` declares `fastembed==0.8.0` under `pip_dependencies`, so Hermes installs it and keeps it across updates (this makes the checkout a package-manager workspace member). An uncached model downloads once per process on a background thread through the warmup path; recall serves full text with its degraded signal until it is ready, and an offline host logs one warning naming `/lcm doctor` and retries on the next start. The background embedding pass now drains the backlog batch by batch for up to 20 s per trigger and resumes on the next one, never re-embedding a row that has a vector. `embedding_provider_health` adds a `readiness` line (model present / preparing / unavailable, and summary coverage). `LCM_EMBEDDINGS_ENABLED=false` turns it off; explicit settings keep their values. (#1186)
+
 ## v0.27.0 (summary quality)
 
 - Fix: survival fit can mark short stored tool rows when head projections cannot fit, and the default summary-prefix bound preserves the user objective for survival fitting. (#1220, #1221; rc6)

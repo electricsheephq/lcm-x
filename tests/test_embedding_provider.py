@@ -499,7 +499,10 @@ def test_fastembed_absent_dependency_is_clean(monkeypatch):
 
 def test_resolve_provider_strings_and_dormant_defaults(monkeypatch):
     defaults = LCMConfig()
-    assert resolve_provider(defaults) is None
+    # #1186: the default is local FastEmbed; resolving it stays inert (no model load).
+    local = resolve_provider(defaults)
+    assert isinstance(local, FastembedProvider) and local.model_id == "BAAI/bge-small-en-v1.5"
+    assert local._model is None
 
     config = LCMConfig(
         embedding_provider="  VOYAGEAI ",
@@ -596,8 +599,8 @@ def test_fastembed_backfill_is_not_bound_by_interactive_query_timeout(monkeypatc
 
 def test_embedding_config_defaults_and_environment(monkeypatch):
     defaults = LCMConfig()
-    assert defaults.embedding_provider == ""
-    assert defaults.embedding_model == ""
+    assert defaults.embedding_provider == "fastembed"  # #1186
+    assert defaults.embedding_model == "BAAI/bge-small-en-v1.5"
     assert defaults.ollama_base_url == "http://localhost:11434"
     assert defaults.embedding_query_timeout_s == 3.0
     assert defaults.embedding_backfill_timeout_s == 120.0

@@ -6,6 +6,9 @@ the member's ``pyproject.toml`` and keeps its other fields. A lint-only file has
 no ``[project]`` table, so the result has a name and no ``version``, ``uv lock``
 rejects it, and the update adds ``hermes-lcm-x`` to ``plugins.disabled``. Lint
 settings therefore live in ``ruff.toml`` and the repo has no ``pyproject.toml``.
+#1186 declares fastembed in ``plugin.yaml``, which makes the checkout a member
+through its manifest; the package manager then generates the member project
+itself, so the no-``pyproject.toml`` rule still holds.
 
 The staging test runs a real package manager only when ``LCM_REAL_HERMES_SRC``
 names a Hermes tree with ``pm/workspace.py`` and ``LCM_REAL_HERMES_PYTHON`` names
@@ -35,10 +38,12 @@ def test_lint_settings_live_in_ruff_toml_not_pyproject():
     assert config["lint"]["ignore"] == ["E402"]
 
 
-def test_checkout_is_not_a_package_manager_member():
+def test_checkout_is_a_member_only_through_its_declared_dependencies():
     # Mirrors PythonDeclaration.is_member in Hermes pm/plugin_declarations.py, used by
     # pm/workspace.py::_is_member_candidate: not external and (a pyproject.toml exists
     # or the manifest declares python/pip dependencies). Nothing is imported from Hermes.
+    # #1186: plugin.yaml declares fastembed, so the checkout is a member through its
+    # manifest; it still has no pyproject.toml for the package manager to rewrite.
     manifest = (REPO_ROOT / "plugin.yaml").read_text(encoding="utf-8")
     top_level_keys = set(re.findall(r"^([A-Za-z_]+):", manifest, re.MULTILINE))
     declares_dependencies = bool(top_level_keys & {"pip_dependencies", "python_dependencies"})
@@ -46,7 +51,7 @@ def test_checkout_is_not_a_package_manager_member():
 
     # Without python_runtime: external, membership is exactly "pyproject or dependencies".
     assert "python_runtime" not in top_level_keys
-    assert not has_pyproject and not declares_dependencies
+    assert not has_pyproject and declares_dependencies
 
 
 _STAGE_PROBE = r"""
@@ -92,4 +97,5 @@ def test_installed_package_manager_stages_no_member(tmp_path):
     if "skip" in result:
         pytest.skip(result["skip"])
 
-    assert result == {"is_member": False, "generation_is_core": True, "plugin_sources": False}
+    # #1186: the declared fastembed dependency makes the checkout a member.
+    assert result == {"is_member": True}

@@ -138,13 +138,13 @@ def test_warning_carries_actionable_operator_guidance(tmp_path, monkeypatch):
 
 
 def test_disabled_embeddings_pass_without_noise(tmp_path):
-    engine = _make_engine(tmp_path)
+    engine = _make_engine(tmp_path, embeddings_enabled=False)  # #1186: off is explicit now
     try:
         payload, check = _doctor_check(engine)
 
         assert check["status"] == "pass"
         assert "disabled" in check["detail"]
-        # A default install must not start warning because of this check.
+        # An install with embeddings off must not start warning because of this check.
         assert payload["overall"] == "healthy"
     finally:
         engine.shutdown()

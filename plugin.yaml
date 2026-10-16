@@ -3,6 +3,10 @@ version: 0.27.0
 description: "LCM-X — Lossless Context Memory eXtension for Hermes, with a recoverable DAG-based context engine"
 author: "Voltropy / Hermes Community"
 requires_hermes: ">=0.21.3"   # the plugin API floor (ctx.register_hook); matches the catalog entry
+# Local semantic recall is on by default (#1186): Hermes installs this into its
+# environment and keeps it across updates. onnxruntime comes transitively.
+pip_dependencies:
+  - fastembed==0.8.0
 provides_tools:
   - lcm_grep
   - lcm_recall

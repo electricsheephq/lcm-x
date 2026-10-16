@@ -74,6 +74,20 @@ def _wait_scheduler_idle(scheduler, timeout: float) -> bool:
 
 
 @pytest.fixture(autouse=True)
+def _no_background_model_prepare(monkeypatch):
+    """#1186: the local model prepare is process-wide state; a test that wants it opts in.
+
+    Local embeddings are on by default, so every bound session would otherwise start a
+    download thread that outlives the test and calls a later test's fakes.
+    """
+    maintenance = sys.modules.get("hermes_lcm.embedding_maintenance")
+    if maintenance is not None:
+        monkeypatch.setattr(maintenance, "_PREPARE", {})
+        monkeypatch.setattr(maintenance, "_PREPARE_THREAD", None, raising=False)
+        monkeypatch.setattr(maintenance, "start_local_model_prepare", lambda *_args, **_kwargs: False)
+
+
+@pytest.fixture(autouse=True)
 def _drain_background_maintenance(monkeypatch):
     """#1013 part B: temporal rollups are on by default, and their worker is process-wide.
 

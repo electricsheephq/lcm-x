@@ -27053,6 +27053,7 @@ class TestEngineTools:
         assert result["dag"]["compression_ratio"] == "10.0:1"
 
     def test_handle_doctor_returns_healthy(self, engine):
+        engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
         result = json.loads(engine.handle_tool_call("lcm_doctor", {}))
 
         assert result["overall"] == "healthy"
@@ -27089,6 +27090,7 @@ class TestEngineTools:
         }
 
     def test_handle_doctor_treats_legacy_blank_source_rows_as_healthy(self, engine):
+        engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
         for source in (None, "", "   ", "\t\n"):
             engine._store._conn.execute(
                 """INSERT INTO messages
@@ -27161,6 +27163,7 @@ class TestEngineTools:
         assert engine._lifecycle.row_count() == 2
 
     def test_handle_doctor_keeps_retained_history_lifecycle_drift_healthy(self, engine, tmp_path):
+        engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
         engine._hermes_home = str(tmp_path / "hermes_home")
         state_db = tmp_path / "hermes_home" / "state.db"
         state_db.parent.mkdir(parents=True, exist_ok=True)
@@ -27241,6 +27244,7 @@ class TestEngineTools:
         assert lifecycle_check["detail"]["read_only"] is True
 
     def test_handle_doctor_warns_on_message_session_without_lifecycle_current(self, engine):
+        engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
         engine.on_session_start("current-session", platform="cli", context_length=200000)
         engine._store.append("current-session", {"role": "user", "content": "covered"}, source="cli")
         engine._store.append("message-only-session", {"role": "user", "content": "missing lifecycle"}, source="cli")
@@ -27256,6 +27260,7 @@ class TestEngineTools:
         assert lifecycle_check["detail"]["read_only"] is True
 
     def test_handle_doctor_does_not_warn_on_last_finalized_message_session(self, engine):
+        engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
         engine.on_session_start(
             "current-session",
             platform="cli",
@@ -27280,6 +27285,7 @@ class TestEngineTools:
         assert lifecycle_check["detail"]["read_only"] is True
 
     def test_handle_doctor_warns_on_node_session_without_lifecycle_reference(self, engine):
+        engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
         engine.on_session_start("current-session", platform="cli", context_length=200000)
         engine._store.append("current-session", {"role": "user", "content": "covered"}, source="cli")
         engine._dag.add_node(

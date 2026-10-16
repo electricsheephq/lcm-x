@@ -170,6 +170,7 @@ class StressRun:
         hermes_home.mkdir(parents=True, exist_ok=True)
         cfg = LCMConfig(
             temporal_rollups_enabled=False,  # deterministic stubs cover compaction only (#1013 part B)
+            embeddings_enabled=False,  # and no background embedding or model download (#1186)
             database_path=str(db_path),
             fresh_tail_count=overrides.pop("fresh_tail_count", 8),
             leaf_chunk_tokens=overrides.pop("leaf_chunk_tokens", 240),
@@ -842,6 +843,7 @@ def _case_lifecycle_soak_and_profile_rebinds(run: StressRun) -> None:
     current_session = "lifecycle-session-000"
     cfg = LCMConfig(
         temporal_rollups_enabled=False,  # deterministic stubs cover compaction only (#1013 part B)
+        embeddings_enabled=False,  # and no background embedding or model download (#1186)
         database_path=str(db_path),
         fresh_tail_count=5,
         leaf_chunk_tokens=120,
@@ -1121,6 +1123,7 @@ def _profile_rebind_probe(run: StressRun, case: str) -> dict[str, Any]:
     profile_b = root / "profile-b"
     cfg = LCMConfig(
         temporal_rollups_enabled=False,  # deterministic stubs cover compaction only (#1013 part B)
+        embeddings_enabled=False,  # and no background embedding or model download (#1186)
         fresh_tail_count=3,
         leaf_chunk_tokens=40,
         context_threshold=0.50,
