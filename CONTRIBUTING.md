@@ -56,7 +56,7 @@ Run the narrowest focused regression first. GitHub Actions is authoritative for 
 matrix. The repository defaults are:
 
 ```bash
-pytest tests/test_lcm_core.py tests/test_lcm_engine.py tests/test_packaging_install.py -q
+pytest tests/test_lcm_core.py tests/test_lcm_engine*.py tests/test_packaging_install.py -q
 pytest -q
 bash -lc 'ulimit -n 1024 && python -m pytest tests/ -q'
 ruff check .
