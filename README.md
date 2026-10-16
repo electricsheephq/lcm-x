@@ -112,8 +112,9 @@ from a compression layer into a memory system: **large-output externalization
 and context-budget controls** (giant tool results move to recoverable refs
 instead of crowding the prompt), **temporal memory** (day/week/month rollups
 plus natural-time recall through `lcm_recent`), and **semantic retrieval**
-(opt-in embedding-backed `lcm_grep` semantic/hybrid modes with Voyage,
-OpenAI-compatible endpoints, Ollama, or in-process FastEmbed). See the
+(embedding-backed `lcm_recall` and `lcm_grep` semantic/hybrid modes; on by
+default with in-process FastEmbed, or with Voyage, OpenAI-compatible endpoints
+or Ollama). See the
 [Feature overview](docs/features-overview.md) for what each family does and
 why, and [Agent configuration profiles](docs/agent-config-profiles.md) for
 copy-paste setups per agent type. Externalization and temporal rollups are on by default.
@@ -218,7 +219,10 @@ When it finds a pre-0.24 install (`plugins/hermes-lcm`, or a `config.yaml` that
 enables `hermes-lcm` / selects `context.engine: lcm`), it prints the migration
 steps below. It never edits `config.yaml` and never deletes the old directory.
 
-Semantic retrieval is optional; its dependency and recovery after a host update are described in the [embedding setup doc](docs/embeddings-setup.md#a-host-update-can-remove-fastembed).
+Local semantic retrieval is on by default: `plugin.yaml` declares `fastembed`, so Hermes installs it, and the
+model (`BAAI/bge-small-en-v1.5`, about 130 MB) downloads in the background on the first start; recall uses full
+text until it is ready. `LCM_EMBEDDINGS_ENABLED=false` turns it off. Offline hosts and recovery after a host update
+are described in the [embedding setup doc](docs/embeddings-setup.md#a-host-update-can-remove-fastembed).
 
 ### Activate it
 

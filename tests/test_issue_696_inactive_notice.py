@@ -100,6 +100,7 @@ def test_doctor_reports_live_peer_and_guidance(engine, monkeypatch, reason, acti
 
 
 def test_doctor_without_record_passes(engine):
+    engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
     payload = json.loads(tools.lcm_doctor({}, engine=engine))
     assert next(c for c in payload["checks"] if c["check"] == "inactive_process")["status"] == "pass"
     assert payload["overall"] == "healthy"

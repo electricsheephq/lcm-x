@@ -14,6 +14,7 @@ FLEET = {
     "LCM_SUMMARY_TIMEOUT_MS": "60000", "LCM_NATIVE_RECOVERY": "false",  # S8: fleet default false (PCS 8a98585)
     "LCM_SUMMARY_SPEND_MAX_CALLS": "0",  # S8 HARNESS OVERRIDE, see HARNESS_OVERRIDES
     "LCM_TEMPORAL_ROLLUPS_ENABLED": "false",  # FLEET_EXCLUDED, explicit: the product default is on (#1013)
+    "LCM_EMBEDDINGS_ENABLED": "false",  # FLEET_EXCLUDED, explicit: the product default is on (#1186)
 }
 HARNESS_OVERRIDES = {"LCM_SUMMARY_SPEND_MAX_CALLS=0": "spend guard off: the replay feeds 305 rows in ~9 min, so the "
                      "24 calls / 600 s guard trips from replay speed alone (field: 0 trips on 22 profiles); per-run "
@@ -21,6 +22,7 @@ HARNESS_OVERRIDES = {"LCM_SUMMARY_SPEND_MAX_CALLS=0": "spend guard off: the repl
 FLEET_EXCLUDED = {
     "LCM_TEMPORAL_ROLLUPS_ENABLED=true": "background rollup maintenance, not compaction; left off so compress() "
                                         "timing and summariser-call counts contain compaction work only",
+    "LCM_EMBEDDINGS_ENABLED=true": "background embedding and model download, not compaction; left off as before #1186",
 }
 
 UNSUPPORTED = {

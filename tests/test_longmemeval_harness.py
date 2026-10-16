@@ -2126,7 +2126,7 @@ def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp
         "queries_changed": 0,
         "queries_blocked": 0,
     }
-    assert row["corpus_counts"] == {"messages": 2, "summary_nodes": 1, "chunks": 0}
+    assert row["corpus_counts"] == {"messages": 2, "summary_nodes": 1, "chunks": 2}
     assert row["embed_cache"] == {"hits": 0, "misses": 0}
     assert "corpus_counts" not in row["arms"]
     assert "embed_cache" not in row["arms"]
@@ -2290,7 +2290,7 @@ def test_resume_validates_restored_corpus_counts(tmp_path):
     assert json.loads(row_line)["corpus_counts"] == {
         "messages": 2,
         "summary_nodes": 1,
-        "chunks": 0,
+        "chunks": 2,
     }
 
     def _write(row):

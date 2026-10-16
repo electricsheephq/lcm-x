@@ -522,6 +522,7 @@ def test_lcm_status_reports_source_lineage_breakdown(engine):
 
 
 def test_lcm_doctor_reports_health_checks(engine):
+    engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
     result = handle_lcm_command("doctor", engine)
     repo_root = Path(__file__).resolve().parent.parent
 
@@ -960,6 +961,7 @@ def test_lcm_doctor_command_payload_read_error_guidance_is_failure(engine, monke
 
 
 def test_lcm_doctor_command_payload_warning_drives_action_recommended(engine, monkeypatch):
+    engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
     def payload_warning(*_args, **_kwargs):
         return {
             "largest_content_rows": [],
@@ -982,6 +984,7 @@ def test_lcm_doctor_command_payload_warning_drives_action_recommended(engine, mo
 
 
 def test_lcm_doctor_reports_legacy_blank_source_as_observation_without_warning(engine):
+    engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
     engine._store.append("sess-known", {"role": "user", "content": "cli message"}, source="cli")
     engine._store.append("sess-unknown", {"role": "user", "content": "unknown message"})
     engine._store._conn.execute(
@@ -1063,6 +1066,7 @@ def test_lcm_doctor_source_apply_is_backup_first_and_idempotent(tmp_path):
 
 
 def test_lcm_doctor_reports_lifecycle_fragmentation_as_read_only_observation(engine):
+    engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
     state_db = Path(engine._hermes_home) / "state.db"
     state_db.parent.mkdir(parents=True, exist_ok=True)
     state_conn = sqlite3.connect(state_db)
@@ -1121,6 +1125,7 @@ def test_lcm_doctor_reports_lifecycle_fragmentation_as_read_only_observation(eng
 
 
 def test_lcm_doctor_reports_lcm_sessions_without_lifecycle_references_as_observations(engine):
+    engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
     engine.on_session_start("current-session", platform="cli", context_length=200000)
     engine._store.append("current-session", {"role": "user", "content": "covered"}, source="cli")
     engine._store.append("message-only-session", {"role": "user", "content": "missing lifecycle"}, source="cli")
@@ -1148,6 +1153,7 @@ def test_lcm_doctor_reports_lcm_sessions_without_lifecycle_references_as_observa
 
 
 def test_lcm_doctor_does_not_warn_on_last_finalized_message_session(engine):
+    engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
     engine.on_session_start(
         "current-session",
         platform="cli",
@@ -1220,6 +1226,7 @@ def test_lcm_doctor_text_reports_same_count_stale_message_fts(engine):
 
 
 def test_lcm_doctor_text_reports_unchecked_message_fts_as_warning(engine, monkeypatch):
+    engine._config.embeddings_enabled = False  # #1186: store health only; the provider is default-on
     def fake_fts_integrity(_conn, spec):
         if spec.table_name == "messages_fts":
             return {"status": "unchecked", "detail": "attempt to write a readonly database"}

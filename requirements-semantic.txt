@@ -1,24 +1,22 @@
 # Optional dependencies for LCM-X semantic/hybrid retrieval (#674).
 #
-# Semantic retrieval is OPT-IN. With LCM_EMBEDDINGS_ENABLED unset or false,
-# LCM-X needs nothing from this file and retrieval stays FTS-only.
+# Local semantic recall is ON by default (#1186): LCM_EMBEDDINGS_ENABLED
+# defaults to true with LCM_EMBEDDING_PROVIDER=fastembed and
+# LCM_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5. plugin.yaml declares
+# `fastembed==0.8.0` under pip_dependencies, so Hermes installs it into the
+# environment that runs Hermes and keeps it across `hermes update`.
 #
-# This file exists so the semantic dependency set is machine-readable rather
-# than prose buried in docs/embeddings-setup.md. LCM-X is installed by symlink
-# (scripts/install.sh), not by pip, so nothing installs this automatically --
-# it must go into the virtualenv that runs Hermes:
+# This file is a FALLBACK only: for a host whose Hermes does not install
+# plugin-declared dependencies, or to repair an environment by hand:
 #
 #     pip install -r requirements-semantic.txt
 #
-# IMPORTANT: `hermes update` can build a NEW environment under
-# installs/<id>/environments/<hash>/venv. It carries over the dependencies
-# Hermes itself records (its extras and the dependencies plugins declare), but
-# a package installed by hand from this file is not recorded, so it can be
-# dropped by a host update. After an update, run `/lcm doctor` (the
-# embedding_provider_health check reports an unavailable provider) and
-# reinstall if it names a missing dependency. No restart
-# is needed once the dependency is present: the provider import is lazy and
-# existing vectors are untouched.
+# A package installed by hand is not recorded by Hermes, so a host update can
+# drop it. `/lcm doctor` (the embedding_provider_health check) reports an
+# unavailable provider and names a missing dependency. No restart is needed
+# once the dependency is present: the provider import is lazy and existing
+# vectors are untouched. Set LCM_EMBEDDINGS_ENABLED=false to turn semantic
+# recall off; LCM-X then needs nothing from this file.
 #
 # Provider-specific. Only install what LCM_EMBEDDING_PROVIDER selects:
 #   fastembed          -> this file (local ONNX, no signup, no daemon)

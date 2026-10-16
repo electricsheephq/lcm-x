@@ -219,6 +219,9 @@ def _load_live_provider() -> Embedder:
         raise RuntimeError(
             "live-provider evaluation requires LCM_RECALL_EVAL_ALLOW_LIVE_PROVIDER=1"
         )
+    # The arms stay explicit: the config's default provider (#1186) never becomes the semantic arm.
+    if not all(os.environ.get(key, "").strip() for key in ("LCM_EMBEDDING_PROVIDER", "LCM_EMBEDDING_MODEL")):
+        raise RuntimeError("LCM_EMBEDDING_PROVIDER and LCM_EMBEDDING_MODEL are required")
     package_name = "hermes_lcm"
     if package_name not in sys.modules:
         package = ModuleType(package_name)

@@ -92,9 +92,9 @@ def test_warns_when_enabled_but_dependency_missing(caplog, monkeypatch):
 
 
 def test_silent_when_embeddings_disabled(caplog):
-    """The default install must not gain a new warning."""
+    """An install with embeddings off must not gain a new warning (off is explicit since #1186)."""
     with caplog.at_level(logging.DEBUG, logger="hermes_lcm"):
-        _warn_if_embedding_provider_unavailable(LCMConfig())
+        _warn_if_embedding_provider_unavailable(LCMConfig(embeddings_enabled=False))
 
     assert _warn_records(caplog) == []
 

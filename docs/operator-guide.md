@@ -418,11 +418,11 @@ Useful environment variables:
 | `LCM_SQLITE_MMAP_SIZE` | `268435456` | SQLite mapped-read size in bytes; `0` disables mapping. Invalid or negative values fall back with one WARNING per process. |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup (previous behavior); a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
-| `LCM_EMBEDDINGS_ENABLED` | `false` | Opt in to embedding warmup, backfill, and semantic retrieval storage |
+| `LCM_EMBEDDINGS_ENABLED` | `true` | Embedding warmup, backfill, and semantic retrieval storage (local FastEmbed recall is on by default); set `false` to turn it off |
 | `LCM_RERANK_WINDOW_LIMIT` | `0` | Optional positive cap on the `lcm_recall` rerank delivery window; `0` keeps the historical window unchanged, while a bound can stabilize the delivery set at `k ≤ limit` |
 | `LCM_RERANK_MARGIN` | `0.0` | Optional positive relevance-gap gate that holds the incoming rank-1 `lcm_recall` candidate unless the rerank challenger clears the margin |
-| `LCM_EMBEDDING_PROVIDER` | empty | Embedding provider: `voyage`, `ollama`, `fastembed`, or `openai-compatible` (`openai`/`siliconflow` aliases resolve to that provider identity) |
-| `LCM_EMBEDDING_MODEL` | empty | Provider model identifier registered by `/lcm embed warmup` |
+| `LCM_EMBEDDING_PROVIDER` | `fastembed` | Embedding provider: `voyage`, `ollama`, `fastembed`, or `openai-compatible` (`openai`/`siliconflow` aliases resolve to that provider identity) |
+| `LCM_EMBEDDING_MODEL` | `BAAI/bge-small-en-v1.5` when the provider is `fastembed`; otherwise required | Provider model identifier registered by `/lcm embed warmup` |
 | `LCM_EMBEDDING_BASE_URL` | empty | Required API root for `openai-compatible`; `/embeddings` is appended after trailing-slash normalization |
 | `LCM_EMBEDDING_API_KEY_ENV` | `LCM_EMBEDDING_API_KEY` | Name of the environment variable holding the OpenAI-compatible endpoint key; store the value in an operator secret manager, never in config/docs |
 | `LCM_EMBEDDING_STORAGE_DTYPE` | `float32` | Vector storage dtype for newly-registered embedding profiles: `float32` (byte-identical legacy path) or `int8` (per-vector quantization plus a sign-bit prescreen, a distinct profile identity). See [Vector storage scale options (v3)](#vector-storage-scale-options-v3) |
@@ -1183,8 +1183,9 @@ FastEmbed runs its model with 2 threads. `FASTEMBED_CACHE_PATH` selects a model 
 including a shared, read-only cache. Pre-seed a read-only cache because
 `/lcm embed warmup` cannot download into it.
 
-Embedding backfill is opt-in and dry-run-first. Configure and warm the model
-before applying any work:
+Local fastembed embeddings are on by default and catch up in the background (#1186). A manual
+backfill is dry-run-first; for another provider, configure and warm the model before applying any
+work:
 
 ```bash
 export LCM_EMBEDDINGS_ENABLED=true

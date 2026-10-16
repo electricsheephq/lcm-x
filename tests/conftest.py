@@ -62,6 +62,25 @@ import pytest  # noqa: E402
 _MAINTENANCE_SCHEDULERS = ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER")
 
 
+def pytest_configure(config):
+    config.addinivalue_line(
+        "markers", "real_local_model: use the real locally cached FastEmbed model"
+    )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_fastembed_cache(tmp_path, request):
+    """#1196: cached models must not start real inference in ordinary unit tests."""
+    # Replay controls call the shared monkeypatch fixture's undo() mid-test.
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        if request.node.get_closest_marker("real_local_model") is None:
+            # Some tests require tmp_path itself to remain an empty output directory.
+            cache_dir = tmp_path.with_name(tmp_path.name + "-fastembed-cache")
+            cache_dir.mkdir()
+            monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache_dir))
+        yield
+
+
 def _wait_scheduler_idle(scheduler, timeout: float) -> bool:
     import time
 
@@ -74,7 +93,27 @@ def _wait_scheduler_idle(scheduler, timeout: float) -> bool:
 
 
 @pytest.fixture(autouse=True)
-def _drain_background_maintenance(monkeypatch):
+def _no_background_model_prepare():
+    """#1186: the local model prepare is process-wide state; a test that wants it opts in.
+
+    Local embeddings are on by default, so every bound session would otherwise start a
+    download thread that outlives the test and calls a later test's fakes.
+    """
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        maintenance = sys.modules.get("hermes_lcm.embedding_maintenance")
+        provider = sys.modules.get("hermes_lcm.embedding_provider")
+        if provider is not None:
+            monkeypatch.setattr(provider, "_FASTEMBED_MODELS", {}, raising=False)
+            monkeypatch.setattr(provider, "_FASTEMBED_BUILD_LOCKS", {}, raising=False)
+        if maintenance is not None:
+            monkeypatch.setattr(maintenance, "_PREPARE", {})
+            monkeypatch.setattr(maintenance, "_PREPARE_THREAD", None, raising=False)
+            monkeypatch.setattr(maintenance, "start_local_model_prepare", lambda *_args, **_kwargs: False)
+        yield
+
+
+@pytest.fixture(autouse=True)
+def _drain_background_maintenance(monkeypatch, _isolate_fastembed_cache, _no_background_model_prepare):
     """#1013 part B: temporal rollups are on by default, and their worker is process-wide.
 
     A job a test schedules must finish inside that test, while its fakes are still installed;

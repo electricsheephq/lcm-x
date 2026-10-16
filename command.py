@@ -74,12 +74,13 @@ from .survival_fit import SURVIVAL_FIT_COUNTER_KEY
 from .host_uid import host_uid_doctor_lines
 from .chunking import (
     _CONVERSATIONAL_ROLES,
+    CHUNK_POLICY_REVISION,
     VALID_CONTENT_POLICIES,
     chunk_message,
     group_by_store_id,
     normalize_content_policy,
 )
-from .embedding_maintenance import incremental_embedding_state
+from .embedding_maintenance import incremental_embedding_state, note_local_model_present
 from .embedding_provider import (
     EmbeddedDocumentBatch,
     EmbeddingProviderError,
@@ -2007,6 +2008,9 @@ def _doctor_text(engine) -> str:
         if isinstance(detail, str):
             suffix = f" {detail}"
         lines.append(f"embedding_provider_health: {embedding_check['status']}{suffix}")
+        readiness = detail.get("readiness") if isinstance(detail, dict) else None
+        if readiness:
+            lines.append(f"embedding_readiness: {readiness}")  # #1186: model state and coverage
     if issues:
         lines.append(f"issues: {', '.join(issues)}")
     else:
@@ -3169,6 +3173,7 @@ def _embedding_warmup_text(engine) -> str:
         result = _embedding_register_profiles(engine._config, engine._store.db_path, allow_download=True)
         if isinstance(result, dict):
             engine._lcm_embedding_provider_cache = result["provider_cache"]
+            note_local_model_present(engine._config)
         return result["text"] if isinstance(result, dict) else result
     except Exception as exc:
         return "\n".join(["LCM embedding warmup", "status: error", f"error: {exc}"])
@@ -4919,6 +4924,7 @@ def _chunk_pending_rows(
     limit: int,
     *,
     incremental: bool = False,
+    record_progress: bool = False,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
     """Discover policy-chunked messages whose chunks are not yet embedded.
 
@@ -4929,14 +4935,18 @@ def _chunk_pending_rows(
     as ``(chunk_id, text, tokens)``, and a metadata map for the selected chunks.
 
     ``incremental`` (the #1014 automatic pass) reads the frontier of
-    ``_chunk_frontier_rows``: new messages first, then history newest first.
+    ``_chunk_frontier_rows``: new messages first, then revision gaps and history
+    newest first. ``record_progress`` is only used under the writer's lease.
     It stops at a message boundary once ``limit`` chunks are found, so its cost
     tracks new messages rather than the store; the returned total then counts
     only what it saw.
     """
     if incremental:
-        already = inflight = set()
-        rows = _chunk_frontier_rows(conn, identity_hash, policy=policy)
+        already = _chunk_boundary_done_ids(conn, identity_hash)
+        inflight = _chunk_inflight_ids(conn, identity_hash)
+        rows = _chunk_frontier_rows(
+            conn, identity_hash, policy=policy, record_progress=record_progress
+        )
     else:
         already = _chunk_embedded_ids(conn, identity_hash)
         inflight = _chunk_inflight_ids(conn, identity_hash)
@@ -4981,7 +4991,10 @@ def _chunk_cursor(
         "SELECT MIN(id), MAX(id) FROM (SELECT CAST(substr(embedded_id, 1, "
         "instr(embedded_id, ':') - 1) AS INTEGER) AS id FROM "
         "lcm_embedding_backfill_inflight WHERE identity_hash = ?1 "
-        "AND instr(embedded_id, ':') > 1) WHERE id > 0",
+        "AND instr(embedded_id, ':') > 1 "
+        "AND substr(embedded_id, 1, instr(embedded_id, ':') - 1) NOT GLOB '*[^0-9]*' "
+        "AND substr(embedded_id, instr(embedded_id, ':') + 1) != '' "
+        "AND substr(embedded_id, instr(embedded_id, ':') + 1) NOT GLOB '*[^0-9]*') WHERE id > 0",
     ):
         try:
             first, last = conn.execute(sql, (identity_hash,)).fetchone()
@@ -4993,19 +5006,98 @@ def _chunk_cursor(
     return None if low is None else (low, high)
 
 
+def _chunk_boundary_done_ids(conn: sqlite3.Connection, identity_hash: str | None) -> set[str]:
+    """Read embedded ids for only the two messages incremental discovery revisits."""
+    bounds = _chunk_cursor(conn, identity_hash)
+    if bounds is None:
+        return set()
+    try:
+        return {str(row[0]) for row in conn.execute(
+            "SELECT chunk_id FROM lcm_chunk_meta WHERE store_id IN (?, ?) AND identity_hash = ?",
+            (*bounds, identity_hash),
+        )}
+    except sqlite3.OperationalError:
+        return set()  # table not created yet
+
+
 _CHUNK_HISTORY_SCAN_MESSAGES = 2_000  # history rows one discovery reads; rows that never chunk are re-read
 
 
+def _chunk_policy_revision(conn: sqlite3.Connection, identity_hash: str | None) -> int:
+    """An unstamped populated identity used revision 1; an empty one needs no fill."""
+    if not identity_hash:
+        return CHUNK_POLICY_REVISION
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?",
+        (f"chunk_policy_revision:{identity_hash}",),
+    ).fetchone()
+    if row is not None:
+        return int(row[0])
+    try:
+        populated = conn.execute(
+            "SELECT 1 FROM lcm_chunk_meta WHERE identity_hash = ? LIMIT 1", (identity_hash,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        populated = None  # chunk tables not created yet
+    return 1 if populated else CHUNK_POLICY_REVISION
+
+
+def _record_chunk_policy_revision(conn: sqlite3.Connection, identity_hash: str) -> None:
+    conn.execute(
+        "INSERT INTO metadata(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value != excluded.value",
+        (f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)),
+    )
+
+
+def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_progress=False):
+    """Fill only missing messages; skip a zero-chunk prefix, never unpublished work."""
+    low, high = bounds
+    skip_key = f"chunk_gapfill_skip_below:{identity_hash}"
+    skip = conn.execute("SELECT value FROM metadata WHERE key = ?", (skip_key,)).fetchone()
+    ceiling = min(high + 1, int(skip[0])) if skip is not None else high + 1
+    roles = "'assistant', 'user', 'tool'" if policy == "heads" else "'assistant', 'user'"
+    rows = conn.execute(
+        f"SELECT store_id, role, content FROM messages AS m "
+        f"WHERE store_id > ? AND store_id < ? AND store_id < ? "
+        f"AND lower(trim(role)) IN ({roles}) AND trim(COALESCE(content, '')) != '' "
+        "AND NOT EXISTS (SELECT 1 FROM lcm_chunk_meta AS c "
+        "WHERE c.store_id = m.store_id AND c.identity_hash = ?) "
+        "ORDER BY store_id DESC LIMIT ?",
+        (low, high, ceiling, identity_hash, limit),
+    ).fetchall()
+    if not rows and record_progress:
+        _record_chunk_policy_revision(conn, identity_hash)
+    saw_chunks = False
+    for row in rows:
+        if any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
+            saw_chunks = True
+            yield row
+        elif record_progress and not saw_chunks:
+            # Only the zero-chunk prefix advances the marker. A selected row
+            # may still be unpublished when the deadline/crash stops this pass.
+            conn.execute(
+                "INSERT OR REPLACE INTO metadata(key, value) VALUES(?, ?)",
+                (skip_key, str(row[0])),
+            )
+
+
 def _chunk_frontier_rows(
-    conn: sqlite3.Connection, identity_hash: str | None, history_limit: int | None = None, policy: str = ""
+    conn: sqlite3.Connection, identity_hash: str | None, history_limit: int | None = None, policy: str = "",
+    *, record_progress: bool = False,
 ):
-    """Messages the automatic chunk pass has not reached. New messages come first, oldest first; then up to
+    """Messages the automatic chunk pass has not reached. New messages come first, oldest first; then missing
+    eligible rows inside revision-1 cursor bounds, newest first and bounded; then up to
     ``_CHUNK_HISTORY_SCAN_MESSAGES`` of the history below the oldest embedded message, newest first. A store with no
     chunk under the identity reads that many of its newest messages, so turning embeddings on for an existing store
     covers recent messages before old history; `/lcm embed backfill` reaches the rest in one go. Under the
     conversational policy only non-empty user and assistant rows can chunk, so the bound counts only those: a long
     run of tool rows cannot hold the walk in place."""
     history_limit = _CHUNK_HISTORY_SCAN_MESSAGES if history_limit is None else history_limit
+    policy = normalize_content_policy(policy)
+    revision = _chunk_policy_revision(conn, identity_hash)
+    if record_progress and identity_hash and (policy == "full" or revision >= CHUNK_POLICY_REVISION):
+        _record_chunk_policy_revision(conn, identity_hash)
     eligible = ""
     if normalize_content_policy(policy) == "conversational":
         roles = ", ".join(f"'{role}'" for role in sorted(_CONVERSATIONAL_ROLES))
@@ -5019,11 +5111,17 @@ def _chunk_frontier_rows(
         return
     low, high = bounds
     yield from conn.execute(
-        f"SELECT store_id, role, content FROM messages WHERE store_id > ?{eligible} ORDER BY store_id", (high,)
+        f"SELECT store_id, role, content FROM messages WHERE store_id >= ?{eligible} ORDER BY store_id", (high,)
     )
+    if policy != "full" and revision < CHUNK_POLICY_REVISION:
+        yield from _chunk_gapfill_rows(
+            conn, identity_hash, bounds, policy, min(history_limit, _CHUNK_HISTORY_SCAN_MESSAGES),
+            record_progress=record_progress,
+        )
     yield from conn.execute(
-        f"SELECT store_id, role, content FROM messages WHERE store_id < ?{eligible} ORDER BY store_id DESC LIMIT ?",
-        (low, history_limit),
+        f"SELECT store_id, role, content FROM messages WHERE store_id <= ? AND store_id != ?{eligible} "
+        "ORDER BY store_id DESC LIMIT ?",
+        (low, high, history_limit),
     )
 
 
@@ -5033,17 +5131,21 @@ _STATUS_CHUNK_SCAN_MESSAGES = 2_000  # /lcm status chunks at most this many mess
 def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None, policy: str) -> str:
     """The automatic pass's pending chunks, read along its frontier and bounded for the status page."""
     total = 0
+    gapfill = normalize_content_policy(policy) != "full" and _chunk_policy_revision(conn, identity_hash) < CHUNK_POLICY_REVISION
+    suffix = " (gap-fill)" if gapfill else ""
+    already = _chunk_boundary_done_ids(conn, identity_hash)
+    inflight = _chunk_inflight_ids(conn, identity_hash)
     rows = _chunk_frontier_rows(
         conn, identity_hash, history_limit=_STATUS_CHUNK_SCAN_MESSAGES + 1, policy=policy
     )
     for scanned, row in enumerate(rows):
         if scanned >= _STATUS_CHUNK_SCAN_MESSAGES:
-            return f"{total}+"
+            return f"{total}+{suffix}"
         total += sum(
             1 for chunk in chunk_message(row[0], row[1], row[2], policy=policy)
-            if chunk.char_end > chunk.char_start
+            if chunk.char_end > chunk.char_start and chunk.chunk_id not in inflight and chunk.chunk_id not in already
         )
-    return str(total)
+    return f"{total}{suffix}"
 
 
 def _rebuild_chunk_document(
@@ -5427,9 +5529,14 @@ def _chunk_backfill_run(
             authorized_uncertain_ids = {row[0] for row in rows}
         else:
             pending, rows, chunk_meta = _chunk_pending_rows(
-                conn, identity, policy, limit, incremental=incremental
+                conn, identity, policy, limit, incremental=incremental,
+                record_progress=incremental,
             )
             authorized_uncertain_ids = set()
+        if not incremental and not retry_uncertain and (
+            policy == "full" or _chunk_policy_revision(conn, identity) >= CHUNK_POLICY_REVISION
+        ):
+            _record_chunk_policy_revision(conn, identity)
         (
             documents,
             privacy_revision,
@@ -5703,6 +5810,12 @@ def _chunk_backfill_run(
                         error = str(exc)
                         stop_reason = "privacy_refused"
                         break
+        if (
+            not incremental and not retry_uncertain and pending == embedded
+            and not error and not failed and not skipped and not stop_reason
+            and not _chunk_inflight_ids(conn, identity)
+        ):
+            _record_chunk_policy_revision(conn, identity)
     except _BackfillLeaseLost:
         lease_lost = True
         stop_reason = "lease_lost"

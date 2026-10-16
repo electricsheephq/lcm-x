@@ -31,8 +31,10 @@ class TestPolicyNormalization:
 
 
 class TestConversationalPolicy:
-    def test_skips_short_acknowledgment(self):
-        assert chunk_message(1, "user", "ok thanks", policy="conversational") == []
+    def test_embeds_short_acknowledgment(self):
+        chunks = chunk_message(1, "user", "ok thanks", policy="conversational")
+        assert len(chunks) == 1
+        assert chunks[0].text == "ok thanks"
 
     def test_embeds_substantial_user_turn(self):
         text = "This is a substantial user question. " * 6

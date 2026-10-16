@@ -40,6 +40,102 @@ def _response(status: int, payload, headers=None) -> HttpResponse:
     )
 
 
+def test_1110_warmup_publishes_and_cache_keys_isolate_models(monkeypatch, tmp_path):
+    class Model:
+        def __init__(self, **kwargs):
+            if kwargs["local_files_only"]:
+                raise RuntimeError("not cached")
+
+        def query_embed(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: Model)
+    first = FastembedProvider("local", cache_dir=tmp_path)
+    first.warmup()
+    second = FastembedProvider("local", cache_dir=tmp_path)
+    assert second._ensure_local() is first._model
+    with pytest.raises(ProviderNotWarmedUp):
+        FastembedProvider("other", cache_dir=tmp_path)._ensure_local()
+    with pytest.raises(ProviderNotWarmedUp):
+        FastembedProvider("local", cache_dir=tmp_path / "other")._ensure_local()
+    monkeypatch.setattr(provider_mod, "_FASTEMBED_THREADS", 1)
+    with pytest.raises(ProviderNotWarmedUp):
+        FastembedProvider("local", cache_dir=tmp_path)._ensure_local()
+
+
+def test_1110_abandoned_query_does_not_lock_shared_backfill(monkeypatch, tmp_path):
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    made = []
+
+    class Model:
+        def __init__(self, **_kwargs):
+            made.append(self)
+
+        def query_embed(self, texts):
+            started.set()
+            try:
+                assert release.wait(3)
+                return [[1.0, 0.0] for _ in texts]
+            finally:
+                finished.set()
+
+        def embed(self, texts):
+            assert started.is_set() and not release.is_set()
+            return [[1.0, 0.0] for _ in texts]
+
+    monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: Model)
+    query = FastembedProvider("local", cache_dir=tmp_path, timeout=0.1)
+    backfill = FastembedProvider("local", cache_dir=tmp_path, timeout=2)
+    query._ensure_local()
+    try:
+        with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
+            query.embed_query("held query")
+        assert started.is_set()
+        assert backfill.embed_documents(["backfill"]) == [[1.0, 0.0]]
+        assert backfill._model is query._model
+        assert len(made) == 1
+    finally:
+        release.set()
+        assert finished.wait(3)
+
+
+def test_1110_concurrent_query_and_backfill_share_one_construction(monkeypatch, tmp_path):
+    barrier = threading.Barrier(2)
+    made = []
+    results = []
+
+    class Model:
+        def __init__(self, **_kwargs):
+            time.sleep(0.02)
+            made.append(self)
+
+        def query_embed(self, texts):
+            barrier.wait(timeout=3)
+            return [[1.0, 0.0] for _ in texts]
+
+        embed = query_embed
+
+    monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: Model)
+    query = FastembedProvider("local", cache_dir=tmp_path, timeout=4)
+    backfill = FastembedProvider("local", cache_dir=tmp_path, timeout=4)
+
+    def run(call):
+        try:
+            results.append(call())
+        except Exception as exc:
+            results.append(exc)
+
+    threads = [threading.Thread(target=run, args=(lambda: query.embed_query("query"),)),
+               threading.Thread(target=run, args=(lambda: backfill.embed_documents(["document"]),))]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+    assert all(not thread.is_alive() for thread in threads)
+    assert [1.0, 0.0] in results and [[1.0, 0.0]] in results
+    assert len(made) == 1
+
+
 class FakeTransport:
     def __init__(self, *responses):
         self.responses = list(responses)
@@ -499,7 +595,10 @@ def test_fastembed_absent_dependency_is_clean(monkeypatch):
 
 def test_resolve_provider_strings_and_dormant_defaults(monkeypatch):
     defaults = LCMConfig()
-    assert resolve_provider(defaults) is None
+    # #1186: the default is local FastEmbed; resolving it stays inert (no model load).
+    local = resolve_provider(defaults)
+    assert isinstance(local, FastembedProvider) and local.model_id == "BAAI/bge-small-en-v1.5"
+    assert local._model is None
 
     config = LCMConfig(
         embedding_provider="  VOYAGEAI ",
@@ -596,8 +695,8 @@ def test_fastembed_backfill_is_not_bound_by_interactive_query_timeout(monkeypatc
 
 def test_embedding_config_defaults_and_environment(monkeypatch):
     defaults = LCMConfig()
-    assert defaults.embedding_provider == ""
-    assert defaults.embedding_model == ""
+    assert defaults.embedding_provider == "fastembed"  # #1186
+    assert defaults.embedding_model == "BAAI/bge-small-en-v1.5"
     assert defaults.ollama_base_url == "http://localhost:11434"
     assert defaults.embedding_query_timeout_s == 3.0
     assert defaults.embedding_backfill_timeout_s == 120.0
