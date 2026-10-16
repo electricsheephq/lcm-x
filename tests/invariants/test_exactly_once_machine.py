@@ -1,8 +1,10 @@
-"""Ordered occurrence checks for append, replay and cold resume.
+"""Ordered occurrence checks for append, compress, replay and cold resume.
 
 The ledger records deliveries, not distinct text. The host view can archive its
-last exchange on retry; the ledger must retain both exchanges. No compaction,
-rotation, host sanitization or arbitrary prefix rewrite is generated here.
+last exchange on retry; the ledger must retain both exchanges. Compression
+changes only the host view. No rotation, host sanitization or arbitrary prefix
+rewrite is generated here. Cold resume excludes only a changed, sanitized
+compression output whose durable proof is stale (#1286), until a compacted pass.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ import pytest
 
 pytest.importorskip("hypothesis")
 from hypothesis import settings, strategies as st
-from hypothesis.stateful import RuleBasedStateMachine, invariant, rule
+from hypothesis.stateful import RuleBasedStateMachine, invariant, precondition, rule
 
 from hermes_lcm import engine as engine_module
 from hermes_lcm import escalation, tokens
@@ -65,7 +67,16 @@ def retry_resend_1179(host, replacement):
 
 # Each entry excludes an input shape only while its issue's strict xfail stands in test_identity_seeds.py
 # (enforced there by test_known_open_exclusions_track_their_strict_xfails).
-KNOWN_OPEN = {1179: retry_resend_1179}
+def cold_stale_proof(stale_proof, operation):
+    """#1286: a changed sanitized output leaves the durable commit proof stale.
+
+    A compacted pass refreshes the proof; a new turn does not. Carrier depth
+    alone never excludes a cold resume. Strict seeds retain the failing paths.
+    """
+    return operation == "cold_resume" and stale_proof
+
+
+KNOWN_OPEN = {1179: retry_resend_1179, 1286: cold_stale_proof}
 
 
 def ambiguous_unstamped_tool_window_259(host, ledger):
@@ -84,7 +95,8 @@ def unstamped_user_beside_carrier_923(host, ledger):
     """#923 strict-xfail shape: unstamped U immediately beside its carrier.
 
     Requires the exact emitted carrier/U supplied by a survival-fit fixture;
-    this machine never emits carriers. See test_issue_650_survival_fit_keeps_summary.
+    ordinary compression keeps stamped source rows, outside this domain.
+    See test_issue_650_survival_fit_keeps_summary.
     """
     if len(host) < 2 or "timestamp" in host[1] or "message_uid" in host[1]:
         return False
@@ -115,12 +127,14 @@ class ExactlyOnceMachine(RuleBasedStateMachine):
         self.patch.setattr(escalation, "_call_llm_for_summary",
                            lambda *args, **kwargs: "Earlier turns retained.\nExpand for details about: turns")
         self.host, self.occurrences = [], []
+        self.stale_proof = False
         self.sequence = 0
         self.retry_occurrence_index = None
         self.engine = self.start_engine()
 
     def start_engine(self):
-        engine = LCMEngine(config=LCMConfig(database_path=str(self.home / "lcm.db")),
+        engine = LCMEngine(config=LCMConfig(database_path=str(self.home / "lcm.db"),
+                                          fresh_tail_count=2, leaf_chunk_tokens=16),
                            hermes_home=str(self.home / "home"))
         engine.on_session_start("identity-session", platform="cli", conversation_id="identity-conversation",
                                 context_length=200_000)
@@ -148,7 +162,7 @@ class ExactlyOnceMachine(RuleBasedStateMachine):
             user["content"] = deepcopy(self.host[-2]["content"])
         is_retry = retry and retry_resend_1179(self.host, user)
         if is_retry and not self.include_known_open:
-            if any(predicate(self.host, user) for predicate in KNOWN_OPEN.values()):
+            if KNOWN_OPEN[1179](self.host, user):
                 return  # exclude this input shape, never an observed oracle failure
         if is_retry:
             self.host = self.host[:-2]
@@ -165,12 +179,28 @@ class ExactlyOnceMachine(RuleBasedStateMachine):
         self.occurrences.extend(deepcopy(batch))
         self.engine.ingest(self.host)
 
+    @precondition(lambda self: bool(self.host))
     @rule()
     def replay(self):
         self.engine.ingest(self.host)
 
+    @precondition(lambda self: bool(self.host))
+    @rule()
+    def compress(self):
+        # Always force: sample actual compaction, without adding cooldown policy
+        # to the occurrence model. Compression delivers no new occurrences.
+        previous = deepcopy(self.host)
+        self.host = self.engine.compress(self.host, current_tokens=self.engine.threshold_tokens + 1, force=True)
+        if self.engine._last_compression_status == "sanitized" and self.host != previous:
+            self.stale_proof = True
+        elif self.engine._last_compression_status == "compacted":
+            self.stale_proof = False
+
+    @precondition(lambda self: bool(self.host))
     @rule()
     def cold_resume(self):
+        if KNOWN_OPEN[1286](self.stale_proof, "cold_resume"):
+            return  # exclude the input shape, never an observed oracle failure
         self.engine.shutdown()
         self.engine = self.start_engine()
         self.host = deepcopy(self.host)
