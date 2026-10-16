@@ -630,8 +630,9 @@ def test_small_default_cli_report_is_byte_identical_to_golden(tmp_path, monkeypa
             "byte-identity enforced only on the pinned platform (Darwin arm64) — "
             f"dataset-block/structural assertions ran; regenerate with: {_GOLDEN_REGEN_COMMAND}"
         )
-    # Keep the banked schema byte-identical after projecting away the additive
-    # configuration and run-status fields. New fields have dedicated arm tests.
+    # Keep the banked schema after projecting away additive configuration and
+    # run-status fields. #1197 refreshes this synthetic golden on Darwin arm64:
+    # its three short turns now supply chunk hits (and improve recall ordering).
     report.pop("retrieval_config")
     report.pop("lcm_recall_health")
     for arms in [report["arms"], *report["per_category"].values()]:
@@ -639,5 +640,5 @@ def test_small_default_cli_report_is_byte_identical_to_golden(tmp_path, monkeypa
             assert row.pop("run") is True
     legacy_bytes = json.dumps(report, indent=2, sort_keys=True).encode("utf-8")
     assert hashlib.sha256(legacy_bytes).hexdigest() == (
-        "7bb56477c3e7889778aed030fc4b2984d5db7f2caeb3e786cb1038e00c08ec0e"
+        "b6515cf58d679a20aa6e6b9220b8da85814f338934dec4895e298c1caca9bf03"
     )

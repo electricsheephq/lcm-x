@@ -293,6 +293,8 @@ FTS-only instantly.
 - `summary` (default) — embeds the generated **summaries** of your history.
 - `chunks` — embeds provider input derived from **raw, verbatim message text**, chunked by `--policy`
   (`conversational` | `heads` | `full`), for verbatim/chunk-KNN recall.
+  `conversational` (the default) embeds every non-empty user and assistant turn, however short; `heads` adds the
+  head and error chunks of tool results; `full` embeds every role.
 - `both` — runs the summary backfill, then the chunk backfill, in one command.
 
 The distinction matters for privacy. The summary corpus starts from model-generated summaries; the

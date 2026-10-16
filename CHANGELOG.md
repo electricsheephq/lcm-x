@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Fix: the `conversational` chunk policy (and the conversational half of `heads`) now embeds every non-empty user and assistant turn; before, turns under 40 tokens got no vector, and short turns often carry the fact a later question asks about. On LoCoMo (1,540 questions, shared OmniMemEval protocol) local embeddings scored 0.710 with the minimum and 0.791 without it, against 0.751 with embeddings off. Stores chunked before this change are filled in by the automatic chunk pass (new messages first, then the missing turns newest first), and `/lcm status` marks the chunk backlog `(gap-fill)` until it is done. Tool rows and the `full` policy are unchanged; no new setting. (#1197)
+
 ## v0.27.0 (summary quality)
 
 - Fix: survival fit can mark short stored tool rows when head projections cannot fit, and the default summary-prefix bound preserves the user objective for survival fitting. (#1220, #1221; rc6)
