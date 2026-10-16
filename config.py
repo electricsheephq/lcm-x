@@ -858,7 +858,8 @@ class LCMConfig:
     # established latency/cost posture; operators may explicitly select Voyage's
     # quality-oriented rerank-2.5 model.
     rerank_enabled: bool = False
-    # Voyage rerank model for the lcm_recall rerank stage. The default equals
+    # Independent reranker: rerank-* / voyage:<model>, or fastembed:<model>.
+    # Local models are prepared by /lcm embed warmup. The default equals
     # the provider-side literal, so unset == historical behavior byte-for-byte;
     # a non-default value is a NEW declared config owing its own A/A' run
     # (architect ruling, eval-queue #252).

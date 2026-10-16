@@ -74,6 +74,12 @@ def _wait_scheduler_idle(scheduler, timeout: float) -> bool:
 
 
 @pytest.fixture(autouse=True)
+def _no_live_voyage_key(monkeypatch):
+    """#1187: an exported operator key must never turn a test into a live Voyage call."""
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _drain_background_maintenance(monkeypatch):
     """#1013 part B: temporal rollups are on by default, and their worker is process-wide.
 

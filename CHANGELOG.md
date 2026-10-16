@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Change: `LCM_RERANK_MODEL` selects Voyage or a local FastEmbed cross-encoder independently of embeddings, including FTS-only recall. Reranking stays off by default; `/lcm embed warmup` prepares local models, recall never downloads them, and doctor reports rerank readiness. (#1187)
+
 ## v0.27.0 (summary quality)
 
 - Fix: survival fit can mark short stored tool rows when head projections cannot fit, and the default summary-prefix bound preserves the user objective for survival fitting. (#1220, #1221; rc6)
