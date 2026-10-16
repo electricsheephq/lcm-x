@@ -1,5 +1,8 @@
 """Ordered occurrence checks for append, compress, replay and cold resume.
 
+RecoveryMachine also generates host recovery fits, with larger delivered rows
+and a small context window; the original machine keeps its input distribution.
+
 The ledger records deliveries, not distinct text. The host view can archive its
 last exchange on retry; the ledger must retain both exchanges. Compression
 changes only the host view. No rotation, host sanitization or arbitrary prefix
@@ -26,6 +29,7 @@ from hermes_lcm import escalation, tokens
 from tests.conftest import _MAINTENANCE_SCHEDULERS, _wait_scheduler_idle
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from hermes_lcm.message_content import normalize_content_value
 
 
 for name, examples in (("ci", 25), ("nightly", 1000)):
@@ -78,6 +82,17 @@ def cold_stale_proof(stale_proof, operation):
 
 KNOWN_OPEN = {1179: retry_resend_1179, 1286: cold_stale_proof}
 
+REPROJECTED_USER = "#503: repeated recovery fit maps a projected user to an older equal-text source"
+
+
+def reprojected_user_input(aliases, host, operation):
+    """Only the still-present output of a recovery that misbound a proven projection."""
+    return operation in ("new_turn", "replay", "compress", "recover", "cold_resume") and any(
+        (row.get("message_uid"), identity(row)) in aliases for row in host)
+
+
+KNOWN_OPEN[503] = reprojected_user_input
+
 
 def ambiguous_unstamped_tool_window_259(host, ledger):
     """#259 permits duplication of an unproven, truncated tool-only window.
@@ -95,8 +110,7 @@ def unstamped_user_beside_carrier_923(host, ledger):
     """#923 strict-xfail shape: unstamped U immediately beside its carrier.
 
     Requires the exact emitted carrier/U supplied by a survival-fit fixture;
-    ordinary compression keeps stamped source rows, outside this domain.
-    See test_issue_650_survival_fit_keeps_summary.
+    this machine never emits carriers. See test_issue_650_survival_fit_keeps_summary.
     """
     if len(host) < 2 or "timestamp" in host[1] or "message_uid" in host[1]:
         return False
@@ -230,3 +244,102 @@ class ExactlyOnceMachine(RuleBasedStateMachine):
 
 TestExactlyOnce = ExactlyOnceMachine.TestCase
 TestExactlyOnce.settings = PROFILE
+
+
+class RecoveryMachine(ExactlyOnceMachine):
+    """The same ledger and rules, plus the host's bypass-cooldown recovery."""
+
+    recovery_aliases = ()
+
+    def start_engine(self):
+        engine = LCMEngine(config=LCMConfig(database_path=str(self.home / "lcm.db"),
+                                          fresh_tail_count=4, leaf_chunk_tokens=16),
+                           hermes_home=str(self.home / "home"))
+        engine.on_session_start("identity-session", platform="cli", conversation_id="identity-conversation",
+                                context_length=2048)
+        return engine
+
+    def stamp(self, row):
+        # Keep plain alpha exchanges short for carrier/kept-row coverage; the
+        # other inputs force real projections with the char-token fallback.
+        # Expand before stamping/ledger delivery, never after ingest.
+        row = deepcopy(row)
+        if isinstance(row.get("content"), str):
+            if "alpha" not in row["content"]:
+                row["content"] *= 384
+        elif isinstance(row.get("content"), list):
+            for part in row["content"]:
+                if part.get("type") == "text":
+                    part["text"] *= 384
+        return super().stamp(row)
+
+    @precondition(lambda self: bool(self.host))
+    @rule()
+    def recover(self):
+        self._compress_view(recovery=True)
+
+    @precondition(lambda self: bool(self.host))
+    @rule()
+    def compress(self):
+        self._compress_view(recovery=False)
+
+    def _compress_view(self, recovery):
+        operation = "recover" if recovery else "compress"
+        if KNOWN_OPEN[503](self.recovery_aliases, self.host, operation):
+            return
+        # Remember the trajectory, not marker text: a proven stored occurrence
+        # is about to be projected from a DIFFERENT occurrence of that text.
+        mapped = self.engine._get_store_id_map_for_messages(self.host)
+        misbound = set()
+        for row in self.host:
+            source = self.engine._survival_projection_source(
+                row, row["role"], normalize_content_value(row.get("content")) or "")
+            if source is None and row["role"] == "user" and row.get("timestamp"):
+                candidates = self.engine._store.connection.execute(
+                    "SELECT store_id FROM messages WHERE session_id = ? AND conversation_id = ? "
+                    "AND observed_at = ?", ("identity-session", "identity-conversation", row["timestamp"]))
+                for (store_id,) in candidates.fetchall():
+                    stored = self.engine._store.get(store_id)
+                    if identity(row) == identity(stored):
+                        source = stored
+                        break
+            if (row["role"] == "user" and source is not None
+                    and mapped.get(id(row)) not in (None, source["store_id"])):
+                misbound.add(row.get("message_uid"))
+        previous = deepcopy(self.host)
+        self.host = self.engine.compress(self.host, current_tokens=self.engine.threshold_tokens + 1,
+                                         bypass_cooldown=recovery, force=not recovery)
+        self.recovery_aliases = tuple(
+            (row.get("message_uid"), identity(row)) for row in self.host
+            if (row.get("message_uid"), identity(row)) in self.recovery_aliases
+            or (row.get("message_uid") in misbound
+                and "[LCM survival fit: this user message " in str(row.get("content", ""))
+                and self.engine._survival_projection_source(
+                row, row["role"], normalize_content_value(row.get("content")) or "") is None))
+        if self.engine._last_compression_status == "sanitized" and self.host != previous:
+            self.stale_proof = True
+        elif self.engine._last_compression_status == "compacted":
+            self.stale_proof = False
+
+    @precondition(lambda self: bool(self.host))
+    @rule()
+    def cold_resume(self):
+        if KNOWN_OPEN[503](self.recovery_aliases, self.host, "cold_resume"):
+            return
+        super().cold_resume()
+
+    @precondition(lambda self: bool(self.host))
+    @rule()
+    def replay(self):
+        if not KNOWN_OPEN[503](self.recovery_aliases, self.host, "replay"):
+            super().replay()
+
+    @rule(text=TEXT, structured=st.booleans(), tool_count=st.integers(0, 3),
+          retry=st.booleans(), tool_name=st.sampled_from(("lookup", "inspect")))
+    def new_turn(self, text, structured, tool_count, retry, tool_name):
+        if not KNOWN_OPEN[503](self.recovery_aliases, self.host, "new_turn"):
+            super().new_turn(text, structured, tool_count, retry, tool_name)
+
+
+TestRecovery = RecoveryMachine.TestCase
+TestRecovery.settings = PROFILE

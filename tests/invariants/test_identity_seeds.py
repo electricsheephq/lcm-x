@@ -1,4 +1,4 @@
-"""Occurrence seeds for compress, #1179 retries and #1286 stale commit proofs."""
+"""Occurrence seeds for compress, recovery, #1179 retries and #1286 stale proofs."""
 from copy import deepcopy
 import re
 import sys
@@ -11,7 +11,7 @@ from hypothesis import settings, strategies as st
 from hypothesis.stateful import invariant, rule, run_state_machine_as_test
 
 from tests.invariants.test_exactly_once_machine import (
-    KNOWN_OPEN, PROFILE, ExactlyOnceMachine, assert_occurrences, identity,
+    KNOWN_OPEN, PROFILE, REPROJECTED_USER, ExactlyOnceMachine, RecoveryMachine, assert_occurrences, identity,
 )
 
 
@@ -179,10 +179,99 @@ def test_cold_compacted_arc_keeps_exact_occurrences():
         machine.teardown()
 
 
+@pytest.mark.parametrize("text", ["alpha", "same text"], ids=["merged-carrier", "user-projection"])
+def test_recover_replay_resume_append(text):
+    """Both recovery output shapes use the complete, unchanged occurrence oracle."""
+    machine = RecoveryMachine()
+    try:
+        for _ in range(3):
+            machine.new_turn(text, False, 0, False, "lookup")
+        ledger = deepcopy(machine.occurrences)
+        machine.recover()
+        assert machine.occurrences == ledger
+        if text == "alpha":
+            assert machine.host[0]["content"].startswith("[Recent Summary (")
+            assert machine.engine._generated_context_carrier_remainder(machine.host[0]) == "alpha"
+            assert machine.host[-2]["content"] == "alpha"
+        else:
+            assert "[LCM survival fit: this user message " in machine.host[0]["content"]
+        machine.exactly_once()
+        machine.replay()
+        machine.exactly_once()
+        machine.cold_resume()
+        machine.exactly_once()
+        machine.new_turn("alpha", False, 0, False, "lookup")
+        machine.exactly_once()
+    finally:
+        machine.teardown()
+
+
+class ReprojectedUserStored(AssertionError):
+    """Only the extra user projection after a repeat fit misbinds its source."""
+
+
+@pytest.mark.parametrize("recoveries", [
+    pytest.param(1, id="single-fit-control"),
+    pytest.param(2, id="repeated-fit", marks=pytest.mark.xfail(
+        strict=True, reason=REPROJECTED_USER, raises=ReprojectedUserStored)),
+])
+def test_repeated_recovery_preserves_user_source(recoveries):
+    machine = RecoveryMachine()
+    try:
+        for _ in range(2):
+            machine.new_turn("same text", True, 0, False, "lookup")
+        for _ in range(recoveries):
+            machine.recover()
+            machine.exactly_once()
+        assert bool(machine.recovery_aliases) == (recoveries == 2)
+        projected_user = deepcopy(machine.host[0])
+        # Bypass the input exclusion; keep exactly_once as the sole judge.
+        machine.engine.shutdown()
+        machine.engine = machine.start_engine()
+        machine.host = deepcopy(machine.host)
+        machine.engine.ingest(machine.host)
+        try:
+            machine.exactly_once()
+        except AssertionError as error:
+            if list(map(identity, machine.rows())) == list(map(identity, [*machine.occurrences, projected_user])):
+                raise ReprojectedUserStored(str(error)) from error
+            raise
+    finally:
+        machine.teardown()
+
+
+@pytest.mark.parametrize("first_text", [
+    pytest.param("alpha", id="distinct-source-control"),
+    pytest.param("βeta", id="equal-source-warm", marks=pytest.mark.xfail(
+        strict=True, reason=REPROJECTED_USER, raises=ReprojectedUserStored)),
+])
+def test_recovery_reprojection_warm_ingest(first_text):
+    machine = RecoveryMachine()
+    try:
+        for text in (first_text, "βeta"):
+            machine.new_turn(text, True, 0, False, "lookup")
+        machine.compress()
+        machine.exactly_once()
+        machine.recover()
+        machine.exactly_once()
+        assert bool(machine.recovery_aliases) == (first_text == "βeta")
+        projected_user = deepcopy(machine.host[0])
+        # Exercise the excluded warm ingest through the original compress rule.
+        ExactlyOnceMachine.compress(machine)
+        try:
+            machine.exactly_once()
+        except AssertionError as error:
+            if list(map(identity, machine.rows())) == list(map(identity, [*machine.occurrences, projected_user])):
+                raise ReprojectedUserStored(str(error)) from error
+            raise
+    finally:
+        machine.teardown()
+
+
 def test_survival_carrier_1000_is_already_fixed(tmp_path, monkeypatch):
     """#1000 remains open for GA, but #1001 already fixed this rc's carrier.
 
-    Survival fit is outside the append-only machine. Reuse the established
+    Reuse the established
     held-fit construction and apply the same complete-row oracle to its replay.
     """
     from hermes_lcm import escalation, tokens
@@ -251,5 +340,10 @@ def test_known_open_exclusions_track_their_strict_xfails():
                for value in list(globals().values()) if callable(value)
                for mark in getattr(value, "pytestmark", [])
                if mark.name == "xfail" and mark.kwargs.get("strict")}
+    reasons.update(str(mark.kwargs.get("reason", ""))
+                   for value in list(globals().values()) if callable(value)
+                   for mark in getattr(value, "pytestmark", []) if mark.name == "parametrize"
+                   for parameter in mark.args[1] if hasattr(parameter, "marks")
+                   for mark in parameter.marks if mark.name == "xfail" and mark.kwargs.get("strict"))
     xfailed = {int(found.group(1)) for reason in reasons if (found := re.match(r"#(\d+)", reason))}
     assert set(KNOWN_OPEN) <= xfailed, (set(KNOWN_OPEN) - xfailed)
