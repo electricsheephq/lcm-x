@@ -65,6 +65,8 @@ Use one primary classification:
 - `bug`, `security`, `data-integrity`, `performance`, `feature`, `docs`, `test`,
   `best-practice`, `nit`, `needs-repro`, `duplicate`, `superseded`, or `out-of-scope`.
 
+Map these terms to repository labels with `docs/maintainers/label-policy.md`.
+
 Assign:
 
 - `P0`: active catastrophic data loss, disclosure, or unusable core path;
