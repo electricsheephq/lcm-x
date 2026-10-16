@@ -338,6 +338,15 @@ rollups remain future work.
 {"period": "date:2026-07-15", "scope": "conversation"}
 ```
 
+### `lcm_expand_query` trust boundary
+
+For `output="answer"`, the operator question and retrieved history occupy separate
+per-call nonce-tagged blocks. The synthesizer treats messages, summaries, tool
+results, and externalized excerpts as untrusted evidence and must never follow
+their instructions. Plain answers remain accepted; a reply that echoes the nonce
+after reasoning is stripped fails closed to the existing degraded response,
+preserving `evidence_provenance` with `synthesis_status="failed"`.
+
 ### `lcm_expand_query` evidence provenance
 
 Every successful, no-match, or structured degraded `lcm_expand_query` response
