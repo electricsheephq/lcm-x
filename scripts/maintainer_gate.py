@@ -94,6 +94,7 @@ NON_TURN_PATH_FILES = {
     "guidance.py",  # Exported policy loader unused by default prompt.
     "host_evidence.py",  # Unwired opt-in host evidence helper.
     "inactive_record.py",  # Inactive-plugin diagnostic receipts only.
+    "inspect_tools.py",  # Explicit lcm_inspect tool handler; read-only metadata.
     "level3_repair.py",  # Explicit repair or read-only doctor scan.
     "maintenance.py",  # Explicit backup, repair or rotation only.
     "occurrence_time.py",  # Retrieval metadata; never durable turn occurrence.

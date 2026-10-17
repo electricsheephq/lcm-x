@@ -1888,7 +1888,7 @@ def _preset_text(tokens: list[str], engine) -> str:
 def _rollups_status_text(engine) -> str:
     # Import lazily to avoid making the slash-command module part of the tool
     # module's import path while still guaranteeing both surfaces use one shape.
-    from .tools import _temporal_rollups_status
+    from .inspect_tools import _temporal_rollups_status
 
     status = _temporal_rollups_status(engine)
     lines = [
