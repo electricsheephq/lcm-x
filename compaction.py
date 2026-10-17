@@ -21,7 +21,8 @@ import logging
 import sys
 import time
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Literal, Optional
 
 from .dag import SummaryNode
 from .escalation import (
@@ -74,6 +75,23 @@ _THRESHOLD_FULL_SWEEP_PARTIAL_STOP_REASONS = frozenset({
     "condensation_no_progress",
     "no_same_depth_condensation_group",
 })
+
+
+@dataclass
+class _CompressionState:
+    """Per-invocation phase results; engine-owned state stays on the engine."""
+
+    boundary_cleanup_only_requested: bool = False
+    below_threshold_cleanup_only_requested: bool = False
+    automatic_preflight_requested: bool = False
+    hold_fit_only_requested: bool = False
+    _compress_started: float = 0.0
+    observed_prompt_tokens: Optional[int] = None
+    force_overflow: bool = False
+    recovery_assembly_cap: Optional[int] = None
+    working_messages: List[Dict[str, Any]] = field(default_factory=list)
+    ingest_cleanup_changed_active_context: bool = False
+    fit_would_strand: bool = False
 
 
 def select_oldest_leaf_chunk(
@@ -1563,33 +1581,26 @@ class CompactionMixin:
         covering = {node: tokens for node, tokens, store_id in leaf_sources if store_id in dropped_ids}
         return [*range(scaffold, start), *sorted(dropped)], ids, sum(covering.values()), len(rows) - len(dropped)
 
-    def _compress_impl(self, messages: List[Dict[str, Any]],
-                       current_tokens: int = None,
-                       focus_topic: Optional[str] = None,
-                       force: bool = False,
-                       recovery_attempt: bool = False) -> List[Dict[str, Any]]:
-        """Main compaction entry point.
-
-        1. Ingest any new messages into the store
-        2. Identify messages outside the fresh tail
-        3. Summarize them into DAG leaf nodes
-        4. Check if condensation is needed
-        5. Assemble new active context: summaries + fresh tail
-        """
+    def _begin_compression(self, state: _CompressionState,
+                           messages: List[Dict[str, Any]],
+                           current_tokens: int = None,
+                           focus_topic: Optional[str] = None,
+                           force: bool = False) -> tuple[Literal["next", "return"], Optional[List[Dict[str, Any]]]]:
+        """Consume the invocation request and handle empty or bypassed inputs."""
         self._objective_only_noop = False
         self._compress_dropped_ignored_rows = False
         self._compress_host_rows_consumed = self._compress_hidden_rows_consumed = 0
         # Preflight handoffs are one-shot instructions for this invocation.
         # Consume them before every early return so a later unrelated turn can
         # never inherit stale cleanup-only state.
-        boundary_cleanup_only_requested = bool(
+        state.boundary_cleanup_only_requested = bool(
             self._compaction_request.cleanup_only_due_to_boundary_cooldown
         )
-        below_threshold_cleanup_only_requested = bool(
+        state.below_threshold_cleanup_only_requested = bool(
             self._compaction_request.below_threshold_cleanup_only
         )
-        automatic_preflight_requested = bool(self._compaction_request.automatic_request)
-        hold_fit_only_requested = bool(self._compaction_request.hold_fit_only_requested)
+        state.automatic_preflight_requested = bool(self._compaction_request.automatic_request)
+        state.hold_fit_only_requested = bool(self._compaction_request.hold_fit_only_requested)
         self._compaction_request.cleanup_only_due_to_boundary_cooldown = False
         self._compaction_request.below_threshold_cleanup_only = False
         self._compaction_request.automatic_request = False
@@ -1598,11 +1609,11 @@ class CompactionMixin:
         if not messages:
             self._last_compression_status = "noop"
             self._last_compression_noop_reason = "empty message list"
-            return messages
+            return "return", messages
 
         self._last_compression_status = "running"
         self._last_compression_noop_reason = ""
-        _compress_started = time.perf_counter()
+        state._compress_started = time.perf_counter()
 
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
         if self._bypasses_lcm_context_management():
@@ -1618,7 +1629,7 @@ class CompactionMixin:
                     )
                     if auxiliary_prompt_tokens > 0:
                         bypass_current_tokens = auxiliary_prompt_tokens
-            return self._compress_lcm_bypassed_session(
+            return "return", self._compress_lcm_bypassed_session(
                 messages,
                 current_tokens=bypass_current_tokens,
                 focus_topic=focus_topic,
@@ -1635,49 +1646,57 @@ class CompactionMixin:
         # yield-aware preflight, use the current active messages as the
         # pressure observation when the host calls ``compress(messages)`` so
         # the follow-up invocation can re-arm the advertised bounded yield.
-        observed_prompt_tokens = (
+        state.observed_prompt_tokens = (
             current_tokens
             if current_tokens is not None
             else count_messages_tokens(messages)
         )
-        force_overflow = self._should_force_overflow_recovery(
-            observed_tokens=observed_prompt_tokens,
+        state.force_overflow = self._should_force_overflow_recovery(
+            observed_tokens=state.observed_prompt_tokens,
             messages=messages,
         )
-        self._compress_forced_overflow = force_overflow
+        self._compress_forced_overflow = state.force_overflow
         # NOTE: deliberately do NOT clear the spend guard on force_overflow.
         # force_overflow is automatic (set every turn the prompt exceeds the
         # assembly cap), which is exactly the sustained-over-cap state a runaway
         # compaction loop produces - clearing it per turn would defeat the guard
         # in the case it exists for. A tripped guard still converges the
         # emergency via deterministic L3 truncation (no LLM spend).
-        recovery_assembly_cap = (
+        state.recovery_assembly_cap = (
             self._overflow_recovery_assembly_cap(
-                observed_tokens=observed_prompt_tokens,
+                observed_tokens=state.observed_prompt_tokens,
                 messages=messages,
             )
-            if force_overflow
+            if state.force_overflow
             else None
         )
 
+        return "next", None
+
+    def _ingest_compression_view(self, state: _CompressionState,
+                                 messages: List[Dict[str, Any]],
+                                 current_tokens: int = None,
+                                 force: bool = False,
+                                 recovery_attempt: bool = False) -> tuple[Literal["next", "return"], Optional[List[Dict[str, Any]]]]:
+        """Ingest the replay view and honor cleanup-only or held requests."""
         # Step 1: Ingest new messages into the immutable store. Work from a
         # replay-safe view so quarantined assistant loops do not enter summaries
         # or provider context after the durable row has been written.
         span_started = time.monotonic()
         try:
-            working_messages = self._ingest_messages(messages)
+            state.working_messages = self._ingest_messages(messages)
         finally:  # #1127: ingest and reconcile, untimed by the sweep steps; a raised lock wait is theirs too
             self._pre_leaf_span("ingest", span_started)
         # #488: project the complete admitted list ONCE; subset consumers read a row's occurrence
         # here. Only a row at exactly one position is registered (F6): a copy or an aliased row
         # is unproven (full identity).
-        occurrences, v4 = self._replay_occurrences(working_messages)
-        positions = Counter(id(m) for m in working_messages)
+        occurrences, v4 = self._replay_occurrences(state.working_messages)
+        positions = Counter(id(m) for m in state.working_messages)
         self._compress_occurrences = {
-            id(m): occurrence for m, occurrence in zip(working_messages, occurrences) if positions[id(m)] == 1
+            id(m): occurrence for m, occurrence in zip(state.working_messages, occurrences) if positions[id(m)] == 1
         } if v4 else None
-        self._prepare_retained_user_anchor(working_messages)
-        ingest_cleanup_changed_active_context = working_messages != messages
+        self._prepare_retained_user_anchor(state.working_messages)
+        state.ingest_cleanup_changed_active_context = state.working_messages != messages
         # #651: below the host threshold, the automatic compress() a preflight
         # maintenance request asked for runs no summariser leaf pass.
         # A held pass stays cleanup-only when the host's tokens reach the
@@ -1686,35 +1705,35 @@ class CompactionMixin:
         # host count below the threshold makes the call cleanup-only too.
         below_threshold_cleanup_only = bool(
             (
-                below_threshold_cleanup_only_requested
-                or (automatic_preflight_requested and (current_tokens or 0) > 0)
+                state.below_threshold_cleanup_only_requested
+                or (state.automatic_preflight_requested and (current_tokens or 0) > 0)
             )
             and not force
             and self.threshold_tokens > 0
             and (
-                (observed_prompt_tokens or 0) < self.threshold_tokens
-                or self._no_progress_hold_blocks(observed_prompt_tokens or 0)
+                (state.observed_prompt_tokens or 0) < self.threshold_tokens
+                or self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
             )
         )
         cleanup_only_requested = bool(
             (
-                boundary_cleanup_only_requested
+                state.boundary_cleanup_only_requested
                 or below_threshold_cleanup_only
                 # #909: replay cleanup may request compress() through an armed hold. Adopt the
                 # durable cleanup, but do no summary work while that automatic hold applies.
-                or (automatic_preflight_requested and not force and not recovery_attempt
-                    and self._sweep_budget_hold_applies(observed_prompt_tokens))
+                or (state.automatic_preflight_requested and not force and not recovery_attempt
+                    and self._sweep_budget_hold_applies(state.observed_prompt_tokens))
             )
-            and not force_overflow
+            and not state.force_overflow
         )
         if cleanup_only_requested:
             sanitized_messages = self._sanitize_active_context_messages(
-                working_messages,
+                state.working_messages,
                 insert_missing_tool_stubs=False,
             )
             self._refresh_raw_backlog_debt(
                 sanitized_messages,
-                observed_tokens=observed_prompt_tokens,
+                observed_tokens=state.observed_prompt_tokens,
             )
             self._ingest_cursor = len(sanitized_messages)
             self._last_compression_status = "sanitized"
@@ -1730,18 +1749,18 @@ class CompactionMixin:
                     sanitized_messages
                 )
             )
-            return sanitized_messages
+            return "return", sanitized_messages
         # #738: an automatic threshold pass with the full sweep off that would end in the #668 exit fit summarises
         # the raw backlog outside the fresh tail it has: the leaf-chunk minimum does not block that leaf.
-        fit_would_strand = bool(
-            not force and not force_overflow and not recovery_attempt and not self._config.threshold_full_sweep_enabled
-            and 0 < self.threshold_tokens <= observed_prompt_tokens
+        state.fit_would_strand = bool(
+            not force and not state.force_overflow and not recovery_attempt and not self._config.threshold_full_sweep_enabled
+            and 0 < self.threshold_tokens <= state.observed_prompt_tokens
             and self._config.survival_fit and int(self.context_length or 0) > 0)
-        if hold_fit_only_requested and not force and not force_overflow:
+        if state.hold_fit_only_requested and not force and not state.force_overflow:
             # #618 item 3: a hold of this conversation is active at the survival ceiling: no sweep and no
             # summariser call; compress() fits the sanitized list.
             sanitized_messages = self._sanitize_active_context_messages(
-                working_messages,
+                state.working_messages,
                 insert_missing_tool_stubs=False,
             )
             self._ingest_cursor = len(sanitized_messages)
@@ -1754,7 +1773,37 @@ class CompactionMixin:
             self._write_generated_ignored_placeholder_hash_ordinals(
                 self._generated_placeholder_digest_ordinals_for_active_replay(sanitized_messages)
             )
-            return sanitized_messages
+            return "return", sanitized_messages
+        return "next", None
+
+    def _compress_impl(self, messages: List[Dict[str, Any]],
+                       current_tokens: int = None,
+                       focus_topic: Optional[str] = None,
+                       force: bool = False,
+                       recovery_attempt: bool = False) -> List[Dict[str, Any]]:
+        """Main compaction entry point.
+
+        1. Ingest any new messages into the store
+        2. Identify messages outside the fresh tail
+        3. Summarize them into DAG leaf nodes
+        4. Check if condensation is needed
+        5. Assemble new active context: summaries + fresh tail
+        """
+        state = _CompressionState()
+        action, result = self._begin_compression(state, messages, current_tokens, focus_topic, force)
+        if action == "return":
+            return result
+        _compress_started = state._compress_started
+        observed_prompt_tokens = state.observed_prompt_tokens
+        force_overflow = state.force_overflow
+        recovery_assembly_cap = state.recovery_assembly_cap
+
+        action, result = self._ingest_compression_view(state, messages, current_tokens, force, recovery_attempt)
+        if action == "return":
+            return result
+        working_messages = state.working_messages
+        ingest_cleanup_changed_active_context = state.ingest_cleanup_changed_active_context
+        fit_would_strand = state.fit_would_strand
         # #651: an automatic threshold pass that stores no leaf is a no-progress
         # candidate; compress() arms the hold if neither rows nor tokens fell.
         self._no_progress_candidate = bool(
