@@ -20,6 +20,8 @@ import hermes_lcm.tools as lcm_tools
 from agent.context_engine import ContextEngine
 from tests.timing_helpers import ContentionProbe
 
+from hermes_lcm import expansion_evidence
+from tests.harness import make_engine
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -41,6 +43,19 @@ def engine(tmp_path):
     e._session_id = "test-session"
     e.context_length = 200000
     e.threshold_tokens = int(200000 * config.context_threshold)
+    try:
+        yield e
+    finally:
+        e.shutdown()
+
+
+@pytest.fixture
+def expansion_engine(tmp_path):
+    """Shared harness with the existing expansion fixture's configuration."""
+    e = make_engine(tmp_path, fresh_tail_count=4, leaf_chunk_tokens=100)
+    e._session_id = "test-session"
+    e.context_length = 200000
+    e.threshold_tokens = int(200000 * e._config.context_threshold)
     try:
         yield e
     finally:
@@ -25206,7 +25221,8 @@ class TestEngineTools:
         assert sum(block.get("type") == "descendant_child_nodes" for block in captured["context_blocks"]) >= 5
         assert any(block.get("type") == "child_messages" for block in captured["context_blocks"])
 
-    def test_expand_query_descendant_collection_handles_zero_token_deep_chain_without_recursion(self, engine):
+    def test_expand_query_descendant_collection_handles_zero_token_deep_chain_without_recursion(self, expansion_engine):
+        engine = expansion_engine
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "ZERO TOKEN DEEP LEAF evidence"},
@@ -25243,7 +25259,7 @@ class TestEngineTools:
         serialized_context = json.dumps(blocks)
         assert "ZERO TOKEN DEEP LEAF evidence" not in serialized_context
         assert len(blocks) < 1105
-        assert lcm_tools._context_content_token_count(blocks) <= 33000
+        assert expansion_evidence._context_content_token_count(blocks) <= 33000
         path_blocks = [block for block in blocks if "source_path" in block]
         assert path_blocks
         assert max(len(block["source_path"]) for block in path_blocks) <= 8

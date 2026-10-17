@@ -631,3 +631,114 @@ def continuations(
         context_pagination.append(item)
 
     return context_pagination
+
+
+def _pagination_payload(
+    *,
+    total_sources: int,
+    source_offset: int,
+    content_offset: int,
+    source_limit: int,
+    returned_sources: int,
+    next_source_offset: int | None,
+    next_content_offset: int,
+    has_more: bool,
+) -> dict[str, Any]:
+    if not has_more:
+        next_source_offset = None
+        next_content_offset = 0
+    remaining_sources = 0
+    if has_more and next_source_offset is not None:
+        remaining_sources = max(0, total_sources - next_source_offset)
+    return {
+        "source_offset": source_offset,
+        "content_offset": content_offset,
+        "source_limit": source_limit,
+        "returned_sources": returned_sources,
+        "total_sources": total_sources,
+        "next_source_offset": next_source_offset,
+        "next_content_offset": next_content_offset,
+        "has_more": has_more,
+        "remaining_sources": remaining_sources,
+    }
+
+
+def _bounded_source_path_payload(source_path: list[dict[str, int]]) -> dict[str, Any]:
+    path_tail = source_path[-8:]
+    payload: dict[str, Any] = {
+        "source_path": path_tail,
+        "source_path_depth": len(source_path),
+    }
+    if len(path_tail) < len(source_path):
+        payload["source_path_truncated"] = True
+    return payload
+
+
+def _raw_match_cursor_block(raw_block: dict[str, Any]) -> dict[str, Any] | None:
+    """Return a content-free ``raw_messages`` block preserving the raw cursor.
+
+    A raw block dropped for budget reasons leaves matched messages unreturned.
+    The caller still needs a handle to continue into them, so the first omitted
+    ``store_id`` survives without any of the content that blew the budget.
+    """
+    pagination = raw_block.get("pagination") or {}
+    next_store_id = next(
+        (
+            message.get("store_id")
+            for message in raw_block.get("messages") or []
+            if isinstance(message.get("store_id"), int)
+        ),
+        pagination.get("next_store_id"),
+    )
+    if not isinstance(next_store_id, int):
+        return None
+    return {
+        "type": "raw_messages",
+        "messages": [],
+        "pagination": {
+            "has_more": True,
+            "returned_sources": 0,
+            "total_sources": pagination.get("total_sources", 0),
+            "next_store_id": next_store_id,
+        },
+    }
+
+
+def _collect_store_ids_from_context_blocks(blocks: list[dict[str, Any]]) -> set[int]:
+    store_ids: set[int] = set()
+    for block in blocks:
+        if not isinstance(block, dict):
+            continue
+        for message in block.get("messages", []) or []:
+            store_id = message.get("store_id")
+            if isinstance(store_id, int):
+                store_ids.add(store_id)
+    return store_ids
+
+
+def _context_content_token_count(blocks: list[dict[str, Any]]) -> int:
+    from .tokens import count_tokens
+
+    total = 0
+    for block in blocks:
+        if block.get("type") == "summary":
+            total += count_tokens(str(block.get("summary") or ""))
+        if "source_path" in block:
+            total += count_tokens(
+                json.dumps(
+                    {
+                        "source_path": block.get("source_path") or [],
+                        "source_path_depth": block.get("source_path_depth"),
+                        "source_path_truncated": block.get("source_path_truncated", False),
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        if block.get("type") in {"messages", "child_messages", "raw_messages"}:
+            for message in block.get("messages", []):
+                total += count_tokens(str(message.get("content") or ""))
+                total += count_tokens(str(message.get("transcript_content") or ""))
+        elif block.get("type") in {"child_nodes", "descendant_child_nodes"}:
+            total += sum(count_tokens(str(child.get("summary") or "")) for child in block.get("children", []))
+    return total
