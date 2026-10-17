@@ -556,7 +556,7 @@
   {
     "id": "admin-slash-doctor",
     "category": "admin",
-    "module": "command.py",
+    "module": "command_doctor.py",
     "entry_point": "_doctor_text",
     "authority_requirement": "admin_only",
     "discloses": [

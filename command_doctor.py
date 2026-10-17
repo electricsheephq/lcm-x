@@ -1,0 +1,563 @@
+"""Text diagnostics for /lcm doctor."""
+
+from __future__ import annotations
+
+
+def _doctor_text(engine) -> str:
+    from . import command
+
+    db_path = command.Path(engine._store.db_path)
+    runtime_identity = engine.get_runtime_identity()
+    store_conn = engine._store.connection
+    dag_conn = engine._dag.connection
+
+    issues: list[str] = []
+    recommended_actions: list[str] = []
+    schema_health = command.inspect_lcm_schema_health(store_conn, database_path=str(db_path))
+    schema_missing_raw = schema_health.get("missing_tables")
+    schema_missing_tables = [str(name) for name in schema_missing_raw] if isinstance(schema_missing_raw, list) else []
+    schema_existing_raw = schema_health.get("existing_tables")
+    schema_existing_tables = [str(name) for name in schema_existing_raw] if isinstance(schema_existing_raw, list) else []
+    schema_core_status = "error" if schema_health.get("error") else "missing" if schema_missing_tables else "ok"
+    if schema_missing_tables or schema_health.get("error"):
+        issues.append("schema_core_tables")
+
+    def _safe_count(conn, query: str, issue_key: str) -> int | str:
+        try:
+            return int(conn.execute(query).fetchone()[0])
+        except Exception as exc:  # pragma: no cover - defensive
+            issues.append(issue_key)
+            return f"error: {exc}"
+
+    try:
+        integrity_row = store_conn.execute("PRAGMA integrity_check").fetchone()
+        integrity = str(integrity_row[0]) if integrity_row else "unknown"
+    except Exception as exc:  # pragma: no cover - defensive
+        integrity = f"error: {exc}"
+        issues.append("sqlite_integrity")
+
+    def _fts_text_status(result: dict[str, command.Any]) -> str:
+        status = str(result.get("status") or "fail")
+        return "ok" if status == "pass" else status
+
+    try:
+        store_fts_count = int(store_conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0])
+        store_fts_integrity = command.check_external_content_fts_integrity(store_conn, command.build_message_fts_spec())
+        store_fts = _fts_text_status(store_fts_integrity)
+        if store_fts == "fail":
+            issues.append("messages_fts")
+        elif store_fts == "unchecked":
+            recommended_actions.append("rerun `/lcm doctor` with read-write SQLite access if a deep messages FTS check is needed")
+    except Exception as exc:  # pragma: no cover - defensive
+        store_fts_count = f"error: {exc}"
+        store_fts = f"error: {exc}"
+        store_fts_integrity = {"status": "fail", "detail": str(exc)}
+        issues.append("messages_fts")
+
+    try:
+        node_fts_count = int(dag_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0])
+        node_fts_integrity = command.check_external_content_fts_integrity(dag_conn, command.build_nodes_fts_spec())
+        node_fts = _fts_text_status(node_fts_integrity)
+        if node_fts == "fail":
+            issues.append("nodes_fts")
+        elif node_fts == "unchecked":
+            recommended_actions.append("rerun `/lcm doctor` with read-write SQLite access if a deep nodes FTS check is needed")
+    except Exception as exc:  # pragma: no cover - defensive
+        node_fts_count = f"error: {exc}"
+        node_fts = f"error: {exc}"
+        node_fts_integrity = {"status": "fail", "detail": str(exc)}
+        issues.append("nodes_fts")
+
+    # A prior non-blocking background integrity scan (issue #6) records a
+    # persisted ``fts_integrity_failed:<table>`` flag when it finds corruption
+    # without rebuilding. Surface it even when this doctor run's live deep check
+    # could not confirm it (e.g. read-only access), pointing at the explicit
+    # repair path.
+    try:
+        store_fts_failed_flag = command.load_integrity_failed(store_conn, command.build_message_fts_spec())
+    except Exception:  # pragma: no cover - defensive
+        store_fts_failed_flag = None
+    try:
+        node_fts_failed_flag = command.load_integrity_failed(dag_conn, command.build_nodes_fts_spec())
+    except Exception:  # pragma: no cover - defensive
+        node_fts_failed_flag = None
+    if store_fts_failed_flag and "messages_fts" not in issues:
+        issues.append("messages_fts")
+    if node_fts_failed_flag and "nodes_fts" not in issues:
+        issues.append("nodes_fts")
+
+    sqlite_mmap_bytes = _safe_count(store_conn, "PRAGMA mmap_size", "sqlite_mmap_size")
+    total_messages = _safe_count(store_conn, "SELECT COUNT(*) FROM messages", "messages_total")
+    total_message_sessions = _safe_count(
+        store_conn,
+        "SELECT COUNT(DISTINCT session_id) FROM messages",
+        "message_sessions_total",
+    )
+    total_nodes = _safe_count(dag_conn, "SELECT COUNT(*) FROM summary_nodes", "summary_nodes_total")
+    total_node_sessions = _safe_count(
+        dag_conn,
+        "SELECT COUNT(DISTINCT session_id) FROM summary_nodes",
+        "summary_node_sessions_total",
+    )
+
+    db_exists = db_path.exists()
+    db_size = db_path.stat().st_size if db_exists else 0
+    wal_path = command.Path(str(db_path) + "-wal")
+    wal_size = wal_path.stat().st_size if wal_path.exists() else 0
+    try:
+        journal_row = store_conn.execute("PRAGMA journal_mode").fetchone()
+        journal_mode = str(journal_row[0]) if journal_row else "unknown"
+    except Exception as exc:  # pragma: no cover - defensive
+        journal_mode = f"error: {exc}"
+        issues.append("sqlite_journal_mode")
+    try:
+        quick_row = store_conn.execute("PRAGMA quick_check").fetchone()
+        quick_check = str(quick_row[0]) if quick_row else "unknown"
+    except Exception as exc:  # pragma: no cover - defensive
+        quick_check = f"error: {exc}"
+        issues.append("sqlite_quick_check")
+    payload_storage_error = ""
+    try:
+        payload_risks = command.scan_sqlite_payload_risks(store_conn)
+        externalized_stats = command.externalized_payload_stats(engine._config, hermes_home=engine._hermes_home)
+        externalized_integrity = command.scan_externalized_payload_integrity(
+            store_conn,
+            engine._config,
+            hermes_home=engine._hermes_home,
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        payload_storage_error = str(exc)
+        payload_risks = {
+            "largest_content_rows": [],
+            "largest_tool_calls_rows": [],
+            "suspicious_data_uri_content_rows": [],
+            "suspicious_data_uri_tool_calls_rows": [],
+            "suspicious_base64_like_rows": [],
+            "quarantined_assistant_rows": [],
+            "suspicious_repetitive_assistant_rows": [],
+            "heartbeat_noise_rows": [],
+        }
+        externalized_stats = {
+            "externalized_payload_count": 0,
+            "externalized_payload_bytes": 0,
+            "externalized_payload_chars": 0,
+            "externalized_payload_dir": "",
+            "latest_externalized_payload_path": "",
+            "latest_externalized_payload_mtime": 0,
+        }
+        externalized_integrity = {
+            "externalized_payload_refs_total": 0,
+            "externalized_payload_refs_existing": 0,
+            "externalized_payload_refs_missing": 0,
+            "externalized_payload_files_unreferenced": 0,
+            "missing_externalized_payload_refs": [],
+            "unreferenced_externalized_payload_files": [],
+        }
+        issues.append("payload_storage")
+    clean_scan = command._scan_clean_candidates(engine)
+
+    debt_rows = []
+    lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "connection", None)
+    if lifecycle_conn is not None:
+        try:
+            debt_rows = lifecycle_conn.execute(
+                """
+                SELECT conversation_id, debt_kind, debt_size_estimate
+                FROM lcm_lifecycle_state
+                WHERE debt_kind IS NOT NULL AND debt_size_estimate > 0
+                ORDER BY updated_at DESC
+                """
+            ).fetchall()
+        except Exception as exc:  # pragma: no cover - defensive
+            issues.append("lifecycle_state")
+            debt_rows = [(f"error: {exc}", "error", 0)]
+
+    observations: list[str] = []
+    missing_externalized_refs = int(externalized_integrity.get("externalized_payload_refs_missing", 0) or 0)
+    suspicious_payload_rows = sum(
+        len(payload_risks.get(key) or [])
+        for key in (
+            "suspicious_data_uri_content_rows",
+            "suspicious_data_uri_tool_calls_rows",
+            "suspicious_base64_like_rows",
+            "suspicious_repetitive_assistant_rows",
+        )
+    )
+
+    if schema_health.get("error"):
+        observations.append(f"schema_core_tables: error: {schema_health['error']}")
+        recommended_actions.append(
+            "verify SQLite can read sqlite_master for the database inspected by Hermes"
+        )
+    elif schema_missing_tables:
+        observations.append(
+            "schema_core_tables: missing " + ", ".join(schema_missing_tables)
+        )
+        recommended_actions.append(
+            "verify HERMES_HOME/LCM_DATABASE_PATH point at the database inspected by Hermes"
+        )
+    else:
+        observations.append("schema_core_tables: ok")
+
+    if debt_rows:
+        first = debt_rows[0]
+        observations.append(
+            f"maintenance_debt: {len(debt_rows)} conversation(s) currently carry deferred maintenance debt; first={first[0]} kind={first[1]} size={first[2]}"
+        )
+        recommended_actions.append(
+            "let normal compaction turns reduce maintenance debt before attempting broader cleanup"
+        )
+
+    if clean_scan["error"]:
+        observations.append(f"cleanup_candidates: scan error: {clean_scan['error']}")
+    elif clean_scan["candidates"]:
+        observations.append(
+            f"cleanup_candidates: {len(clean_scan['candidates'])} pattern-matched junk/noise session candidate(s) detected"
+        )
+        recommended_actions.append("inspect candidate sessions with `/lcm doctor clean`")
+        recommended_actions.append("create a safety snapshot first with `/lcm backup`")
+    else:
+        observations.append("cleanup_candidates: none")
+
+    if missing_externalized_refs:
+        issues.append("payload_storage")
+        observations.append(
+            f"payload_storage: {missing_externalized_refs} externalized payload ref(s) point to missing JSON files"
+        )
+        recommended_actions.append(
+            "inspect missing externalized payload refs and restore from backups if needed"
+        )
+    if suspicious_payload_rows:
+        observations.append(
+            f"payload_storage: {suspicious_payload_rows} suspicious inline/base64 payload row(s) need review"
+        )
+        recommended_actions.append(
+            "inspect suspicious payload rows before cleanup; restore payload files from backup before deleting or rewriting anything"
+        )
+    if payload_storage_error:
+        observations.append(f"payload_storage_error: {payload_storage_error}")
+        recommended_actions.append("inspect payload storage diagnostics before cleanup or deletion")
+
+    try:
+        source_stats = engine._store.get_source_stats()
+    except Exception as exc:  # pragma: no cover - defensive
+        issues.append("source_lineage")
+        source_stats = {
+            "messages_total": 0,
+            "attributed_messages": 0,
+            "normalized_unknown_messages": 0,
+            "legacy_blank_source_messages": 0,
+            "effective_unknown_messages": 0,
+            "error": str(exc),
+        }
+    observations.append(
+        "source_lineage: "
+        f"attributed={source_stats['attributed_messages']} "
+        f"unknown={source_stats['normalized_unknown_messages']} "
+        f"legacy_blank={source_stats['legacy_blank_source_messages']} "
+        f"effective_unknown={source_stats['effective_unknown_messages']}"
+    )
+    if source_stats.get("error"):
+        observations.append(f"source_lineage_error: {source_stats['error']}")
+    if source_stats["legacy_blank_source_messages"]:
+        observations.append(
+            "legacy blank-source rows are normalized as `source=unknown` for back-compat filters"
+        )
+
+    try:
+        lifecycle_stats = engine._lifecycle.get_fragmentation_stats(
+            state_db_path=command._state_db_path_for_engine(engine)
+        )
+    except Exception as exc:  # pragma: no cover - defensive
+        issues.append("lifecycle_fragmentation")
+        lifecycle_stats = {"error": str(exc)}
+    else:
+        observations.append(
+            "lifecycle_fragmentation: "
+            f"lifecycle_rows={lifecycle_stats['lifecycle_rows']} "
+            f"empty_lifecycle_rows={lifecycle_stats.get('empty_lifecycle_rows', 0)} "
+            f"message_sessions={lifecycle_stats['distinct_message_sessions']} "
+            f"node_sessions={lifecycle_stats['distinct_node_sessions']} "
+            f"current_missing_in_lcm_any={lifecycle_stats['lifecycle_current_missing_in_lcm_any']} "
+            f"last_finalized_missing_in_lcm_any={lifecycle_stats['lifecycle_last_finalized_missing_in_lcm_any']} "
+            f"current_missing_in_state={lifecycle_stats['lifecycle_current_missing_in_state']} "
+            f"last_finalized_missing_in_state={lifecycle_stats['lifecycle_last_finalized_missing_in_state']} "
+            f"message_sessions_missing_in_state={lifecycle_stats['lcm_message_sessions_missing_in_state']} "
+            f"node_sessions_missing_in_state={lifecycle_stats['lcm_node_sessions_missing_in_state']} "
+            f"message_sessions_without_lifecycle_current={lifecycle_stats['message_sessions_without_lifecycle_current']} "
+            f"message_sessions_without_lifecycle_reference={lifecycle_stats['message_sessions_without_lifecycle_reference']} "
+            f"node_sessions_without_lifecycle_reference={lifecycle_stats['node_sessions_without_lifecycle_reference']} "
+            f"state_sessions_missing_in_lcm_any={lifecycle_stats['state_sessions_missing_in_lcm_any']}"
+        )
+        if lifecycle_stats.get("state_db_error"):
+            observations.append(f"lifecycle_fragmentation_state_db_error: {lifecycle_stats['state_db_error']}")
+        classification = lifecycle_stats.get("classification") or {}
+        categories = classification.get("categories") or []
+        if classification:
+            observations.append(
+                "lifecycle_fragmentation_classification: "
+                f"{classification.get('status', 'unknown')}; {len(categories)} categories need review"
+            )
+            for category in categories:
+                sample = ",".join(category.get("sample_session_ids") or []) or "(none)"
+                observations.append(
+                    "lifecycle_category "
+                    f"{category.get('name')}: count={category.get('count', 0)} sample={sample}"
+                )
+        if command._has_lifecycle_fragmentation(lifecycle_stats):
+            recommended_actions.append(
+                "inspect lifecycle fragmentation before any cleanup/repair behavior mutates state"
+            )
+            recommended_actions.append(
+                "treat this as read-only evidence; do not infer every mismatch is harmful"
+            )
+
+    if clean_scan.get("protected_count"):
+        observations.append(
+            f"protected_sessions: skipped {clean_scan['protected_count']} currently bound session(s) from cleanup candidates"
+        )
+
+    protection = command.sensitive_pattern_status(engine._config)
+    if protection["enabled"] and protection["active_patterns"]:
+        observations.append(
+            "sensitive_pattern_handling: enabled; matching raw secret values are replaced before SQLite, FTS, summaries, active replay, and externalized payloads"
+        )
+    elif protection["enabled"]:
+        observations.append("sensitive_pattern_handling: enabled but no active known patterns are configured")
+        recommended_actions.append("set LCM_SENSITIVE_PATTERNS to one or more known names, or disable sensitive handling")
+    else:
+        observations.append("sensitive_pattern_handling: disabled")
+    if protection["unknown_patterns"]:
+        issues.append("sensitive_pattern_config")
+        recommended_actions.append(
+            "remove unknown LCM_SENSITIVE_PATTERNS entries or replace them with supported names"
+        )
+
+    if store_fts_failed_flag:
+        observations.append(
+            "messages_fts_integrity: a background integrity scan flagged corruption "
+            f"(detail: {store_fts_failed_flag['detail'] or 'unknown'})"
+        )
+        recommended_actions.append(
+            "run `/lcm doctor repair`, then `/lcm backup` and `/lcm doctor repair apply` to rebuild messages_fts"
+        )
+    if node_fts_failed_flag:
+        observations.append(
+            "nodes_fts_integrity: a background integrity scan flagged corruption "
+            f"(detail: {node_fts_failed_flag['detail'] or 'unknown'})"
+        )
+        recommended_actions.append(
+            "run `/lcm doctor repair`, then `/lcm backup` and `/lcm doctor repair apply` to rebuild nodes_fts"
+        )
+
+    triage_checks: list[dict[str, command.Any]] = []
+    if integrity != "ok":
+        triage_checks.append({"check": "database_integrity", "status": "fail", "detail": integrity})
+    if schema_health.get("error") or schema_missing_tables:
+        triage_checks.append({"check": "schema_core_tables", "status": "fail", "detail": schema_health})
+    if store_fts != "ok":
+        triage_checks.append({
+            "check": "messages_fts_integrity",
+            "status": "warn" if store_fts == "unchecked" else "fail",
+            "detail": store_fts_integrity,
+        })
+    if node_fts != "ok":
+        triage_checks.append({
+            "check": "nodes_fts_integrity",
+            "status": "warn" if node_fts == "unchecked" else "fail",
+            "detail": node_fts_integrity,
+        })
+    if store_fts_failed_flag and store_fts != "fail":
+        triage_checks.append({
+            "check": "messages_fts_integrity",
+            "status": "fail",
+            "detail": {"status": "fail", "background_flag": store_fts_failed_flag},
+        })
+    if node_fts_failed_flag and node_fts != "fail":
+        triage_checks.append({
+            "check": "nodes_fts_integrity",
+            "status": "fail",
+            "detail": {"status": "fail", "background_flag": node_fts_failed_flag},
+        })
+    if clean_scan["candidates"]:
+        triage_checks.append({"check": "cleanup_candidates", "status": "warn", "detail": clean_scan})
+    if payload_storage_error or missing_externalized_refs or any(payload_risks.get(key) for key in (
+        "suspicious_data_uri_content_rows",
+        "suspicious_data_uri_tool_calls_rows",
+        "suspicious_base64_like_rows",
+        "suspicious_repetitive_assistant_rows",
+        "heartbeat_noise_rows",
+    )):
+        detail = {**payload_risks, **externalized_integrity}
+        if payload_storage_error:
+            detail["error"] = payload_storage_error
+        triage_checks.append({
+            "check": "payload_storage",
+            "status": "fail" if payload_storage_error else "warn",
+            "detail": detail,
+        })
+    if (protection["enabled"] and not protection["active_patterns"]) or protection["unknown_patterns"]:
+        triage_checks.append({"check": "sensitive_pattern_handling", "status": "warn", "detail": protection})
+    if source_stats.get("error"):
+        triage_checks.append({"check": "source_lineage_hygiene", "status": "fail", "detail": source_stats})
+    if lifecycle_stats.get("error") or command._has_lifecycle_fragmentation(lifecycle_stats):
+        lifecycle_status = "fail" if lifecycle_stats.get("error") else "warn"
+        triage_checks.append({"check": "lifecycle_fragmentation", "status": lifecycle_status, "detail": lifecycle_stats})
+    try:  # #582: the survival fit kept a session alive by dropping stored turns from live context
+        survival_fit = engine._store.read_metadata_json(command.SURVIVAL_FIT_COUNTER_KEY)
+    except Exception:
+        survival_fit = None
+    survival_fit = survival_fit if isinstance(survival_fit, dict) else {}
+    fit_count = command.survival_fit_count(survival_fit)
+    if fit_count != 0:
+        projected = survival_fit.get("projected_count")  # absent on a record from before the key: unknown
+        if type(projected) is not int or projected < 0 or survival_fit.get("count_lost"):
+            projected = None  # damaged metadata, or history lost with the count: conservatively unknown
+        projection_floor = command.survival_fit_projection_floor_applies(survival_fit)  # #919: same predicate as triage
+        uncovered = survival_fit.get("last_uncovered_rows")
+        uncovered_fits = survival_fit.get("uncovered_fit_count")
+        unknown_fits = survival_fit.get("unknown_coverage_fit_count")
+        within = ("rollback to a 0.24.x version older than v0.24.5: that plugin cannot compact stored rows that a "
+                  "survival fit removed from the live context; stop Hermes, move the configured database file (by "
+                  "default lcm.db, with its -wal and -shm companions) aside and keep it, then restore the database "
+                  "backup taken before the first v0.24.5 install with the plugin; a rollback of the plugin alone to "
+                  f"{'v0.27.0' if projection_floor else 'v0.24.5'} or later is fine")
+        applied = ("applied an unknown number of times (the stored count is unreadable)" if fit_count is None
+                   else f"applied {fit_count} time(s)")
+        if survival_fit.get("last_shortened") is False:
+            applied = applied.replace("applied", "attempted", 1) + "; could not shorten the list on the last attempt"
+        rollback = (f"; {within}; a rollback to v0.23.3 keeps the database file and needs native recovery ON "
+                    "(see triage_guidance)" if survival_fit.get("ever_shortened", True) else "")
+        if projection_floor:
+            rollback += ("; a survival fit projected rows (or the projection count is unknown): from v0.27.0 on, "
+                         "a plugin-only rollback must target v0.27.0 or later; v0.26.x or earlier cannot recognise "
+                         "a short projected row (head + mark) and stores it again on a cold resume (#601 duplicates); "
+                         "to roll back further, stop Hermes and move the configured database file (by default lcm.db, "
+                         "with its -wal and -shm companions) aside and keep it")
+        last_cause = f"; last cause {survival_fit['last_cause']}" if survival_fit.get("last_cause") else ""
+        observations.append(f"survival_fit: {applied}; last reason "
+                            f"{survival_fit.get('last_reason') or '(unknown)'}{last_cause}; projected_count "
+                            f"{'unknown' if projected is None else projected}; unreached_budget_count "
+                            f"{survival_fit.get('unreached_budget_count', 0)}; last_reached_budget "
+                            f"{survival_fit.get('last_reached_budget', 'unknown')}; last_uncovered_rows "
+                            f"{'unknown' if uncovered is None else uncovered}; uncovered_fit_count "
+                            f"{'unknown' if uncovered_fits is None else uncovered_fits}; unknown_coverage_fit_count "
+                            f"{'unknown' if unknown_fits is None else unknown_fits}{rollback}")
+        triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
+    stub_first_exit = getattr(engine, "_last_stub_first_exit", None)
+    if stub_first_exit:  # #671: a partial stop; the rows no leaf summarised stay stored as backlog
+        observations.append("stub_first_exit: the last threshold compaction stopped on its free cuts without a "
+                            "model call (partial); " + " ".join(f"{k}={v}" for k, v in stub_first_exit.items()))
+    inactive_process = command.inactive_record_notice(getattr(engine, "_hermes_home", ""))
+    if inactive_process:
+        issues.append("inactive_process")
+        inactive_check = {"check": "inactive_process", "status": "warn", "detail": inactive_process}
+        triage_checks.append(inactive_check)
+        recommended_actions.append(command.doctor_guidance_for_check(inactive_check)["operator_action"])
+    try:
+        from .tools import _embedding_provider_health_check
+        embedding_check = _embedding_provider_health_check(engine)
+    except Exception as exc:  # as the lcm_doctor tool does: a check that raises reports fail, never a silent ok
+        embedding_check = {"check": "embedding_provider_health", "status": "fail", "detail": str(exc)}
+    if embedding_check and embedding_check["status"] in {"warn", "fail"}:
+        issues.append("embedding_provider_health")
+        triage_checks.append(embedding_check)
+        recommended_actions.append(command.doctor_guidance_for_check(embedding_check)["operator_action"])
+    triage_guidance = command.doctor_guidance_for_checks(triage_checks)
+
+    doctor_status = "issues-found" if integrity != "ok" or issues else (
+        "action-recommended" if recommended_actions else "ok"
+    )
+    wal_reset_affected = command.sqlite_wal_reset_affected()
+    lines = [
+        "LCM doctor",
+        f"status: {doctor_status}",
+        f"plugin_name: {runtime_identity.get('plugin_name', '(unknown)')}",
+        f"plugin_version: {runtime_identity.get('plugin_version', '(unknown)')}",
+        f"plugin_path: {runtime_identity.get('plugin_path', '(unknown)')}",
+        f"module_path: {runtime_identity.get('module_path', '(unknown)')}",
+        f"plugin_git_commit: {runtime_identity.get('plugin_git_commit') or '(unavailable)'}",
+        f"plugin_git_branch: {runtime_identity.get('plugin_git_branch') or '(unavailable)'}",
+        f"plugin_git_dirty: {runtime_identity.get('plugin_git_dirty') if runtime_identity.get('plugin_git_dirty') is not None else '(unavailable)'}",
+        f"database_path: {db_path}",
+        f"database_exists: {command._fmt_bool(db_exists)}",
+        f"database_size: {command._fmt_size(db_size) if db_exists else 'missing'}",
+        f"wal_size: {command._fmt_size(wal_size)}",
+        f"schema_core_tables: {schema_core_status}",
+        f"schema_missing_tables: {', '.join(schema_missing_tables) or '(none)'}",
+        f"schema_existing_tables: {', '.join(schema_existing_tables) or '(none)'}",
+        f"journal_mode: {journal_mode}; sqlite_mmap_bytes={sqlite_mmap_bytes}",
+        f"sqlite_library: {command.sqlite3.sqlite_version} (WAL-reset bug: {'affected' if wal_reset_affected else 'not affected'})",
+        *(["sqlite_wal_reset_advice: upgrade Python/SQLite to 3.51.3+; see https://sqlite.org/wal.html#walresetbug"]
+          if wal_reset_affected and journal_mode.lower() == "wal" else []),
+        f"quick_check: {quick_check}",
+        f"sqlite_integrity: {integrity}",
+        f"messages_total: {total_messages}",
+        f"message_sessions_total: {total_message_sessions}",
+        f"summary_nodes_total: {total_nodes}",
+        f"summary_node_sessions_total: {total_node_sessions}",
+        f"messages_fts: {store_fts}",
+        f"stem index: {command.stem_index_status(store_conn)}",
+        f"messages_fts_rows: {store_fts_count}",
+        f"nodes_fts: {node_fts}",
+        f"nodes_fts_rows: {node_fts_count}",
+        f"largest_content_rows: {payload_risks['largest_content_rows']}",
+        f"largest_tool_calls_rows: {payload_risks['largest_tool_calls_rows']}",
+        f"suspicious_data_uri_content_rows: {payload_risks['suspicious_data_uri_content_rows']}",
+        f"suspicious_data_uri_tool_calls_rows: {payload_risks['suspicious_data_uri_tool_calls_rows']}",
+        f"suspicious_base64_like_rows: {payload_risks['suspicious_base64_like_rows']}",
+        f"quarantined_assistant_rows: {payload_risks['quarantined_assistant_rows']}",
+        f"suspicious_repetitive_assistant_rows: {payload_risks['suspicious_repetitive_assistant_rows']}",
+        f"heartbeat_noise_rows: {payload_risks['heartbeat_noise_rows']}",
+        f"sensitive_patterns_enabled: {command._fmt_bool(protection.get('enabled'))}",
+        f"sensitive_patterns: {', '.join(protection.get('patterns') or []) or '(none)'}",
+        f"sensitive_patterns_source: {protection.get('source', 'default')}",
+        f"sensitive_patterns_unknown: {', '.join(protection.get('unknown_patterns') or []) or '(none)'}",
+        f"externalized_payload_dir: {externalized_stats['externalized_payload_dir']}",
+        f"externalized_payload_count: {externalized_stats['externalized_payload_count']}",
+        f"externalized_payload_bytes: {externalized_stats['externalized_payload_bytes']}",
+        f"externalized_payload_chars: {externalized_stats['externalized_payload_chars']}",
+        f"latest_externalized_payload_path: {externalized_stats['latest_externalized_payload_path'] or '(none)'}",
+        f"externalized_payload_refs_total: {externalized_integrity['externalized_payload_refs_total']}",
+        f"externalized_payload_refs_existing: {externalized_integrity['externalized_payload_refs_existing']}",
+        f"externalized_payload_refs_missing: {externalized_integrity['externalized_payload_refs_missing']}",
+        f"externalized_payload_files_unreferenced: {externalized_integrity['externalized_payload_files_unreferenced']}",
+        f"missing_externalized_payload_refs: {externalized_integrity['missing_externalized_payload_refs']}",
+        f"unreferenced_externalized_payload_files: {externalized_integrity['unreferenced_externalized_payload_files']}",
+        f"survival_fit_count: {'unknown' if fit_count is None else fit_count}",
+        *command.host_uid_doctor_lines(engine),
+    ]
+    if inactive_process:
+        lines.append(f"inactive_process: {inactive_process}")
+    if embedding_check is not None:
+        detail = embedding_check.get("detail")
+        reason = detail.get("reason") if isinstance(detail, dict) else None
+        suffix = f" ({reason})" if reason else ""
+        if isinstance(detail, str):
+            suffix = f" {detail}"
+        lines.append(f"embedding_provider_health: {embedding_check['status']}{suffix}")
+    if issues:
+        lines.append(f"issues: {', '.join(issues)}")
+    else:
+        lines.append("issues: none")
+    lines.append("observations:")
+    for item in observations:
+        lines.append(f"- {item}")
+    lines.append("recommended_actions:")
+    if recommended_actions:
+        for item in recommended_actions:
+            lines.append(f"- {item}")
+    else:
+        lines.append("- none")
+    lines.append("triage_guidance:")
+    if triage_guidance:
+        for item in triage_guidance:
+            warning_suffix = " warning-only" if item.get("warning_only") else ""
+            lines.append(
+                "- "
+                f"{item['check']}: {item['action']}{warning_suffix} — "
+                f"{item['operator_action']}"
+            )
+    else:
+        lines.append("- none")
+    return "\n".join(lines)
