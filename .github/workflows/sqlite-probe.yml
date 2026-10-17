@@ -1,0 +1,323 @@
+name: SQLite A/B probe
+
+# Diagnostic-only workflow for the intermittent "database disk image is
+# malformed" / "vtable constructor failed: *_fts" CI failures (#1084, #1112,
+# #1352). It compares the runner's stock SQLite against SQLite 3.51.3, which
+# fixes the WAL-reset race (https://sqlite.org/wal.html section 11), on the
+# same workload. It only runs for PRs whose head branch starts with
+# probe/sqlite-, and it never gates merges.
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  sqlite-ab:
+    if: startsWith(github.head_ref, 'probe/sqlite-')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        lib: [stock, fixed]
+        python-version: ["3.12"]
+    env:
+      SQLITE_FIXED_URL: https://sqlite.org/2026/sqlite-amalgamation-3510300.zip
+      SQLITE_FIXED_SHA256: acb1e6f5d832484bf6d32b681e858c38add8b2acdfd42ac5df24b8afb46552b4
+      SQLITE_FIXED_VERSION: 3.51.3
+      LOOP_K: "15"
+
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install test dependencies
+        run: pip install pytest==9.1.1 numpy ruff==0.15.13 hypothesis==6.141.1
+
+      - name: Stub hermes-agent ABC
+        run: |
+          mkdir -p agent
+          cat > agent/__init__.py <<'STUB'
+          STUB
+          cat > agent/context_engine.py <<'STUB'
+          """Dependency-free ContextEngine contract shared by the pinned hosts."""
+          import copy
+          import json
+          from abc import ABC, abstractmethod
+
+          class ContextEngine(ABC):
+              last_prompt_tokens = 0
+              last_completion_tokens = 0
+              last_total_tokens = 0
+              threshold_tokens = 0
+              context_length = 0
+              compression_count = 0
+              threshold_percent = 0.75
+              protect_first_n = 3
+              protect_last_n = 6
+              emit_automatic_compaction_status = True
+
+              def __init__(self, **kwargs):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+
+              @property
+              @abstractmethod
+              def name(self):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def update_from_response(self, usage):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def should_compress(self, prompt_tokens=None):
+                  raise NotImplementedError
+
+              @abstractmethod
+              def compress(self, messages, current_tokens=None, focus_topic=None, force=False, memory_context=""):
+                  raise NotImplementedError
+
+              def should_compress_info(self, prompt_tokens=None):
+                  return self.should_compress(prompt_tokens), None
+
+              def should_compress_preflight(self, messages):
+                  return False
+
+              def get_automatic_compaction_status_message(self, *, phase, default_message, **context):
+                  return default_message if self.emit_automatic_compaction_status else None
+
+              def on_session_start(self, session_id, **kwargs):
+                  pass
+
+              def on_session_end(self, session_id, messages):
+                  pass
+
+              def on_session_reset(self):
+                  self.compression_count = 0
+                  self.last_prompt_tokens = 0
+                  self.last_completion_tokens = 0
+                  self.last_total_tokens = 0
+
+              def get_tool_schemas(self):
+                  return []
+
+              def handle_tool_call(self, name, args, **kwargs):
+                  return json.dumps({"error": f"Unknown context engine tool: {name}"})
+
+              def get_status(self):
+                  last_prompt = max(self.last_prompt_tokens, 0)
+                  return {
+                      "last_prompt_tokens": last_prompt,
+                      "threshold_tokens": self.threshold_tokens,
+                      "context_length": self.context_length,
+                      "usage_percent": min(100, last_prompt / self.context_length * 100) if self.context_length else 0,
+                      "compression_count": self.compression_count,
+                  }
+
+              def clone_for_agent(self):
+                  return copy.deepcopy(self)
+
+              def update_model(self, model, context_length, base_url="", api_key="", provider="", api_mode=""):
+                  # Host threshold resolution imports its compressor; keep this
+                  # unit-test fallback dependency-free. LCMEngine overrides it.
+                  self.context_length = context_length
+          STUB
+
+      - name: Prepare probe directories
+        run: |
+          probe_dir="$RUNNER_TEMP/sqlite-probe"
+          mkdir -p "$probe_dir/logs" "$probe_dir/keep"
+          {
+            echo "PROBE_DIR=$probe_dir"
+            echo "LCM_SQLITE_AB_KEEP_DIR=$probe_dir/keep"
+            echo "PROBE_JOB_START=$(date +%s)"
+          } >> "$GITHUB_ENV"
+
+      - name: Verify _sqlite3 links libsqlite3.so.0 dynamically
+        run: |
+          ext="$(python -c 'import _sqlite3; print(_sqlite3.__file__)')"
+          echo "_sqlite3 extension: $ext"
+          ldd "$ext" | tee "$PROBE_DIR/ldd-stock.txt"
+          if ! grep -q 'libsqlite3\.so\.0' "$PROBE_DIR/ldd-stock.txt"; then
+            echo "::error::_sqlite3 does not link libsqlite3.so.0 dynamically; LD_LIBRARY_PATH cannot swap the library"
+            exit 1
+          fi
+          dpkg-query -W -f='${Package} ${Version}\n' libsqlite3-0 | tee "$PROBE_DIR/libsqlite3-0-package.txt"
+
+      - name: Build SQLite ${{ env.SQLITE_FIXED_VERSION }} (fixed arm)
+        if: matrix.lib == 'fixed'
+        run: |
+          build_dir="$RUNNER_TEMP/sqlite-fixed"
+          mkdir -p "$build_dir"
+          cd "$build_dir"
+          curl -fsSL --retry 3 -o amalgamation.zip "$SQLITE_FIXED_URL"
+          echo "$SQLITE_FIXED_SHA256  amalgamation.zip" | sha256sum -c -
+          unzip -q amalgamation.zip
+          src="$(find . -maxdepth 2 -name sqlite3.c -print -quit)"
+          gcc -O2 -fPIC -shared -g \
+            -DSQLITE_ENABLE_FTS3 -DSQLITE_ENABLE_FTS3_PARENTHESIS -DSQLITE_ENABLE_FTS4 \
+            -DSQLITE_ENABLE_FTS5 -DSQLITE_ENABLE_JSON1 -DSQLITE_THREADSAFE=1 \
+            -DSQLITE_ENABLE_COLUMN_METADATA -DSQLITE_ENABLE_UNLOCK_NOTIFY \
+            -DSQLITE_ENABLE_DBSTAT_VTAB -DSQLITE_ENABLE_RTREE -DSQLITE_ENABLE_STAT4 \
+            -DSQLITE_ENABLE_MATH_FUNCTIONS -DSQLITE_ENABLE_PREUPDATE_HOOK \
+            -DSQLITE_ENABLE_SESSION -DSQLITE_SECURE_DELETE -DSQLITE_SOUNDEX \
+            -DSQLITE_MAX_VARIABLE_NUMBER=250000 \
+            -Wl,-soname,libsqlite3.so.0 \
+            -o "$build_dir/libsqlite3.so.0" "$src" -lpthread -ldl -lm
+          echo "LD_LIBRARY_PATH=$build_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          ext="$(python -c 'import _sqlite3; print(_sqlite3.__file__)')"
+          LD_LIBRARY_PATH="$build_dir" ldd "$ext" | tee "$RUNNER_TEMP/sqlite-probe/ldd-fixed.txt"
+
+      - name: Print linked SQLite version and source id
+        run: |
+          python - <<'PY' | tee "$PROBE_DIR/sqlite-identity.txt"
+          import os
+          import sqlite3
+          import sys
+
+          con = sqlite3.connect(":memory:")
+          source_id = con.execute("select sqlite_source_id()").fetchone()[0]
+          options = [row[0] for row in con.execute("pragma compile_options")]
+          print("python", sys.version.replace("\n", " "))
+          print("lib arm", os.environ.get("MATRIX_LIB"))
+          print("sqlite_version", sqlite3.sqlite_version)
+          print("sqlite_source_id", source_id)
+          print("compile_options", " ".join(options))
+          expected = os.environ.get("EXPECT_VERSION")
+          if expected and sqlite3.sqlite_version != expected:
+              sys.exit(f"fixed arm loaded SQLite {sqlite3.sqlite_version}, expected {expected}")
+          PY
+          {
+            echo "### SQLite identity (${MATRIX_LIB})"
+            echo '```'
+            cat "$PROBE_DIR/sqlite-identity.txt"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          MATRIX_LIB: ${{ matrix.lib }}
+          EXPECT_VERSION: ${{ matrix.lib == 'fixed' && env.SQLITE_FIXED_VERSION || '' }}
+
+      - name: A/B stress harness (seeds 1..3, 300 cycles)
+        run: |
+          ulimit -n 1024
+          echo "fd limit: $(ulimit -n)"
+          : > "$PROBE_DIR/counts.tsv"
+          : > "$PROBE_DIR/ab-results.jsonl"
+          fails=0
+          if [ ! -f tests/test_zz_sqlite_ab_probe.py ]; then
+            echo "::warning::tests/test_zz_sqlite_ab_probe.py is missing; A/B harness not run"
+            printf 'ab_probe_missing\t0\t0\n' >> "$PROBE_DIR/counts.tsv"
+            exit 0
+          fi
+          for seed in 1 2 3; do
+            log="$PROBE_DIR/logs/ab-seed-$seed.log"
+            rc=0
+            LCM_SQLITE_AB=1 LCM_SQLITE_AB_CYCLES=300 LCM_SQLITE_AB_SEED="$seed" \
+              timeout 600 python -m pytest tests/test_zz_sqlite_ab_probe.py -q -s -p no:randomly \
+              > "$log" 2>&1 || rc=$?
+            grep -h '^SQLITE_AB_RESULT ' "$log" >> "$PROBE_DIR/ab-results.jsonl" || true
+            echo "seed $seed: pytest exit $rc"
+            if [ "$rc" -ne 0 ]; then
+              fails=$((fails + 1))
+              tail -n 40 "$log"
+            fi
+          done
+          printf 'ab_probe\t%s\t%s\n' "$fails" 3 >> "$PROBE_DIR/counts.tsv"
+
+      - name: Repeat-failure loops (K=${{ env.LOOP_K }})
+        run: |
+          ulimit -n 1024
+          echo "fd limit: $(ulimit -n)"
+          # Stop starting new iterations 45 minutes after the job started, so a
+          # final 600 s iteration plus the summary and upload fit in 60 minutes.
+          deadline=$((PROBE_JOB_START + 2700))
+          run_loop() {
+            local name="$1"
+            shift
+            local fails=0 ran=0 i rc log
+            for i in $(seq 1 "$LOOP_K"); do
+              if [ "$(date +%s)" -ge "$deadline" ]; then
+                echo "$name: loop budget exhausted after $ran runs"
+                break
+              fi
+              log="$PROBE_DIR/logs/$name-$i.log"
+              rc=0
+              timeout 600 env "$@" > "$log" 2>&1 || rc=$?
+              ran=$((ran + 1))
+              if [ "$rc" -ne 0 ]; then
+                fails=$((fails + 1))
+                echo "$name iteration $i: exit $rc"
+                grep -E 'DatabaseError|OperationalError|malformed|vtable constructor|FAILED|Error' "$log" | head -n 20 || true
+              else
+                rm -f "$log"
+              fi
+            done
+            printf '%s\t%s\t%s\n' "$name" "$fails" "$ran" >> "$PROBE_DIR/counts.tsv"
+          }
+          run_loop TestRestart LCM_HYPOTHESIS_PROFILE=nightly \
+            python -m pytest "tests/invariants/test_exactly_once_machine.py::TestRestart" -q -rx -p no:randomly
+          run_loop TestRotation \
+            python -m pytest "tests/invariants/test_exactly_once_machine.py::TestRotation" -q -rx -p no:randomly
+          run_loop restart_replay_resume_append \
+            python -m pytest "tests/invariants/test_identity_seeds.py::test_restart_replay_resume_append" -q -rx -p no:randomly
+          run_loop assertion_pipeline \
+            python -m pytest "tests/test_assertion_model_pipeline.py::test_compression_hook_queues_exact_rows_without_waiting_for_assertion_publication" -q -rx -p no:randomly
+
+      - name: Summary
+        if: always()
+        run: |
+          total=0
+          {
+            echo "### Failure counts (${MATRIX_LIB})"
+            echo
+            echo "| test | failures | runs |"
+            echo "|---|---|---|"
+            if [ -f "$PROBE_DIR/counts.tsv" ]; then
+              while IFS=$'\t' read -r name fails runs; do
+                echo "| $name | $fails | $runs |"
+              done < "$PROBE_DIR/counts.tsv"
+            fi
+            echo
+            echo "A/B harness results:"
+            echo '```'
+            cat "$PROBE_DIR/ab-results.jsonl" 2>/dev/null || echo "(none)"
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -f "$PROBE_DIR/counts.tsv" ]; then
+            total="$(awk -F '\t' '{s += $2} END {print s + 0}' "$PROBE_DIR/counts.tsv")"
+          fi
+          echo "PROBE_TOTAL_FAILURES=$total" >> "$GITHUB_ENV"
+          echo "total failures: $total"
+        env:
+          MATRIX_LIB: ${{ matrix.lib }}
+
+      - name: Upload failing DBs and logs
+        if: always() && env.PROBE_TOTAL_FAILURES != '0'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: sqlite-probe-${{ matrix.lib }}-py${{ matrix.python-version }}
+          path: |
+            ${{ env.PROBE_DIR }}/keep
+            ${{ env.PROBE_DIR }}/logs
+            ${{ env.PROBE_DIR }}/*.txt
+            ${{ env.PROBE_DIR }}/*.tsv
+            ${{ env.PROBE_DIR }}/*.jsonl
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Fail the arm when any probe run failed
+        if: always()
+        run: |
+          if [ "${PROBE_TOTAL_FAILURES:-0}" != "0" ]; then
+            echo "::error::$PROBE_TOTAL_FAILURES probe run(s) failed on the ${MATRIX_LIB} arm"
+            exit 1
+          fi
+        env:
+          MATRIX_LIB: ${{ matrix.lib }}
