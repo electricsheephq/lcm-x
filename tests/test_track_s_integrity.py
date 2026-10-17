@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import runpy
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -346,7 +347,10 @@ def test_decision_timeout_kills_group(tmp_path):
         "p=subprocess.Popen([sys.executable,'-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(120)'])\n"
         f"Path({str(pidfile)!r}).write_text(str(p.pid))\ntime.sleep(120)\n")
     prefix = (TRACK / "decision/run_decision.sh").read_text().split("PY=${PYTHON", 1)[0]
-    prefix = prefix.replace("sleep 10", "sleep 0.1")
+    # #1091: each poll first waits (at most 10 s) for the descendant's pid, so the group
+    # is never killed before the child has started its descendant and recorded it.
+    wait = f"for _ in $(seq 200); do [ -s {shlex.quote(str(pidfile))} ] && break; sleep 0.05; done; sleep 0.1"
+    prefix = prefix.replace("sleep 10", wait)
     command = prefix + '\nrun timeout 0 "$1" "$2"\n'
     try:
         result = subprocess.run(["bash", "-c", command, "test", sys.executable, str(child)],
@@ -356,7 +360,7 @@ def test_decision_timeout_kills_group(tmp_path):
         state = subprocess.run(["ps", "-o", "stat=", "-p", pidfile.read_text()], capture_output=True, text=True)
         assert not state.stdout.strip() or state.stdout.strip().startswith("Z")
     finally:
-        if pidfile.exists():
+        if pidfile.exists() and pidfile.read_text().strip():
             try:
                 os.kill(int(pidfile.read_text()), 9)
             except ProcessLookupError:
