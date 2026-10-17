@@ -22,13 +22,21 @@ jobs:
           # Keep identical to scripts/maintainer_gate.py's TURN_PATH_FILES.
           TURN_PATH_FILES: |-
             __init__.py
+            assembly_plan.py
             aux_session.py
             bypass.py
             codex_routing.py
             compaction.py
+            compaction_policy.py
+            compaction_request.py
+            compress_run.py
+            config.py
             dag.py
+            db_bootstrap.py
+            diagnostics.py
             emission_projection.py
             engine.py
+            engine_registry.py
             escalation.py
             externalize.py
             extraction.py
@@ -36,19 +44,42 @@ jobs:
             host_uid.py
             host_uid_emit.py
             identity_anchor.py
+            ingest_content.py
+            ingest_integrity.py
+            ingest_pem_model.py
+            ingest_pem_scan.py
+            ingest_persisted.py
+            ingest_policy.py
             ingest_protection.py
+            leaf_prep.py
             lifecycle_state.py
             message_analysis.py
             message_content.py
+            message_patterns.py
+            model_routing.py
             placeholder_ledger.py
+            plugin_identity.py
             prefix_matching.py
             recognition_matching.py
             reconcile.py
+            reset_state.py
+            rollup_builder.py
+            rollup_periods.py
+            rollup_store.py
             sanitize.py
+            schemas.py
+            session_patterns.py
+            sqlite_util.py
+            store.py
             store_complete.py
+            summary_attempt.py
             summary_input_clip.py
+            summary_outcome.py
+            survival_codec.py
             survival_fit.py
             tokens.py
+            tool_pairs.py
+            tool_registry.py
         run: |
           relevant=true
           if [[ "$EVENT_NAME" == pull_request ]]; then

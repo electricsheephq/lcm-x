@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from scripts.maintainer_gate import evaluate, review_lanes_hint
+from scripts.maintainer_gate import NON_TURN_PATH_FILES, TURN_PATH_FILES, evaluate, review_lanes_hint
 
 
 HEAD = "1" * 40
@@ -33,6 +33,17 @@ TURN_PATH_PACKET = [
     "Sibling shapes: neighbouring windows, row roles, and recovery paths.",
 ]
 SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "maintainer_gate.py"
+
+
+def test_top_level_modules_are_classified() -> None:
+    modules = {path.name for path in SCRIPT.parents[1].glob("*.py") if path.is_file()}
+    guidance = (
+        "Classify every new top-level module in scripts/maintainer_gate.py's TURN_PATH_FILES "
+        "or NON_TURN_PATH_FILES; for turn-path modules, update TURN_PATH_FILES in "
+        ".github/workflows/differential.yml too."
+    )
+    assert TURN_PATH_FILES.isdisjoint(NON_TURN_PATH_FILES), guidance
+    assert modules == TURN_PATH_FILES | NON_TURN_PATH_FILES, guidance
 
 
 def passing_checks(head_sha: str = HEAD) -> list[dict[str, object]]:
@@ -258,12 +269,39 @@ def test_review_lanes_hint_never_blocks_readiness(checks_present):
     [
         *[
             ([{"filename": path}], ["lcm-memory-preservation", "turn-path"], BOTH_LANES)
-            for path in ("engine.py", "survival_fit.py", "__init__.py", "compaction.py", "identity_anchor.py",
-                         "recognition_matching.py", "emission_projection.py")
+            for path in (
+                "engine.py", "survival_fit.py", "__init__.py", "compaction.py", "identity_anchor.py",
+                "assembly_plan.py", "compaction_policy.py", "compaction_request.py", "compress_run.py",
+                "leaf_prep.py", "summary_attempt.py", "summary_outcome.py", "survival_codec.py", "tool_pairs.py",
+                "config.py",
+                "db_bootstrap.py",
+                "diagnostics.py",
+                "engine_registry.py",
+                "message_patterns.py",
+                "model_routing.py",
+                "plugin_identity.py",
+                "rollup_builder.py",
+                "rollup_periods.py",
+                "rollup_store.py",
+                "schemas.py",
+                "session_patterns.py",
+                "sqlite_util.py",
+                "store.py",
+                "tool_registry.py",
+                "reset_state.py",
+                "recognition_matching.py",
+                "emission_projection.py",
+                "ingest_content.py",
+                "ingest_integrity.py",
+                "ingest_pem_model.py",
+                "ingest_pem_scan.py",
+                "ingest_persisted.py",
+                "ingest_policy.py",
+            )
         ],
         *[
             ([{"filename": path}], ["lcm-memory-preservation"], BOTH_LANES)
-            for path in ("presets.py", "store.py", "tools.py")
+            for path in ("presets.py", "tools.py")
         ],
         (
             [{"filename": "engine.py", "previous_filename": "presets.py"}],
@@ -283,7 +321,34 @@ def test_review_lanes_hint_never_blocks_readiness(checks_present):
         ),
     ],
     ids=["engine", "survival-fit", "pre-llm-hook", "compaction", "ingest-identity",
-         "recognition-matching", "emission-projection", "preset-only", "store-only", "tools-only", "rename-into-turn-path", "rename-out-of-turn-path",
+         "assembly-plan", "compaction-policy", "compaction-request", "compress-run", "leaf-prep",
+         "summary-attempt", "summary-outcome", "survival-codec", "tool-pairs",
+         "config",
+         "db-bootstrap",
+         "diagnostics",
+         "engine-registry",
+         "message-patterns",
+         "model-routing",
+         "plugin-identity",
+         "rollup-builder",
+         "rollup-periods",
+         "rollup-store",
+         "schemas",
+         "session-patterns",
+         "sqlite-util",
+         "store",
+         "tool-registry",
+         "reset-state",
+         "recognition-matching",
+         "emission-projection",
+         "ingest-content",
+         "ingest-integrity",
+         "ingest-pem-model",
+         "ingest-pem-scan",
+         "ingest-persisted",
+         "ingest-policy",
+         "preset-only", "tools-only",
+         "rename-into-turn-path", "rename-out-of-turn-path",
          "docs-only", "rename-across-policy-boundary"],
 )
 def test_review_lanes_hint_maps_changed_paths(changed_files, risks, lanes):
