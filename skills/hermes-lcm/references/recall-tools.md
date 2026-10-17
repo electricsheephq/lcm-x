@@ -51,7 +51,7 @@ Use as low-level drill-down after a known handle:
 
 - `node_id` expands a current-session summary with source pagination;
 - `store_id` recovers one raw message and works across LCM sessions;
-- `externalized_ref` opens a payload of the current session, or of a session it replaced at a compression-boundary rotation, with content pagination.
+- `externalized_ref` opens a payload of the current session, or of a session it replaced at a compression-boundary rotation, with content pagination; use `lcm_expand(externalized_ref=..., session_id=...)` to select another session under the same ownership/rotation checks, bounded by `max_tokens` and paged by `content_offset`.
 
 Do not use it as broad first-step discovery.
 
