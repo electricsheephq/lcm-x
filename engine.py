@@ -8712,46 +8712,9 @@ class LCMEngine(
         retained_generated_context_parts: list[str] = []
         summary_message: Optional[Dict[str, Any]] = None
         if summary_parts:
-            if (
-                summary_budget is None
-                and (ceiling := self._survival_ceiling()) is not None
-            ):
-                # #930: bound only the prefix; keep the tail and every stored node.
-                # Use the pre-compaction input for overhead, not the shortened tail.
-                overhead_source = ([system_msg] if system_msg is not None else [])
-                if retained_user_msg is not None:
-                    overhead_source.append(retained_user_msg)
-                overhead_source.extend(anchor_source)
-                overhead = self._survival_assembly_overhead(
-                    overhead_source, max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
-                )
-                # Measure without externalizing preserved-objective payloads.
-                # Tool-pair repair still reserves any missing-result stubs.
-                measurement_tail = self._sanitize_tool_pairs(list(tail_selected))
-                default_budget = default_prefix_budget(
-                    ceiling=ceiling, overhead=overhead, leading_tokens=count_messages_tokens(result),
-                    tail_tokens=count_messages_tokens(tail_selected),
-                    repaired_tail_tokens=count_messages_tokens(measurement_tail),
-                    recall_budget_tokens=self._config.proactive_recall_budget_tokens,
-                    proactive_recall_enabled=self._config.proactive_recall_enabled,
-                    embeddings_enabled=self._config.embeddings_enabled, survival_fit=self._config.survival_fit,
-                )
-                full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
-                if count_message_tokens(full_prefix) > default_budget:
-                    summary_budget = default_budget
-                    if part_keys[0] == (-1, None) and count_message_tokens({
-                        "role": summary_role, "content": strip_injected_context_blocks(summary_parts[0]),
-                    }) > summary_budget:
-                        for candidate_index, candidate in enumerate(anchor_candidates[1:], start=1):
-                            if candidate_index >= 2:
-                                candidate = self._build_preserved_objective_summary_part({
-                                    "role": "user", "content": candidate[len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1:],
-                                })
-                            if count_message_tokens({
-                                "role": summary_role, "content": strip_injected_context_blocks(candidate),
-                            }) <= summary_budget:
-                                summary_parts[0] = anchor_part = candidate
-                                break
+            summary_budget, anchor_part = self._resolve_survival_prefix_budget(
+                system_msg, retained_user_msg, anchor_source, tail_selected, result,
+                summary_role, summary_parts, part_keys, anchor_candidates, summary_budget, anchor_part)
             selection = select_prefix(summary_parts, PrefixBudgetFacts(
                 part_keys=part_keys, summary_role=summary_role, summary_budget=summary_budget,
                 assembly_cap=assembly_cap, survival_fit=self._config.survival_fit,
@@ -9034,6 +8997,52 @@ class LCMEngine(
             tail_token_total += msg_tokens
         tail_selected = list(reversed(kept_tail_reversed))
         return tail_selected, tail_token_total
+
+    def _resolve_survival_prefix_budget(
+        self, system_msg, retained_user_msg, anchor_source, tail_selected, result,
+        summary_role, summary_parts, part_keys, anchor_candidates, summary_budget, anchor_part,
+    ) -> tuple[Optional[int], Optional[str]]:
+        if (
+            summary_budget is None
+            and (ceiling := self._survival_ceiling()) is not None
+        ):
+            # #930: bound only the prefix; keep the tail and every stored node.
+            # Use the pre-compaction input for overhead, not the shortened tail.
+            overhead_source = ([system_msg] if system_msg is not None else [])
+            if retained_user_msg is not None:
+                overhead_source.append(retained_user_msg)
+            overhead_source.extend(anchor_source)
+            overhead = self._survival_assembly_overhead(
+                overhead_source, max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
+            )
+            # Measure without externalizing preserved-objective payloads.
+            # Tool-pair repair still reserves any missing-result stubs.
+            measurement_tail = self._sanitize_tool_pairs(list(tail_selected))
+            default_budget = default_prefix_budget(
+                ceiling=ceiling, overhead=overhead, leading_tokens=count_messages_tokens(result),
+                tail_tokens=count_messages_tokens(tail_selected),
+                repaired_tail_tokens=count_messages_tokens(measurement_tail),
+                recall_budget_tokens=self._config.proactive_recall_budget_tokens,
+                proactive_recall_enabled=self._config.proactive_recall_enabled,
+                embeddings_enabled=self._config.embeddings_enabled, survival_fit=self._config.survival_fit,
+            )
+            full_prefix = {"role": summary_role, "content": "\n\n---\n\n".join(summary_parts)}
+            if count_message_tokens(full_prefix) > default_budget:
+                summary_budget = default_budget
+                if part_keys[0] == (-1, None) and count_message_tokens({
+                    "role": summary_role, "content": strip_injected_context_blocks(summary_parts[0]),
+                }) > summary_budget:
+                    for candidate_index, candidate in enumerate(anchor_candidates[1:], start=1):
+                        if candidate_index >= 2:
+                            candidate = self._build_preserved_objective_summary_part({
+                                "role": "user", "content": candidate[len(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX) + 1:],
+                            })
+                        if count_message_tokens({
+                            "role": summary_role, "content": strip_injected_context_blocks(candidate),
+                        }) <= summary_budget:
+                            summary_parts[0] = anchor_part = candidate
+                            break
+        return summary_budget, anchor_part
 
     def _mint_assembled_engine_uids(self, result, candidates, summary_message, carried_tail, recall_row,
                                     context_row, tail_selected) -> None:
