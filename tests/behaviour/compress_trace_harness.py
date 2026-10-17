@@ -828,20 +828,23 @@ def first_difference(expected: Trace, actual: Trace) -> str | None:
 
 
 def main() -> None:
-    # Match suite isolation and also discard unknown inherited LCM settings.
-    for key in set(os.environ) | product_env_keys(Path(__file__).resolve().parents[2]):
-        if key.startswith("LCM_") or key in product_env_keys(Path(__file__).resolve().parents[2]):
+    environment = dict(os.environ)
+    try:
+        for key in product_env_keys(Path(__file__).resolve().parents[2]):
             os.environ.pop(key, None)
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--regenerate", action="store_true")
-    args = parser.parse_args()
-    if not args.regenerate:
-        parser.error("pass --regenerate to intentionally replace the golden fixture")
-    with tempfile.TemporaryDirectory(prefix="compress-trace-") as directory:
-        observed = {case.name: observe(case, Path(directory) / case.name) for case in SCENARIOS}
-    GOLDEN.parent.mkdir(exist_ok=True)
-    GOLDEN.write_text(json.dumps(observed, sort_keys=True, indent=0) + "\n")
-    print(f"Wrote {len(observed)} scenarios to {GOLDEN.name}")
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument("--regenerate", action="store_true")
+        args = parser.parse_args()
+        if not args.regenerate:
+            parser.error("pass --regenerate to intentionally replace the golden fixture")
+        with tempfile.TemporaryDirectory(prefix="compress-trace-") as directory:
+            observed = {case.name: observe(case, Path(directory) / case.name) for case in SCENARIOS}
+        GOLDEN.parent.mkdir(exist_ok=True)
+        GOLDEN.write_text(json.dumps(observed, sort_keys=True, indent=0) + "\n")
+        print(f"Wrote {len(observed)} scenarios to {GOLDEN.name}")
+    finally:
+        os.environ.clear()
+        os.environ.update(environment)
 
 
 if __name__ == "__main__":

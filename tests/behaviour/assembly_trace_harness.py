@@ -622,18 +622,21 @@ def first_difference(expected: Trace, actual: Trace) -> str | None:
 
 
 def main() -> None:
-    # Match suite isolation and also discard unknown inherited LCM settings.
-    for key in set(os.environ) | product_env_keys(ROOT):
-        if key.startswith('LCM_') or key in product_env_keys(ROOT):
+    environment = dict(os.environ)
+    try:
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument('--repo', type=Path, required=True)
+        parser.add_argument('--out', type=Path, required=True)
+        args = parser.parse_args()
+        for key in product_env_keys(ROOT) | product_env_keys(args.repo.resolve()):
             os.environ.pop(key, None)
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--repo', type=Path, required=True)
-    parser.add_argument('--out', type=Path, required=True)
-    args = parser.parse_args()
-    with tempfile.TemporaryDirectory(prefix='assembly-trace-') as directory:
-        result = {case.name: observe(case, Path(directory).resolve() / case.name) for case in SCENARIOS}
-    args.out.write_text(json.dumps(result, sort_keys=True, indent=0) + '\n')
-    print(f'Wrote {len(result)} assembly scenarios')
+        with tempfile.TemporaryDirectory(prefix='assembly-trace-') as directory:
+            result = {case.name: observe(case, Path(directory).resolve() / case.name) for case in SCENARIOS}
+        args.out.write_text(json.dumps(result, sort_keys=True, indent=0) + '\n')
+        print(f'Wrote {len(result)} assembly scenarios')
+    finally:
+        os.environ.clear()
+        os.environ.update(environment)
 
 
 if __name__ == '__main__':

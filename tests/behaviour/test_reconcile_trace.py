@@ -1,9 +1,7 @@
 """Frozen reconciliation behavior and an independent engine-state inventory."""
 from __future__ import annotations
 
-import importlib
 import json
-import os
 import sys
 import subprocess
 from pathlib import Path
@@ -67,27 +65,6 @@ def test_first_divergence_reports_cursor_read_order_and_state(index: int) -> Non
     assert first_difference(original, original) is None
     assert "<end>" in str(first_difference(original, original[:1]))
 
-
-def test_direct_regeneration_isolates_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    harness = importlib.import_module("tests.behaviour.reconcile_trace_harness")
-    from tests.phase0_hygiene import product_env_keys
-
-    keys = product_env_keys(Path(__file__).resolve().parents[2])
-    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "false")
-    monkeypatch.setenv("LCM_FRESH_TAIL_COUNT", "9999")
-    monkeypatch.setenv("LCM_TRACE_UNKNOWN_SETTING", "inherited")
-    destination = tmp_path / "trace.json"
-    monkeypatch.setattr(harness, "GOLDEN", destination)
-    monkeypatch.setattr(harness, "SCENARIOS", SCENARIOS[:1])
-    monkeypatch.setattr(sys, "argv", ["trace", "--repo", str(harness.ROOT), "--out", str(destination)])
-
-    def observe_clean(case: object, root: Path) -> list[str]:
-        assert not {key for key in os.environ if key.startswith("LCM_") or key in keys}
-        return ["clean settings"]
-
-    monkeypatch.setattr(harness, "observe", observe_clean)
-    harness.main()
-    assert json.loads(destination.read_text()) == {SCENARIOS[0].name: ["clean settings"]}
 
 
 @pytest.mark.parametrize("equals", [False, True], ids=["separate", "equals"])

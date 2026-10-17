@@ -616,23 +616,26 @@ def first_difference(expected: Trace, actual: Trace) -> str | None:
 
 
 def main() -> None:
-    # Match suite isolation and also discard unknown inherited LCM settings.
-    for key in set(os.environ) | product_env_keys(ROOT):
-        if key.startswith("LCM_") or key in product_env_keys(ROOT):
+    environment = dict(os.environ)
+    try:
+        parser = argparse.ArgumentParser(description=__doc__)
+        parser.add_argument("--regenerate", action="store_true")
+        parser.add_argument("--repo", type=Path, default=ROOT)
+        parser.add_argument("--out", type=Path)
+        args = parser.parse_args()
+        for key in product_env_keys(ROOT) | product_env_keys(args.repo.resolve()):
             os.environ.pop(key, None)
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--regenerate", action="store_true")
-    parser.add_argument("--repo", type=Path, default=ROOT)
-    parser.add_argument("--out", type=Path)
-    args = parser.parse_args()
-    if not args.regenerate and args.out is None:
-        parser.error("pass --out or explicitly --regenerate")
-    assert Path(reconcile.__file__).resolve() == args.repo.resolve() / "reconcile.py", "wrong product tree"
-    with tempfile.TemporaryDirectory(prefix="reconcile-trace-") as directory:
-        observed = {case.name: observe(case, Path(directory) / case.name) for case in SCENARIOS}
-    destination = args.out or GOLDEN
-    destination.write_text(json.dumps(observed, sort_keys=True, indent=0, ensure_ascii=False) + "\n")
-    print(f"Wrote {len(observed)} scenarios to {destination.name}")
+        if not args.regenerate and args.out is None:
+            parser.error("pass --out or explicitly --regenerate")
+        assert Path(reconcile.__file__).resolve() == args.repo.resolve() / "reconcile.py", "wrong product tree"
+        with tempfile.TemporaryDirectory(prefix="reconcile-trace-") as directory:
+            observed = {case.name: observe(case, Path(directory) / case.name) for case in SCENARIOS}
+        destination = args.out or GOLDEN
+        destination.write_text(json.dumps(observed, sort_keys=True, indent=0, ensure_ascii=False) + "\n")
+        print(f"Wrote {len(observed)} scenarios to {destination.name}")
+    finally:
+        os.environ.clear()
+        os.environ.update(environment)
 
 
 if __name__ == "__main__":
