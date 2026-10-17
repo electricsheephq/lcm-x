@@ -436,3 +436,87 @@ def test_auxiliary_handoff_respects_main_native_binding(tmp_path, monkeypatch, n
         assert (main in resets) == (bound == "child")
         assert (engine.__dict__["_host_fallback_compressor"] is main) == (bound != "child")
         assert ("child", created[1]) in ended
+
+
+@pytest.mark.parametrize("schedule", ["host_constructor", "marker_lookup"])
+def test_child_native_publication_after_end(tmp_path, monkeypatch, native, schedule):
+    """An admitted child retains its identity even after its live marker is gone."""
+    pin_char_counter(monkeypatch)
+    created, ended, resets = native
+    reached, resume = threading.Event(), threading.Event()
+    child_states = []
+    native_class = sys.modules["agent.context_compressor"].ContextCompressor
+
+    class HostChild:
+        _subagent_id = "synthetic-child"
+        _parent_session_id = "parent"
+        session_id = "child"
+
+        def compress(self, engine):
+            run_child(engine)
+
+    def pause():
+        reached.set()
+        assert resume.wait(10), "parent did not release publication"
+
+    def run_child(engine):
+        child_states.append(vars(engine._thread_context))
+        _compress_child(engine)
+
+    with engine_context(tmp_path, window=200_000, session_id="parent") as engine:
+        engine.model = "test-model"
+        main_compressor = None
+        engine.__dict__["_host_fallback_compressor"] = main_compressor
+        engine.__dict__["_host_fallback_session_id"] = "parent"
+        original_init = native_class.__init__
+        original_get = engine._get_host_fallback_compressor
+        original_end = native_class.on_session_end
+        original_reset = native_class.on_session_reset
+
+        def construct(self, **kwargs):
+            original_init(self, **kwargs)
+            if schedule == "host_constructor":
+                pause()
+
+        def get():
+            if schedule == "marker_lookup":
+                pause()
+            return original_get()
+
+        def end(self, sid, messages):
+            assert not engine._auxiliary_session_lock._is_owned()
+            assert messages == []
+            original_end(self, sid, messages)
+
+        def reset(self):
+            assert not engine._auxiliary_session_lock._is_owned()
+            original_reset(self)
+
+        monkeypatch.setattr(native_class, "__init__", construct)
+        monkeypatch.setattr(native_class, "on_session_end", end)
+        monkeypatch.setattr(native_class, "on_session_reset", reset)
+        monkeypatch.setattr(engine, "_get_host_fallback_compressor", get)
+        with ThreadPoolExecutor(1) as pool:
+            future = pool.submit(HostChild().compress if schedule == "host_constructor" else run_child, engine)
+            try:
+                assert reached.wait(10), "child did not reach publication boundary"
+                engine.on_session_end("child", [])
+                assert engine._child_host_fallback_states == {}
+                assert ended == resets == []
+            finally:
+                resume.set()
+            future.result(10)
+        assert len(created) == 1
+        assert ended == [("child", created[0])]
+        assert resets == created
+        assert created[0].compression_count == 0
+        assert engine._child_host_fallback_states == {}
+        assert child_states[0].get("_host_fallback_compressor") is None
+        assert child_states[0].get("_host_fallback_session_id", "") == ""
+        assert engine.__dict__["_host_fallback_compressor"] is main_compressor
+        assert engine.__dict__["_host_fallback_session_id"] == "parent"
+        # Repeated lifecycle cleanup cannot rediscover or dispose the loser twice.
+        engine.on_session_end("child", [])
+        engine.on_session_reset()
+        assert ended == [("child", created[0])]
+        assert resets == created

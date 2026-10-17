@@ -587,8 +587,9 @@ class CompactionMixin:
         """Run compaction and leave a terminal public status on every failure. ``bypass_cooldown`` is the
         host's mark of a recovery attempt (#608): the returned list fits under the compaction threshold."""
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
-        if self._bypasses_lcm_context_management():
-            return self._compress_bypassed(messages, current_tokens, focus_topic, force)
+        with self._bypass_compression_binding() as bypassed:
+            if bypassed:
+                return self._compress_bypassed(messages, current_tokens, focus_topic, force)
         self._last_compress_leaves = None
         self._last_hidden_backlog = None
         self._compress_forced_overflow = False
@@ -1605,25 +1606,26 @@ class CompactionMixin:
         _compress_started = time.perf_counter()
 
         self._maybe_reclassify_late_auxiliary_before_compaction_write()
-        if self._bypasses_lcm_context_management():
-            # Bypassed traffic observes nothing about the pressured session's
-            # tail: it must neither extend nor reset the blocked streak.
-            self._pressure_yield_invocation_verdict = "neutral"
-            bypass_current_tokens = current_tokens
-            if bypass_current_tokens is None or bypass_current_tokens <= 0:
-                auxiliary_session_id = self._thread_context_session_id()
-                if auxiliary_session_id:
-                    auxiliary_prompt_tokens = self._current_auxiliary_prompt_tokens(
-                        auxiliary_session_id
-                    )
-                    if auxiliary_prompt_tokens > 0:
-                        bypass_current_tokens = auxiliary_prompt_tokens
-            return self._compress_lcm_bypassed_session(
-                messages,
-                current_tokens=bypass_current_tokens,
-                focus_topic=focus_topic,
-                force=force,
-            )
+        with self._bypass_compression_binding() as bypassed:
+            if bypassed:
+                # Bypassed traffic observes nothing about the pressured session's
+                # tail: it must neither extend nor reset the blocked streak.
+                self._pressure_yield_invocation_verdict = "neutral"
+                bypass_current_tokens = current_tokens
+                if bypass_current_tokens is None or bypass_current_tokens <= 0:
+                    auxiliary_session_id = self._thread_context_session_id()
+                    if auxiliary_session_id:
+                        auxiliary_prompt_tokens = self._current_auxiliary_prompt_tokens(
+                            auxiliary_session_id
+                        )
+                        if auxiliary_prompt_tokens > 0:
+                            bypass_current_tokens = auxiliary_prompt_tokens
+                return self._compress_lcm_bypassed_session(
+                    messages,
+                    current_tokens=bypass_current_tokens,
+                    focus_topic=focus_topic,
+                    force=force,
+                )
         self._rebind_after_unadopted_compaction_commit()
         # #1012 F4: observe foreground passes only, after classification and rebinding. Without the host's
         # figure there is nothing to observe; this pass's assembly then measures, as before (#1107).
