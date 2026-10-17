@@ -338,6 +338,19 @@ class _TailReplayCandidate:
     candidate_identity_messages: List[Dict[str, Any]] = field(init=False)
     candidate_visible_prefix: list[tuple[str, str, str, str, str]] = field(init=False)
     candidate_prefix: list[tuple[str, str, str, str, str]] = field(init=False)
+    literal_prefix: list[tuple[str, str, str, str, str]] = field(init=False)
+    matches_sanitized_tail: bool = field(init=False)
+    matches_raw_tail: bool = field(init=False)
+    has_durable_compacted_snapshot_replay: bool = field(init=False)
+    candidate_has_tool_anchor: bool = field(init=False)
+    candidate_has_lossy_redacted_replay_identity: bool = field(init=False)
+    candidate_ends_with_replayed_tool_result: bool = field(init=False)
+    matches_tool_anchored_stale_window: bool = field(init=False)
+    candidate_has_persisted_marker: bool = field(init=False)
+    matches_durable_persisted_output_full_replay: bool = field(init=False)
+    candidate_has_unrecoverable_persisted_marker: bool = field(init=False)
+    matches_inline_generation_cleanup_tail: bool = field(init=False)
+    raw_suffix_needs_cleanup_equivalence: bool = field(init=False)
 
 
 class ReconcileMixin:
@@ -1752,6 +1765,202 @@ class ReconcileMixin:
         candidate.candidate_visible_prefix = candidate_visible_prefix
         candidate.candidate_prefix = candidate_prefix
 
+    def _collect_replay_anchors(
+        self, run: _TailReplayRun, candidate: _TailReplayCandidate,
+    ) -> None:
+        sanitized_replay_tail = run.sanitized_replay_tail
+        stored_tail = run.stored_tail
+        engine_prefix_digests = run.engine_prefix_digests
+        session_end_prefix_digests = run.session_end_prefix_digests
+        engine_snapshot_digests = run.engine_snapshot_digests
+        active_lineage_identities = run.active_lineage_identities
+        occurrence_by_id = run.occurrence_by_id
+        v4 = run.v4
+        session_end_snapshot_digests = run.session_end_snapshot_digests
+        pruned_source_ids = run.pruned_source_ids
+        stored_tool_identities = run.stored_tool_identities
+        durable_replay_identities = run.durable_replay_identities
+        candidate_prefix = candidate.candidate_prefix
+        literal_prefix = candidate.literal_prefix
+        cursor = candidate.cursor
+        candidate_identity_messages = candidate.candidate_identity_messages
+
+        matches_sanitized_tail = (
+            len(candidate_prefix) <= len(sanitized_replay_tail)
+            and self._matches_store_tail_suffix(sanitized_replay_tail, candidate_prefix, literal_prefix)
+        )
+        matches_raw_tail = self._matches_store_tail_suffix(stored_tail, candidate_prefix, literal_prefix)
+        engine_snapshot_digest = engine_prefix_digests.get(cursor, "")
+        session_end_snapshot_digest = session_end_prefix_digests.get(cursor, "")
+        has_registered_engine_snapshot = (
+            bool(engine_snapshot_digest)
+            and engine_snapshot_digest in engine_snapshot_digests
+        )
+        has_ordered_folded_snapshot_mapping = False
+        if has_registered_engine_snapshot and active_lineage_identities:
+            candidate_store_ids = self._get_store_id_map_for_messages(
+                candidate_identity_messages,
+                [occurrence_by_id[id(m)] for m in candidate_identity_messages] if v4 else None,
+            )
+            ordered_store_ids = [
+                int(candidate_store_ids.get(id(message)) or 0)
+                for message in candidate_identity_messages
+            ]
+            has_ordered_folded_snapshot_mapping = (
+                bool(ordered_store_ids)
+                and all(store_id > 0 for store_id in ordered_store_ids)
+                and ordered_store_ids == sorted(set(ordered_store_ids))
+            )
+        has_durable_compacted_snapshot_replay = (
+            (
+                has_registered_engine_snapshot
+            )
+            or (
+                bool(session_end_snapshot_digest)
+                and session_end_snapshot_digest in session_end_snapshot_digests
+            )
+        ) and (
+            matches_sanitized_tail
+            or matches_raw_tail
+            or has_ordered_folded_snapshot_mapping
+        )
+        # Tool-anchored replay evidence. Unlike the snapshot-digest proof
+        # above -- which is a registered engine-assembled fingerprint -- this
+        # term is anchored on a durable tool row carrying an execution id.
+        # The anchor is NOT "the id is minted once": LCM does not get to
+        # assume that (see ``stored_tool_identities``). What it requires is
+        # that every disjunct below exact-match the WHOLE identity -- role,
+        # normalized content, tool_call_id and tool_calls -- against durable
+        # rows; content resemblance alone never qualifies.
+        # #773: a host-pruned tool row that took its stored row's identity matches that row by
+        # construction, not by content, so it is never an anchor: a genuinely new call that reuses
+        # an id and whose result is literally the placeholder text is persisted, not advanced over.
+        candidate_tool_anchor_indexes = [
+            index
+            for index, (msg, identity) in enumerate(zip(candidate_identity_messages, candidate_prefix))
+            if identity[0] == "tool" and identity[2] and id(msg) not in pruned_source_ids
+        ]
+        candidate_has_tool_anchor = bool(candidate_tool_anchor_indexes)
+        # ...and that exact-identity match is only evidence when EVERY
+        # identity the terms below advance over is lossless. A lossy
+        # sensitive redaction collapses distinct secrets of equal length
+        # onto one placeholder, so a collapsed component proves nothing and
+        # the anchor cannot carry the length-guard bypass below.
+        #
+        # The scope is the whole prefix, and both redacted components of
+        # each identity, because the terms below match the whole prefix:
+        # ``login(password=abcdef)`` and ``login(password=ghijkl)`` differ
+        # only inside the issuing assistant's ``tool_calls`` and can return
+        # the same innocuous result, so a fence reading only the tool row's
+        # content sees nothing lossy and lets ``candidate_ends_with_``
+        # ``replayed_tool_result`` advance over the second real call.
+        candidate_has_lossy_redacted_replay_identity = any(
+            _has_lossy_redacted_identity(identity) for identity in candidate_prefix
+        )
+        candidate_tool_identities = {
+            candidate_prefix[index] for index in candidate_tool_anchor_indexes
+        }
+        # The tool pair itself is durable, the prefix ends on that durable
+        # tool result, and everything ahead of it is the contentless
+        # assistant that issued the call -- required to be durable too, so
+        # this term can never advance over a row the store has not seen.
+        # Whatever follows the pair in the incoming batch is left to the
+        # caller as a genuinely new delta.
+        candidate_ends_with_replayed_tool_result = (
+            len(candidate_tool_anchor_indexes) == 1
+            and candidate_tool_anchor_indexes[0] == len(candidate_prefix) - 1
+            and candidate_tool_identities.issubset(stored_tool_identities)
+            and all(
+                identity[0] == "assistant"
+                and not identity[1]
+                and identity in durable_replay_identities
+                for identity in candidate_prefix[: candidate_tool_anchor_indexes[0]]
+            )
+        )
+        # A restart can replay a durable window from the MIDDLE of the
+        # session, so suffix matching alone misses it. Accept a contiguous
+        # exact window anywhere in the durable tail, but never one that
+        # spans a user turn after the last tool anchor: a user turn is the
+        # boundary at which a repeated window stops being provably replay
+        # and becomes an ambiguous delta, which main persists by design
+        # (#259 -- visible duplication is preferred over silent loss).
+        candidate_has_user_after_tool_anchor = candidate_has_tool_anchor and any(
+            identity[0] == "user"
+            for identity in candidate_prefix[candidate_tool_anchor_indexes[-1] + 1 :]
+        )
+        matches_tool_anchored_stale_window = (
+            candidate_has_tool_anchor
+            and not candidate_has_user_after_tool_anchor
+            and (
+                _contains_identity_window(sanitized_replay_tail, candidate_prefix)
+                or _contains_identity_window(stored_tail, candidate_prefix)
+            )
+        )
+
+        candidate.matches_sanitized_tail = matches_sanitized_tail
+        candidate.matches_raw_tail = matches_raw_tail
+        candidate.has_durable_compacted_snapshot_replay = has_durable_compacted_snapshot_replay
+        candidate.candidate_has_tool_anchor = candidate_has_tool_anchor
+        candidate.candidate_has_lossy_redacted_replay_identity = candidate_has_lossy_redacted_replay_identity
+        candidate.candidate_ends_with_replayed_tool_result = candidate_ends_with_replayed_tool_result
+        candidate.matches_tool_anchored_stale_window = matches_tool_anchored_stale_window
+
+    def _collect_persisted_replay_evidence(
+        self, run: _TailReplayRun, candidate: _TailReplayCandidate,
+    ) -> None:
+        stored_tail = run.stored_tail
+        stored_tail_rows = run.stored_tail_rows
+        sanitized_replay_tail = run.sanitized_replay_tail
+        candidate_identity_messages = candidate.candidate_identity_messages
+        candidate_prefix = candidate.candidate_prefix
+        matches_raw_tail = candidate.matches_raw_tail
+
+        candidate_has_persisted_marker = any(
+            str(msg.get("role") or "") == "tool"
+            and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
+            for msg in candidate_identity_messages
+        )
+        matches_durable_persisted_output_full_replay = self._matches_persisted_output_durable_full_replay(
+            candidate_identity_messages,
+            candidate_prefix,
+            stored_tail,
+            stored_tail_rows,
+        )
+        candidate_has_unrecoverable_persisted_marker = any(
+            str(msg.get("role") or "") == "tool"
+            and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
+            and recover_hermes_persisted_output_with_file_stat(
+                normalize_content_value(msg.get("content")) or ""
+            )
+            is None
+            for msg in candidate_identity_messages
+        )
+        matches_inline_generation_cleanup_tail = False
+        if candidate_has_unrecoverable_persisted_marker:
+            generationless_sanitized_tail = [
+                self._strip_inline_persisted_output_generation_identity(identity)
+                for identity in sanitized_replay_tail
+            ]
+            generationless_candidate_prefix = [
+                self._strip_inline_persisted_output_generation_identity(identity)
+                for identity in candidate_prefix
+            ]
+            matches_inline_generation_cleanup_tail = self._matches_store_tail_suffix(
+                generationless_sanitized_tail,
+                generationless_candidate_prefix,
+            )
+        raw_tail_suffix = stored_tail[-len(candidate_prefix) :] if matches_raw_tail else []
+        raw_suffix_needs_cleanup_equivalence = any(
+            self._active_cleanup_replay_identity(identity) != identity
+            for identity in raw_tail_suffix
+        )
+
+        candidate.candidate_has_persisted_marker = candidate_has_persisted_marker
+        candidate.matches_durable_persisted_output_full_replay = matches_durable_persisted_output_full_replay
+        candidate.candidate_has_unrecoverable_persisted_marker = candidate_has_unrecoverable_persisted_marker
+        candidate.matches_inline_generation_cleanup_tail = matches_inline_generation_cleanup_tail
+        candidate.raw_suffix_needs_cleanup_equivalence = raw_suffix_needs_cleanup_equivalence
+
     def _find_reconciled_cursor_for_store_tail(
         self,
         messages: List[Dict[str, Any]],
@@ -1771,9 +1980,6 @@ class ReconcileMixin:
         )
         self._prepare_tail_replay_run(run)
         messages = run.messages
-        active_lineage_identities = run.active_lineage_identities
-        occurrence_by_id = run.occurrence_by_id
-        v4 = run.v4
         scaffold_ids = run.scaffold_ids
         objective_ids = run.objective_ids
         active_identity = run.active_identity
@@ -1782,14 +1988,8 @@ class ReconcileMixin:
         effective_session_count = run.effective_session_count
         sanitized_tail_collapsed = run.sanitized_tail_collapsed
         effective_fresh_tail_count = run.effective_fresh_tail_count
-        engine_snapshot_digests = run.engine_snapshot_digests
         native_recovery_snapshot_digests = run.native_recovery_snapshot_digests
-        session_end_snapshot_digests = run.session_end_snapshot_digests
-        stored_tool_identities = run.stored_tool_identities
-        durable_replay_identities = run.durable_replay_identities
         native_prefix_digests = run.native_prefix_digests
-        engine_prefix_digests = run.engine_prefix_digests
-        session_end_prefix_digests = run.session_end_prefix_digests
         empty_prefix_cursor: int | None = None
         for cursor in range(len(messages), -1, -1):
             candidate_messages = messages[:cursor]
@@ -1826,117 +2026,15 @@ class ReconcileMixin:
             ]
             literal_by_id = {id(msg): identity for msg, identity in zip(candidate_visible_messages, literal_visible_prefix)}
             literal_prefix = [literal_by_id[id(msg)] for msg in candidate_identity_messages]
-            matches_sanitized_tail = (
-                len(candidate_prefix) <= len(sanitized_replay_tail)
-                and self._matches_store_tail_suffix(sanitized_replay_tail, candidate_prefix, literal_prefix)
-            )
-            matches_raw_tail = self._matches_store_tail_suffix(stored_tail, candidate_prefix, literal_prefix)
-            engine_snapshot_digest = engine_prefix_digests.get(cursor, "")
-            session_end_snapshot_digest = session_end_prefix_digests.get(cursor, "")
-            has_registered_engine_snapshot = (
-                bool(engine_snapshot_digest)
-                and engine_snapshot_digest in engine_snapshot_digests
-            )
-            has_ordered_folded_snapshot_mapping = False
-            if has_registered_engine_snapshot and active_lineage_identities:
-                candidate_store_ids = self._get_store_id_map_for_messages(
-                    candidate_identity_messages,
-                    [occurrence_by_id[id(m)] for m in candidate_identity_messages] if v4 else None,
-                )
-                ordered_store_ids = [
-                    int(candidate_store_ids.get(id(message)) or 0)
-                    for message in candidate_identity_messages
-                ]
-                has_ordered_folded_snapshot_mapping = (
-                    bool(ordered_store_ids)
-                    and all(store_id > 0 for store_id in ordered_store_ids)
-                    and ordered_store_ids == sorted(set(ordered_store_ids))
-                )
-            has_durable_compacted_snapshot_replay = (
-                (
-                    has_registered_engine_snapshot
-                )
-                or (
-                    bool(session_end_snapshot_digest)
-                    and session_end_snapshot_digest in session_end_snapshot_digests
-                )
-            ) and (
-                matches_sanitized_tail
-                or matches_raw_tail
-                or has_ordered_folded_snapshot_mapping
-            )
-            # Tool-anchored replay evidence. Unlike the snapshot-digest proof
-            # above -- which is a registered engine-assembled fingerprint -- this
-            # term is anchored on a durable tool row carrying an execution id.
-            # The anchor is NOT "the id is minted once": LCM does not get to
-            # assume that (see ``stored_tool_identities``). What it requires is
-            # that every disjunct below exact-match the WHOLE identity -- role,
-            # normalized content, tool_call_id and tool_calls -- against durable
-            # rows; content resemblance alone never qualifies.
-            # #773: a host-pruned tool row that took its stored row's identity matches that row by
-            # construction, not by content, so it is never an anchor: a genuinely new call that reuses
-            # an id and whose result is literally the placeholder text is persisted, not advanced over.
-            candidate_tool_anchor_indexes = [
-                index
-                for index, (msg, identity) in enumerate(zip(candidate_identity_messages, candidate_prefix))
-                if identity[0] == "tool" and identity[2] and id(msg) not in pruned_source_ids
-            ]
-            candidate_has_tool_anchor = bool(candidate_tool_anchor_indexes)
-            # ...and that exact-identity match is only evidence when EVERY
-            # identity the terms below advance over is lossless. A lossy
-            # sensitive redaction collapses distinct secrets of equal length
-            # onto one placeholder, so a collapsed component proves nothing and
-            # the anchor cannot carry the length-guard bypass below.
-            #
-            # The scope is the whole prefix, and both redacted components of
-            # each identity, because the terms below match the whole prefix:
-            # ``login(password=abcdef)`` and ``login(password=ghijkl)`` differ
-            # only inside the issuing assistant's ``tool_calls`` and can return
-            # the same innocuous result, so a fence reading only the tool row's
-            # content sees nothing lossy and lets ``candidate_ends_with_``
-            # ``replayed_tool_result`` advance over the second real call.
-            candidate_has_lossy_redacted_replay_identity = any(
-                _has_lossy_redacted_identity(identity) for identity in candidate_prefix
-            )
-            candidate_tool_identities = {
-                candidate_prefix[index] for index in candidate_tool_anchor_indexes
-            }
-            # The tool pair itself is durable, the prefix ends on that durable
-            # tool result, and everything ahead of it is the contentless
-            # assistant that issued the call -- required to be durable too, so
-            # this term can never advance over a row the store has not seen.
-            # Whatever follows the pair in the incoming batch is left to the
-            # caller as a genuinely new delta.
-            candidate_ends_with_replayed_tool_result = (
-                len(candidate_tool_anchor_indexes) == 1
-                and candidate_tool_anchor_indexes[0] == len(candidate_prefix) - 1
-                and candidate_tool_identities.issubset(stored_tool_identities)
-                and all(
-                    identity[0] == "assistant"
-                    and not identity[1]
-                    and identity in durable_replay_identities
-                    for identity in candidate_prefix[: candidate_tool_anchor_indexes[0]]
-                )
-            )
-            # A restart can replay a durable window from the MIDDLE of the
-            # session, so suffix matching alone misses it. Accept a contiguous
-            # exact window anywhere in the durable tail, but never one that
-            # spans a user turn after the last tool anchor: a user turn is the
-            # boundary at which a repeated window stops being provably replay
-            # and becomes an ambiguous delta, which main persists by design
-            # (#259 -- visible duplication is preferred over silent loss).
-            candidate_has_user_after_tool_anchor = candidate_has_tool_anchor and any(
-                identity[0] == "user"
-                for identity in candidate_prefix[candidate_tool_anchor_indexes[-1] + 1 :]
-            )
-            matches_tool_anchored_stale_window = (
-                candidate_has_tool_anchor
-                and not candidate_has_user_after_tool_anchor
-                and (
-                    _contains_identity_window(sanitized_replay_tail, candidate_prefix)
-                    or _contains_identity_window(stored_tail, candidate_prefix)
-                )
-            )
+            candidate.literal_prefix = literal_prefix
+            self._collect_replay_anchors(run, candidate)
+            matches_sanitized_tail = candidate.matches_sanitized_tail
+            matches_raw_tail = candidate.matches_raw_tail
+            has_durable_compacted_snapshot_replay = candidate.has_durable_compacted_snapshot_replay
+            candidate_has_tool_anchor = candidate.candidate_has_tool_anchor
+            candidate_has_lossy_redacted_replay_identity = candidate.candidate_has_lossy_redacted_replay_identity
+            candidate_ends_with_replayed_tool_result = candidate.candidate_ends_with_replayed_tool_result
+            matches_tool_anchored_stale_window = candidate.matches_tool_anchored_stale_window
             matches_visible_sanitized_tail = (
                 filtered_candidate_placeholders
                 and bool(candidate_visible_prefix)
@@ -1959,45 +2057,12 @@ class ReconcileMixin:
             )
             if (matches_visible_sanitized_tail or matches_visible_raw_tail) and not early_candidate_has_unrecoverable_persisted_marker:
                 return cursor
-            candidate_has_persisted_marker = any(
-                str(msg.get("role") or "") == "tool"
-                and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
-                for msg in candidate_identity_messages
-            )
-            matches_durable_persisted_output_full_replay = self._matches_persisted_output_durable_full_replay(
-                candidate_identity_messages,
-                candidate_prefix,
-                stored_tail,
-                stored_tail_rows,
-            )
-            candidate_has_unrecoverable_persisted_marker = any(
-                str(msg.get("role") or "") == "tool"
-                and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
-                and recover_hermes_persisted_output_with_file_stat(
-                    normalize_content_value(msg.get("content")) or ""
-                )
-                is None
-                for msg in candidate_identity_messages
-            )
-            matches_inline_generation_cleanup_tail = False
-            if candidate_has_unrecoverable_persisted_marker:
-                generationless_sanitized_tail = [
-                    self._strip_inline_persisted_output_generation_identity(identity)
-                    for identity in sanitized_replay_tail
-                ]
-                generationless_candidate_prefix = [
-                    self._strip_inline_persisted_output_generation_identity(identity)
-                    for identity in candidate_prefix
-                ]
-                matches_inline_generation_cleanup_tail = self._matches_store_tail_suffix(
-                    generationless_sanitized_tail,
-                    generationless_candidate_prefix,
-                )
-            raw_tail_suffix = stored_tail[-len(candidate_prefix) :] if matches_raw_tail else []
-            raw_suffix_needs_cleanup_equivalence = any(
-                self._active_cleanup_replay_identity(identity) != identity
-                for identity in raw_tail_suffix
-            )
+            self._collect_persisted_replay_evidence(run, candidate)
+            candidate_has_persisted_marker = candidate.candidate_has_persisted_marker
+            matches_durable_persisted_output_full_replay = candidate.matches_durable_persisted_output_full_replay
+            candidate_has_unrecoverable_persisted_marker = candidate.candidate_has_unrecoverable_persisted_marker
+            matches_inline_generation_cleanup_tail = candidate.matches_inline_generation_cleanup_tail
+            raw_suffix_needs_cleanup_equivalence = candidate.raw_suffix_needs_cleanup_equivalence
             if (
                 not matches_sanitized_tail
                 and not matches_raw_tail
