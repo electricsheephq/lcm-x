@@ -636,9 +636,9 @@ class SurvivalFitMixin:
             logger.warning("LCM survival fit dropped the summary prefix (emergency: prefix=%d tokens, budget=%d)",
                            self._survival_measure(plan.emergency_span), budget)
         if after_exception or not persisted:
-            self._ingest_cursor, self._ingest_cursor_needs_reconcile = 0, True
+            self._frontier_holder().invalidate()
         else:
-            self._ingest_cursor = len(fitted)
+            self._frontier_holder().adopt(len(fitted))
         if after > budget:  # still the best list available: returned, but never reported as within budget
             logger.warning("LCM survival fit could not reach budget (after=%d, budget=%d, reason=%s)", after, budget, reason)
         self._survival_record(reason, count, ids, before, after, budget, projected, notice, warn_user=not exit_fit, **evidence)

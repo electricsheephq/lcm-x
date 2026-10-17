@@ -221,3 +221,127 @@ def test_holder_exists_before_first_legacy_init_assignment(
         assert all(holder is instance._frontier for holder in holders)
     finally:
         instance.shutdown()
+
+
+@pytest.mark.parametrize("factory", [LCMEngine.__new__, object.__new__])
+@pytest.mark.parametrize("seeded", [False, True])
+@pytest.mark.parametrize("site", ["progress", "runtime", "invalidate", "adopt"])
+def test_frontier_transition_sites_keep_write_order_and_lazy_creation(
+    factory: Any, seeded: bool, site: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from hermes_lcm.frontier_state import FrontierState
+    from hermes_lcm.survival_fit import FitPlan
+
+    instance = factory(LCMEngine)
+    if seeded:
+        instance._frontier = FrontierState(17, True, 23, {"proof": []}, {"rows": []})
+    previous = vars(instance._frontier).copy() if seeded else vars(FrontierState()).copy()
+    writes: list[tuple[str, Any]] = []
+
+    def record(holder: Any, name: str, value: Any) -> None:
+        writes.append((name, value))
+        object.__setattr__(holder, name, value)
+
+    monkeypatch.setattr(FrontierState, "__setattr__", record)
+    expected = [] if seeded else list(previous.items())
+    if site in {"progress", "runtime"}:
+        expected += [("compacted_store_id", 0), ("cursor", 0), ("needs_reconcile", False)]
+        if site == "progress":
+            instance._reset_compaction_progress()
+        else:
+            instance._compaction_request = SimpleNamespace()
+            instance._pressure_yield_reset_epoch = 0
+            instance._reset_session_scoped_runtime_state()
+            expected += [("commit_proof", None), ("emission_descriptors", None)]
+        assert instance._last_ingest_reconciliation == {"action": "none", "reason": "not run"}
+    else:
+        fitted = [{"role": "user", "content": "kept"}]
+        instance._survival_measure = lambda rows: len(rows)
+        instance._survival_record = lambda *args, **kwargs: None
+        plan = FitPlan(fitted, 1, [1], False, "", False, [])
+        assert instance._apply_survival_fit(
+            fitted * 2, plan, 2, 1, "probe", after_exception=False,
+            persisted=site == "adopt", exit_fit=False,
+        ) is fitted
+        expected += [("cursor", 1)] if site == "adopt" else [("cursor", 0), ("needs_reconcile", True)]
+    assert writes == expected
+    final = previous | dict(expected)
+    assert vars(instance._frontier) == final
+    for name in ("commit_proof", "emission_descriptors"):
+        assert getattr(instance._frontier, name) is final[name]
+
+
+def test_constructor_creates_one_frontier_without_transition_calls(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from tests.harness import engine_context
+
+    holders: list[Any] = []
+
+    def record(instance: Any, name: str, value: Any) -> None:
+        if name == "_frontier":
+            holders.append(value)
+        object.__setattr__(instance, name, value)
+
+    def unexpected(*args: Any, **kwargs: Any) -> None:
+        pytest.fail("constructor reached a reset or survival-fit site")
+
+    monkeypatch.setattr(LCMEngine, "__setattr__", record)
+    for name in ("_reset_compaction_progress", "_reset_session_scoped_runtime_state", "_apply_survival_fit"):
+        monkeypatch.setattr(LCMEngine, name, unexpected)
+    with engine_context(tmp_path) as instance:
+        assert len(holders) == 1
+        assert holders[0] is instance._frontier
+
+
+@pytest.fixture
+def transition_state(monkeypatch: pytest.MonkeyPatch) -> tuple[Any, dict[str, Any], list[str]]:
+    from hermes_lcm.frontier_state import FrontierState
+
+    state = FrontierState(17, True, 23, {"proof": []}, {"rows": []})
+    before = vars(state).copy()
+    writes: list[str] = []
+
+    def record(holder: Any, name: str, value: Any) -> None:
+        writes.append(name)
+        object.__setattr__(holder, name, value)
+
+    monkeypatch.setattr(FrontierState, "__setattr__", record)
+    return state, before, writes
+
+
+def assert_frontier_transition(
+    observation: tuple[Any, dict[str, Any], list[str]], updates: dict[str, Any],
+) -> None:
+    state, before, writes = observation
+    assert writes == list(updates)
+    assert vars(state) == before | updates
+    for name in before.keys() - updates.keys():
+        assert getattr(state, name) is before[name]
+
+
+def test_invalidate_changes_only_cursor_and_reconcile(transition_state: Any) -> None:
+    transition_state[0].invalidate()
+    assert_frontier_transition(transition_state, {"cursor": 0, "needs_reconcile": True})
+
+
+def test_invalidate_drops_proof_before_cursor_and_reconcile(transition_state: Any) -> None:
+    transition_state[0].invalidate(drop_proof=True)
+    assert_frontier_transition(transition_state, {"commit_proof": None, "cursor": 0, "needs_reconcile": True})
+
+
+def test_adopt_changes_only_cursor(transition_state: Any) -> None:
+    transition_state[0].adopt(31)
+    assert_frontier_transition(transition_state, {"cursor": 31})
+
+
+def test_reset_progress_keeps_proofs(transition_state: Any) -> None:
+    transition_state[0].reset_progress()
+    assert_frontier_transition(transition_state, {"compacted_store_id": 0, "cursor": 0, "needs_reconcile": False})
+
+
+def test_reset_proofs_keeps_progress(transition_state: Any) -> None:
+    transition_state[0].reset_proofs()
+    assert_frontier_transition(transition_state, {"commit_proof": None, "emission_descriptors": None})

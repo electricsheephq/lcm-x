@@ -43,9 +43,7 @@ class ResetStateMixin:
 
     def _reset_compaction_progress(self) -> None:
         """Reset process-local compaction markers for a fresh/unproven session."""
-        self._last_compacted_store_id = 0
-        self._ingest_cursor = 0
-        self._ingest_cursor_needs_reconcile = False
+        self._frontier_holder().reset_progress()
         self._last_ingest_reconciliation = {"action": "none", "reason": "not run"}
 
     def _reset_session_scoped_runtime_state(self) -> None:
@@ -59,8 +57,7 @@ class ResetStateMixin:
         self._reset_compaction_progress()
         # A commit proof is valid only through the compression handoff of the
         # session that produced it (#483); any other reset drops it.
-        self._compress_commit_proof = None
-        self._last_emission_descriptors = None
+        self._frontier_holder().reset_proofs()
         self._retired_durable_proof = None  # #671: a stale durable proof retired by reconcile, by created_at
         self._clear_fresh_tail_pressure_yield_state()
         self._generated_ignored_active_replay_placeholder_hashes = set()

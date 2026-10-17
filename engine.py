@@ -1366,6 +1366,11 @@ class LCMEngine(
         self._engine_name = ENGINE_NAME
         self._identity_migration: Dict[str, Any] | None = None
 
+    def _frontier_holder(self) -> FrontierState:
+        if not hasattr(self, "_frontier"):
+            self._frontier = FrontierState()
+        return self._frontier
+
     @property
     def _ingest_cursor(self) -> int:
         return self._frontier.cursor
