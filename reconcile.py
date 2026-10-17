@@ -22,6 +22,7 @@ import hashlib
 import json
 import re
 from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional
 
@@ -293,6 +294,17 @@ def _todo_annotation_span(content: str, start: int) -> int:
             open_item = not _TODO_ITEM_END_RE.search(line)
         end += 1 + len(line)
     return end
+
+
+@dataclass(eq=False, repr=False)
+class _StoreCursorRun:
+    """Cross-phase locals for one restart reconciliation; never engine state."""
+
+    messages: List[Dict[str, Any]]
+    session_count: int
+    allow_session_end_replay_proof: bool
+    tail_limit: int = field(init=False)
+    stored_tail: List[tuple[str, str, str, str, str]] = field(init=False)
 
 
 class ReconcileMixin:
@@ -2574,6 +2586,169 @@ class ReconcileMixin:
                     break
         return fits
 
+    def _reconcile_empty_store_session(self, run: _StoreCursorRun) -> int:
+        """Reconcile an empty session against its carry, proofs and placeholders."""
+        messages = run.messages
+        session_count = run.session_count
+        # An empty rotation child resumed before its first ingest: its own
+        # durable proof re-indexes the host's post-compaction list (#483, C7).
+        replaced: list = []
+        proof_cursor = self._cursor_from_durable_commit_proof(messages, allow_replaced_tail=replaced)
+        if proof_cursor is not None:
+            for source, start, end in replaced:  # #519 R1: the vanished parent row leaves the carry
+                self._rewrite_own_carry_ranges(
+                    [(s, a, b - 1 if (s, a, b) == (source, start, end) else b) for s, a, b in self._load_compression_carry_ranges(with_anchor=False)],
+                    "host replaced the last carried user row", [end],
+                )
+            self._record_ingest_reconciliation(
+                action="advanced cursor",
+                reason="replayed proven post-compaction continuation in empty session",
+                cursor=proof_cursor,
+                incoming=len(messages),
+                session_count=session_count,
+                stored_tail_count=0,
+                effective_incoming=proof_cursor,
+            )
+            return proof_cursor
+        native_recovery_snapshot_digests = set(
+            self._load_native_recovery_replay_snapshot_digests()
+        )
+        if native_recovery_snapshot_digests:
+            native_prefix_digests, _, _ = self._replay_snapshot_prefix_digests(
+                messages, native_recovery=True,
+            )
+            for cursor in range(len(messages), 0, -1):
+                digest = native_prefix_digests.get(cursor, "")
+                if digest not in native_recovery_snapshot_digests:
+                    continue
+                self._record_ingest_reconciliation(
+                    action="advanced cursor",
+                    reason="replayed adopted native recovery in empty rollover session",
+                    cursor=cursor,
+                    incoming=len(messages),
+                    session_count=session_count,
+                    stored_tail_count=0,
+                    effective_incoming=cursor,
+                )
+                return cursor
+        placeholder_budget = self._load_generated_ignored_placeholder_hash_counts()
+        placeholder_ordinals = self._load_generated_ignored_placeholder_hash_ordinals()
+        if placeholder_budget and placeholder_ordinals:
+            consumed: dict[str, int] = {}
+            cursor = 0
+            for msg in messages:
+                text = text_content_for_pattern_matching(msg.get("content")) or ""
+                digest = self._active_replay_placeholder_digest(text)
+                if not digest:
+                    break
+                consumed[digest] = consumed.get(digest, 0) + 1
+                ordinal = consumed[digest]
+                remaining = int(placeholder_budget.get(digest, 0) or 0)
+                if remaining <= 0 or ordinal not in placeholder_ordinals.get(digest, set()):
+                    break
+                cursor += 1
+            if cursor > 0:
+                self._record_ingest_reconciliation(
+                    action="advanced cursor",
+                    reason="replayed generated placeholders in empty session",
+                    cursor=cursor,
+                    incoming=len(messages),
+                    session_count=session_count,
+                    stored_tail_count=0,
+                    effective_incoming=cursor,
+                )
+                return cursor
+        stale = self._load_compression_carry_ranges(with_anchor=False)
+        if stale:  # #519 R2: the re-stored copies are the child's only rows; publication owns them alone
+            self._rewrite_own_carry_ranges([], "empty child re-stores its list", [(a + 1, b) for _s, a, b in stale])
+        return 0
+
+    def _reconcile_unmatched_store_history(self, run: _StoreCursorRun) -> int:
+        """Resolve stale snapshots, late proof and retirement after no tail match."""
+        messages = run.messages
+        allow_session_end_replay_proof = run.allow_session_end_replay_proof
+        session_count = run.session_count
+        tail_limit = run.tail_limit
+        stored_tail = run.stored_tail
+        incoming_identities = self._effective_replay_identities(messages)
+        stored_head_rows = self._store.get_session_messages(
+            self._session_id,
+            limit=tail_limit,
+        )
+        stored_head = [self._message_replay_identity(row, stored_row=True) for row in stored_head_rows]
+        # Stale-snapshot proof uses the raw durable prefix.  Ignore-message
+        # filters may suppress noisy rows for tail reconciliation, but filtered
+        # history alone must not create replay evidence for skipping a batch.
+        incoming_has_unproofed_raw_persisted_marker = any(
+            str(msg.get("role") or "") == "tool"
+            and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
+            and recover_hermes_persisted_output_with_file_stat(
+                normalize_content_value(msg.get("content")) or ""
+            )
+            is None
+            for msg in messages
+        )
+        if (
+            not incoming_has_unproofed_raw_persisted_marker
+            and self._is_suspicious_stale_no_overlap_snapshot(
+                incoming_identities,
+                stored_tail,
+                stored_head,
+            )
+        ):
+            self._record_ingest_reconciliation(
+                action="skipped batch",
+                reason="skipped stale no-overlap snapshot",
+                cursor=len(messages),
+                incoming=len(messages),
+                session_count=session_count,
+                stored_tail_count=len(stored_tail),
+                effective_incoming=len(incoming_identities),
+            )
+            logger.warning(
+                "LCM skipped stale no-overlap snapshot after existing-session bind: session=%s incoming=%d effective_incoming=%d stored_tail=%d session_count=%d",
+                self._session_id,
+                len(messages),
+                len(incoming_identities),
+                len(stored_tail),
+                session_count,
+            )
+            return len(messages)
+
+        proof_cursor = self._cursor_from_durable_commit_proof(messages)
+        if proof_cursor is not None:
+            self._record_ingest_reconciliation(
+                action="advanced cursor",
+                reason="replayed proven post-compaction continuation",
+                cursor=proof_cursor,
+                incoming=len(messages),
+                session_count=session_count,
+                stored_tail_count=len(stored_tail),
+                effective_incoming=proof_cursor,
+            )
+            return proof_cursor
+        if self._retire_stale_durable_proof(messages):
+            # #671: reconcile again as a store with no proof does. Only a replay of stored rows confirms the
+            # retirement; any other outcome (a skipped batch, a scaffold-only prefix) is today's decision below.
+            cursor = self._reconcile_ingest_cursor_from_store(
+                messages, allow_session_end_replay_proof=allow_session_end_replay_proof)
+            recon = self._last_ingest_reconciliation
+            if cursor > 0 and recon.get("action") == "advanced cursor" and str(recon.get("reason") or "").startswith("replayed "):
+                recon["reason"] += " past a stale commit proof"
+                return cursor
+            self._retired_durable_proof = None
+
+        self._record_ingest_reconciliation(
+            action="persisted batch",
+            reason="persisted ambiguous delta",
+            cursor=0,
+            incoming=len(messages),
+            session_count=session_count,
+            stored_tail_count=len(stored_tail),
+            effective_incoming=len(incoming_identities),
+        )
+        return 0
+
     def _reconcile_ingest_cursor_from_store(
         self,
         messages: List[Dict[str, Any]],
@@ -2589,81 +2764,15 @@ class ReconcileMixin:
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
             return 0
+        run = _StoreCursorRun(
+            messages=messages, session_count=session_count,
+            allow_session_end_replay_proof=allow_session_end_replay_proof,
+        )
         if session_count <= 0:
-            # An empty rotation child resumed before its first ingest: its own
-            # durable proof re-indexes the host's post-compaction list (#483, C7).
-            replaced: list = []
-            proof_cursor = self._cursor_from_durable_commit_proof(messages, allow_replaced_tail=replaced)
-            if proof_cursor is not None:
-                for source, start, end in replaced:  # #519 R1: the vanished parent row leaves the carry
-                    self._rewrite_own_carry_ranges(
-                        [(s, a, b - 1 if (s, a, b) == (source, start, end) else b) for s, a, b in self._load_compression_carry_ranges(with_anchor=False)],
-                        "host replaced the last carried user row", [end],
-                    )
-                self._record_ingest_reconciliation(
-                    action="advanced cursor",
-                    reason="replayed proven post-compaction continuation in empty session",
-                    cursor=proof_cursor,
-                    incoming=len(messages),
-                    session_count=session_count,
-                    stored_tail_count=0,
-                    effective_incoming=proof_cursor,
-                )
-                return proof_cursor
-            native_recovery_snapshot_digests = set(
-                self._load_native_recovery_replay_snapshot_digests()
-            )
-            if native_recovery_snapshot_digests:
-                native_prefix_digests, _, _ = self._replay_snapshot_prefix_digests(
-                    messages, native_recovery=True,
-                )
-                for cursor in range(len(messages), 0, -1):
-                    digest = native_prefix_digests.get(cursor, "")
-                    if digest not in native_recovery_snapshot_digests:
-                        continue
-                    self._record_ingest_reconciliation(
-                        action="advanced cursor",
-                        reason="replayed adopted native recovery in empty rollover session",
-                        cursor=cursor,
-                        incoming=len(messages),
-                        session_count=session_count,
-                        stored_tail_count=0,
-                        effective_incoming=cursor,
-                    )
-                    return cursor
-            placeholder_budget = self._load_generated_ignored_placeholder_hash_counts()
-            placeholder_ordinals = self._load_generated_ignored_placeholder_hash_ordinals()
-            if placeholder_budget and placeholder_ordinals:
-                consumed: dict[str, int] = {}
-                cursor = 0
-                for msg in messages:
-                    text = text_content_for_pattern_matching(msg.get("content")) or ""
-                    digest = self._active_replay_placeholder_digest(text)
-                    if not digest:
-                        break
-                    consumed[digest] = consumed.get(digest, 0) + 1
-                    ordinal = consumed[digest]
-                    remaining = int(placeholder_budget.get(digest, 0) or 0)
-                    if remaining <= 0 or ordinal not in placeholder_ordinals.get(digest, set()):
-                        break
-                    cursor += 1
-                if cursor > 0:
-                    self._record_ingest_reconciliation(
-                        action="advanced cursor",
-                        reason="replayed generated placeholders in empty session",
-                        cursor=cursor,
-                        incoming=len(messages),
-                        session_count=session_count,
-                        stored_tail_count=0,
-                        effective_incoming=cursor,
-                    )
-                    return cursor
-            stale = self._load_compression_carry_ranges(with_anchor=False)
-            if stale:  # #519 R2: the re-stored copies are the child's only rows; publication owns them alone
-                self._rewrite_own_carry_ranges([], "empty child re-stores its list", [(a + 1, b) for _s, a, b in stale])
-            return 0
+            return self._reconcile_empty_store_session(run)
 
         tail_limit = min(max(len(messages) * 4, 64), session_count)
+        run.tail_limit = tail_limit
         stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
         if not stored_rows:
             return 0
@@ -2679,6 +2788,7 @@ class ReconcileMixin:
             self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False)
             for row in stored_tail_rows
         ]
+        run.stored_tail = stored_tail
         cursor = self._find_reconciled_cursor_for_store_tail(
             messages,
             stored_tail,
@@ -2765,84 +2875,7 @@ class ReconcileMixin:
             )
             return cursor
 
-        incoming_identities = self._effective_replay_identities(messages)
-        stored_head_rows = self._store.get_session_messages(
-            self._session_id,
-            limit=tail_limit,
-        )
-        stored_head = [self._message_replay_identity(row, stored_row=True) for row in stored_head_rows]
-        # Stale-snapshot proof uses the raw durable prefix.  Ignore-message
-        # filters may suppress noisy rows for tail reconciliation, but filtered
-        # history alone must not create replay evidence for skipping a batch.
-        incoming_has_unproofed_raw_persisted_marker = any(
-            str(msg.get("role") or "") == "tool"
-            and _is_hermes_persisted_output_marker(normalize_content_value(msg.get("content")) or "")
-            and recover_hermes_persisted_output_with_file_stat(
-                normalize_content_value(msg.get("content")) or ""
-            )
-            is None
-            for msg in messages
-        )
-        if (
-            not incoming_has_unproofed_raw_persisted_marker
-            and self._is_suspicious_stale_no_overlap_snapshot(
-                incoming_identities,
-                stored_tail,
-                stored_head,
-            )
-        ):
-            self._record_ingest_reconciliation(
-                action="skipped batch",
-                reason="skipped stale no-overlap snapshot",
-                cursor=len(messages),
-                incoming=len(messages),
-                session_count=session_count,
-                stored_tail_count=len(stored_tail),
-                effective_incoming=len(incoming_identities),
-            )
-            logger.warning(
-                "LCM skipped stale no-overlap snapshot after existing-session bind: session=%s incoming=%d effective_incoming=%d stored_tail=%d session_count=%d",
-                self._session_id,
-                len(messages),
-                len(incoming_identities),
-                len(stored_tail),
-                session_count,
-            )
-            return len(messages)
-
-        proof_cursor = self._cursor_from_durable_commit_proof(messages)
-        if proof_cursor is not None:
-            self._record_ingest_reconciliation(
-                action="advanced cursor",
-                reason="replayed proven post-compaction continuation",
-                cursor=proof_cursor,
-                incoming=len(messages),
-                session_count=session_count,
-                stored_tail_count=len(stored_tail),
-                effective_incoming=proof_cursor,
-            )
-            return proof_cursor
-        if self._retire_stale_durable_proof(messages):
-            # #671: reconcile again as a store with no proof does. Only a replay of stored rows confirms the
-            # retirement; any other outcome (a skipped batch, a scaffold-only prefix) is today's decision below.
-            cursor = self._reconcile_ingest_cursor_from_store(
-                messages, allow_session_end_replay_proof=allow_session_end_replay_proof)
-            recon = self._last_ingest_reconciliation
-            if cursor > 0 and recon.get("action") == "advanced cursor" and str(recon.get("reason") or "").startswith("replayed "):
-                recon["reason"] += " past a stale commit proof"
-                return cursor
-            self._retired_durable_proof = None
-
-        self._record_ingest_reconciliation(
-            action="persisted batch",
-            reason="persisted ambiguous delta",
-            cursor=0,
-            incoming=len(messages),
-            session_count=session_count,
-            stored_tail_count=len(stored_tail),
-            effective_incoming=len(incoming_identities),
-        )
-        return 0
+        return self._reconcile_unmatched_store_history(run)
 
     def _replayed_tool_segment_indexes_after_cursor(
         self,
