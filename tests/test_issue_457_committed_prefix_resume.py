@@ -17,6 +17,7 @@ import pytest
 aux = pytest.importorskip("agent.auxiliary_client", reason="requires real Hermes worker hooks")
 _host = pytest.importorskip("agent.conversation_compression")
 from hermes_lcm.config import LCMConfig
+import hermes_lcm.engine as engine_module
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.tokens import count_messages_tokens
 
@@ -67,7 +68,6 @@ def test_default_tuning_late_cancel_then_retry_resumes(tmp_path, monkeypatch, ca
     calls = []
 
     def provider(**kwargs):
-        calls.append(1)
         m = re.search(r'<lcm-summary nonce="[0-9a-f]+">', str(kwargs["messages"][0].get("content") or ""))
         head = m.group(0) if m else "<lcm-summary>"
         return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content=(
@@ -75,6 +75,13 @@ def test_default_tuning_late_cancel_then_retry_resumes(tmp_path, monkeypatch, ca
             "Expand for details about: triage\n</lcm-summary>")))])
 
     monkeypatch.setattr(aux, "call_llm", provider)
+    real_summary = engine_module.summarize_with_escalation
+
+    def leaf_summary(*args, **kwargs):
+        calls.append(1)
+        return real_summary(*args, **kwargs)
+
+    monkeypatch.setattr(engine_module, "summarize_with_escalation", leaf_summary)
     resumes = []
     real_prefix_len = LCMEngine._committed_replay_drops
 
@@ -87,6 +94,8 @@ def test_default_tuning_late_cancel_then_retry_resumes(tmp_path, monkeypatch, ca
     messages = _transcript()
     original = deepcopy(messages)
     engine = _engine(tmp_path)
+    tail_count = engine._config.fresh_tail_count
+    expected_frontier = len(original) - tail_count
 
     def leaves():
         return [n for n in engine._dag.get_session_nodes(SID) if n.source_type == "messages"]
@@ -129,7 +138,7 @@ def test_default_tuning_late_cancel_then_retry_resumes(tmp_path, monkeypatch, ca
             r[f"retry{n}"] = dict(
                 provider_calls=len(calls) - before, returned_rows=len(out),
                 summary_rows=sum(SUMMARY_HEADER in str(m.get("content") or "") for m in out),
-                same_as_committed_output=out == committed["out"], tail_kept=_tail_kept(out, original[-32:]),
+                same_as_committed_output=out == committed["out"], tail_kept=_tail_kept(out, original[-tail_count:]),
                 frontier=frontier(), leaves=len(leaves()), store_rows=engine._store.get_session_count(SID),
                 status=engine._last_compression_status, noop=engine._last_compression_noop_reason,
                 resumes=list(resumes))
@@ -138,18 +147,17 @@ def test_default_tuning_late_cancel_then_retry_resumes(tmp_path, monkeypatch, ca
         r["input_preserved"] = messages == original
         print("ISSUE457_DEFAULTS=" + json.dumps(r, sort_keys=True, default=str))
         assert r["first_attempt_calls"] == 1
-        assert r["leaves_after_cancel"] == 1 and r["frontier_after_cancel"] == 110
+        assert r["leaves_after_cancel"] == 1 and r["frontier_after_cancel"] == expected_frontier
         for n in (1, 2):
             got = r[f"retry{n}"]
             assert got["provider_calls"] == 0, "FREEZE: the retry re-summarized committed rows"
-            assert [(x["k"], x["start"]) for x in got["resumes"]] == [(110, 0)]
+            assert [(x["k"], x["start"]) for x in got["resumes"]] == [(expected_frontier, 0)]
             assert got["status"] == "compacted"
-            assert (got["frontier"], got["leaves"], got["store_rows"]) == (110, 1, 142)
-            # Output = the committed attempt's own output: the summary + the whole 32-row
-            # protected tail (the assembler folds the summary into the leading user turn and
-            # the tool-call assistant into the assistant turn before it: 31 rows).
+            assert (got["frontier"], got["leaves"], got["store_rows"]) == (expected_frontier, 1, len(original))
+            # The configured tail survives; the assembler folds the summary into its
+            # leading user turn and the tool-call assistant into the preceding assistant.
             assert got["same_as_committed_output"] and got["tail_kept"]
-            assert got["returned_rows"] == 31 and got["summary_rows"] == 1
+            assert got["returned_rows"] == tail_count - 1 and got["summary_rows"] == 1
             assert SUMMARY_HEADER in str(outs[n][0].get("content") or "")
         assert r["conflict_log_lines"] == 0
         assert r["input_preserved"]

@@ -52,6 +52,13 @@ def _engine(tmp_path, session_id=SID, **overrides):
     return engine
 
 
+def _engine_default(tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "default.db"))
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path / "h"))
+    engine.on_session_start(SID, platform="cli", conversation_id=CID, context_length=200_000)
+    return engine
+
+
 def _transcript():
     plain, i = [], 0
     while len(plain) < 40 or count_messages_tokens(plain[:-30]) < 24_000:
@@ -122,6 +129,40 @@ def test_gen2_cancel_after_commit_retry_binds_replay(tmp_path, provider, cold, d
         new = _more(120, delta)
         retry = _compress(engine, deepcopy(host) + deepcopy(new))
         assert engine._store.get_session_count(SID) == rows + delta
+        assert engine._last_ingest_reconciliation["reason"] == REASON
+        assert engine._last_compression_status == "compacted"
+        assert provider.calls == calls
+        assert _rows(retry) == _rows(out2) + _rows(new)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("cold", [False, True], ids=["same-engine", "cold-engine"])
+def test_default_chunk_gen2_retry_binds_replay(tmp_path, provider, cold):
+    engine = _engine_default(tmp_path)
+    try:
+        config = engine._config
+        assert config.leaf_chunk_tokens == 24_000 and config.fresh_tail_count == 24
+        first = _transcript()
+        assert count_messages_tokens(first[:-config.fresh_tail_count]) >= config.leaf_chunk_tokens + 1000
+        engine.ingest(first)
+        out1 = deepcopy(_compress(engine, first))
+        assert engine._last_compression_status == "compacted"
+        _adopt(engine, first)
+        second = _more(0, len(first), "default second gen turn")
+        assert count_messages_tokens(second[:-config.fresh_tail_count]) >= config.leaf_chunk_tokens + 1000
+        host = deepcopy(out1) + second
+        engine.ingest(host)
+        out2 = deepcopy(_compress(engine, host))
+        assert engine._last_compression_status == "compacted"
+        rows = engine._store.get_session_count(SID)
+        if cold:
+            engine.shutdown()
+            engine = _engine_default(tmp_path)
+        calls = provider.calls  # engine-module stub counts leaf calls only, never rollup calls
+        new = []
+        retry = _compress(engine, deepcopy(host) + deepcopy(new))
+        assert engine._store.get_session_count(SID) == rows
         assert engine._last_ingest_reconciliation["reason"] == REASON
         assert engine._last_compression_status == "compacted"
         assert provider.calls == calls

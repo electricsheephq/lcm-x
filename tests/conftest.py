@@ -106,6 +106,25 @@ def _isolate_product_environment(monkeypatch, request, tmp_path_factory):
 _MAINTENANCE_SCHEDULERS = ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER")
 
 
+def pytest_configure(config):
+    config.addinivalue_line("markers", "background_rollups: opt in to background temporal rollup scheduling")
+
+
+@pytest.fixture(autouse=True)
+def _background_rollups_opt_in(request):
+    """#1084: keep outbox invalidation enabled without an unrelated concurrent writer."""
+    if request.node.get_closest_marker("background_rollups") is None:
+        from hermes_lcm.engine import LCMEngine
+
+        # Some replay tests call monkeypatch.undo() mid-test; keep this fixture's
+        # patch independent so that cannot opt them into a background writer.
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(LCMEngine, "_schedule_rollup_maintenance", lambda self, scope: None)
+            yield
+    else:
+        yield
+
+
 def _wait_scheduler_idle(scheduler, timeout: float) -> bool:
     import time
 

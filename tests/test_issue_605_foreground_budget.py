@@ -642,6 +642,7 @@ def test_one_info_stop_line_per_compaction_whose_seconds_add_up(tmp_path, monkey
 
 # -- the spend guard: one slot per compaction; rollups on their own guard ------------------------------------------
 
+@pytest.mark.background_rollups
 def test_one_spend_slot_per_foreground_compaction_and_rollups_have_their_own_guard(
         tmp_path, monkeypatch, clock, caplog):
     engine = _engine(tmp_path)

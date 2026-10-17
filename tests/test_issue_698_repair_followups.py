@@ -135,6 +135,7 @@ def test_repair_inserts_missing_provenance_and_preserves_existing_timestamp(engi
                         (recorded,)).fetchone() == (1, "repair-model", 456.0)
 
 
+@pytest.mark.background_rollups
 def test_repair_schedules_rollups_once_per_affected_session_after_commits(engine, monkeypatch):
     engine._config.temporal_rollups_enabled = True
     initialize_rollup_invalidation_outbox(engine._dag)

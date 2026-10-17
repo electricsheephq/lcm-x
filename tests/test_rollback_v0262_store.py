@@ -1,5 +1,6 @@
 """Plugin-only rollback to v0.26.2 preserves stem-index writes, summaries, and inactive markers."""
 import io
+import inspect
 import json
 import select
 import subprocess
@@ -10,7 +11,9 @@ from hermes_lcm import db_bootstrap as boot, inactive_record, tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from tests.test_host_uid_engine_uids import _compress, _host
-from tests.test_host_uid_shadow import ROLLBACK_READERS, _skip_or_fail_in_ci, _state_db
+from tests.test_host_uid_shadow import (
+    ROLLBACK_READERS, _assert_store_snapshot_preserved, _skip_or_fail_in_ci, _state_db, _store_snapshot,
+)
 from tests.test_stemmed_recall_index import consistent, finish, partial
 _OLD_READER = r'''
 import importlib.util, json, sys
@@ -51,11 +54,15 @@ try:
     print(json.dumps({"inserted": len(inserted), "updated": 1, "deleted": 1,
                       "ids": [inserted[0]["store_id"], updated_id], "deleted_id": deleted_id,
                       "summaries": summaries, "legacy": str(legacy),
+                      "snapshot": _store_snapshot(store.connection),
                       "grep": len(grep["results"]), "recall": len(recall["hits"])}), flush=True)
     assert sys.stdin.readline().strip() == "finish"
 finally:
     engine.shutdown()
 '''
+_OLD_READER = inspect.getsource(_store_snapshot) + _OLD_READER
+
+
 def test_v0262_writes_main_store_and_rolls_forward(tmp_path, monkeypatch, caplog):
     root = Path(__file__).resolve().parents[1]
     commit = ROLLBACK_READERS["v0.26.2"]
@@ -87,7 +94,7 @@ def test_v0262_writes_main_store_and_rolls_forward(tmp_path, monkeypatch, caplog
         conn = partial(engine._store)
         finish(engine._store)
         consistent(conn)
-        before = conn.execute("SELECT store_id, content FROM messages ORDER BY store_id").fetchall()
+        before = _store_snapshot(conn)
         inactive_record.write_inactive_record(tmp_path, elapsed_s=0.1, reason="main diagnostic")
         marker = next(tmp_path.joinpath(*inactive_record.RECORD_DIR).glob("lcm-x-not-active.*.json"))
         marker_bytes = marker.read_bytes()
@@ -116,6 +123,7 @@ def test_v0262_writes_main_store_and_rolls_forward(tmp_path, monkeypatch, caplog
     assert report["inserted"] == report["updated"] == report["deleted"] == 1
     assert report["grep"] >= 1 and report["recall"] >= 1
     assert report["summaries"] == summaries
+    _assert_store_snapshot_preserved(before, report["snapshot"])
     assert marker.read_bytes() == marker_bytes
     engine = LCMEngine(config=config, hermes_home=str(tmp_path))
     try:
@@ -125,7 +133,7 @@ def test_v0262_writes_main_store_and_rolls_forward(tmp_path, monkeypatch, caplog
             finish(engine._store)
         consistent(conn)
         rows = dict(conn.execute("SELECT store_id, content FROM messages").fetchall())
-        assert all(rows[store_id] == content for store_id, content in before)
+        _assert_store_snapshot_preserved(before, _store_snapshot(conn))
         assert [rows[store_id] for store_id in report["ids"]] == [
             "Rollback deployments succeeded", "deployments updated"]
         assert report["deleted_id"] not in rows
