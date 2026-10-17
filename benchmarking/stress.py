@@ -147,18 +147,19 @@ class StressRun:
         _ensure_hermes_lcm_package(self.plugin_dir, reload_submodules=True)
         import hermes_lcm.engine as engine_mod
         import hermes_lcm.tools as tools_mod
+        import hermes_lcm.expand_query_tools as expand_query_mod
 
         self._engine_mod = engine_mod
         self._tools_mod = tools_mod
         self._original_summarize = engine_mod.summarize_with_escalation
-        self._original_synthesize = tools_mod._synthesize_expansion_answer
+        self._original_synthesize = expand_query_mod._synthesize_expansion_answer
         engine_mod.summarize_with_escalation = deterministic_summary
-        tools_mod._synthesize_expansion_answer = deterministic_expand_answer
+        expand_query_mod._synthesize_expansion_answer = deterministic_expand_answer
         try:
             yield
         finally:
             engine_mod.summarize_with_escalation = self._original_summarize
-            tools_mod._synthesize_expansion_answer = self._original_synthesize
+            expand_query_mod._synthesize_expansion_answer = self._original_synthesize
 
     def make_engine(self, case: str, **overrides: Any):
         _ensure_hermes_lcm_package(self.plugin_dir)

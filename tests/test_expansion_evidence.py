@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+
+from hermes_lcm import expand_query_tools
 import json
 from copy import deepcopy
 from types import SimpleNamespace
@@ -69,7 +71,7 @@ def test_expansion_continuation_shapes(monkeypatch: Any) -> None:
     node = SimpleNamespace(node_id=1, session_id="archive", depth=0, summary="summary", expand_hint="hint")
     engine = SimpleNamespace(current_session_id="active", _config=SimpleNamespace(),
                              _dag=SimpleNamespace(get_node=lambda _: node))
-    monkeypatch.setattr(lcm_tools, "_collect_context_blocks_for_node", lambda *a, **kw: deepcopy(blocks))
+    monkeypatch.setattr(expand_query_tools, "_collect_context_blocks_for_node", lambda *a, **kw: deepcopy(blocks))
     result = json.loads(lcm_tools.lcm_expand_query(
         {"prompt": "details?", "node_ids": [1], "session_ids": ["archive"],
          "output": "evidence", "context_max_tokens": 32000}, engine=engine,
@@ -87,8 +89,8 @@ def test_expansion_omitted_raw_cursor(monkeypatch: Any) -> None:
         _dag=SimpleNamespace(search=lambda *a, **kw: [node]),
         _store=SimpleNamespace(search=lambda *a, **kw: [{"store_id": 9}]),
     )
-    monkeypatch.setattr(lcm_tools, "_collect_context_blocks_for_node", lambda *a, **kw: [])
-    monkeypatch.setattr(lcm_tools, "_collect_raw_match_context_block", lambda *a, **kw: (
+    monkeypatch.setattr(expand_query_tools, "_collect_context_blocks_for_node", lambda *a, **kw: [])
+    monkeypatch.setattr(expand_query_tools, "_collect_raw_match_context_block", lambda *a, **kw: (
         {"type": "raw_messages", "messages": [],
          "pagination": {"has_more": True, "next_store_id": 9}}, [],
     ))

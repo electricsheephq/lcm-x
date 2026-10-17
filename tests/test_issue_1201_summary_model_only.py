@@ -13,7 +13,9 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from hermes_lcm import assertion_extraction, escalation, extraction, host_evidence, selective_compiler, tools
+from hermes_lcm import assertion_extraction, escalation, extraction, host_evidence, selective_compiler
+from hermes_lcm import expand_query_tools
+from tests.harness import make_engine
 from hermes_lcm import engine as engine_module
 from hermes_lcm.assertion_store import SourceSnapshot
 from hermes_lcm.config import LCMConfig
@@ -58,6 +60,20 @@ def engine(tmp_path, monkeypatch):
                         lambda *a, **k: ("Earlier work completed.\nExpand for details about: work", 1))
     yield instance
     instance.shutdown()
+
+
+@pytest.fixture
+def expansion_engine(tmp_path, monkeypatch):
+    instance = make_engine(
+        tmp_path, window=200_000, session_id="issue-1201", fresh_tail_count=4,
+        leaf_chunk_tokens=100, extraction_enabled=False, temporal_rollups_enabled=False,
+    )
+    monkeypatch.setattr(engine_module, "summarize_with_escalation",
+                        lambda *a, **k: ("Earlier work completed.\nExpand for details about: work", 1))
+    try:
+        yield instance
+    finally:
+        instance.shutdown()
 
 
 def _seed(engine):
@@ -579,7 +595,8 @@ def test_t6_existing_metadata_and_host_constant(engine, monkeypatch):
 
 @pytest.mark.parametrize("builder", ["summary-l1", "summary-l2", "extraction", "assertion",
                                     "host-evidence", "selective", "expansion"])
-def test_t7_auxiliary_prompt_builders_never_forward_live_rows(engine, monkeypatch, tmp_path, builder):
+def test_t7_auxiliary_prompt_builders_never_forward_live_rows(expansion_engine, monkeypatch, tmp_path, builder):
+    engine = expansion_engine
     rows = [{"role": "user", "content": "A synthetic decision to preserve.",
              "display_metadata": {"model_only": True}, "display_kind": "summary"}]
     before = deepcopy(rows)
@@ -612,7 +629,7 @@ def test_t7_auxiliary_prompt_builders_never_forward_live_rows(engine, monkeypatc
                 {"operation": "latest_state", "facet": "decision"},
                 [{**rows[0], "handle": "h1", "quote": rows[0]["content"], "date": None}])})
     else:
-        tools._synthesize_expansion_answer(prompt="What was decided?", context_blocks=rows,
+        expand_query_tools._synthesize_expansion_answer(prompt="What was decided?", context_blocks=rows,
                                           model="", max_tokens=100, timeout=1)
     assert len(calls) == 1
     for outgoing in calls[0]:

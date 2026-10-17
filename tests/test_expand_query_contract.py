@@ -9,6 +9,8 @@ from typing import Any
 
 import pytest
 
+from hermes_lcm import expand_query_tools
+
 from hermes_lcm import expansion_evidence, tools, tokens
 from tests.harness import pin_char_counter
 
@@ -39,7 +41,7 @@ def inventory(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 def response_bytes(engine: Any, monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
-    monkeypatch.setattr(tools, "_synthesize_expansion_answer", lambda **kw: "  café answer  ")
+    monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", lambda **kw: "  café answer  ")
     args = {"prompt": "What evidence?", "node_ids": [3], "context_max_tokens": 1000}
     result = {
         "missing": tools.lcm_expand_query({}),
@@ -74,7 +76,7 @@ def test_expand_query_timeout_logger(
     def timeout(**kwargs: Any) -> str:
         raise TimeoutError("fixture")
 
-    monkeypatch.setattr(tools, "_synthesize_expansion_answer", timeout)
+    monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", timeout)
     with caplog.at_level(logging.WARNING, logger="hermes_lcm.tools"):
         result = json.loads(tools.lcm_expand_query(
             {"prompt": "What evidence?", "node_ids": [1]}, engine=inventory))
@@ -144,3 +146,56 @@ def test_expansion_evidence_keeps_tokens_import_lazy(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(fake_tokens, "count_tokens", lambda text: 17, raising=False)
     monkeypatch.setitem(sys.modules, fake_tokens.__name__, fake_tokens)
     assert module._context_content_token_count([{"type": "summary", "summary": "marker"}]) == 17
+
+
+def test_expand_query_shared_patch_points(
+    inventory: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shared = (
+        "_expand_child_nodes", "_expand_message_sources", "_slice_content_for_response",
+        "_content_offset_for_query_match", "_truncate_text_to_token_budget",
+        "_combined_result_sort_key", "_coerce_query_arg", "_session_expand_hint", "_require_engine",
+    )
+    seen: set[str] = set()
+
+    def wrap(name: str, original: Any) -> Any:
+        def marker(*args: Any, **kwargs: Any) -> Any:
+            seen.add(name)
+            return original(*args, **kwargs)
+        return marker
+
+    for name in shared:
+        monkeypatch.setattr(tools, name, wrap(name, getattr(tools, name)))
+    node = inventory._dag.get_node(3)
+    node.search_rank, node.search_directness, node.latest_at = -1.0, 1, 100
+    monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", lambda **kw: "marker answer")
+    result = json.loads(tools.lcm_expand_query(
+        {"prompt": "What evidence?", "query": "café", "session_ids": ["session", "archive"],
+         "context_max_tokens": 1000}, engine=inventory))
+    assert result["answer"] == "marker answer"
+    assert seen == set(shared)
+    monkeypatch.setattr(tools, "_LCM_EXPAND_QUERY_SESSION_ID_CAP", 0)
+    assert json.loads(tools.lcm_expand_query(
+        {"prompt": "What evidence?", "session_ids": ["session"]}, engine=inventory,
+    )) == {"error": "session_ids accepts at most 20 entries"}
+
+
+def test_stress_synthesizer_patch_reaches_facade(
+    inventory: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from hermes_lcm.benchmarking import stress
+
+    # The harness's real context manager runs, without reloading pytest's modules.
+    monkeypatch.setattr(stress, "_ensure_hermes_lcm_package", lambda *a, **k: None)
+    monkeypatch.setattr(stress, "deterministic_expand_answer", lambda **k: "stress sentinel")
+    run = stress.StressRun.__new__(stress.StressRun)
+    run.plugin_dir = Path(__file__).resolve().parents[1]
+    original = expand_query_tools._synthesize_expansion_answer
+    assert not hasattr(tools, "_synthesize_expansion_answer")
+    with run.patched_summarizers():
+        result = json.loads(tools.lcm_expand_query(
+            {"prompt": "What evidence?", "node_ids": [1]}, engine=inventory))
+        assert result["answer"] == "stress sentinel"
+        assert expand_query_tools._synthesize_expansion_answer is stress.deterministic_expand_answer
+    assert expand_query_tools._synthesize_expansion_answer is original
+    assert not hasattr(tools, "_synthesize_expansion_answer")

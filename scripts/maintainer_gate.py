@@ -89,6 +89,7 @@ NON_TURN_PATH_FILES = {
     "evidence_compiler.py",  # Default-off hook or explicit evidence tool.
     "evidence_pack.py",  # Explicit evidence tool or default-off compiler.
     "evidence_tools.py",  # Explicit evidence tool handlers only.
+    "expand_query_tools.py",  # Explicit lcm_expand_query tool handler only.
     "expansion_evidence.py",  # Explicit expansion context/provenance only.
     "guidance.py",  # Exported policy loader unused by default prompt.
     "host_evidence.py",  # Unwired opt-in host evidence helper.

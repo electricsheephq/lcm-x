@@ -14,6 +14,8 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from hermes_lcm import expand_query_tools
+
 import hermes_lcm.engine as lcm_engine
 import hermes_lcm.tools as lcm_tools
 
@@ -1874,11 +1876,10 @@ class TestEscalationStripReasoning:
 
     def test_synthesize_expansion_answer_strips_reasoning_from_response(self, monkeypatch):
         """Integration: lcm_expand_query routes through
-        tools._synthesize_expansion_answer, which is a separate LLM call path
+        expand_query_tools._synthesize_expansion_answer, which is a separate LLM call path
         from _call_llm_for_summary. Both must strip reasoning blocks before
         returning, otherwise expand_query answers leak the model's internal
         reasoning back to the caller."""
-        import hermes_lcm.tools as tools_mod
 
         class _FakeMessage:
             def __init__(self, content):
@@ -1903,7 +1904,7 @@ class TestEscalationStripReasoning:
 
         self._install_fake_auxiliary_client(monkeypatch, fake_call_llm)
 
-        result = tools_mod._synthesize_expansion_answer(
+        result = expand_query_tools._synthesize_expansion_answer(
             prompt="What was discussed?",
             context_blocks=[{"role": "user", "content": "ignored in fake"}],
             model="any",
@@ -1927,7 +1928,6 @@ class TestEscalationStripReasoning:
     def test_synthesize_expansion_routes_reasoning_config_to_hermes(
         self, monkeypatch, effort, expected
     ):
-        import hermes_lcm.tools as tools_mod
 
         seen = {}
 
@@ -1943,12 +1943,12 @@ class TestEscalationStripReasoning:
 
         self._install_fake_auxiliary_client(monkeypatch, fake_call_llm)
         monkeypatch.setattr(
-            tools_mod,
+            expand_query_tools,
             "apply_lcm_model_route",
             lambda kwargs, model: kwargs.update(extra_body={"unrelated": True}),
         )
 
-        result = tools_mod._synthesize_expansion_answer(
+        result = expand_query_tools._synthesize_expansion_answer(
             prompt="What was discussed?",
             context_blocks=[{"role": "user", "content": "context"}],
             model="any",
@@ -25079,7 +25079,8 @@ class TestEngineTools:
         assert second["expanded"][0]["content_offset"] == 1
         assert second["pagination"]["next_content_offset"] == 2
 
-    def test_expand_query_routes_configured_reasoning_effort_to_synthesis(self, engine, monkeypatch):
+    def test_expand_query_routes_configured_reasoning_effort_to_synthesis(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._config.expansion_reasoning_effort = "low"
         engine._store.append(
             "test-session", {"role": "user", "content": "reasoning expansion evidence"}
@@ -25090,7 +25091,7 @@ class TestEngineTools:
             captured.update(kwargs)
             return "expanded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         result = json.loads(engine.handle_tool_call("lcm_expand_query", {
             "prompt": "What is the evidence?",
             "query": "reasoning expansion evidence",
@@ -25099,14 +25100,15 @@ class TestEngineTools:
         assert result["answer"] == "expanded answer"
         assert captured["reasoning_effort"] == "low"
 
-    def test_handle_expand_query_recursively_descends_parent_nodes_to_leaf_messages(self, engine, monkeypatch):
+    def test_handle_expand_query_recursively_descends_parent_nodes_to_leaf_messages(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "recursive answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "LEAF RAW SECRET zeta detail"},
@@ -25165,14 +25167,15 @@ class TestEngineTools:
         assert "LEAF RAW SECRET zeta detail" in serialized_context
         assert any(block.get("type") == "child_messages" for block in captured["context_blocks"])
 
-    def test_handle_expand_query_deep_parent_reaches_leaf_messages(self, engine, monkeypatch):
+    def test_handle_expand_query_deep_parent_reaches_leaf_messages(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "deep recursive answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "DEEP LEAF RAW SECRET omega detail"},
@@ -25254,7 +25257,7 @@ class TestEngineTools:
             )
 
         root = engine._dag.get_node(child_id)
-        blocks = lcm_tools._collect_context_blocks_for_node(engine, root, max_tokens=32000)
+        blocks = expand_query_tools._collect_context_blocks_for_node(engine, root, max_tokens=32000)
 
         serialized_context = json.dumps(blocks)
         assert "ZERO TOKEN DEEP LEAF evidence" not in serialized_context
@@ -25266,14 +25269,15 @@ class TestEngineTools:
         assert any(block.get("source_path_truncated") is True for block in path_blocks)
         assert any(block.get("source_path_depth", 0) > len(block["source_path"]) for block in path_blocks)
 
-    def test_handle_expand_query_uses_raw_hits_when_summary_search_misses(self, engine, monkeypatch):
+    def test_handle_expand_query_uses_raw_hits_when_summary_search_misses(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "raw bridge answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "PHOENIXRAWONLY appears only in the raw message"},
@@ -25308,7 +25312,8 @@ class TestEngineTools:
         serialized_context = json.dumps(captured["context_blocks"])
         assert "PHOENIXRAWONLY appears only in the raw message" in serialized_context
 
-    def test_handle_expand_query_keeps_raw_snippets_out_of_synthesis_context(self, engine, monkeypatch):
+    def test_handle_expand_query_keeps_raw_snippets_out_of_synthesis_context(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -25329,7 +25334,7 @@ class TestEngineTools:
                 }
             ]
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         monkeypatch.setattr(engine._store, "search", fake_store_search)
 
         result = json.loads(
@@ -25351,14 +25356,15 @@ class TestEngineTools:
         raw_block = next(block for block in captured["context_blocks"] if block["type"] == "raw_messages")
         assert "snippet" not in raw_block["messages"][0]
 
-    def test_handle_expand_query_deduped_raw_hit_does_not_leak_snippet(self, engine, monkeypatch):
+    def test_handle_expand_query_deduped_raw_hit_does_not_leak_snippet(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "deduped raw answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "DEDUPEDRAW message evidence"},
@@ -25412,7 +25418,8 @@ class TestEngineTools:
         assert not any(block.get("type") == "raw_messages" for block in captured["context_blocks"])
         assert result["raw_matches"] == []
 
-    def test_handle_expand_query_keeps_raw_tool_calls_out_of_synthesis_context(self, engine, monkeypatch):
+    def test_handle_expand_query_keeps_raw_tool_calls_out_of_synthesis_context(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -25435,7 +25442,7 @@ class TestEngineTools:
                 }
             ]
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         monkeypatch.setattr(engine._store, "search", fake_store_search)
 
         result = json.loads(
@@ -25460,7 +25467,8 @@ class TestEngineTools:
         assert raw_item["tool_call_id"] == "call_123"
         assert raw_item["tool_name"] == "expensive_tool"
 
-    def test_handle_expand_query_raw_hit_context_windows_around_match(self, engine, monkeypatch):
+    def test_handle_expand_query_raw_hit_context_windows_around_match(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -25483,7 +25491,7 @@ class TestEngineTools:
                 }
             ]
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         monkeypatch.setattr(engine._store, "search", fake_store_search)
 
         result = json.loads(
@@ -25506,7 +25514,8 @@ class TestEngineTools:
         assert raw_item["match_window_offset"] == content.index("TAILMATCH")
         assert "prefix-noise" not in raw_item["content"]
 
-    def test_handle_expand_query_raw_hit_match_window_uses_sanitized_query_terms(self, engine, monkeypatch):
+    def test_handle_expand_query_raw_hit_match_window_uses_sanitized_query_terms(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -25529,7 +25538,7 @@ class TestEngineTools:
                 }
             ]
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         monkeypatch.setattr(engine._store, "search", fake_store_search)
 
         for query in ["tail-match", "tail.match", "tail/match", "tail:match", "tail(match)"]:
@@ -25554,7 +25563,8 @@ class TestEngineTools:
             assert raw_item["match_window_offset"] == content.index("tail match")
             assert "match unrelated" not in raw_item["content"]
 
-    def test_handle_expand_query_raw_hit_truncation_returns_store_expand_cursor(self, engine, monkeypatch):
+    def test_handle_expand_query_raw_hit_truncation_returns_store_expand_cursor(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         import hermes_lcm.tokens as token_utils
 
         def fake_count_tokens(text):
@@ -25564,7 +25574,7 @@ class TestEngineTools:
             return "raw cursor answer"
 
         monkeypatch.setattr(token_utils, "count_tokens", fake_count_tokens)
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "PHOENIXRAWCURSOR has a longer raw detail"},
@@ -25585,7 +25595,8 @@ class TestEngineTools:
         raw_page = next(item for item in result["context_pagination"] if item["type"] == "raw_messages")
         assert raw_page["expand_args"] == {"store_id": store_id, "content_offset": 1}
 
-    def test_handle_expand_query_advances_content_cursor_when_context_budget_cannot_fit_character(self, engine, monkeypatch):
+    def test_handle_expand_query_advances_content_cursor_when_context_budget_cannot_fit_character(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         import hermes_lcm.tokens as token_utils
 
         captured = {}
@@ -25598,7 +25609,7 @@ class TestEngineTools:
             return "bounded answer"
 
         monkeypatch.setattr(token_utils, "count_tokens", fake_count_tokens)
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "abcdef"},
@@ -26038,7 +26049,8 @@ class TestEngineTools:
         assert second["content_offset"] == 1
         assert second["next_content_offset"] == 2
 
-    def test_handle_expand_query_uses_independent_context_budget_for_auxiliary_retrieval(self, engine, monkeypatch):
+    def test_handle_expand_query_uses_independent_context_budget_for_auxiliary_retrieval(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -26046,7 +26058,7 @@ class TestEngineTools:
             captured["max_tokens"] = max_tokens
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         first_store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "first filler " * 80},
@@ -26085,14 +26097,15 @@ class TestEngineTools:
         context_json = json.dumps(captured["context_blocks"])
         assert "SECOND RAW DETAIL" in context_json
 
-    def test_handle_expand_query_applies_context_budget_globally_across_nodes(self, engine, monkeypatch):
+    def test_handle_expand_query_applies_context_budget_globally_across_nodes(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         first_store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "first filler " * 80},
@@ -26146,14 +26159,15 @@ class TestEngineTools:
             for item in result["context_pagination"]
         )
 
-    def test_handle_expand_query_counts_summary_blocks_against_context_budget(self, engine, monkeypatch):
+    def test_handle_expand_query_counts_summary_blocks_against_context_budget(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "raw detail should wait behind summary budget"},
@@ -26193,14 +26207,15 @@ class TestEngineTools:
             for item in result["context_pagination"]
         )
 
-    def test_handle_expand_query_reports_last_child_summary_truncation_in_context_pagination(self, engine, monkeypatch):
+    def test_handle_expand_query_reports_last_child_summary_truncation_in_context_pagination(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         child_id = engine._dag.add_node(
             SummaryNode(
                 session_id="test-session",
@@ -26261,19 +26276,18 @@ class TestEngineTools:
             captured["context_blocks"] = context_blocks
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_expand_query_externalized_truncated.db"),
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
+        engine = make_engine(
+            tmp_path,
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=200,
         )
-        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         engine._session_id = "test-session"
         content = "EXTERNALIZED RAW DETAIL " + ("abcdef" * 1000)
         engine._serialize_messages(
             [{"role": "tool", "tool_call_id": "call_ext", "content": content}]
         )
-        ref = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json")).name
+        ref = next((tmp_path / "home" / "lcm-large-outputs").glob("*.json")).name
         placeholder = f"[GC'd externalized tool output: tool_call_id=call_ext; chars={len(content)}; ref={ref}]"
         store_id = engine._store.append(
             "test-session",
@@ -26362,19 +26376,18 @@ class TestEngineTools:
             return "bounded answer"
 
         monkeypatch.setattr(token_utils, "count_tokens", fake_count_tokens)
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_expand_query_externalized_transcript_budget.db"),
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
+        engine = make_engine(
+            tmp_path,
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=2,
         )
-        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         engine._session_id = "test-session"
         content = "PAYLOAD"
         engine._serialize_messages([
             {"role": "tool", "tool_call_id": "call_ext", "content": content}
         ])
-        ref = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json")).name
+        ref = next((tmp_path / "home" / "lcm-large-outputs").glob("*.json")).name
         transcript_content = (
             f"[GC'd externalized tool output: tool_call_id=call_ext; chars={len(content)}; ref={ref}]"
             + (" transcript filler" * 20)
@@ -26443,19 +26456,18 @@ class TestEngineTools:
             captured["context_blocks"] = context_blocks
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_expand_query_externalized.db"),
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
+        engine = make_engine(
+            tmp_path,
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=200,
         )
-        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         engine._session_id = "test-session"
         content = "EXTERNALIZED RAW DETAIL survives for auxiliary retrieval " + ("abcdef" * 100)
         engine._serialize_messages([
             {"role": "tool", "tool_call_id": "call_ext", "content": content}
         ])
-        ref = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json")).name
+        ref = next((tmp_path / "home" / "lcm-large-outputs").glob("*.json")).name
         placeholder = f"[GC'd externalized tool output: tool_call_id=call_ext; chars={len(content)}; ref={ref}]"
         store_id = engine._store.append(
             "test-session",
@@ -26746,7 +26758,8 @@ class TestEngineTools:
         assert "error" in result
         assert "prompt" in result["error"]
 
-    def test_handle_expand_query_uses_expansion_model(self, engine, monkeypatch):
+    def test_handle_expand_query_uses_expansion_model(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._config.expansion_model = "expansion-model-x"
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         node_id = engine._dag.add_node(
@@ -26772,7 +26785,7 @@ class TestEngineTools:
             seen["timeout"] = timeout
             return "Expansion answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
 
         result = json.loads(
             engine.handle_tool_call(
@@ -26790,7 +26803,8 @@ class TestEngineTools:
         assert seen["prompt"] == "What was the plan?"
         assert seen["context_blocks"]
 
-    def test_handle_expand_query_timeout_returns_explicit_degraded_error(self, engine, monkeypatch):
+    def test_handle_expand_query_timeout_returns_explicit_degraded_error(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._config.expansion_timeout_ms = 2500
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         node_id = engine._dag.add_node(
@@ -26809,7 +26823,7 @@ class TestEngineTools:
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             raise TimeoutError("expansion timed out")
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
 
         result = json.loads(
             engine.handle_tool_call(
@@ -26825,7 +26839,8 @@ class TestEngineTools:
         assert result["matches"]
         assert "answer" not in result
 
-    def test_handle_expand_query_unexpected_synthesis_error_is_not_degraded(self, engine, monkeypatch):
+    def test_handle_expand_query_unexpected_synthesis_error_is_not_degraded(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         engine._dag.add_node(
             SummaryNode(
@@ -26843,7 +26858,7 @@ class TestEngineTools:
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             raise RuntimeError("schema bug")
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
 
         with pytest.raises(RuntimeError, match="schema bug"):
             engine.handle_tool_call(
@@ -26851,7 +26866,8 @@ class TestEngineTools:
                 {"query": "docker", "prompt": "What was the plan?"},
             )
 
-    def test_handle_expand_query_blank_synthesis_is_not_false_success(self, engine, monkeypatch):
+    def test_handle_expand_query_blank_synthesis_is_not_false_success(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         node_id = engine._dag.add_node(
             SummaryNode(
@@ -26865,7 +26881,7 @@ class TestEngineTools:
                 created_at=0,
             )
         )
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "   ")
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", lambda **kwargs: "   ")
 
         result = json.loads(
             engine.handle_tool_call(
@@ -26880,7 +26896,8 @@ class TestEngineTools:
         assert result["matches"]
         assert "answer" not in result
 
-    def test_handle_expand_query_node_ids_timeout_preserves_requested_match(self, engine, monkeypatch):
+    def test_handle_expand_query_node_ids_timeout_preserves_requested_match(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         node_id = engine._dag.add_node(
             SummaryNode(
@@ -26898,7 +26915,7 @@ class TestEngineTools:
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             raise TimeoutError("expansion timed out")
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
 
         result = json.loads(
             engine.handle_tool_call(
@@ -26914,7 +26931,8 @@ class TestEngineTools:
         assert result["matches"][0]["node_id"] == node_id
         assert "answer" not in result
 
-    def test_handle_expand_query_hyphenated_operator_query_falls_back_cleanly(self, engine, monkeypatch):
+    def test_handle_expand_query_hyphenated_operator_query_falls_back_cleanly(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._store.append(
             "test-session",
             {
@@ -26936,7 +26954,7 @@ class TestEngineTools:
         )
 
         monkeypatch.setattr(
-            lcm_tools, "_synthesize_expansion_answer",
+            expand_query_tools, "_synthesize_expansion_answer",
             lambda **kwargs: "Recovered through normalized retrieval",
         )
         monkeypatch.setattr(
@@ -27011,7 +27029,8 @@ class TestEngineTools:
 
         assert result["error"] == "node_ids must contain only integers"
 
-    def test_handle_expand_query_accepts_valid_integer_node_ids(self, engine, monkeypatch):
+    def test_handle_expand_query_accepts_valid_integer_node_ids(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         node_id = engine._dag.add_node(
             SummaryNode(
@@ -27029,7 +27048,7 @@ class TestEngineTools:
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             return "Expansion answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
 
         result = json.loads(
             engine.handle_tool_call(
@@ -27591,8 +27610,9 @@ class TestEngineTools:
         assert result["node_ids"] == [strong_id]
 
     def test_handle_expand_query_searches_bounded_explicit_sessions(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
+        engine = expansion_engine
         captured = {}
         old_store_id = engine._store.append(
             "old-session",
@@ -27619,7 +27639,7 @@ class TestEngineTools:
             captured["context_blocks"] = kwargs["context_blocks"]
             return "cross-session answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         result = json.loads(
             engine.handle_tool_call(
                 "lcm_expand_query",
@@ -27640,12 +27660,13 @@ class TestEngineTools:
         assert "NEEDLE excluded raw evidence" not in serialized_context
 
     def test_handle_expand_query_raw_matches_carry_session_ownership(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
         # Cross-session hits that match only raw messages: `matches` is empty
         # because no summary node matches, and the `answer` output returns no
         # context blocks, so `raw_matches` is the caller's only channel for
         # session ownership. Losing it here loses provenance entirely.
+        engine = expansion_engine
         alpha_store_id = engine._store.append(
             "alpha-session",
             {"role": "user", "content": "KRYPTONITE alpha raw evidence"},
@@ -27656,7 +27677,7 @@ class TestEngineTools:
         )
 
         monkeypatch.setattr(
-            lcm_tools,
+            expand_query_tools,
             "_synthesize_expansion_answer",
             lambda **kwargs: "cross-session raw answer",
         )
@@ -27772,8 +27793,9 @@ class TestEngineTools:
         assert result["error"] == "session_ids accepts at most 20 entries"
 
     def test_handle_expand_query_evidence_skips_synthesis_and_stays_bounded(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
+        engine = expansion_engine
         store_id = engine._store.append(
             "old-session",
             {"role": "user", "content": "bounded evidence " * 200},
@@ -27794,7 +27816,7 @@ class TestEngineTools:
         def fail_synthesis(**kwargs):
             raise AssertionError("evidence output must not call the synthesis model")
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fail_synthesis)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fail_synthesis)
         result = json.loads(
             engine.handle_tool_call(
                 "lcm_expand_query",
@@ -27886,10 +27908,11 @@ class TestEngineTools:
 
     @pytest.mark.parametrize("invalid_output", ["", 0, []])
     def test_handle_expand_query_rejects_explicit_invalid_output(
-        self, engine, monkeypatch, invalid_output
+        self, expansion_engine, monkeypatch, invalid_output
     ):
+        engine = expansion_engine
         monkeypatch.setattr(
-            lcm_tools,
+            expand_query_tools,
             "_synthesize_expansion_answer",
             lambda **kwargs: pytest.fail("invalid output must not invoke synthesis"),
         )
@@ -27908,13 +27931,14 @@ class TestEngineTools:
         assert result["error"] == "output must be one of: answer, evidence"
 
     def test_handle_expand_query_keeps_raw_cursor_when_summaries_exhaust_budget(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
         # Summaries can consume the whole context budget while distinct raw
         # messages still matched. Dropping the raw arm silently strands those
         # hits: `context_truncated` alone gives the caller no handle to
         # continue into them, so the raw-message cursor must survive even when
         # no raw content fits.
+        engine = expansion_engine
         raw_store_id = engine._store.append(
             "old-session",
             {"role": "user", "content": "SENTINEL raw hit that must stay reachable"},
@@ -27933,7 +27957,7 @@ class TestEngineTools:
         )
 
         monkeypatch.setattr(
-            lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "answer"
+            expand_query_tools, "_synthesize_expansion_answer", lambda **kwargs: "answer"
         )
         result = json.loads(
             engine.handle_tool_call(
@@ -27997,11 +28021,12 @@ class TestEngineTools:
         assert raw_entry["expand_args"] == {"store_id": raw_store_id}
 
     def test_handle_expand_query_answer_provenance_reports_explicit_sessions(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
         # A multi-session answer must not describe its retrieval scope as the
         # current session, and its summary locators must replay against the
         # session the node came from rather than the active one.
+        engine = expansion_engine
         historical_node_id = engine._dag.add_node(
             SummaryNode(
                 session_id="old-session",
@@ -28028,7 +28053,7 @@ class TestEngineTools:
         )
 
         monkeypatch.setattr(
-            lcm_tools,
+            expand_query_tools,
             "_synthesize_expansion_answer",
             lambda **kwargs: "cross-session answer",
         )
@@ -28061,11 +28086,12 @@ class TestEngineTools:
         assert items[current_node_id]["expand_args"] == {"node_id": current_node_id}
 
     def test_handle_expand_query_marks_historical_messages_as_not_current(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
         # Threading the node's session into child expansion selects the lookup
         # scope. `from_current_session` still describes the ACTIVE session, so
         # archived rows must not be advertised as current.
+        engine = expansion_engine
         store_id = engine._store.append(
             "old-session",
             {"role": "user", "content": "TOPAZ historical raw evidence"},
@@ -28089,7 +28115,7 @@ class TestEngineTools:
             captured["context_blocks"] = kwargs["context_blocks"]
             return "historical answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         json.loads(
             engine.handle_tool_call(
                 "lcm_expand_query",

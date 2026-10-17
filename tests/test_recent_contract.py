@@ -10,7 +10,7 @@ from typing import Any, cast
 import pytest
 
 from hermes_lcm import recent as recent_module
-from hermes_lcm import evidence_tools, inspect_tools
+from hermes_lcm import evidence_tools, inspect_tools, expand_query_tools, expansion_evidence
 from hermes_lcm import tools
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.rollup_periods import parse_recent_period
@@ -109,7 +109,7 @@ def test_tools_facade_does_not_reexport_recent_private_helpers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Public tool facades and other modules' load-bearing exports are allowed.
-    for family in (recent_module, evidence_tools, inspect_tools):
+    for family in (recent_module, evidence_tools, inspect_tools, expand_query_tools, expansion_evidence):
         private_helpers = {
             name for name, value in vars(family).items()
             if name.startswith("_") and inspect.isfunction(value)
