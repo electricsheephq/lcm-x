@@ -345,3 +345,66 @@ def test_reset_progress_keeps_proofs(transition_state: Any) -> None:
 def test_reset_proofs_keeps_progress(transition_state: Any) -> None:
     transition_state[0].reset_proofs()
     assert_frontier_transition(transition_state, {"commit_proof": None, "emission_descriptors": None})
+
+
+@pytest.mark.parametrize("method, args, updates", [
+    ("adopt_trusted", (31,), {"cursor": 31, "needs_reconcile": False}),
+    ("restart_cursor", (), {"cursor": 0, "compacted_store_id": 0}),
+    ("bind_frontier", (31,), {"compacted_store_id": 31}),
+    ("publish_frontier", (31,), {"compacted_store_id": 31}),
+])
+def test_boundary_transition_fields_and_order(
+    transition_state: Any, method: str, args: tuple[Any, ...], updates: dict[str, Any],
+) -> None:
+    getattr(transition_state[0], method)(*args)
+    assert_frontier_transition(transition_state, updates)
+
+
+@pytest.mark.parametrize("proof", [False, True])
+@pytest.mark.parametrize("descriptors", [False, True])
+def test_binding_filter_subsets(transition_state: Any, proof: bool, descriptors: bool) -> None:
+    transition_state[0].filter_by_binding(proof=proof, descriptors=descriptors)
+    updates = {}
+    if proof:
+        updates["commit_proof"] = None
+    if descriptors:
+        updates["emission_descriptors"] = None
+    assert_frontier_transition(transition_state, updates)
+
+
+@pytest.mark.parametrize("field, key, value", [
+    ("commit_proof", "carry_ranges", [("source", 1, 7)]),
+    ("commit_proof", "session_id", "child"),
+    ("emission_descriptors", "session_id", "child"),
+    ("commit_proof", "input", None),
+])
+def test_child_transfer_keeps_dict_identity(
+    transition_state: Any, field: str, key: str, value: Any,
+) -> None:
+    state, before, _ = transition_state
+    target = before[field]
+    previous = target.copy()
+    state.transfer_to_child(target, key, value)
+    assert target == previous | {key: value}
+    assert target[key] is value
+    assert_frontier_transition(transition_state, {})
+
+
+def test_child_emission_scope_keeps_enclosing_dict(transition_state: Any) -> None:
+    state, before, _ = transition_state
+    emission = {"scope": {"session_id": "source", "reset_epoch": 7}}
+    before["commit_proof"]["emissions"] = [emission]
+    scope = {**emission["scope"], "session_id": "child"}
+    state.transfer_to_child(emission, "scope", scope)
+    assert before["commit_proof"]["emissions"][0] is emission
+    assert emission["scope"] is scope
+    assert_frontier_transition(transition_state, {})
+
+
+def test_end_consumed_keeps_captured_dict(transition_state: Any) -> None:
+    state, before, _ = transition_state
+    proof = before["commit_proof"]
+    previous = proof.copy()
+    state.mark_end_consumed(proof)
+    assert proof == previous | {"end_consumed": True}
+    assert_frontier_transition(transition_state, {})
