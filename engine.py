@@ -169,6 +169,7 @@ from .sqlite_util import (
 from .store import MessageStore, _normalize_conversation_id_value, _normalize_observed_at
 from .tokens import count_message_tokens, count_messages_tokens, count_tokens
 from .assembly_plan import PrefixBudgetFacts, default_prefix_budget, select_prefix, select_tail
+from .frontier_state import FrontierState
 from . import tools as lcm_tools
 
 logger = logging.getLogger(__name__)
@@ -1103,6 +1104,7 @@ class LCMEngine(
         self._ignore_pattern_dropped_count: int = 0
 
         # Track which store_ids have been ingested into the DAG
+        self._frontier = FrontierState()
         self._last_compacted_store_id: int = 0
 
         # Cursor: index in the current messages list up to which all
@@ -1363,6 +1365,64 @@ class LCMEngine(
         # active Hermes config still selects ``context.engine: lcm`` (#471).
         self._engine_name = ENGINE_NAME
         self._identity_migration: Dict[str, Any] | None = None
+
+    @property
+    def _ingest_cursor(self) -> int:
+        return self._frontier.cursor
+
+    @_ingest_cursor.setter
+    def _ingest_cursor(self, value: int) -> None:
+        if not hasattr(self, "_frontier"):
+            self._frontier = FrontierState()
+        self._frontier.cursor = value
+
+    @property
+    def _ingest_cursor_needs_reconcile(self) -> bool:
+        return self._frontier.needs_reconcile
+
+    @_ingest_cursor_needs_reconcile.setter
+    def _ingest_cursor_needs_reconcile(self, value: bool) -> None:
+        if not hasattr(self, "_frontier"):
+            self._frontier = FrontierState()
+        self._frontier.needs_reconcile = value
+
+    @property
+    def _last_compacted_store_id(self) -> int:
+        return self._frontier.compacted_store_id
+
+    @_last_compacted_store_id.setter
+    def _last_compacted_store_id(self, value: int) -> None:
+        if not hasattr(self, "_frontier"):
+            self._frontier = FrontierState()
+        self._frontier.compacted_store_id = value
+
+    @property
+    def _compress_commit_proof(self) -> dict[str, Any] | None:
+        return self._frontier.commit_proof
+
+    @_compress_commit_proof.setter
+    def _compress_commit_proof(self, value: dict[str, Any] | None) -> None:
+        if not hasattr(self, "_frontier"):
+            self._frontier = FrontierState()
+        self._frontier.commit_proof = value
+
+    @property
+    def _last_emission_descriptors(self) -> dict[str, Any] | None:
+        return self._frontier.emission_descriptors
+
+    @_last_emission_descriptors.setter
+    def _last_emission_descriptors(self, value: dict[str, Any] | None) -> None:
+        if not hasattr(self, "_frontier"):
+            self._frontier = FrontierState()
+        self._frontier.emission_descriptors = value
+
+    def __copy__(self) -> "LCMEngine":
+        """Copy scalar frontier values while retaining the shared proof dicts."""
+        clone = type(self).__new__(type(self))
+        clone.__dict__.update(self.__dict__)
+        if hasattr(self, "_frontier"):
+            clone._frontier = copy.copy(self._frontier)
+        return clone
 
     def apply_identity_migration(self, notice: Dict[str, Any] | None) -> None:
         """Answer to the legacy engine name while the config still uses it."""

@@ -40,6 +40,7 @@ jobs:
             escalation.py
             externalize.py
             extraction.py
+            frontier_state.py
             fresh_tail.py
             host_uid.py
             host_uid_emit.py

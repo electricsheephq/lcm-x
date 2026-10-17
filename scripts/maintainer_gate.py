@@ -66,6 +66,7 @@ TURN_PATH_FILES = {
     "store.py",  # Ingest protection and row normalization decide what a turn stores.
     "tool_registry.py",  # Selects model-facing schemas exposed on the default turn.
     "reset_state.py",  # resets the ingest cursor and compaction progress on rotation
+    "frontier_state.py",  # Holds the ingest cursor and compaction frontier each turn reads and writes.
     "emission_projection.py", "recognition_matching.py",  # Split out of engine paths by #1294.
     # Split out of ingest_protection.py: what one ingested turn stores and how it is checked.
     "ingest_content.py", "ingest_integrity.py", "ingest_pem_model.py",
