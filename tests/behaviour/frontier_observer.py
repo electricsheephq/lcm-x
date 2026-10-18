@@ -17,6 +17,7 @@ LEGACY_FIELDS: dict[str, str] = {
     and HOLDER_NAME in prop.fget.__code__.co_names
     and field.name in prop.fget.__code__.co_names
 } if holder_type is not None else {}
+LEGACY_FIELDS["short_replay_floor"] = "_frontier.short_replay_floor"
 
 
 def legacy_frontier_fields(method: ast.AST) -> set[str]:
@@ -32,6 +33,8 @@ def legacy_frontier_fields(method: ast.AST) -> set[str]:
 
 
 def observed_attribute(engine: Any, name: str) -> Any:
+    if name == "_frontier.short_replay_floor":
+        return engine._frontier.short_replay_floor
     value = getattr(engine, name, {"absent": True})
     # The frozen legacy properties already observe every holder value.
     if name == HOLDER_NAME and holder_type is not None and isinstance(value, holder_type):

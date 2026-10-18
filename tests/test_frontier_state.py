@@ -185,7 +185,7 @@ def test_holder_fields_and_properties_forward(engine: Any) -> None:
         "_compress_commit_proof": "commit_proof",
         "_last_emission_descriptors": "emission_descriptors",
     }
-    assert {field.name for field in fields(FrontierState)} == set(mapping.values()) | {"short_replay"}
+    assert {field.name for field in fields(FrontierState)} == set(mapping.values()) | {"short_replay", "short_replay_floor"}
     assert engine._short_ingest_replay is None
     assert isinstance(engine._frontier, FrontierState)
     state = FrontierState()
@@ -244,7 +244,7 @@ def test_frontier_transition_sites_keep_write_order_and_lazy_creation(
     monkeypatch.setattr(FrontierState, "__setattr__", record)
     expected = [] if seeded else list(previous.items())
     if site in {"progress", "runtime"}:
-        expected += [("short_replay", None), ("compacted_store_id", 0), ("cursor", 0), ("needs_reconcile", False)]
+        expected += [("short_replay", None), ("short_replay_floor", 0), ("compacted_store_id", 0), ("cursor", 0), ("needs_reconcile", False)]
         if site == "progress":
             instance._reset_compaction_progress()
         else:
@@ -263,7 +263,7 @@ def test_frontier_transition_sites_keep_write_order_and_lazy_creation(
             persisted=site == "adopt", exit_fit=False,
         ) is fitted
         expected += ([("cursor", 1)] if site == "adopt" else
-                     [("short_replay", None), ("cursor", 0), ("needs_reconcile", True)])
+                     [("short_replay", None), ("short_replay_floor", 0), ("cursor", 0), ("needs_reconcile", True)])
     assert writes == expected
     final = previous | dict(expected)
     assert vars(instance._frontier) == final
@@ -322,13 +322,13 @@ def assert_frontier_transition(
 
 def test_invalidate_changes_only_cursor_and_reconcile(transition_state: Any) -> None:
     transition_state[0].invalidate()
-    assert_frontier_transition(transition_state, {"short_replay": None, "cursor": 0, "needs_reconcile": True})
+    assert_frontier_transition(transition_state, {"short_replay": None, "short_replay_floor": 0, "cursor": 0, "needs_reconcile": True})
 
 
 def test_invalidate_drops_proof_before_cursor_and_reconcile(transition_state: Any) -> None:
     transition_state[0].invalidate(drop_proof=True)
     assert_frontier_transition(transition_state, {
-        "short_replay": None, "commit_proof": None, "cursor": 0, "needs_reconcile": True,
+        "short_replay": None, "short_replay_floor": 0, "commit_proof": None, "cursor": 0, "needs_reconcile": True,
     })
 
 
@@ -340,7 +340,7 @@ def test_adopt_changes_only_cursor(transition_state: Any) -> None:
 def test_reset_progress_keeps_proofs(transition_state: Any) -> None:
     transition_state[0].reset_progress()
     assert_frontier_transition(transition_state, {
-        "short_replay": None, "compacted_store_id": 0, "cursor": 0, "needs_reconcile": False,
+        "short_replay": None, "short_replay_floor": 0, "compacted_store_id": 0, "cursor": 0, "needs_reconcile": False,
     })
 
 
@@ -351,7 +351,7 @@ def test_reset_proofs_keeps_progress(transition_state: Any) -> None:
 
 @pytest.mark.parametrize("method, args, updates", [
     ("adopt_trusted", (31,), {"cursor": 31, "needs_reconcile": False}),
-    ("restart_cursor", (), {"short_replay": None, "cursor": 0, "compacted_store_id": 0}),
+    ("restart_cursor", (), {"short_replay": None, "short_replay_floor": 0, "cursor": 0, "compacted_store_id": 0}),
     ("bind_frontier", (31,), {"compacted_store_id": 31}),
     ("publish_frontier", (31,), {"compacted_store_id": 31}),
 ])
