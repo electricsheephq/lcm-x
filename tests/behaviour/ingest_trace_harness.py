@@ -262,8 +262,6 @@ class IngestCanonical(Canonical):
             return {"callable": True}
         if isinstance(value, bytes):
             return {"bytes": value.hex()}
-        if path == "_pending_session_tails" and isinstance(value, list):
-            value = [{**item, "store": "<owning-store>"} for item in value]
         return super().value(value, path, in_payload=in_payload)
 
 
@@ -300,11 +298,18 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
         if name in {"_store", "_host_rewrite_store"}:
             value = {"present": value is not None}
         elif name == "_dag":
-            value = engine._dag.get_session_nodes("S", limit=10000)
+            value = {session: engine._dag.get_session_nodes(session, limit=10000)
+                     for session in sorted({"S", engine._session_id} - {""})}
         elif name == "_lifecycle":
             value = engine._lifecycle.get_by_conversation("trace-conversation")
         elif name in {"_identity_anchor_recoveries", "_identity_anchor_recovery"}:
             value = recovery_receipts(engine, value)
+        elif name == "_pending_session_tails":
+            value = [{**tail, "store": (
+                "<absent-store>" if "store" not in tail else
+                None if tail["store"] is None else
+                "<owning-store>" if tail["store"] is engine._store else "<other-store>"
+            )} for tail in value]
         state[name] = canonical.value(value, name)
     conn = engine._store._conn
     # Exact durable rows, including relation IDs, observed_at/source, UID bindings,
@@ -605,10 +610,6 @@ def prepare(engine: Any, case: Scenario, root: Path, engines: ExitStack) -> tupl
         incoming[0]["message_uid"] = "host-uid-new"
     if case.variant == "no-session":
         engine._session_id = ""
-    elif case.variant == "ignored":
-        engine._session_ignored = True
-    elif case.variant == "stateless":
-        engine._session_stateless = True
     return engine, incoming
 
 
@@ -710,6 +711,8 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                             large_output_active_replay_stub_threshold_tokens=10)
         if case.shape == "ignored":
             settings["ignore_message_patterns"] = ["IGNORE THIS ROW"]
+        if case.variant in {"ignored", "stateless"}:
+            settings["ignore_session_patterns" if case.variant == "ignored" else "stateless_session_patterns"] = ["S"]
         if case.shape == "uid":
             (root / "home").mkdir(exist_ok=True)
             with sqlite3.connect(root / "home" / "state.db") as host:
@@ -751,18 +754,12 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
             emit("aliases-before", aliases(incoming, incoming))
             before = snapshot(engine, canonical)
             emit("state-before", before)
-            connections: list[tuple[str, sqlite3.Connection]] = []
-            for name in ("_store", "_dag", "_lifecycle", "_host_rewrite_store"):
-                conn = getattr(getattr(engine, name, None), "_conn", None)
-                if isinstance(conn, sqlite3.Connection) and all(conn is not c for _, c in connections):
-                    connections.append((name, conn))
-
             def sql_trace(name: str, sql: str) -> None:
                 if sql.lstrip().startswith("--") or re.search(r"(['\"])(main|temp)\1\s*\.", sql):
                     return
                 emit("sql " + name, canonical.text(sql))
 
-            def wrap(name: str, original: Callable[..., Any]) -> Callable[..., Any]:
+            def wrap(name: str, original: Callable[..., Any], inject_faults: bool) -> Callable[..., Any]:
                 def observed(*args: Any, **kwargs: Any) -> Any:
                     # Callback identity is a stable label; invocation stays inside
                     # the real store transaction and remains visible through SQL.
@@ -783,8 +780,9 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                             emit("metadata-callback result", result)
                             return result
                         kwargs = {**kwargs, "metadata_factory": metadata}
-                    scoped_failure = ((case.fault == "probe" and name == "has_session_messages")
-                                      or (case.fault == "prematch" and name == "find_rows_by_observed_at"))
+                    scoped_failure = inject_faults and (
+                        (case.fault == "probe" and name == "has_session_messages")
+                        or (case.fault == "prematch" and name == "find_rows_by_observed_at"))
                     if scoped_failure:
                         engine._store._conn.set_authorizer(lambda action, table, *_:
                             sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == "messages"
@@ -801,42 +799,53 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                     return result
                 return observed
 
-            log = logging.getLogger("hermes_lcm")
-            handler, old_level = Logs(events, canonical), log.level
-            log.addHandler(handler)
-            log.setLevel(logging.DEBUG)
-            with pytest.MonkeyPatch.context() as observers:
-                for name in ("append_batch", "_append_protected_batch", "has_session_messages", "get_session_count",
-                             "get_session_messages", "get_session_messages_after", "get_session_tail",
-                             "get_session_rows_through", "get_range", "get_batch", "get_message_relations", "get",
-                             "read_metadata_json", "read_metadata_json_many", "update_metadata_json", "write_metadata_json",
-                             "backfill_observed_at_many", "add_message_relations", "add_host_uid_bindings",
-                             "host_uid_bindings_for", "find_rows_by_observed_at", "find_session_rows_by_content",
-                             "load_session_page"):
-                    if hasattr(engine._store, name):
-                        observers.setattr(engine._store, name, wrap(name, getattr(engine._store, name)))
-                for name, conn in connections:
-                    conn.set_trace_callback(partial(sql_trace, name))
-                    if isinstance(conn, TraceConnection):
-                        conn.failure_observer = lambda sql, parameters, exc, name=name: emit(
-                            "sql failed " + name, [sql, parameters, type(exc).__name__, str(exc)])
-                try:
-                    with sqlite_fault(engine, case.fault, events):
-                        for attempt in range(2 if case.fault == "duplicate-tail" else 1):
-                            try:
-                                result = engine._ingest_messages(incoming,
-                                    allow_session_end_replay_proof=case.variant == "allow-end")
-                                emit(f"return-{attempt}", result)
-                                emit(f"aliases-{attempt}", aliases(incoming, result))
-                            except Exception as exc:
-                                emit(f"raise-{attempt}", [type(exc).__name__, str(exc)])
-                finally:
-                    for _, conn in connections:
-                        conn.set_trace_callback(None)
+            @contextmanager
+            def observing(*, inject_faults: bool = False) -> Iterator[None]:
+                # Resolve connections anew for each engine, including cold
+                # reopen. Snapshots and lifecycle setup stay outside tracing.
+                connections: list[tuple[str, sqlite3.Connection]] = []
+                for name in ("_store", "_dag", "_lifecycle", "_host_rewrite_store"):
+                    conn = getattr(getattr(engine, name, None), "_conn", None)
+                    if isinstance(conn, sqlite3.Connection) and all(conn is not c for _, c in connections):
+                        connections.append((name, conn))
+                log = logging.getLogger("hermes_lcm")
+                handler, old_level = Logs(events, canonical), log.level
+                log.addHandler(handler)
+                log.setLevel(logging.DEBUG)
+                with pytest.MonkeyPatch.context() as observers:
+                    for name in ("append_batch", "_append_protected_batch", "has_session_messages", "get_session_count",
+                                 "get_session_messages", "get_session_messages_after", "get_session_tail",
+                                 "get_session_rows_through", "get_range", "get_batch", "get_message_relations", "get",
+                                 "read_metadata_json", "read_metadata_json_many", "update_metadata_json", "write_metadata_json",
+                                 "backfill_observed_at_many", "add_message_relations", "add_host_uid_bindings",
+                                 "host_uid_bindings_for", "find_rows_by_observed_at", "find_session_rows_by_content",
+                                 "load_session_page"):
+                        if hasattr(engine._store, name):
+                            observers.setattr(engine._store, name, wrap(name, getattr(engine._store, name), inject_faults))
+                    for name, conn in connections:
+                        conn.set_trace_callback(partial(sql_trace, name))
                         if isinstance(conn, TraceConnection):
-                            conn.failure_observer = None
-                    log.removeHandler(handler)
-                    log.setLevel(old_level)
+                            conn.failure_observer = lambda sql, parameters, exc, name=name: emit(
+                                "sql failed " + name, [sql, parameters, type(exc).__name__, str(exc)])
+                    try:
+                        yield
+                    finally:
+                        for _, conn in connections:
+                            conn.set_trace_callback(None)
+                            if isinstance(conn, TraceConnection):
+                                conn.failure_observer = None
+                        log.removeHandler(handler)
+                        log.setLevel(old_level)
+
+            with observing(inject_faults=True), sqlite_fault(engine, case.fault, events):
+                for attempt in range(2 if case.fault == "duplicate-tail" else 1):
+                    try:
+                        result = engine._ingest_messages(incoming,
+                            allow_session_end_replay_proof=case.variant == "allow-end")
+                        emit(f"return-{attempt}", result)
+                        emit(f"aliases-{attempt}", aliases(incoming, result))
+                    except Exception as exc:
+                        emit(f"raise-{attempt}", [type(exc).__name__, str(exc)])
             after = snapshot(engine, canonical)
             for name, value in after.items():
                 if before.get(name) != value:
@@ -851,20 +860,22 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
             # Deferred effects are checked by another real ingest and a cold
             # lifecycle rebind, including a replay after the reopened cursor.
             engine._session_end_flush_active = False
-            try:
-                result = engine._ingest_messages(incoming)
-                emit("next-return", result)
-                emit("next-aliases", aliases(incoming, result))
-            except Exception as exc:
-                emit("next-raise", [type(exc).__name__, str(exc)])
+            with observing():
+                try:
+                    result = engine._ingest_messages(incoming)
+                    emit("next-return", result)
+                    emit("next-aliases", aliases(incoming, result))
+                except Exception as exc:
+                    emit("next-raise", [type(exc).__name__, str(exc)])
             emit("next-state", snapshot(engine, canonical))
             engine = reopen(engine, root, engines)
             if case.shape == "ignored":
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
-            try:
-                emit("cold-return", engine._ingest_messages(incoming))
-            except Exception as exc:
-                emit("cold-raise", [type(exc).__name__, str(exc)])
+            with observing():
+                try:
+                    emit("cold-return", engine._ingest_messages(incoming))
+                except Exception as exc:
+                    emit("cold-raise", [type(exc).__name__, str(exc)])
             emit("cold-state", snapshot(engine, canonical))
             manifest = payload_observation(engine)
             if manifest:

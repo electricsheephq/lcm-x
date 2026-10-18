@@ -53,8 +53,9 @@ def test_fixture_scenario_inventory_and_size() -> None:
     assert len(names) == 190
     assert len(names) == len(set(names))
     assert set(data) == set(names), TRACE_GUIDANCE
-    assert GOLDEN.stat().st_size <= 1_500_000
-    assert all(len(json.dumps(trace).encode()) <= 40_000 for trace in data.values())
+    # Initial, next and cold ingests now each retain their full observer stream.
+    assert GOLDEN.stat().st_size <= 3_200_000
+    assert all(len(json.dumps(trace).encode()) <= 45_000 for trace in data.values())
 
 
 def test_first_divergence() -> None:
