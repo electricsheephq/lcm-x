@@ -8889,21 +8889,9 @@ class LCMEngine(
             _stamp_generated_model_only(result, generated_rows)
             return result
 
-        existing_folded_lineage = self._load_folded_tail_lineage(result)
-        if (
-            folded_result_index is not None
-            and folded_original_tail is not None
-            and folded_result_index < len(result)
-        ):
-            if not self._write_folded_tail_lineage(
-                result[folded_result_index],
-                folded_source_store_id,
-            ):
-                result[folded_result_index] = folded_original_tail
-                result = self._sanitize_active_context_messages(result, generated_rows=generated_rows)
-                self._clear_folded_tail_lineage()
-        elif existing_folded_lineage is None:
-            self._clear_folded_tail_lineage()
+        result = self._persist_folded_lineage(
+            result, folded_result_index, folded_original_tail, folded_source_store_id, generated_rows,
+        )
 
         # Decide only after the final cleanup, including fold recovery. Trial
         # assemblies above use the same decision without publishing proof.
@@ -9128,6 +9116,26 @@ class LCMEngine(
                     })
                 tail_selected = tail_selected[1:]
         return carried_tail, tail_selected
+
+    def _persist_folded_lineage(
+        self, result, folded_result_index, folded_original_tail, folded_source_store_id, generated_rows,
+    ) -> List[Dict[str, Any]]:
+        existing_folded_lineage = self._load_folded_tail_lineage(result)
+        if (
+            folded_result_index is not None
+            and folded_original_tail is not None
+            and folded_result_index < len(result)
+        ):
+            if not self._write_folded_tail_lineage(
+                result[folded_result_index],
+                folded_source_store_id,
+            ):
+                result[folded_result_index] = folded_original_tail
+                result = self._sanitize_active_context_messages(result, generated_rows=generated_rows)
+                self._clear_folded_tail_lineage()
+        elif existing_folded_lineage is None:
+            self._clear_folded_tail_lineage()
+        return result
 
     def _mint_assembled_engine_uids(self, result, candidates, summary_message, carried_tail, recall_row,
                                     context_row, tail_selected) -> None:
