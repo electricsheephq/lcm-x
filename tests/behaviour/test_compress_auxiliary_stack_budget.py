@@ -180,3 +180,127 @@ def test_sweep_phase_host_callbacks_preserve_auxiliary_at_host_depth(
         assert set(distances) == walkers
         assert max(distances.values()) < 28, "keep calls within four frames of the limit in their original frame"
         print(json.dumps(dict(phase=phase, distances=distances, paths=paths), sort_keys=True))
+
+
+@pytest.mark.parametrize("path", ["tail", "yield", "replay", "filter"])
+def test_leaf_phase_image_pricing_preserves_auxiliary_at_host_depth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, path: str,
+) -> None:
+    """Exercise the host pricing callback through each leaf-phase token path."""
+    import ast
+    import inspect
+    import json
+    import sys
+    from types import ModuleType
+
+    from tests.behaviour.compress_trace_harness import LiteralPattern, PAD, dag
+
+    harness.pin_char_counter(monkeypatch)
+    agent = _LateAuxiliaryAgent()
+    compaction = importlib.import_module("hermes_lcm.compaction")
+    source = inspect.getsource(compaction)
+    driver = next(n for n in ast.walk(ast.parse(source))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_compress_impl")
+    loop = next(n for n in driver.body if isinstance(n, ast.While))
+    # Before extraction the same callback is identified by its original phase
+    # statement, so this exact test also measures the immediate parent.
+    filtering = next((n for n in loop.body if isinstance(n, ast.If)
+                      and ast.unparse(n.test) == "candidate_start < fresh_tail_start"), None)
+    target = "_filter_leaf_backlog" if path == "filter" else "_admit_leaf_and_adopt_replay"
+    distances: dict[str, int] = {}
+    paths: dict[str, list[str]] = {}
+    observed_roots: set[str] = set()
+    settings = dict(fresh_tail_count=100 if path in {"yield", "replay"} else 2,
+                    fresh_tail_max_tokens=0, leaf_chunk_tokens=800,
+                    context_threshold=0.001, threshold_full_sweep_enabled=False,
+                    max_assembly_tokens=100000, summary_model="trace-model",
+                    temporal_rollups_enabled=False, embeddings_enabled=False,
+                    fresh_tail_pressure_yield_min_observations=1,
+                    large_output_externalization_enabled=False,
+                    ignore_message_patterns=["IGNORE THIS ROW"] if path == "filter" else [])
+    with harness.engine_context(tmp_path, window=200000, session_id="foreground-session", **settings) as engine:
+        harness.ScriptedSummarizer().install(monkeypatch)
+        view = []
+        for i in range(6):
+            view.extend([harness.user(f"Request {i}. " + PAD), harness.assistant(f"Reply {i}. " + PAD)])
+        image = {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}
+        for row in view:
+            row["content"] = [{"type": "text", "text": row["content"]}, image]
+        if path == "filter":
+            view[2]["content"] = "IGNORE THIS ROW " + PAD
+        if path == "filter":
+            engine._compiled_ignore_message_patterns = [LiteralPattern()]
+            engine._store.append_batch("foreground-session", view, conversation_id=engine._conversation_id)
+            engine._ingest_cursor = len(view)
+        else:
+            engine.ingest(view)
+        if path == "replay":
+            engine._dag.add_node(dag.SummaryNode(
+                session_id="foreground-session", depth=0, summary="Committed prefix.", token_count=20,
+                source_token_count=2000, source_ids=[1, 2, 3, 4], source_type="messages", created_at=100.0))
+            engine._lifecycle.advance_frontier(engine._conversation_id, "foreground-session", 4)
+            engine._last_compacted_store_id = 4
+            for _ in range(3):
+                engine._summary_circuit_breaker.record_failure("trace-model")
+
+        def price() -> int:
+            frame = inspect.currentframe()
+            chain = []
+            phase_frame = None
+            while frame is not None:
+                chain.append(frame.f_code.co_name)
+                if frame.f_code.co_name == target:
+                    phase_frame = frame
+                    break
+                if frame.f_code.co_name == "_compress_impl":
+                    if loop.lineno < frame.f_lineno <= loop.end_lineno and filtering is not None:
+                        is_filter = filtering.lineno <= frame.f_lineno <= filtering.end_lineno
+                        if is_filter == (path == "filter") and frame.f_lineno <= filtering.end_lineno:
+                            phase_frame = frame
+                    break
+                frame = frame.f_back
+            if phase_frame is None:
+                return 1500
+            root = chain[-2]
+            if path == "yield" and root != "_maybe_engage_fresh_tail_pressure_yield":
+                return 1500
+            if path == "replay" and root != "count_messages_tokens":
+                return 1500
+            observed_roots.add(root)
+            agent._memory_write_origin = "background_review"
+            try:
+                assert engine._thread_context_session_id() == "review-session"
+                assert engine._in_process_auxiliary_caller_generation("review-session") > 0
+            finally:
+                agent._memory_write_origin = ""
+            return 1500
+
+        def profile(frame: Any, event: str, value: Any) -> None:
+            name = frame.f_code.co_name
+            if event != "return" or name not in {
+                "_in_process_auxiliary_session_id_from_stack", "_in_process_auxiliary_caller_generation"
+            } or not agent._memory_write_origin:
+                return
+            chain, current = [], frame.f_back
+            while current is not None:
+                chain.append(current.f_code.co_name)
+                if current.f_locals.get("self") is agent:
+                    break
+                current = current.f_back
+            assert current is not None
+            if len(chain) > distances.get(name, 0):
+                distances[name], paths[name] = len(chain), chain
+
+        pricing = ModuleType("agent.image_token_cost")
+        pricing.current_image_token_cost = price
+        monkeypatch.setitem(sys.modules, pricing.__name__, pricing)
+        previous = sys.getprofile()
+        sys.setprofile(profile)
+        try:
+            with engine._fresh_tail_pressure_yield_invocation():
+                agent.compress(engine, view, 3000)
+        finally:
+            sys.setprofile(previous)
+        assert observed_roots and len(distances) == 2
+        assert max(distances.values()) < 28
+        print(json.dumps(dict(path=path, roots=sorted(observed_roots), distances=distances, paths=paths), sort_keys=True))

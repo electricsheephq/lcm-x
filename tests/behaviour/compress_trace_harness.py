@@ -68,6 +68,18 @@ class Scenario:
 
 
 SCENARIOS = (
+    Scenario("resume-commit-wide-tail", shape="no-system", setup="resume-wide-tail", mode="open-circuit",
+             overrides=(("fresh_tail_count", 100),)),
+    Scenario("persisted-volatile-no-pattern", shape="volatile", setup="stored-volatile"),
+    Scenario("ignored-unknown-role", shape="ignored-unknown", setup="stored", overrides=(
+        ("ignore_message_patterns", ["IGNORE THIS ROW"]),)),
+    Scenario("dependent-nonreply-barrier", setup="nonreply-ledger"),
+    Scenario("ignored-tail-unknown-role", shape="tail-unknown", setup="stored", overrides=(
+        ("fresh_tail_count", 3), ("ignore_message_patterns", ["IGNORE THIS ROW"]))),
+    Scenario("ignored-tail-nondict-barrier", shape="tail-nondict", overrides=(
+        ("fresh_tail_count", 3), ("ignore_message_patterns", ["IGNORE THIS ROW"]))),
+    Scenario("ignored-tail-unanchored-eof", shape="unanchored-eof", setup="stored", overrides=(
+        ("fresh_tail_count", 2), ("ignore_message_patterns", ["IGNORE THIS ROW"]))),
     Scenario("empty", shape="empty"),
     Scenario("fresh-tail-protected", turns=1, force=False),
     Scenario("below-leaf-minimum", overrides=(("leaf_chunk_tokens", 20000),)),
@@ -560,6 +572,26 @@ def transcript(case: Scenario) -> list[dict[str, Any]]:
                          {"role": "assistant", "content": "A fresh reply."}])
     if case.shape in {"no-system", "retained"}:
         rows = rows[1:]
+    if case.setup == "resume-wide-tail":
+        for row in rows:
+            row.pop("timestamp", None)
+    if case.shape == "volatile":
+        rows[2]["content"] = (
+            "[LCM active replay placeholder: assistant output quarantined; "
+            "kind=quarantined_assistant_output; reason=fixture; "
+            "scope=ignored_message_pattern; field=content; chars=8; bytes=8; "
+            "sha256=0123456789abcdef]")
+    if case.shape == "ignored-unknown":
+        rows[3] = {"role": "unknown", "content": "IGNORE THIS ROW " + PAD}
+    if case.shape in {"tail-unknown", "tail-nondict"}:
+        rows[-4]["content"] = "IGNORE THIS ROW " + PAD
+        rows[-2] = {"role": "unknown", "content": "Unclassified tail row."}
+        if case.shape == "tail-nondict":
+            rows[-2] = None
+    if case.shape == "unanchored-eof":
+        rows = [{"role": "user", "content": "IGNORE THIS ROW " + PAD},
+                {"role": "assistant", "content": "Dependent reply. " + PAD},
+                {"role": "assistant", "content": "Dependent continuation. " + PAD}]
     return rows
 
 
@@ -710,14 +742,38 @@ def observe(case: Scenario, root: Path) -> Trace:
             view = transcript(case)
             if settings.get("ignore_message_patterns"):
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
+            if case.setup == "resume-wide-tail":
+                engine.ingest(view)
+                engine._dag.add_node(dag.SummaryNode(
+                    session_id="S", depth=0, summary="Committed prefix. Expand for details about: turns",
+                    token_count=20, source_token_count=1200, source_ids=[1, 2, 3, 4],
+                    source_type="messages", created_at=100.0))
+                engine._lifecycle.advance_frontier("trace-conversation", "S", 4)
+                engine._last_compacted_store_id = 4
             if case.setup == "bypass-no-aux":
                 engine.ingest(view)
                 engine.on_session_start("trace-bypass", context_length=200000, platform="cli")
                 assert engine._bypasses_lcm_context_management()
                 assert engine._thread_context_session_id() == ""
-            if case.setup == "stored":
+            if case.setup in {"stored", "stored-volatile"}:
                 engine._store.append_batch("S", view, conversation_id="trace-conversation")
                 engine._ingest_cursor = len(view)
+            if case.setup == "stored-volatile":
+                engine._store.write_metadata_json(
+                    engine._ignored_placeholder_metadata_keys(), json.dumps(["0123456789abcdef"]))
+                assert not engine._compiled_ignore_message_patterns
+            if case.setup == "nonreply-ledger":
+                engine.ingest(view)
+                engine._compress_run.store_ids_by_message_id = engine._get_store_id_map_for_messages(view)
+                user = view[1]
+                store_id = engine._compress_run.store_ids_by_message_id[id(user)]
+                digest = hashlib.sha256(f"S\0{store_id}".encode()).hexdigest()[:16]
+                engine._store.write_metadata_json(engine._ignored_dependent_reply_metadata_keys(),
+                                                  json.dumps([{"store": digest}]))
+                assert engine._ignored_dependent_reply_store_fingerprint(user) is None
+                assert engine._ignored_dependent_reply_content_fingerprint(user, user["content"]) is None
+                assert not engine._is_generated_ignored_dependent_reply(user, user["content"])
+                events.append("non-reply role: both fingerprints absent despite persisted ledger; generated=False")
             if case.shape == "child":
                 engine._mark_thread_context_stateless("trace-child")
                 if case.setup == "child-usage":
@@ -824,6 +880,12 @@ def observe(case: Scenario, root: Path) -> Trace:
                         if case.mode == "open-after-first" and attempt:
                             for _ in range(3):
                                 engine._summary_circuit_breaker.record_failure("trace-model")
+                        if case.setup == "resume-wide-tail":
+                            view = [dict(row) for row in view]
+                            engine._config.fresh_tail_count = 100
+                            before_calls = provider.calls
+                            before_rows = harness.stored_rows(engine, "S")
+                            before_nodes = engine._dag.get_session_nodes("S", limit=10000)
                         propagated_frontier_error = False
                         try:
                             with engine._fresh_tail_pressure_yield_invocation():
@@ -834,6 +896,16 @@ def observe(case: Scenario, root: Path) -> Trace:
                             if not isinstance(exc, (Exception, HostInterrupted)):
                                 raise
                             events.append(f"raise {type(exc).__name__} message={compact(canonical.text(str(exc)))}")
+                            if case.shape == "tail-nondict":
+                                assert isinstance(exc, AttributeError)
+                                frames = []
+                                traceback = exc.__traceback__
+                                while traceback is not None:
+                                    frames.append(traceback.tb_frame.f_code.co_name)
+                                    traceback = traceback.tb_next
+                                assert "_begin_compression" in frames
+                                assert "count_message_tokens" in frames
+                                events.append("non-dict tail: token counting rejects input before ingestion and leaf phases")
                             if case.mode == "frontier-read-error":
                                 assert isinstance(exc, sqlite3.DatabaseError)
                                 assert not compaction._is_sqlite_locked_error(exc)
@@ -841,6 +913,15 @@ def observe(case: Scenario, root: Path) -> Trace:
                         finally:
                             if case.mode == "frontier-read-error":
                                 engine._dag._conn.set_authorizer(None)
+                        if case.setup == "resume-wide-tail":
+                            assert provider.calls == before_calls
+                            assert harness.stored_rows(engine, "S") == before_rows
+                            assert engine._dag.get_session_nodes("S", limit=10000) == before_nodes
+                            assert len(returned) < len(view)
+                            assert all(any(row["content"] in str(out.get("content", ""))
+                                           and row["role"] == out.get("role") for out in returned)
+                                       for row in view[int(engine._last_compacted_store_id):])
+                            events.append("resumed prefix: no new leaf; durable rows unchanged; remaining tail survives")
                         if case.mode == "frontier-read-error":
                             assert frontier_read_denied and propagated_frontier_error
                             assert engine._foreground_budget.leaf_reserve == 0.0

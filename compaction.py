@@ -22,7 +22,7 @@ import sys
 import time
 from collections import Counter
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 from .dag import SummaryNode
 from .escalation import (
@@ -105,6 +105,28 @@ class _CompressionState:
     max_leaf_passes: int = 0
     pre_leaf_condensation_passes: int = 0
     pre_leaf_condensation_reason: str = ""
+    dropped_replayed_scaffold_messages: bool = False
+    resumed_prefix: bool = False
+    resumed_ahead: int = 0
+    noop_reason: str = ""
+    sweep_stop_reason: str = ""
+    sweep_raw_drained: bool = False
+    no_call_only: bool = False
+    refused_input: Optional[tuple[List[Dict[str, Any]], List[Dict[str, Any]], bool]] = None
+
+
+@dataclass
+class _LeafState:
+    """Scratch for one leaf iteration; fields become valid in their owning phase."""
+
+    fresh_tail_start: int = 0
+    leading_anchor_count: int = 0
+    publication_excluded_store_ids: List[int] = field(default_factory=list)
+    filter_exclusion_proofs: Dict[int, Any] = field(default_factory=dict)
+    hidden_backlog: Any = False
+    copy_lookup: List[Any] = field(default_factory=list)
+    candidate_start: int = 0
+    premapped_store_ids: Optional[Dict[int, int]] = None
 
 
 def select_oldest_leaf_chunk(
@@ -1932,6 +1954,246 @@ class CompactionMixin:
             )
         return "next", None
 
+    def _admit_leaf_and_adopt_replay(
+        self, state: _CompressionState, leaf: _LeafState,
+        leaf_passes: int, sweep_step_done: Callable[[str, float], float],
+    ) -> tuple[Literal["next", "break", "continue", "return"], Optional[List[Dict[str, Any]]]]:
+        """Admit one leaf pass and adopt already committed replay."""
+        if state.threshold_full_sweep_active and time.monotonic() >= state.sweep_deadline:
+            state.sweep_stop_reason = "time_budget_exhausted"
+            return "break", None
+        if state.budget.progress:
+            try:  # #605: no pass work for a later leaf whose call could not start (sweep on or off)
+                state.budget.admit(self._primary_summary_route())
+            except SweepBudgetExhausted as exc:
+                state.sweep_stop_reason = exc.reason
+                if leaf_passes == 0:
+                    state.noop_reason = f"foreground budget stop before a leaf ({exc.reason})"
+                return "break", None
+        route_stop = self._summary_route_stop_applies(state.force_overflow)
+        # #640: the first pass adopts a committed summary (#457) before the route stop; adoption needs no route.
+        adopt_before_stop = route_stop and leaf_passes == 0 and not state.resumed_prefix
+        # #628: no level 3 leaf while every route is refused; a source stored whole with no call (#605 F2)
+        # needs no route, so the stop is decided at the selected source.
+        state.no_call_only = route_stop and not adopt_before_stop
+        # review of #723: the input of refused passes since the last stored leaf, returned if none stores one
+        state.refused_input = (state.refused_input or (state.working_messages, state.pressure_messages,
+                                           state.dropped_replayed_scaffold_messages)) if route_stop else None
+        # #1013: the tail's token cap measures what the active context replays (a quarantined
+        # row as its placeholder), not the raw host text; pressure stays on the raw view.
+        leaf.fresh_tail_start = self._fresh_tail_start(state.working_messages)
+
+        # Keep only a real system prompt anchored. Gateway sessions may
+        # pass only conversation messages, so index 0 can be an old user
+        # turn; that must remain eligible for compaction instead of being
+        # replayed forever as fresh-looking intent.
+        leaf.leading_anchor_count = self._leading_anchor_count(state.working_messages)
+        step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
+        leaf.publication_excluded_store_ids = self._get_store_ids_for_messages(
+            state.working_messages[:leaf.leading_anchor_count]
+        ) if leaf.leading_anchor_count else []  # #608: an empty slice maps to nothing
+        if state.threshold_full_sweep_active and sweep_step_done("anchor_ids", step_started) >= state.sweep_deadline:
+            state.sweep_stop_reason = "time_budget_exhausted"
+            return "break", None
+        leaf.filter_exclusion_proofs: Dict[int, Any] = {}
+        leaf.hidden_backlog = False
+        leaf.copy_lookup = []  # per-leaf only: backlog and input share one bounded twin read
+        # #695: adoption checks committed lineage even when the retry's normal tail covers the whole list.
+        if leaf.fresh_tail_start <= leaf.leading_anchor_count and not adopt_before_stop:
+            # Also reached with threshold_full_sweep_active: a sweep whose
+            # "drained" raw prefix is really a tail covering the whole
+            # session must yield like any other blocked pass, or the sweep
+            # condenses nothing and the deadlock survives in sweep mode.
+            if self._maybe_engage_fresh_tail_pressure_yield(
+                state.pressure_messages,
+                state.observed_prompt_tokens,
+                eligible_tokens=0,
+            ):
+                return "continue", None
+            step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
+            leaf.hidden_backlog = self._store_complete_backlog(state.working_messages, leaf.leading_anchor_count, leaf.copy_lookup)
+            if state.threshold_full_sweep_active and sweep_step_done("store_complete", step_started) >= state.sweep_deadline:
+                state.sweep_stop_reason = "time_budget_exhausted"
+                return "break", None
+        if leaf.fresh_tail_start <= leaf.leading_anchor_count and not leaf.hidden_backlog and not adopt_before_stop:
+            state.noop_reason = "no eligible raw backlog outside fresh tail"
+            if state.threshold_full_sweep_active:
+                state.sweep_raw_drained = True
+                state.sweep_stop_reason = "raw_prefix_drained"
+            return "break", None
+
+        leaf.candidate_start = leaf.leading_anchor_count
+        while leaf.candidate_start < leaf.fresh_tail_start and (
+            self._is_replayed_context_scaffold_message(state.working_messages[leaf.candidate_start])
+            if self._compress_occurrences is None  # no v4 proof in force: the rc4 contract
+            else self._compress_occurrences.get(id(state.working_messages[leaf.candidate_start]), (None, ()))[1] is None
+        ):
+            leaf.candidate_start += 1
+        # #457: a retry replays rows a cancelled attempt already committed; drop
+        # those with the scaffold, keeping any row committed lineage does not hold.
+        # Reuse the map when the pass maps this same list.
+        drops, leaf.premapped_store_ids, kept = set(range(leaf.leading_anchor_count, leaf.candidate_start)), None, 0
+        if leaf_passes == 0 and not state.resumed_prefix and not leaf.hidden_backlog:
+            step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
+            resumed, store_ids, summary_tokens, kept = self._committed_replay_drops(
+                state.working_messages, leaf.candidate_start
+            )
+            if state.threshold_full_sweep_active and sweep_step_done("replay_drops", step_started) >= state.sweep_deadline:
+                state.sweep_stop_reason = "time_budget_exhausted"
+                return "break", None
+            state.resumed_prefix = bool(resumed)
+            state.resumed_ahead = resumed[0] - leaf.candidate_start if resumed else 0  # kept rows before lineage
+            leaf.premapped_store_ids = None if drops or resumed else store_ids
+            if resumed:  # the committed summary replaces the dropped rows in the estimate
+                resumed_tokens = count_messages_tokens([state.working_messages[index] for index in resumed])
+                state.estimated_active_tokens = max(0, state.estimated_active_tokens - resumed_tokens + summary_tokens)
+            drops.update(resumed)
+        if adopt_before_stop and not state.resumed_prefix:  # #640: nothing adopted, so the #628 stop applies now
+            if leaf.fresh_tail_start <= leaf.leading_anchor_count:  # a full tail stops here, as before the no-call source
+                state.sweep_stop_reason = "summary_route_unavailable"
+                return "break", None
+            state.no_call_only, adopt_before_stop = True, False
+        if drops:
+            leaf.publication_excluded_store_ids.extend(
+                self._get_store_ids_for_messages(
+                    state.working_messages[leaf.leading_anchor_count:leaf.candidate_start]
+                )
+            )
+            state.dropped_replayed_scaffold_messages = True
+            state.working_messages = [message for index, message in enumerate(state.working_messages) if index not in drops]
+            state.pressure_messages = [message for index, message in enumerate(state.pressure_messages) if index not in drops]
+            leaf.candidate_start = leaf.leading_anchor_count
+            leaf.fresh_tail_start = self._fresh_tail_start(state.working_messages)
+            # A kept row at or below F has no raw store lineage for a new leaf: return it
+            # raw after the committed summary instead of a pass that cannot publish.
+            if leaf.fresh_tail_start <= leaf.leading_anchor_count or (state.resumed_prefix and kept):
+                state.noop_reason = "selected leaf chunk lacks raw store lineage"
+                return "break", None
+        if adopt_before_stop:  # #640: the committed summary is adopted; no new leaf while every route is refused
+            state.sweep_stop_reason = "summary_route_unavailable"
+            return "break", None
+        return "next", None
+
+    def _filter_leaf_backlog(
+        self, state: _CompressionState, leaf: _LeafState,
+        dependent_reply_message_ids: set[int], sweep_step_done: Callable[[str, float], float],
+    ) -> tuple[Literal["next", "break", "continue", "return"], Optional[List[Dict[str, Any]]]]:
+        """Filter the leaf backlog while preserving exclusion and dependent proofs."""
+        if leaf.candidate_start < leaf.fresh_tail_start:
+            step_started = time.monotonic() if state.threshold_full_sweep_active else 0.0
+            self._compress_run.store_ids_by_message_id = (
+                leaf.premapped_store_ids
+                if leaf.premapped_store_ids is not None
+                else self._get_store_id_map_for_messages(state.working_messages[leaf.leading_anchor_count:])
+            )
+            if state.threshold_full_sweep_active and sweep_step_done("store_id_map", step_started) >= state.sweep_deadline:
+                state.sweep_stop_reason = "time_budget_exhausted"
+                return "break", None
+            compactable_pairs = list(
+                zip(
+                    state.working_messages[leaf.candidate_start:leaf.fresh_tail_start],
+                    state.pressure_messages[leaf.candidate_start:leaf.fresh_tail_start],
+                )
+            )
+            kept_working: list[Dict[str, Any]] = []
+            kept_pressure: list[Dict[str, Any]] = []
+            dropped_ignored_backlog = False
+            drop_dependent_reply = False
+            for working_msg, pressure_msg in compactable_pairs:
+                role = str(working_msg.get("role") or "")
+                content_text = text_content_for_pattern_matching(working_msg.get("content")) or ""
+                generated_dependent_reply = self._is_generated_ignored_dependent_reply(
+                    working_msg,
+                    content_text,
+                )
+                volatile_digest = self._active_replay_placeholder_digest(content_text)
+                generated_volatile_placeholder = (
+                    self._is_volatile_ignored_quarantine_placeholder(working_msg, content_text)
+                    and volatile_digest is not None
+                    and volatile_digest in self._load_generated_ignored_placeholder_hashes()
+                )
+                configured_filter_match = (
+                    self._matches_ignore_message_patterns(working_msg)
+                    or self._matches_ignore_message_patterns(pressure_msg)
+                    or self._mapped_stored_row_matches_ignore_message_patterns(working_msg)
+                )
+                if (
+                    configured_filter_match
+                    or self._is_ignored_active_replay_placeholder(working_msg, content_text)
+                    or generated_volatile_placeholder
+                ):
+                    mapped_store_id = (
+                        self._compress_run.store_ids_by_message_id.get(
+                            id(working_msg)
+                        )
+                    )
+                    if mapped_store_id is not None:
+                        store_id = int(mapped_store_id)
+                        leaf.publication_excluded_store_ids.append(store_id)
+                        stored = self._store.get(store_id)
+                        if configured_filter_match:
+                            leaf.filter_exclusion_proofs[store_id] = (
+                                stored.get("content")
+                                if stored is not None
+                                and self._matches_ignore_message_patterns(
+                                    stored,
+                                    stored_row=True,
+                                )
+                                else _UNPROVEN_FILTER_EXCLUSION
+                            )
+                    dropped_ignored_backlog = True
+                    if role in {"user", "system", "tool", "assistant"}:
+                        drop_dependent_reply = True
+                    continue
+                if generated_dependent_reply:
+                    dependent_reply_message_ids.add(id(working_msg))
+                    if role in {"assistant", "tool"}:
+                        drop_dependent_reply = True
+                if drop_dependent_reply and role in {"assistant", "tool"}:
+                    dependent_reply_message_ids.add(id(working_msg))
+                    self._remember_generated_ignored_dependent_reply(working_msg, content_text)
+                if role in {"user", "system"}:
+                    drop_dependent_reply = False
+                kept_working.append(working_msg)
+                kept_pressure.append(pressure_msg)
+            drop_dependent_reply_into_tail = drop_dependent_reply
+            if dropped_ignored_backlog:
+                state.dropped_replayed_scaffold_messages = True
+                self._compress_dropped_ignored_rows = True  # #1013: the output needs a durable proof
+                state.working_messages = (
+                    state.working_messages[:leaf.candidate_start]
+                    + kept_working
+                    + state.working_messages[leaf.fresh_tail_start:]
+                )
+                state.pressure_messages = (
+                    state.pressure_messages[:leaf.candidate_start]
+                    + kept_pressure
+                    + state.pressure_messages[leaf.fresh_tail_start:]
+                )
+                leaf.fresh_tail_start = self._fresh_tail_start(state.working_messages)
+            if drop_dependent_reply_into_tail:
+                tail_scan_start = max(leaf.fresh_tail_start, leaf.leading_anchor_count)
+                pending_tail_dependents: list[tuple[Dict[str, Any], str]] = []
+                saw_tail_boundary = False
+                for tail_msg in state.working_messages[tail_scan_start:]:
+                    if not isinstance(tail_msg, dict):
+                        continue
+                    tail_role = str(tail_msg.get("role") or "")
+                    if tail_role in {"user", "system"}:
+                        saw_tail_boundary = True
+                        break
+                    if tail_role in {"assistant", "tool"}:
+                        tail_text = text_content_for_pattern_matching(tail_msg.get("content")) or ""
+                        self._remember_generated_ignored_dependent_reply(tail_msg, tail_text)
+                        pending_tail_dependents.append((tail_msg, tail_text))
+                if saw_tail_boundary or leaf.leading_anchor_count > 0 or kept_working:
+                    for tail_msg, _tail_text in pending_tail_dependents:
+                        dependent_reply_message_ids.add(id(tail_msg))
+            if dropped_ignored_backlog and leaf.fresh_tail_start <= leaf.leading_anchor_count:
+                state.noop_reason = "selected leaf chunk lacks raw store lineage"
+                return "break", None
+        return "next", None
+
     def _compress_impl(self, messages: List[Dict[str, Any]],
                        current_tokens: int = None,
                        focus_topic: Optional[str] = None,
@@ -2025,233 +2287,60 @@ class CompactionMixin:
         if budget.pre_leaf is not None:
             budget.pre_leaf.steps = sweep_step_seconds
         while leaf_passes < max_leaf_passes:
-            if threshold_full_sweep_active and time.monotonic() >= sweep_deadline:
-                sweep_stop_reason = "time_budget_exhausted"
+            leaf = _LeafState()
+            state.working_messages = working_messages
+            state.pressure_messages = pressure_messages
+            state.estimated_active_tokens = estimated_active_tokens
+            state.dropped_replayed_scaffold_messages = dropped_replayed_scaffold_messages
+            state.resumed_prefix = resumed_prefix
+            state.resumed_ahead = resumed_ahead
+            state.noop_reason = noop_reason
+            state.sweep_stop_reason = sweep_stop_reason
+            state.sweep_raw_drained = sweep_raw_drained
+            state.no_call_only = no_call_only
+            state.refused_input = refused_input
+            action, result = self._admit_leaf_and_adopt_replay(
+                state, leaf, leaf_passes, sweep_step_done,
+            )
+            working_messages = state.working_messages
+            pressure_messages = state.pressure_messages
+            estimated_active_tokens = state.estimated_active_tokens
+            dropped_replayed_scaffold_messages = state.dropped_replayed_scaffold_messages
+            resumed_prefix = state.resumed_prefix
+            resumed_ahead = state.resumed_ahead
+            noop_reason = state.noop_reason
+            sweep_stop_reason = state.sweep_stop_reason
+            sweep_raw_drained = state.sweep_raw_drained
+            no_call_only = state.no_call_only
+            refused_input = state.refused_input
+            if action == "break":
                 break
-            if budget.progress:
-                try:  # #605: no pass work for a later leaf whose call could not start (sweep on or off)
-                    budget.admit(self._primary_summary_route())
-                except SweepBudgetExhausted as exc:
-                    sweep_stop_reason = exc.reason
-                    if leaf_passes == 0:
-                        noop_reason = f"foreground budget stop before a leaf ({exc.reason})"
-                    break
-            route_stop = self._summary_route_stop_applies(force_overflow)
-            # #640: the first pass adopts a committed summary (#457) before the route stop; adoption needs no route.
-            adopt_before_stop = route_stop and leaf_passes == 0 and not resumed_prefix
-            # #628: no level 3 leaf while every route is refused; a source stored whole with no call (#605 F2)
-            # needs no route, so the stop is decided at the selected source.
-            no_call_only = route_stop and not adopt_before_stop
-            # review of #723: the input of refused passes since the last stored leaf, returned if none stores one
-            refused_input = (refused_input or (working_messages, pressure_messages,
-                                               dropped_replayed_scaffold_messages)) if route_stop else None
-            # #1013: the tail's token cap measures what the active context replays (a quarantined
-            # row as its placeholder), not the raw host text; pressure stays on the raw view.
-            fresh_tail_start = self._fresh_tail_start(working_messages)
+            if action == "continue":
+                continue
+            if action == "return":
+                return result
+            fresh_tail_start = leaf.fresh_tail_start
+            leading_anchor_count = leaf.leading_anchor_count
+            publication_excluded_store_ids = leaf.publication_excluded_store_ids
+            filter_exclusion_proofs = leaf.filter_exclusion_proofs
+            hidden_backlog = leaf.hidden_backlog
+            copy_lookup = leaf.copy_lookup
 
-            # Keep only a real system prompt anchored. Gateway sessions may
-            # pass only conversation messages, so index 0 can be an old user
-            # turn; that must remain eligible for compaction instead of being
-            # replayed forever as fresh-looking intent.
-            leading_anchor_count = self._leading_anchor_count(working_messages)
-            step_started = time.monotonic() if threshold_full_sweep_active else 0.0
-            publication_excluded_store_ids = self._get_store_ids_for_messages(
-                working_messages[:leading_anchor_count]
-            ) if leading_anchor_count else []  # #608: an empty slice maps to nothing
-            if threshold_full_sweep_active and sweep_step_done("anchor_ids", step_started) >= sweep_deadline:
-                sweep_stop_reason = "time_budget_exhausted"
+            action, result = self._filter_leaf_backlog(
+                state, leaf, dependent_reply_message_ids, sweep_step_done,
+            )
+            working_messages = state.working_messages
+            pressure_messages = state.pressure_messages
+            dropped_replayed_scaffold_messages = state.dropped_replayed_scaffold_messages
+            noop_reason = state.noop_reason
+            sweep_stop_reason = state.sweep_stop_reason
+            if action == "break":
                 break
-            filter_exclusion_proofs: Dict[int, Any] = {}
-            hidden_backlog = False
-            copy_lookup = []  # per-leaf only: backlog and input share one bounded twin read
-            # #695: adoption checks committed lineage even when the retry's normal tail covers the whole list.
-            if fresh_tail_start <= leading_anchor_count and not adopt_before_stop:
-                # Also reached with threshold_full_sweep_active: a sweep whose
-                # "drained" raw prefix is really a tail covering the whole
-                # session must yield like any other blocked pass, or the sweep
-                # condenses nothing and the deadlock survives in sweep mode.
-                if self._maybe_engage_fresh_tail_pressure_yield(
-                    pressure_messages,
-                    observed_prompt_tokens,
-                    eligible_tokens=0,
-                ):
-                    continue
-                step_started = time.monotonic() if threshold_full_sweep_active else 0.0
-                hidden_backlog = self._store_complete_backlog(working_messages, leading_anchor_count, copy_lookup)
-                if threshold_full_sweep_active and sweep_step_done("store_complete", step_started) >= sweep_deadline:
-                    sweep_stop_reason = "time_budget_exhausted"
-                    break
-            if fresh_tail_start <= leading_anchor_count and not hidden_backlog and not adopt_before_stop:
-                noop_reason = "no eligible raw backlog outside fresh tail"
-                if threshold_full_sweep_active:
-                    sweep_raw_drained = True
-                    sweep_stop_reason = "raw_prefix_drained"
-                break
-
-            candidate_start = leading_anchor_count
-            while candidate_start < fresh_tail_start and (
-                self._is_replayed_context_scaffold_message(working_messages[candidate_start])
-                if self._compress_occurrences is None  # no v4 proof in force: the rc4 contract
-                else self._compress_occurrences.get(id(working_messages[candidate_start]), (None, ()))[1] is None
-            ):
-                candidate_start += 1
-            # #457: a retry replays rows a cancelled attempt already committed; drop
-            # those with the scaffold, keeping any row committed lineage does not hold.
-            # Reuse the map when the pass maps this same list.
-            drops, premapped_store_ids, kept = set(range(leading_anchor_count, candidate_start)), None, 0
-            if leaf_passes == 0 and not resumed_prefix and not hidden_backlog:
-                step_started = time.monotonic() if threshold_full_sweep_active else 0.0
-                resumed, store_ids, summary_tokens, kept = self._committed_replay_drops(
-                    working_messages, candidate_start
-                )
-                if threshold_full_sweep_active and sweep_step_done("replay_drops", step_started) >= sweep_deadline:
-                    sweep_stop_reason = "time_budget_exhausted"
-                    break
-                resumed_prefix = bool(resumed)
-                resumed_ahead = resumed[0] - candidate_start if resumed else 0  # kept rows before lineage
-                premapped_store_ids = None if drops or resumed else store_ids
-                if resumed:  # the committed summary replaces the dropped rows in the estimate
-                    resumed_tokens = count_messages_tokens([working_messages[index] for index in resumed])
-                    estimated_active_tokens = max(0, estimated_active_tokens - resumed_tokens + summary_tokens)
-                drops.update(resumed)
-            if adopt_before_stop and not resumed_prefix:  # #640: nothing adopted, so the #628 stop applies now
-                if fresh_tail_start <= leading_anchor_count:  # a full tail stops here, as before the no-call source
-                    sweep_stop_reason = "summary_route_unavailable"
-                    break
-                no_call_only, adopt_before_stop = True, False
-            if drops:
-                publication_excluded_store_ids.extend(
-                    self._get_store_ids_for_messages(
-                        working_messages[leading_anchor_count:candidate_start]
-                    )
-                )
-                dropped_replayed_scaffold_messages = True
-                working_messages = [message for index, message in enumerate(working_messages) if index not in drops]
-                pressure_messages = [message for index, message in enumerate(pressure_messages) if index not in drops]
-                candidate_start = leading_anchor_count
-                fresh_tail_start = self._fresh_tail_start(working_messages)
-                # A kept row at or below F has no raw store lineage for a new leaf: return it
-                # raw after the committed summary instead of a pass that cannot publish.
-                if fresh_tail_start <= leading_anchor_count or (resumed_prefix and kept):
-                    noop_reason = "selected leaf chunk lacks raw store lineage"
-                    break
-            if adopt_before_stop:  # #640: the committed summary is adopted; no new leaf while every route is refused
-                sweep_stop_reason = "summary_route_unavailable"
-                break
-
-            if candidate_start < fresh_tail_start:
-                step_started = time.monotonic() if threshold_full_sweep_active else 0.0
-                self._compress_run.store_ids_by_message_id = (
-                    premapped_store_ids
-                    if premapped_store_ids is not None
-                    else self._get_store_id_map_for_messages(working_messages[leading_anchor_count:])
-                )
-                if threshold_full_sweep_active and sweep_step_done("store_id_map", step_started) >= sweep_deadline:
-                    sweep_stop_reason = "time_budget_exhausted"
-                    break
-                compactable_pairs = list(
-                    zip(
-                        working_messages[candidate_start:fresh_tail_start],
-                        pressure_messages[candidate_start:fresh_tail_start],
-                    )
-                )
-                kept_working: list[Dict[str, Any]] = []
-                kept_pressure: list[Dict[str, Any]] = []
-                dropped_ignored_backlog = False
-                drop_dependent_reply = False
-                for working_msg, pressure_msg in compactable_pairs:
-                    role = str(working_msg.get("role") or "")
-                    content_text = text_content_for_pattern_matching(working_msg.get("content")) or ""
-                    generated_dependent_reply = self._is_generated_ignored_dependent_reply(
-                        working_msg,
-                        content_text,
-                    )
-                    volatile_digest = self._active_replay_placeholder_digest(content_text)
-                    generated_volatile_placeholder = (
-                        self._is_volatile_ignored_quarantine_placeholder(working_msg, content_text)
-                        and volatile_digest is not None
-                        and volatile_digest in self._load_generated_ignored_placeholder_hashes()
-                    )
-                    configured_filter_match = (
-                        self._matches_ignore_message_patterns(working_msg)
-                        or self._matches_ignore_message_patterns(pressure_msg)
-                        or self._mapped_stored_row_matches_ignore_message_patterns(working_msg)
-                    )
-                    if (
-                        configured_filter_match
-                        or self._is_ignored_active_replay_placeholder(working_msg, content_text)
-                        or generated_volatile_placeholder
-                    ):
-                        mapped_store_id = (
-                            self._compress_run.store_ids_by_message_id.get(
-                                id(working_msg)
-                            )
-                        )
-                        if mapped_store_id is not None:
-                            store_id = int(mapped_store_id)
-                            publication_excluded_store_ids.append(store_id)
-                            stored = self._store.get(store_id)
-                            if configured_filter_match:
-                                filter_exclusion_proofs[store_id] = (
-                                    stored.get("content")
-                                    if stored is not None
-                                    and self._matches_ignore_message_patterns(
-                                        stored,
-                                        stored_row=True,
-                                    )
-                                    else _UNPROVEN_FILTER_EXCLUSION
-                                )
-                        dropped_ignored_backlog = True
-                        if role in {"user", "system", "tool", "assistant"}:
-                            drop_dependent_reply = True
-                        continue
-                    if generated_dependent_reply:
-                        dependent_reply_message_ids.add(id(working_msg))
-                        if role in {"assistant", "tool"}:
-                            drop_dependent_reply = True
-                    if drop_dependent_reply and role in {"assistant", "tool"}:
-                        dependent_reply_message_ids.add(id(working_msg))
-                        self._remember_generated_ignored_dependent_reply(working_msg, content_text)
-                    if role in {"user", "system"}:
-                        drop_dependent_reply = False
-                    kept_working.append(working_msg)
-                    kept_pressure.append(pressure_msg)
-                drop_dependent_reply_into_tail = drop_dependent_reply
-                if dropped_ignored_backlog:
-                    dropped_replayed_scaffold_messages = True
-                    self._compress_dropped_ignored_rows = True  # #1013: the output needs a durable proof
-                    working_messages = (
-                        working_messages[:candidate_start]
-                        + kept_working
-                        + working_messages[fresh_tail_start:]
-                    )
-                    pressure_messages = (
-                        pressure_messages[:candidate_start]
-                        + kept_pressure
-                        + pressure_messages[fresh_tail_start:]
-                    )
-                    fresh_tail_start = self._fresh_tail_start(working_messages)
-                if drop_dependent_reply_into_tail:
-                    tail_scan_start = max(fresh_tail_start, leading_anchor_count)
-                    pending_tail_dependents: list[tuple[Dict[str, Any], str]] = []
-                    saw_tail_boundary = False
-                    for tail_msg in working_messages[tail_scan_start:]:
-                        if not isinstance(tail_msg, dict):
-                            continue
-                        tail_role = str(tail_msg.get("role") or "")
-                        if tail_role in {"user", "system"}:
-                            saw_tail_boundary = True
-                            break
-                        if tail_role in {"assistant", "tool"}:
-                            tail_text = text_content_for_pattern_matching(tail_msg.get("content")) or ""
-                            self._remember_generated_ignored_dependent_reply(tail_msg, tail_text)
-                            pending_tail_dependents.append((tail_msg, tail_text))
-                    if saw_tail_boundary or leading_anchor_count > 0 or kept_working:
-                        for tail_msg, _tail_text in pending_tail_dependents:
-                            dependent_reply_message_ids.add(id(tail_msg))
-                if dropped_ignored_backlog and fresh_tail_start <= leading_anchor_count:
-                    noop_reason = "selected leaf chunk lacks raw store lineage"
-                    break
+            if action == "continue":
+                continue
+            if action == "return":
+                return result
+            fresh_tail_start = leaf.fresh_tail_start
 
             # Auto-derive focus topic from the post-filter compaction view when
             # not explicitly provided.  The derived focus is summarizer-visible,
