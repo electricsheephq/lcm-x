@@ -219,3 +219,46 @@ def test_compress_generation_marker_clears(tmp_path: Path, monkeypatch: pytest.M
         else:
             engine.compress([], current_tokens=100)
         assert engine._active_compress_generation is None
+
+
+@pytest.mark.parametrize(("metadata", "steps", "expected"), [
+    ("none", [list(range(8)), list(range(6)), [0, 1, 2, 3, 4, 6, 7, 5]], 8),
+    ("none", [list(range(8)), list(range(6)), [0, 1, 2, 3, 4, 6, 5, 7]], 8),
+    ("none", [list(range(8)), list(range(10)), list(range(9)),
+              [0, 1, 2, 3, 4, 5, 6, 7, 9, 8, 10]], 11),
+    ("stamphead", [list(range(8)), list(range(4)), [0, 1, 2, 3, 5, 4, 7, 6, 8, 9],
+                   [0, 1, 2, 3, 5, 4, 7, 6, 8],
+                   [0, 1, 2, 3, 5, 4, 7, 6, 9, 8, 10]], 11),
+], ids=["N2", "N2d", "N6", "H3-stamped-head"])
+def test_f5_lookback_all_positions(
+    tmp_path: Path, metadata: str, steps: list[list[int]], expected: int,
+) -> None:
+    full = history()
+    if metadata == "stamphead":
+        for i in range(4):
+            full[i]["timestamp"] = float(10 + i)
+    full.extend({"role": "user", "content": f"fresh-{i}"} for i in (8, 9, 10))
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        for step in steps:
+            engine.ingest(deepcopy([full[i] for i in step]))
+        assert len(ledger(engine)) == expected
+        assert ledger(engine) == texts(full[:expected])
+
+
+@pytest.mark.parametrize("metadata", ["none", "stamp", "uid"])
+def test_front_truncation_multiplicity_limitation(tmp_path: Path, metadata: str) -> None:
+    full = history(metadata)
+    fresh = deepcopy(full[1])
+    if metadata == "stamp":
+        fresh["timestamp"] = 100.0
+    elif metadata == "uid":
+        fresh["message_uid"] = "new-occurrence"
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        counts = []
+        for view in (full, full[3:], full[3:] + [fresh]):
+            engine.ingest(deepcopy(view))
+            counts.append(len(ledger(engine)))
+        # Documented multiplicity limitation: without occurrence metadata, the
+        # new identical row is indistinguishable from the unmatched old row.
+        assert counts == ([8, 8, 8] if metadata == "none" else [8, 8, 9])
+        assert ledger(engine) == texts(full if metadata == "none" else full + [fresh])

@@ -13,6 +13,7 @@ class FrontierState:
     compacted_store_id: int = 0
     commit_proof: dict[str, Any] | None = None
     emission_descriptors: dict[str, Any] | None = None
+    # Retain the episode minimum; replay look-back no longer depends on it.
     short_replay_floor: int = 0
     short_replay: tuple[list[Any], list[dict[str, Any]]] | None = None
 
