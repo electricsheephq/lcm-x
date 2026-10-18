@@ -1200,13 +1200,25 @@ def test_r1_f4_the_preparation_serializer_creates_no_payload_directory(tmp_path)
 def test_r1_f5_off_publication_records_progress_after_the_host_list_trim(
     tmp_path, provider, _isolated
 ):
-    engine = _engine(tmp_path, background_leaf_prep_enabled=False)
+    from tests.harness import make_engine
+
+    engine = make_engine(
+        tmp_path, window=WINDOW, session_id="S", platform="telegram", conversation_id="conv",
+        background_leaf_prep_enabled=False, background_leaf_prep_max_calls=64,
+        fresh_tail_count=2, leaf_chunk_tokens=CHUNK, context_threshold=0.75,
+        threshold_full_sweep_enabled=True, large_output_externalization_enabled=False,
+        large_output_active_replay_stubbing_enabled=False, temporal_rollups_enabled=False,
+        l3_truncate_tokens=2, incremental_max_depth=0,
+    )
     seen: dict[str, int] = {}
 
     def lines(frame, event, arg):
         if event == "line":
             local = frame.f_locals
-            budget, working = local.get("budget"), local.get("working_messages")
+            if frame.f_code.co_name == "_advance_after_leaf":
+                budget, working = local["state"].budget, local["state"].working_messages
+            else:
+                budget, working = local.get("budget"), local.get("working_messages")
             if (
                 "published" not in seen
                 and engine._last_compacted_store_id
@@ -1222,7 +1234,7 @@ def test_r1_f5_off_publication_records_progress_after_the_host_list_trim(
         return lines
 
     def calls(frame, event, arg):
-        return lines if frame.f_code.co_name == "_compress_impl" else None
+        return lines if frame.f_code.co_name in {"_compress_impl", "_advance_after_leaf"} else None
 
     try:
         view = _crossing_view(engine)

@@ -7028,6 +7028,175 @@ class LCMEngine(
             (cursor + offset, replay_msg)
             for offset, replay_msg in enumerate(new_messages)
         ]
+        messages_to_store_with_index, active_replay_messages = self._ingest_filter_rows(
+            messages_to_store_with_index=messages_to_store_with_index,
+            active_replay_messages=active_replay_messages,
+            replay_messages=replay_messages,
+            new_messages=new_messages,
+            original_new_messages=original_new_messages,
+            cursor=cursor,
+            compression_boundary_ingest_pending=compression_boundary_ingest_pending,
+            empty_session_placeholder_budget=empty_session_placeholder_budget,
+            empty_session_placeholder_ordinals=empty_session_placeholder_ordinals,
+            ignored_original_messages=ignored_original_messages,
+            replayed_tool_segment_indexes=replayed_tool_segment_indexes,
+            short_replayed=short_replayed,
+            new_prefix_occurrences=new_prefix_occurrences,
+            unchanged_prefix_occurrences=unchanged_prefix_occurrences,
+            anchored_replay_indexes=anchored_replay_indexes,
+            anchor_plan=anchor_plan,
+            anchor_remainders=anchor_remainders,
+        )
+
+        if not messages_to_store_with_index:
+            self._ingest_cursor = n
+            self._compression_boundary_ingest_pending = False
+            self._compression_boundary_active_placeholder_digest_budget = {}
+            self._compression_boundary_active_placeholder_digest_ordinals = {}
+            self._compression_boundary_stored_placeholder_digest_counts = {}
+            self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
+            self._host_uid_shadow(host_uids)
+            return self._remember_active_replay_messages(messages, active_replay_messages)
+
+        tool_result_names = _tool_result_names(messages)
+        protected_messages = protect_messages_for_ingest(
+            [msg for _idx, msg in messages_to_store_with_index],
+            session_id=self._session_id,
+            config=self._config,
+            hermes_home=self._hermes_home,
+            tool_name_hints=[tool_result_names.get(idx, "") for idx, _msg in messages_to_store_with_index],
+            context_window_tokens=self._publish_ingest_context_window(),
+        )
+        recovery_tool_result_indices = self._active_replay_recovery_tool_result_indices(
+            active_replay_messages
+        )
+        for (absolute_idx, _replay_msg), protected_msg in zip(
+            messages_to_store_with_index,
+            protected_messages,
+        ):
+            if self._protected_message_uses_raw_payload_active_stub(protected_msg):
+                # Assistant messages must keep their original content in the
+                # active replay: the host renders active_replay_messages to the
+                # user and feeds it back to the model.  Replacing an assistant
+                # response with a placeholder makes the agent's own reasoning
+                # invisible to both.  The store still holds the externalized
+                # version for durable recovery via lcm_expand.
+                _orig_role = str(active_replay_messages[absolute_idx].get("role") or "")
+                if _orig_role == "assistant":
+                    continue
+                if active_replay_messages is replay_messages:
+                    active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
+                        replay_messages
+                    )
+                active_message = dict(active_replay_messages[absolute_idx])
+                active_message["content"] = protected_msg["content"]
+                active_replay_messages[absolute_idx] = active_message
+                continue
+
+            active_message = active_replay_messages[absolute_idx]
+            stubbed_message = self._maybe_stub_active_tool_result(
+                active_message,
+                is_recovery_tool_result=(absolute_idx in recovery_tool_result_indices),
+                tool_name=tool_result_names.get(absolute_idx, ""),
+            )
+            if stubbed_message is not None:
+                if active_replay_messages is replay_messages:
+                    active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
+                        replay_messages
+                    )
+                active_replay_messages[absolute_idx] = stubbed_message
+
+        estimates = [count_message_tokens(m) for m in protected_messages]
+        batch = dict(
+            store=self._store, session_id=self._session_id,
+            source=self._session_platform, conversation_id=self._conversation_id,
+            messages=protected_messages, estimates=estimates,
+            metadata_messages=[msg for _idx, msg in messages_to_store_with_index],
+        )
+        pending_after_store_id = 0
+        if self._session_end_flush_active:
+            tail = self._store.get_session_tail(self._session_id, limit=1)
+            pending_after_store_id = tail[-1]["store_id"] if tail else 0
+        try:
+            store_ids = self._append_ingest_batch(batch)
+        except Exception as exc:
+            if self._session_end_flush_active and _is_sqlite_locked_error(exc):
+                # Freeze the already filtered/protected rows, not the host's
+                # mutable history or the next session's ingest cursor.
+                pending = {**batch, "after_store_id": pending_after_store_id}
+                for key in ("messages", "estimates", "metadata_messages"):
+                    pending[key] = copy.deepcopy(pending[key])
+                if not any(old == pending for old in self._pending_session_tails):
+                    self._pending_session_tails.append(pending)
+                _PENDING_TAIL_ENGINES.add(self)
+            raise
+        if shortened is not None and all(row["timestamp"] is None for row in shortened[1]):
+            self._frontier.extend_short_replay(
+                [self._message_replay_identity(messages[idx], strip_carrier=False)
+                 for idx, _ in messages_to_store_with_index],
+                [self._host_occurrence_metadata(messages[idx]) for idx, _ in messages_to_store_with_index],
+            )
+        else:
+            self._frontier.finish_short_replay()  # CONSUME only after the append succeeds.
+        originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
+        self._watch_stored_user_rows(zip(originals, protected_messages, store_ids))
+        if anchor_plan is not None:
+            stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
+            try:  # #1501 provenance: read right after R is stored (R3 has a NULL stamp); a miss duplicates
+                self._identity_anchor_mark_carried(messages, stored_at, anchor_plan)
+            except Exception as exc:
+                logger.warning("LCM carried-stamp marker write failed (%s)", type(exc).__name__)
+            try:
+                self._identity_anchor_commit(anchor_plan, {idx: stored_at[idx] for idx in anchor_remainders if idx in stored_at})
+                self._identity_anchor_remember([
+                    (self._message_replay_identity(reconcile_messages[idx], strip_carrier=False), store_id, messages[idx])
+                    for idx, store_id in stored_at.items() if idx not in anchor_remainders
+                ])
+                self._identity_anchor_record_versions(
+                    [(messages[idx], store_id) for idx, store_id in stored_at.items() if idx not in anchor_remainders]
+                )
+            except Exception as exc:
+                logger.warning("LCM identity-anchor relation write failed (%s)", type(exc).__name__)
+        self._host_uid_shadow(host_uids, {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index,
+                                                                                         store_ids)}, anchor_remainders)
+        # Rollup staleness is driven by summary-node PUBLICATION
+        # (_invalidate_rollups_for_published_node at every add_node site), not by
+        # raw ingest: marking a period stale before its covering summary exists
+        # would let a rebuild publish 'ready' from old sources and omit the leaf
+        # (maintainer #388 P1).
+        self._ingest_cursor = n
+        self._compression_boundary_ingest_pending = False
+        self._compression_boundary_active_placeholder_digest_budget = {}
+        self._compression_boundary_active_placeholder_digest_ordinals = {}
+        self._compression_boundary_stored_placeholder_digest_counts = {}
+        logger.debug("Ingested %d messages into LCM store", len(messages_to_store_with_index))
+        self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
+        # Most ``protected_messages`` changes are storage-only: inline media and
+        # data/base64 substrings stay provider-usable in active replay. The
+        # exceptions are whole-message ``raw_payload`` externalization and the
+        # separately opt-in textual tool-result interceptor above.
+        return self._remember_active_replay_messages(messages, active_replay_messages)
+
+    def _ingest_filter_rows(
+        self, *,
+        messages_to_store_with_index: list[tuple[int, Dict[str, Any]]],
+        active_replay_messages: List[Dict[str, Any]],
+        replay_messages: List[Dict[str, Any]],
+        new_messages: List[Dict[str, Any]],
+        original_new_messages: List[Dict[str, Any]],
+        cursor: int,
+        compression_boundary_ingest_pending: bool,
+        empty_session_placeholder_budget: dict[str, int],
+        empty_session_placeholder_ordinals: dict[str, set[int]],
+        ignored_original_messages: list[bool],
+        replayed_tool_segment_indexes: set[int],
+        short_replayed: set[int],
+        new_prefix_occurrences: set[int],
+        unchanged_prefix_occurrences: set[int],
+        anchored_replay_indexes: set[int],
+        anchor_plan: Optional[dict[str, Any]],
+        anchor_remainders: dict[int, Any],
+    ) -> tuple[list[tuple[int, Dict[str, Any]]], List[Dict[str, Any]]]:
         if messages_to_store_with_index:
             kept: list[tuple[int, Dict[str, Any]]] = []
             boundary_placeholder_seen: dict[str, int] = {}
@@ -7244,135 +7413,7 @@ class LCMEngine(
                     store_msg = original_msg
                 kept.append((absolute_idx, store_msg))
             messages_to_store_with_index = kept
-
-        if not messages_to_store_with_index:
-            self._ingest_cursor = n
-            self._compression_boundary_ingest_pending = False
-            self._compression_boundary_active_placeholder_digest_budget = {}
-            self._compression_boundary_active_placeholder_digest_ordinals = {}
-            self._compression_boundary_stored_placeholder_digest_counts = {}
-            self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
-            self._host_uid_shadow(host_uids)
-            return self._remember_active_replay_messages(messages, active_replay_messages)
-
-        tool_result_names = _tool_result_names(messages)
-        protected_messages = protect_messages_for_ingest(
-            [msg for _idx, msg in messages_to_store_with_index],
-            session_id=self._session_id,
-            config=self._config,
-            hermes_home=self._hermes_home,
-            tool_name_hints=[tool_result_names.get(idx, "") for idx, _msg in messages_to_store_with_index],
-            context_window_tokens=self._publish_ingest_context_window(),
-        )
-        recovery_tool_result_indices = self._active_replay_recovery_tool_result_indices(
-            active_replay_messages
-        )
-        for (absolute_idx, _replay_msg), protected_msg in zip(
-            messages_to_store_with_index,
-            protected_messages,
-        ):
-            if self._protected_message_uses_raw_payload_active_stub(protected_msg):
-                # Assistant messages must keep their original content in the
-                # active replay: the host renders active_replay_messages to the
-                # user and feeds it back to the model.  Replacing an assistant
-                # response with a placeholder makes the agent's own reasoning
-                # invisible to both.  The store still holds the externalized
-                # version for durable recovery via lcm_expand.
-                _orig_role = str(active_replay_messages[absolute_idx].get("role") or "")
-                if _orig_role == "assistant":
-                    continue
-                if active_replay_messages is replay_messages:
-                    active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
-                        replay_messages
-                    )
-                active_message = dict(active_replay_messages[absolute_idx])
-                active_message["content"] = protected_msg["content"]
-                active_replay_messages[absolute_idx] = active_message
-                continue
-
-            active_message = active_replay_messages[absolute_idx]
-            stubbed_message = self._maybe_stub_active_tool_result(
-                active_message,
-                is_recovery_tool_result=(absolute_idx in recovery_tool_result_indices),
-                tool_name=tool_result_names.get(absolute_idx, ""),
-            )
-            if stubbed_message is not None:
-                if active_replay_messages is replay_messages:
-                    active_replay_messages = self._copy_active_replay_messages_preserving_generated_ids(
-                        replay_messages
-                    )
-                active_replay_messages[absolute_idx] = stubbed_message
-
-        estimates = [count_message_tokens(m) for m in protected_messages]
-        batch = dict(
-            store=self._store, session_id=self._session_id,
-            source=self._session_platform, conversation_id=self._conversation_id,
-            messages=protected_messages, estimates=estimates,
-            metadata_messages=[msg for _idx, msg in messages_to_store_with_index],
-        )
-        pending_after_store_id = 0
-        if self._session_end_flush_active:
-            tail = self._store.get_session_tail(self._session_id, limit=1)
-            pending_after_store_id = tail[-1]["store_id"] if tail else 0
-        try:
-            store_ids = self._append_ingest_batch(batch)
-        except Exception as exc:
-            if self._session_end_flush_active and _is_sqlite_locked_error(exc):
-                # Freeze the already filtered/protected rows, not the host's
-                # mutable history or the next session's ingest cursor.
-                pending = {**batch, "after_store_id": pending_after_store_id}
-                for key in ("messages", "estimates", "metadata_messages"):
-                    pending[key] = copy.deepcopy(pending[key])
-                if not any(old == pending for old in self._pending_session_tails):
-                    self._pending_session_tails.append(pending)
-                _PENDING_TAIL_ENGINES.add(self)
-            raise
-        if shortened is not None and all(row["timestamp"] is None for row in shortened[1]):
-            self._frontier.extend_short_replay(
-                [self._message_replay_identity(messages[idx], strip_carrier=False)
-                 for idx, _ in messages_to_store_with_index],
-                [self._host_occurrence_metadata(messages[idx]) for idx, _ in messages_to_store_with_index],
-            )
-        else:
-            self._frontier.finish_short_replay()  # CONSUME only after the append succeeds.
-        originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
-        self._watch_stored_user_rows(zip(originals, protected_messages, store_ids))
-        if anchor_plan is not None:
-            stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
-            try:  # #1501 provenance: read right after R is stored (R3 has a NULL stamp); a miss duplicates
-                self._identity_anchor_mark_carried(messages, stored_at, anchor_plan)
-            except Exception as exc:
-                logger.warning("LCM carried-stamp marker write failed (%s)", type(exc).__name__)
-            try:
-                self._identity_anchor_commit(anchor_plan, {idx: stored_at[idx] for idx in anchor_remainders if idx in stored_at})
-                self._identity_anchor_remember([
-                    (self._message_replay_identity(reconcile_messages[idx], strip_carrier=False), store_id, messages[idx])
-                    for idx, store_id in stored_at.items() if idx not in anchor_remainders
-                ])
-                self._identity_anchor_record_versions(
-                    [(messages[idx], store_id) for idx, store_id in stored_at.items() if idx not in anchor_remainders]
-                )
-            except Exception as exc:
-                logger.warning("LCM identity-anchor relation write failed (%s)", type(exc).__name__)
-        self._host_uid_shadow(host_uids, {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index,
-                                                                                         store_ids)}, anchor_remainders)
-        # Rollup staleness is driven by summary-node PUBLICATION
-        # (_invalidate_rollups_for_published_node at every add_node site), not by
-        # raw ingest: marking a period stale before its covering summary exists
-        # would let a rebuild publish 'ready' from old sources and omit the leaf
-        # (maintainer #388 P1).
-        self._ingest_cursor = n
-        self._compression_boundary_ingest_pending = False
-        self._compression_boundary_active_placeholder_digest_budget = {}
-        self._compression_boundary_active_placeholder_digest_ordinals = {}
-        self._compression_boundary_stored_placeholder_digest_counts = {}
-        logger.debug("Ingested %d messages into LCM store", len(messages_to_store_with_index))
-        self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
-        # Most ``protected_messages`` changes are storage-only: inline media and
-        # data/base64 substrings stay provider-usable in active replay. The
-        # exceptions are whole-message ``raw_payload`` externalization and the
-        # separately opt-in textual tool-result interceptor above.
-        return self._remember_active_replay_messages(messages, active_replay_messages)
+        return messages_to_store_with_index, active_replay_messages
 
     @staticmethod
     def _protected_message_uses_raw_payload_active_stub(message: Dict[str, Any]) -> bool:

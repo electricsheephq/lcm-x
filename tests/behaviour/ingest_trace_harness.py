@@ -143,6 +143,10 @@ SCENARIOS = (
     Scenario("uid-bindings-new", "W1", shape="uid", stored=0),
     Scenario("uid-bindings-replay", "P1/W1", shape="uid", warm=True),
     Scenario("uid-bindings-new-occurrence", "P1/W1", shape="uid", warm=True, variant="new-stamp"),
+    Scenario("row-filter-ignored-append-error", "F1/W1", shape="ignored", variant="changed", fault="append"),
+    Scenario("row-filter-generated-append-error", "F1/W1", shape="quarantine", variant="generated-append", fault="append"),
+    Scenario("row-filter-ignore-ledger-lock", "F1/W1", shape="ignored-ledger",
+             variant="ignore-ledger", fault="locked", stored=0),
 )
 
 
@@ -517,6 +521,12 @@ def prepare(engine: Any, case: Scenario, root: Path, engines: ExitStack) -> tupl
             if case.variant == "host-held":
                 incoming = [dict(m) for m in active]
             incoming.append({"role": "user", "content": "next"})
+    elif case.variant == "ignore-ledger":
+        # The SQLite writer lock prevents ledger writes. The second digest
+        # displaces the first, and append failure exposes the fallback copies.
+        incoming = [{"role": "user", "content": "IGNORE THIS ROW first"},
+                    {"role": "assistant", "content": "IGNORE THIS ROW second"},
+                    {"role": "user", "content": "ordinary row after ignored messages"}]
     elif case.variant == "empty":
         incoming = []
     elif case.variant in {"prefix", "suffix"}:
@@ -612,6 +622,14 @@ def prepare(engine: Any, case: Scenario, root: Path, engines: ExitStack) -> tupl
             engine._generated_ignored_active_replay_placeholder_message_ids.add(id(incoming[0]))
     if case.shape == "uid" and not case.stored:
         incoming[0]["message_uid"] = "host-uid-new"
+    if case.variant == "generated-append":
+        incoming = [{**original[0], "timestamp": 999.}, {"role": "user", "content": "after ignored quarantine"}]
+        incoming[0]["content"] = incoming[0]["content"].replace(
+            "LCM sensitive redaction:", "LCM active replay placeholder: assistant output quarantined;")
+        digest = engine._active_replay_placeholder_digest(incoming[0]["content"])
+        assert digest
+        engine._remember_generated_ignored_placeholder_hash(digest)
+        incoming.insert(0, {"role": "user", "content": "new row before generated placeholder"})
     if case.variant == "no-session":
         engine._session_id = ""
     return engine, incoming
@@ -713,7 +731,7 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                             large_output_externalization_threshold_chars=100,
                             large_output_active_replay_stubbing_enabled=True,
                             large_output_active_replay_stub_threshold_tokens=10)
-        if case.shape == "ignored":
+        if case.shape in {"ignored", "ignored-ledger"}:
             settings["ignore_message_patterns"] = ["IGNORE THIS ROW"]
         if case.variant in {"ignored", "stateless"}:
             settings["ignore_session_patterns" if case.variant == "ignored" else "stateless_session_patterns"] = ["S"]
@@ -724,10 +742,10 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                              "end_reason TEXT, source TEXT, model_config TEXT)")
                 host.execute("INSERT INTO sessions VALUES ('S', NULL, NULL, 'cli', NULL)")
         with context(root, window=200000, conversation_id="trace-conversation", **settings) as engine, ExitStack() as engines:
-            if case.shape == "ignored":
+            if case.shape in {"ignored", "ignored-ledger"}:
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
             engine, incoming = prepare(engine, case, root, engines)
-            if case.shape == "ignored":
+            if case.shape in {"ignored", "ignored-ledger"}:
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
             canonical = IngestCanonical(root, incoming)
             if case.shape == "uid":
@@ -873,7 +891,7 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) ->
                     emit("next-raise", [type(exc).__name__, str(exc)])
             emit("next-state", snapshot(engine, canonical))
             engine = reopen(engine, root, engines)
-            if case.shape == "ignored":
+            if case.shape in {"ignored", "ignored-ledger"}:
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
             with observing():
                 try:

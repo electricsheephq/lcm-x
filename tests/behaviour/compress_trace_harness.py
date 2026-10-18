@@ -10,6 +10,7 @@ the full canonical bound statement.
 from __future__ import annotations
 
 import argparse
+import ast
 import dataclasses
 import hashlib
 import importlib
@@ -284,6 +285,48 @@ SCENARIOS = (
              ("background_leaf_prep_max_calls", 64), ("context_threshold", 0.75),
              ("max_assembly_tokens", 200000),
              ("large_output_externalization_path", ""))),
+    *(Scenario(f"publish-advance-{mode}", setup="prepared", mode=mode, force=mode == "promote-low",
+               current_tokens=130001 if mode == "promote-low" else 150000, overrides=(("background_leaf_prep_enabled", True),
+               ("background_leaf_prep_max_calls", 64), ("context_threshold", 0.75),
+               ("max_assembly_tokens", 200000), ("large_output_externalization_path", "")))
+      for mode in ("promote-low", "promote-continue", "publish-route", "publish-coverage",
+                   "publish-binding", "publish-frontier", "publish-fence", "publish-retry")),
+    Scenario("publish-advance-nonlock", mode="publish-error"),
+    Scenario("publish-advance-gc-nonlock", shape="tools", mode="gc-error", overrides=(
+        ("dynamic_leaf_chunk_max", 20000), ("large_output_externalization_enabled", True), ("large_output_active_replay_stubbing_enabled", False),
+        ("large_output_externalization_threshold_chars", 100), ("large_output_transcript_gc_enabled", True))),
+    Scenario("publish-advance-hidden-drain", shape="hidden", sweep=True),
+    Scenario("publish-advance-dynamic-empty", turns=2, current_tokens=60000, overrides=(
+        ("dynamic_leaf_chunk_enabled", True), ("leaf_chunk_tokens", 1), ("dynamic_leaf_chunk_max", 1))),
+    Scenario("publish-advance-deferred-short", setup="debt", current_tokens=190000, overrides=(
+        ("max_assembly_tokens", 200000), ("reserve_tokens_floor", 0), ("critical_budget_pressure_ratio", 0.9), ("deferred_maintenance_enabled", True), ("dynamic_leaf_chunk_enabled", True),
+        ("leaf_chunk_tokens", 2500), ("dynamic_leaf_chunk_max", 2500))),
+    *(Scenario(f"selection-prepared-{kind}", setup=f"prepared-{kind}", force=False,
+               current_tokens=150000, overrides=(("background_leaf_prep_enabled", True),
+               ("background_leaf_prep_max_calls", 64), ("context_threshold", 0.75),
+               ("max_assembly_tokens", 200000), ("large_output_externalization_path", "")))
+      for kind in ("match", "overflow", "no-call", "hidden", "split")),
+    Scenario("selection-empty-filtered", shape="filtered-empty", setup="stored", force=False,
+             overrides=(("ignore_message_patterns", ["IGNORE THIS ROW"]),)),
+    Scenario("selection-objective-sweep", shape="objective", sweep=True, force=False,
+             overrides=(("fresh_tail_count", 8),)),
+    Scenario("selection-pressure-sweep", sweep=True, force=False, overrides=(("fresh_tail_count", 100),
+             ("fresh_tail_pressure_yield_min_observations", 1),)),
+    *(Scenario(f"selection-deferred-critical-{dynamic}", setup="debt", force=False,
+               current_tokens=150000, overrides=(("deferred_maintenance_enabled", True),
+               ("max_assembly_tokens", 200000),
+               ("critical_budget_pressure_ratio", 0.5), ("leaf_chunk_tokens", 20000),
+               ("dynamic_leaf_chunk_enabled", dynamic), ("survival_fit", False)))
+      for dynamic in (False, True)),
+    Scenario("selection-unattributed", setup="rotated", retry=True,
+             overrides=(("fresh_tail_pressure_yield_enabled", False), ("extraction_enabled", True))),
+
+    Scenario("selection-prepared-input-price-change", setup="prepared-input-price-change", force=False,
+             current_tokens=150000, overrides=(("background_leaf_prep_enabled", True),
+             ("background_leaf_prep_max_calls", 64), ("context_threshold", 0.75),
+             ("leaf_chunk_tokens", 4000), ("dynamic_leaf_chunk_max", 4000),
+             ("max_assembly_tokens", 200000), ("large_output_externalization_path", ""))),
+
 )
 
 
@@ -644,6 +687,10 @@ def transcript(case: Scenario) -> list[dict[str, Any]]:
         rows = [{"role": "user", "content": "IGNORE THIS ROW " + PAD},
                 {"role": "assistant", "content": "Dependent reply. " + PAD},
                 {"role": "assistant", "content": "Dependent continuation. " + PAD}]
+    if case.shape == "filtered-empty":
+        rows = [rows[0], {"role": "unknown", "content": "IGNORE THIS ROW " + PAD},
+                {"role": "user", "content": "Fresh request."},
+                {"role": "assistant", "content": "Fresh answer."}]
     return rows
 
 
@@ -692,6 +739,12 @@ class Provider:
         if mode == "lock-gc" and self.calls == 1:
             self.engine._store._conn.execute("""CREATE TEMP TRIGGER lock_gc BEFORE UPDATE OF content ON messages
                 BEGIN SELECT RAISE(ABORT, 'database is locked'); END""")
+        if mode == "publish-error" and self.calls == 1:
+            self.engine._dag._conn.execute("""CREATE TEMP TRIGGER fail_publish BEFORE INSERT ON summary_nodes
+                BEGIN SELECT RAISE(ABORT, 'fixture publication failure'); END""")
+        if mode == "gc-error" and self.calls == 1:
+            self.engine._store._conn.execute("""CREATE TEMP TRIGGER fail_gc BEFORE UPDATE OF content ON messages
+                BEGIN SELECT RAISE(ABORT, 'fixture gc failure'); END""")
         if mode.startswith("rescue-read-error"):
             first = 2 if mode.endswith("after") else 1
             if self.calls in (first, first + 1):
@@ -792,6 +845,99 @@ def state(engine: Any, canonical: Canonical) -> dict[str, Any]:
     return result
 
 
+@contextmanager
+def leaf_selection_probe(engine: Any, case: Scenario, provider: Any, events: Trace) -> Iterator[None]:
+    """Observe the selection/admission contract without replacing an engine method."""
+    if not case.name.startswith("selection-"):
+        yield
+        return
+    source = ast.parse(inspect.getsource(compaction))
+    selected_lines = {node.lineno for node in ast.walk(source) if isinstance(node, ast.Assign)
+                      and any(isinstance(t, ast.Attribute) and t.attr == "selected" for t in node.targets)}
+    counts = {"selected": 0, "chunks": 0, "match": 0, "matched": 0, "refused": 0, "extraction": 0, "matched_input": 0, "split_input": 0, "rerun": 0}
+    rejections: list[str] = []
+    pending_rerun: list[int] = []
+    provider_calls = provider.calls
+    previous_trace, previous_profile = sys.gettrace(), sys.getprofile()
+
+    def trace(frame: Any, event: str, value: Any) -> Any:
+        if previous_trace is not None:
+            previous_trace(frame, event, value)
+        if (event == "line" and frame.f_globals.get("__name__") == compaction.__name__
+                and frame.f_code.co_name in {"_compress_impl", "_select_leaf_candidate"}
+                and frame.f_lineno in selected_lines):
+            counts["selected"] += 1
+        return trace
+
+    def profile(frame: Any, event: str, value: Any) -> None:
+        if previous_profile is not None:
+            previous_profile(frame, event, value)
+        name = frame.f_code.co_name
+        if event == "return" and name == "_match_prepared_leaf" and value is not None:
+            counts["matched"] += 1
+        if event == "return" and name == "_leaf_consumption" and frame.f_back.f_code.co_name in {
+            "_compress_impl", "_prepare_leaf_input"
+        }:
+            local = frame.f_back.f_locals
+            prepared = local["prepared"] if "prepared" in local else local["leaf"].prepared
+            # The match has already checked this exact consumption. With stable
+            # storage, the second check cannot reject the prepared host unit.
+            if tuple(value[3:]) != (list(prepared.covered_store_ids),) * 2:
+                assert case.setup == "prepared-input-price-change"
+                counts["split_input"] += 1
+            else:
+                counts["matched_input"] += 1
+        if event != "call":
+            return
+        if name == "_identity_anchor_extend_chunk" and frame.f_back.f_code.co_name in {
+            "_compress_impl", "_select_leaf_candidate"
+        }:
+            counts["chunks"] += 1
+            assert engine._foreground_budget.selected
+            if pending_rerun:
+                assert engine._foreground_budget.leaves == pending_rerun.pop()
+                counts["rerun"] += 1
+        if name == "_match_prepared_leaf":
+            counts["match"] += 1
+            local = frame.f_back.f_locals
+            state, leaf = local.get("state"), local.get("leaf")
+            hidden = local["hidden_backlog"] if "hidden_backlog" in local else leaf.hidden_backlog
+            overflow = local["force_overflow"] if "force_overflow" in local else state.force_overflow
+            no_call = local["no_call_only"] if "no_call_only" in local else state.no_call_only
+            assert not (hidden or overflow or no_call)
+        if name == "_reject_prepared_chain":
+            rejections.append(frame.f_locals["reason"])
+            if frame.f_back.f_code.co_name in {"_compress_impl", "_prepare_leaf_input"}:
+                assert frame.f_locals["reason"] == "host_unit_split"
+                pending_rerun.append(engine._foreground_budget.leaves)
+        if name == "_run_pre_compaction_extraction":
+            counts["extraction"] += 1
+        if name == "_warn_unattributed_leaf":
+            counts["refused"] += 1
+            assert provider.calls == provider_calls and counts["extraction"] == 0
+
+    sys.settrace(trace)
+    sys.setprofile(profile)
+    try:
+        yield
+    finally:
+        sys.settrace(previous_trace)
+        sys.setprofile(previous_profile)
+    assert counts["selected"] == counts["chunks"]
+    if case.setup in {"prepared-overflow", "prepared-no-call", "prepared-hidden"}:
+        assert counts["match"] == 0
+    if case.shape == "filtered-empty":
+        assert counts["selected"] == provider.calls == 0
+    if case.setup == "prepared-match":
+        assert counts["matched"] == counts["matched_input"] > 0
+    if case.setup == "prepared-split":
+        assert "host_unit_split" in rejections
+    if case.setup == "prepared-input-price-change":
+        assert counts["split_input"] == counts["rerun"] == 1
+        assert not pending_rerun and rejections == ["host_unit_split"]
+    events.append("selection probes " + encoded(counts) + " rejections=" + encoded(rejections))
+
+
 def observe(case: Scenario, root: Path) -> Trace:
     root.mkdir(parents=True, exist_ok=True)
     events: Trace = []
@@ -822,6 +968,31 @@ def observe(case: Scenario, root: Path) -> Trace:
         context: Any = engine_context
         with context(root, window=case.window, conversation_id="trace-conversation", **settings) as engine:
             view = transcript(case)
+            if case.setup == "prepared-input-price-change":
+                from types import ModuleType
+
+                changed = False
+                def image_price() -> int:
+                    nonlocal changed
+                    frame, names = inspect.currentframe(), set()
+                    while frame is not None:
+                        names.add(frame.f_code.co_name)
+                        frame = frame.f_back
+                    # The host reprices one image after matching. Real input
+                    # budgeting then cuts the prepared unit and reruns the pass.
+                    if (not changed and "_store_complete_input" in names and "_compress_impl" in names
+                            and "_match_prepared_leaf" not in names):
+                        changed = True
+                        events.append("host image repriced during input budgeting")
+                        return 100000
+                    return 1500
+
+                pricing = ModuleType("agent.image_token_cost")
+                pricing.current_image_token_cost = image_price
+                patch.setitem(sys.modules, pricing.__name__, pricing)
+                for row in view[1:]:
+                    row["content"] = [{"type": "text", "text": row["content"]},
+                                      {"type": "image_url", "image_url": {"url": "data:image/png;base64,AA=="}}]
             if settings.get("ignore_message_patterns"):
                 engine._compiled_ignore_message_patterns = [LiteralPattern()]
             if case.setup == "resume-wide-tail":
@@ -903,6 +1074,9 @@ def observe(case: Scenario, root: Path) -> Trace:
                 view = [*view[2:], dict(view[0]), dict(view[1])]
                 engine._ingest_cursor = len(view)
             if case.setup == "debt":
+                if case.name == "publish-advance-deferred-short":
+                    engine.ingest(view)
+                    engine.last_prompt_tokens = case.current_tokens
                 engine._lifecycle.record_debt("trace-conversation", kind="raw_backlog", size_estimate=4000)
             if case.mode == "open-circuit":
                 for _ in range(3):
@@ -941,6 +1115,16 @@ def observe(case: Scenario, root: Path) -> Trace:
                 provider.calls = 0
                 if case.setup == "prepared-route-changed":
                     engine._config.summary_model = "changed-trace-model"
+                if case.setup == "prepared-overflow":
+                    case = dataclasses.replace(case, current_tokens=250000)
+                if case.setup == "prepared-no-call":
+                    for _ in range(3):
+                        engine._summary_circuit_breaker.record_failure("trace-model")
+                if case.setup == "prepared-hidden":
+                    view = view[-2:]
+                if case.setup == "prepared-split":
+                    engine._compress_run.store_ids_by_message_id = engine._get_store_id_map_for_messages(view)
+                    engine._remember_generated_ignored_dependent_reply(view[2], view[2]["content"])
             if case.setup == "hang-repeat":
                 engine._foreground_budget = engine._new_foreground_budget()
                 with engine._fresh_tail_pressure_yield_invocation():
@@ -977,7 +1161,24 @@ def observe(case: Scenario, root: Path) -> Trace:
                     return sqlite3.SQLITE_DENY
                 return sqlite3.SQLITE_OK
 
+            publication_race = False
+
             def trace_sql(connection: str, sql: str) -> None:
+                nonlocal publication_race
+                if (case.name.startswith("publish-advance-") and not publication_race
+                        and connection == "_dag" and sql.lstrip().startswith("INSERT INTO summary_nodes")):
+                    publication_race = True
+                    conn = engine._dag._conn
+                    if case.mode == "publish-route":
+                        engine._config.summary_model = "changed-trace-model"
+                    elif case.mode == "publish-coverage":
+                        conn.execute("UPDATE messages SET content = 'changed in transaction' WHERE store_id = 2")
+                    elif case.mode == "publish-binding":
+                        conn.execute("UPDATE lcm_lifecycle_state SET current_session_id = 'other-session'")
+                    elif case.mode == "publish-frontier":
+                        conn.execute("UPDATE lcm_lifecycle_state SET current_frontier_store_id = 1")
+                    elif case.mode == "publish-fence":
+                        conn.execute("UPDATE messages SET conversation_id = 'other-conversation' WHERE store_id = 2")
                 if (case.mode == "close-after-leaf" and connection == "_dag"
                         and sql.strip() == "COMMIT" and provider.calls == 1):
                     for _ in range(3):
@@ -1076,13 +1277,76 @@ def observe(case: Scenario, root: Path) -> Trace:
                             if event == "call" and frame.f_code.co_name == "_survival_fit":
                                 fit_causes.append(frame.f_locals["fit_cause"])
 
+                        publication_probe: dict[str, Any] = {
+                            "publish": 0, "insert": 0, "revalidate": 0, "stage": 0, "promoted": 0,
+                            "summaries": 0, "rejected": [], "order": [],
+                        }
+                        publication_passes: list[tuple[int, int, int]] = []
+                        initial_limit = 0
+
+                        def profile_publication(frame: Any, event: str, value: Any) -> None:
+                            nonlocal initial_limit
+                            if previous_profile is not None:
+                                previous_profile(frame, event, value)
+                            name = frame.f_code.co_name
+                            finish_keys = (
+                                "leaf_passes", "max_leaf_passes", "sweep_stop_reason", "estimated_active_tokens", "prep_low_water")
+                            if event == "return" and name == "_advance_after_leaf" and value is None:
+                                # An exception unwinds before the driver can unpack the run state.
+                                publication_probe["finish"] = {
+                                    key: getattr(frame.f_locals["state"], key) for key in finish_keys}
+                            if event == "return" and name == "_compress_impl" and "finish" not in publication_probe:
+                                publication_probe["finish"] = {key: frame.f_locals.get(key) for key in (
+                                    "leaf_passes", "max_leaf_passes", "sweep_stop_reason", "estimated_active_tokens", "prep_low_water")}
+                            if event != "call":
+                                return
+                            if name == "_publish_leaf_node":
+                                publication_probe["publish"] += 1
+                                assert engine._session_id and engine._conversation_id
+                                owner = frame.f_back
+                                while owner.f_code.co_name != "_compress_impl":
+                                    owner = owner.f_back
+                                local = owner.f_locals
+                                if not initial_limit:
+                                    initial_limit = local["max_leaf_passes"]
+                                publication_passes.append((local["leaf_passes"], local["max_leaf_passes"], provider.calls))
+                                if case.mode == "publish-retry" and publication_probe["publish"] == 1:
+                                    # A genuine stale read snapshot fails the first INSERT, then retries.
+                                    conn = engine._dag._conn
+                                    conn.execute("BEGIN")
+                                    conn.execute("SELECT COUNT(*) FROM messages").fetchone()
+                                    engine._store._conn.execute("UPDATE messages SET content = content WHERE store_id = 2")
+                                    engine._store._conn.commit()
+                            if name == "insert_node":
+                                owner = frame.f_back
+                                while owner is not None and owner.f_code.co_name != "_publish_leaf_node":
+                                    owner = owner.f_back
+                                if owner is not None:
+                                    publication_probe["insert"] += 1
+                            if name == "revalidate" and frame.f_globals.get("__name__") == "hermes_lcm.compaction":
+                                assert frame.f_locals["conn"].in_transaction
+                                publication_probe["revalidate"] += 1
+                                publication_probe["order"].append("revalidate")
+                            if name == "stage_compaction_publication":
+                                assert frame.f_locals["conn"].in_transaction
+                                publication_probe["stage"] += 1
+                                publication_probe["order"].append("stage")
+                            if name == "_reject_prepared_chain":
+                                publication_probe["rejected"].append(frame.f_locals["reason"])
+                            if name == "promoted" and frame.f_code.co_qualname == "promoted":
+                                publication_probe["promoted"] += 1
+                            if name == "_summarize_leaf_chunk_with_rescue":
+                                publication_probe["summaries"] += 1
+
                         previous_profile = sys.getprofile()
                         if case.name.startswith("stop-reason-") and (case.setup != "rotated" or attempt):
                             sys.setprofile(profile_fit)
                         if case.name.startswith("leaf-phase-"):
                             sys.setprofile(profile_leaf)
+                        if case.name.startswith("publish-advance-"):
+                            sys.setprofile(profile_publication)
                         try:
-                            with engine._fresh_tail_pressure_yield_invocation():
+                            with leaf_selection_probe(engine, case, provider, events), engine._fresh_tail_pressure_yield_invocation():
                                 if case.name.startswith("stop-reason-") and (case.setup != "rotated" or attempt):
                                     returned = engine.compress(view, current_tokens=case.current_tokens,
                                                                force=case.force, focus_topic=case.focus)
@@ -1114,6 +1378,41 @@ def observe(case: Scenario, root: Path) -> Trace:
                                 engine._dag._conn.set_authorizer(None)
                             if case.mode.startswith("rescue-read-error"):
                                 engine._store._conn.set_authorizer(None)
+                        if case.name.startswith("publish-advance-"):
+                            reasons = {"publish-route": "route_fingerprint_mismatch",
+                                       "publish-coverage": "coverage_digest_mismatch",
+                                       "publish-binding": "binding_changed", "publish-frontier": "frontier_moved",
+                                       "publish-fence": "fence_conflict"}
+                            if case.mode in reasons:
+                                assert publication_probe["rejected"] == [reasons[case.mode]], publication_probe
+                                assert publication_probe["promoted"] == 0
+                            if case.mode in {"publish-route", "publish-coverage"}:
+                                assert publication_probe["order"][0] == "revalidate"
+                                assert publication_probe["summaries"] > 0
+                            if case.mode in {"publish-binding", "publish-frontier", "publish-fence"}:
+                                assert publication_probe["order"] == ["revalidate", "stage"]
+                                assert engine._foreground_budget.leaves == 0
+                                assert returned == view
+                            if case.mode in {"promote-low", "promote-continue", "publish-retry"}:
+                                promoted = publication_probe["promoted"]
+                                assert promoted > 0, publication_probe
+                                assert publication_probe["order"][:2] == ["revalidate", "stage"]
+                                for passes, limit, calls in publication_passes[:promoted]:
+                                    assert limit == initial_limit + passes and calls == 0, (case.name, initial_limit, publication_passes, publication_probe)
+                                if case.mode == "promote-low":
+                                    assert publication_probe["finish"]["sweep_stop_reason"] == "prepared_leaves_promoted"
+                                    assert provider.calls == 0
+                                if case.mode == "promote-continue":
+                                    assert len(publication_passes) > 1
+                                if case.mode == "publish-retry":
+                                    assert publication_probe["insert"] == publication_probe["publish"] + 1
+                                    assert publication_probe["revalidate"] == promoted
+                            if case.mode in {"publish-error", "gc-error"}:
+                                assert any(event.startswith("raise IntegrityError") for event in events), (case.name, publication_probe, [e for e in events if e.startswith(("raise ", "log "))])
+                                assert engine._foreground_budget.leaves == (case.mode == "gc-error")
+                                assert bool(engine._dag.get_session_nodes("S")) == (case.mode == "gc-error")
+                            events.append("publication probes " + encoded(publication_probe))
+                            events.append("publication pass limits " + encoded(publication_passes))
                         if case.name.startswith("leaf-phase-"):
                             assert engine._leaf_rescue_admit is None
                             assert leaf_probe["captures"] == leaf_probe["summaries"]
@@ -1293,6 +1592,8 @@ def observe(case: Scenario, root: Path) -> Trace:
                         conn.set_trace_callback(None)
                     if case.shape == "child":
                         engine._clear_thread_context_stateless("trace-child")
+    if case.name.startswith("selection-"):
+        assert not any(event.startswith("raise AssertionError") for event in events), events
     return events
 
 
