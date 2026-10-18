@@ -1405,6 +1405,7 @@
 "attr _compress_occurrences=null",
 "attr _compress_run={\"store_ids_by_message_id\":{\"<message-1>\":16,\"<message-2>\":17}}",
 "attr _foreground_budget=sha12/len=8f0b120b5adc/350",
+"attr _ingest_cursor=2",
 "attr _last_compression_noop_reason=\"threshold sweep time budget spent before the first leaf\"",
 "attr _last_compression_status=\"noop\"",
 "attr _last_hidden_backlog=[14,false]",
@@ -1413,7 +1414,7 @@
 "attr _pending_emission_candidates=[]",
 "attr _survival_pass_observed=true",
 "attr _sweep_budget_hold_until=1721.0",
-"attrs count=133 sha256=056f5f67cb3d1e0b79a8e798c488fec5a2bf9f9c42bec70b2ff458a97656a702"
+"attrs count=133 sha256=a6582e39e9996f2f8013da3ee27015b7ea717f0503910fa1b6dfdad15492e3f2"
 ],
 "default-sweep-target": [
 "compress attempt=1",
