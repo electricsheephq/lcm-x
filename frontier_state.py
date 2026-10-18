@@ -13,17 +13,22 @@ class FrontierState:
     compacted_store_id: int = 0
     commit_proof: dict[str, Any] | None = None
     emission_descriptors: dict[str, Any] | None = None
+    short_replay_floor: int = 0
     short_replay: tuple[list[Any], list[dict[str, Any]]] | None = None
 
     def shorten(self, n: int, identities: list[Any], metadata: list[dict[str, Any]]) -> None:
         if self.short_replay is None and len(identities) == len(metadata) == self.cursor:
             self.short_replay = (identities, metadata)
+            self.short_replay_floor = n
+        elif self.short_replay is not None:
+            self.short_replay_floor = min(self.short_replay_floor, n)
         self.cursor = n
 
     def finish_short_replay(self, *, restore: bool = False) -> None:
         if restore and self.short_replay is not None:
             self.cursor = max(self.cursor, len(self.short_replay[0]))
         self.short_replay = None
+        self.short_replay_floor = 0
 
     def extend_short_replay(self, identities: list[Any], metadata: list[dict[str, Any]]) -> None:
         if self.short_replay is not None:

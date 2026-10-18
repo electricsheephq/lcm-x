@@ -129,3 +129,25 @@ def test_uid_rewrite_keeps_one_copy(tmp_path: Path, shape: str) -> None:
         assert [engine._message_replay_identity(row, strip_carrier=False) for row in restored] == identities
         engine.ingest(restored)
         assert ledger(engine) == before
+
+
+@pytest.mark.parametrize("metadata", ["none", "uidmix", "stamphead"])
+@pytest.mark.parametrize("steps", [
+    [list(range(8)), list(range(4)), list(range(6)), [0, 1, 2, 3, 4, 6, 7, 5]],
+    [list(range(8)), list(range(2)), list(range(5)), [0, 1, 2, 3, 5, 6, 7, 4, 8]],
+    [list(range(8)), list(range(4)), list(range(6)), list(range(2)), list(range(8))],
+    [list(range(8)), list(range(4)), list(range(8)), list(range(4)), list(range(8))],
+    [list(range(8)), list(range(2)), list(range(5)), list(range(9))],
+], ids=["reordered", "reordered-fresh", "nested", "repeated", "ordered-fresh"])
+def test_nested_shrink_lookback(tmp_path: Path, metadata: str, steps: list[list[int]]) -> None:
+    full = history()
+    for i, row in enumerate(full):
+        if metadata == "uidmix" and i % 2 == 0:
+            row["message_uid"] = f"old-{i}"
+        elif metadata == "stamphead" and i < 4:
+            row["timestamp"] = float(10 + i)
+    full.append({"role": "user", "content": "new after nested shrink"})
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        for step in steps:
+            engine.ingest(deepcopy([full[i] for i in step]))
+            assert ledger(engine) == texts(full[:9 if 8 in step else 8])

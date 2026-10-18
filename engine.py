@@ -6655,7 +6655,7 @@ class LCMEngine(
                 if current["timestamp"] is None:
                     # Prefer forward matches; a reordered tail can still use an
                     # unmatched occurrence beyond the shortened boundary.
-                    start = 0 if uid else self._ingest_cursor
+                    start = 0 if uid else self._frontier.short_replay_floor
                     positions += list(range(start, matched))
                 for pos in positions:
                     if pos in used:
