@@ -247,3 +247,93 @@ def test_1179_steady_skip_requires_literal_content(build: Build, content: str) -
     # The unchanged call may retain its existing occurrence; the changed result may not.
     if content == CLEARED:
         assert any(hashlib.sha256(row["content"].encode()).hexdigest() == CLEARED_SHA256 for row in added)
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("following", [2, 4])
+@pytest.mark.parametrize("clear_earlier", [False, True], ids=["plain", "earlier-salvage"])
+def test_restart_keeps_retry_once(build: Build, mode: str, following: int, clear_earlier: bool) -> None:
+    """I1/I2/I8: a literal retry pair remains durable across restart (#1540)."""
+    def counts(rows: list[Row]) -> tuple[int, int]:
+        return (
+            sum(any(call["id"] == "c" for call in row.get("tool_calls") or []) for row in rows),
+            sum(row.get("tool_call_id") == "c" and row["content"] == CLEARED for row in rows),
+        )
+
+    engine, host = compact(build, mode=mode)
+    original = stored(engine)
+    assert counts(original) == (1, 0)
+    host[-3]["timestamp"] = 20
+    host[-1]["content"] = CLEARED
+    pair: Any = tool_pair
+    for index in range(following):
+        host.extend(pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    first = stored(engine)
+    assert first[:len(original)] == original
+    assert counts(first) == (2, 1)
+    assert len(first) == len(original) + 3 + 2 * following
+    engine.shutdown()
+    engine = build()
+    assert stored(engine) == first
+    if clear_earlier:
+        next(row for row in host if row.get("tool_call_id") == "older")["content"] = CLEARED
+    host.append({"role": "user", "content": "after restart", "timestamp": 50})
+    engine.ingest(deepcopy(host))
+    final = stored(engine)
+    assert final[:len(first)] == first
+    assert counts(final) == (2, 1)
+    assert len(final) == len(first) + 1
+    assert final[-1]["content"] == "after restart"
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == final
+
+
+@pytest.mark.parametrize("transition", ["repeat", "later-turn", "rotation"])
+def test_retry_invalidation_lifetime(build: Build, transition: str) -> None:
+    engine, host = compact(build)
+    host[-3]["timestamp"] = 20
+    host[-1]["content"] = CLEARED
+    pair: Any = tool_pair
+    for index in range(2):
+        host.extend(pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    if transition == "rotation":
+        sid = engine._session_id
+        engine.on_session_end(sid, deepcopy(host))
+        engine.on_session_start("child", boundary_reason="compression", old_session_id=sid,
+                                conversation_id=engine._conversation_id, platform="cli")
+        host = [{"role": "user", "content": "child ask", "timestamp": 40},
+                *pair("child-c", LONG, tool_name="lookup")]
+        for index in range(2):
+            host.extend(pair(f"child-following-{index}", f"child output {index}", tool_name="lookup"))
+        engine.ingest(deepcopy(host))
+    before = stored(engine)
+    if transition != "repeat":
+        target = "child-c" if transition == "rotation" else "older"
+        next(row for row in host if row.get("tool_call_id") == target)["content"] = CLEARED
+        host.append({"role": "user", "content": "later ask", "timestamp": 50})
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    assert after[:len(before)] == before
+    assert len(after) == len(before) + (0 if transition == "repeat" else 1)
+    if transition != "repeat":
+        assert after[-1]["content"] == "later ask"
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+def test_placeholder_at_first_unproven_index(build: Build, mode: str) -> None:
+    engine, host = compact(build, mode=mode)
+    before = stored(engine)
+    host[-1]["content"] = CLEARED
+    pair: Any = tool_pair
+    host.append(pair("fresh", CLEARED, tool_name="lookup")[1])
+    for index in range(2):
+        host.extend(pair(f"new-{index}", f"new result {index}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    assert len(added) == 5
+    assert sum(row.get("tool_call_id") == "fresh" and row["content"] == CLEARED for row in added) == 1
+    assert not any(row.get("tool_call_id") == "c" for row in added)
