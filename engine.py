@@ -6635,16 +6635,13 @@ class LCMEngine(
             self._short_ingest_replay = None
         elif shortened is not None:
             identities, metadata = shortened
-            # A complete old prefix followed by another row is the restored
-            # host history. At exactly the old length, an unstamped identical
-            # replacement exchange remains ambiguous: retain the shorter cursor.
-            complete = n > len(identities) or (n == len(identities) and all(
-                previous.get("timestamp") is not None or previous.get("message_uid") is not None
-                for previous in metadata[self._ingest_cursor:]
-            ))
-            if complete and all(
+            # A complete ordered old view is restored history, even at exactly
+            # the old length without stamps. Fresh host stamps identify resends;
+            # an identical never-stamped resend keeps the base replay convention.
+            if n >= len(identities) and all(
                 self._message_replay_identity(message, strip_carrier=False) == identity
-                and not self._host_occurrence_changed(message, previous)
+                and all(value is None or value == previous.get(key)
+                        for key, value in self._host_occurrence_metadata(message).items())
                 for message, identity, previous in zip(messages, identities, metadata)
             ):
                 # A partial no-op compress may return its withheld tail. Only
