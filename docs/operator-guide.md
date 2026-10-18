@@ -301,7 +301,7 @@ On the `main` line, output with both opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.27.0 (15 tools)
+  ✓ hermes-lcm-x v0.28.0 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -309,9 +309,10 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.27.0` is the identity of the current stable release: the `v0.27.0-rc1`
-tag carried it first, the gauntlet ran at the last rc tag (`v0.27.0-rc8`), and the GA tree is
+and tag. `0.28.0` is the forward identity of the next minor release: the `v0.28.0-rc1`
+tag carries it first, the gauntlet runs at the last rc tag, and the GA tree must be
 that rc tree plus the GA release-notes file (`v0.26.0` at `867eb587` shipped the same way).
+The rollback target for this candidate is `v0.27.0`.
 
 For source checkouts, `lcm_status`, `/lcm status`, `lcm_inspect`,
 `lcm_doctor`, and `/lcm doctor` also report the loaded plugin path and
@@ -328,15 +329,18 @@ prepends the policy. The canonical file and digest source is
 
 ## Troubleshooting
 
-### Session-end warning says `final messages may be absent`
+### Session-end warning says `final messages may be absent` or `retry pending`
 
-The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: the
-pending message count before the final ingest attempt, without message content.
-The outer ingest/finalize warning includes the same field only when ingest has
-not finished. The session-end SQLite busy timeout stays 50 ms. Resuming the same
-session and ingesting its full history recovers the missing tail without
-duplicates; starting a different session does not recover a never-resumed tail.
-This field measures that known window (#1160); it adds no retry or durable marker.
+The interrupted or SQLite-lock raw-flush warning includes `unflushed=N`: the pending message count
+before the final ingest attempt, without message content. The outer ingest/finalize warning includes
+the same field only when ingest has not finished. The session-end SQLite busy timeout stays 50 ms.
+When a lock skip keeps the rows in memory, the warning says `retry pending at the next session start
+or shutdown`: the same process retries them at the next session start or session end, and for up to
+5 s at shutdown or process exit. If rows remain after that, a warning ending `after shutdown retry;
+final messages may be absent from the plugin-local store unflushed=N` gives the rows still
+unflushed. Resuming the same session and ingesting its full history also recovers the tail without
+duplicates. An abrupt exit, or another process holding the write lock for the whole shutdown bound,
+can still leave the tail absent (#1160).
 
 ### `hermes plugins` shows `lcm-x (not found)` but LCM tools exist
 
@@ -511,8 +515,7 @@ compaction until foreground turn end, with a 600 s backstop (#1096). At turn end
 hung circuit is released for one ordinary retry; bypassed sessions cannot release it. A second hang keeps
 the 600 s sweep and no-progress holds. Without turn-end notifications the backstop applies as before.
 A hang waived because a fallback route was usable also counts as the conversation's first hang, so a
-later sole-route hang before a leaf is stored takes the 600 s path. On a first hang, `lcm_status` shows
-the sweep hold but no no-progress hold; the 600 s backstop applies to the sweep hold.
+later sole-route hang before a leaf is stored takes the 600 s path. On a first hang, `lcm_status` shows no no-progress hold; the 600 s backstop applies to the sweep hold.
 A stored leaf or conversation/session reset clears the strike. Other circuit errors and hold reasons,
 forced overflow and survival-ceiling exemptions are unchanged. INFO logs name the route at arm and release.
 

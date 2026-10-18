@@ -568,8 +568,11 @@ class ReconcileMixin:
                 return False
         return True
 
-    def _proof_replay_identity(self, msg: Dict[str, Any], strip_carrier: bool = True) -> tuple[str, str, str, str, str]:
-        return _proof_user_identity(self._message_replay_identity(msg, strip_carrier=strip_carrier))
+    def _proof_replay_identity(
+        self, msg: Dict[str, Any], strip_carrier: bool = True, *, allow_pruned_tool_alias: bool = True,
+    ) -> tuple[str, str, str, str, str]:
+        return _proof_user_identity(self._message_replay_identity(
+            msg, strip_carrier=strip_carrier, allow_pruned_tool_alias=allow_pruned_tool_alias))
 
     def _replay_occurrences(self, messages, proof=None):
         """#488 (A2, F6): per POSITION of a COMPLETE list, (projection entry, replay identity) from

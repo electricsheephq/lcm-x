@@ -142,6 +142,7 @@ from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
 from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity
+from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
 from .compaction import CompactionMixin
 from . import leaf_prep
@@ -6669,6 +6670,9 @@ class LCMEngine(
             # (#259: visible duplication beats silent loss). One-shot: a later
             # reconciled cursor that equals len(output) must not re-arm it.
             proof["consulted"] = True
+            # #1529: like the durable matcher, guard positions in the COMPLETE
+            # host list, not the candidate prefix (later results permit salvage).
+            recent_tools = _hermes_salvage_protected_positions(messages)
             host_input = proof.get("input")
             is_native_proof = bool(proof.get("native"))
             proof_identity_groups = (proof.get("output"), host_input)
@@ -6680,7 +6684,8 @@ class LCMEngine(
             if native_lossy:
                 self._ingest_cursor_needs_reconcile = True
             elif n >= self._ingest_cursor and [
-                self._proof_replay_identity(m, strip_carrier=False) for m in messages[: self._ingest_cursor]
+                self._proof_replay_identity(m, strip_carrier=False, allow_pruned_tool_alias=idx not in recent_tools)
+                for idx, m in enumerate(messages[: self._ingest_cursor])
             ] == proof["output"]:
                 # Content proves position, but a known metadata conflict proves
                 # a new occurrence. Use the output snapshot, not the input cache.
@@ -6697,7 +6702,8 @@ class LCMEngine(
                 accepted_compaction_prefix = cursor
                 self._compress_commit_proof = None
             elif (proof.get("end_consumed") or proof.get("native")) and host_input is not None and n >= len(host_input) and [
-                self._proof_replay_identity(m, strip_carrier=False) for m in messages[: len(host_input)]
+                self._proof_replay_identity(m, strip_carrier=False, allow_pruned_tool_alias=idx not in recent_tools)
+                for idx, m in enumerate(messages[: len(host_input)])
             ] == host_input:
                 self._ingest_cursor = len(host_input)
                 cursor = self._ingest_cursor
@@ -6746,7 +6752,10 @@ class LCMEngine(
                     old_stamp = self._host_occurrence_metadata(previous)["timestamp"]
                     if stamp is not None and old_stamp is not None and stamp != old_stamp:
                         restamped_prefix_occurrences.add(idx)
-                elif self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous):
+                elif (messages[idx].get("content") == previous.get("content")
+                      and self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)):
+                    # An alias can match changed literal bytes; metadata alone
+                    # must not skip that result when a retry rewinds the cursor.
                     unchanged_prefix_occurrences.add(idx)
             if new_prefix_occurrences:
                 cursor = self._ingest_cursor = min(new_prefix_occurrences)

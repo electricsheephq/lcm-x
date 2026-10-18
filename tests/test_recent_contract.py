@@ -11,7 +11,7 @@ import pytest
 
 from hermes_lcm import recent as recent_module
 from hermes_lcm import evidence_tools, inspect_tools, expand_query_tools, expansion_evidence
-from hermes_lcm import tools
+from hermes_lcm import tools, expand_tools
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.rollup_periods import parse_recent_period
 
@@ -109,19 +109,23 @@ def test_tools_facade_does_not_reexport_recent_private_helpers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     # Public tool facades and other modules' load-bearing exports are allowed.
-    for family in (recent_module, evidence_tools, inspect_tools, expand_query_tools, expansion_evidence):
+    for family in (recent_module, evidence_tools, inspect_tools, expand_query_tools, expansion_evidence, expand_tools):
         private_helpers = {
             name for name, value in vars(family).items()
             if name.startswith("_") and inspect.isfunction(value)
             and value.__module__ == family.__name__
         }
-        assert private_helpers
+        assert private_helpers or family is expand_tools
         assert private_helpers.isdisjoint(vars(tools))
         assert not {
             name for name, value in vars(tools).items()
             if name.startswith("_") and inspect.isfunction(value)
             and value.__module__ == family.__name__
         }
+    assert {
+        name for name, value in vars(expand_tools).items()
+        if inspect.isfunction(value) and value.__module__ == expand_tools.__name__
+    } == {"lcm_describe", "lcm_expand"}
     assert callable(tools.lcm_recent)
 
     # Keep this existing guard's ID while characterizing the next facade family.

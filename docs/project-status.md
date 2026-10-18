@@ -22,7 +22,7 @@ The latest stable release is `v0.27.0` at `c67d7633d963a2ffd24cf90995189ee58e2f8
 
 The source snapshot used for this reconciliation is `main@c67d7633d963a2ffd24cf90995189ee58e2f88c7` (the v0.27.0 GA merge, the commit the `v0.27.0` tag points at). Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits.
 
-At the GA tag, main carries the identity `0.27.0` (`hermes-lcm-x`); the next release candidate bumps it. Releases with product code are rc-first under `bench/specs/RELEASE-READINESS-V1.md`; the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
+Main carries the forward identity `0.28.0` (`hermes-lcm-x`), first tagged as `v0.28.0-rc1`; `v0.27.0` remains the latest stable release. Releases with product code are rc-first under `bench/specs/RELEASE-READINESS-V1.md`; the release identity test keeps `plugin.yaml`, README, the operator guide, CHANGELOG and the bug-report template synchronized.
 
 ## Reference-agent acceptance state
 

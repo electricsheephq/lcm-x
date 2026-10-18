@@ -37,7 +37,7 @@ body:
     attributes:
       label: Plugin version
       description: The hermes-lcm-x entry from `hermes plugins list --json` (version and source sha), or the exact commit SHA.
-      placeholder: Exact commit SHA for v0.27.0 or main, for example 0123456789abcdef...
+      placeholder: Exact commit SHA for v0.28.0 or main, for example 0123456789abcdef...
     validations:
       required: true
   - type: input
