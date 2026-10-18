@@ -6650,6 +6650,7 @@ class LCMEngine(
                     self._frontier.adopt(n)  # Proven partial restore; KEEP the original boundary.
         cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
+        restamped_prefix_occurrences = set()
         unchanged_prefix_occurrences = set()
         accepted_compaction_prefix = 0
         proof = getattr(self, "_compress_commit_proof", None)
@@ -6741,6 +6742,10 @@ class LCMEngine(
                     break  # content changes retain the existing anchor audit
                 if self._host_occurrence_changed(messages[idx], previous):
                     new_prefix_occurrences.add(idx)
+                    stamp = self._host_occurrence_metadata(messages[idx])["timestamp"]
+                    old_stamp = self._host_occurrence_metadata(previous)["timestamp"]
+                    if stamp is not None and old_stamp is not None and stamp != old_stamp:
+                        restamped_prefix_occurrences.add(idx)
                 elif self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous):
                     unchanged_prefix_occurrences.add(idx)
             if new_prefix_occurrences:
@@ -6880,6 +6885,9 @@ class LCMEngine(
                 accepted = {"accepted_prefix": accepted_compaction_prefix} if accepted_compaction_prefix else {}
                 anchor_plan = self._identity_anchor_prematch(messages, reconcile_messages, cursor, audit_from, **accepted)
                 anchor_plan["replayed"] -= replayed_tool_segment_indexes
+                # A changed stamp exposes the row for matching; a known old occurrence
+                # remains replay. Same-stamp UID conflicts still force a new occurrence.
+                new_prefix_occurrences -= restamped_prefix_occurrences & anchor_plan["replayed"]
                 # A reused stamp cannot override positive evidence of a new uid.
                 anchor_plan["replayed"] -= new_prefix_occurrences
                 for idx in new_prefix_occurrences:

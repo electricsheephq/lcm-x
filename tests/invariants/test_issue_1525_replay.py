@@ -540,3 +540,19 @@ def test_episode_frontier_lifetime(tmp_path: Path, monkeypatch: Any, transition:
             engine.ingest(deepcopy(full[:6]))
         engine.ingest(deepcopy(full + [msg("restored fresh", 101.)]))
         assert rows(engine) == before + expected([msg("restored fresh", 101.)])
+
+
+@pytest.mark.parametrize("uid", [False, True])
+def test_stamped_withheld_row_after_same_text_turn(tmp_path: Path, uid: bool) -> None:
+    """I1/#1179: a known old stamp is replay even after a same-text new turn."""
+    full = full_list()
+    if uid:
+        for index, row in enumerate(full):
+            row["message_uid"] = f"old-{index}"
+    fresh = msg(full[4]["content"], 600.)
+    if uid:
+        fresh["message_uid"] = "new-turn"
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        for view in (full, full[:4], full[:4] + [fresh], full + [fresh]):
+            engine.ingest(deepcopy(view))
+        assert rows(engine) == expected(full + [fresh])
