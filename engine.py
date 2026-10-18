@@ -7128,7 +7128,7 @@ class LCMEngine(
                     self._pending_session_tails.append(pending)
                 _PENDING_TAIL_ENGINES.add(self)
             raise
-        if shortened is not None and all(row["timestamp"] is None for row in shortened[1]):
+        if shortened is not None and any(row["timestamp"] is None for row in shortened[1]):
             self._frontier.extend_short_replay(
                 [self._message_replay_identity(messages[idx], strip_carrier=False)
                  for idx, _ in messages_to_store_with_index],

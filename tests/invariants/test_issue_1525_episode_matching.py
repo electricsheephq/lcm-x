@@ -262,3 +262,42 @@ def test_front_truncation_multiplicity_limitation(tmp_path: Path, metadata: str)
         # new identical row is indistinguishable from the unmatched old row.
         assert counts == ([8, 8, 8] if metadata == "none" else [8, 8, 9])
         assert ledger(engine) == texts(full if metadata == "none" else full + [fresh])
+
+
+@pytest.mark.parametrize("metadata", ["stamphead", "uidhead", "stamptail", "alt", "s0only"])
+@pytest.mark.parametrize("fresh_metadata", ["none", "stamp", "uid"])
+@pytest.mark.parametrize("shape", ["X1", "X4", "X4b", "X5", "noappend", "ordered"])
+def test_mixed_episode_append_regrow(
+    tmp_path: Path, metadata: str, fresh_metadata: str, shape: str,
+) -> None:
+    """I1/I2: an append must retain replay coverage for an unstamped tail."""
+    masks = {"stamphead": "ssssnnnn", "uidhead": "uuuunnnn", "stamptail": "nnnnssss",
+             "alt": "sunsunsu", "s0only": "snnnnnnn"}
+    full = history()
+    for i, (row, kind) in enumerate(zip(full, masks[metadata])):
+        if kind == "s":
+            row["timestamp"] = float(10 + i)
+        elif kind == "u":
+            row["message_uid"] = f"old-{i}"
+    fresh: Row = {"role": "user", "content": "fresh-F"}
+    if fresh_metadata == "stamp":
+        fresh["timestamp"] = 500.0
+    elif fresh_metadata == "uid":
+        fresh["message_uid"] = "new-F"
+    short = full[:4]
+    appended = short + [fresh]
+    views = {
+        "X1": [full, short, appended, appended + full[4:]],
+        "X4": [full, short, appended, full + [fresh]],
+        "X4b": [full, short, appended, full],
+        "X5": [full, short, appended, appended + full[4:6]],
+        "noappend": [full, short, short, full + [fresh]],
+        "ordered": [full, full[:2], full[:5], full + [fresh]],
+    }
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        for view in views[shape]:
+            engine.ingest(deepcopy(view))
+        stored = ledger(engine)
+        assert len(stored) == 9
+        assert len(set(stored)) == 9
+        assert stored == texts(full + [fresh])
