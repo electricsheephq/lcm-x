@@ -6652,12 +6652,17 @@ class LCMEngine(
                 identity = self._message_replay_identity(message, strip_carrier=False)
                 uid = current["message_uid"]
                 positions = list(range(matched, len(identities)))
-                if current["timestamp"] is None and uid:
-                    positions += [pos for pos in range(matched) if pos not in used]
+                if current["timestamp"] is None:
+                    # Prefer forward matches; a reordered tail can still use an
+                    # unmatched occurrence beyond the shortened boundary.
+                    start = 0 if uid else self._ingest_cursor
+                    positions += list(range(start, matched))
                 for pos in positions:
+                    if pos in used:
+                        continue
                     previous = metadata[pos]
                     if current["timestamp"] is None and uid:
-                        if uid != previous["message_uid"]:
+                        if uid != previous["message_uid"] or identity != identities[pos]:
                             continue
                     elif identity != identities[pos] or self._host_occurrence_changed(message, previous):
                         continue
@@ -6989,7 +6994,9 @@ class LCMEngine(
             if self._ingest_cursor > n:
                 self._frontier.shorten(
                     n, list(cached_source_identities or ()),
-                    [{**self._host_occurrence_metadata(row), "compress_calls": self._compress_calls}
+                    [{**self._host_occurrence_metadata(row),
+                      # compress() increments before ingesting its short view.
+                      "compress_calls": self._compress_calls - int(self._last_compression_status == "running")}
                      for row in self._last_active_replay_messages],
                 )
             cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
