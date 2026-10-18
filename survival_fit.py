@@ -201,6 +201,27 @@ class SurvivalFitMixin:
         if exit_fit and window_budget is not None and before > window_budget:
             return self._survival_fit(messages, result, observed_tokens, reason[len("exit_fit:"):],
                                       after_exception=after_exception, summary_failure=summary_failure, fit_cause=fit_cause)
+        plan, persisted = self._plan_survival_fit(
+            messages, result, observed_tokens, before, budget, reason, exit_fit=exit_fit,
+            after_exception=after_exception, window_cap=window_cap, request_cap=request_cap)
+        if plan is None:
+            return result
+        fitted = self._apply_survival_fit(result, plan, before, budget, reason,
+                                          after_exception=after_exception, persisted=persisted, exit_fit=exit_fit,
+                                          summary_failure=summary_failure, fit_cause=fit_cause)
+        if fitted is not result:
+            from .engine import _stamp_generated_model_only
+            # Pure DAG-verified scaffold only: carriers include human text. Keep
+            # row/list identities unless this view needs different display metadata.
+            generated_rows = [row for row in fitted if row.get("role") != "system"
+                              and self._is_verified_replay_scaffold_message(row)]
+            _stamp_generated_model_only(fitted, generated_rows, copy_rows=True)
+        return fitted
+
+    def _plan_survival_fit(self, messages, result, observed_tokens, before: int, budget: int, reason: str, *,
+                           exit_fit: bool, after_exception: bool = False, window_cap: Optional[int] = None,
+                           request_cap: Optional[int] = None) -> tuple[Optional[FitPlan], bool]:
+        """Select a fit and preserve the pre-cut durability proof for the caller's apply step."""
         system = 0
         while system < len(result) and isinstance(result[system], dict) and result[system].get("role") == "system":
             system += 1
@@ -230,7 +251,7 @@ class SurvivalFitMixin:
             if cut is None:
                 logger.info("LCM exit fit skipped: no whole-turn cut between the summary prefix and the fresh tail "
                             "reaches the exit cap (tokens=%d, budget=%d)", before, budget)
-                return result
+                return None, persisted
             emergency = False
         else:
             cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True) if prefix > system else None
@@ -242,20 +263,9 @@ class SurvivalFitMixin:
             cut = cut or self._survival_cut(result, system, budget, persisted, reason, store_ids, False,
                                             hard_cap=hard_cap)
         if cut is None:
-            return result
+            return None, persisted
         fitted, count, ids, projected, notice = cut
-        plan = FitPlan(fitted, count, ids, projected, notice, emergency, result[system:prefix])
-        fitted = self._apply_survival_fit(result, plan, before, budget, reason,
-                                          after_exception=after_exception, persisted=persisted, exit_fit=exit_fit,
-                                          summary_failure=summary_failure, fit_cause=fit_cause)
-        if fitted is not result:
-            from .engine import _stamp_generated_model_only
-            # Pure DAG-verified scaffold only: carriers include human text. Keep
-            # row/list identities unless this view needs different display metadata.
-            generated_rows = [row for row in fitted if row.get("role") != "system"
-                              and self._is_verified_replay_scaffold_message(row)]
-            _stamp_generated_model_only(fitted, generated_rows, copy_rows=True)
-        return fitted
+        return FitPlan(fitted, count, ids, projected, notice, emergency, result[system:prefix]), persisted
 
     def _survival_summary_identity(self, row: dict, summary: str, uid, proof_kind: str, absorbed_from=None, taken=()) -> dict:
         """The survival summary part (B1's gate): the carrier's engine uid, else a minted ``survival_summary``
