@@ -379,3 +379,18 @@ def test_cold_after_partial_noop(tmp_path: Path, stamped: bool, restore: bool) -
         # the base's lossless ambiguous-batch behavior, including its duplicates.
         replayed = full[:-2] if not stamped and not restore else []
         assert rows(engine) == before + expected(replayed + [fresh])
+
+
+def test_unstamped_exact_length_resend_is_ambiguous(tmp_path: Path) -> None:
+    """An equal unstamped replacement exchange cannot prove a restored tail."""
+    full = [{"role": row["role"], "content": row["content"]} for row in full_list()]
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        engine.ingest(deepcopy(full))
+        before = rows(engine)
+        engine.ingest(deepcopy(full[:-2]))
+        engine.ingest(deepcopy(full))
+        # This could be an unchanged restoration or an identical new exchange.
+        # Prefer a visible duplicate over silently losing that new occurrence.
+        assert rows(engine) == before + expected(full[-2:])
+        engine.ingest(deepcopy(full))
+        assert rows(engine) == before + expected(full[-2:])
