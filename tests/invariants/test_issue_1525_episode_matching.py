@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import sqlite3
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -151,3 +153,69 @@ def test_nested_shrink_lookback(tmp_path: Path, metadata: str, steps: list[list[
         for step in steps:
             engine.ingest(deepcopy([full[i] for i in step]))
             assert ledger(engine) == texts(full[:9 if 8 in step else 8])
+
+
+def test_stale_running_after_inner_bypass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    full = history("stamp")
+    copies = [{"role": row["role"], "content": row["content"]} for row in full[4:]]
+    fresh: Row = {"role": "user", "content": "fresh after bypass"}
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        real_count = engine._store.get_session_count
+        calls = 0
+        auxiliary = threading.local()
+
+        def flaky_count(session_id: str) -> int:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise sqlite3.OperationalError("database is locked")
+            return int(real_count(session_id))
+
+        original_generation = type(engine)._in_process_auxiliary_caller_generation
+
+        def generation(self: Any, session_id: str, **kwargs: Any) -> Any:
+            return 1 if getattr(auxiliary, "active", False) else original_generation(self, session_id, **kwargs)
+
+        monkeypatch.setattr(engine._store, "get_session_count", flaky_count)
+        monkeypatch.setattr(type(engine), "_in_process_auxiliary_caller_generation", generation)
+        errors: list[BaseException] = []
+
+        def fork() -> None:
+            auxiliary.active = True
+            try:
+                engine.compress([{"role": "user", "content": "fork row"}], current_tokens=100)
+            except BaseException as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=fork)
+        worker.start()
+        worker.join()
+        assert not errors
+        assert calls >= 2
+        assert engine._last_compression_status == "running"
+        monkeypatch.setattr(engine._store, "get_session_count", real_count)
+        engine.ingest(deepcopy(full))
+        engine.ingest(deepcopy(full[:4]))
+        engine.last_compression_status = ""
+        engine.ingest(deepcopy(full[:4] + copies + [fresh]))
+        assert ledger(engine) == texts(full + [fresh])
+
+
+@pytest.mark.parametrize("raises", [False, True])
+def test_compress_generation_marker_clears(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, raises: bool) -> None:
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        before = engine._compress_calls
+
+        def compress_impl(messages: list[Row], **kwargs: Any) -> list[Row]:
+            assert engine._active_compress_generation == before
+            if raises:
+                raise KeyboardInterrupt("synthetic compress exit")
+            return messages
+
+        monkeypatch.setattr(engine, "_compress_impl", compress_impl)
+        if raises:
+            with pytest.raises(KeyboardInterrupt):
+                engine.compress([], current_tokens=100)
+        else:
+            engine.compress([], current_tokens=100)
+        assert engine._active_compress_generation is None

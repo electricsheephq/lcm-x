@@ -703,6 +703,7 @@ class CompactionMixin:
             self._survival_fit_reason = None
             self._no_progress_candidate = False
             self._stub_first_exit_now = self._last_stub_first_exit = None  # #671: the latest compaction only
+            self._active_compress_generation = self._compress_calls
             self._compress_calls += 1  # #1116: a stub-first proof becomes durable only for the latest call
             if bypass_cooldown:  # #651: a host recovery attempt is never cleanup-only maintenance
                 self._compaction_request.below_threshold_cleanup_only = self._compaction_request.automatic_request = False
@@ -795,6 +796,7 @@ class CompactionMixin:
                     return fitted
             raise
         finally:
+            self._active_compress_generation = None
             self._end_pre_leaf_phase(budget, "stopped")
             self._last_compress_leaves = (self._hold_conversation_key(), budget.leaves)
             self._compress_forced_overflow = False

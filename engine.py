@@ -1264,6 +1264,7 @@ class LCMEngine(
         # #671: the latest stub-first exit (tokens before/after, target, backlog rows) and this compress()'s.
         self._last_stub_first_exit: Optional[dict[str, int]] = None
         self._stub_first_exit_now: Optional[dict[str, int]] = None
+        self._active_compress_generation: int | None = None
         self._compress_calls = 0  # #1116: which compress() a stub-first proof came from
         self._last_compression_status = "idle"
         self._last_compression_noop_reason = ""
@@ -6996,7 +6997,8 @@ class LCMEngine(
                     n, list(cached_source_identities or ()),
                     [{**self._host_occurrence_metadata(row),
                       # compress() increments before ingesting its short view.
-                      "compress_calls": self._compress_calls - int(self._last_compression_status == "running")}
+                      "compress_calls": (self._compress_calls if self._active_compress_generation is None
+                                         else self._active_compress_generation)}
                      for row in self._last_active_replay_messages],
                 )
             cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
