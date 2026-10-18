@@ -364,6 +364,8 @@ def test_ordered_keyless_regrow(tmp_path: Path, metadata: str, shift: str) -> No
         if shift == "partial":
             engine.ingest(deepcopy(full[:7] + [fresh]))
             assert rows(engine) == expected(full + [fresh])
+            engine.ingest(deepcopy(full + [fresh]))
+            assert rows(engine) == expected(full + [fresh])
 
 
 @pytest.mark.parametrize("second", ["same", "shorter", "front"])

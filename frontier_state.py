@@ -25,6 +25,11 @@ class FrontierState:
             self.cursor = max(self.cursor, len(self.short_replay[0]))
         self.short_replay = None
 
+    def extend_short_replay(self, identities: list[Any], metadata: list[dict[str, Any]]) -> None:
+        if self.short_replay is not None:
+            old_identities, old_metadata = self.short_replay
+            self.short_replay = (old_identities + identities, old_metadata + metadata)
+
     def invalidate(self, *, drop_proof: bool = False) -> None:
         self.finish_short_replay(restore=True)
         if drop_proof:

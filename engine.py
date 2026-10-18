@@ -6633,21 +6633,36 @@ class LCMEngine(
         self._capture_host_rewrites(messages)
         n = len(messages)
         shortened = self._frontier.short_replay
+        if (shortened is not None and shortened[1]
+                and self._compress_calls > shortened[1][0].get("compress_calls", self._compress_calls)
+                and self._last_compression_status not in {"running", "error"}
+                and all(row["timestamp"] is not None for row in shortened[1])
+                and any(self._host_occurrence_metadata(row)["timestamp"] is None
+                        for row in messages[self._ingest_cursor:])):
+            # A successful compaction adopted this shorter boundary; a no-op
+            # has no commit proof, but its new appended exchange is still fresh.
+            shortened = None
         short_replayed = set()
         if shortened is not None:
             identities, metadata = shortened
             matched = 0
+            used = set()
             for idx, message in enumerate(messages):
                 current = self._host_occurrence_metadata(message)
                 identity = self._message_replay_identity(message, strip_carrier=False)
-                for pos in range(matched, len(identities)):
+                uid = current["message_uid"]
+                positions = list(range(matched, len(identities)))
+                if current["timestamp"] is None and uid:
+                    positions += [pos for pos in range(matched) if pos not in used]
+                for pos in positions:
                     previous = metadata[pos]
-                    if identity != identities[pos] or self._host_occurrence_changed(message, previous):
+                    if current["timestamp"] is None and uid:
+                        if uid != previous["message_uid"]:
+                            continue
+                    elif identity != identities[pos] or self._host_occurrence_changed(message, previous):
                         continue
-                    uid = current["message_uid"]
-                    if current["timestamp"] is None and uid and uid != previous["message_uid"]:
-                        continue
-                    matched = pos + 1
+                    matched = max(matched, pos + 1)
+                    used.add(pos)
                     if current["timestamp"] is None:
                         short_replayed.add(idx)
                     break
@@ -6974,7 +6989,8 @@ class LCMEngine(
             if self._ingest_cursor > n:
                 self._frontier.shorten(
                     n, list(cached_source_identities or ()),
-                    [self._host_occurrence_metadata(row) for row in self._last_active_replay_messages],
+                    [{**self._host_occurrence_metadata(row), "compress_calls": self._compress_calls}
+                     for row in self._last_active_replay_messages],
                 )
             cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
             self._compression_boundary_ingest_pending = False
@@ -7302,7 +7318,14 @@ class LCMEngine(
                     self._pending_session_tails.append(pending)
                 _PENDING_TAIL_ENGINES.add(self)
             raise
-        self._frontier.finish_short_replay()  # CONSUME only after the append succeeds.
+        if shortened is not None and all(row["timestamp"] is None for row in shortened[1]):
+            self._frontier.extend_short_replay(
+                [self._message_replay_identity(messages[idx], strip_carrier=False)
+                 for idx, _ in messages_to_store_with_index],
+                [self._host_occurrence_metadata(messages[idx]) for idx, _ in messages_to_store_with_index],
+            )
+        else:
+            self._frontier.finish_short_replay()  # CONSUME only after the append succeeds.
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
         self._watch_stored_user_rows(zip(originals, protected_messages, store_ids))
         if anchor_plan is not None:
