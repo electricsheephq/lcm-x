@@ -500,3 +500,43 @@ def test_partial_then_full_noop_compress(tmp_path: Path) -> None:
         assert len(rows(engine)) == 18
         engine.ingest(deepcopy(restored + fresh))
         assert rows(engine) == before + expected(fresh)
+
+
+@pytest.mark.parametrize("transition", ["auxiliary", "failed-append", "anchor-off"])
+def test_episode_frontier_lifetime(tmp_path: Path, monkeypatch: Any, transition: str) -> None:
+    """I1/I12: preserve the old boundary until a stored occurrence consumes it."""
+    full = full_list()
+    if transition == "failed-append":
+        for row in full:
+            row.pop("timestamp")
+    if transition == "anchor-off":
+        monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "0")
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        engine.ingest(deepcopy(full))
+        before = rows(engine)
+        engine.ingest(deepcopy(full[:4]))
+        if transition == "auxiliary":
+            from concurrent.futures import ThreadPoolExecutor
+            class Child:
+                def __init__(self) -> None:
+                    self._parent_session_id, self.session_id = "S", "child"
+                    self._subagent_id, self._delegate_depth = "probe", 1
+                def start(self) -> None:
+                    engine.on_session_start(self.session_id, platform="cli", context_length=128000,
+                                            parent_session_id=self._parent_session_id)
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                pool.submit(Child().start).result()
+            assert engine.current_session_id == "S"
+            for row in full:
+                row.pop("timestamp")
+        elif transition == "failed-append":
+            with monkeypatch.context() as patch:
+                def fail(*args: Any, **kwargs: Any) -> Any:
+                    raise sqlite3.OperationalError("database is locked")
+                patch.setattr(engine._store, "_append_protected_batch", fail)
+                engine.ingest(deepcopy(full[:4] + [msg("failed fresh", 100.)]))
+            assert engine._ingest_failure_count == 1
+        else:
+            engine.ingest(deepcopy(full[:6]))
+        engine.ingest(deepcopy(full + [msg("restored fresh", 101.)]))
+        assert rows(engine) == before + expected([msg("restored fresh", 101.)])

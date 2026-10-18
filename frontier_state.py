@@ -13,8 +13,20 @@ class FrontierState:
     compacted_store_id: int = 0
     commit_proof: dict[str, Any] | None = None
     emission_descriptors: dict[str, Any] | None = None
+    short_replay: tuple[list[Any], list[dict[str, Any]]] | None = None
+
+    def shorten(self, n: int, identities: list[Any], metadata: list[dict[str, Any]]) -> None:
+        if self.short_replay is None and len(identities) == len(metadata) == self.cursor:
+            self.short_replay = (identities, metadata)
+        self.cursor = n
+
+    def finish_short_replay(self, *, restore: bool = False) -> None:
+        if restore and self.short_replay is not None:
+            self.cursor = max(self.cursor, len(self.short_replay[0]))
+        self.short_replay = None
 
     def invalidate(self, *, drop_proof: bool = False) -> None:
+        self.finish_short_replay(restore=True)
         if drop_proof:
             self.commit_proof = None
         self.cursor = 0
@@ -24,6 +36,7 @@ class FrontierState:
         self.cursor = n
 
     def reset_progress(self) -> None:
+        self.finish_short_replay(restore=True)
         self.compacted_store_id = 0
         self.cursor = 0
         self.needs_reconcile = False
@@ -37,6 +50,7 @@ class FrontierState:
         self.needs_reconcile = False
 
     def restart_cursor(self) -> None:
+        self.finish_short_replay(restore=True)
         self.cursor = 0
         self.compacted_store_id = 0
 

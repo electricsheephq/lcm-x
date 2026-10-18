@@ -1317,7 +1317,6 @@ class LCMEngine(
         self._current_compress_placeholder_identity_counts: dict[tuple[str, str, str, str], int] = {}
         self._last_active_replay_source_identities: list[tuple[Any, ...]] = []
         self._last_active_replay_messages: list[Dict[str, Any]] = []
-        self._short_ingest_replay: Optional[tuple[list, list[dict]]] = None
         self._generated_ignored_active_replay_placeholder_message_ids: set[int] = set()
         self._generated_ignored_active_replay_placeholder_messages: dict[int, Dict[str, Any]] = {}
         self._logged_filter_config = False
@@ -1373,6 +1372,10 @@ class LCMEngine(
         return self._frontier
 
     @property
+    def _short_ingest_replay(self):
+        return self._frontier.short_replay
+
+    @property
     def _ingest_cursor(self) -> int:
         return self._frontier.cursor
 
@@ -1380,7 +1383,7 @@ class LCMEngine(
     def _ingest_cursor(self, value: int) -> None:
         if not hasattr(self, "_frontier"):
             self._frontier = FrontierState()
-        self._frontier.cursor = value
+        self._frontier.adopt(value)
 
     @property
     def _ingest_cursor_needs_reconcile(self) -> bool:
@@ -4528,7 +4531,6 @@ class LCMEngine(
                     )
 
     def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
-        self._short_ingest_replay = None
         # The post-LLM hook also binds here under stable engine use, without
         # entering the public wrapper.
         self._retry_session_end_tails()
@@ -5255,7 +5257,7 @@ class LCMEngine(
             self._on_session_reset_unlocked()
 
     def _on_session_reset_unlocked(self) -> None:
-        self._short_ingest_replay = None
+        self._frontier.finish_short_replay(restore=True)
         for state in self._host_fallback_states():
             if state.get("_host_fallback_compressor") is not None:
                 compressor = state.get("_host_fallback_compressor")
@@ -6629,25 +6631,23 @@ class LCMEngine(
             self._identity_anchor_observe_recovery()
         self._capture_host_rewrites(messages)
         n = len(messages)
-        shortened = self._short_ingest_replay
-        if self._ingest_cursor_needs_reconcile or self._compress_commit_proof:
-            # Cold reconciliation and LCM's own compression own their boundary.
-            self._short_ingest_replay = None
-        elif shortened is not None:
+        shortened = self._frontier.short_replay
+        if shortened is not None:
             identities, metadata = shortened
-            # A complete ordered old view is restored history, even at exactly
-            # the old length without stamps. The canonical occurrence rule treats
-            # missing-to-known metadata as adoption; known conflicts identify resends.
-            if n >= len(identities) and all(
+            stamped = all(row["timestamp"] is not None for row in metadata)
+            if stamped and any(self._host_occurrence_metadata(row)["timestamp"] is None
+                               for row in messages):
+                self._frontier.finish_short_replay(restore=True)
+            elif all(
                 self._message_replay_identity(message, strip_carrier=False) == identity
                 and not self._host_occurrence_changed(message, previous)
                 for message, identity, previous in zip(messages, identities, metadata)
             ):
-                # A partial no-op compress may return its withheld tail. Only
-                # the whole ordered view proves restoration; a matching fragment
-                # could instead be a same-text resend after undo (#1525).
-                self._ingest_cursor = len(identities)
-                self._short_ingest_replay = None
+                if n >= len(identities):
+                    self._frontier.adopt(len(identities))
+                    self._frontier.finish_short_replay()
+                elif stamped:
+                    self._frontier.adopt(n)  # Proven partial restore; KEEP the original boundary.
         cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
         unchanged_prefix_occurrences = set()
@@ -6937,14 +6937,10 @@ class LCMEngine(
             # Keep the old ordered replay evidence across repeated short views,
             # while allowing new occurrences to start at the shorter cursor.
             if self._ingest_cursor > n:
-                if (self._short_ingest_replay is None and cached_source_identities is not None
-                        and len(cached_source_identities) == self._ingest_cursor
-                        and len(self._last_active_replay_messages) == self._ingest_cursor):
-                    self._short_ingest_replay = (
-                        list(cached_source_identities),
-                        [self._host_occurrence_metadata(row) for row in self._last_active_replay_messages],
-                    )
-                self._ingest_cursor = n
+                self._frontier.shorten(
+                    n, list(cached_source_identities or ()),
+                    [self._host_occurrence_metadata(row) for row in self._last_active_replay_messages],
+                )
             cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
             self._compression_boundary_ingest_pending = False
             self._compression_boundary_active_placeholder_digest_budget = {}
@@ -7197,9 +7193,6 @@ class LCMEngine(
             self._host_uid_shadow(host_uids)
             return self._remember_active_replay_messages(messages, active_replay_messages)
 
-        # A new occurrence ends the ambiguous short-view episode. Never reuse
-        # its former positions to suppress a later same-text occurrence.
-        self._short_ingest_replay = None
         tool_result_names = _tool_result_names(messages)
         protected_messages = protect_messages_for_ingest(
             [msg for _idx, msg in messages_to_store_with_index],
@@ -7272,6 +7265,7 @@ class LCMEngine(
                     self._pending_session_tails.append(pending)
                 _PENDING_TAIL_ENGINES.add(self)
             raise
+        self._frontier.finish_short_replay()  # CONSUME only after the append succeeds.
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
         self._watch_stored_user_rows(zip(originals, protected_messages, store_ids))
         if anchor_plan is not None:
