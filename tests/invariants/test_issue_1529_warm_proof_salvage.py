@@ -125,6 +125,65 @@ def test_retry_preserves_every_role(build: Build, mode: str, uids: bool, content
     assert_retry(engine, host, before, content)
 
 
+@pytest.mark.parametrize("mode", ["warm", "cold", "rotating"])
+@pytest.mark.parametrize("following", [0, 1, 2, 4])
+def test_retry_with_following_tools(build: Build, mode: str, following: int) -> None:
+    """Later results can permit salvage, but cannot erase a new turn's pair."""
+    engine, host = compact(build, mode=mode)
+    before = stored(engine)
+    host[-3]["timestamp"] = 20
+    host[-1]["content"] = CLEARED
+    pair: Any = tool_pair
+    for index in range(following):
+        host.extend(pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    assert_retry(engine, host, before, CLEARED)
+    after = stored(engine)
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("target", ["older", "middle"])
+def test_retry_keeps_earlier_turn_salvage_deduplicated(build: Build, mode: str, target: str) -> None:
+    engine, host = compact(build, mode=mode)
+    before = stored(engine)
+    host[-3]["timestamp"] = 20
+    host[-1]["content"] = CLEARED
+    next(row for row in host if row.get("tool_call_id") == target)["content"] = CLEARED
+    pair: Any = tool_pair
+    for index in range(2):
+        host.extend(pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    assert_retry(engine, host, before, CLEARED)
+    added = stored(engine)[len(before):]
+    assert not any(row.get("tool_call_id") == target or any(
+        call["id"] == target for call in row.get("tool_calls") or []) for row in added)
+    assert len(added) == 7
+
+
+@pytest.mark.parametrize("initial", [LONG + "c", CLEARED], ids=["long", "literal-placeholder"])
+@pytest.mark.parametrize("change", [False, True], ids=["unchanged", "changed"])
+def test_steady_retry_literal_control(build: Build, initial: str, change: bool) -> None:
+    engine = build()
+    host = fixture()[-3:]
+    host[-1]["content"] = initial
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    host[0]["timestamp"] = 20
+    if change:
+        host[-1]["content"] = CLEARED if initial != CLEARED else "new genuine output"
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    assert sum(row["role"] == "user" for row in added) == 1
+    assert sum(bool(row.get("tool_calls")) for row in added) == 0
+    assert sum(row["role"] == "tool" for row in added) == int(change)
+    if change:
+        assert added[-1]["content"] == host[-1]["content"]
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+
+
 @pytest.mark.parametrize("mode", ["warm", "cold"])
 @pytest.mark.parametrize("newer", [0, 1, 2], ids=["newest", "second-newest", "older-than-prefix"])
 def test_salvage_guard_uses_complete_list(build: Build, mode: str, newer: int) -> None:
