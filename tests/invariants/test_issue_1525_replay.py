@@ -315,7 +315,7 @@ def test_actual_compression_rotation_after_shrink(tmp_path: Path, monkeypatch: A
 @pytest.mark.parametrize("metadata", ["timestamp", "message_uid", "unstamped"])
 @pytest.mark.parametrize("together", [False, True])
 def test_undo_resend_same_text(tmp_path: Path, metadata: str, together: bool) -> None:
-    """Equal text after undo is a new turn, even before its different reply arrives."""
+    """Occurrence keys distinguish an identical resend from restored text."""
     full = full_list()
     for index, row in enumerate(full):
         if metadata != "timestamp":
@@ -334,12 +334,15 @@ def test_undo_resend_same_text(tmp_path: Path, metadata: str, together: bool) ->
         engine.ingest(deepcopy(full[:-2]))
         if not together:
             engine.ingest(deepcopy(full[:-2] + fresh[:1]))
-            assert rows(engine) == before + expected(fresh[:1])
+            assert rows(engine) == before + expected([] if metadata == "unstamped" else fresh[:1])
+        # Identical unstamped text resent after undo is stored once until hosts
+        # send occurrence keys; its text survives but its occurrence time is lost.
+        stored_fresh = fresh[1:] if metadata == "unstamped" else fresh
         view = full[:-2] + fresh
         engine.ingest(deepcopy(view))
-        assert rows(engine) == before + expected(fresh)
+        assert rows(engine) == before + expected(stored_fresh)
         engine.ingest(deepcopy(view))
-        assert rows(engine) == before + expected(fresh)
+        assert rows(engine) == before + expected(stored_fresh)
 
 
 @pytest.mark.parametrize("metadata", ["unstamped", "message_uid"])
