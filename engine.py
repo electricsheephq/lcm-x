@@ -6568,8 +6568,8 @@ class LCMEngine(
         if not target:
             return {}
         result, matched = {}, 0
-        projection, identities = self._occurrence_replay_identities(messages[:cursor], proof)
-        for index, identity in enumerate(identities):
+        projection, identities = self._occurrence_replay_identities(messages, proof)
+        for index, identity in enumerate(identities[:cursor]):
             if identity is None:
                 continue
             digest = _commit_proof_identity_digest(_proof_user_identity(identity))
@@ -6813,6 +6813,23 @@ class LCMEngine(
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
+        # #1529: a salvage-eligible placeholder after a known new occurrence
+        # belongs to that retry, not to the old output it could otherwise alias.
+        # Invalidate replay evidence for the rest of that turn, including the
+        # unstamped call before the placeholder. Earlier/later turns retain
+        # their own replay proofs and legitimate old-output salvage.
+        if new_prefix_occurrences:
+            recent_tools = _hermes_salvage_protected_positions(messages)
+            for start in tuple(new_prefix_occurrences):
+                end = next((idx for idx in range(start + 1, n)
+                            if messages[idx].get("role") == "user"), n)
+                if any(
+                    idx not in recent_tools
+                    and messages[idx].get("role") == "tool"
+                    and messages[idx].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                    for idx in range(start + 1, end)
+                ):
+                    new_prefix_occurrences.update(range(start + 1, end))
         # A restart can preserve a genuinely new row (so the cursor stops early)
         # and still replay exact durable tool pairs AFTER it. Those pairs are
         # matched on their durable ``tool_call_id`` identity, so suppressing
@@ -6829,6 +6846,7 @@ class LCMEngine(
             if reconciled_existing_session and cursor > 0
             else set()
         )
+        replayed_tool_segment_indexes -= new_prefix_occurrences
         if replayed_tool_segment_indexes:
             self._last_ingest_reconciliation["replayed_tool_segment_rows"] = len(
                 replayed_tool_segment_indexes

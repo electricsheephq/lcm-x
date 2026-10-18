@@ -160,6 +160,31 @@ def test_retry_keeps_earlier_turn_salvage_deduplicated(build: Build, mode: str, 
     assert len(added) == 7
 
 
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+def test_retry_invalidation_stops_at_next_user(build: Build, mode: str) -> None:
+    engine, host = compact(build, mode=mode)
+    before = stored(engine)
+    next(row for row in host if row.get("content") == "middle lookup")["timestamp"] = 20
+    for row in host:
+        if row.get("tool_call_id") in {"middle", "c"}:
+            row["content"] = CLEARED
+    pair: Any = tool_pair
+    for index in range(2):
+        host.extend(pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    engine.ingest(host)
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    assert sum(row["role"] == "user" for row in added) == 1
+    assert sum(any(call["id"] == "middle" for call in row.get("tool_calls") or []) for row in added) == 1
+    assert sum(row.get("tool_call_id") == "middle" and row["content"] == CLEARED for row in added) == 1
+    assert not any(row.get("tool_call_id") == "c" or any(
+        call["id"] == "c" for call in row.get("tool_calls") or []) for row in added)
+    assert len(added) == 7
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+
+
 @pytest.mark.parametrize("initial", [LONG + "c", CLEARED], ids=["long", "literal-placeholder"])
 @pytest.mark.parametrize("change", [False, True], ids=["unchanged", "changed"])
 def test_steady_retry_literal_control(build: Build, initial: str, change: bool) -> None:
