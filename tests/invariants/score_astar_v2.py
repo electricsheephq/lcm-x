@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any
 
 Key = tuple[Any, ...]
-LABELS = ("cand", "main", "iter2", "head", "ga", "v028")
+LABELS = ("cand", "main", "f05", "iter3", "iter2", "ga", "v028", "head")
 FLAGS = ("DUP", "DISTINCT_LOSS", "FRESH_NOT_ONCE", "MULTIPLICITY_LOSS")
 
 
@@ -153,6 +153,8 @@ def oracle(traces: dict[str, dict[str, Any]], shape: str, reference: str) -> dic
     """
     events = traces[reference]["events"]
     universe: set[Key] = set()
+    in_place: set[Key] = set()
+    previous_lengths: dict[tuple[int, str], int] = {}
     tokens: dict[tuple[int, Key], dict[Key, int]] = defaultdict(dict)
     absorbed: set[tuple[int, Key, int]] = set()
     replay: Counter[Key] = Counter()
@@ -176,7 +178,12 @@ def oracle(traces: dict[str, dict[str, Any]], shape: str, reference: str) -> dic
         before = stored(event, "before", shape)
         after = stored(event, "after", shape)
         final[group] = after
-        for message, normalized in zip(event["messages"], event["normalized"], strict=True):
+        view_key = (group, event["session"])
+        view_length = len(event["messages"])
+        shrinking = view_length < previous_lengths.get(view_key, 0)
+        if event["operation"] in {"ingest", "compress"}:
+            previous_lengths[view_key] = view_length
+        for position, (message, normalized) in enumerate(zip(event["messages"], event["normalized"], strict=True)):
             role, text = normalized
             if not str(text).strip():
                 continue
@@ -211,7 +218,9 @@ def oracle(traces: dict[str, dict[str, Any]], shape: str, reference: str) -> dic
                 sid = ancestor
             ownership.setdefault(owner_key, sid)
             key = text_key(sid, role, text, shape)
-            universe.add(key)
+            if key not in universe and key not in in_place:
+                # First appearances inside a shortened prefix are edits (#1563).
+                (in_place if shrinking and position < view_length else universe).add(key)
             used[(key, *metadata)] += 1
             identity = (*metadata, used[(key, *metadata)])
             bucket = tokens[group, key]
@@ -249,7 +258,7 @@ def oracle(traces: dict[str, dict[str, Any]], shape: str, reference: str) -> dic
         distinct = max((max(bucket.values(), default=0) for (_, text), bucket in tokens.items() if text == key), default=0)
         observed = max((counter[key] for counter in final.values()), default=0)
         replay[key] = min(replay[key], max(0, observed - distinct))
-    return {"universe": universe, "replay": replay, "proof": proof,
+    return {"universe": universe, "in_place": in_place, "replay": replay, "proof": proof,
             "emission_exclusions": exclusions, "ownership_linkage": linkage,
             "input_sha256": digest([host_view(event) for event in events])}
 
@@ -307,6 +316,19 @@ def self_test() -> dict[str, bool]:
     generated_events.append(event([{"role": "user", "content": generated["content"] + "\n\nnew text"}], ledger, ledger))
     facts = oracle(traces, "synthetic/arbitrary", "ga")
     checks["novel_text_behind_carrier_kept"] = len(facts["universe"]) == 2
+    edited = {"role": "user", "content": "edited prefix"}
+    appended = {"role": "user", "content": "appended text"}
+    other = {"role": "assistant", "content": "original tail"}
+    scoped_events = [event([row, other], [], ledger),
+                     event([edited], ledger, ledger),
+                     event([edited, appended], ledger, ledger)]
+    scoped = oracle({"ga": {"events": scoped_events}}, "synthetic/scope", "ga")
+    missing = compare(original, original, original, original, scoped["universe"], empty, "uid", "synthetic")
+    checks["appended_loss_flagged"] = str(("S", "user", "appended text")) in missing["FRESH_NOT_ONCE"]
+    checks["in_place_loss_report_only_1563"] = (
+        ("S", "user", "edited prefix") in scoped["in_place"]
+        and str(("S", "user", "edited prefix")) not in missing["FRESH_NOT_ONCE"])
+    checks["scoped_ga_self_passes"] = not failed(compare(original, original, original, original, set(original), empty, "uid", "synthetic"))
     assert all(checks.values()), checks
     return checks
 
@@ -352,6 +374,9 @@ def score(lane: Path) -> dict[str, Any]:
         record["normalization"] = {label: dict(Counter(source for event in trace["events"]
                                                      for source in event.get("normalization_sources", [])))
                                    for label, trace in traces.items()}
+        record["report_only_in_place_edits_1563"] = {
+            label: {str(key): trees[label]["counter"][key] for key in sorted(f["in_place"], key=str)}
+            for label, f in input_facts.items()}
         record["host_input_universe"] = [list(key) for key in sorted(universe, key=str)]
         record["fresh_exclusions"] = {label: {key: facts[key] for key in ("emission_exclusions", "ownership_linkage")}
                                       for label, facts in input_facts.items()}
