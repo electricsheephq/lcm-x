@@ -23,11 +23,17 @@ import sqlite3
 import sys
 import threading
 import time
+from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 ANCHORS = {  # shape -> (host file, text on the cited line)
+    "cli_undo": ("hermes_cli/cli_session_mixin.py", "def undo_last("),
+    "cli_shrink": ("hermes_cli/cli_session_mixin.py", "def _publish_truncated_history("),
+    "cli_compress": ("hermes_cli/cli_session_mixin.py", "def _manual_compress("),
+    "cli_full_compress": ("agent/conversation_compression_manual.py", "def compress_now("),
+    "cli_prompt": ("hermes_cli/cli_chat_turn_mixin.py", "self.agent.run_conversation("),
     "acp_persist": ("acp_adapter/server.py", "persist_user_message=user_text"),
     "acp_strip": ("acp_adapter/server.py", "user_text = _extract_text(prompt).strip()"),
     "acp_restore": ("acp_adapter/session.py", "get_messages_as_conversation(session_id, repair_alternation=True)"),
@@ -469,6 +475,7 @@ def main():
               host_commits=buf.getvalue().count(COMMITTED) - cur["commits0"], **extra)
 
     needed = {"acp": ["acp_persist", "acp_strip"] + (["acp_restore"] if phase != "A" else []),
+              "cli": ["cli_undo", "cli_shrink", "cli_compress", "cli_full_compress", "cli_prompt"],
               "gateway": ["gateway_transcript", "gateway_user_text", "gateway_run", "gateway_key_start",
                           "gateway_key_rotation"]}[cell["transport"]]
     needed += [k for f in faults for k in FAULT_CITES.get(f, [])]
@@ -559,8 +566,9 @@ def main():
     sid = "S0"
     if phase != "A" and cell["transport"] == "gateway":  # a restarted gateway binds the durable tip
         sid = sdb_read.get_compression_tip("S0") or "S0"
-    agent = build(sid, "acp", gw_key)
-    out["platform"] = "acp"
+    platform = "cli" if cell["transport"] == "cli" else "acp"
+    agent = build(sid, platform, gw_key)
+    out["platform"] = platform
     engine = agent.context_compressor
     out["engine"] = getattr(engine, "name", None)
     if out["engine"] != cell["plugin"]["engine"]:
@@ -585,6 +593,24 @@ def main():
     etype = type(engine)
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     orig_start, orig_end = etype.on_session_start, getattr(etype, "on_session_end", None)
+    if cell.get("cli_undo"):
+        ingress, lifecycle = [], []
+        out["reach_1525"] = {"ingress": ingress, "lifecycle": lifecycle}
+        orig_ingest, orig_reset = etype._ingest_messages, etype.on_session_reset
+
+        def traced_ingest(self, messages, *args, **kwargs):
+            record = {"turn": cur["turn"], "length": len(messages), "engine": id(self),
+                      "session": self.current_session_id, "cursor_before": self._ingest_cursor}
+            ingress.append(record)
+            result = orig_ingest(self, messages, *args, **kwargs)
+            record["cursor_after"] = self._ingest_cursor
+            return result
+
+        def traced_reset(self, *args, **kwargs):
+            lifecycle.append("reset")
+            return orig_reset(self, *args, **kwargs)
+
+        etype._ingest_messages, etype.on_session_reset = traced_ingest, traced_reset
 
     if "F4" in cell.get("bars", []):
         orig_gate = etype.should_compress
@@ -683,6 +709,8 @@ def main():
     model_tools.handle_function_call = traced_hfc
 
     def traced_start(self, session_id, *args, **kwargs):
+        if cell.get("cli_undo"):
+            lifecycle.append("start")
         rotation = kwargs.get("boundary_reason") == "compression"
         if rotation and cur["ended"] and "crash_between_session_end_and_start" in faults \
                 and "crash_between_session_end_and_start" not in fired:
@@ -909,6 +937,37 @@ def main():
     def low_backlog(last_turn):
         return backlog_low(cell_dir, last_turn, backlog_log)
     for t in extend_turns(cell, first, low_backlog):
+        if cell.get("cli_undo") and t == 5:
+            # Use the actual CLI handlers; only its display-only busy context is replaced.
+            from cli import HermesCLI
+            cli = HermesCLI.__new__(HermesCLI)
+            cli.agent, cli.session_id, cli._session_db = agent, agent.session_id, agent._session_db
+            cli.conversation_history = history
+            cli._busy_command = lambda *a, **kw: nullcontext()
+            before_cursor, before_session = engine._ingest_cursor, engine.current_session_id
+            before_leaves, before_lifecycle = depth0(), len(lifecycle)
+            before_length = len(history)
+            cli.undo_last(prefill=False)
+            history = cli.conversation_history
+            retained = [dict(row) for row in history]
+            after_undo = len(ingress)
+            if cell["cli_undo"] == "noop-compress":
+                cli._manual_compress("/compress")
+            short_ingress = ingress[after_undo:]
+            proof = {"before_length": before_length, "short_length": len(history),
+                     "old_cursor": before_cursor, "unchanged": cli.conversation_history == retained,
+                     "leaf_delta": None if before_leaves is None else depth0() - before_leaves,
+                     "same_engine": agent.context_compressor is engine,
+                     "same_session": engine.current_session_id == before_session,
+                     "lifecycle_delta": len(lifecycle) - before_lifecycle,
+                     "compress_ingress": short_ingress}
+            out["reach_1525"].update(proof)
+            if (before_length != 8 or len(history) != 6 or before_cursor != 8
+                    or not proof["unchanged"] or proof["leaf_delta"] != 0
+                    or not proof["same_engine"] or not proof["same_session"] or proof["lifecycle_delta"]
+                    or (cell["cli_undo"] == "noop-compress" and not short_ingress)):
+                finish("unsupported", reason="CLI undo/no-op-compress preconditions not observed")
+                return
         f = faults.get("plugin_switch")  # native-on-off: exit between turns; run_matrix swaps in the candidate
         if f and t == f["turn"] and t != first and "plugin_switch" not in fired:
             fire("plugin_switch", t)
@@ -944,6 +1003,11 @@ def main():
         finish("unsupported", reason="no marked overflow_recovery after the planned tool result; "
                f"injection fired={fr['kind'] in fired}, prior compactions={counters['compacted_turns']}")
         return
+    if cell.get("cli_undo"):
+        fresh_ingress = [row for row in ingress if row["turn"] == 5]
+        if not fresh_ingress or fresh_ingress[0]["length"] > before_cursor:
+            finish("unsupported", reason="fresh prompt did not enter below the prior cursor")
+            return
     finish("done", next_turn=None)
 
 
