@@ -6633,11 +6633,29 @@ class LCMEngine(
         self._capture_host_rewrites(messages)
         n = len(messages)
         shortened = self._frontier.short_replay
+        short_replayed = set()
         if shortened is not None:
             identities, metadata = shortened
+            matched = 0
+            for idx, message in enumerate(messages):
+                current = self._host_occurrence_metadata(message)
+                identity = self._message_replay_identity(message, strip_carrier=False)
+                for pos in range(matched, len(identities)):
+                    previous = metadata[pos]
+                    if identity != identities[pos] or self._host_occurrence_changed(message, previous):
+                        continue
+                    uid = current["message_uid"]
+                    if current["timestamp"] is None and uid and uid != previous["message_uid"]:
+                        continue
+                    matched = pos + 1
+                    if current["timestamp"] is None:
+                        short_replayed.add(idx)
+                    break
             stamped = all(row["timestamp"] is not None for row in metadata)
             if stamped and any(self._host_occurrence_metadata(row)["timestamp"] is None
-                               for row in messages):
+                               for row in messages) and not any(
+                    self._host_occurrence_changed(message, previous)
+                    for message, previous in zip(messages, metadata)):
                 self._frontier.finish_short_replay(restore=True)
             elif all(
                 self._message_replay_identity(message, strip_carrier=False) == identity
@@ -7040,6 +7058,8 @@ class LCMEngine(
             )
             for offset, (original_msg, replay_msg) in enumerate(zip(original_new_messages, new_messages)):
                 absolute_idx = cursor + offset
+                if absolute_idx in short_replayed:
+                    continue
                 if absolute_idx in replayed_tool_segment_indexes:
                     continue
                 if new_prefix_occurrences and absolute_idx in unchanged_prefix_occurrences:

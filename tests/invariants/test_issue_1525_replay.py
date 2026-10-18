@@ -342,6 +342,27 @@ def test_undo_resend_same_text(tmp_path: Path, metadata: str, together: bool) ->
         assert rows(engine) == before + expected(fresh)
 
 
+@pytest.mark.parametrize("metadata", ["unstamped", "message_uid"])
+@pytest.mark.parametrize("shift", ["insert", "remove", "partial"])
+def test_ordered_keyless_regrow(tmp_path: Path, metadata: str, shift: str) -> None:
+    full = full_list()
+    for index, row in enumerate(full):
+        row.pop("timestamp")
+        if metadata == "message_uid":
+            row["message_uid"] = f"old-{index}"
+    fresh = {"role": "user", "content": "new after shrink"}
+    view = (full[:4] + [fresh] + full[4:] if shift == "insert" else
+            full[:4] + full[5:] + [fresh] if shift == "remove" else full[:6])
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        engine.ingest(deepcopy(full))
+        engine.ingest(deepcopy(full[:4]))
+        engine.ingest(deepcopy(view))
+        assert rows(engine) == expected(full + ([] if shift == "partial" else [fresh]))
+        if shift == "partial":
+            engine.ingest(deepcopy(full[:7] + [fresh]))
+            assert rows(engine) == expected(full + [fresh])
+
+
 @pytest.mark.parametrize("second", ["same", "shorter", "front"])
 @pytest.mark.parametrize("restore", [False, True])
 def test_second_short_view(tmp_path: Path, second: str, restore: bool) -> None:
