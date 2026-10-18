@@ -6912,6 +6912,11 @@ class LCMEngine(
         original_new_messages = messages[cursor:] if cursor < n else []
 
         if not new_messages:
+            # The audited shorter view is fully accounted for. Keep the cursor
+            # aligned with the cache below so later appends cannot hide behind
+            # the old host-list length (#1525).
+            if self._ingest_cursor > n:
+                self._ingest_cursor = n
             cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
             self._compression_boundary_ingest_pending = False
             self._compression_boundary_active_placeholder_digest_budget = {}
