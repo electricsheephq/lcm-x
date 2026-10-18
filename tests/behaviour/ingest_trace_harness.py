@@ -211,6 +211,8 @@ def engine_attributes(root: Path) -> tuple[set[str], set[str]]:
                 attributes.add(node.args[0].value)
             if attr in methods:
                 pending.append(attr)
+                if isinstance(getattr(engine_module.LCMEngine, attr, None), property):
+                    attributes.add(attr)
             elif attr is not None and attr not in {"_frontier", "__dict__"}:
                 attributes.add(attr)
     return attributes, visited

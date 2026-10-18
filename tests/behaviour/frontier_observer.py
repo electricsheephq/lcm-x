@@ -27,6 +27,7 @@ def legacy_frontier_fields(method: ast.AST) -> set[str]:
         if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Attribute)
         and node.value.attr == HOLDER_NAME
         and isinstance(node.value.value, ast.Name) and node.value.value.id == "self"
+        and not callable(getattr(holder_type, node.attr, None))
     }
 
 
