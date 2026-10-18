@@ -381,16 +381,58 @@ def test_cold_after_partial_noop(tmp_path: Path, stamped: bool, restore: bool) -
         assert rows(engine) == before + expected(replayed + [fresh])
 
 
-def test_unstamped_exact_length_resend_is_ambiguous(tmp_path: Path) -> None:
-    """An equal unstamped replacement exchange cannot prove a restored tail."""
+@pytest.mark.parametrize("metadata", ["timestamp", "message_uid", "unstamped"])
+@pytest.mark.parametrize("original_stamped", [False, True])
+def test_exact_length_identical_resend(tmp_path: Path, metadata: str, original_stamped: bool) -> None:
+    """Fresh stamps distinguish resends; never-stamped identical views keep base parity."""
     full = [{"role": row["role"], "content": row["content"]} for row in full_list()]
+    if original_stamped and metadata != "unstamped":
+        for index, row in enumerate(full):
+            row[metadata] = float(index + 10) if metadata == "timestamp" else f"old-{index}"
+    resent = deepcopy(full)
+    if metadata != "unstamped":
+        for index, row in enumerate(resent[-2:]):
+            row[metadata] = float(index + 100) if metadata == "timestamp" else f"new-{index}"
     with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
         engine.ingest(deepcopy(full))
         before = rows(engine)
         engine.ingest(deepcopy(full[:-2]))
+        engine.ingest(deepcopy(resent))
+        # Without stamps an identical resend cannot be distinguished from a
+        # restored tail. Match the base's replay convention in that one case.
+        after = before + (expected(resent[-2:]) if metadata != "unstamped" else [])
+        assert rows(engine) == after
+        engine.ingest(deepcopy(resent))
+        assert rows(engine) == after
+
+
+def test_identical_unstamped_exact_restore(tmp_path: Path) -> None:
+    """Two unchanged compressions must not re-store the withheld exchange."""
+    full = [{"role": row["role"], "content": row["content"]} for row in full_list()]
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
         engine.ingest(deepcopy(full))
-        # This could be an unchanged restoration or an identical new exchange.
-        # Prefer a visible duplicate over silently losing that new occurrence.
-        assert rows(engine) == before + expected(full[-2:])
+        before = rows(engine)
+        assert engine.compress(deepcopy(full[:-2]), current_tokens=100, force=True) == full[:-2]
+        assert engine.compress(deepcopy(full), current_tokens=100, force=True) == full
+        assert rows(engine) == before
+
+
+def test_partial_then_full_noop_compress(tmp_path: Path) -> None:
+    """Legacy rows plus stamped turns survive split/compress/rejoin, full compress, and append."""
+    full = [{"role": row["role"], "content": row["content"]} for row in full_list()]
+    full += [msg(f"later-{i}", float(i + 100), "user" if i % 2 == 0 else "assistant") for i in range(8)]
+    fresh = [msg("after two compressions", 200.), msg("fresh reply", 201., "assistant")]
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
         engine.ingest(deepcopy(full))
-        assert rows(engine) == before + expected(full[-2:])
+        before = rows(engine)
+        head, tail = deepcopy(full[:6]), deepcopy(full[6:])
+        returned = engine.compress(head, current_tokens=100, force=True)
+        assert returned == head
+        restored = returned + tail
+        assert engine.compress(restored, current_tokens=100, force=True) == full
+        assert rows(engine) == before
+        engine.ingest(deepcopy(restored + fresh))
+        assert rows(engine) == before + expected(fresh)
+        assert len(rows(engine)) == 18
+        engine.ingest(deepcopy(restored + fresh))
+        assert rows(engine) == before + expected(fresh)
