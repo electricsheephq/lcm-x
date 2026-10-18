@@ -8853,30 +8853,9 @@ class LCMEngine(
             and anchor_part is not None
             and count_messages_tokens(result) > assembly_cap + (kept_reply or {}).get("tokens", 0)
         ):
-            if any(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX in (normalize_content_value(m.get("content")) or "")
-                   for m in result):
-                logger.warning(
-                    "LCM assembly: %d token(s) over the cap after sanitizing; dropping the preserved user "
-                    "objective from the active context as a last resort (the store keeps it)",
-                    count_messages_tokens(result) - assembly_cap - (kept_reply or {}).get("tokens", 0),
-                )
-            trimmed_result: list[Dict[str, Any]] = []
-            for msg in result:
-                content = normalize_content_value(msg.get("content")) or ""
-                if _PRESERVED_OBJECTIVE_CONTEXT_PREFIX not in content:
-                    trimmed_result.append(msg)
-                    continue
-                parts = [
-                    part for part in content.split("\n\n---\n\n")
-                    if not part.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
-                ]
-                if parts:
-                    trimmed = msg.copy()
-                    trimmed["content"] = "\n\n---\n\n".join(parts)
-                    trimmed_result.append(trimmed)
-                    generated_rows = [trimmed if row is msg else row
-                                      for row in generated_rows]
-            result = self._sanitize_active_context_messages(trimmed_result, generated_rows=generated_rows)
+            result, generated_rows = self._trim_preserved_objective_last_resort(
+                result, generated_rows, assembly_cap, kept_reply,
+            )
         if kept_reply is not None and (why := self._kept_reply_rejection(
                 result, kept_reply, kept_reply["objective"] and bool(anchor_candidates),
                 ([system_msg] if system_msg is not None else []) + ([retained_user_message] if retained_user_message
@@ -9116,6 +9095,35 @@ class LCMEngine(
                     })
                 tail_selected = tail_selected[1:]
         return carried_tail, tail_selected
+
+    def _trim_preserved_objective_last_resort(
+        self, result, generated_rows, assembly_cap, kept_reply,
+    ) -> tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+        if any(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX in (normalize_content_value(m.get("content")) or "")
+               for m in result):
+            logger.warning(
+                "LCM assembly: %d token(s) over the cap after sanitizing; dropping the preserved user "
+                "objective from the active context as a last resort (the store keeps it)",
+                count_messages_tokens(result) - assembly_cap - (kept_reply or {}).get("tokens", 0),
+            )
+        trimmed_result: list[Dict[str, Any]] = []
+        for msg in result:
+            content = normalize_content_value(msg.get("content")) or ""
+            if _PRESERVED_OBJECTIVE_CONTEXT_PREFIX not in content:
+                trimmed_result.append(msg)
+                continue
+            parts = [
+                part for part in content.split("\n\n---\n\n")
+                if not part.lstrip().startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX)
+            ]
+            if parts:
+                trimmed = msg.copy()
+                trimmed["content"] = "\n\n---\n\n".join(parts)
+                trimmed_result.append(trimmed)
+                generated_rows = [trimmed if row is msg else row
+                                  for row in generated_rows]
+        result = self._sanitize_active_context_messages(trimmed_result, generated_rows=generated_rows)
+        return result, generated_rows
 
     def _persist_folded_lineage(
         self, result, folded_result_index, folded_original_tail, folded_source_store_id, generated_rows,

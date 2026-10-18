@@ -252,6 +252,7 @@ SCENARIOS = (
     Scenario('objective-overcap-without-objective', 14, shape='objective', cap=1),
     Scenario('objective-trim', 14, shape='trim', cap=1),
     Scenario('objective-trim-parts', 14, shape='trim-parts', cap=1, depths=(0,)),
+    Scenario('objective-trim-generated', 14, shape='trim-recall', cap=1, recall=True),
     Scenario('metadata-absent', 15, depths=(0,), metadata=False),
     Scenario('metadata-present', 15, depths=(0,)),
     Scenario('trial-fold', 16, shape='fold', retained=True, depths=(0,), persist=False),
@@ -375,12 +376,17 @@ def setup(engine: Any, case: Scenario, patch: pytest.MonkeyPatch) -> tuple[Messa
         engine._pending_context_anchor_messages = [message('user', objective), *tail]
     elif case.shape == 'reply':
         engine._pending_context_anchor_messages = [message('user', 'Earlier objective'), *tail]
+    if case.shape == 'trim-recall':
+        engine._pending_context_anchor_messages = [message('user', 'Earlier objective'), *tail]
     if case.recall:
         tools: Any = importlib.import_module('hermes_lcm.tools')
         vectors: Any = importlib.import_module('hermes_lcm.vector_store')
         patch.setattr(tools, 'resolve_provider', lambda _config: Provider())
+        recall_summary = 'kanban dashboard sprint plan'
+        if case.shape == 'trim-recall':
+            recall_summary += '\n\n---\n\n' + OBJECTIVE + '\nquoted objective'
         node_id = engine._dag.add_node(dag_module.SummaryNode(
-            session_id='earlier-session', depth=0, summary='kanban dashboard sprint plan', token_count=20,
+            session_id='earlier-session', depth=0, summary=recall_summary, token_count=20,
             source_token_count=40, source_ids=[], source_type='messages', created_at=1700000000.0))
         store = vectors.VectorStore(engine._store.db_path, config=engine._config)
         try:
