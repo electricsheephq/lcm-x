@@ -6636,12 +6636,11 @@ class LCMEngine(
         elif shortened is not None:
             identities, metadata = shortened
             # A complete ordered old view is restored history, even at exactly
-            # the old length without stamps. Fresh host stamps identify resends;
-            # an identical never-stamped resend keeps the base replay convention.
+            # the old length without stamps. The canonical occurrence rule treats
+            # missing-to-known metadata as adoption; known conflicts identify resends.
             if n >= len(identities) and all(
                 self._message_replay_identity(message, strip_carrier=False) == identity
-                and all(value is None or value == previous.get(key)
-                        for key, value in self._host_occurrence_metadata(message).items())
+                and not self._host_occurrence_changed(message, previous)
                 for message, identity, previous in zip(messages, identities, metadata)
             ):
                 # A partial no-op compress may return its withheld tail. Only
