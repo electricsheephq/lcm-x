@@ -3188,7 +3188,9 @@ class ReconcileMixin:
         #1385: a Hermes salvage placeholder that took a stored row's identity
         matches by construction, not by occurrence. It cannot prove segment
         replay: a fresh same-id call can genuinely return the placeholder text.
-        Prefer a duplicate ambiguous salvage pair over losing a fresh pair.
+        #1540: compare literal identities on BOTH sides instead. A stored
+        placeholder can prove its own replay, but an older full output cannot
+        supply that evidence. Keep the same multiset consumption bounds.
         """
         if not self._session_id or cursor >= len(messages):
             return set()
@@ -3200,7 +3202,7 @@ class ReconcileMixin:
         stored_identity_counts = Counter(
             identity
             for identity in (
-                self._message_replay_identity(row, stored_row=True)
+                self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False)
                 for row in stored_rows
                 if not self._matches_ignore_message_patterns(row, stored_row=True)
             )
@@ -3232,15 +3234,12 @@ class ReconcileMixin:
                 result = messages[probe]
                 tool_call_id = str(result.get("tool_call_id") or "")
                 content = normalize_content_value(result.get("content")) or ""
-                result_identity = self._message_replay_identity(result)
-                borrows = (content == _HERMES_PRUNED_TOOL_PLACEHOLDER
-                           and result_identity[1] != _HERMES_PRUNED_TOOL_PLACEHOLDER)
+                result_identity = self._message_replay_identity(result, allow_pruned_tool_alias=False)
                 if (
                     tool_call_id in call_ids
                     and not _is_hermes_persisted_output_marker(content)
                     and not _has_lossy_redacted_identity(result_identity)
                     and result_identity in stored_identity_counts
-                    and not borrows
                 ):
                     result_indexes[tool_call_id] = probe
                     segment_needs[result_identity] += 1
