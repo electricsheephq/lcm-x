@@ -384,7 +384,7 @@ def test_cold_after_partial_noop(tmp_path: Path, stamped: bool, restore: bool) -
 @pytest.mark.parametrize("metadata", ["timestamp", "message_uid", "unstamped"])
 @pytest.mark.parametrize("original_stamped", [False, True])
 def test_exact_length_identical_resend(tmp_path: Path, metadata: str, original_stamped: bool) -> None:
-    """Fresh stamps distinguish resends; never-stamped identical views keep base parity."""
+    """Known stamp conflicts distinguish resends; ambiguous views keep base parity."""
     full = [{"role": row["role"], "content": row["content"]} for row in full_list()]
     if original_stamped and metadata != "unstamped":
         for index, row in enumerate(full):
@@ -398,12 +398,76 @@ def test_exact_length_identical_resend(tmp_path: Path, metadata: str, original_s
         before = rows(engine)
         engine.ingest(deepcopy(full[:-2]))
         engine.ingest(deepcopy(resent))
-        # Without stamps an identical resend cannot be distinguished from a
-        # restored tail. Match the base's replay convention in that one case.
-        after = before + (expected(resent[-2:]) if metadata != "unstamped" else [])
+        # An unstamped identical resend, or transitional legacy rows gaining
+        # their first stamps, cannot be distinguished from restored history
+        # adopting metadata. Match the base's replay convention in those cases.
+        after = before + (expected(resent[-2:]) if original_stamped and metadata != "unstamped" else [])
         assert rows(engine) == after
         engine.ingest(deepcopy(resent))
         assert rows(engine) == after
+
+
+@pytest.mark.parametrize("field", ["timestamp", "message_uid"])
+@pytest.mark.parametrize("extra", [False, True])
+def test_legacy_metadata_adoption(tmp_path: Path, field: str, extra: bool) -> None:
+    """Restoration can adopt one metadata field while keeping the other known."""
+    lineage(tmp_path)
+    original = full_list()
+    for index, row in enumerate(original):
+        if field == "timestamp":
+            row.pop("timestamp")
+            row["message_uid"] = f"known-{index}"
+    restored = deepcopy(original)
+    for index, row in enumerate(restored):
+        row[field] = float(index + 10) if field == "timestamp" else f"adopted-{index}"
+    fresh = [msg("fresh after restore", 1000.)] if extra else []
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        engine.ingest(deepcopy(original))
+        before = rows(engine)
+        assert len(before) == 8
+        engine.compress(deepcopy(original[:6]), current_tokens=100, force=True)
+        engine.ingest(deepcopy(restored + fresh))
+        after = rows(engine)
+        assert len(after) == (9 if extra else 8)
+        assert Counter((r[0], r[1]) for r in after) == (
+            Counter((r[0], r[1]) for r in before)
+            + Counter((r["role"], r["content"]) for r in fresh)
+        )
+        engine.ingest(deepcopy(restored + fresh))
+        assert rows(engine) == after
+
+
+def test_adoption_after_compaction(tmp_path: Path, monkeypatch: Any) -> None:
+    """Late timestamps on restored compaction output do not duplicate its tail."""
+    product = importlib.import_module("hermes_lcm.engine")
+    from tests.test_issue_436_identity_anchor import _turns
+
+    lineage(tmp_path)
+    monkeypatch.setattr(product, "summarize_with_escalation",
+                        lambda **kwargs: ("Earlier turns.\nExpand for details about: turns", 1))
+    original = _turns(1, 8, 0.)
+    for row in original:
+        row.pop("timestamp")
+    with engine_context(tmp_path, window=200000, conversation_id="conv",
+                        fresh_tail_count=2, leaf_chunk_tokens=1) as engine:
+        engine.ingest(deepcopy(original))
+        before = rows(engine)
+        assert len(before) == 16
+        output = engine.compress(deepcopy(original), current_tokens=engine.threshold_tokens + 1, force=True)
+        assert engine._last_compression_status == "compacted"
+        engine.on_session_end("S", original)
+        engine.on_session_start("S", boundary_reason="compression", old_session_id="S",
+                                platform="cli", context_length=200000, conversation_id="conv")
+        engine.ingest(deepcopy(output))
+        assert engine._compress_commit_proof is None
+        engine.ingest(deepcopy(output[:-1]))
+        restored = deepcopy(output)
+        for index, row in enumerate(restored):
+            row["timestamp"] = 1000. + index
+        engine.ingest(deepcopy(restored))
+        after = rows(engine)
+        assert len(after) == 16
+        assert Counter((r[0], r[1]) for r in after) == Counter((r[0], r[1]) for r in before)
 
 
 def test_identical_unstamped_exact_restore(tmp_path: Path) -> None:
