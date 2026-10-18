@@ -11,12 +11,13 @@ import os
 
 BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 DRAIN_BARS = ("D1", "D2", "D3")  # scorers/drain.py: the host list drains under a hidden backlog (#597, #626)
-TRANSPORTS = ("acp", "gateway")
+TRANSPORTS = ("acp", "gateway", "cli")
 FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "crash_mid_tool_call",
           "crash_after_rotation_before_child_row", "crash_between_session_end_and_start", "cancel_then_retry",
           "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
+    1525: (("B1", "B2"), "CLI undo, unchanged full compression, then a fresh prompt"),
     7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
     # B5/B8 are downstream of #553 duplication in acp-history rotation (ref-0.21.5 vs customer-0.21.2,
     # nightly aa84e61d); re-check when #553 is fixed.
@@ -327,7 +328,12 @@ def validate(c: dict) -> None:
 
 def select(patterns: str, extra=(), opt_in=()) -> list[dict]:
     """Default-window backtests and ``opt_in`` probes match explicit patterns only, never ``all``."""
-    opt_in = (*default_window_cells(), *opt_in)
+    undo_cells = [cell(f"reach-1525/cli-undo-{mode}/managed", [1525], in_place=True,
+                      transport="cli", turns=5, repeat=1, lcm_env={}, min_compactions=0,
+                      bars=["B1", "B2", "B3"], final_compaction_check=False, cli_undo=mode,
+                      doc="Real CLI undo after four exchanges; full no-op compress or direct-prompt control.")
+                  for mode in ("noop-compress", "prompt")]
+    opt_in = (*default_window_cells(), *undo_cells, *opt_in)
     cells = registry() + list(extra)  # extra: transport-only cells (R2 process_cell.R2_CELLS)
     for c in cells + list(opt_in):
         validate(c)

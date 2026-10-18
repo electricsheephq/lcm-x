@@ -58,7 +58,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_compress_commit_proof", "_last_emission_descriptors", "_compress_occurrences", "_compress_run",
     "_config", "_hermes_home", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
     "_host_rewrite_overrides", "_host_rewrite_watch", "_last_active_replay_messages",
-    "_last_active_replay_source_identities", "_last_ingest_reconciliation", "_retired_durable_proof",
+    "_last_active_replay_source_identities", "_short_ingest_replay", "_last_ingest_reconciliation", "_retired_durable_proof",
     "_compiled_ignore_message_patterns", "_compression_boundary_ingest_pending",
     "_compression_boundary_active_placeholder_digest_budget", "_compression_boundary_active_placeholder_digest_ordinals",
     "_compression_boundary_stored_placeholder_digest_counts", "_ignored_message_count", "_ignore_pattern_dropped_count",
