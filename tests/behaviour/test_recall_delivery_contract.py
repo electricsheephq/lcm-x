@@ -255,3 +255,89 @@ def test_anchor_window_gaps(corpus, monkeypatch, case):
     assert info["fired"] is (case != "short")
     assert info["position"] == {"short": None, "past-slots": 10, "fallback-cut": 4}[case]
     check_golden(f"anchor-{case}", raw)
+
+
+@pytest.mark.parametrize("count", [0, 1, 3])
+@pytest.mark.parametrize("deficit", [0, 1])
+def test_event_time_item_cap_exact_edge(corpus, monkeypatch, count, deficit):
+    engine, hits, _, _, _ = corpus
+    engine._store.connection.execute(
+        "UPDATE messages SET observed_at = ?, observed_at_source = ?",
+        (NOW - 86400, "host_message_timestamp"),
+    )
+    engine._store.connection.commit()
+    chosen = hits[:count]
+    # The first hit arrives through two arms but occupies one delivery slot.
+    set_arms(monkeypatch, fts=chosen[:1], chunk=chosen)
+    baseline = json.loads(recall(corpus, scope_bias=0))
+    assert len(baseline["hits"]) == count
+    assert all("event_time" in hit for hit in baseline["hits"])
+    if count:
+        assert baseline["hits"][0]["arms"] == ["chunk", "fts"]
+    cap = sum(len(json.dumps(hit, ensure_ascii=False)) for hit in baseline["hits"])
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", max(1, cap - deficit))
+    calls, fetched, snapshots = [], {}, {}
+    real_read = tools._lcm_recall_event_time_rows
+    real_fields = tools._lcm_recall_event_time
+
+    def read(engine, ids, *, deadline):
+        calls.append(("read", list(ids)))
+        rows, reason = real_read(engine, ids, deadline=deadline)
+        fetched.update(rows)
+        snapshots.update(deepcopy(rows))
+        return rows, reason
+
+    def fields(row):
+        store_id = next(key for key, value in fetched.items() if value is row)
+        calls.append(("fields", store_id))
+        return real_fields(row)
+
+    monkeypatch.setattr(tools, "_lcm_recall_event_time_rows", read)
+    monkeypatch.setattr(tools, "_lcm_recall_event_time", fields)
+    raw = recall(corpus, scope_bias=0)
+    expected = deepcopy(baseline)
+    if count and deficit:
+        expected["hits"][-1].pop("event_time")
+        expected["hits"][-1].pop("event_time_source")
+        expected["event_time_unavailable"] = True
+        expected["event_time_unavailable_reason"] = "response_cap"
+    assert raw == json.dumps(expected)
+    ids = [hit["store_id"] for hit in baseline["hits"]]
+    assert calls == ([("read", ids)] + [("fields", sid) for sid in ids] if ids else [])
+    # Delivery edits its own hit dicts, not the source rows supplied by the read.
+    assert fetched == snapshots
+
+
+def test_event_time_item_cap_bare_oversized_hit(corpus, monkeypatch):
+    engine, hits, _, _, _ = corpus
+    engine._store.connection.execute(
+        "UPDATE messages SET observed_at = NULL, observed_at_source = NULL"
+    )
+    engine._store.connection.commit()
+    set_arms(monkeypatch, chunk=hits[:1])
+    baseline = recall(corpus, scope_bias=0)
+    assert len(json.loads(baseline)["hits"]) == 1
+    assert "event_time" not in json.loads(baseline)["hits"][0]
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", 1)
+    # The first hit remains deliverable; stripping zero optional characters
+    # must not invent an unavailable marker or drop the hit.
+    assert recall(corpus, scope_bias=0) == baseline
+
+
+def test_event_time_item_cap_skips_bare_tail(corpus, monkeypatch):
+    engine, hits, _, _, _ = corpus
+    engine._store.connection.execute(
+        "UPDATE messages SET observed_at = ?, observed_at_source = ? WHERE store_id IN (?, ?)",
+        (NOW - 86400, "host_message_timestamp", hits[0]["store_id"], hits[1]["store_id"]),
+    )
+    engine._store.connection.commit()
+    set_arms(monkeypatch, chunk=hits[:3])
+    expected = json.loads(recall(corpus, scope_bias=0))
+    assert ["event_time" in hit for hit in expected["hits"]] == [True, True, False]
+    cap = sum(len(json.dumps(hit, ensure_ascii=False)) for hit in expected["hits"])
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap - 1)
+    expected["hits"][1].pop("event_time")
+    expected["hits"][1].pop("event_time_source")
+    expected["event_time_unavailable"] = True
+    expected["event_time_unavailable_reason"] = "response_cap"
+    assert recall(corpus, scope_bias=0) == json.dumps(expected)

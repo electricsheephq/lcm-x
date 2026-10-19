@@ -418,52 +418,13 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs: Any) -> str:
     query = _tools._coerce_query_arg(args.get("query"))
     raw_node_ids = args.get("node_ids") or []
 
-    nodes = []
-    raw_results: list[dict[str, Any]] = []
-    if raw_node_ids:
-        allowed_session_ids = set(session_ids)
-        for node_id in raw_node_ids:
-            try:
-                parsed_node_id = int(node_id)
-            except (TypeError, ValueError):
-                return json.dumps({"error": "node_ids must contain only integers"})
-            node = engine._dag.get_node(parsed_node_id)
-            if node is not None and node.session_id in allowed_session_ids:
-                nodes.append(node)
-    elif query:
-        for session_id in session_ids:
-            nodes.extend(
-                engine._dag.search(query, session_id=session_id, limit=max_results)
-            )
-            raw_results.extend(
-                engine._store.search(query, session_id=session_id, limit=max_results)
-            )
-        if len(session_ids) > 1:
-            nodes.sort(
-                key=lambda node: (
-                    float(node.search_rank)
-                    if node.search_rank is not None
-                    else float("inf"),
-                    -float(node.search_directness or 0),
-                    -float(node.latest_at or node.created_at or 0),
-                )
-            )
-            raw_results.sort(
-                key=lambda row: _tools._combined_result_sort_key(
-                    {
-                        "type": "message",
-                        "role": row.get("role"),
-                        "_sort_rank": row.get("search_rank"),
-                        "_sort_directness": row.get("_directness_score"),
-                        "_sort_ts": row.get("timestamp"),
-                    },
-                    "relevance",
-                )
-            )
-        nodes = nodes[:max_results]
-        raw_results = raw_results[:max_results]
-    else:
-        return json.dumps({"error": "Provide either query or node_ids"})
+    retrieved = _retrieve_expand_query_matches(
+        engine=engine, raw_node_ids=raw_node_ids, session_ids=session_ids,
+        query=query, max_results=max_results,
+    )
+    if isinstance(retrieved, str):
+        return retrieved
+    nodes, raw_results = retrieved
 
     if not nodes and not raw_results:
         if output == "evidence":
@@ -694,3 +655,60 @@ def lcm_expand_query(args: Dict[str, Any], **kwargs: Any) -> str:
             ),
         }
     )
+
+
+def _retrieve_expand_query_matches(
+    *,
+    engine: "LCMEngine",
+    raw_node_ids: Any,
+    session_ids: list[str],
+    query: str | None,
+    max_results: int,
+) -> tuple[list[Any], list[dict[str, Any]]] | str:
+    nodes = []
+    raw_results: list[dict[str, Any]] = []
+    if raw_node_ids:
+        allowed_session_ids = set(session_ids)
+        for node_id in raw_node_ids:
+            try:
+                parsed_node_id = int(node_id)
+            except (TypeError, ValueError):
+                return json.dumps({"error": "node_ids must contain only integers"})
+            node = engine._dag.get_node(parsed_node_id)
+            if node is not None and node.session_id in allowed_session_ids:
+                nodes.append(node)
+    elif query:
+        for session_id in session_ids:
+            nodes.extend(
+                engine._dag.search(query, session_id=session_id, limit=max_results)
+            )
+            raw_results.extend(
+                engine._store.search(query, session_id=session_id, limit=max_results)
+            )
+        if len(session_ids) > 1:
+            nodes.sort(
+                key=lambda node: (
+                    float(node.search_rank)
+                    if node.search_rank is not None
+                    else float("inf"),
+                    -float(node.search_directness or 0),
+                    -float(node.latest_at or node.created_at or 0),
+                )
+            )
+            raw_results.sort(
+                key=lambda row: _tools._combined_result_sort_key(
+                    {
+                        "type": "message",
+                        "role": row.get("role"),
+                        "_sort_rank": row.get("search_rank"),
+                        "_sort_directness": row.get("_directness_score"),
+                        "_sort_ts": row.get("timestamp"),
+                    },
+                    "relevance",
+                )
+            )
+        nodes = nodes[:max_results]
+        raw_results = raw_results[:max_results]
+    else:
+        return json.dumps({"error": "Provide either query or node_ids"})
+    return nodes, raw_results

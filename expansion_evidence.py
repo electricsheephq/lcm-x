@@ -420,6 +420,25 @@ def _build_expand_query_evidence(
         "items": items,
     }
 
+    evidence = _select_expand_query_evidence_budget(
+        items=items, candidates=candidates, evidence=evidence, retrieval_scope=retrieval_scope,
+        scope_kind=scope_kind, scope_sessions=scope_sessions,
+        synthesis_status=synthesis_status, context_truncated=context_truncated,
+    )
+    return evidence
+
+
+def _select_expand_query_evidence_budget(
+    *,
+    items: list[dict[str, Any]],
+    candidates: list[dict[str, Any]],
+    evidence: dict[str, Any],
+    retrieval_scope: dict[str, Any],
+    scope_kind: str,
+    scope_sessions: list[str],
+    synthesis_status: str,
+    context_truncated: bool,
+) -> dict[str, Any]:
     def refresh_bounds() -> None:
         items_truncated = len(items) < len(candidates)
         located_items = sum(1 for item in items if item.get("locator_present"))

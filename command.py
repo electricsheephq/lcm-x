@@ -3796,16 +3796,9 @@ def _embedding_backfill_summary_run(
 
                 def before_dispatch(indexes: tuple[int, ...]) -> None:
                     nonlocal latest_request_id
-                    normalized = tuple(int(index) for index in indexes)
-                    if (
-                        not normalized
-                        or len(set(normalized)) != len(normalized)
-                        or any(index < 0 or index >= len(batch) for index in normalized)
-                        or any(index in request_by_index for index in normalized)
-                    ):
-                        raise EmbeddingProviderError(
-                            "provider dispatched invalid or duplicate document indexes"
-                        )
+                    normalized = _normalize_summary_backfill_indexes(
+                        indexes=indexes, batch=batch, request_by_index=request_by_index,
+                    )
                     if privacy_revision is not None:
                         try:
                             validate_embedding_privacy_dispatch(
@@ -4102,6 +4095,24 @@ def _embedding_backfill_summary_run(
         privacy_blocked=privacy_blocked,
         privacy_withheld=privacy_withheld,
     )
+
+
+def _normalize_summary_backfill_indexes(
+    *, indexes: tuple[int, ...], batch: list[tuple[str, str, int]],
+    request_by_index: dict[int, str],
+) -> tuple[int, ...]:
+    """Normalize and validate one summary backfill request's page indexes."""
+    normalized = tuple(int(index) for index in indexes)
+    if (
+        not normalized
+        or len(set(normalized)) != len(normalized)
+        or any(index < 0 or index >= len(batch) for index in normalized)
+        or any(index in request_by_index for index in normalized)
+    ):
+        raise EmbeddingProviderError(
+            "provider dispatched invalid or duplicate document indexes"
+        )
+    return normalized
 
 
 def _embedding_backfill_remaining(

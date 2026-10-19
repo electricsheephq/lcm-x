@@ -199,3 +199,133 @@ def test_stress_synthesizer_patch_reaches_facade(
         assert expand_query_tools._synthesize_expansion_answer is stress.deterministic_expand_answer
     assert expand_query_tools._synthesize_expansion_answer is original
     assert not hasattr(tools, "_synthesize_expansion_answer")
+
+
+@pytest.fixture
+def retrieval_inventory(inventory: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Expose retrieval order and object identity through the public envelope."""
+    nodes = {
+        i: SimpleNamespace(node_id=i, session_id=session, depth=0, summary=f"summary {i}",
+                           expand_hint=f"expand {i}", search_rank=rank,
+                           search_directness=directness, latest_at=latest, created_at=10)
+        for i, session, rank, directness, latest in (
+            (1, "session", None, 0, 0), (2, "session", -1, 1, 20),
+            (3, "session", -1, 1, 30), (4, "archive", -1, 2, 10),
+            (5, "archive", None, 0, 0),
+        )
+    }
+    rows = {i: {"store_id": i, "session_id": node.session_id, "role": "user",
+                "search_rank": node.search_rank, "_directness_score": node.search_directness,
+                "timestamp": node.latest_at} for i, node in nodes.items()}
+    seen: list[tuple[Any, ...]] = []
+
+    def get_node(node_id: int) -> Any:
+        seen.append(("get", node_id))
+        return nodes.get(node_id)
+
+    def search_nodes(query: str, *, session_id: str, limit: int) -> list[Any]:
+        seen.append(("dag", query, session_id, limit))
+        return [n for n in nodes.values() if n.session_id == session_id]
+
+    def search_rows(query: str, *, session_id: str, limit: int) -> list[dict[str, Any]]:
+        seen.append(("store", query, session_id, limit))
+        return [r for r in rows.values() if r["session_id"] == session_id]
+
+    def collect_node(engine: Any, node: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        assert engine is inventory and node is nodes[node.node_id]
+        seen.append(("context", node.node_id))
+        return []
+
+    def collect_rows(engine: Any, selected: list[dict[str, Any]], **kwargs: Any) -> Any:
+        assert engine is inventory
+        assert all(row is rows[row["store_id"]] for row in selected)
+        seen.append(("raw", *(row["store_id"] for row in selected)))
+        return None, [{"store_id": row["store_id"], "session_id": row["session_id"]}
+                      for row in selected]
+
+    inventory._dag = SimpleNamespace(get_node=get_node, search=search_nodes)
+    inventory._store = SimpleNamespace(search=search_rows)
+    monkeypatch.setattr(expand_query_tools, "_collect_context_blocks_for_node", collect_node)
+    monkeypatch.setattr(expand_query_tools, "_collect_raw_match_context_block", collect_rows)
+    return SimpleNamespace(engine=inventory, nodes=nodes, rows=rows, seen=seen)
+
+
+def _retrieval_envelope(
+    query: str | None, node_ids: list[int], raw_ids: list[int], *,
+    sessions: list[str] | None = None,
+) -> str:
+    matches = [{"node_id": i, "depth": 0, "summary": f"summary {i}",
+                "expand_hint": f"expand {i}"} for i in node_ids]
+    if sessions is not None:
+        for match, i in zip(matches, node_ids):
+            session = "session" if i <= 3 else "archive"
+            match["session_id"] = session
+            match["expand_hint"] = f"lcm_expand(node_id={i}, session_id={session!r})"
+    payload: dict[str, Any] = {
+        "prompt": "Which evidence?", "query": query, "output": "evidence", "evidence": [],
+        "context_max_tokens": 1000, "context_tokens": 1 if node_ids or raw_ids else 0,
+        "context_truncated": False, "context_pagination": [], "node_ids": node_ids,
+        "matches": matches,
+        "raw_matches": [{"store_id": i, "session_id": "session" if i <= 3 else "archive"}
+                        for i in raw_ids],
+    }
+    if sessions is not None:
+        payload["session_ids"] = sessions
+    return json.dumps(payload)
+
+
+@pytest.mark.parametrize(("args", "error", "reads"), [
+    ({}, "Provide either query or node_ids", []),
+    ({"node_ids": [], "query": ""}, "Provide either query or node_ids", []),
+    ({"node_ids": [1, "bad"]}, "node_ids must contain only integers", [("get", 1)]),
+    ({"node_ids": [None]}, "node_ids must contain only integers", []),
+])
+def test_retrieval_error_bytes(retrieval_inventory: Any, args: dict[str, Any],
+                               error: str, reads: list[Any]) -> None:
+    probe = retrieval_inventory
+    assert tools.lcm_expand_query({"prompt": "Which evidence?", **args}, engine=probe.engine) == json.dumps({"error": error})
+    assert probe.seen == reads
+
+
+@pytest.mark.parametrize(("node_ids", "expected"), [
+    (["2", 1, 2, 999, 4], [2, 1, 2]),
+    ([0, -1, 999, 4], []),
+])
+def test_retrieval_explicit_nodes_scope_and_order(
+    retrieval_inventory: Any, node_ids: list[Any], expected: list[int],
+) -> None:
+    probe = retrieval_inventory
+    args = {"prompt": "Which evidence?", "node_ids": node_ids, "query": "ignored",
+            "output": "evidence", "context_max_tokens": 1000, "session_ids": []}
+    assert tools.lcm_expand_query(args, engine=probe.engine) == _retrieval_envelope("ignored", expected, [])
+    assert probe.seen == [("get", int(i)) for i in node_ids] + [("context", i) for i in expected]
+
+
+@pytest.mark.parametrize(("limit", "selected"), [(-1, [1]), (0, [1, 2, 3]), (1, [1]),
+                                                          (2, [1, 2]), (3, [1, 2, 3]),
+                                                          (4, [1, 2, 3])])
+def test_retrieval_query_limit_and_read_order(
+    retrieval_inventory: Any, limit: int, selected: list[int],
+) -> None:
+    probe = retrieval_inventory
+    args = {"prompt": "Which evidence?", "query": "needle", "node_ids": [],
+            "session_ids": [], "output": "evidence", "context_max_tokens": 1000,
+            "max_results": limit}
+    assert tools.lcm_expand_query(args, engine=probe.engine) == _retrieval_envelope("needle", selected, selected)
+    normalized = 5 if limit == 0 else max(1, limit)
+    assert probe.seen == [("dag", "needle", "session", normalized),
+                          ("store", "needle", "session", normalized),
+                          *(("context", i) for i in selected), ("raw", *selected)]
+
+
+def test_retrieval_cross_session_ranking_and_aliases(retrieval_inventory: Any) -> None:
+    probe = retrieval_inventory
+    args = {"prompt": "Which evidence?", "query": "needle", "session_ids": [" archive ", "session", "archive"],
+            "output": "evidence", "context_max_tokens": 1000, "max_results": 5}
+    selected = [4, 3, 2, 5, 1]
+    assert tools.lcm_expand_query(args, engine=probe.engine) == _retrieval_envelope(
+        "needle", selected, selected, sessions=["archive", "session"])
+    assert probe.seen == [("dag", "needle", "archive", 5), ("store", "needle", "archive", 5),
+                          ("dag", "needle", "session", 5), ("store", "needle", "session", 5),
+                          *(("context", i) for i in selected), ("raw", *selected)]
+    assert list(probe.nodes) == list(probe.rows) == [1, 2, 3, 4, 5]
