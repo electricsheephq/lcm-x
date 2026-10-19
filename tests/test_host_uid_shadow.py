@@ -6,12 +6,14 @@ fed to the classifier directly."""
 
 from __future__ import annotations
 
+import copy
 import json
 import logging
 import os
 import pathlib
 import re
 import sqlite3
+from collections import Counter
 
 import pytest
 
@@ -724,6 +726,93 @@ ROLLBACK_READERS = {
     "v0.25.1": "f47b55e031b507b424ff5f480d8f2a80d358f1f0",
     "v0.26.2": "6800cf45ad05280e6cf6fa9e1ad96c62b7132646",
 }
+
+
+def _store_snapshot(conn):
+    """Full named-column records shared by v0.26.2 and Main, after Main's first open.
+
+    Read PRAGMA rather than relying on positional row decoding. These four stored
+    schemas have the same columns in both builds; older readers preserve sidecars
+    even when they do not implement them. The function is also embedded in children.
+    """
+    snapshot = {}
+    for table, key in (("messages", "store_id"), ("summary_nodes", "node_id"),
+                       ("summary_node_provenance", "node_id"), ("host_uid_bindings", None)):
+        columns = [row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')]
+        if not columns:
+            continue
+        names = ", ".join(f'"{column}"' for column in columns)
+        order = f'"{key}"' if key else names
+        snapshot[table] = {
+            "columns": columns,
+            "rows": [list(row) for row in conn.execute(f'SELECT {names} FROM "{table}" ORDER BY {order}')],
+        }
+    return snapshot
+
+
+def _binding_after_agree_check(row, columns):
+    """Allow only NULL→agree, the replay diagnostic in store.py:1062-1070."""
+    checked = columns.index("first_check")
+    if row[checked] is None:
+        return (*row[:checked], "agree", *row[checked + 1:])
+    return row
+
+
+def _assert_store_snapshot_preserved(before, after):
+    """Old-reader additions are allowed; every full pre-existing record must remain."""
+    for table, records in before.items():
+        assert after[table]["columns"] == records["columns"], table
+        old = Counter(tuple(row) for row in records["rows"])
+        new = Counter(tuple(row) for row in after[table]["rows"])
+        missing, added = old - new, new - old
+        if table == "host_uid_bindings":
+            for row, count in list(missing.items()):
+                allowed = _binding_after_agree_check(row, records["columns"])
+                if allowed != row and added[allowed] >= count:
+                    del missing[row]
+                    added[allowed] -= count
+        assert not missing, f"{table}: changed or missing pre-existing full records: {missing}"
+
+
+@pytest.mark.parametrize("column,value", [
+    ("first_check", "disagree"), ("store_id", -1), ("uid", "changed"),
+    ("lineage_key", "changed"), ("kind", "changed"), ("binding_version", -1),
+    ("proof_kind", "changed"), ("created_at", -1.0), ("disagree_seen", 1),
+])
+def test_rollback_snapshot_rejects_other_binding_changes(tmp_path, column, value):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest(_UID_LIST)
+        before = _store_snapshot(engine._store.connection)
+    finally:
+        engine.shutdown()
+    after = copy.deepcopy(before)
+    bindings = after["host_uid_bindings"]
+    bindings["rows"][0][bindings["columns"].index(column)] = value
+    with pytest.raises(AssertionError, match="host_uid_bindings"):
+        _assert_store_snapshot_preserved(before, after)
+
+
+@pytest.mark.parametrize("initial", [None, "agree", "disagree"])
+def test_rollback_snapshot_allows_only_initial_agree_check(tmp_path, initial):
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    try:
+        engine.ingest(_UID_LIST)
+        before = _store_snapshot(engine._store.connection)
+    finally:
+        engine.shutdown()
+    bindings = before["host_uid_bindings"]
+    checked = bindings["columns"].index("first_check")
+    bindings["rows"][0][checked] = initial
+    after = copy.deepcopy(before)
+    after["host_uid_bindings"]["rows"][0][checked] = "agree" if initial != "agree" else None
+    if initial is None:
+        _assert_store_snapshot_preserved(before, after)
+    else:
+        with pytest.raises(AssertionError, match="host_uid_bindings"):
+            _assert_store_snapshot_preserved(before, after)
 
 
 def _skip_or_fail_in_ci(reason):

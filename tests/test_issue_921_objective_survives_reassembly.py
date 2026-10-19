@@ -1,6 +1,7 @@
 """#921: the sole user objective survives another assembly in the same turn."""
 
 import io
+import inspect
 import json
 import subprocess
 import sys
@@ -13,7 +14,9 @@ import hermes_lcm.engine as engine_module
 import hermes_lcm.tokens as tokens
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-from tests.test_host_uid_shadow import ROLLBACK_READERS, _skip_or_fail_in_ci
+from tests.test_host_uid_shadow import (
+    ROLLBACK_READERS, _assert_store_snapshot_preserved, _skip_or_fail_in_ci, _store_snapshot,
+)
 
 
 PREFIX = "[Current user objective preserved from compacted history]"
@@ -277,9 +280,11 @@ try:
     assert [(r["role"], r["content"]) for r in after] == [(r["role"], r["content"]) for r in before]
     assert engine._store._conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
     print(f"ROLLBACK_READER_OK {reader} objective recognized; replay adds no rows")
+    print(json.dumps(_store_snapshot(engine._store.connection)))
 finally:
     engine.shutdown()
 '''
+_OLD_READER = inspect.getsource(_store_snapshot) + _OLD_READER
 
 
 @pytest.mark.parametrize("reader", sorted(ROLLBACK_READERS))
@@ -289,6 +294,7 @@ def test_rollback_reader_accepts_reassembled_objective(engine, tmp_path, reader)
     if subprocess.run(["git", "-C", str(root), "cat-file", "-e", f"{commit}^{{commit}}"], capture_output=True).returncode:
         _skip_or_fail_in_ci(f"the {reader} rollback reader commit is not available")
     emitted = engine.compress(_first_assembly(engine))
+    before_snapshot = _store_snapshot(engine._store.connection)
     engine.shutdown()
     archive = subprocess.run(["git", "-C", str(root), "archive", commit], check=True, capture_output=True).stdout
     old = tmp_path / "old-reader"
@@ -302,3 +308,4 @@ def test_rollback_reader_accepts_reassembled_objective(engine, tmp_path, reader)
     )
     assert result.returncode == 0, result.stderr[-3000:]
     assert f"ROLLBACK_READER_OK {reader}" in result.stdout
+    _assert_store_snapshot_preserved(before_snapshot, json.loads(result.stdout.splitlines()[-1]))

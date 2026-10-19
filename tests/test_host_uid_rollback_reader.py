@@ -2,6 +2,7 @@
 
 import copy
 import io
+import inspect
 import json
 import shutil
 import subprocess
@@ -17,7 +18,10 @@ from hermes_lcm.config import host_message_uid_mode
 from hermes_lcm.host_uid_emit import IDENTITY_KEYS
 from tests.test_host_uid_emit_carry import _call
 from tests.test_host_uid_engine_uids import _compress, _host
-from tests.test_host_uid_shadow import ROLLBACK_READERS, _engine, _m, _skip_or_fail_in_ci, _state_db
+from tests.test_host_uid_shadow import (
+    ROLLBACK_READERS, _assert_store_snapshot_preserved, _engine, _m, _skip_or_fail_in_ci, _state_db,
+    _store_snapshot,
+)
 
 
 _OLD_READER = r"""
@@ -50,10 +54,12 @@ try:
                  for i, row in enumerate(replay)],
         "before": before, "first_added": len(first) - before,
         "replay_added": len(replay) - len(first), "sqlite_integrity": integrity,
+        "snapshot": _store_snapshot(engine._store.connection),
     }, sort_keys=True))
 finally:
     engine.shutdown()
 """
+_OLD_READER = inspect.getsource(_store_snapshot) + _OLD_READER
 
 
 def _without_uids(messages):
@@ -100,6 +106,7 @@ def test_persisted_shadow_uids_are_inert_to_rollback_reader(tmp_path, monkeypatc
         assert carried, emitted
         assert any("_tool_call_uids" in row or "_tool_call_uid" in row for row in emitted), emitted
         before_counts = Counter(row["content"] for row in engine._store.get_session_messages("S"))
+        before_snapshot = _store_snapshot(engine._store.connection)
     finally:
         engine.shutdown()
 
@@ -117,6 +124,7 @@ def test_persisted_shadow_uids_are_inert_to_rollback_reader(tmp_path, monkeypatc
             capture_output=True, text=True, cwd=str(tmp_path), timeout=60)
         assert result.returncode == 0, result.stderr[-3000:]
         results.append(json.loads(result.stdout))
+        _assert_store_snapshot_preserved(before_snapshot, results[-1]["snapshot"])
 
     uid, plain = results
     assert uid["sqlite_integrity"] == plain["sqlite_integrity"] == "sqlite_integrity: ok"

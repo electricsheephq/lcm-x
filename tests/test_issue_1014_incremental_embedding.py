@@ -738,6 +738,7 @@ def test_status_backlog_names_uncertain_rows_the_pass_cannot_retry(tmp_path, hom
         engine.shutdown()
 
 
+@pytest.mark.background_rollups
 def test_embedding_worker_is_named_for_embeddings_not_rollups(caplog):
     scheduler = lcm_engine._RollupMaintenanceScheduler(
         max_pending_jobs=1, kind="incremental embedding",

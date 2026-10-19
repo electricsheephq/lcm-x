@@ -173,6 +173,7 @@ def test_rollups_rebuild_marks_all_targets_stale_and_builds_bounded(engine, monk
         store.close()
 
 
+@pytest.mark.background_rollups
 def test_rollups_rebuild_refuses_while_background_maintenance_is_active(
     engine,
     monkeypatch,
@@ -210,6 +211,7 @@ def test_rollups_rebuild_refuses_while_background_maintenance_is_active(
         assert engine_module._ROLLUP_MAINTENANCE_SCHEDULER.drain({key}, timeout=5)
 
 
+@pytest.mark.background_rollups
 def test_rollups_rebuild_releases_operator_lease_when_store_open_fails(
     engine,
     monkeypatch,
@@ -230,6 +232,7 @@ def test_rollups_rebuild_releases_operator_lease_when_store_open_fails(
     engine_module._ROLLUP_MAINTENANCE_SCHEDULER.release_exclusive(key)
 
 
+@pytest.mark.background_rollups
 def test_rollups_rebuild_releases_operator_lease_when_store_close_fails(
     engine,
     monkeypatch,

@@ -305,6 +305,7 @@ def test_empty_builds_have_zero_store_side_effects(rollup_parts):
     assert store.connection.execute("SELECT COUNT(*) FROM lcm_rollups").fetchone()[0] == 0
 
 
+@pytest.mark.background_rollups
 def test_publication_staleness_and_bounded_bind_maintenance(tmp_path, monkeypatch):
     # Raw ingest ALONE must not stale rollups (maintainer #388 P1): a period is
     # staled only when a covering summary node is PUBLISHED. Then background
@@ -450,6 +451,7 @@ def test_maintenance_budget_stops_before_starting_next_build(rollup_parts, monke
     assert statuses == ["ready", "stale"]
 
 
+@pytest.mark.background_rollups
 def test_session_start_does_not_wait_for_slow_rollup_provider(tmp_path, monkeypatch):
     db_path = tmp_path / "async-session-start.db"
     config = LCMConfig(
@@ -549,6 +551,7 @@ def test_session_start_does_not_wait_for_slow_rollup_provider_latency(tmp_path, 
         engine.shutdown()
 
 
+@pytest.mark.background_rollups
 def test_rollup_background_maintenance_deduplicates_rapid_scope_binds(
     tmp_path,
     monkeypatch,
@@ -826,6 +829,7 @@ def test_rollup_scheduler_operator_exclusion_is_bounded_and_defers_maintenance()
     assert completed == ["after-release"]
 
 
+@pytest.mark.background_rollups
 def test_rollup_background_failure_is_logged_without_breaking_bind(
     tmp_path,
     monkeypatch,
@@ -855,6 +859,7 @@ def test_rollup_background_failure_is_logged_without_breaking_bind(
         engine.shutdown()
 
 
+@pytest.mark.background_rollups
 def test_engine_shutdown_does_not_wait_for_background_rollup_provider(
     tmp_path,
     monkeypatch,
@@ -987,6 +992,7 @@ def test_session_reset_stales_rollups_referencing_deleted_nodes(tmp_path):
         engine.shutdown()
 
 
+@pytest.mark.background_rollups
 def test_flag_off_skips_rollup_maintenance(tmp_path, monkeypatch):
     config = LCMConfig(
         database_path=str(tmp_path / "flag-off.db"),
@@ -1208,6 +1214,7 @@ def test_daily_sources_excludes_condensed_children_present_same_day(rollup_parts
     assert "child leaf summary" not in captured["text"]
 
 
+@pytest.mark.background_rollups
 def test_raw_ingest_does_not_prebuild_then_publication_drives_stale(tmp_path, monkeypatch):
     # Item 6 P1: raw ingest must not build/omit a rollup before its summary
     # exists; publication of the covering leaf is the sole staleness signal.
@@ -1250,6 +1257,7 @@ def test_raw_ingest_does_not_prebuild_then_publication_drives_stale(tmp_path, mo
         engine.shutdown()
 
 
+@pytest.mark.background_rollups
 def test_bypassed_session_skips_rollup_maintenance(tmp_path, monkeypatch):
     config = LCMConfig(
         database_path=str(tmp_path / "bypass.db"),
