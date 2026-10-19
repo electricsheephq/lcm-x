@@ -716,6 +716,31 @@ def test_v2_window_finds_short_unicode_and_marked_matches(v2module):
     # Strict identifiers still win when they match, and no evidence keeps the prefix.
     assert v2module.coding_excerpt(dict(hit, marks=[]), 'nothing matches', 4000).startswith(
         'user\nx = 1\n')
+    # Short words match whole tokens only: an earlier 'valid' must not take the window.
+    noisy = dict(hit, content='valid = 1\n' * 900 + 'row.id = 2\n' + 'y = 2\n' * 1000)
+    for query, marks in (('id', []), ('unrelated paraphrase only', ['id'])):
+        assert 'row.id = 2' in v2module.coding_excerpt(dict(noisy, marks=marks), query, 4000), query
+
+
+def test_v2_shares_worker_capacity_with_frozen_routes(tmp_path, v2module):
+    one = Service(tmp_path / 'v1', 'synthetic-token', workers=1, runner=stub_runner)
+    two = Service(tmp_path / 'v2', 'synthetic-token', workers=1, runner=stub_runner)
+    server = v2module.Server(one, port=0, v2=two)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    search = dict(user_id='user/a', query='q')
+    try:
+        assert one.slots.acquire(blocking=False)  # a frozen request holds the only slot
+        try:
+            assert wire(base, '/aml/v2/search', search)[0] == 429
+        finally:
+            one.slots.release()
+        assert wire(base, '/aml/v2/search', search)[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
 
 
 def test_v2_per_user_serialization(tmp_path, v2module):

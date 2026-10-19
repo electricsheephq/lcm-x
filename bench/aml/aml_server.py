@@ -214,10 +214,16 @@ def query_span(content, query, width, strict=True):
     lowered = content.lower()
     occurrences = []
     for index, term in enumerate(terms):
-        position = lowered.find(term)
-        while position != -1 and len(occurrences) < 20000:
-            occurrences.append((position, position + len(term), index))
-            position = lowered.find(term, position + 1)
+        if strict:  # identifiers may sit inside longer names (parse in parse_rows)
+            position = lowered.find(term)
+            while position != -1 and len(occurrences) < 20000:
+                occurrences.append((position, position + len(term), index))
+                position = lowered.find(term, position + 1)
+        else:  # short words count only as whole tokens (id, not the id in valid)
+            for match in re.finditer(r'(?<!\w)' + re.escape(term) + r'(?!\w)', lowered):
+                if len(occurrences) >= 20000:
+                    break
+                occurrences.append((match.start(), match.end(), index))
     occurrences.sort()
     counts, weight, best, left = {}, 0, None, 0
     for right, (_start, end, term) in enumerate(occurrences):
@@ -714,6 +720,8 @@ class Server(ThreadingHTTPServer):
 
     def __init__(self, service, port=8791, slow_seconds=10, v2=None, v2_failed=False):
         self.service, self.slow_seconds, self.v2 = service, slow_seconds, v2
+        if v2 is not None:
+            v2.slots = service.slots  # AML_WORKERS bounds both route families together
         self.v2_failed, self.receipt_failures = v2_failed, set()
         self.receipts = Path(os.environ.get('AML_RECEIPTS', str(service.root / 'receipts.jsonl')))
         self.receipt_lock = threading.Lock()
