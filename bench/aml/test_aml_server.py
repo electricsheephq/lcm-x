@@ -751,3 +751,43 @@ def test_v2_surrogate_and_crash_are_request_local(tmp_path, monkeypatch):
             assert wire(base, '/aml/v2/add', addition(request=f'bad-{i}', content=content))[0] == 500
             assert wire(base, '/aml/v2/add', addition(request=f'ok-{i}', content='recovered'))[0] == 200
             assert wire(base, '/aml/v2/health') == (200, b'{"status":"ok"}')
+
+
+def test_v1_routes_switch_to_v2(tmp_path, v2module):
+    one = Service(tmp_path / 'v1', 'synthetic-token', runner=stub_runner)
+    two = Service(tmp_path / 'v2', 'synthetic-token', runner=stub_runner)
+    server = v2module.Server(one, port=0, v2=two)
+    server.v1_to_v2 = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    try:
+        assert wire(base, '/aml/v1/health', method='HEAD') == (200, b'')
+        assert wire(base, '/aml/v1/health')[0] == 200
+        assert wire(base, '/aml/v1/add', addition(content='PRIVATE-CONTENT\n    code'))[0] == 200
+        assert (two.root / digest('user/a')).exists() and not (one.root / digest('user/a')).exists()
+        assert wire(base, '/aml/v1/search', dict(user_id='user/a', query='PRIVATE-QUERY'))[0] == 200
+        records = [json.loads(line) for line in server.receipts.read_text().splitlines()]
+        assert records[-1]['hits'] == 2
+        # Unbound frozen paths keep the frozen service.
+        assert wire(base, '/aml/search', dict(user_id='user/a', query='PRIVATE-QUERY')) == (200, b'{"data":[]}')
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_v1_routes_switch_fails_closed_without_v2(tmp_path, v2module):
+    one = Service(tmp_path / 'v1', 'synthetic-token', runner=stub_runner)
+    server = v2module.Server(one, port=0, v2=None, v2_failed=True)
+    server.v1_to_v2 = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    try:
+        assert wire(base, '/aml/v1/health')[0] == 503
+        assert wire(base, '/aml/v1/search', dict(user_id='user/a', query='q'))[0] == 503
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()

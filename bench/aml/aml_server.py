@@ -610,7 +610,16 @@ class Handler(BaseHTTPRequestHandler):
     # AML's v0.27.0 binding uses /aml/v1/<op>; accept it as an alias of /aml/<op>.
     V1_ALIASES = {'/aml/v1/health': '/aml/health', '/aml/v1/add': '/aml/add', '/aml/v1/search': '/aml/search'}
 
+    # AML binds one endpoint per key, so a new version reuses /aml/v1/<op>. With
+    # AML_V1_ROUTES=v2 those bound paths are served by v2 (never by the frozen path).
+    V1_TO_V2 = {'/aml/v1/health': '/aml/v2/health', '/aml/v1/add': '/aml/v2/add', '/aml/v1/search': '/aml/v2/search'}
+
+    def route_v1_to_v2(self):
+        if getattr(self.server, 'v1_to_v2', False):
+            self.path = self.V1_TO_V2.get(self.path, self.path)
+
     def do_HEAD(self):
+        self.route_v1_to_v2()
         if self.path == '/aml/v2/health' and (self.server.v2 or self.server.v2_failed):
             self.do_GET()
         else:
@@ -618,6 +627,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.original_path = self.path
+        self.route_v1_to_v2()
         if self.server.v2_failed and self.path.startswith('/aml/v2/'):
             self.respond(503, {'detail': {'reason': 'v2 unavailable'}})
             return
@@ -632,6 +642,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.original_path = self.path
+        self.route_v1_to_v2()
         if self.server.v2_failed and self.path.startswith('/aml/v2/'):
             self.respond(503, {'detail': {'reason': 'v2 unavailable'}})
             return
@@ -708,6 +719,9 @@ def main():
     search_mode = os.environ.get('AML_SEARCH_MODE') or 'textual'
     if search_mode not in ('textual', 'coding'):
         parser.exit(1, 'AML_SEARCH_MODE must be textual or coding\n')
+    v1_routes = os.environ.get('AML_V1_ROUTES') or 'frozen'
+    if v1_routes not in ('frozen', 'v2') or (v1_routes == 'v2' and not os.environ.get('AML_V2_DB_ROOT')):
+        parser.exit(1, 'AML_V1_ROUTES must be frozen, or v2 with AML_V2_DB_ROOT set\n')
     local_network_only()
     os.umask(0o077)
     token = os.environ.get('AML_ADDSEARCH_TOKEN', '')
@@ -746,7 +760,11 @@ def main():
                                   FASTEMBED_CACHE_PATH=str(root / '.model-cache'))
         with Server(service, int(os.environ.get('AML_PORT', '8791')),
                     float(os.environ.get('AML_SLOW_SECONDS', '10')), v2=v2, v2_failed=v2_failed) as server:
-            print(json.dumps(dict(event='start', search_mode=search_mode)), flush=True)
+            server.v1_to_v2 = v1_routes == 'v2'
+            start = dict(event='start', search_mode=search_mode)
+            if server.v1_to_v2:
+                start['v1_routes'] = 'v2'
+            print(json.dumps(start), flush=True)
             server.serve_forever()
 
 
