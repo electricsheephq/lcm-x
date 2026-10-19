@@ -135,6 +135,7 @@ CODING_SNAP_CHARS = 200         # how far a window edge may move to land on a li
 # FTS message snippets wrap each match as >>>term<<< (store snippet()); summary snippets are plain
 # summary text. Only a whole pair on one line is a marker; a bare >>> or <<< is code and stays.
 _FTS_MARK = re.compile(r'>>>(\S(?:[^\n<>]{0,198}\S)?)<<<')
+_CODING_WORD = re.compile(r'\w+')
 _CODING_TERM = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.:/\\-]*[A-Za-z0-9_]')
 _CODING_STOPWORDS = frozenset(
     'the and for with that this from into when then than have has had was were are not but '
@@ -187,7 +188,8 @@ def coding_hits(client, query, user_key, top_k):
         span = (start, end) if (isinstance(start, int) and isinstance(end, int)
                                 and 0 <= start < end <= len(content)) else None
         stored_id = f"summary:{hit['node_id']}" if summary and hit.get('node_id') is not None else row.get('store_id')
-        hits.append(dict(content=content, stored_id=stored_id,
+        marks = [] if summary else _FTS_MARK.findall(str(hit.get('snippet') or ''))
+        hits.append(dict(content=content, stored_id=stored_id, marks=marks,
                          role=row.get('role'), summary=summary, span=span,
                          event_time=hit.get('event_time') or session.get('time'),
                          trajectory=session.get('order')))
@@ -201,10 +203,14 @@ def _coding_header(hit):
     return (f"[{hit['event_time']}] " if hit.get('event_time') else '') + label
 
 
-def query_span(content, query, width):
-    """Densest width-char span of distinct query terms in content, or None."""
-    terms = sorted({term.lower() for term in _CODING_TERM.findall(query)
-                    if 3 <= len(term) <= width and term.lower() not in _CODING_STOPWORDS})
+def query_span(content, query, width, strict=True):
+    """Densest width-char span of distinct query terms in content, or None.
+
+    strict keeps ASCII identifiers of 3+ chars; the relaxed pass (a fallback before
+    the row prefix) keeps any Unicode word, so short or non-ASCII matches still count."""
+    found = _CODING_TERM.findall(query) if strict else _CODING_WORD.findall(query)
+    terms = sorted({term.lower() for term in found
+                    if (3 if strict else 1) <= len(term) <= width and term.lower() not in _CODING_STOPWORDS})
     lowered = content.lower()
     occurrences = []
     for index, term in enumerate(terms):
@@ -236,7 +242,11 @@ def coding_excerpt(hit, query, budget):
     before_max = f'[... {len(content)} earlier chars omitted]\n'
     after_max = f'\n[... {len(content)} later chars omitted]'
     width = max(1, budget - len(header) - 1 - len(before_max) - len(after_max))
-    span = hit.get('span') or query_span(content, query, width) or (0, 0)
+    # LCM-X's matched chunk, then query identifiers, then the FTS-marked terms of the
+    # hit's own snippet, then any query word; the row prefix only when none is found.
+    span = (hit.get('span') or query_span(content, query, width)
+            or query_span(content, ' '.join(hit.get('marks') or ()), width, strict=False)
+            or query_span(content, query, width, strict=False) or (0, 0))
     start = (span[0] + span[1] - width) // 2
     start = max(0, min(start, len(content) - width))
     end = start + width

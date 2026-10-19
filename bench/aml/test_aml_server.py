@@ -701,6 +701,21 @@ def test_v2_fallback_snippets_keep_literal_markers(monkeypatch, v2module):
     # Summary text is never marked, so it is delivered verbatim; a message snippet loses only
     # whole FTS marker pairs, and a bare >>> or <<< in code stays.
     assert [h['content'] for h in found] == [summary_text, 'call parse then emit_rows >>> repl <<< x']
+    assert [h['marks'] for h in found] == [[], ['parse', 'emit_rows']]
+
+
+def test_v2_window_finds_short_unicode_and_marked_matches(v2module):
+    # No chunk span; the only match sits past the 4,000-char prefix of a long row.
+    content = 'x = 1\n' * 1500 + 'row.id = 検索\n' + 'y = 2\n' * 1000
+    hit = dict(content=content, stored_id=1, role='user', summary=False, span=None,
+               event_time=None, trajectory=None)
+    for query, marks in (('id', []), ('検索', []), ('unrelated paraphrase only', ['id'])):
+        text = v2module.coding_excerpt(dict(hit, marks=marks), query, 4000)
+        assert 'row.id = 検索' in text, query
+        assert len(text) <= 4000
+    # Strict identifiers still win when they match, and no evidence keeps the prefix.
+    assert v2module.coding_excerpt(dict(hit, marks=[]), 'nothing matches', 4000).startswith(
+        'user\nx = 1\n')
 
 
 def test_v2_per_user_serialization(tmp_path, v2module):
