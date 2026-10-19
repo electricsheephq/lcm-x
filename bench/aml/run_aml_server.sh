@@ -11,7 +11,7 @@ export AML_OMNIMEMEVAL_REPO="${AML_OMNIMEMEVAL_REPO:?AML_OMNIMEMEVAL_REPO is req
   echo "AML_OMNIMEMEVAL_REPO has no scripts/client_factory/lcmx_client.py" >&2; exit 1; }
 : "${AML_ADDSEARCH_TOKEN:?AML_ADDSEARCH_TOKEN is required}"
 mkdir -p -- "$AML_DB_ROOT"
-chmod 0700 -- "$AML_DB_ROOT"
+chmod 0700 "$AML_DB_ROOT"
 if [[ -n "${AML_V2_DB_ROOT:-}" ]]; then
   export AML_V2_DB_ROOT
 fi
