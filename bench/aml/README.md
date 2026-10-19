@@ -78,3 +78,17 @@ Run the synthetic tests from the LCM-X repository root:
 ```
 
 Delete evaluation data within 30 days, including retained copies and backups.
+
+## Opt-in v2 coding delivery
+
+Set `AML_V2_DB_ROOT=/path/to/separate-v2-data` to enable `/aml/v2/add`,
+`/aml/v2/search`, and `/aml/v2/health` (GET or HEAD). Roots must be disjoint.
+The frozen routes retain their mode and per-request workers. V2 uses the same
+adapter retrieval with verbatim code, role/time/trajectory headers and matched
+windows: 4,000 chars per hit, spare budget up to 10,240, at most 10 hits and
+40,000 content chars. `AML_WORKERS` processes warm clients and embedders before
+health returns 200; crashes and deadlines replace workers. Adds retain atomic
+generations and user serialization. Both route families append metadata-only
+receipts to `AML_RECEIPTS` (default `<AML_DB_ROOT>/receipts.jsonl`); receipts
+contain no queries, content or tokens. The product's embedding thread constant
+is unchanged; this adapter exposes no thread configuration knob.

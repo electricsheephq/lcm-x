@@ -486,3 +486,205 @@ def test_t6_startup_receipt_mode_and_privacy(tmp_path):
             line = process.stdout.readline()
             assert json.loads(line) == {'event': 'start', 'search_mode': mode}
             assert all(value not in line for value in ('synthetic-token', str(tmp_path)))
+
+
+@pytest.fixture
+def frozen(tmp_path):
+    import importlib.util
+    path = tmp_path / 'frozen.py'
+    path.write_bytes(subprocess.check_output(['git', '-C', '/Users/m1/repos/lcm-x',
+                                             'show', '39757f7e:bench/aml/aml_server.py']))
+    spec = importlib.util.spec_from_file_location('frozen', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def v2module(frozen):
+    return frozen if os.environ.get('AML_TEST_FROZEN') else aml_server
+
+
+def wire(base, path, body=None, method=None, headers=None):
+    request = Request(base + path, data=None if body is None else json.dumps(body).encode(),
+                      method=method, headers=headers or {'X-Api-Key': 'synthetic-token'})
+    try:
+        response = build_opener(ProxyHandler({})).open(request, timeout=5)
+    except HTTPError as error:
+        response = error
+    with response:
+        return response.status, response.read()
+
+
+@pytest.mark.parametrize('mode', ['coding', 'textual'])
+def test_frozen_wire_golden(tmp_path, frozen, mode):
+    from functools import partial
+    observed = []
+    for index, module in enumerate((frozen, aml_server)):
+        env, _ = gateway_environment(tmp_path / str(index), mode)
+        factory = Path(env['AML_OMNIMEMEVAL_REPO']) / 'scripts/client_factory/lcmx_client.py'
+        with factory.open('a') as stub:
+            stub.write('    def add(self, *args, **kwargs): pass\n')
+        with pytest.MonkeyPatch.context() as patcher:
+            for key, value in env.items():
+                patcher.setenv(key, value)
+            service = module.Service(env['AML_DB_ROOT'], 'synthetic-token',
+                                     runner=partial(module.run_worker, search_mode=mode))
+            server = module.Server(service, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = 'http://127.0.0.1:' + str(server.server_port)
+            try:
+                cases = [case for prefix in ('/aml/', '/aml/v1/')
+                         for case in [
+                             (prefix + 'health', None, 'GET'), (prefix + 'health', None, 'HEAD'),
+                             (prefix + 'add', {}, None), (prefix + 'add', addition(), None),
+                             (prefix + 'search', [], None), (prefix + 'missing', {}, None),
+                             (prefix + 'search', dict(user_id='u', query='a\nb' + 'x' * 5000), None),
+                             (prefix + 'search', dict(user_id='u', query='q', top_k=0), None),
+                             (prefix + 'search', {}, None, {'Authorization': 'bad'}),
+                             (prefix + 'search', {}, None, {'X-Api-Key': 'synthetic-token', 'Transfer-Encoding': 'chunked'}),
+                             (prefix + 'add', {}, None, {'X-Api-Key': 'synthetic-token', 'Content-Length': str(MAX_BYTES + 1)})]]
+                observed.append([wire(base, *case) for case in cases])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+    assert observed[0] == observed[1]
+
+
+@pytest.mark.parametrize('shape', ['verbatim', 'header', 'window', 'fallback', 'budget', 'top_k', 'schema'])
+def test_v2_delivery(v2module, shape):
+    m = v2module
+    text = 'def f():\n    return 1\n'
+    hit = dict(content=text, role='assistant', event_time='2021-01-01Z', trajectory=2, summary=False)
+    if shape in ('window', 'fallback'):
+        hit['content'] = 'padding\n' * 3000 + '    DeepTracebackError: plugins\n' + 'tail\n' * 3000
+        at = hit['content'].index('DeepTracebackError')
+        hit['span'] = (at, at + 18) if shape == 'window' else None
+    hits = [dict(hit, content=hit['content'] + str(i)) for i in range(12)]
+    rows = m.v2_search_response(hits, 'u', 2 if shape == 'top_k' else 100,
+                                'DeepTracebackError plugins')['data']
+    if shape == 'verbatim':
+        assert text in rows[0]['content']
+    elif shape == 'header':
+        assert rows[0]['content'].startswith('[2021-01-01Z] assistant (trajectory 2)\n')
+        assert m.v2_search_response([dict(hit, event_time=None)], 'u', 1)['data'][0]['content'].startswith('assistant')
+    elif shape in ('window', 'fallback'):
+        assert '    DeepTracebackError: plugins' in rows[0]['content']
+    elif shape == 'budget':
+        rows = m.v2_search_response([dict(hit, content='x' * 30000)] * 10, 'u', 100)['data']
+        assert len(rows) == 10 and sum(len(r['content']) for r in rows) <= 40000
+        single = m.v2_search_response([dict(hit, content='x' * 30000)], 'u', 100)['data'][0]
+        assert 4000 < len(single['content']) <= 10240
+    elif shape == 'top_k':
+        assert len(rows) == 2
+    else:
+        assert all(set(r) == {'id', 'content', 'score'} for r in rows)
+
+
+@pytest.mark.parametrize('fault', ['deadline', 'crash'])
+def test_v2_worker_replacement(tmp_path, v2module, fault):
+    script = tmp_path / 'worker.py'
+    script.write_text("import json,sys,time,os\nprint('{\"ready\":true}',flush=True)\n"
+                      "for line in sys.stdin:\n r=json.loads(line)\n"
+                      " if r['operation']=='deadline': time.sleep(10)\n"
+                      " if r['operation']=='crash': os._exit(1)\n"
+                      " print('{\"status\":200,\"body\":{}}',flush=True)\n")
+    pool = v2module.WarmPool(tmp_path, 1, [sys.executable, '-B', str(script)])
+    try:
+        end = time.monotonic() + 5
+        while not pool.warm():
+            assert time.monotonic() < end
+            time.sleep(.01)
+        pid = pool.processes[0].pid
+        with pytest.raises(v2module.APIError):
+            pool(tmp_path, 'ok', {}, time.monotonic() - 1)
+        with pytest.raises(v2module.APIError) as failure:
+            pool(tmp_path, fault, {}, time.monotonic() + .1)
+        assert failure.value.status == (408 if fault == 'deadline' else 500)
+        assert pool(tmp_path, 'ok', {}, time.monotonic() + 5) == {}
+        assert pool.processes[0].pid != pid
+    finally:
+        pool.close()
+
+
+def test_v2_roots_receipts_and_head(tmp_path, v2module):
+    one = Service(tmp_path / 'v1', 'synthetic-token', runner=stub_runner)
+    two = Service(tmp_path / 'v2', 'synthetic-token', runner=stub_runner)
+    two.runner.warm = lambda: True
+    server = v2module.Server(one, port=0, v2=two)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    try:
+        assert wire(base, '/aml/v2/health', method='HEAD') == (200, b'')
+        assert wire(base, '/aml/v1/health', method='HEAD')[0] == 501
+        assert wire(base, '/aml/v2/add', addition(content='PRIVATE-CONTENT\n    code'))[0] == 200
+        assert wire(base, '/aml/search', dict(user_id='user/a', query='PRIVATE-QUERY')) == (200, b'{"data":[]}')
+        assert wire(base, '/aml/v2/search', dict(user_id='user/a', query='PRIVATE-QUERY'))[0] == 200
+        assert not (one.root / digest('user/a')).exists()
+        lines = server.receipts.read_text()
+        assert all(x not in lines for x in ('PRIVATE', 'synthetic-token', 'user/a'))
+        records = [json.loads(line) for line in lines.splitlines()]
+        assert len(records) == 5 and records[-1]['hits'] == 2
+        assert records[-1]['route'] == '/aml/v2/search'
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_v2_adapter_order_rows(tmp_path, monkeypatch, v2module):
+    monkeypatch.syspath_prepend('/Users/m1/repos/worktrees/omnimemeval-lcmx/scripts')
+    monkeypatch.setenv('LCMX_REPO', '/Users/m1/repos/worktrees/lcm-x-v0280-ga-aml')
+    monkeypatch.setenv('LCMX_DB_ROOT', str(tmp_path))
+    monkeypatch.setenv('LCMX_CONFIG', 'off')
+    monkeypatch.setenv('LCMX_DELIVERY', 'full')
+    from client_factory.lcmx_client import LcmxClient
+    client = LcmxClient()
+    client.add([dict(role='user', content='first\n    source'),
+                dict(role='assistant', content='second\n    source')], 'u')
+    import hermes_lcm.tools as tools
+    calls = []
+    def recall(args, engine):
+        calls.append(args)
+        return json.dumps(dict(hits=[dict(kind='message', store_id=i, session_id='u-s1',
+                                         chunk_span=dict(char_start=0, char_end=3)) for i in (2, 1, 2)]))
+    monkeypatch.setattr(tools, 'lcm_recall', recall)
+    expected = client.search('source', 'u', 10)
+    hits = v2module.coding_hits(client, 'source', 'u', 10)
+    assert [' '.join(h['content'].split()) for h in hits] == expected.splitlines()
+    assert [h['role'] for h in hits] == ['assistant', 'user', 'assistant']
+    assert all(h['trajectory'] == 1 and h['span'] == (0, 3) for h in hits)
+    assert calls[0] == calls[1]
+
+
+def test_v2_per_user_serialization(tmp_path, v2module):
+    active, overlap = [], []
+    def runner(root, op, body, deadline):
+        active.append(body['user_id'])
+        overlap.append(len(active))
+        time.sleep(.03)
+        active.remove(body['user_id'])
+        return {}
+    service = Service(tmp_path / 'v1', 'synthetic-token', runner=runner)
+    v2 = Service(tmp_path / 'v2', 'synthetic-token', runner=runner)
+    server = v2module.Server(service, port=0, v2=v2)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    statuses = []
+    def post():
+        statuses.append(wire(base, '/aml/v2/add', addition())[0])
+    threads = [threading.Thread(target=post) for _ in range(3)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert statuses == [200] * 3 and overlap == [1, 1, 1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        serving.join()

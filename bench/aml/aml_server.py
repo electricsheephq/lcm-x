@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import copy
 from datetime import datetime, timezone
 import fcntl
 from functools import partial
@@ -19,6 +20,7 @@ import math
 import os
 from pathlib import Path
 import re
+import queue
 import shutil
 import socket
 import sqlite3
@@ -27,6 +29,7 @@ import sys
 import threading
 import time
 import uuid
+from unittest.mock import patch
 
 MAX_BYTES = 30 * 1024 * 1024
 MAX_SECONDS = 1800
@@ -127,6 +130,146 @@ def coding_search_response(text, user_key, top_k):
         rows.append(dict(id=digest(user_key + '\0' + line), content=content, score=1.0 / (rank + 1)))
         total += len(content)
     return {'data': rows}
+
+
+CODING_ITEM_MAX_CHARS = 10240   # grow up to a whole 10,000-char stored row plus its header
+CODING_SNAP_CHARS = 200         # how far a window edge may move to land on a line break
+_CODING_TERM = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.:/\\-]*[A-Za-z0-9_]')
+_CODING_STOPWORDS = frozenset(
+    'the and for with that this from into when then than have has had was were are not but '
+    'you your our its can how what why which where there their them they will would should '
+    'could does did done about after before over under also just only some any all'.split())
+
+
+def coding_hits(client, query, user_key, top_k):
+    """Observe the adapter's actual search, including recall order and stored rows.
+
+    Workers run one request at a time, so the temporary recall observer cannot
+    cross requests. The adapter still owns every retrieval argument and store.
+    """
+    import hermes_lcm.tools as tools
+    payload, stored = {}, {}
+    recall, opened = tools.lcm_recall, client._open
+
+    def observe(*args, **kwargs):
+        result = recall(*args, **kwargs)
+        payload.update(json.loads(result))
+        return result
+
+    def open_store(*args):
+        config, store, dag, vectors = opened(*args)
+        get_batch = store.get_batch
+
+        def rows(ids):
+            result = get_batch(ids)
+            stored.update(result)
+            return result
+
+        store.get_batch = rows
+        return config, store, dag, vectors
+
+    with patch.object(tools, 'lcm_recall', observe), patch.object(client, '_open', open_store):
+        client.search(query, user_key, top_k)
+    sessions = client._load_sessions(user_key)
+    hits = []
+    for hit in payload.get('hits', [])[:top_k]:
+        summary = hit.get('kind') == 'summary'
+        row = {} if summary else stored.get(hit.get('store_id'), {})
+        content = str(row.get('content') or hit.get('snippet') or '')
+        if not row.get('content'):
+            content = content.replace('>>>', '').replace('<<<', '')
+        if not content.strip():
+            continue
+        session = sessions.get(str(hit.get('session_id'))) or {}
+        chunk = hit.get('chunk_span') or {}
+        start, end = chunk.get('char_start'), chunk.get('char_end')
+        span = (start, end) if (isinstance(start, int) and isinstance(end, int)
+                                and 0 <= start < end <= len(content)) else None
+        hits.append(dict(content=content, role=row.get('role'), summary=summary, span=span,
+                         event_time=hit.get('event_time') or session.get('time'),
+                         trajectory=session.get('order')))
+    return hits
+
+
+def _coding_header(hit):
+    label = 'session summary' if hit['summary'] else (hit.get('role') or 'message')
+    if hit.get('trajectory'):
+        label += f" (trajectory {hit['trajectory']})"
+    return (f"[{hit['event_time']}] " if hit.get('event_time') else '') + label
+
+
+def query_span(content, query, width):
+    """Densest width-char span of distinct query terms in content, or None."""
+    terms = sorted({term.lower() for term in _CODING_TERM.findall(query)
+                    if 3 <= len(term) <= width and term.lower() not in _CODING_STOPWORDS})
+    lowered = content.lower()
+    occurrences = []
+    for index, term in enumerate(terms):
+        position = lowered.find(term)
+        while position != -1 and len(occurrences) < 20000:
+            occurrences.append((position, position + len(term), index))
+            position = lowered.find(term, position + 1)
+    occurrences.sort()
+    counts, weight, best, left = {}, 0, None, 0
+    for right, (_start, end, term) in enumerate(occurrences):
+        counts[term] = counts.get(term, 0) + 1
+        weight += len(terms[term]) if counts[term] == 1 else 0
+        while end - occurrences[left][0] > width:
+            gone = occurrences[left][2]
+            counts[gone] -= 1
+            weight -= len(terms[gone]) if counts[gone] == 0 else 0
+            left += 1
+        if best is None or weight > best[0]:
+            best = (weight, occurrences[left][0], max(e for _s, e, _t in occurrences[left:right + 1]))
+    return best and best[1:]
+
+
+def coding_excerpt(hit, query, budget):
+    """Render one hit in at most budget chars: provenance header, then verbatim text,
+    windowed around LCM-X's matched chunk (else the densest query terms) when long."""
+    header, content = _coding_header(hit), hit['content']
+    if len(header) + 1 + len(content) <= budget:
+        return header + '\n' + content
+    before_max = f'[... {len(content)} earlier chars omitted]\n'
+    after_max = f'\n[... {len(content)} later chars omitted]'
+    width = max(1, budget - len(header) - 1 - len(before_max) - len(after_max))
+    span = hit.get('span') or query_span(content, query, width) or (0, 0)
+    start = (span[0] + span[1] - width) // 2
+    start = max(0, min(start, len(content) - width))
+    end = start + width
+    if start > 0:
+        newline = content.find('\n', start, min(span[0], start + CODING_SNAP_CHARS))
+        start = newline + 1 if newline != -1 else start
+    if end < len(content):
+        newline = content.rfind('\n', max(span[1], end - CODING_SNAP_CHARS), end)
+        end = newline if newline > start else end
+    text = content[start:end]
+    if start:
+        text = f'[... {start} earlier chars omitted]\n' + text
+    if end < len(content):
+        text += f'\n[... {len(content) - end} later chars omitted]'
+    return header + '\n' + text
+
+
+def v2_search_response(hits, user_key, top_k, query=''):
+    """At most min(top_k, 10) hits and 40,000 content chars, in LCM-X rank order."""
+    chosen = [(digest(user_key + '\0' + str(rank) + '\0' + hit['content']), hit,
+               len(_coding_header(hit)) + 1 + len(hit['content']))
+              for rank, hit in enumerate(hits[:min(top_k, CODING_TOP_K)])]
+    shares, total = [], 0
+    for _key, _hit, size in chosen:
+        share = min(size, CODING_ITEM_CHARS)
+        if shares and total + share > CODING_TOTAL_CHARS:
+            break
+        shares.append(share)
+        total += share
+    spare = CODING_TOTAL_CHARS - total
+    for index, (_key, _hit, size) in enumerate(chosen[:len(shares)]):
+        grow = max(0, min(spare, min(size, CODING_ITEM_MAX_CHARS) - shares[index]))
+        shares[index] += grow
+        spare -= grow
+    return {'data': [dict(id=key, content=coding_excerpt(hit, query, share), score=1.0 / (rank + 1))
+                     for rank, ((key, hit, _size), share) in enumerate(zip(chosen, shares))]}
 
 
 def fsync_dir(path):
@@ -338,6 +481,131 @@ def run_worker(root, operation, body, deadline, search_mode='textual'):
     return reply['body']
 
 
+def warm_worker():
+    local_network_only()
+    output = os.fdopen(os.dup(1), 'wb', buffering=0)
+    with open(os.devnull, 'w') as sink:
+        os.dup2(sink.fileno(), 1)
+        os.dup2(sink.fileno(), 2)
+        root = Path(os.environ['AML_V2_DB_ROOT'])
+        client = configure_adapter(root)  # includes embedder construction before ready
+        output.write(encoded({'ready': True}) + b'\n')
+        for line in sys.stdin.buffer:
+            try:
+                request = json.loads(line)
+                body = request['body']
+                if request['operation'] == 'add':
+                    def factory(stage):
+                        staged = copy.copy(client)
+                        staged._db_root = stage
+                        return staged
+                    result = add_generation(root, body, factory)
+                else:
+                    key = digest(body['user_id'])
+                    with user_lock(root, key):
+                        result = v2_search_response(coding_hits(client, body['query'], key, body['top_k']),
+                                                    key, body['top_k'], body['query'])
+                reply = dict(status=200, body=result)
+            except Exception:
+                reply = dict(status=500, body={'detail': {'reason': 'LCM-X operation failed'}})
+            output.write(encoded(reply) + b'\n')
+
+
+class WarmPool:
+    def __init__(self, root, workers, command=None):
+        self.root, self.workers, self.closed = root, workers, threading.Event()
+        self.available, self.processes = queue.Queue(), []
+        self.command = command or [sys.executable, '-B', str(Path(__file__).resolve()), '--warm-worker']
+        self.guard = threading.Lock()
+        for _ in range(workers):
+            threading.Thread(target=self.maintain, daemon=True).start()
+
+    def maintain(self):
+        while not self.closed.is_set():
+            env = dict(os.environ, AML_V2_DB_ROOT=str(self.root), PYTHONDONTWRITEBYTECODE='1')
+            env.pop('AML_ADDSEARCH_TOKEN', None)
+            env.update(LCM_LONGMEMEVAL_FASTEMBED_CACHE=str(self.root / '.model-cache'),
+                       FASTEMBED_CACHE_PATH=str(self.root / '.model-cache'))
+            process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                       stderr=subprocess.DEVNULL, env=env)
+            with self.guard:
+                self.processes.append(process)
+            try:
+                if self.exchange(process, None, time.monotonic() + MAX_SECONDS) != {'ready': True}:
+                    raise ValueError('not ready')
+                process.ready = True
+                self.available.put(process)
+                while not self.closed.wait(0.05) and process.poll() is None:
+                    pass
+            except Exception:
+                pass
+            finally:
+                process.kill() if process.poll() is None else None
+                process.wait()
+                with self.guard:
+                    if process in self.processes:
+                        self.processes.remove(process)
+                process.stdin.close()
+                process.stdout.close()
+            self.closed.wait(0.05)
+
+    def exchange(self, process, payload, deadline):
+        answer = queue.Queue()
+
+        def io():
+            try:
+                if payload is not None:
+                    process.stdin.write(encoded(payload) + b'\n')
+                    process.stdin.flush()
+                answer.put(json.loads(process.stdout.readline()))
+            except Exception:
+                answer.put(None)
+
+        threading.Thread(target=io, daemon=True).start()
+        try:
+            reply = answer.get(timeout=max(0, deadline - time.monotonic()))
+        except queue.Empty:
+            process.kill()
+            process.wait()
+            raise APIError(408, 'request deadline exceeded') from None
+        if reply is None:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+            raise APIError(500, 'LCM-X worker failed')
+        return reply
+
+    def warm(self):
+        with self.guard:
+            return len(self.processes) == self.workers and all(getattr(p, 'ready', False) and p.poll() is None for p in self.processes)
+
+    def __call__(self, root, operation, body, deadline):
+        while True:
+            if time.monotonic() >= deadline:
+                raise APIError(408, 'request deadline exceeded')
+            try:
+                process = self.available.get(timeout=max(0, deadline - time.monotonic()))
+            except queue.Empty:
+                raise APIError(408, 'request deadline exceeded') from None
+            if process.poll() is None:
+                break
+        try:
+            reply = self.exchange(process, dict(operation=operation, body=body), deadline)
+            if reply['status'] != 200:
+                raise APIError(reply['status'], reply['body']['detail']['reason'])
+            return reply['body']
+        finally:
+            if process.poll() is None:
+                self.available.put(process)
+
+    def close(self):
+        self.closed.set()
+        with self.guard:
+            for process in self.processes:
+                if process.poll() is None:
+                    process.kill()
+
+
 class Service:
     def __init__(self, root, token, workers=4, timeout=MAX_SECONDS, runner=run_worker):
         if not token or workers < 1 or not 0 < timeout <= MAX_SECONDS:
@@ -376,6 +644,8 @@ class Handler(BaseHTTPRequestHandler):
     def handle_one_request(self):
         self.started = time.monotonic()
         self.deadline = self.started + self.server.service.timeout
+        self.original_path = None
+        self.metrics = dict(top_k=None, hits=0, response_bytes=0, rows_with_newline=0)
         self.logged, self.user_hash, self.request_hash = False, None, None
         timer = threading.Timer(self.server.service.timeout, self.expire)
         timer.daemon = True
@@ -396,6 +666,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.logged:
             return
         self.logged = True
+        route = self.original_path or getattr(self, 'path', '')
+        if route not in ('/aml/health', '/aml/add', '/aml/search', *self.V1_ALIASES,
+                         '/aml/v2/health', '/aml/v2/add', '/aml/v2/search'):
+            route = '<unknown>'
+        record = dict(timestamp=datetime.now(timezone.utc).isoformat(), route=route,
+                      op=route.rsplit('/', 1)[-1], status=status,
+                      ms=round((time.monotonic() - self.started) * 1000, 3),
+                      user_digest=self.user_hash, **self.metrics)
+        with self.server.receipt_lock, open(self.server.receipts, 'ab') as receipt:
+            receipt.write(encoded(record) + b'\n')
         ms = round((time.monotonic() - self.started) * 1000, 3)
         path = getattr(self, 'path', '')
         path = path if path in ('/aml/health', '/aml/add', '/aml/search') else '<unknown>'
@@ -407,6 +687,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def respond(self, status, body):
         data = encoded(body)
+        rows = body.get('data', []) if isinstance(body, dict) else []
+        self.metrics.update(response_bytes=len(data), hits=len(rows),
+                            rows_with_newline=sum('\n' in row['content'] for row in rows))
         try:
             self.send_response(status)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -415,7 +698,10 @@ class Handler(BaseHTTPRequestHandler):
             if status == 429:
                 self.send_header('Retry-After', '60')
             self.end_headers()
-            self.wfile.write(data)
+            if self.command != 'HEAD' or self.path != '/aml/v2/health':
+                self.wfile.write(data)
+            else:
+                self.metrics['response_bytes'] = 0
         except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
             pass
         finally:
@@ -427,7 +713,18 @@ class Handler(BaseHTTPRequestHandler):
     # AML's v0.27.0 binding uses /aml/v1/<op>; accept it as an alias of /aml/<op>.
     V1_ALIASES = {'/aml/v1/health': '/aml/health', '/aml/v1/add': '/aml/add', '/aml/v1/search': '/aml/search'}
 
+    def do_HEAD(self):
+        if self.path == '/aml/v2/health' and self.server.v2:
+            self.do_GET()
+        else:
+            self.send_error(501)
+
     def do_GET(self):
+        self.original_path = self.path
+        if self.path == '/aml/v2/health' and self.server.v2:
+            warm = self.server.v2.runner.warm()
+            self.respond(200 if warm else 503, {'status': 'ok' if warm else 'warming'})
+            return
         self.path = self.V1_ALIASES.get(self.path, self.path)
         if self.path == '/aml/health':
             self.respond(200, {'status': 'ok'})
@@ -435,12 +732,15 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(404, {'detail': {'reason': 'unknown endpoint'}})
 
     def do_POST(self):
+        self.original_path = self.path
+        v2 = self.path in ('/aml/v2/add', '/aml/v2/search') and self.server.v2 is not None
+        service = self.server.v2 if v2 else self.server.service
         self.path = self.V1_ALIASES.get(self.path, self.path)
         slot = None
         try:
-            if self.path not in ('/aml/add', '/aml/search'):
+            if not v2 and self.path not in ('/aml/add', '/aml/search'):
                 raise APIError(404, 'unknown endpoint')
-            if not authenticated(self.headers, self.server.service.token):
+            if not authenticated(self.headers, service.token):
                 raise APIError(401, 'authentication required')
             lengths = self.headers.get_all('Content-Length', [])
             if (self.headers.get('Transfer-Encoding') or len(lengths) != 1
@@ -449,9 +749,9 @@ class Handler(BaseHTTPRequestHandler):
             length = int(lengths[0])
             if length > MAX_BYTES:
                 raise APIError(413, 'request exceeds 30 MiB')
-            if not self.server.service.slots.acquire(blocking=False):
+            if not service.slots.acquire(blocking=False):
                 raise APIError(429, 'worker capacity exhausted; retry later')
-            slot = self.server.service.slots
+            slot = service.slots
             self.connection.settimeout(max(0.001, self.deadline - time.monotonic()))
             raw = self.rfile.read(length)
             if len(raw) != length:
@@ -461,10 +761,12 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, UnicodeError, RecursionError):
                 raise APIError(400, 'invalid JSON') from None
             if isinstance(body, dict):
+                value = body.get('top_k', 100) if self.path.endswith('/search') else None
+                self.metrics['top_k'] = value if type(value) is int else None
                 self.user_hash = digest(body['user_id']) if isinstance(body.get('user_id'), str) else None
                 self.request_hash = digest(body['request_id']) if isinstance(body.get('request_id'), str) else None
             reserved_slot, slot = slot, None
-            response = self.server.service.execute(self.path.rsplit('/', 1)[1], body,
+            response = service.execute(self.path.rsplit('/', 1)[1], body,
                                                    self.deadline, reserved_slot)
             self.respond(200, response)
         except APIError as error:
@@ -482,8 +784,10 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
 
-    def __init__(self, service, port=8791, slow_seconds=10):
-        self.service, self.slow_seconds = service, slow_seconds
+    def __init__(self, service, port=8791, slow_seconds=10, v2=None):
+        self.service, self.slow_seconds, self.v2 = service, slow_seconds, v2
+        self.receipts = Path(os.environ.get('AML_RECEIPTS', str(service.root / 'receipts.jsonl')))
+        self.receipt_lock = threading.Lock()
         super().__init__(('127.0.0.1', port), Handler)
 
     def handle_error(self, request, client_address):
@@ -494,7 +798,11 @@ class Server(ThreadingHTTPServer):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--warm-worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.warm_worker:
+        warm_worker()
+        return
     if args.worker:
         worker()
         return
@@ -509,12 +817,27 @@ def main():
                       float(os.environ.get('AML_REQUEST_TIMEOUT_SECONDS', '1800')),
                       runner=partial(run_worker, search_mode=search_mode))
     # One server per database root; worker file locks also survive parent exit.
-    with open(root / '.server.lock', 'a') as lease:
+    with contextlib.ExitStack() as stack:
+        lease = stack.enter_context(open(root / '.server.lock', 'a'))
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         prune_generations(root)
         prepare_model_cache(root)
+        v2 = None
+        if os.environ.get('AML_V2_DB_ROOT'):
+            v2root = Path(os.environ['AML_V2_DB_ROOT']).expanduser().resolve()
+            if v2root == root or v2root in root.parents or root in v2root.parents:
+                parser.exit(1, 'v1 and v2 roots must be disjoint\n')
+            v2root.mkdir(parents=True, exist_ok=True)
+            lease2 = stack.enter_context(open(v2root / '.server.lock', 'a'))
+            fcntl.flock(lease2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            prune_generations(v2root)
+            prepare_model_cache(v2root)
+            prepare_model_cache(root)  # keep frozen workers on their own cache
+            pool = WarmPool(v2root, int(os.environ.get('AML_WORKERS', '4')))
+            stack.callback(pool.close)
+            v2 = Service(v2root, token, pool.workers, service.timeout, pool)
         with Server(service, int(os.environ.get('AML_PORT', '8791')),
-                    float(os.environ.get('AML_SLOW_SECONDS', '10'))) as server:
+                    float(os.environ.get('AML_SLOW_SECONDS', '10')), v2=v2) as server:
             print(json.dumps(dict(event='start', search_mode=search_mode)), flush=True)
             server.serve_forever()
 
