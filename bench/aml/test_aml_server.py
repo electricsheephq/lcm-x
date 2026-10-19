@@ -489,12 +489,19 @@ def test_t6_startup_receipt_mode_and_privacy(tmp_path):
             assert all(value not in line for value in ('synthetic-token', str(tmp_path)))
 
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FROZEN_COMMIT = '39757f7e'  # merge of #1569: the frozen gateway these tests pin
+
+
 @pytest.fixture
 def frozen(tmp_path):
     import importlib.util
+    source = f'{FROZEN_COMMIT}:bench/aml/aml_server.py'
+    if subprocess.run(['git', '-C', str(REPO_ROOT), 'cat-file', '-e', source],
+                      capture_output=True).returncode:
+        pytest.skip(f'frozen gateway {FROZEN_COMMIT} is not in this checkout (shallow clone?)')
     path = tmp_path / 'frozen.py'
-    path.write_bytes(subprocess.check_output(['git', '-C', '/Users/m1/repos/lcm-x',
-                                             'show', '39757f7e:bench/aml/aml_server.py']))
+    path.write_bytes(subprocess.check_output(['git', '-C', str(REPO_ROOT), 'show', source]))
     spec = importlib.util.spec_from_file_location('frozen', path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -502,8 +509,8 @@ def frozen(tmp_path):
 
 
 @pytest.fixture
-def v2module(frozen):
-    return frozen if os.environ.get('AML_TEST_FROZEN') else aml_server
+def v2module(request):
+    return request.getfixturevalue('frozen') if os.environ.get('AML_TEST_FROZEN') else aml_server
 
 
 def wire(base, path, body=None, method=None, headers=None):
@@ -626,8 +633,13 @@ def test_v2_roots_receipts_and_head(tmp_path, v2module):
 
 
 def test_v2_adapter_order_rows(tmp_path, monkeypatch, v2module):
-    monkeypatch.syspath_prepend('/Users/m1/repos/worktrees/omnimemeval-lcmx/scripts')
-    monkeypatch.setenv('LCMX_REPO', '/Users/m1/repos/worktrees/lcm-x-v0280-ga-aml')
+    # Integration with the real pinned adapter (README: AML_OMNIMEMEVAL_REPO) over an LCM-X
+    # product tree (AML_TEST_LCMX_REPO, default this checkout).
+    omni = Path(os.environ.get('AML_OMNIMEMEVAL_REPO') or '/nonexistent')
+    if not (omni / 'scripts/client_factory/lcmx_client.py').is_file():
+        pytest.skip('set AML_OMNIMEMEVAL_REPO to the pinned OmniMemEval checkout')
+    monkeypatch.syspath_prepend(str(omni / 'scripts'))
+    monkeypatch.setenv('LCMX_REPO', os.environ.get('AML_TEST_LCMX_REPO') or str(REPO_ROOT))
     monkeypatch.setenv('LCMX_DB_ROOT', str(tmp_path))
     monkeypatch.setenv('LCMX_CONFIG', 'off')
     monkeypatch.setenv('LCMX_DELIVERY', 'full')
@@ -654,6 +666,41 @@ def test_v2_adapter_order_rows(tmp_path, monkeypatch, v2module):
         dict(kind='summary', node_id=1, snippet='summary', session_id='u-s1')])))
     summary = v2module.coding_hits(client, 'source', 'u', 10)
     assert v2module.v2_search_response(summary, 'u', 10)['data'][0]['id'] == digest('u\0summary:1')
+
+
+def test_v2_fallback_snippets_keep_literal_markers(monkeypatch, v2module):
+    import types
+    summary_text = '>>> run(x)\nshift = a >>> 2\ncat <<< "$s"'
+    hits = [dict(kind='summary', node_id=7, session_id='s', snippet=summary_text),
+            dict(kind='message', store_id=9, session_id='s',
+                 snippet='call >>>parse<<< then >>>emit_rows<<< >>> repl <<< x')]
+    tools = types.ModuleType('hermes_lcm.tools')
+    tools.lcm_recall = lambda *args, **kwargs: json.dumps(dict(hits=hits))
+    package = types.ModuleType('hermes_lcm')
+    package.tools = tools
+    monkeypatch.setitem(sys.modules, 'hermes_lcm', package)
+    monkeypatch.setitem(sys.modules, 'hermes_lcm.tools', tools)
+
+    class Store:
+        def get_batch(self, ids):
+            return {}  # no stored row: both hits fall back to their snippet
+
+    class Client:
+        def _open(self, *args):
+            return None, Store(), None, None
+
+        def search(self, query, user_id, top_k):
+            import hermes_lcm.tools as recall_tools
+            recall_tools.lcm_recall({}, None)
+            self._open()[1].get_batch([9])
+
+        def _load_sessions(self, user_id):
+            return {}
+
+    found = v2module.coding_hits(Client(), 'parse', 'u', 10)
+    # Summary text is never marked, so it is delivered verbatim; a message snippet loses only
+    # whole FTS marker pairs, and a bare >>> or <<< in code stays.
+    assert [h['content'] for h in found] == [summary_text, 'call parse then emit_rows >>> repl <<< x']
 
 
 def test_v2_per_user_serialization(tmp_path, v2module):

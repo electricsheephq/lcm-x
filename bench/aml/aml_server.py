@@ -132,6 +132,9 @@ def coding_search_response(text, user_key, top_k):
 
 CODING_ITEM_MAX_CHARS = 10240   # grow up to a whole 10,000-char stored row plus its header
 CODING_SNAP_CHARS = 200         # how far a window edge may move to land on a line break
+# FTS message snippets wrap each match as >>>term<<< (store snippet()); summary snippets are plain
+# summary text. Only a whole pair on one line is a marker; a bare >>> or <<< is code and stays.
+_FTS_MARK = re.compile(r'>>>(\S(?:[^\n<>]{0,198}\S)?)<<<')
 _CODING_TERM = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.:/\\-]*[A-Za-z0-9_]')
 _CODING_STOPWORDS = frozenset(
     'the and for with that this from into when then than have has had was were are not but '
@@ -174,8 +177,8 @@ def coding_hits(client, query, user_key, top_k):
         summary = hit.get('kind') == 'summary'
         row = {} if summary else stored.get(hit.get('store_id'), {})
         content = str(row.get('content') or hit.get('snippet') or '')
-        if not row.get('content'):
-            content = content.replace('>>>', '').replace('<<<', '')
+        if not row.get('content') and not summary:
+            content = _FTS_MARK.sub(r'\1', content)
         if not content.strip():
             continue
         session = sessions.get(str(hit.get('session_id'))) or {}
