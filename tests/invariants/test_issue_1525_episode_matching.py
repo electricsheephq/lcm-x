@@ -301,3 +301,116 @@ def test_mixed_episode_append_regrow(
         assert len(stored) == 9
         assert len(set(stored)) == 9
         assert stored == texts(full + [fresh])
+
+
+@pytest.mark.parametrize("metadata", ["stamp", "stamphead", "none", "alt", "uidhead"])
+@pytest.mark.parametrize("shape", ["V1", "V3", "V4", "V5", "V6", "V9", "V2-noappend"])
+def test_f7_nested_restore_preserves_fresh(tmp_path: Path, metadata: str, shape: str) -> None:
+    """I1/I2: a restored snapshot must never include a withheld fresh row."""
+    full = history()
+    mask = {"stamp": "ssssssss", "stamphead": "ssssnnnn", "none": "nnnnnnnn",
+            "alt": "sunsunsu", "uidhead": "uuuunnnn"}[metadata]
+    for i, (row, kind) in enumerate(zip(full, mask)):
+        if kind == "s":
+            row["timestamp"] = float(10 + i)
+        elif kind == "u":
+            row["message_uid"] = f"old-{i}"
+    fresh: Row = {"role": "user", "content": "fresh-F"}
+    later: Row = {"role": "user", "content": "fresh-G"}
+    last: Row = {"role": "user", "content": "fresh-H"}
+    if shape == "V3":
+        fresh["message_uid"] = "new-F"
+    if shape == "V4":
+        later["timestamp"] = 500.0
+    elif shape == "V5":
+        later["message_uid"] = "new-G"
+    short = full[:4] if shape == "V6" else full[:2]
+    views = [full, full[:4], full[:4] + [fresh], short]
+    additions = [fresh]
+    if shape != "V2-noappend":
+        views.append(short + [later])
+        additions.append(later)
+    if shape == "V9":
+        views.append(short + [later, last])
+        additions.append(last)
+    views.append(full + additions)
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        for view in views:
+            engine.ingest(deepcopy(view))
+        assert ledger(engine) == texts(full + additions)
+
+
+@pytest.mark.parametrize("metadata", ["stamp", "none", "uid", "stamphead"])
+@pytest.mark.parametrize("fresh_metadata", ["none", "uid", "stamp"])
+@pytest.mark.parametrize("size", [2, 8], ids=["FD2", "FD8"])
+def test_f7_front_drop_append_once(
+    tmp_path: Path, metadata: str, fresh_metadata: str, size: int,
+) -> None:
+    full = history(metadata)[:size]
+    if metadata == "stamphead":
+        for i, row in enumerate(full[:size // 2]):
+            row["timestamp"] = float(10 + i)
+    fresh: Row = {"role": "user", "content": "fresh-F"}
+    if fresh_metadata == "stamp":
+        fresh["timestamp"] = 500.0
+    elif fresh_metadata == "uid":
+        fresh["message_uid"] = "new-F"
+    short = full[1 if size == 2 else 3:]
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        for view in (full, short, short + [fresh], full + [fresh]):
+            engine.ingest(deepcopy(view))
+        assert ledger(engine) == texts(full + [fresh])
+
+
+@pytest.mark.parametrize("seed", [100040, 100154])
+def test_f7_appended_prefix_keeps_resend_budget(tmp_path: Path, seed: int) -> None:
+    """Already-ingested appended rows cannot consume the new suffix's budget."""
+    if seed == 100040:
+        full: list[Row] = [
+            {"role": "user" if i % 2 == 0 else "assistant", "content": f"row-{i}",
+             "timestamp": float(10 + i)} for i in range(10)
+        ]
+        full += [{"role": "assistant", "content": "fresh-0"}, {"role": "user", "content": "fresh-1"}]
+        steps = [list(range(10)), list(range(10)), [0, 1, 2], [0, 1, 2, 10], [0, 1, 2, 10, 11],
+                 [0, 1, 2, 10, 11, 3, 4, 5, 6, 7, 8, 9], [0, 1, 2, 10, 11, 3, 4, 5, 6, 7, 8, 9],
+                 [0, 1, 2, 10, 11, 3, 4, 5, 6, 7, 8, 9, 10]]
+        expected = [10, 10, 10, 11, 12, 12, 12, 12]
+    else:
+        full = history("stamp")[:7] + [
+            {"role": "user", "content": "fresh-0", "message_uid": "new-0"},
+            {"role": "assistant", "content": "fresh-1", "message_uid": "new-1"},
+            {"role": "user", "content": "fresh-2", "timestamp": 1002.0},
+        ]
+        steps = [list(range(7)), list(range(6)), [0, 1, 2, 3, 4, 5, 7], [0, 1, 2, 3, 4, 5, 7, 7],
+                 [0, 1, 2, 3, 4, 5, 7, 7, 8], [7, 1, 2, 3, 4, 5, 0, 7, 8], [7, 1, 2, 3, 4, 5, 0, 7, 8, 9]]
+        expected = [7, 7, 8, 8, 9, 9, 10]
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        counts = []
+        for step in steps:
+            engine.ingest(deepcopy([full[i] for i in step]))
+            counts.append(len(ledger(engine)))
+        assert counts == expected
+        assert ledger(engine) == texts(full)
+
+
+@pytest.mark.parametrize("shape", ["X1", "X4b", "X5", "equal-stripped"])
+@pytest.mark.parametrize("fresh_metadata", ["none", "uid"])
+def test_f7_stamped_restore_requires_content(
+    tmp_path: Path, shape: str, fresh_metadata: str,
+) -> None:
+    full = history("stamp")
+    fresh: Row = {"role": "user", "content": "fresh-F"}
+    if fresh_metadata == "uid":
+        fresh["message_uid"] = "new-F"
+    short = full[:4]
+    appended = short + [fresh]
+    views = {"X1": [appended, appended + full[4:]], "X4b": [appended, full],
+             "X5": [appended, appended + full[4:6]],
+             "equal-stripped": [[{"role": r["role"], "content": r["content"]} for r in full]]}
+    with engine_context(tmp_path, window=128000, conversation_id="conv") as engine:
+        for view in [full, short] + views[shape]:
+            engine.ingest(deepcopy(view))
+        assert ledger(engine) == texts(full if shape == "equal-stripped" else full + [fresh])
+        if shape == "equal-stripped":
+            assert engine._frontier.short_replay is None
+            assert engine._ingest_cursor == len(full)

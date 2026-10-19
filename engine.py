@@ -6666,15 +6666,19 @@ class LCMEngine(
                     elif identity != identities[pos] or self._host_occurrence_changed(message, previous):
                         continue
                     matched = max(matched, pos + 1)
-                    used.add(pos)
+                    # An already-ingested appended prefix row leaves its replay
+                    # budget available for the suffix; each suffix match uses it once.
+                    if not (idx < self._ingest_cursor and previous.get("appended")):
+                        used.add(pos)
                     if current["timestamp"] is None:
                         short_replayed.add(idx)
                     break
             stamped = all(row["timestamp"] is not None for row in metadata)
             if stamped and any(self._host_occurrence_metadata(row)["timestamp"] is None
-                               for row in messages) and not any(
-                    self._host_occurrence_changed(message, previous)
-                    for message, previous in zip(messages, metadata)):
+                               for row in messages) and all(
+                    self._message_replay_identity(message, strip_carrier=False) == identity
+                    and not self._host_occurrence_changed(message, previous)
+                    for message, identity, previous in zip(messages, identities, metadata)):
                 self._frontier.finish_short_replay(restore=True)
             elif all(
                 self._message_replay_identity(message, strip_carrier=False) == identity
@@ -7128,11 +7132,15 @@ class LCMEngine(
                     self._pending_session_tails.append(pending)
                 _PENDING_TAIL_ENGINES.add(self)
             raise
-        if shortened is not None and any(row["timestamp"] is None for row in shortened[1]):
+        if shortened is not None and (
+                any(row["timestamp"] is None for row in shortened[1])
+                or any(self._host_occurrence_metadata(messages[idx])["timestamp"] is None
+                       for idx, _ in messages_to_store_with_index)):
             self._frontier.extend_short_replay(
                 [self._message_replay_identity(messages[idx], strip_carrier=False)
                  for idx, _ in messages_to_store_with_index],
-                [self._host_occurrence_metadata(messages[idx]) for idx, _ in messages_to_store_with_index],
+                [{**self._host_occurrence_metadata(messages[idx]), "appended": True}
+                 for idx, _ in messages_to_store_with_index],
             )
         else:
             self._frontier.finish_short_replay()  # CONSUME only after the append succeeds.
