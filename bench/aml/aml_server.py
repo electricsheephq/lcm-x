@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import copy
 from datetime import datetime, timezone
 import fcntl
 from functools import partial
@@ -20,7 +19,6 @@ import math
 import os
 from pathlib import Path
 import re
-import queue
 import shutil
 import socket
 import sqlite3
@@ -185,7 +183,9 @@ def coding_hits(client, query, user_key, top_k):
         start, end = chunk.get('char_start'), chunk.get('char_end')
         span = (start, end) if (isinstance(start, int) and isinstance(end, int)
                                 and 0 <= start < end <= len(content)) else None
-        hits.append(dict(content=content, role=row.get('role'), summary=summary, span=span,
+        stored_id = f"summary:{hit['node_id']}" if summary and hit.get('node_id') is not None else row.get('store_id')
+        hits.append(dict(content=content, stored_id=stored_id,
+                         role=row.get('role'), summary=summary, span=span,
                          event_time=hit.get('event_time') or session.get('time'),
                          trajectory=session.get('order')))
     return hits
@@ -253,9 +253,15 @@ def coding_excerpt(hit, query, budget):
 
 def v2_search_response(hits, user_key, top_k, query=''):
     """At most min(top_k, 10) hits and 40,000 content chars, in LCM-X rank order."""
-    chosen = [(digest(user_key + '\0' + str(rank) + '\0' + hit['content']), hit,
-               len(_coding_header(hit)) + 1 + len(hit['content']))
-              for rank, hit in enumerate(hits[:min(top_k, CODING_TOP_K)])]
+    chosen, seen = [], set()
+    for hit in hits:
+        stored_key = str(hit['stored_id']) if hit.get('stored_id') is not None else hit['content']
+        key = digest(user_key + '\0' + stored_key)
+        if key not in seen:
+            seen.add(key)
+            chosen.append((key, hit, len(_coding_header(hit)) + 1 + len(hit['content'])))
+        if len(chosen) >= min(top_k, CODING_TOP_K):
+            break
     shares, total = [], 0
     for _key, _hit, size in chosen:
         share = min(size, CODING_ITEM_CHARS)
@@ -443,9 +449,13 @@ def worker():
                 user_key = digest(body['user_id'])
                 with user_lock(root, user_key):
                     client = configure_adapter(root)
-                    response = coding_search_response if payload['search_mode'] == 'coding' else search_response
-                    result = response(client.search(body['query'], user_key, body['top_k']),
-                                      user_key, body['top_k'])
+                    if payload['search_mode'] == 'v2':
+                        result = v2_search_response(coding_hits(client, body['query'], user_key, body['top_k']),
+                                                    user_key, body['top_k'], body['query'])
+                    else:
+                        response = coding_search_response if payload['search_mode'] == 'coding' else search_response
+                        result = response(client.search(body['query'], user_key, body['top_k']),
+                                          user_key, body['top_k'])
             reply = {'status': 200, 'body': result}
         except APIError as error:
             reply = {'status': error.status, 'body': {'detail': {'reason': error.reason}}}
@@ -459,6 +469,9 @@ def run_worker(root, operation, body, deadline, search_mode='textual'):
     env = dict(os.environ)
     env.pop('AML_ADDSEARCH_TOKEN', None)
     env['PYTHONDONTWRITEBYTECODE'] = '1'
+    if search_mode == 'v2':
+        env.update(LCM_LONGMEMEVAL_FASTEMBED_CACHE=str(root / '.model-cache'),
+                   FASTEMBED_CACHE_PATH=str(root / '.model-cache'))
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise APIError(408, 'request deadline exceeded')
@@ -479,131 +492,6 @@ def run_worker(root, operation, body, deadline, search_mode='textual'):
     if reply['status'] != 200:
         raise APIError(reply['status'], reply['body']['detail']['reason'])
     return reply['body']
-
-
-def warm_worker():
-    local_network_only()
-    output = os.fdopen(os.dup(1), 'wb', buffering=0)
-    with open(os.devnull, 'w') as sink:
-        os.dup2(sink.fileno(), 1)
-        os.dup2(sink.fileno(), 2)
-        root = Path(os.environ['AML_V2_DB_ROOT'])
-        client = configure_adapter(root)  # includes embedder construction before ready
-        output.write(encoded({'ready': True}) + b'\n')
-        for line in sys.stdin.buffer:
-            try:
-                request = json.loads(line)
-                body = request['body']
-                if request['operation'] == 'add':
-                    def factory(stage):
-                        staged = copy.copy(client)
-                        staged._db_root = stage
-                        return staged
-                    result = add_generation(root, body, factory)
-                else:
-                    key = digest(body['user_id'])
-                    with user_lock(root, key):
-                        result = v2_search_response(coding_hits(client, body['query'], key, body['top_k']),
-                                                    key, body['top_k'], body['query'])
-                reply = dict(status=200, body=result)
-            except Exception:
-                reply = dict(status=500, body={'detail': {'reason': 'LCM-X operation failed'}})
-            output.write(encoded(reply) + b'\n')
-
-
-class WarmPool:
-    def __init__(self, root, workers, command=None):
-        self.root, self.workers, self.closed = root, workers, threading.Event()
-        self.available, self.processes = queue.Queue(), []
-        self.command = command or [sys.executable, '-B', str(Path(__file__).resolve()), '--warm-worker']
-        self.guard = threading.Lock()
-        for _ in range(workers):
-            threading.Thread(target=self.maintain, daemon=True).start()
-
-    def maintain(self):
-        while not self.closed.is_set():
-            env = dict(os.environ, AML_V2_DB_ROOT=str(self.root), PYTHONDONTWRITEBYTECODE='1')
-            env.pop('AML_ADDSEARCH_TOKEN', None)
-            env.update(LCM_LONGMEMEVAL_FASTEMBED_CACHE=str(self.root / '.model-cache'),
-                       FASTEMBED_CACHE_PATH=str(self.root / '.model-cache'))
-            process = subprocess.Popen(self.command, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                       stderr=subprocess.DEVNULL, env=env)
-            with self.guard:
-                self.processes.append(process)
-            try:
-                if self.exchange(process, None, time.monotonic() + MAX_SECONDS) != {'ready': True}:
-                    raise ValueError('not ready')
-                process.ready = True
-                self.available.put(process)
-                while not self.closed.wait(0.05) and process.poll() is None:
-                    pass
-            except Exception:
-                pass
-            finally:
-                process.kill() if process.poll() is None else None
-                process.wait()
-                with self.guard:
-                    if process in self.processes:
-                        self.processes.remove(process)
-                process.stdin.close()
-                process.stdout.close()
-            self.closed.wait(0.05)
-
-    def exchange(self, process, payload, deadline):
-        answer = queue.Queue()
-
-        def io():
-            try:
-                if payload is not None:
-                    process.stdin.write(encoded(payload) + b'\n')
-                    process.stdin.flush()
-                answer.put(json.loads(process.stdout.readline()))
-            except Exception:
-                answer.put(None)
-
-        threading.Thread(target=io, daemon=True).start()
-        try:
-            reply = answer.get(timeout=max(0, deadline - time.monotonic()))
-        except queue.Empty:
-            process.kill()
-            process.wait()
-            raise APIError(408, 'request deadline exceeded') from None
-        if reply is None:
-            if process.poll() is None:
-                process.kill()
-            process.wait()
-            raise APIError(500, 'LCM-X worker failed')
-        return reply
-
-    def warm(self):
-        with self.guard:
-            return len(self.processes) == self.workers and all(getattr(p, 'ready', False) and p.poll() is None for p in self.processes)
-
-    def __call__(self, root, operation, body, deadline):
-        while True:
-            if time.monotonic() >= deadline:
-                raise APIError(408, 'request deadline exceeded')
-            try:
-                process = self.available.get(timeout=max(0, deadline - time.monotonic()))
-            except queue.Empty:
-                raise APIError(408, 'request deadline exceeded') from None
-            if process.poll() is None:
-                break
-        try:
-            reply = self.exchange(process, dict(operation=operation, body=body), deadline)
-            if reply['status'] != 200:
-                raise APIError(reply['status'], reply['body']['detail']['reason'])
-            return reply['body']
-        finally:
-            if process.poll() is None:
-                self.available.put(process)
-
-    def close(self):
-        self.closed.set()
-        with self.guard:
-            for process in self.processes:
-                if process.poll() is None:
-                    process.kill()
 
 
 class Service:
@@ -674,16 +562,25 @@ class Handler(BaseHTTPRequestHandler):
                       op=route.rsplit('/', 1)[-1], status=status,
                       ms=round((time.monotonic() - self.started) * 1000, 3),
                       user_digest=self.user_hash, **self.metrics)
-        with self.server.receipt_lock, open(self.server.receipts, 'ab') as receipt:
-            receipt.write(encoded(record) + b'\n')
+        try:
+            with self.server.receipt_lock, open(self.server.receipts, 'ab') as receipt:
+                receipt.write(encoded(record) + b'\n')
+        except Exception as error:
+            with self.server.receipt_lock:
+                kind = (type(error).__name__, getattr(error, 'errno', None))
+                if kind not in self.server.receipt_failures:
+                    self.server.receipt_failures.add(kind)
+                    with contextlib.suppress(Exception):
+                        print('AML receipt unavailable: ' + kind[0], file=sys.stderr, flush=True)
         ms = round((time.monotonic() - self.started) * 1000, 3)
         path = getattr(self, 'path', '')
         path = path if path in ('/aml/health', '/aml/add', '/aml/search') else '<unknown>'
         method = getattr(self, 'command', '')
         method = method if method in ('GET', 'POST', 'HEAD', 'PUT', 'DELETE', 'OPTIONS', 'PATCH') else '<unknown>'
-        print(json.dumps(dict(method=method, path=path, user_hash=self.user_hash,
-                              status=status, ms=ms, request_id_hash=self.request_hash,
-                              slow=ms >= self.server.slow_seconds * 1000)), flush=True)
+        with contextlib.suppress(Exception):
+            print(json.dumps(dict(method=method, path=path, user_hash=self.user_hash,
+                                  status=status, ms=ms, request_id_hash=self.request_hash,
+                                  slow=ms >= self.server.slow_seconds * 1000)), flush=True)
 
     def respond(self, status, body):
         data = encoded(body)
@@ -714,16 +611,18 @@ class Handler(BaseHTTPRequestHandler):
     V1_ALIASES = {'/aml/v1/health': '/aml/health', '/aml/v1/add': '/aml/add', '/aml/v1/search': '/aml/search'}
 
     def do_HEAD(self):
-        if self.path == '/aml/v2/health' and self.server.v2:
+        if self.path == '/aml/v2/health' and (self.server.v2 or self.server.v2_failed):
             self.do_GET()
         else:
             self.send_error(501)
 
     def do_GET(self):
         self.original_path = self.path
+        if self.server.v2_failed and self.path.startswith('/aml/v2/'):
+            self.respond(503, {'detail': {'reason': 'v2 unavailable'}})
+            return
         if self.path == '/aml/v2/health' and self.server.v2:
-            warm = self.server.v2.runner.warm()
-            self.respond(200 if warm else 503, {'status': 'ok' if warm else 'warming'})
+            self.respond(200, {'status': 'ok'})
             return
         self.path = self.V1_ALIASES.get(self.path, self.path)
         if self.path == '/aml/health':
@@ -733,6 +632,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         self.original_path = self.path
+        if self.server.v2_failed and self.path.startswith('/aml/v2/'):
+            self.respond(503, {'detail': {'reason': 'v2 unavailable'}})
+            return
         v2 = self.path in ('/aml/v2/add', '/aml/v2/search') and self.server.v2 is not None
         service = self.server.v2 if v2 else self.server.service
         self.path = self.V1_ALIASES.get(self.path, self.path)
@@ -784,8 +686,9 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
 
-    def __init__(self, service, port=8791, slow_seconds=10, v2=None):
+    def __init__(self, service, port=8791, slow_seconds=10, v2=None, v2_failed=False):
         self.service, self.slow_seconds, self.v2 = service, slow_seconds, v2
+        self.v2_failed, self.receipt_failures = v2_failed, set()
         self.receipts = Path(os.environ.get('AML_RECEIPTS', str(service.root / 'receipts.jsonl')))
         self.receipt_lock = threading.Lock()
         super().__init__(('127.0.0.1', port), Handler)
@@ -798,11 +701,7 @@ class Server(ThreadingHTTPServer):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--worker', action='store_true', help=argparse.SUPPRESS)
-    parser.add_argument('--warm-worker', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
-    if args.warm_worker:
-        warm_worker()
-        return
     if args.worker:
         worker()
         return
@@ -822,22 +721,31 @@ def main():
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         prune_generations(root)
         prepare_model_cache(root)
-        v2 = None
+        v2, v2_failed = None, False
         if os.environ.get('AML_V2_DB_ROOT'):
-            v2root = Path(os.environ['AML_V2_DB_ROOT']).expanduser().resolve()
-            if v2root == root or v2root in root.parents or root in v2root.parents:
-                parser.exit(1, 'v1 and v2 roots must be disjoint\n')
-            v2root.mkdir(parents=True, exist_ok=True)
-            lease2 = stack.enter_context(open(v2root / '.server.lock', 'a'))
-            fcntl.flock(lease2, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            prune_generations(v2root)
-            prepare_model_cache(v2root)
-            prepare_model_cache(root)  # keep frozen workers on their own cache
-            pool = WarmPool(v2root, int(os.environ.get('AML_WORKERS', '4')))
-            stack.callback(pool.close)
-            v2 = Service(v2root, token, pool.workers, service.timeout, pool)
+            try:
+                with contextlib.ExitStack() as v2stack:
+                    v2root = Path(os.environ['AML_V2_DB_ROOT']).expanduser().resolve()
+                    if v2root == root or v2root in root.parents or root in v2root.parents:
+                        raise ValueError('v1 and v2 roots must be disjoint')
+                    v2root.mkdir(parents=True, exist_ok=True)
+                    v2root.chmod(0o700)
+                    lease2 = v2stack.enter_context(open(v2root / '.server.lock', 'a'))
+                    fcntl.flock(lease2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    prune_generations(v2root)
+                    prepare_model_cache(v2root)
+                    v2 = Service(v2root, token, int(os.environ.get('AML_WORKERS', '4')), service.timeout,
+                                 partial(run_worker, search_mode='v2'))
+                    stack.enter_context(v2stack.pop_all())
+            except Exception:
+                v2_failed = True
+                with contextlib.suppress(Exception):
+                    print('AML v2 unavailable: preparation failed', file=sys.stderr, flush=True)
+            finally:
+                os.environ.update(LCM_LONGMEMEVAL_FASTEMBED_CACHE=str(root / '.model-cache'),
+                                  FASTEMBED_CACHE_PATH=str(root / '.model-cache'))
         with Server(service, int(os.environ.get('AML_PORT', '8791')),
-                    float(os.environ.get('AML_SLOW_SECONDS', '10')), v2=v2) as server:
+                    float(os.environ.get('AML_SLOW_SECONDS', '10')), v2=v2, v2_failed=v2_failed) as server:
             print(json.dumps(dict(event='start', search_mode=search_mode)), flush=True)
             server.serve_forever()
 

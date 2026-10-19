@@ -60,9 +60,9 @@ def execute(service, op, body, deadline=None):
 
 
 @contextmanager
-def running_server(tmp_path, service=None):
+def running_server(tmp_path, service=None, v2=None):
     service = service or Service(tmp_path, 'synthetic-token', runner=stub_runner)
-    server = Server(service, port=0)
+    server = Server(service, port=0, v2=v2)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -227,7 +227,8 @@ def test_http_contract_and_private_logs(tmp_path, capsys):
     assert all(set(row) == {'method', 'path', 'user_hash', 'status', 'ms', 'request_id_hash', 'slow'} for row in receipts)
 
 
-def test_worker_timeout_kills_process(tmp_path, monkeypatch):
+@pytest.mark.parametrize('mode', ['textual', 'v2'])
+def test_worker_timeout_kills_process(tmp_path, monkeypatch, mode):
     real_popen = subprocess.Popen
     processes = []
 
@@ -238,7 +239,7 @@ def test_worker_timeout_kills_process(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, 'Popen', sleeping_worker)
     with pytest.raises(APIError) as error:
-        run_worker(tmp_path, 'add', addition(), time.monotonic() + 0.05)
+        run_worker(tmp_path, 'add', addition(), time.monotonic() + 0.05, mode)
     assert error.value.status == 408
     assert processes[0].poll() is not None
 
@@ -506,18 +507,25 @@ def v2module(frozen):
 
 
 def wire(base, path, body=None, method=None, headers=None):
-    request = Request(base + path, data=None if body is None else json.dumps(body).encode(),
-                      method=method, headers=headers or {'X-Api-Key': 'synthetic-token'})
-    try:
-        response = build_opener(ProxyHandler({})).open(request, timeout=5)
-    except HTTPError as error:
-        response = error
-    with response:
-        return response.status, response.read()
+    data = b'' if body is None else json.dumps(body).encode()
+    headers = dict(headers or {'X-Api-Key': 'synthetic-token'})
+    if body is not None:
+        headers.setdefault('Content-Length', str(len(data)))
+    request = f"{method or ('GET' if body is None else 'POST')} {path} HTTP/1.0\r\n"
+    request += ''.join(f'{key}: {value}\r\n' for key, value in headers.items())
+    with socket.create_connection(('127.0.0.1', int(base.rsplit(':', 1)[1])), timeout=5) as connection:
+        connection.sendall(request.encode() + b'\r\n' + data)
+        chunks = []
+        while chunk := connection.recv(65536):
+            chunks.append(chunk)
+    head, payload = b''.join(chunks).split(b'\r\n\r\n', 1)
+    assert payload.count(b'HTTP/1.0 ') == 0, 'second response on connection'
+    return int(head.split()[1]), payload
 
 
 @pytest.mark.parametrize('mode', ['coding', 'textual'])
-def test_frozen_wire_golden(tmp_path, frozen, mode):
+@pytest.mark.parametrize('sink', ['ok', 'directory', 'permission', 'full'])
+def test_frozen_wire_golden(tmp_path, frozen, mode, sink, capsys):
     from functools import partial
     observed = []
     for index, module in enumerate((frozen, aml_server)):
@@ -531,6 +539,13 @@ def test_frozen_wire_golden(tmp_path, frozen, mode):
             service = module.Service(env['AML_DB_ROOT'], 'synthetic-token',
                                      runner=partial(module.run_worker, search_mode=mode))
             server = module.Server(service, port=0)
+            if sink != 'ok':
+                server.receipts = tmp_path
+                if sink != 'directory' and module is aml_server:
+                    def fail_open(*args, **kwargs):
+                        import errno
+                        raise OSError(errno.EACCES if sink == 'permission' else errno.ENOSPC, 'synthetic')
+                    patcher.setattr(module, 'open', fail_open, raising=False)
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
             base = 'http://127.0.0.1:' + str(server.server_port)
@@ -551,6 +566,7 @@ def test_frozen_wire_golden(tmp_path, frozen, mode):
                 server.server_close()
                 thread.join()
     assert observed[0] == observed[1]
+    assert len(capsys.readouterr().err.splitlines()) == (0 if sink == 'ok' else 1)
 
 
 @pytest.mark.parametrize('shape', ['verbatim', 'header', 'window', 'fallback', 'budget', 'top_k', 'schema'])
@@ -573,7 +589,7 @@ def test_v2_delivery(v2module, shape):
     elif shape in ('window', 'fallback'):
         assert '    DeepTracebackError: plugins' in rows[0]['content']
     elif shape == 'budget':
-        rows = m.v2_search_response([dict(hit, content='x' * 30000)] * 10, 'u', 100)['data']
+        rows = m.v2_search_response([dict(hit, stored_id=i, content='x' * 30000) for i in range(10)], 'u', 100)['data']
         assert len(rows) == 10 and sum(len(r['content']) for r in rows) <= 40000
         single = m.v2_search_response([dict(hit, content='x' * 30000)], 'u', 100)['data'][0]
         assert 4000 < len(single['content']) <= 10240
@@ -583,36 +599,10 @@ def test_v2_delivery(v2module, shape):
         assert all(set(r) == {'id', 'content', 'score'} for r in rows)
 
 
-@pytest.mark.parametrize('fault', ['deadline', 'crash'])
-def test_v2_worker_replacement(tmp_path, v2module, fault):
-    script = tmp_path / 'worker.py'
-    script.write_text("import json,sys,time,os\nprint('{\"ready\":true}',flush=True)\n"
-                      "for line in sys.stdin:\n r=json.loads(line)\n"
-                      " if r['operation']=='deadline': time.sleep(10)\n"
-                      " if r['operation']=='crash': os._exit(1)\n"
-                      " print('{\"status\":200,\"body\":{}}',flush=True)\n")
-    pool = v2module.WarmPool(tmp_path, 1, [sys.executable, '-B', str(script)])
-    try:
-        end = time.monotonic() + 5
-        while not pool.warm():
-            assert time.monotonic() < end
-            time.sleep(.01)
-        pid = pool.processes[0].pid
-        with pytest.raises(v2module.APIError):
-            pool(tmp_path, 'ok', {}, time.monotonic() - 1)
-        with pytest.raises(v2module.APIError) as failure:
-            pool(tmp_path, fault, {}, time.monotonic() + .1)
-        assert failure.value.status == (408 if fault == 'deadline' else 500)
-        assert pool(tmp_path, 'ok', {}, time.monotonic() + 5) == {}
-        assert pool.processes[0].pid != pid
-    finally:
-        pool.close()
-
 
 def test_v2_roots_receipts_and_head(tmp_path, v2module):
     one = Service(tmp_path / 'v1', 'synthetic-token', runner=stub_runner)
     two = Service(tmp_path / 'v2', 'synthetic-token', runner=stub_runner)
-    two.runner.warm = lambda: True
     server = v2module.Server(one, port=0, v2=two)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -658,6 +648,12 @@ def test_v2_adapter_order_rows(tmp_path, monkeypatch, v2module):
     assert [h['role'] for h in hits] == ['assistant', 'user', 'assistant']
     assert all(h['trajectory'] == 1 and h['span'] == (0, 3) for h in hits)
     assert calls[0] == calls[1]
+    assert [h['stored_id'] for h in hits] == [2, 1, 2]
+    assert len(v2module.v2_search_response(hits, 'u', 10)['data']) == 2
+    monkeypatch.setattr(tools, 'lcm_recall', lambda *a, **k: json.dumps(dict(hits=[
+        dict(kind='summary', node_id=1, snippet='summary', session_id='u-s1')])))
+    summary = v2module.coding_hits(client, 'source', 'u', 10)
+    assert v2module.v2_search_response(summary, 'u', 10)['data'][0]['id'] == digest('u\0summary:1')
 
 
 def test_v2_per_user_serialization(tmp_path, v2module):
@@ -688,3 +684,70 @@ def test_v2_per_user_serialization(tmp_path, v2module):
         server.shutdown()
         server.server_close()
         serving.join()
+
+
+@pytest.mark.parametrize('fault', ['cache', 'lease', 'root'])
+def test_v2_startup_failure_contained(tmp_path, fault):
+    import fcntl
+    env, base = gateway_environment(tmp_path, 'coding')
+    root = tmp_path / 'v2'
+    root.mkdir()
+    with (root / '.server.lock').open('a') as lease:
+        if fault == 'lease':
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif fault == 'root':
+            root = root / 'invalid-file'
+            root.touch()
+        env.update(AML_V2_DB_ROOT=str(root), AML_EMBED_CACHE_SOURCE=str(tmp_path / 'missing'))
+        with subprocess.Popen([sys.executable, '-B', aml_server.__file__], env=env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) as process:
+            try:
+                end = time.monotonic() + 5
+                while True:
+                    assert process.poll() is None, process.stderr.read()
+                    try:
+                        assert wire(base, '/aml/health') == (200, b'{"status":"ok"}')
+                        break
+                    except OSError:
+                        assert time.monotonic() < end
+                        time.sleep(.02)
+                assert wire(base, '/aml/v1/search', dict(user_id='u', query='q'))[0] == 200
+                for path in ('health', 'add', 'search', 'missing'):
+                    assert wire(base, '/aml/v2/' + path, {} if path != 'health' else None) == (
+                        503, b'{"detail":{"reason":"v2 unavailable"}}')
+                assert wire(base, '/aml/v2/health', method='HEAD') == (503, b'')
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+            assert process.stderr.read().splitlines() == ['AML v2 unavailable: preparation failed']
+
+
+def test_v2_stable_ids_and_deduplication():
+    hit = dict(content='same stored row', stored_id=7, role='user', summary=False)
+    other = dict(hit, content='another row', stored_id=8)
+    first = aml_server.v2_search_response([hit, hit, other], 'u', 10, 'first')['data']
+    second = aml_server.v2_search_response([other, hit], 'u', 10, 'different')['data']
+    assert len(first) == 2
+    assert first[0]['id'] == second[1]['id'] == digest('u\0' + '7')
+    assert first[0]['id'] != aml_server.v2_search_response([hit], 'other', 1)['data'][0]['id']
+    fallback = dict(hit, stored_id=None)
+    assert aml_server.v2_search_response([fallback, fallback], 'u', 10)['data'][0]['id'] == digest('u\0same stored row')
+
+
+def test_v2_surrogate_and_crash_are_request_local(tmp_path, monkeypatch):
+    from functools import partial
+    env, _ = gateway_environment(tmp_path, 'coding')
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    factory = Path(env['AML_OMNIMEMEVAL_REPO']) / 'scripts/client_factory/lcmx_client.py'
+    with factory.open('a') as stub:
+        stub.write('    def add(self, messages, *args, **kwargs):\n'
+                   '        import os\n'
+                   '        if messages[0]["content"] == "CRASH": os._exit(1)\n')
+    service = Service(tmp_path / 'v2', 'synthetic-token', workers=1,
+                      runner=partial(run_worker, search_mode='v2'))
+    with running_server(tmp_path / 'v1', v2=service) as base:
+        for i, content in enumerate(('\ud83d', 'CRASH')):
+            assert wire(base, '/aml/v2/add', addition(request=f'bad-{i}', content=content))[0] == 500
+            assert wire(base, '/aml/v2/add', addition(request=f'ok-{i}', content='recovered'))[0] == 200
+            assert wire(base, '/aml/v2/health') == (200, b'{"status":"ok"}')

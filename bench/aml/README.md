@@ -86,9 +86,12 @@ Set `AML_V2_DB_ROOT=/path/to/separate-v2-data` to enable `/aml/v2/add`,
 The frozen routes retain their mode and per-request workers. V2 uses the same
 adapter retrieval with verbatim code, role/time/trajectory headers and matched
 windows: 4,000 chars per hit, spare budget up to 10,240, at most 10 hits and
-40,000 content chars. `AML_WORKERS` processes warm clients and embedders before
-health returns 200; crashes and deadlines replace workers. Adds retain atomic
-generations and user serialization. Both route families append metadata-only
+40,000 content chars with stable stored-row IDs and duplicate rows removed.
+V2 uses the same killable per-request workers as the frozen routes. Health is
+200 once its root/cache is prepared; a v2 preparation failure returns 503 on v2
+routes while frozen routes remain available. Adds retain atomic generations
+and user serialization. Both route families append metadata-only
 receipts to `AML_RECEIPTS` (default `<AML_DB_ROOT>/receipts.jsonl`); receipts
-contain no queries, content or tokens. The product's embedding thread constant
-is unchanged; this adapter exposes no thread configuration knob.
+contain no queries, content or tokens; write failures never affect responses.
+The product's embedding thread constant is unchanged; this adapter exposes no
+thread configuration knob.
