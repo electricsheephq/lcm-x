@@ -763,6 +763,7 @@ def test_v1_routes_switch_to_v2(tmp_path, v2module):
     base = 'http://127.0.0.1:' + str(server.server_port)
     try:
         assert wire(base, '/aml/v1/health', method='HEAD') == (200, b'')
+        assert json.loads(server.receipts.read_text().splitlines()[-1])['route'] == '/aml/v1/health'
         assert wire(base, '/aml/v1/health')[0] == 200
         assert wire(base, '/aml/v1/add', addition(content='PRIVATE-CONTENT\n    code'))[0] == 200
         assert (two.root / digest('user/a')).exists() and not (one.root / digest('user/a')).exists()
@@ -786,6 +787,8 @@ def test_v1_routes_switch_fails_closed_without_v2(tmp_path, v2module):
     base = 'http://127.0.0.1:' + str(server.server_port)
     try:
         assert wire(base, '/aml/v1/health')[0] == 503
+        assert wire(base, '/aml/v1/health', method='HEAD')[0] == 503
+        assert json.loads(server.receipts.read_text().splitlines()[-1])['route'] == '/aml/v1/health'
         assert wire(base, '/aml/v1/search', dict(user_id='user/a', query='q'))[0] == 503
     finally:
         server.shutdown()

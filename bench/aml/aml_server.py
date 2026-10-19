@@ -619,6 +619,7 @@ class Handler(BaseHTTPRequestHandler):
             self.path = self.V1_TO_V2.get(self.path, self.path)
 
     def do_HEAD(self):
+        self.original_path = self.path
         self.route_v1_to_v2()
         if self.path == '/aml/v2/health' and (self.server.v2 or self.server.v2_failed):
             self.do_GET()
@@ -626,7 +627,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(501)
 
     def do_GET(self):
-        self.original_path = self.path
+        if self.command != 'HEAD':  # do_HEAD already kept the incoming path
+            self.original_path = self.path
         self.route_v1_to_v2()
         if self.server.v2_failed and self.path.startswith('/aml/v2/'):
             self.respond(503, {'detail': {'reason': 'v2 unavailable'}})
