@@ -15,7 +15,7 @@ import time
 from .audit import audit, connect, preimage, progress
 from .catchup import stop
 from .common import append, config, dump, foreign_files, guards, immutable_cache, isolated, load, parser, product, safe_paths
-from .corpus import build
+from .corpus import build, pilot_rows
 from .cpu import Supervisor
 
 SMOKE = "functional smoke, shared host, not a bar result"
@@ -49,7 +49,7 @@ def prepare(a):
     # Isolate corpus construction too, before any product import.
     isolated(a.scratch/"builder-home", a.model_cache)
     os.environ["HOME"] = str(a.scratch/"builder-home")
-    pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", min(1000, a.rows), a.shape, a.baseline)
+    pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", pilot_rows(1000, a.rows, a.shape), a.shape, a.baseline)
     estimate = 5*(pilot["database_bytes"]+len(pilot["expected"]["chunks"])*2048)*a.rows/pilot["rows"]
     if estimate > 6*2**30:
         raise RuntimeError("estimated live stores exceed 6 GB; declare a larger runner budget first")
@@ -173,11 +173,15 @@ def integrity(a, manifest):
         if digest(original) != manifest["preimage"]["raw_digest"]:
             raise RuntimeError("corpus row corruption")
         now = preimage(c)
+        changed_metadata = [k for k, v in manifest["preimage"]["metadata"].items() if now["metadata"].get(k) != v]
         dump(a.root/"final-integrity.json", dict(corpus_raw_digest=digest(original),
             expected_raw_digest=manifest["preimage"]["raw_digest"],
+            changed_metadata=changed_metadata,
             vector_digest=hashlib.sha256(json.dumps(now["vectors"], sort_keys=True).encode()).hexdigest()))
         if any(now["vectors"].get(k) != v for k, v in manifest["preimage"]["vectors"].items()):
             raise RuntimeError("pre-existing vector corruption")
+        if changed_metadata:
+            raise RuntimeError("pre-existing metadata corruption")
         if c.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RuntimeError("database corruption")
 

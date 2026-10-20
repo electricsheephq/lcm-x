@@ -33,6 +33,7 @@ def worker(request):
             coverage.append(progress(a.db, manifest)["complete"])
         trace(engine, mod, a.samples, a.seed+a.block, observe, check)
         final = progress(a.db, manifest)
+        coverage.append(final["complete"])
         end = time.perf_counter()
         activity = catchup_activity(a.root, start, end,
             {k: v["covered"] for k, v in initial["classes"].items()},

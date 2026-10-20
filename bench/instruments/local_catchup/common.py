@@ -100,6 +100,8 @@ def config(mod, db, enabled=True):
 
 def guards(mod, events, generation=0):
     """Observe real product calls, fail closed on network or foreground backfill/prepare."""
+    def foreground_thread():
+        return threading.current_thread() is threading.main_thread() or getattr(threading.current_thread(), "name", "") == "i2-recall"
     def deny(*a, **kw):
         append(events, {"violation": "network_attempt", "thread": threading.current_thread().name})
         raise RuntimeError("offline instrument denies network")
@@ -111,7 +113,7 @@ def guards(mod, events, generation=0):
         raise RuntimeError("product ORT thread count exceeds two")
     original = provider.FastembedProvider._construct
     def construct(self, *, allow_download):
-        foreground = threading.current_thread() is threading.main_thread()
+        foreground = foreground_thread()
         append(events, {"event": "prepare", "foreground": foreground,
                         "download": allow_download, "at": time.monotonic()})
         if allow_download or foreground:
@@ -126,7 +128,7 @@ def guards(mod, events, generation=0):
     for name in ("_embedding_backfill_summary_run", "_chunk_backfill_run"):
         original_run = getattr(command, name)
         def run(*a, _name=name, _run=original_run, **kw):
-            foreground = threading.current_thread() is threading.main_thread()
+            foreground = foreground_thread()
             append(events, {"event": _name, "foreground": foreground})
             if foreground:
                 raise RuntimeError("foreground backfill forbidden")

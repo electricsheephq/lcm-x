@@ -1,6 +1,7 @@
 """Bar 3: real recall intervals overlapping committed compaction publications."""
 import json
 import random
+import re
 import threading
 import time
 
@@ -9,13 +10,34 @@ from .common import append, dump, load
 from .cpu import percentile
 from .measurement import SMOKE, arguments, bootstrap, catchup_activity, cell, integrity, prepare, runtime, safety, trace, wait_covered
 
+INCOMPLETE_SEMANTIC_REASONS = (
+    r"\b(?:chunk|summary) semantic index catching up\b",
+    r"\b(?:chunk|summary) semantic index has \d+ rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus (?:chunks|summary)\b",
+)
+
+
+def honest_coverage(payload, incomplete_arms):
+    if not incomplete_arms:
+        return True
+    reasons = [*payload.get("degraded_reasons", []), payload.get("degraded_reason", "")]
+    disclosed = payload.get("degraded") and any(
+        re.search(pattern, reason) for reason in reasons if isinstance(reason, str)
+        for pattern in INCOMPLETE_SEMANTIC_REASONS)
+    coverage = payload.get("provenance", {}).get("coverage", {})
+    return bool(disclosed or any(arm in coverage and coverage[arm] != "full" for arm in incomplete_arms))
+
 
 def overlapping(rows, publications):
     return [r for r in rows if any(r["start"] < p["end"] and p["start"] < r["end"] for p in publications)]
 
 
+def overlapping_publications(counted, publications):
+    return len({p.get("node_id", i) for i, p in enumerate(publications) if overlapping([p], counted)})
+
+
 def score(rows, publications, seed=1586, state="OFF", activity=None):
     counted = overlapping(rows, publications)
+    distinct = overlapping_publications(counted, publications)
     stats = {}
     for name, quantile, limit in (("p50", .5, 2.), ("p90", .9, 8.)):
         values = [r["seconds"] for r in counted]
@@ -23,10 +45,11 @@ def score(rows, publications, seed=1586, state="OFF", activity=None):
         upper = percentile(bootstrap(values, lambda v: percentile(v, quantile), seed), .95) if values else None
         stats[name] = dict(seconds=point, upper95_s=upper, limit_s=limit)
     failures = sum(r["health"] in ("error", "timeout") or not r["fts_hits"] or not r["honest_coverage"] for r in rows)
-    valid = len(counted) >= 200 and len(publications) >= 10
+    valid = len(counted) >= 200 and distinct >= 10
     passed = not failures and all(v["seconds"] <= v["limit_s"] and v["upper95_s"] <= v["limit_s"] for v in stats.values()) if counted else False
     result = dict(state="INVALID" if not valid else "PASS" if passed else "FAIL", overlapping=len(counted),
-                publications=len(publications), failures=failures, statistics=stats, seed=seed, resamples=10000)
+                publications=len(publications), overlapping_publications=distinct,
+                failures=failures, statistics=stats, seed=seed, resamples=10000)
     if state == "ON-catching-up" and not (activity or {}).get("catchup_activity"):
         result.update(state="INVALID", reason="on_no_catchup_activity")
     return result
@@ -68,22 +91,24 @@ def worker(request):
                 while not halt.is_set() or i < len(pinned):
                     q = pinned[i % len(pinned)]
                     before = vector_counts(a.db, manifest) if a.state != "OFF" else {}
-                    incomplete = any(before[k] < len(v) for k, v in manifest["expected"].items()) if before else False
+                    incomplete_arms = [arm for kind, arm in (("chunks", "chunk"), ("leaves", "summary"))
+                                       if before and before[kind] < len(manifest["expected"][kind])]
                     start = time.perf_counter()
                     payload = json.loads(mod("tools").lcm_recall({"query": queries[q["id"]]}, engine=reader))
                     end = time.perf_counter()
                     coverage = payload.get("provenance", {}).get("coverage", {})
                     health = "timeout" if payload.get("timeout") else "error" if "error" in payload else "degraded" if payload.get("degraded") else "ok"
                     row = dict(query_id=q["id"], start=start, end=end, seconds=end-start, health=health,
-                        reason=payload.get("degraded_reason"), semantic_coverage=coverage,
+                        reason=payload.get("degraded_reasons", payload.get("degraded_reason")), semantic_coverage=coverage,
                         fts_hits=any("fts" in h.get("arms", []) for h in payload.get("hits", [])),
-                        honest_coverage=not incomplete or bool(payload.get("degraded") and payload.get("degraded_reason")),
-                        incomplete=incomplete, coverage_start=before,
+                        honest_coverage=honest_coverage(payload, incomplete_arms),
+                        incomplete=bool(incomplete_arms), coverage_start=before,
                         coverage_end=vector_counts(a.db, manifest) if before else {})
                     rows.append(row)
                     append(a.root/"recalls.jsonl", row)
                     i += 1
-                    if i >= len(pinned) and len(publications) >= 10 and len(overlapping(rows, publications)) >= 200:
+                    counted = overlapping(rows, publications)
+                    if i >= len(pinned) and len(counted) >= 200 and overlapping_publications(counted, publications) >= 10:
                         break
             except Exception as exc:
                 errors.append(type(exc).__name__)
