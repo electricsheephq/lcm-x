@@ -1,4 +1,5 @@
 """Recorded catch-up backlog is distinct from kNN coverage and ordinary ingest lag."""
+from contextlib import nullcontext
 import json
 import sqlite3
 import threading
@@ -446,3 +447,30 @@ def test_atomic_ingest_defers_backlog_mark_until_outer_commit(engine, abort):
     with sqlite3.connect(engine._store.db_path) as conn:
         assert bool(conn.execute("SELECT 1 FROM messages WHERE store_id=?", (ids[0],)).fetchone()) is not abort
     assert engine._store._manual_chunk_backlog_pending is False
+
+
+@pytest.mark.parametrize("atomic", [True, False])
+def test_backlog_policy_error_preserves_ingest(engine, monkeypatch, caplog, atomic):
+    engine._config.embedding_provider = "voyage"
+    assert not embedding_maintenance._automatic_chunks_allowed(engine._config, command)
+    store = engine._store
+    assert not store._conn.in_transaction
+    message = {"role": "user", "content": "cobalt survives backlog policy error"}
+
+    def fail_policy(*args, **kwargs):
+        raise RuntimeError("simulated backlog policy error")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(embedding_maintenance, "_automatic_chunks_allowed", fail_policy)
+        with caplog.at_level("DEBUG", logger="hermes_lcm.store"):
+            with store.atomic() if atomic else nullcontext():
+                sid = store.append("seed", message)
+
+    assert "Could not mark manual chunk backlog" in caplog.text
+    assert "simulated backlog policy error" in caplog.text
+    assert not store._conn.in_transaction
+    with sqlite3.connect(store.db_path) as conn:
+        assert conn.execute("SELECT content FROM messages WHERE store_id=?", (sid,)).fetchone() == (message["content"],)
+    later = store.append("seed", {"role": "user", "content": "cobalt store still usable"})
+    assert later > sid
+    assert store.get(later)["content"] == "cobalt store still usable"

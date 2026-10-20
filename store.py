@@ -473,6 +473,7 @@ class MessageStore:
         self._context_window_tokens.clear()
 
     def _mark_manual_chunk_backlog(self) -> None:
+        was_in_transaction = self._conn.in_transaction
         try:
             config = self._ingest_protection_config
             if not config.embeddings_enabled:
@@ -494,7 +495,8 @@ class MessageStore:
             )
             self._conn.commit()
         except Exception:
-            self._conn.rollback()
+            if not was_in_transaction and self._conn.in_transaction:
+                self._conn.rollback()
             logging.getLogger(__name__).debug("Could not mark manual chunk backlog", exc_info=True)
 
     def append(self, session_id: str, msg: Dict[str, Any],
