@@ -43,6 +43,42 @@ def recall(engine, **args):
     return json.loads(tools.lcm_recall({"query": "quartz", **args}, engine=engine))
 
 
+@pytest.mark.parametrize("delivery", ["snippets", "answer_ready", "grep"])
+def test_distinct_recorded_times_preserve_latest_restatement(engine, delivery):
+    ids = [
+        append(engine, f"I live in {city} now", role="user", timestamp=1_700_000_000 + day * 86400)
+        for city, day in [("Berlin", 0), ("Paris", 10), ("Berlin", 20)]
+    ]
+    if delivery == "grep":
+        hits = json.loads(tools.lcm_grep({"query": "live"}, engine=engine))["results"]
+    else:
+        hits = json.loads(tools.lcm_recall({"query": "live", "detail": delivery}, engine=engine))["hits"]
+    assert {hit["store_id"] for hit in hits} == set(ids)
+    assert all("duplicate_store_ids" not in hit for hit in hits)
+    # A latest-fact consumer must still receive the day-20 Berlin occurrence.
+    latest = max(hits, key=lambda hit: engine._store.get(hit["store_id"])["observed_at"])
+    assert latest["store_id"] == ids[-1]
+    assert engine._store.get(latest["store_id"])["content"] == "I live in Berlin now"
+
+
+@pytest.mark.parametrize("delivery", ["snippets", "answer_ready", "grep"])
+@pytest.mark.parametrize("copy_timestamp", [None, 1_700_000_000])
+def test_stamped_original_with_replay_copy_still_collapses(engine, delivery, copy_timestamp):
+    first = append(engine, timestamp=1_700_000_000)
+    second = append(engine, timestamp=copy_timestamp)
+    before = engine._store.get_batch([first, second])
+    assert before[first]["observed_at"] == 1_700_000_000
+    assert before[second]["observed_at"] == copy_timestamp
+    if delivery == "grep":
+        hits = json.loads(tools.lcm_grep({"query": "quartz"}, engine=engine))["results"]
+    else:
+        hits = recall(engine, detail=delivery)["hits"]
+    assert len(hits) == 1
+    assert hits[0]["store_id"] == first
+    assert hits[0]["duplicate_store_ids"] == [second]
+    assert engine._store.get_batch([first, second]) == before
+
+
 @pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
 def test_unstamped_replay_shape_and_expand_own_row(engine, detail):
     # #1674 is unmerged at the base: minimal D5 shape, a kept plain reply

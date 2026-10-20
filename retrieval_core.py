@@ -550,10 +550,18 @@ def collapse_duplicate_candidates(
                 hashlib.sha256(row["content"].encode("utf-8")).digest(),
             )
         groups.setdefault(key, []).append(entry)
+    positions = {id(entry): index for index, entry in enumerate(entries)}
     output = []
     for members in groups.values():
+        observed_ats = {
+            rows.get(member["hit"].get("store_id"), {}).get("observed_at")
+            for member in members
+        } - {None}
+        if len(observed_ats) > 1:
+            output.extend((positions[id(member)], member) for member in members)
+            continue
         if len(members) == 1:
-            output.append(members[0])
+            output.append((positions[id(members[0])], members[0]))
             continue
         representative = min(members, key=lambda e: int(e["hit"]["store_id"]))
         entry = {**representative, "hit": dict(representative["hit"]), "ranks": {}}
@@ -574,8 +582,8 @@ def collapse_duplicate_candidates(
         if ids:
             entry["hit"]["duplicate_store_ids"] = sorted(ids)
         entry["rrf_score"] = max(member["rrf_score"] for member in members)
-        output.append(entry)
-    return output
+        output.append((positions[id(members[0])], entry))
+    return [entry for _, entry in sorted(output, key=lambda item: item[0])]
 
 
 def collapse_duplicate_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -605,7 +613,7 @@ def duplicate_identity_rows(
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
         placeholders = ",".join("?" for _ in ids)
         rows = conn.execute(
-            "SELECT store_id, session_id, conversation_id, role, tool_call_id, content "
+            "SELECT store_id, session_id, conversation_id, role, tool_call_id, content, observed_at "
             f"FROM messages WHERE store_id IN ({placeholders})", ids,
         ).fetchall()
         if time.monotonic() >= deadline:

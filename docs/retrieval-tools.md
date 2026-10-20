@@ -195,6 +195,7 @@ quotas, expansion quotas and response budgets. The key is the session and
 conversation identity, role, tool-call id (empty when absent), and SHA-256 of the
 **full stored content**. Summaries are never grouped; chunks of the same message
 still fuse by `store_id` first.
+Rows repeating the same text at different recorded times are not collapsed; unstamped repeats in one session are.
 
 The representative has the smallest matching `store_id`. Recall keeps the
 maximum fused score and union of retrieval arms. Only grouped hits carry

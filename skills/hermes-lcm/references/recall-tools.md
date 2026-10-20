@@ -17,6 +17,7 @@ Use for discovery across current-session raw messages and summary nodes.
 - Broader `session_scope='all'|'session'` is explicit, bounded, raw-message-only archive recovery inside `lcm.db`.
 - Exact role/time/source/conversation filters apply before limiting where supported.
 - Exact message copies in the same session/conversation, role and tool-call identity count once before the delivery limit. Only grouped hits add `duplicate_store_ids` (sorted other ids); `store_id` is the earliest copy. Summaries remain separate. Each listed id still works with `lcm_expand`.
+- Rows repeating the same text at different recorded times are not collapsed; unstamped repeats in one session are.
 - If the payload carries `message_search_error`, the raw-message stage crashed and its
   results are missing: treat any returned results as INCOMPLETE (they come from the other
   stages only), never as proof of absence. Retry once, or fall back to `lcm_recall` /
