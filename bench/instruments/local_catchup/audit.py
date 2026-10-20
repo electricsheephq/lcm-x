@@ -111,13 +111,18 @@ def progress(db, manifest, verify=False):
         for kind, table, key in (("chunks", "lcm_chunk_vectors", "chunk_id"), ("leaves", "lcm_embedding_vectors", "embedded_id")):
             known = dict(manifest["preimage"]["vectors"], **observed)
             for ident, identity, vec in c.execute(f"SELECT {key},identity_hash,vec FROM {table} WHERE ?||'/'||identity_hash||'/'||{key} NOT IN (SELECT key FROM json_each(?))", (kind, json.dumps(known))):
-                observed[f"{kind}/{identity}/{ident}"] = hashlib.sha256(vec).hexdigest()
                 # Snapshot all reachability metadata with the first observed vector,
                 # including on the cheap I2 path (verify=False).
                 meta = "lcm_chunk_meta" if kind == "chunks" else "lcm_embedding_meta"
                 cur = c.execute(f"SELECT * FROM {meta} WHERE {key}=? AND identity_hash=?", (ident, identity))
                 columns = [d[0] for d in cur.description]
-                for row in cur:
+                rows = cur.fetchall()
+                if not rows:
+                    # Metadata not written yet: observe the vector on a later poll, together with its
+                    # metadata in one snapshot, so metadata never first appears unchecked after its vector.
+                    continue
+                observed[f"{kind}/{identity}/{ident}"] = hashlib.sha256(vec).hexdigest()
+                for row in rows:
                     suffix = "/"+row[columns.index("embedded_kind")] if kind == "leaves" else ""
                     manifest.setdefault("observed_metadata", {}).setdefault(
                         f"{kind}/{identity}/{ident}{suffix}", digest([row]))
