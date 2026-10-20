@@ -4241,9 +4241,13 @@ def _chunk_partial_ids(conn, identity_hash, *, backlog=False):
         if isinstance(ids, dict):
             if any(type(ids.get(k)) is not int or ids[k] < 0 for k in ("cursor", "turn")):
                 raise ValueError("invalid partial cursor")
-            if backlog and ids.get("repair_pending"):
-                warning_value = ids["repair_pending"]
-                raise ValueError("pending partial repair")
+            if "repair_pending" in ids:
+                marker = ids["repair_pending"]
+                if not isinstance(marker, str) or len(marker) != 16 or any(c not in "0123456789abcdef" for c in marker):
+                    raise ValueError("invalid partial repair marker")
+                if backlog:
+                    warning_value = marker
+                    raise ValueError("pending partial repair")
             ids = ids.get("ids")
         if not isinstance(ids, list) or any(type(i) is not int for i in ids):
             raise ValueError("invalid message ids")
