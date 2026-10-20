@@ -134,8 +134,8 @@ def test_full_context_fits_or_explicit_skip(question):
     assert skipped["status"] == "skipped" and skipped["reason"] == "does not fit"
 
 
-@pytest.mark.parametrize("text,label", [("yes", True), ("NO", False), ("Yes.", None), ("no, it misses", None),
-                                      ("**Yes**", None), ("yesterday", None), ("unclear", None), ("", None)])
+@pytest.mark.parametrize("text,label", [("yes", True), ("NO", False), ("Yes.", True), ("no, it misses", False),
+                                      ("**Yes**", True), ("yesterday", None), ("unclear", None), ("", None)])
 def test_lme_parse(text, label):
     assert judges.parse(text, "lme-s") is label
 
@@ -219,13 +219,13 @@ def test_score_error_denominators_and_pairing(tmp_path):
         runs.append(run)
         (run / "run-manifest.json").write_text(json.dumps({"config": "off", "delivery": mode,
             "reader": READERS[0], "dataset_sha256": "synthetic", "lcmx_commit": "c", "harness_commit": "c",
-            "split_label": "synthetic", "id_list_sha256": "i"}))
+            "split_label": "synthetic", "id_list_sha256": "i", "status": "complete", "question_ids": ["0", "1"]}))
         rows = [{"qid": str(i), "qtype": "synthetic", "status": "ok" if i == 0 else "error",
                  "question": "Synthetic?", "gold": "yes", "hypothesis": "no",
                  "judges": {m: {"status": "ok", "correct": i == 0 or m == JUDGES[0]} for m in JUDGES}} for i in range(2)]
         (run / "judged.jsonl").write_text("\n".join(map(json.dumps, rows)))
     result = score.score(runs, tmp_path / "report")
-    assert all(s["primary"] == 1 and s["reader_errors"] == 1 for s in result["arms"].values())
+    assert all(s["primary"] == .5 and s["reader_errors"] == 1 for s in result["arms"].values())
     assert all(s["agreement"]["percent"] == 100 for s in result["arms"].values())
     assert len(result["paired"]) == 1
     assert all(line.startswith("|") or not line for line in (tmp_path / "report/report.md").read_text().splitlines())
@@ -453,7 +453,7 @@ def write_arm(root, mode, statuses, **manifest):
     run.mkdir()
     (run / "run-manifest.json").write_text(json.dumps({"config": "off", "delivery": mode, "reader": READERS[0],
         "dataset_sha256": "d", "lcmx_commit": "c", "harness_commit": "c", "split_label": "s",
-        "id_list_sha256": "i", **manifest}))
+        "id_list_sha256": "i", "status": "complete", "question_ids": [str(i) for i in range(len(statuses))], **manifest}))
     (run / "judged.jsonl").write_text("\n".join(json.dumps({"qid": str(i), "qtype": "t", "status": status,
         "question": "Synthetic?", "gold": "g", "hypothesis": "h",
         "judges": {m: {"status": "ok", "correct": m == JUDGES[0]} for m in JUDGES}}) for i, status in enumerate(statuses)))
@@ -871,7 +871,8 @@ def test_score_with_codex_primary_and_sampled_agreement_judge(tmp_path):
         arms.append(run_dir)
         (run_dir / "run-manifest.json").write_text(json.dumps({"config": "off", "delivery": mode, "reader": SOL,
             "dataset_sha256": "d", "lcmx_commit": "c", "harness_commit": "c", "split_label": "smoke",
-            "id_list_sha256": "i", "judges": [SOL_JUDGE], "agreement_judge": OPUS}))
+            "id_list_sha256": "i", "judges": [SOL_JUDGE], "agreement_judge": OPUS,
+            "status": "complete", "question_ids": [str(i) for i in range(10)]}))
         rows = []
         for i in range(10):
             verdicts = {SOL_JUDGE: {"status": "ok", "correct": i % 2 == 0}}

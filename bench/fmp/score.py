@@ -7,6 +7,7 @@ from collections import Counter
 from pathlib import Path
 
 from .common import write_json
+from .closeout import result_card, snapshot
 from .models import JUDGES
 from .judges import parse
 
@@ -67,7 +68,8 @@ def invalid(row, models):
 
 EXCLUDED = ("skipped", "not_run")  # skips: explicit denominators; not_run: spend stops (D7)
 IDENTITY = ("lcmx_commit", "harness_commit", "split_label", "dataset_sha256", "id_list_sha256", "judges",
-            "agreement_judge")
+            "agreement_judge", "summaries", "agreement_sample", "agreement_seed", "agreement_fraction",
+            "harness_tree_sha256")
 TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "wrapper_overhead_tokens")
 
 
@@ -93,9 +95,14 @@ def quota(calls):
 def score(runs, output, allow_partial=False, pair_across_commits=False):
     output = Path(output)
     arms, manifests, disagreements = {}, {}, []
-    for directory in map(Path, runs):
+    snapshots = snapshot(runs, output)
+    for directory in snapshots:
         manifest = json.loads((directory / "run-manifest.json").read_text())
         rows = [json.loads(line) for line in (directory / "judged.jsonl").read_text().splitlines()]
+        if manifest.get("status") not in ("complete", "incomplete"):
+            raise ValueError("run is not fully judged")
+        if {r["qid"] for r in rows} != set(manifest.get("question_ids") or []):
+            raise ValueError("judged rows do not cover the run's question ids")
         for row in rows:
             for judge in row.get("judges", {}).values():
                 if judge.get("raw"):
@@ -104,7 +111,8 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
             raise ValueError("duplicate result ids")
         arm = "/".join([manifest["config"], manifest["delivery"], manifest["reader"]])
         if pair_across_commits:
-            arm += "@" + manifest["lcmx_commit"][:12]
+            identity = manifest["lcmx_commit"]
+            arm += "@" + (identity if identity.endswith("-dirty") else identity[:12])
         if arm in arms:
             raise ValueError("duplicate arm")
         arms[arm], manifests[arm] = {r["qid"]: r for r in rows}, manifest
@@ -138,18 +146,19 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         calls = [c for r in rows for c in r.get("calls", [])]
         finishes = [c.get("finish_reason") for c in calls if c.get("status") == "ok"]
         judge_calls = [c for r in rows for c in r.get("judge_calls", [])]
-        accuracy = {m: mean([correct(r, m) for r in eligible]) for m in full}
+        attempted = [r for r in rows if r["status"] not in EXCLUDED]
+        accuracy = {m: mean([bool(correct(r, m)) for r in attempted]) for m in full}
         sampled = [r for r in eligible if extra and extra in r.get("judges", {}) and ok_verdict(r, extra)]
-        summaries[arm] = {"n": len(rows), "scored_n": len(eligible), "accuracy": accuracy,
+        summaries[arm] = {"n": len(rows), "scored_n": len(attempted), "accuracy": accuracy,
             "valid_n": len(eligible), "invalid_by_reason": dict(Counter(k for r in rows for k in invalid(r, full))),
             "reader_tokens_unknown": {k: sum(c.get(k) is None for c in calls) for k in TOKEN_KEYS},
             "judge_tokens_unknown": {k: sum(c.get(k) is None for c in judge_calls) for k in TOKEN_KEYS},
             "input_tokens_label": "total incl. retrieved evidence",
-            "primary": mean(list(accuracy.values())) if eligible else None,
+            "primary": mean(list(accuracy.values())) if attempted else None,
             "agreement_sample": {"judge": extra, "n": len(sampled),
                                  "accuracy": {m: mean([correct(r, m) for r in sampled if ok_verdict(r, m)]) for m in (full[0], extra)}}
                                 if extra else None,
-            "by_type": {t: {m: mean([correct(r, m) for r in eligible if r["qtype"] == t]) for m in full}
+            "by_type": {t: {m: mean([bool(correct(r, m)) for r in attempted if r["qtype"] == t]) for m in full}
                         for t in sorted({r["qtype"] for r in rows})},
             "agreement": agreement(*[[r["judges"][m]["correct"] for r in valid] for m in pair]) if pair else None,
             "tool_calls_per_question": mean([r.get("tool_calls", 0) for r in eligible]),
@@ -200,7 +209,7 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
             "primary_difference_ci95": bootstrap([sum(x) / len(full) for x in zip(*vectors[left])],
                                                   [sum(x) / len(full) for x in zip(*vectors[right])])}
     report = {"arms": summaries, "paired": comparisons, "bootstrap_resamples": 10_000,
-              "claim": "smoke only; invalid rows excluded; scored_n is the accuracy denominator"}
+              "claim": "attempted errors count incorrect; skips and not_run excluded; paired tests use valid rows only"}
     if pair_across_commits:
         report.update(paired_across="lcmx_commit", lcmx_commits=commits)
     report["tokens_500_per_arm"] = {arm: {k: 500 * (s["reader_tokens_per_question"][k] + s["judge_tokens_per_question"][k])
@@ -216,7 +225,7 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
                 "wall_500_one_config_s_at_observed_workers": factor * summary["wall_s"]}
         report["full_run_estimate"] = {"arms": estimates,
             "matrix": "500 LME-S x off/local x agentic/single/full_context x sol/opus = 6000 answers, 12000 judgments",
-            "total_usd": 2 * sum(e["sol_500_one_config_usd"] + e["opus_500_one_config_usd"] for e in estimates.values()),
+            "total_usd": sum(e["sol_500_one_config_usd"] + e["opus_500_one_config_usd"] for e in estimates.values()),
             "wall_s_at_observed_workers": 4 * sum(e["wall_500_one_config_s_at_observed_workers"] for e in estimates.values()),
             "assumptions": "Linear smoke extrapolation, identical token counts; Opus reader priced 2x Sol. "
                            "Equal reader latency assumed (unmeasured); excludes local build and rerank. "
@@ -270,4 +279,5 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
                   f"| Wall hours, observed workers | {e['wall_s_at_observed_workers'] / 3600:.2f} |",
                   f"| Wall hours, ideal workers=12 | {e['wall_s_at_observed_workers'] / 14400:.2f} |"]
     (output / "report.md").write_text("\n".join(lines) + "\n")
+    result_card(output, report, allow_partial, pair_across_commits, snapshots)
     return report

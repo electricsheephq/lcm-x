@@ -74,4 +74,3 @@ def test_judge_checks_current_code(tmp_path, monkeypatch, factor):
     (tmp_path / "run-manifest.json").write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="identity mismatch"):
         next(run.run(args, None, [q], "d", "i", {}, None))
-

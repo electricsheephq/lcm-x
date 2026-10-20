@@ -15,7 +15,8 @@ def arm(root, name, commit, verdicts, **overrides):
     manifest = {"config": "off", "delivery": "single", "reader": models.CODEX_DEFAULT_READER,
                 "lcmx_commit": commit, "harness_commit": "synthetic-harness", "split_label": "smoke",
                 "dataset_sha256": "synthetic-data", "id_list_sha256": "synthetic-ids",
-                "judges": [MODEL], "agreement_judge": None, **overrides}
+                "judges": [MODEL], "agreement_judge": None, "status": "complete",
+                "question_ids": [str(i) for i in range(len(verdicts))], **overrides}
     (path / "run-manifest.json").write_text(json.dumps(manifest))
     rows = [{"qid": str(i), "qtype": "synthetic", "status": "ok", "question": "Synthetic?",
              "gold": "x", "hypothesis": "x", "judges": {MODEL: {"status": "ok", "correct": value}}}

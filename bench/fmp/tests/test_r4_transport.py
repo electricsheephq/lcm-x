@@ -90,4 +90,3 @@ def test_voyage_key_loaded_only_in_mcp(tmp_path, monkeypatch):
     assert seen == ["synthetic-voyage"]
     assert runner.call_args.args[0] == ["security", "find-generic-password", "-s", "VOYAGE_API_KEY", "-w"]
     monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
-

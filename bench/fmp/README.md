@@ -16,7 +16,8 @@ questions, golds, hypotheses and tool JSON belong only to private run outputs.
 ```bash
 export FMP_PYTHON=/path/to/venv/bin/python FMP_LME_DATA=/path/to/longmemeval_s_cleaned.json
 export FMP_LOCOMO=/path/to/locomo10.json   # optional: FMP_CACHE_ROOT=/dir/with/earlier/embedding/caches
-nice -n 19 bash bench/fmp/run_smoke.sh OUTPUT_DIR
+export FMP_RESULT_CARD_TOOL=/path/to/installed/bench-card.py
+nice -n 19 bash bench/fmp/run_smoke.sh /absolute/external/OUTPUT_DIR
 ```
 
 ## v1.1: subscription-plan transport (no metered API)
@@ -63,7 +64,7 @@ abstention (seed 1189; ids in `lme-ids.json`/`lme-strata.json`) with `off`,
 Sol/high, three deliveries and two judges, and one LoCoMo conversation (conv-30)
 agentic and single. Its workers=3 and persistent shared $9.50 ledger cover all
 deliveries and judgments. Reruns must retain that ledger and cap. The default
-output is artifacts/1189/r1/smoke. Existing run files are never overwritten by
+output must be outside the checkout (for example, an absolute run directory). Existing run files are never overwritten by
 answer/judge; use a new output directory.
 
 For individual commands, use `nice -n 19 bash bench/fmp/run.sh COMMAND` with:
@@ -152,3 +153,10 @@ re-hashes the prompt files and refuses a mismatch with the answer manifest.
 
 Judge sources are copied verbatim into prompts.py with attribution and bundled
 MIT/Apache-2.0 license texts in licenses/. No upstream runtime imports are used.
+
+Scoring requires `FMP_RESULT_CARD_TOOL` pointing to the installed `bench-card.py`. It snapshots
+judged rows and manifests into `score-inputs/`, then writes and checks `RESULT-MANIFEST.json`
+and `RESULT.md`; an unavailable writer fails scoring. Use a new score output directory. The card
+records the exact re-score command and inputs. T1/T2 publication remains a separate owner action.
+For Voyage MCP retrieval, the trusted reader loads the existing `VOYAGE_API_KEY` Keychain service
+directly; the model CLI environment, arguments, prompts and MCP configuration never carry its value.

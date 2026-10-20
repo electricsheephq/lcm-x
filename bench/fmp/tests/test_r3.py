@@ -21,7 +21,8 @@ def arm(root, config, rows):
     path = root / config
     path.mkdir(parents=True)
     (path / "run-manifest.json").write_text(json.dumps({"config": config, "delivery": "agentic",
-        "reader": models.CODEX_DEFAULT_READER, "judges": [MODEL], "split_label": "smoke"}))
+        "reader": models.CODEX_DEFAULT_READER, "judges": [MODEL], "split_label": "smoke",
+        "status": "complete", "question_ids": [r["qid"] for r in rows]}))
     (path / "judged.jsonl").write_text("\n".join(map(json.dumps, rows)))
     return path
 
@@ -31,8 +32,8 @@ def row(i, verdict=True, **extra):
             "gold": "x", "hypothesis": "x", "judges": {MODEL: {"status": "ok", "correct": verdict}}, **extra}
 
 
-@pytest.mark.parametrize("text,dataset", [("Yes or no? No.", "lme-s"), ("Yes, of course", "lme-s"),
-    ("**Yes**", "lme-s"), ("It is right. CORRECT", "locomo"), ('{"label":" CORRECT "}', "locomo"),
+@pytest.mark.parametrize("text,dataset", [("Yes or no? No.", "lme-s"), ("Maybe yes", "lme-s"),
+    ("Yes and No", "lme-s"), ("It is right. CORRECT", "locomo"), ('{"label":" CORRECT "}', "locomo"),
     ('{"label":\'CORRECT\'}', "locomo")])
 def test_regression_strict_final_verdict(text, dataset):
     assert judges.parse(text, dataset) is None
@@ -62,7 +63,7 @@ def test_regression_six_invalid_pairs_excluded(tmp_path):
     result = score.score([arm(tmp_path, "off", left), arm(tmp_path, "local", right)], tmp_path / "report")
     a = next(iter(result["arms"].values()))
     pair = next(iter(result["paired"].values()))
-    assert a["accuracy"][MODEL] is None and a["scored_n"] == 0
+    assert a["accuracy"][MODEL] == 0 and a["scored_n"] == 6
     assert a["invalid_by_reason"] == {"judge_error": 6}
     assert pair["n_pairs"] == 0 and pair["dropped_by_reason"] == {"judge_error": 6}
     assert pair["per_judge"][MODEL]["p"] == 1 and pair["primary_difference_ci95"] is None
@@ -72,7 +73,7 @@ def test_regression_scorer_reparses_legacy_raw_verdict(tmp_path):
     judged = {MODEL: {"status": "ok", "correct": True, "raw": ["Yes or no? No."]}}
     result = score.score([arm(tmp_path, "off", [row(0, judges=judged)])], tmp_path / "report")
     a = next(iter(result["arms"].values()))
-    assert a["scored_n"] == 0 and a["accuracy"][MODEL] is None
+    assert a["scored_n"] == 1 and a["accuracy"][MODEL] == 0
 
 
 def test_regression_claude_missing_usage(tmp_path):
@@ -99,7 +100,7 @@ def test_regression_shared_validity_mask(tmp_path, reason, extra):
                           arm(tmp_path, "local", [row(0), row(1, False)])], tmp_path / "report")
     a = next(iter(result["arms"].values()))
     pair = next(iter(result["paired"].values()))
-    assert a["primary"] == 1 and a["scored_n"] == 1
+    assert a["primary"] == .5 and a["scored_n"] == 2
     assert a["invalid_by_reason"] == {reason: 1}
     assert pair["n_pairs"] == 1 and pair["dropped_by_reason"] == {reason: 1}
 
