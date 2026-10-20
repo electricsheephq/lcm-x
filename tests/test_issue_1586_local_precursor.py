@@ -249,7 +249,8 @@ def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch)
 
 
 @pytest.mark.parametrize("prepare_fails", [False, True])
-def test_hybrid_grep_defers_process_cold_local_model(make_engine, monkeypatch, tmp_path, prepare_fails):
+@pytest.mark.parametrize("mode", ["hybrid", "semantic"])
+def test_grep_defers_process_cold_local_model(make_engine, monkeypatch, tmp_path, prepare_fails, mode):
     entered, release = threading.Event(), threading.Event()
     cache = tmp_path / "disk-warm-model"
     cache.mkdir()
@@ -295,12 +296,12 @@ def test_hybrid_grep_defers_process_cold_local_model(make_engine, monkeypatch, t
         ("fastembed", "fixture-local"), providers.resolve_provider(engine._config),
     )
     assert not providers._FASTEMBED_MODELS
-    args = {"query": "canary", "mode": "hybrid"}
+    args = {"query": "canary", "mode": mode}
     try:
         assert maintenance.start_local_model_prepare(engine._store.db_path, engine._config)
         assert entered.wait(5)
         result = json.loads(tools.lcm_grep(args, engine=engine))
-        assert calls == [], "hybrid grep constructed a process-cold model on the request path"
+        assert calls == [], f"{mode} grep constructed a process-cold model on the request path"
         assert result["results"] and "full-text hit" in result["results"][0]["snippet"]
         assert result["degraded_to_fts"] and "preparing" in result["degraded_reason"]
         release.set()
@@ -310,12 +311,18 @@ def test_hybrid_grep_defers_process_cold_local_model(make_engine, monkeypatch, t
         if prepare_fails:
             assert calls == []
             assert result["results"] and result["degraded_to_fts"]
+            assert "full-text hit" in result["results"][0]["snippet"]
             assert "unavailable" in result["degraded_reason"]
             assert "fixture preparation failed" in result["degraded_reason"]
         else:
             assert calls == [("lcm-embedding-prepare", True)]
             assert not result["degraded_to_fts"]
-            assert any(hit.get("node_id") == node_id and "semantic_rank" in hit for hit in result["results"])
+            if mode == "hybrid":
+                assert any(hit.get("node_id") == node_id and "semantic_rank" in hit for hit in result["results"])
+            else:
+                # Direct semantic hits expose cosine_score, not hybrid fusion rank.
+                assert any(hit.get("node_id") == node_id and hit.get("cosine_score") == 1.0
+                           for hit in result["results"])
     finally:
         release.set()
         thread = maintenance._PREPARE_THREAD
