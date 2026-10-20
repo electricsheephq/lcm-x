@@ -7,11 +7,13 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sys
 from datetime import date
 from html import escape as html_escape
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
+from urllib.parse import unquote, urlsplit
 
 
 SCOREBOARD_DIR = Path(__file__).resolve().parent
@@ -39,6 +41,46 @@ REQUIRED_FIELDS = (
     "caveats",
 )
 SCALAR_FIELDS = REQUIRED_FIELDS[:-2]
+# Frozen identities from the original 18-row registry; dates never grant an exception.
+LEGACY_ROW_IDS = frozenset({
+    'longmemeval-v1-s500-accuracy-2026-07-29',
+    'longmemeval-v1-s500-latency-2026-07-29',
+    'longmemeval-v2-451-agentic-2026-07-27',
+    'locomo10-1986-arm-a-2026-07-30',
+    'scale-curve-fastscan-2026-07-30',
+    'longmemeval-v2-451-static-2026-07-31',
+    'locomo10-1986-declared-2026-08-02',
+    'ama208-full-2026-08-02',
+    'v2-static-451-sota-luna-2026-08-03',
+    'longmemeval-v1-m500-retrieval-2026-08-19',
+    'locomo10-1986-b3a-2026-08-26',
+    'longmemeval-v1-m500-retrieval-fulltext-2026-10-05',
+    'longmemeval-v1-m500-retrieval-default-v0260-2026-10-05',
+    'longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06',
+    'longmemeval-v1-s500-qa-off-v0261-2026-10-08',
+    'longmemeval-v1-s500-qa-local-v0261-2026-10-08',
+    'locomo10-1986-qa-off-v0261-2026-10-07',
+    'locomo10-1986-qa-local-v0261-2026-10-08',
+})
+DURABLE_URL = re.compile(
+    r"https://github\.com/[^/?#\s]+/[^/?#\s]+/"
+    r"(?:releases/download/[^/?#\s]+/[^/?#\s]+|"
+    r"blob/[0-9a-fA-F]{40}/[^?#\s]+(?:#L[1-9][0-9]*(?:-L[1-9][0-9]*)?)?)"
+)
+
+
+def _durable_url(value: str) -> bool:
+    if not DURABLE_URL.fullmatch(value):
+        return False
+    path = urlsplit(value).path
+    for _ in range(3):  # nested encodings (%252e) decode in more than one pass
+        decoded = unquote(path)
+        if decoded == path:
+            break
+        path = decoded
+    else:
+        return False  # still changing after three passes: not a durable path
+    return not any(part in {".", ".."} for part in path.split("/"))
 
 
 class ScoreboardError(ValueError):
@@ -49,9 +91,24 @@ def _error(line_number: int, message: str) -> ScoreboardError:
     return ScoreboardError(f"line {line_number}: {message}")
 
 
+def _validate_references(value: Any, field: str, line_number: int) -> None:
+    if isinstance(value, str):
+        if "session-" + "note" in value.lower():
+            raise _error(line_number, f"field '{field}' must not cite local session folders")
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_references(item, f"{field}[{index}]", line_number)
+    elif isinstance(value, dict):
+        for key, item in value.items():
+            _validate_references(item, f"{field}.{key}", line_number)
+
+
 def _validate_row(row: Any, line_number: int) -> dict[str, Any]:
     if not isinstance(row, dict):
         raise _error(line_number, "expected a JSON object")
+
+    for field, value in row.items():
+        _validate_references(value, field, line_number)
 
     missing = [field for field in REQUIRED_FIELDS if field not in row]
     if missing:
@@ -79,12 +136,25 @@ def _validate_row(row: Any, line_number: int) -> dict[str, Any]:
     except ValueError:
         raise _error(line_number, "field 'date' must be an ISO date") from None
 
-    for field in ("evidence", "caveats"):
+    for field in ("evidence", "caveats", "local_raw"):
+        if field not in row:
+            continue
         values = row[field]
         if not isinstance(values, list):
             raise _error(line_number, f"field '{field}' must be a list")
         if any(not isinstance(item, str) for item in values):
             raise _error(line_number, f"field '{field}' items must be strings")
+
+    if any(
+        Path(item).is_absolute() or PureWindowsPath(item).is_absolute() or item.startswith("~")
+        for item in row.get("local_raw", [])
+    ):
+        raise _error(line_number, "field 'local_raw' must not contain absolute or home paths")
+
+    if row["id"] not in LEGACY_ROW_IDS and (
+        not row["evidence"] or any(not _durable_url(item) for item in row["evidence"])
+    ):
+        raise _error(line_number, "field 'evidence' needs a non-empty list of durable GitHub URLs")
 
     if "superseded_by" in row:
         successor = row["superseded_by"]
@@ -186,9 +256,11 @@ def _render_summary(rows: Iterable[dict[str, Any]]) -> list[str]:
 def _render_disclosure(row: dict[str, Any]) -> list[str]:
     lines = [f"### <a id=\"{html_escape(row['id'], quote=True)}\"></a>{_inline(row['id'])}", ""]
     fields = list(REQUIRED_FIELDS) + (["superseded_by"] if "superseded_by" in row else [])
+    if "local_raw" in row:
+        fields.insert(fields.index("caveats"), "local_raw")
     for field in fields:
         lines.append(f"**{field}:**")
-        if field in ("evidence", "caveats"):
+        if field in ("evidence", "caveats", "local_raw"):
             values = row[field]
             lines.extend(f"- {_inline(item)}" for item in values or ["none"])
         else:

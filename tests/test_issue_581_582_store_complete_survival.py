@@ -73,13 +73,20 @@ def _covered(engine) -> list[int]:
             if node.source_type == "messages" for store_id in node.source_ids]
 
 
-def _assert_contiguous(engine) -> None:
+def _assert_contiguous(engine, copy_proofs=None) -> None:
     """Every owned row at or below the frontier is covered by a summary exactly once, or excluded by an
-    existing rule (none are here): the publication proof, re-checked from the outside."""
+    existing rule (none are here), or a proven copy whose earlier byte-equal twin is covered:
+    the publication proof, re-checked from the outside over non-copies."""
     covered = Counter(_covered(engine))
     frontier = _frontier(engine)
     below = [int(row["store_id"]) for row in _rows(engine) if int(row["store_id"]) <= frontier]
-    assert below and all(covered[store_id] == 1 for store_id in below), (frontier, below, covered)
+    copies = copy_proofs or {}
+    rows = {int(row["store_id"]): row for row in _rows(engine)}
+    columns = ("role", "content", "tool_call_id", "tool_calls", "tool_name")
+    for copy, twin in copies.items():
+        assert twin < copy <= frontier and covered[twin] == 1 and covered[copy] == 0
+        assert all(rows[copy].get(key) == rows[twin].get(key) for key in columns)
+    assert below and all(covered[store_id] == 1 for store_id in below if store_id not in copies), (frontier, below, covered)
 
 
 def _eva_store(tmp_path):
@@ -156,8 +163,12 @@ def test_b_hidden_only_leaf_consumes_no_host_row(tmp_path, summaries):
 def test_c_leaf_ends_before_a_retained_occurrence(tmp_path, summaries):
     """R (an unstamped user row) is stored early; the host re-orders it into the fresh tail. The leaf
     never covers R while the view retains it, and publication never conflicts."""
+    from tests.test_host_uid_shadow import _state_db
+
+    # #1403: canonical identity proves that the reordered NULL row is the retained occurrence.
+    _state_db(tmp_path, [("S", None, None)])
     engine = _engine(tmp_path, fresh_tail_count=1, leaf_chunk_tokens=1)
-    r = {"role": "user", "content": "[R] retained occurrence" + PAD}
+    r = {"role": "user", "content": "[R] retained occurrence" + PAD, "message_uid": "retained-r"}
     stored = [*_turn("T1", 100.0), r, *[row for i in range(2, 6) for row in _turn(f"T{i}", 100.0 * i)]]
     try:
         engine.ingest(stored)
@@ -479,6 +490,51 @@ def test_e_survival_fit_after_an_injected_publication_conflict(tmp_path, summari
         assert "publication_invariant_conflict" in caplog.text
         counter = engine._store.read_metadata_json("survival_fit:counter")
         assert counter["count"] == 1 and counter["last_reason"] == "publication_invariant_conflict"
+    finally:
+        engine.shutdown()
+
+
+def test_issue_1180_stop_line_names_publication_failure(tmp_path, summaries, host_estimator, caplog):
+    engine = _engine(tmp_path, context_length=WINDOW)
+    view = _long_view()
+    try:
+        engine.ingest(view)
+
+        def conflict(*args, **kwargs):
+            raise LifecyclePublicationConflictError("injected conflict (ids only)")
+
+        engine._lifecycle.stage_compaction_publication = conflict
+        with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+            result = engine.compress(view, current_tokens=host_estimator(view))
+        _assert_fitted(engine, view, result, host_estimator)
+        stops = [r.getMessage() for r in caplog.records if r.getMessage().startswith("LCM compaction stop:")]
+        assert len(stops) == 1 and "reason=error " in stops[0]
+        assert "failure=publication_invariant_conflict" in stops[0].split()
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("fitted", [False, True], ids=["raised", "fitted"])
+def test_issue_1180_stop_line_names_compress_exception(tmp_path, monkeypatch, host_estimator, caplog, fitted):
+    engine = _engine(tmp_path, context_length=WINDOW)
+    view = _long_view() if fitted else _turn("short", 100.0)
+    try:
+        engine.ingest(view)
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("injected compress failure")
+
+        monkeypatch.setattr(engine, "_compress_impl", fail)
+        with caplog.at_level(logging.INFO, logger="hermes_lcm"):
+            if fitted:
+                result = engine.compress(view, current_tokens=host_estimator(view))
+                _assert_fitted(engine, view, result, host_estimator)
+            else:
+                with pytest.raises(RuntimeError, match="injected compress failure"):
+                    engine.compress(view, current_tokens=host_estimator(view))
+        stops = [r.getMessage() for r in caplog.records if r.getMessage().startswith("LCM compaction stop:")]
+        assert len(stops) == 1 and "reason=error " in stops[0]
+        assert "failure=exception:RuntimeError" in stops[0].split()
     finally:
         engine.shutdown()
 

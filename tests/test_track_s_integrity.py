@@ -422,7 +422,7 @@ def s2_receipt_phase(tmp_path, *, snapshots=True, changed=False, reader=None):
     cp = {"dir": cpdir, "db": cpdir / "db", "view": [], "row": 304,
           "receipts": [], "n_events": 0, "admission": {}}
     run = SimpleNamespace(snaps=[cp] if snapshots else [], receipts_out=[], reader_calls=[],
-                          events=[], sysmsg={}, system="", db=tmp_path / "db", ntok=lambda view: 0)
+                          events=[], sysmsg={}, system="", db=tmp_path / "db", ntok=lambda view: 0, sid="synthetic")
     reader = reader or SimpleNamespace(readback={"model": "glm-5.3"})
     hashes = iter((["before"] if snapshots else []) + ["after" if changed else "before"])
     main = main_phase("s2/run_s_lcmx.py", "reader =", run=run, run_dir=tmp_path,
@@ -430,7 +430,7 @@ def s2_receipt_phase(tmp_path, *, snapshots=True, changed=False, reader=None):
         is_store=True, probe=lambda *a: [], sha=lambda db: next(hashes), view=[], man={},
         summary={}, isolation={"db_sha256_before_probes": "before"}, json=json,
         time=__import__("time"), shutil=__import__("shutil"), continuity=lambda *a: [],
-        db_ro=lambda db: SimpleNamespace(execute=lambda q: SimpleNamespace(fetchone=lambda: [0])))
+        db_ro=lambda db: SimpleNamespace(execute=lambda q, *params: SimpleNamespace(fetchone=lambda: [0])))
     rc = main()
     return rc, json.loads((tmp_path / "summary.json").read_text()), cpdir
 

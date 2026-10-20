@@ -121,10 +121,12 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 ## Project status
 
 The latest stable release is
-`v0.26.2@6800cf45ad05280e6cf6fa9e1ad96c62b7132646` (plugin `hermes-lcm-x`, engine
-`lcm-x`; the rename shipped in v0.24.0, #471), a patch on v0.26.1 in which user and
-assistant text is externalized only above 100,000 characters or about 25,000
-estimated tokens, whichever comes first, with a preview and a read hint (#1016). It carries
+`v0.27.0@c67d7633d963a2ffd24cf90995189ee58e2f88c7` (plugin `hermes-lcm-x`, engine
+`lcm-x`; the rename shipped in v0.24.0, #471), a minor release on v0.26.2 with the
+theme summary quality: leaf summaries see the middle of long messages (#611),
+full-text recall stems its queries (#1035), and the defaults match the managed
+deployment, with a 24,000-token leaf chunk and a 2,000-token summary target
+(#1013, #1123). It requires Hermes 0.21.3 or newer (#1080). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
 is an independent flag that transforms only the provider-bound copy — see
@@ -137,14 +139,14 @@ Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line carries the forward identity `hermes-lcm-x v0.27.0` — summary quality — which the
-`v0.27.0-rc1` tag carries first, on top of the `v0.26.2` release tag (`hermes-lcm-x v0.26.2 (15 tools)`; patch releases are cut from `release/v0.26.x` and carry their own identity). An identity is never a restamp of any past commit's own recorded identity
+The `main` line carries the forward identity `hermes-lcm-x v0.28.1` — session continuity and profile settings — which the
+`v0.28.1-rc1` tag carries first, on top of `v0.28.0` (patch releases of v0.26.x were cut from `release/v0.26.x` and carry their own identity). An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 The manifest declares 15 tools; runtime discovery advertises 13 by default,
 or 15 with both assertion and adaptive-retrieval flags on.
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
-for it. v0.25.0 makes a hidden backlog drain at turn pace (#597); v0.28.0
+for it. v0.25.0 makes a hidden backlog drain at turn pace (#597); v0.31.0
 removes the wait by preparing summaries in the background and publishing them
 at the threshold (#787). Recall is re-baselined on the shipped default
 configuration.
@@ -263,7 +265,7 @@ On the `main` line, output with both opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.27.0 (15 tools)
+  ✓ hermes-lcm-x v0.28.1 (15 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -525,43 +527,32 @@ Available commands:
 - `/lcm backup` - timestamped SQLite backup. The snapshot holds the database only; copy the externalized payload directory named in the output alongside it when moving a backup to another host.
 - `/lcm rotate` - read-only preview of an in-place tail-preserving compact of
   the active session
-- `/lcm rotate apply` - backup-first rotate that advances the lifecycle frontier
-  past pre-tail raw messages
+- `/lcm rotate apply` - refused on Hermes (#1141); use `/compress here N`
 - `/lcm help` - command help
 
 Apply paths are intentionally narrow and backup-first. Start with diagnostics
 before cleanup or repair.
 
-### Rotate: compact in place without changing session identity
+### Rotate: read-only preview
 
-`/lcm rotate` compacts a long-running session in place without changing
-`session_id` or `conversation_id`. It is the in-session counterpart to
-Hermes-level `/new` and to `/lcm doctor clean`.
+`/lcm rotate` previews the tail-preserving frontier for the active session
+without changing `session_id` or `conversation_id`. It reports the configured
+fresh tail, pre-tail message count, current and planned lifecycle frontier, and
+rolling backup path. The preview refuses ignored or stateless sessions.
 
-What rotate does:
+`/lcm rotate apply` is refused on Hermes (#1141): Hermes reloads its own
+transcript after a restart, so advancing the frontier without summaries leaves
+rows LCM-X cannot map. No backup is created and no lifecycle state is changed.
+Use `/compress here N` to summarise everything except the most recent N messages.
+If an earlier LCM-X already rotated this session and Hermes restarted since, compaction can stop on rows below that frontier and `/compress here N` will not repair it: start a new session with `/new` (raw rows stay recoverable via `lcm_load_session`; in-place fix tracked in #1184).
+Raw source rows remain recoverable through `lcm_load_session` and `lcm_expand`.
 
-- preserves the live tail (`LCM_FRESH_TAIL_COUNT` most-recent messages)
-- advances the lifecycle frontier marker past every raw message before the tail,
-  so subsequent bootstrap stops replaying them into the active prompt
-- writes a rolling `*-rotate-latest.sqlite3` backup under the same backup
-  directory as `/lcm backup`, overwriting the previous rotate slot atomically so
-  disk usage stays bounded across repeated rotates
-
-What rotate does not do:
-
-- it does not delete raw messages; pre-tail rows remain recoverable through
-  `lcm_load_session` and `lcm_expand`
-- it does not invoke the summarization model; trigger normal compaction first if
-  you want pre-tail content covered by summary nodes before rotating
-- it does not change session or conversation identity, and it refuses ignored or
-  stateless sessions with a clear reason
-
-`lcm_status` and `/lcm status` surface `last_rotate_at` and the rolling backup
-path. Re-running `/lcm rotate apply` after the frontier is already at or ahead of
-the target boundary reports `status: noop` and does not overwrite the previous
-known-good rolling backup.
+`lcm_status` and `/lcm status` still surface `last_rotate_at` and the rolling
+backup path for existing stores.
 
 ## Configuration
+
+The [generated scalar environment reference](skills/hermes-lcm/references/configuration.md#generated-scalar-environment-reference) lists every scalar registry key, type, declared default, diagnostic range/choice, and deprecation release. The tables below provide behavior and tuning guidance.
 
 Most installs only need `plugins.enabled` and `context.engine: lcm-x`.
 
@@ -585,13 +576,16 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | `LCM_FRESH_TAIL_PRESSURE_YIELD_MIN_OBSERVATIONS` | `3` | Consecutive tail-blocked compaction attempts under host-observed pressure before the yield engages; any attempt not blocked by the tail resets the count; `1` yields on first observation |
 | `LCM_INCREMENTAL_MAX_DEPTH` | `3` | Max DAG condensation depth (`-1` = unlimited, `0` = leaf only); enables hierarchical summarization |
 | `LCM_LEAF_CHUNK_TOKENS` | `24000` | Raw-backlog floor before leaf compaction; with dynamic chunking enabled, the base chunk target |
-| `LCM_LEAF_TARGET_RATIO` | `0.20` | Leaf summary target as a share of the leaf's source tokens (`> 0` and `<= 1`); target = `min(MAX, max(MIN, int(source_tokens * RATIO)))` and the first summary call gets `max_tokens` = 2 × target (#614) |
-| `LCM_LEAF_TARGET_MIN_TOKENS` | `2000` | Floor of the leaf summary target (`>= 1`) |
+| `LCM_LEAF_TARGET_RATIO` | `0.20` | Leaf summary target as a share of the leaf's source tokens (`> 0` and `<= 1`); target = `min(MAX, max(MIN, int(source_tokens * RATIO)))` and the first summary call gets `max_tokens` = 2 × target (#614). Setting only the ratio has no effect while MIN equals MAX and emits a warning; set `LCM_LEAF_TARGET_MAX_TOKENS` above MIN to enable the ratio |
+| `LCM_LEAF_TARGET_MIN_TOKENS` | `2000` | Floor of the leaf summary target (`>= 1`); a minimum above the default cap also needs `LCM_LEAF_TARGET_MAX_TOKENS`, otherwise it resets with a warning naming that key |
 | `LCM_LEAF_TARGET_MAX_TOKENS` | `2000` | Cap of the leaf summary target (`>=` the floor); an out-of-range value of any of the three keys falls back to its default with a config warning |
 | `LCM_DYNAMIC_LEAF_CHUNK_ENABLED` | `false` | Enable backlog-sized leaf chunk targets; when off, one leaf takes at most max(`LCM_LEAF_CHUNK_TOKENS`, `LCM_DYNAMIC_LEAF_CHUNK_MAX`) of the oldest non-tail raw backlog, capped at 40% of a known window |
 | `LCM_DYNAMIC_LEAF_CHUNK_MAX` | `40000` | Upper bound for dynamic leaf chunk targets |
 | `LCM_THRESHOLD_FULL_SWEEP_ENABLED` | `true` | At threshold, run one synchronous bounded sweep that drains chunked raw history before publishing one new active context; `false` compacts only until pressure falls below the trigger |
 | `LCM_SUMMARY_PREFIX_TARGET_TOKENS` | `0` | Sweep-only summary-frontier target; `0` uses one leaf budget, capped at a quarter of the compaction threshold |
+| `LCM_BACKGROUND_LEAF_PREP_ENABLED` | `false` | #787 slice 1: after each turn, summarise the oldest raw backlog above the frontier off-turn (never the fresh tail) once the host count passes P = threshold − 0.15 × window, and at the threshold crossing publish those prepared leaves through the fenced publication, with no model call, down to L = threshold − max(2 × chunk, 0.1 × window); still above L, the turn runs the normal path. Prepared leaves are in memory only. Off on windows where P ≤ 0.30 × window or L ≤ 0, when `auxiliary.compression.max_concurrency` is 1, and while ignore-message patterns are set. `/lcm status` reports `background_leaf_prep` counters while on |
+| `LCM_BACKGROUND_LEAF_PREP_MAX_CALLS` | `8` | The background preparation's own spend guard: summariser calls per window (it also waits while the foreground guard has fewer than 2 calls left, and uses its own `prep:` circuit keys) |
+| `LCM_BACKGROUND_LEAF_PREP_WINDOW_S` | `600` | The window of that guard, in seconds |
 | `LCM_FOREGROUND_SOFT_SECONDS` | `60` | Sweep soft target, counted from `compress()` entry: after the first stored leaf or condensed node, no summariser call starts unless its recent duration says it ends by then (`0` = none; at most the hard bound) |
 | `LCM_FOREGROUND_HARD_SECONDS` | `120` | Sweep hard bound, counted from `compress()` entry: no summariser call starts unless it is expected to end, with a finalize reserve, by then, and none gets a timeout past it (`0` or invalid = `120`) |
 | `LCM_NEW_SESSION_RETAIN_DEPTH` | `2` | DAG depth retained after manual `/new` (`-1` all, `0` none) |
@@ -620,7 +614,8 @@ assistant even when doing so exceeds a configured bound.
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `true` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
-| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders |
+| `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `0` | Lowers the stub-first exit's target (#671) to min(built-in, int(ratio x threshold)); `0` keeps the built-in min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold); `>= 0` and `<= 1`, else the built-in target with a config warning |
+| `LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED` | `false` | Rewrite already-externalized summarized tool rows to compact placeholders; deprecated since v0.28.0, removed in v0.29.0 (#1246). Enabling it adds a config warning; behavior is unchanged until removal |
 | `LCM_DOCTOR_CLEAN_APPLY_ENABLED` | `false` | Permit destructive `/lcm doctor clean apply` in trusted operator contexts |
 | `LCM_EMPTY_LIFECYCLE_GC_ENABLED` | `true` | Master toggle for automatic pruning of lifecycle rows for sessions that never ingested any messages or summary nodes |
 | `LCM_EMPTY_LIFECYCLE_GC_THRESHOLD` | `200` | Number of lifecycle rows at which the GC pass fires |
@@ -643,7 +638,7 @@ assistant even when doing so exceeds a configured bound.
 | `LCM_SUMMARY_TIMEOUT_MS` | `120000` | Timeout for one summarization call (inherits `auxiliary.compression.timeout` when that is set); the foreground time budget can cut a call shorter |
 | `LCM_SUMMARY_PROMPT_VERSION` | `1` | 1 = today's prompts; 2 = the frontier prompt with the focus directives in the policy and a 3× output ceiling |
 | `LCM_NATIVE_RECOVERY` | `false` | removed in v0.25.0; ignored if set (`true` logs one WARNING each time the plugin loads) |
-| `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` |
+| `LCM_SURVIVAL_FIT` | `true` | When compaction cannot bring the returned list under the model window (a publication failure, a sweep deadline, a lock), drop the oldest whole user turns from live context until it fits; an oversized newest turn gets a bounded projection. Nothing is deleted: the rows stay stored and reachable with `lcm_grep` / `lcm_load_session`. Logs `LCM survival fit applied`, warns the user once, and `/lcm doctor` reports `survival_fit` as history without changing its status. The `lcm_doctor` tool returns it in the top-level `survival_fit` field, or null when no fit is recorded |
 | `LCM_SURVIVAL_RESERVE` | `0.15` | Share of the model window the survival fit keeps free for the response and host overhead (the fit target is window x (1 - reserve), minus the observed host overhead) |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |
 | `LCM_CRITICAL_BUDGET_PRESSURE_RATIO` | `0.0` | Disabled at `0.0`; when set, permits critical-pressure bypasses for bounded deferred catch-up and cache-friendly follow-on condensation only |
@@ -911,9 +906,22 @@ no condensation and no summariser call. The rows no leaf summarised stay stored 
 are recorded as raw backlog; the stop reason `stub_first_exit` is a partial stop in
 `lcm_status` (`last_stub_first_exit`, and the threshold sweep record when the sweep is
 on), the doctor and the `LCM compaction stop:` line, with the tokens before and after,
-the target and the backlog rows left. Recovery attempts, forced overflow and calls
+the target and the backlog rows left. On error stops, `reason=error` stays unchanged
+and a trailing `failure=` field names the known cause (#1180). Recovery attempts, forced overflow and calls
 below the threshold never take this exit; when the cuts miss the target the
 compaction runs as before.
+
+`LCM_STUB_FIRST_EXIT_TARGET_RATIO` (default `0`, env only) lowers that target to a
+share of the threshold: the exit is taken only when the list is at or under
+min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold, int(ratio x threshold)),
+and cuts that stay over it take the leaf path as before. `0` keeps the built-in
+target and a value of 0.95 or more changes nothing; a negative value, a value over
+`1` or a non-number keeps the built-in target with a config warning. The target in
+`last_stub_first_exit` and on the stop line is the one applied. It matters on a large
+window: with a 750,000-token threshold the built-in target is 712,500, so an exit can
+leave a live list of 600,000 tokens that reaches the threshold again soon, while `0.2`
+takes the exit only at 150,000 tokens or under. The share follows the active model's
+threshold, so a smaller window gets a smaller target and takes the leaf path more often.
 
 The storage-boundary payload guard is separate from that configurable policy. LCM always
 scans messages at the store boundary before writing `messages.content` or
@@ -1078,6 +1086,16 @@ view while an ignored or stateless side channel is bound. Before the first
 normal message constructs an agent, or in a genuinely sessionless process,
 `session_id: (unbound)` and `threshold_tokens: (uninitialized)` remain expected.
 
+### Reporting a bug
+
+Run the read-only `/lcm status` and `/lcm doctor` diagnostics, or ask your agent to use
+`lcm_status` and `lcm_doctor` with default arguments if slash commands are unavailable.
+Slash commands are disabled by default; never run repair or apply modes to reproduce a bug.
+From the next release, ask your Hermes agent to "report a problem with LCM-X"; it shows a draft for your approval.
+Search existing issues, then use the [bug report form](https://github.com/electricsheephq/lcm-x/issues/new?template=bug_report.yml).
+Include versions and short, redacted excerpts from `hermes logs -n 300 | grep -i lcm`.
+For security problems, use the [private advisory form](https://github.com/electricsheephq/lcm-x/security/advisories/new).
+
 ## Architecture
 
 The engine sits between Hermes context assembly and the backing conversation
@@ -1109,7 +1127,7 @@ exposes retrieval tools that can drill back into exact stored sources.
 - [Operator guide](docs/operator-guide.md) — install, activation, full
   configuration reference, diagnostics
 - [Retrieval tools reference](docs/retrieval-tools.md) — exact tool contracts
-- [Current project state](docs/project-status.md) — v0.26.2 stable baseline,
+- [Current project state](docs/project-status.md) — v0.27.0 stable baseline,
   separate main-development identity, active work, and proof boundaries
 - [Benchmark methodology and results](benchmarks/METHODOLOGY.md) — retrieval
   and judged-QA evaluation contracts, reproduction, and landed result index
@@ -1161,7 +1179,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.26.2` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.27.0` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License

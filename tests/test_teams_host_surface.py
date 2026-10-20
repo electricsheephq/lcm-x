@@ -75,6 +75,9 @@ WRITES_AS_SELF = {
 HOST_ONLY = {
     "enable_teams", "setup_teams", "disable_teams", "preflight_teams",
     "update_model", "shutdown", "clone_for_agent", "drain_rollup_maintenance",
+    # Hermes reset callback (#1306): requires the engine object and a finalized
+    # foreground binding; uses ordinary start guards and ignores the host DB.
+    "bind_session_state",
     # Sets the host-facing engine name from the Hermes config at register /
     # clone time (#471); it reads no store and grants nothing.
     "apply_identity_migration",

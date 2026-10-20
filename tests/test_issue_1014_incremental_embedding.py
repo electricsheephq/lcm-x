@@ -1049,7 +1049,18 @@ def test_automatic_chunks_take_new_messages_before_history_and_history_newest_fi
 
 
 def test_status_chunk_backlog_reads_a_bounded_frontier(tmp_path, home, providers, monkeypatch):
-    engine = _make_engine(tmp_path, home)
+    from tests.harness import make_engine
+
+    engine = make_engine(
+        tmp_path, fresh_tail_count=4, leaf_chunk_tokens=1, embeddings_enabled=True,
+        embedding_provider="ollama", embedding_model="model-a",
+    )
+    store = VectorStore(engine._config.database_path, config=engine._config)
+    try:
+        store.register_profile("model-a", "ollama", 2)
+        store.register_profile("model-a", "ollama", 2, task="chunk")
+    finally:
+        store.close()
     calls = []
     real_chunk_message = command_mod.chunk_message
     monkeypatch.setattr(
@@ -1064,11 +1075,11 @@ def test_status_chunk_backlog_reads_a_bounded_frontier(tmp_path, home, providers
         calls.clear()
         status = handle_lcm_command("status", engine)
 
-        assert "embedding_backlog_chunks: 50+" in status
+        assert "embedding_backlog_chunks: 50+" in status.splitlines()
         assert len(calls) == 50  # the newest 50 messages, not the store
 
         monkeypatch.setattr(command_mod, "_STATUS_CHUNK_SCAN_MESSAGES", 1_000)
-        assert "embedding_backlog_chunks: 120" in handle_lcm_command("status", engine)
+        assert "embedding_backlog_chunks: 120" in handle_lcm_command("status", engine).splitlines()
     finally:
         engine.shutdown()
 

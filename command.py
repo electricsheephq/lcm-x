@@ -10,46 +10,57 @@ from pathlib import Path
 import dataclasses
 import json
 import math
-import os
 import re
 import sqlite3
 import time
 from typing import Any
 import uuid
 
+from . import config as config_choices
+from .config import embedding_provider_id, lcm_env_get
+from .command_auth import CommandInvocation, Decision, authorize
+from .command_doctor import (
+    _doctor_text as _doctor_text,
+)
+from .command_router import route
+from .command_status import (
+    _status_text as _status_text,
+    _embedding_maintenance_status_lines as _embedding_maintenance_status_lines,
+)
 from .db_bootstrap import (
     _create_stem_fts,
     check_external_content_fts_integrity,
     external_content_fts_needs_repair,
-    inspect_lcm_schema_health,
+    inspect_lcm_schema_health as inspect_lcm_schema_health,
     join_background_integrity_scans,
     dispatch_background_stem_backfill,
-    stem_index_status,
-    load_integrity_failed,
+    stem_index_status as stem_index_status,
+    load_integrity_failed as load_integrity_failed,
     remediate_interim_schema_stamp,
     repair_external_content_fts,
-    sqlite_wal_reset_affected,
+    sqlite_wal_reset_affected as sqlite_wal_reset_affected,
 )
 from .diagnostics import (
-    _has_lifecycle_fragmentation,
-    _state_db_path_for_engine,
-    doctor_guidance_for_check,
-    doctor_guidance_for_checks,
-    survival_fit_projection_floor_applies,
+    _has_lifecycle_fragmentation as _has_lifecycle_fragmentation,
+    _state_db_path_for_engine as _state_db_path_for_engine,
+    doctor_guidance_for_check as doctor_guidance_for_check,
+    doctor_guidance_for_checks as doctor_guidance_for_checks,
+    survival_fit_count as survival_fit_count,
+    survival_fit_projection_floor_applies as survival_fit_projection_floor_applies,
 )
 from .ingest_protection import (
     EmbeddingPrivacyPolicyError,
     embedding_privacy_revision,
     embedding_provider_requires_privacy,
-    externalized_payload_stats,
+    externalized_payload_stats as externalized_payload_stats,
     protect_embedding_text,
-    scan_externalized_payload_integrity,
-    scan_sqlite_payload_risks,
-    sensitive_pattern_status,
+    scan_externalized_payload_integrity as scan_externalized_payload_integrity,
+    scan_sqlite_payload_risks as scan_sqlite_payload_risks,
+    sensitive_pattern_status as sensitive_pattern_status,
     validate_embedding_privacy_dispatch,
 )
 from .dag import SummaryDAG, build_nodes_fts_spec
-from .inactive_record import inactive_record_notice
+from .inactive_record import inactive_record_notice as inactive_record_notice
 from .engine_registry import has_resident_lcm_engine
 from .presets import (
     explicit_operator_overrides,
@@ -70,16 +81,17 @@ from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
 from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_host_uid_bindings, delete_message_relations
-from .survival_fit import SURVIVAL_FIT_COUNTER_KEY
-from .host_uid import host_uid_doctor_lines
+from .survival_fit import SURVIVAL_FIT_COUNTER_KEY as SURVIVAL_FIT_COUNTER_KEY
+from .host_uid import host_uid_doctor_lines as host_uid_doctor_lines
 from .chunking import (
     _CONVERSATIONAL_ROLES,
+    CHUNK_POLICY_REVISION,
     VALID_CONTENT_POLICIES,
     chunk_message,
     group_by_store_id,
     normalize_content_policy,
 )
-from .embedding_maintenance import incremental_embedding_state
+from .embedding_maintenance import incremental_embedding_state as incremental_embedding_state
 from .embedding_provider import (
     EmbeddedDocumentBatch,
     EmbeddingProviderError,
@@ -108,24 +120,9 @@ _EMBEDDING_BACKFILL_CLAIM_KEY = "lcm_embedding_backfill_claim"
 _EMBEDDING_BACKFILL_CLAIM_TTL_S = 10 * 60
 _EMBEDDING_BACKFILL_BATCH_SIZE = 32
 
-# Command paths; arguments do not change WRITE classification. Unknown paths
-# also default to WRITE. Plain doctor uses SQLite's FTS integrity-check INSERT.
-READ_LCM_SUBCOMMANDS = frozenset({
-    "status", "help", "doctor clean", "doctor clean lifecycle", "doctor source",
-    "doctor retention", "rotate", "rollups", "preset show", "preset suggest",
-})
-WRITE_LCM_SUBCOMMANDS = frozenset({
-    "doctor", "doctor clean apply", "doctor clean lifecycle apply",
-    "doctor repair", "doctor repair apply", "doctor repair level3",
-    "doctor repair level3 apply", "doctor repair schema-stamp",
-    "doctor repair schema-stamp apply", "doctor source apply", "backup",
-    "rotate apply", "rollups rebuild", "assertions rebuild", "preset apply",
-    "embed warmup", "embed backfill",
-})
-
 
 def _env_float(key: str, default: float) -> float:
-    raw = os.environ.get(key)
+    raw = lcm_env_get(key)
     if raw is None:
         return default
     try:
@@ -164,7 +161,7 @@ def _embedding_backfill_batch_size(max_batch_items: int | None = None) -> int:
     cap = _VOYAGE_MAX_BATCH_ITEMS
     if isinstance(max_batch_items, int):
         cap = max(1, min(max_batch_items, _VOYAGE_MAX_BATCH_ITEMS))
-    raw = os.environ.get("LCM_EMBEDDING_BACKFILL_BATCH_SIZE")
+    raw = lcm_env_get("LCM_EMBEDDING_BACKFILL_BATCH_SIZE")
     if raw is None:
         return min(_EMBEDDING_BACKFILL_BATCH_SIZE, cap)
     try:
@@ -521,7 +518,7 @@ def _help_text(error: str | None = None) -> str:
         "- /lcm doctor retention: read-only retention analysis for stored session footprint and age",
         "- /lcm backup: create a timestamped SQLite backup before any future cleanup workflow",
         "- /lcm rotate: preview a tail-preserving in-place compact of the active session (read-only)",
-        "- /lcm rotate apply: backup-first rotate that advances the lifecycle frontier past pre-tail raw messages",
+        "- /lcm rotate apply: refused on Hermes (#1141); use /compress here N",
         "- /lcm rollups: show temporal-rollup status for the current session",
         "- /lcm rollups rebuild <day|week|month|all> [date]: synchronously rebuild a bounded UTC target set",
         "- /lcm assertions rebuild [--apply] [--limit N]: preview or run one bounded exact-row assertion batch",
@@ -533,196 +530,6 @@ def _help_text(error: str | None = None) -> str:
         "- /lcm help: show this help",
     ])
     return "\n".join(lines)
-
-
-def _status_text(engine) -> str:
-    status = engine.get_status()
-    db_path = Path(engine._store.db_path)
-    db_exists = db_path.exists()
-    db_size = db_path.stat().st_size if db_exists else 0
-    session_bound = bool(engine.current_session_id)
-    source_stats = status.get("source_lineage") or {}
-    runtime_identity = status.get("runtime_identity") or {}
-    source_stats = {
-        "messages_total": int(source_stats.get("messages_total", 0) or 0),
-        "attributed_messages": int(source_stats.get("attributed_messages", 0) or 0),
-        "normalized_unknown_messages": int(source_stats.get("normalized_unknown_messages", 0) or 0),
-        "legacy_blank_source_messages": int(source_stats.get("legacy_blank_source_messages", 0) or 0),
-        "effective_unknown_messages": int(source_stats.get("effective_unknown_messages", 0) or 0),
-        **({"error": source_stats.get("error")} if source_stats.get("error") else {}),
-    }
-    protection = status.get("ingest_protection") or sensitive_pattern_status(engine._config)
-    config_sources = status.get("config_sources") or {}
-    config_source_warnings = status.get("config_source_warnings") or []
-    ignored_config_yaml_lcm_keys = status.get("ignored_config_yaml_lcm_keys") or []
-
-    uninitialized = "(uninitialized)"
-    unknown = "(unknown)"
-    model = (engine.model or unknown) if session_bound else uninitialized
-    provider = (engine.provider or unknown) if session_bound else uninitialized
-    context_length_source = (
-        (getattr(engine, "_context_length_source", "") or unknown)
-        if session_bound
-        else uninitialized
-    )
-
-    lines = [
-        "LCM status",
-        f"stem index: {stem_index_status(engine._store.connection)}",
-        f"engine: {status.get('engine', engine.name)}",
-        f"plugin_name: {runtime_identity.get('plugin_name', '(unknown)')}",
-        f"plugin_version: {runtime_identity.get('plugin_version', '(unknown)')}",
-        f"plugin_path: {runtime_identity.get('plugin_path', '(unknown)')}",
-        f"module_path: {runtime_identity.get('module_path', '(unknown)')}",
-        f"plugin_git_commit: {runtime_identity.get('plugin_git_commit') or '(unavailable)'}",
-        f"plugin_git_branch: {runtime_identity.get('plugin_git_branch') or '(unavailable)'}",
-        f"plugin_git_dirty: {runtime_identity.get('plugin_git_dirty') if runtime_identity.get('plugin_git_dirty') is not None else '(unavailable)'}",
-        f"hermes_home: {runtime_identity.get('hermes_home', '') or '(unset)'}",
-        f"session_id: {engine.current_session_id or '(unbound)'}",
-        f"session_platform: {engine.current_session_platform or ('(unbound)' if not session_bound else '(unknown)')}",
-        f"model: {model}",
-        f"provider: {provider}",
-        f"database_path: {db_path}",
-        f"database_path_source: {runtime_identity.get('database_path_source', '(unknown)')}",
-        f"database_exists: {_fmt_bool(db_exists)}",
-        f"database_size: {_fmt_size(db_size) if db_exists else 'missing'}",
-        f"compression_count: {engine.compression_count}",
-        f"total_compactions: {status.get('total_compactions', 0)}",
-        f"total_compactions_scope: {status.get('total_compactions_scope', 'current_conversation')}",
-        f"last_compression_status: {status.get('last_compression_status', 'idle')}",
-        f"last_compression_noop_reason: {status.get('last_compression_noop_reason', '') or '(none)'}",
-        f"context_length: {engine.context_length if session_bound else '(uninitialized)'}",
-        f"raw_context_length: {status.get('raw_context_length', 0) if session_bound else '(uninitialized)'}",
-        f"effective_context_length_cap: {status.get('effective_context_length_cap') or '(none)'}",
-        f"effective_context_length_reason: {status.get('effective_context_length_reason') or '(none)'}",
-        f"context_length_source: {context_length_source}",
-        f"configured_context_threshold: {status.get('configured_context_threshold', engine._config.context_threshold)}",
-        f"context_threshold: {status.get('context_threshold', engine._config.context_threshold)}",
-        f"context_threshold_source: {status.get('context_threshold_source', config_sources.get('context_threshold', 'manual_or_default'))}",
-        f"context_threshold_autoraised: {status.get('context_threshold_autoraised') or '(none)'}",
-        f"threshold_tokens: {engine.threshold_tokens if session_bound else '(uninitialized)'}",
-        f"cache_metrics_available: {_fmt_bool(status.get('cache_metrics_available'))}",
-        f"last_input_tokens: {status.get('last_input_tokens', 0)}",
-        f"last_output_tokens: {status.get('last_output_tokens', 0)}",
-        f"last_cache_read_tokens: {status.get('last_cache_read_tokens', 0)}",
-        f"last_cache_write_tokens: {status.get('last_cache_write_tokens', 0)}",
-        f"last_reasoning_tokens: {status.get('last_reasoning_tokens', 0)}",
-        f"cache_read_ratio: {float(status.get('cache_read_ratio', 0.0) or 0.0) * 100:.1f}%",
-        f"sensitive_patterns_enabled: {_fmt_bool(protection.get('enabled'))}",
-        f"sensitive_patterns: {', '.join(protection.get('patterns') or []) or '(none)'}",
-        f"sensitive_patterns_source: {protection.get('source', 'default')}",
-        # Filter classification for current_session_id (the foreground view).
-        # When a side channel is in flight, get_status() reports the bound
-        # session's flags; we read the engine properties instead so this row
-        # stays consistent with the session_id row above.
-        f"session_ignored: {_fmt_bool(engine.current_session_ignored)}",
-        f"session_stateless: {_fmt_bool(engine.current_session_stateless)}",
-        f"side_channel_active: {_fmt_bool(engine.side_channel_active)}",
-        f"conversation_id: {runtime_identity.get('conversation_id', '') or '(unbound)'}",
-        f"lifecycle_current_session_id: {runtime_identity.get('lifecycle_current_session_id', '') or '(none)'}",
-        f"lifecycle_last_finalized_session_id: {runtime_identity.get('lifecycle_last_finalized_session_id', '') or '(none)'}",
-        f"source_messages_total: {source_stats['messages_total']}",
-        f"source_attributed_messages: {source_stats['attributed_messages']}",
-        f"source_unknown_messages: {source_stats['normalized_unknown_messages']}",
-        f"source_legacy_blank_messages: {source_stats['legacy_blank_source_messages']}",
-        f"source_effective_unknown_messages: {source_stats['effective_unknown_messages']}",
-    ]
-
-    last_rotate_at = status.get("last_rotate_at")
-    if last_rotate_at:
-        lines.append(
-            f"last_rotate_at: "
-            f"{datetime.fromtimestamp(float(last_rotate_at), tz=timezone.utc).isoformat(timespec='seconds')}"
-        )
-        rotate_backup_size = int(status.get("rotate_backup_size", 0) or 0)
-        if rotate_backup_size:
-            lines.append(f"rotate_backup_size: {_fmt_size(rotate_backup_size)}")
-    else:
-        lines.append("last_rotate_at: (never)")
-    if status.get("rotate_backup_path"):
-        lines.append(f"rotate_backup_path: {status['rotate_backup_path']}")
-
-    if session_bound:
-        lines.extend([
-            f"store_messages: {status.get('store_messages', 0)}",
-            f"dag_nodes: {status.get('dag_nodes', 0)}",
-        ])
-    else:
-        lines.append(
-            "note: no active Hermes session has initialized LCM in this process yet — after a fresh restart, send one normal message first if you want live per-session runtime details"
-        )
-
-    if "ignore_session_patterns_source" in status:
-        lines.append(
-            f"ignore_session_patterns_source: {status.get('ignore_session_patterns_source')}"
-        )
-    if "stateless_session_patterns_source" in status:
-        lines.append(
-            f"stateless_session_patterns_source: {status.get('stateless_session_patterns_source')}"
-        )
-    if config_source_warnings:
-        lines.append("config_source_warnings: " + "; ".join(config_source_warnings))
-    if ignored_config_yaml_lcm_keys:
-        lines.append(
-            "ignored_config_yaml_lcm_keys: "
-            + ", ".join(f"lcm.{key}" for key in ignored_config_yaml_lcm_keys)
-        )
-    if source_stats.get("error"):
-        lines.append(f"source_lineage_error: {source_stats['error']}")
-    if bool(getattr(engine._config, "embeddings_enabled", False)):
-        lines.extend(_embedding_maintenance_status_lines(engine))
-    return "\n".join(lines)
-
-
-def _embedding_maintenance_status_lines(engine) -> list[str]:
-    """Unembedded backlog per corpus and the last incremental pass (#1014)."""
-    db_path = engine._store.db_path
-    backlog = {"summaries": "(no profile)", "chunks": "(no profile)"}
-
-    def _count(conn, identity: str, pending: int | str) -> str:
-        # In-flight rows are not pending; a provider failure after dispatch
-        # leaves them uncertain until an operator `--retry-uncertain` run.
-        try:
-            uncertain = int(conn.execute(
-                "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight "
-                "WHERE identity_hash = ? AND state IN ('dispatched', 'uncertain')",
-                (identity,),
-            ).fetchone()[0])
-        except sqlite3.OperationalError:
-            uncertain = 0
-        return f"{pending} (uncertain {uncertain})" if uncertain else str(pending)
-
-    try:
-        conn = _embedding_read_connection(db_path)
-        try:
-            profile = _embedding_current_profile(conn)
-            if profile is not None:
-                identity = str(profile["identity_hash"])
-                backlog["summaries"] = _count(
-                    conn, identity, _embedding_pending_rows(conn, identity, 0)[0]
-                )
-            chunk_profile = _chunk_current_profile(conn)
-            if chunk_profile is not None:
-                policy = normalize_content_policy(getattr(
-                    engine._config, "embedding_content_policy", "conversational"
-                ))
-                identity = str(chunk_profile["identity_hash"])
-                backlog["chunks"] = _count(conn, identity, _chunk_backlog_estimate(conn, identity, policy))
-        finally:
-            conn.close()
-    except sqlite3.Error as exc:
-        backlog = {name: f"(unavailable: {exc})" for name in backlog}
-    last, failures = incremental_embedding_state(db_path)
-    last_text = "(never)" if last is None else (
-        datetime.fromtimestamp(last[0], tz=timezone.utc).isoformat(timespec="seconds")
-        + f" {last[1]}"
-    )
-    return [
-        f"embedding_backlog_summaries: {backlog['summaries']}",
-        f"embedding_backlog_chunks: {backlog['chunks']}",
-        f"embedding_incremental_last_pass: {last_text}",
-        f"embedding_incremental_failures: {failures}",
-    ]
 
 
 def _scan_clean_candidates(engine) -> dict[str, Any]:
@@ -928,13 +735,28 @@ def _rotate_text(engine) -> str:
     if preview.get("noop"):
         lines.append(f"reason: {preview.get('reason', 'no_change')}")
         lines.append("note: read-only preview — rotate apply would be a no-op for this session")
+        lines.append("note: if an earlier LCM-X already rotated this session and Hermes restarted since, compaction can stop on the rows below that frontier and /compress here N will not repair it: start a new session with /new (raw rows stay recoverable via lcm_load_session; in-place fix tracked in #1184)")
     else:
-        lines.append("note: read-only preview — use `/lcm rotate apply` to advance the frontier (backup-first)")
+        lines.append("note: read-only preview — on Hermes, use `/compress here N` to compact (rotate apply is refused, #1141)")
+        lines.append("note: if an earlier LCM-X already rotated this session and Hermes restarted since, compaction can stop on the rows below that frontier and /compress here N will not repair it: start a new session with /new (raw rows stay recoverable via lcm_load_session; in-place fix tracked in #1184)")
         lines.append("note: pre-tail raw messages remain in the store and recoverable via lcm_load_session")
     return "\n".join(lines)
 
 
 def _rotate_apply_text(engine) -> str:
+    return "\n".join([
+        "LCM rotate apply",
+        "status: refused",
+        "reason: host_owns_transcript",
+        "note: Hermes reloads its own transcript after a restart, so advancing the frontier without summaries leaves rows LCM-X cannot map (#1141)",
+        "note: use `/compress here N` to summarise everything except the most recent N messages",
+        "note: if an earlier LCM-X already rotated this session and Hermes restarted since, compaction can stop on the rows below that frontier and /compress here N will not repair it: start a new session with /new (raw rows stay recoverable via lcm_load_session; in-place fix tracked in #1184)",
+        "note: no backup was created and no lifecycle state was changed",
+    ])
+
+
+def _rotate_apply_unchecked(engine) -> str:
+    # Kept for hosts that rebuild the context from the store.
     # Pre-flight refusal AND noop check before touching disk. This avoids
     # both writing a backup for a session that would refuse and overwriting
     # the previous known-good rolling backup when the apply would be a no-op
@@ -1473,571 +1295,6 @@ def _doctor_source_apply_text(engine) -> str:
     ])
 
 
-def _doctor_text(engine) -> str:
-    db_path = Path(engine._store.db_path)
-    runtime_identity = engine.get_runtime_identity()
-    store_conn = engine._store.connection
-    dag_conn = engine._dag.connection
-
-    issues: list[str] = []
-    recommended_actions: list[str] = []
-    schema_health = inspect_lcm_schema_health(store_conn, database_path=str(db_path))
-    schema_missing_raw = schema_health.get("missing_tables")
-    schema_missing_tables = [str(name) for name in schema_missing_raw] if isinstance(schema_missing_raw, list) else []
-    schema_existing_raw = schema_health.get("existing_tables")
-    schema_existing_tables = [str(name) for name in schema_existing_raw] if isinstance(schema_existing_raw, list) else []
-    schema_core_status = "error" if schema_health.get("error") else "missing" if schema_missing_tables else "ok"
-    if schema_missing_tables or schema_health.get("error"):
-        issues.append("schema_core_tables")
-
-    def _safe_count(conn, query: str, issue_key: str) -> int | str:
-        try:
-            return int(conn.execute(query).fetchone()[0])
-        except Exception as exc:  # pragma: no cover - defensive
-            issues.append(issue_key)
-            return f"error: {exc}"
-
-    try:
-        integrity_row = store_conn.execute("PRAGMA integrity_check").fetchone()
-        integrity = str(integrity_row[0]) if integrity_row else "unknown"
-    except Exception as exc:  # pragma: no cover - defensive
-        integrity = f"error: {exc}"
-        issues.append("sqlite_integrity")
-
-    def _fts_text_status(result: dict[str, Any]) -> str:
-        status = str(result.get("status") or "fail")
-        return "ok" if status == "pass" else status
-
-    try:
-        store_fts_count = int(store_conn.execute("SELECT COUNT(*) FROM messages_fts").fetchone()[0])
-        store_fts_integrity = check_external_content_fts_integrity(store_conn, build_message_fts_spec())
-        store_fts = _fts_text_status(store_fts_integrity)
-        if store_fts == "fail":
-            issues.append("messages_fts")
-        elif store_fts == "unchecked":
-            recommended_actions.append("rerun `/lcm doctor` with read-write SQLite access if a deep messages FTS check is needed")
-    except Exception as exc:  # pragma: no cover - defensive
-        store_fts_count = f"error: {exc}"
-        store_fts = f"error: {exc}"
-        store_fts_integrity = {"status": "fail", "detail": str(exc)}
-        issues.append("messages_fts")
-
-    try:
-        node_fts_count = int(dag_conn.execute("SELECT COUNT(*) FROM nodes_fts").fetchone()[0])
-        node_fts_integrity = check_external_content_fts_integrity(dag_conn, build_nodes_fts_spec())
-        node_fts = _fts_text_status(node_fts_integrity)
-        if node_fts == "fail":
-            issues.append("nodes_fts")
-        elif node_fts == "unchecked":
-            recommended_actions.append("rerun `/lcm doctor` with read-write SQLite access if a deep nodes FTS check is needed")
-    except Exception as exc:  # pragma: no cover - defensive
-        node_fts_count = f"error: {exc}"
-        node_fts = f"error: {exc}"
-        node_fts_integrity = {"status": "fail", "detail": str(exc)}
-        issues.append("nodes_fts")
-
-    # A prior non-blocking background integrity scan (issue #6) records a
-    # persisted ``fts_integrity_failed:<table>`` flag when it finds corruption
-    # without rebuilding. Surface it even when this doctor run's live deep check
-    # could not confirm it (e.g. read-only access), pointing at the explicit
-    # repair path.
-    try:
-        store_fts_failed_flag = load_integrity_failed(store_conn, build_message_fts_spec())
-    except Exception:  # pragma: no cover - defensive
-        store_fts_failed_flag = None
-    try:
-        node_fts_failed_flag = load_integrity_failed(dag_conn, build_nodes_fts_spec())
-    except Exception:  # pragma: no cover - defensive
-        node_fts_failed_flag = None
-    if store_fts_failed_flag and "messages_fts" not in issues:
-        issues.append("messages_fts")
-    if node_fts_failed_flag and "nodes_fts" not in issues:
-        issues.append("nodes_fts")
-
-    sqlite_mmap_bytes = _safe_count(store_conn, "PRAGMA mmap_size", "sqlite_mmap_size")
-    total_messages = _safe_count(store_conn, "SELECT COUNT(*) FROM messages", "messages_total")
-    total_message_sessions = _safe_count(
-        store_conn,
-        "SELECT COUNT(DISTINCT session_id) FROM messages",
-        "message_sessions_total",
-    )
-    total_nodes = _safe_count(dag_conn, "SELECT COUNT(*) FROM summary_nodes", "summary_nodes_total")
-    total_node_sessions = _safe_count(
-        dag_conn,
-        "SELECT COUNT(DISTINCT session_id) FROM summary_nodes",
-        "summary_node_sessions_total",
-    )
-
-    db_exists = db_path.exists()
-    db_size = db_path.stat().st_size if db_exists else 0
-    wal_path = Path(str(db_path) + "-wal")
-    wal_size = wal_path.stat().st_size if wal_path.exists() else 0
-    try:
-        journal_row = store_conn.execute("PRAGMA journal_mode").fetchone()
-        journal_mode = str(journal_row[0]) if journal_row else "unknown"
-    except Exception as exc:  # pragma: no cover - defensive
-        journal_mode = f"error: {exc}"
-        issues.append("sqlite_journal_mode")
-    try:
-        quick_row = store_conn.execute("PRAGMA quick_check").fetchone()
-        quick_check = str(quick_row[0]) if quick_row else "unknown"
-    except Exception as exc:  # pragma: no cover - defensive
-        quick_check = f"error: {exc}"
-        issues.append("sqlite_quick_check")
-    payload_storage_error = ""
-    try:
-        payload_risks = scan_sqlite_payload_risks(store_conn)
-        externalized_stats = externalized_payload_stats(engine._config, hermes_home=engine._hermes_home)
-        externalized_integrity = scan_externalized_payload_integrity(
-            store_conn,
-            engine._config,
-            hermes_home=engine._hermes_home,
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        payload_storage_error = str(exc)
-        payload_risks = {
-            "largest_content_rows": [],
-            "largest_tool_calls_rows": [],
-            "suspicious_data_uri_content_rows": [],
-            "suspicious_data_uri_tool_calls_rows": [],
-            "suspicious_base64_like_rows": [],
-            "quarantined_assistant_rows": [],
-            "suspicious_repetitive_assistant_rows": [],
-            "heartbeat_noise_rows": [],
-        }
-        externalized_stats = {
-            "externalized_payload_count": 0,
-            "externalized_payload_bytes": 0,
-            "externalized_payload_chars": 0,
-            "externalized_payload_dir": "",
-            "latest_externalized_payload_path": "",
-            "latest_externalized_payload_mtime": 0,
-        }
-        externalized_integrity = {
-            "externalized_payload_refs_total": 0,
-            "externalized_payload_refs_existing": 0,
-            "externalized_payload_refs_missing": 0,
-            "externalized_payload_files_unreferenced": 0,
-            "missing_externalized_payload_refs": [],
-            "unreferenced_externalized_payload_files": [],
-        }
-        issues.append("payload_storage")
-    clean_scan = _scan_clean_candidates(engine)
-
-    debt_rows = []
-    lifecycle_conn = getattr(getattr(engine, "_lifecycle", None), "connection", None)
-    if lifecycle_conn is not None:
-        try:
-            debt_rows = lifecycle_conn.execute(
-                """
-                SELECT conversation_id, debt_kind, debt_size_estimate
-                FROM lcm_lifecycle_state
-                WHERE debt_kind IS NOT NULL AND debt_size_estimate > 0
-                ORDER BY updated_at DESC
-                """
-            ).fetchall()
-        except Exception as exc:  # pragma: no cover - defensive
-            issues.append("lifecycle_state")
-            debt_rows = [(f"error: {exc}", "error", 0)]
-
-    observations: list[str] = []
-    missing_externalized_refs = int(externalized_integrity.get("externalized_payload_refs_missing", 0) or 0)
-    suspicious_payload_rows = sum(
-        len(payload_risks.get(key) or [])
-        for key in (
-            "suspicious_data_uri_content_rows",
-            "suspicious_data_uri_tool_calls_rows",
-            "suspicious_base64_like_rows",
-            "suspicious_repetitive_assistant_rows",
-        )
-    )
-
-    if schema_health.get("error"):
-        observations.append(f"schema_core_tables: error: {schema_health['error']}")
-        recommended_actions.append(
-            "verify SQLite can read sqlite_master for the database inspected by Hermes"
-        )
-    elif schema_missing_tables:
-        observations.append(
-            "schema_core_tables: missing " + ", ".join(schema_missing_tables)
-        )
-        recommended_actions.append(
-            "verify HERMES_HOME/LCM_DATABASE_PATH point at the database inspected by Hermes"
-        )
-    else:
-        observations.append("schema_core_tables: ok")
-
-    if debt_rows:
-        first = debt_rows[0]
-        observations.append(
-            f"maintenance_debt: {len(debt_rows)} conversation(s) currently carry deferred maintenance debt; first={first[0]} kind={first[1]} size={first[2]}"
-        )
-        recommended_actions.append(
-            "let normal compaction turns reduce maintenance debt before attempting broader cleanup"
-        )
-
-    if clean_scan["error"]:
-        observations.append(f"cleanup_candidates: scan error: {clean_scan['error']}")
-    elif clean_scan["candidates"]:
-        observations.append(
-            f"cleanup_candidates: {len(clean_scan['candidates'])} pattern-matched junk/noise session candidate(s) detected"
-        )
-        recommended_actions.append("inspect candidate sessions with `/lcm doctor clean`")
-        recommended_actions.append("create a safety snapshot first with `/lcm backup`")
-    else:
-        observations.append("cleanup_candidates: none")
-
-    if missing_externalized_refs:
-        issues.append("payload_storage")
-        observations.append(
-            f"payload_storage: {missing_externalized_refs} externalized payload ref(s) point to missing JSON files"
-        )
-        recommended_actions.append(
-            "inspect missing externalized payload refs and restore from backups if needed"
-        )
-    if suspicious_payload_rows:
-        observations.append(
-            f"payload_storage: {suspicious_payload_rows} suspicious inline/base64 payload row(s) need review"
-        )
-        recommended_actions.append(
-            "inspect suspicious payload rows before cleanup; restore payload files from backup before deleting or rewriting anything"
-        )
-    if payload_storage_error:
-        observations.append(f"payload_storage_error: {payload_storage_error}")
-        recommended_actions.append("inspect payload storage diagnostics before cleanup or deletion")
-
-    try:
-        source_stats = engine._store.get_source_stats()
-    except Exception as exc:  # pragma: no cover - defensive
-        issues.append("source_lineage")
-        source_stats = {
-            "messages_total": 0,
-            "attributed_messages": 0,
-            "normalized_unknown_messages": 0,
-            "legacy_blank_source_messages": 0,
-            "effective_unknown_messages": 0,
-            "error": str(exc),
-        }
-    observations.append(
-        "source_lineage: "
-        f"attributed={source_stats['attributed_messages']} "
-        f"unknown={source_stats['normalized_unknown_messages']} "
-        f"legacy_blank={source_stats['legacy_blank_source_messages']} "
-        f"effective_unknown={source_stats['effective_unknown_messages']}"
-    )
-    if source_stats.get("error"):
-        observations.append(f"source_lineage_error: {source_stats['error']}")
-    if source_stats["legacy_blank_source_messages"]:
-        observations.append(
-            "legacy blank-source rows are normalized as `source=unknown` for back-compat filters"
-        )
-
-    try:
-        lifecycle_stats = engine._lifecycle.get_fragmentation_stats(
-            state_db_path=_state_db_path_for_engine(engine)
-        )
-    except Exception as exc:  # pragma: no cover - defensive
-        issues.append("lifecycle_fragmentation")
-        lifecycle_stats = {"error": str(exc)}
-    else:
-        observations.append(
-            "lifecycle_fragmentation: "
-            f"lifecycle_rows={lifecycle_stats['lifecycle_rows']} "
-            f"empty_lifecycle_rows={lifecycle_stats.get('empty_lifecycle_rows', 0)} "
-            f"message_sessions={lifecycle_stats['distinct_message_sessions']} "
-            f"node_sessions={lifecycle_stats['distinct_node_sessions']} "
-            f"current_missing_in_lcm_any={lifecycle_stats['lifecycle_current_missing_in_lcm_any']} "
-            f"last_finalized_missing_in_lcm_any={lifecycle_stats['lifecycle_last_finalized_missing_in_lcm_any']} "
-            f"current_missing_in_state={lifecycle_stats['lifecycle_current_missing_in_state']} "
-            f"last_finalized_missing_in_state={lifecycle_stats['lifecycle_last_finalized_missing_in_state']} "
-            f"message_sessions_missing_in_state={lifecycle_stats['lcm_message_sessions_missing_in_state']} "
-            f"node_sessions_missing_in_state={lifecycle_stats['lcm_node_sessions_missing_in_state']} "
-            f"message_sessions_without_lifecycle_current={lifecycle_stats['message_sessions_without_lifecycle_current']} "
-            f"message_sessions_without_lifecycle_reference={lifecycle_stats['message_sessions_without_lifecycle_reference']} "
-            f"node_sessions_without_lifecycle_reference={lifecycle_stats['node_sessions_without_lifecycle_reference']} "
-            f"state_sessions_missing_in_lcm_any={lifecycle_stats['state_sessions_missing_in_lcm_any']}"
-        )
-        if lifecycle_stats.get("state_db_error"):
-            observations.append(f"lifecycle_fragmentation_state_db_error: {lifecycle_stats['state_db_error']}")
-        classification = lifecycle_stats.get("classification") or {}
-        categories = classification.get("categories") or []
-        if classification:
-            observations.append(
-                "lifecycle_fragmentation_classification: "
-                f"{classification.get('status', 'unknown')}; {len(categories)} categories need review"
-            )
-            for category in categories:
-                sample = ",".join(category.get("sample_session_ids") or []) or "(none)"
-                observations.append(
-                    "lifecycle_category "
-                    f"{category.get('name')}: count={category.get('count', 0)} sample={sample}"
-                )
-        if _has_lifecycle_fragmentation(lifecycle_stats):
-            recommended_actions.append(
-                "inspect lifecycle fragmentation before any cleanup/repair behavior mutates state"
-            )
-            recommended_actions.append(
-                "treat this as read-only evidence; do not infer every mismatch is harmful"
-            )
-
-    if clean_scan.get("protected_count"):
-        observations.append(
-            f"protected_sessions: skipped {clean_scan['protected_count']} currently bound session(s) from cleanup candidates"
-        )
-
-    protection = sensitive_pattern_status(engine._config)
-    if protection["enabled"] and protection["active_patterns"]:
-        observations.append(
-            "sensitive_pattern_handling: enabled; matching raw secret values are replaced before SQLite, FTS, summaries, active replay, and externalized payloads"
-        )
-    elif protection["enabled"]:
-        observations.append("sensitive_pattern_handling: enabled but no active known patterns are configured")
-        recommended_actions.append("set LCM_SENSITIVE_PATTERNS to one or more known names, or disable sensitive handling")
-    else:
-        observations.append("sensitive_pattern_handling: disabled")
-    if protection["unknown_patterns"]:
-        issues.append("sensitive_pattern_config")
-        recommended_actions.append(
-            "remove unknown LCM_SENSITIVE_PATTERNS entries or replace them with supported names"
-        )
-
-    if store_fts_failed_flag:
-        observations.append(
-            "messages_fts_integrity: a background integrity scan flagged corruption "
-            f"(detail: {store_fts_failed_flag['detail'] or 'unknown'})"
-        )
-        recommended_actions.append(
-            "run `/lcm doctor repair`, then `/lcm backup` and `/lcm doctor repair apply` to rebuild messages_fts"
-        )
-    if node_fts_failed_flag:
-        observations.append(
-            "nodes_fts_integrity: a background integrity scan flagged corruption "
-            f"(detail: {node_fts_failed_flag['detail'] or 'unknown'})"
-        )
-        recommended_actions.append(
-            "run `/lcm doctor repair`, then `/lcm backup` and `/lcm doctor repair apply` to rebuild nodes_fts"
-        )
-
-    triage_checks: list[dict[str, Any]] = []
-    if integrity != "ok":
-        triage_checks.append({"check": "database_integrity", "status": "fail", "detail": integrity})
-    if schema_health.get("error") or schema_missing_tables:
-        triage_checks.append({"check": "schema_core_tables", "status": "fail", "detail": schema_health})
-    if store_fts != "ok":
-        triage_checks.append({
-            "check": "messages_fts_integrity",
-            "status": "warn" if store_fts == "unchecked" else "fail",
-            "detail": store_fts_integrity,
-        })
-    if node_fts != "ok":
-        triage_checks.append({
-            "check": "nodes_fts_integrity",
-            "status": "warn" if node_fts == "unchecked" else "fail",
-            "detail": node_fts_integrity,
-        })
-    if store_fts_failed_flag and store_fts != "fail":
-        triage_checks.append({
-            "check": "messages_fts_integrity",
-            "status": "fail",
-            "detail": {"status": "fail", "background_flag": store_fts_failed_flag},
-        })
-    if node_fts_failed_flag and node_fts != "fail":
-        triage_checks.append({
-            "check": "nodes_fts_integrity",
-            "status": "fail",
-            "detail": {"status": "fail", "background_flag": node_fts_failed_flag},
-        })
-    if clean_scan["candidates"]:
-        triage_checks.append({"check": "cleanup_candidates", "status": "warn", "detail": clean_scan})
-    if payload_storage_error or missing_externalized_refs or any(payload_risks.get(key) for key in (
-        "suspicious_data_uri_content_rows",
-        "suspicious_data_uri_tool_calls_rows",
-        "suspicious_base64_like_rows",
-        "suspicious_repetitive_assistant_rows",
-        "heartbeat_noise_rows",
-    )):
-        detail = {**payload_risks, **externalized_integrity}
-        if payload_storage_error:
-            detail["error"] = payload_storage_error
-        triage_checks.append({
-            "check": "payload_storage",
-            "status": "fail" if payload_storage_error else "warn",
-            "detail": detail,
-        })
-    if (protection["enabled"] and not protection["active_patterns"]) or protection["unknown_patterns"]:
-        triage_checks.append({"check": "sensitive_pattern_handling", "status": "warn", "detail": protection})
-    if source_stats.get("error"):
-        triage_checks.append({"check": "source_lineage_hygiene", "status": "fail", "detail": source_stats})
-    if lifecycle_stats.get("error") or _has_lifecycle_fragmentation(lifecycle_stats):
-        lifecycle_status = "fail" if lifecycle_stats.get("error") else "warn"
-        triage_checks.append({"check": "lifecycle_fragmentation", "status": lifecycle_status, "detail": lifecycle_stats})
-    try:  # #582: the survival fit kept a session alive by dropping stored turns from live context
-        survival_fit = engine._store.read_metadata_json(SURVIVAL_FIT_COUNTER_KEY)
-    except Exception:
-        survival_fit = None
-    survival_fit = survival_fit if isinstance(survival_fit, dict) else {}
-    try:
-        fit_count = int(survival_fit.get("count") or 0)
-    except (TypeError, ValueError, OverflowError):  # a damaged record: a fit with an unknown count
-        fit_count = None
-    recorded_projection = survival_fit.get("projected_count", 0)
-    if fit_count == 0 and (survival_fit.get("count_lost")
-                           or not (type(recorded_projection) is int and recorded_projection == 0)):
-        fit_count = None  # #966: a zero or unreadable count beside projection evidence is an unknown count
-    if fit_count != 0:
-        projected = survival_fit.get("projected_count")  # absent on a record from before the key: unknown
-        if type(projected) is not int or projected < 0 or survival_fit.get("count_lost"):
-            projected = None  # damaged metadata, or history lost with the count: conservatively unknown
-        projection_floor = survival_fit_projection_floor_applies(survival_fit)  # #919: same predicate as triage
-        uncovered = survival_fit.get("last_uncovered_rows")
-        uncovered_fits = survival_fit.get("uncovered_fit_count")
-        unknown_fits = survival_fit.get("unknown_coverage_fit_count")
-        within = ("rollback to a 0.24.x version older than v0.24.5: that plugin cannot compact stored rows that a "
-                  "survival fit removed from the live context; stop Hermes, move the configured database file (by "
-                  "default lcm.db, with its -wal and -shm companions) aside and keep it, then restore the database "
-                  "backup taken before the first v0.24.5 install with the plugin; a rollback of the plugin alone to "
-                  f"{'v0.27.0' if projection_floor else 'v0.24.5'} or later is fine")
-        applied = ("applied an unknown number of times (the stored count is unreadable)" if fit_count is None
-                   else f"applied {fit_count} time(s)")
-        if survival_fit.get("last_shortened") is False:
-            applied = applied.replace("applied", "attempted", 1) + "; could not shorten the list on the last attempt"
-        rollback = (f"; {within}; a rollback to v0.23.3 keeps the database file and needs native recovery ON "
-                    "(see triage_guidance)" if survival_fit.get("ever_shortened", True) else "")
-        if projection_floor:
-            rollback += ("; a survival fit projected rows (or the projection count is unknown): from v0.27.0 on, "
-                         "a plugin-only rollback must target v0.27.0 or later; v0.26.x or earlier cannot recognise "
-                         "a short projected row (head + mark) and stores it again on a cold resume (#601 duplicates); "
-                         "to roll back further, stop Hermes and move the configured database file (by default lcm.db, "
-                         "with its -wal and -shm companions) aside and keep it")
-        observations.append(f"survival_fit: {applied}; last reason "
-                            f"{survival_fit.get('last_reason') or '(unknown)'}; projected_count "
-                            f"{'unknown' if projected is None else projected}; unreached_budget_count "
-                            f"{survival_fit.get('unreached_budget_count', 0)}; last_reached_budget "
-                            f"{survival_fit.get('last_reached_budget', 'unknown')}; last_uncovered_rows "
-                            f"{'unknown' if uncovered is None else uncovered}; uncovered_fit_count "
-                            f"{'unknown' if uncovered_fits is None else uncovered_fits}; unknown_coverage_fit_count "
-                            f"{'unknown' if unknown_fits is None else unknown_fits}{rollback}")
-        triage_checks.append({"check": "survival_fit", "status": "warn", "detail": survival_fit})
-    stub_first_exit = getattr(engine, "_last_stub_first_exit", None)
-    if stub_first_exit:  # #671: a partial stop; the rows no leaf summarised stay stored as backlog
-        observations.append("stub_first_exit: the last threshold compaction stopped on its free cuts without a "
-                            "model call (partial); " + " ".join(f"{k}={v}" for k, v in stub_first_exit.items()))
-    inactive_process = inactive_record_notice(getattr(engine, "_hermes_home", ""))
-    if inactive_process:
-        issues.append("inactive_process")
-        inactive_check = {"check": "inactive_process", "status": "warn", "detail": inactive_process}
-        triage_checks.append(inactive_check)
-        recommended_actions.append(doctor_guidance_for_check(inactive_check)["operator_action"])
-    try:
-        from .tools import _embedding_provider_health_check
-        embedding_check = _embedding_provider_health_check(engine)
-    except Exception as exc:  # as the lcm_doctor tool does: a check that raises reports fail, never a silent ok
-        embedding_check = {"check": "embedding_provider_health", "status": "fail", "detail": str(exc)}
-    if embedding_check and embedding_check["status"] in {"warn", "fail"}:
-        issues.append("embedding_provider_health")
-        triage_checks.append(embedding_check)
-        recommended_actions.append(doctor_guidance_for_check(embedding_check)["operator_action"])
-    triage_guidance = doctor_guidance_for_checks(triage_checks)
-
-    doctor_status = "issues-found" if integrity != "ok" or issues else (
-        "action-recommended" if recommended_actions else "ok"
-    )
-    wal_reset_affected = sqlite_wal_reset_affected()
-    lines = [
-        "LCM doctor",
-        f"status: {doctor_status}",
-        f"plugin_name: {runtime_identity.get('plugin_name', '(unknown)')}",
-        f"plugin_version: {runtime_identity.get('plugin_version', '(unknown)')}",
-        f"plugin_path: {runtime_identity.get('plugin_path', '(unknown)')}",
-        f"module_path: {runtime_identity.get('module_path', '(unknown)')}",
-        f"plugin_git_commit: {runtime_identity.get('plugin_git_commit') or '(unavailable)'}",
-        f"plugin_git_branch: {runtime_identity.get('plugin_git_branch') or '(unavailable)'}",
-        f"plugin_git_dirty: {runtime_identity.get('plugin_git_dirty') if runtime_identity.get('plugin_git_dirty') is not None else '(unavailable)'}",
-        f"database_path: {db_path}",
-        f"database_exists: {_fmt_bool(db_exists)}",
-        f"database_size: {_fmt_size(db_size) if db_exists else 'missing'}",
-        f"wal_size: {_fmt_size(wal_size)}",
-        f"schema_core_tables: {schema_core_status}",
-        f"schema_missing_tables: {', '.join(schema_missing_tables) or '(none)'}",
-        f"schema_existing_tables: {', '.join(schema_existing_tables) or '(none)'}",
-        f"journal_mode: {journal_mode}; sqlite_mmap_bytes={sqlite_mmap_bytes}",
-        f"sqlite_library: {sqlite3.sqlite_version} (WAL-reset bug: {'affected' if wal_reset_affected else 'not affected'})",
-        *(["sqlite_wal_reset_advice: upgrade Python/SQLite to 3.51.3+; see https://sqlite.org/wal.html#walresetbug"]
-          if wal_reset_affected and journal_mode.lower() == "wal" else []),
-        f"quick_check: {quick_check}",
-        f"sqlite_integrity: {integrity}",
-        f"messages_total: {total_messages}",
-        f"message_sessions_total: {total_message_sessions}",
-        f"summary_nodes_total: {total_nodes}",
-        f"summary_node_sessions_total: {total_node_sessions}",
-        f"messages_fts: {store_fts}",
-        f"stem index: {stem_index_status(store_conn)}",
-        f"messages_fts_rows: {store_fts_count}",
-        f"nodes_fts: {node_fts}",
-        f"nodes_fts_rows: {node_fts_count}",
-        f"largest_content_rows: {payload_risks['largest_content_rows']}",
-        f"largest_tool_calls_rows: {payload_risks['largest_tool_calls_rows']}",
-        f"suspicious_data_uri_content_rows: {payload_risks['suspicious_data_uri_content_rows']}",
-        f"suspicious_data_uri_tool_calls_rows: {payload_risks['suspicious_data_uri_tool_calls_rows']}",
-        f"suspicious_base64_like_rows: {payload_risks['suspicious_base64_like_rows']}",
-        f"quarantined_assistant_rows: {payload_risks['quarantined_assistant_rows']}",
-        f"suspicious_repetitive_assistant_rows: {payload_risks['suspicious_repetitive_assistant_rows']}",
-        f"heartbeat_noise_rows: {payload_risks['heartbeat_noise_rows']}",
-        f"sensitive_patterns_enabled: {_fmt_bool(protection.get('enabled'))}",
-        f"sensitive_patterns: {', '.join(protection.get('patterns') or []) or '(none)'}",
-        f"sensitive_patterns_source: {protection.get('source', 'default')}",
-        f"sensitive_patterns_unknown: {', '.join(protection.get('unknown_patterns') or []) or '(none)'}",
-        f"externalized_payload_dir: {externalized_stats['externalized_payload_dir']}",
-        f"externalized_payload_count: {externalized_stats['externalized_payload_count']}",
-        f"externalized_payload_bytes: {externalized_stats['externalized_payload_bytes']}",
-        f"externalized_payload_chars: {externalized_stats['externalized_payload_chars']}",
-        f"latest_externalized_payload_path: {externalized_stats['latest_externalized_payload_path'] or '(none)'}",
-        f"externalized_payload_refs_total: {externalized_integrity['externalized_payload_refs_total']}",
-        f"externalized_payload_refs_existing: {externalized_integrity['externalized_payload_refs_existing']}",
-        f"externalized_payload_refs_missing: {externalized_integrity['externalized_payload_refs_missing']}",
-        f"externalized_payload_files_unreferenced: {externalized_integrity['externalized_payload_files_unreferenced']}",
-        f"missing_externalized_payload_refs: {externalized_integrity['missing_externalized_payload_refs']}",
-        f"unreferenced_externalized_payload_files: {externalized_integrity['unreferenced_externalized_payload_files']}",
-        f"survival_fit_count: {'unknown' if fit_count is None else fit_count}",
-        *host_uid_doctor_lines(engine),
-    ]
-    if inactive_process:
-        lines.append(f"inactive_process: {inactive_process}")
-    if embedding_check is not None:
-        detail = embedding_check.get("detail")
-        reason = detail.get("reason") if isinstance(detail, dict) else None
-        suffix = f" ({reason})" if reason else ""
-        if isinstance(detail, str):
-            suffix = f" {detail}"
-        lines.append(f"embedding_provider_health: {embedding_check['status']}{suffix}")
-        lines.append(f"rerank: {embedding_check.get('rerank', 'unknown')}")
-    if issues:
-        lines.append(f"issues: {', '.join(issues)}")
-    else:
-        lines.append("issues: none")
-    lines.append("observations:")
-    for item in observations:
-        lines.append(f"- {item}")
-    lines.append("recommended_actions:")
-    if recommended_actions:
-        for item in recommended_actions:
-            lines.append(f"- {item}")
-    else:
-        lines.append("- none")
-    lines.append("triage_guidance:")
-    if triage_guidance:
-        for item in triage_guidance:
-            warning_suffix = " warning-only" if item.get("warning_only") else ""
-            lines.append(
-                "- "
-                f"{item['check']}: {item['action']}{warning_suffix} — "
-                f"{item['operator_action']}"
-            )
-    else:
-        lines.append("- none")
-    return "\n".join(lines)
-
-
 def _doctor_clean_text(engine) -> str:
     scan = _scan_clean_candidates(engine)
     if scan["error"]:
@@ -2514,9 +1771,9 @@ def _preset_show_text(tokens: list[str], engine) -> str:
         f"policy_path: {preset.policy_path}",
         f"benchmark_version: {provenance.get('benchmark_version', '(unknown)')}",
         f"fixture_suite: {fixture_suite}",
-        f"score: {metric_summary.get('score', '(unknown)')}",
-        f"baseline_score: {metric_summary.get('baseline_score', '(unknown)')}",
-        f"retrieval_canary_recall: {metric_summary.get('retrieval_canary_recall', '(unknown)')}",
+        f"evidence: {provenance.get('evidence', '(unknown)')}",  # names the comparison arm of baseline_*
+        *(f"{key}: {value}" for key, value in metric_summary.items()),  # #1126: the preset's own recorded metrics
+        *([] if metric_summary else ["metric_summary: (none recorded for this preset)"]),
         f"applies_to: {applies_to}",
         "runtime_env:",
     ]
@@ -2546,7 +1803,7 @@ def _preset_suggest_text(engine) -> str:
     explicit = explicit_operator_overrides()
     invalid = invalid_operator_overrides()
     invalid_text = ", ".join(
-        f"{env_var}={os.environ.get(env_var, '')}" for env_var in sorted(invalid.values())
+        f"{env_var}={lcm_env_get(env_var, '')}" for env_var in sorted(invalid.values())
     ) if invalid else "(none)"
     lines.extend([
         f"suggested_preset: {preset.name}",
@@ -2636,7 +1893,7 @@ def _preset_text(tokens: list[str], engine) -> str:
 def _rollups_status_text(engine) -> str:
     # Import lazily to avoid making the slash-command module part of the tool
     # module's import path while still guaranteeing both surfaces use one shape.
-    from .tools import _temporal_rollups_status
+    from .inspect_tools import _temporal_rollups_status
 
     status = _temporal_rollups_status(engine)
     lines = [
@@ -2997,7 +2254,7 @@ def _resolve_storage_dtype(config, override: str | None = None) -> str:
         if override is not None
         else getattr(config, "embedding_storage_dtype", "float32")
     ).strip().lower()
-    return "int8" if value == "int8" else "float32"
+    return value if value in config_choices.EMBEDDING_STORAGE_DTYPES else "float32"
 
 
 def _resolve_store_dim(config, provider_dim: int, override: int | None = None) -> int:
@@ -3959,7 +3216,7 @@ def _embedding_backfill_options(
             continue
         if token == "--dtype" and index + 1 < len(tokens) and not seen_dtype:
             expected_dtype = tokens[index + 1].lower()
-            if expected_dtype not in {"float32", "int8"}:
+            if expected_dtype not in config_choices.EMBEDDING_STORAGE_DTYPES:
                 return "`--dtype` must be one of `float32` or `int8`."
             seen_dtype = True
             index += 2
@@ -4112,11 +3369,26 @@ def _embedding_backfill_report(
     return "\n".join(lines)
 
 
-def _provider_document_batches(provider, texts: list[str], *, before_dispatch):
+def _embedding_batches_until_stopped(batches, stop_event):
+    """Check before advancing a provider generator, never during publication."""
+    batches = iter(batches)
+    while stop_event is None or not stop_event.is_set():
+        try:
+            batch = next(batches)
+        except StopIteration:
+            return
+        yield batch
+
+
+def _provider_document_batches(provider, texts: list[str], *, before_dispatch, stop_event=None):
     """Yield accepted provider requests, adapting legacy deterministic fakes."""
     method = getattr(provider, "embed_document_batches", None)
     if callable(method):
-        yield from method(texts, before_dispatch=before_dispatch)
+        yield from _embedding_batches_until_stopped(
+            method(texts, before_dispatch=before_dispatch), stop_event,
+        )
+        return
+    if stop_event is not None and stop_event.is_set():
         return
     before_dispatch(tuple(range(len(texts))))
     vectors = provider.embed_documents(texts)
@@ -4187,7 +3459,7 @@ def _prepare_embedding_provider_documents(
 
 
 def _provider_chunk_document_batches(
-    provider, batch, chunk_meta, *, before_dispatch
+    provider, batch, chunk_meta, *, before_dispatch, stop_event=None
 ):
     """Yield accepted provider requests for a chunk backfill batch.
 
@@ -4203,12 +3475,12 @@ def _provider_chunk_document_batches(
             [(index, batch[index][1]) for index in group_indexes]
             for group_indexes in group_by_store_id(store_ids)
         ]
-        yield from provider.embed_chunk_group_batches(
-            groups, before_dispatch=before_dispatch
+        yield from _embedding_batches_until_stopped(
+            provider.embed_chunk_group_batches(groups, before_dispatch=before_dispatch), stop_event,
         )
         return
     yield from _provider_document_batches(
-        provider, [item[1] for item in batch], before_dispatch=before_dispatch
+        provider, [item[1] for item in batch], before_dispatch=before_dispatch, stop_event=stop_event,
     )
 
 
@@ -4262,9 +3534,27 @@ def _embedding_backfill_summary_text(
     return str(result) if isinstance(result, str) else _embedding_backfill_report(**result)
 
 
+def _summary_backfill_estimates(
+    *, documents: list[tuple[str, str, int]], provider_name, config,
+) -> tuple[int, int, int]:
+    est_tokens = sum(document[2] for document in documents)
+    est_cost_tokens = sum(
+        document[2]
+        for document in documents
+        if provider_name.lower() != "voyage"
+        or document[2] <= _VOYAGE_MAX_DOCUMENT_TOKENS
+    )
+    est_batches = _embedding_batch_estimate(
+        provider_name,
+        [document[2] for document in documents],
+        getattr(config, "embedding_max_batch_items", None),
+    )
+    return est_tokens, est_cost_tokens, est_batches
+
+
 def _embedding_backfill_summary_run(
     config, db_path, *, apply: bool, limit: int, retry_uncertain: bool,
-    include_next_hint: bool = True, expected_dtype: str | None = None,
+    include_next_hint: bool = True, expected_dtype: str | None = None, stop_event=None,
 ) -> str | dict[str, Any]:
     """Summary backfill core: refusal text, or the report fields (#1014).
 
@@ -4327,21 +3617,6 @@ def _embedding_backfill_summary_run(
     finally:
         read_conn.close()
 
-    def _estimates(documents: list[tuple[str, str, int]]) -> tuple[int, int, int]:
-        est_tokens = sum(document[2] for document in documents)
-        est_cost_tokens = sum(
-            document[2]
-            for document in documents
-            if provider_name.lower() != "voyage"
-            or document[2] <= _VOYAGE_MAX_DOCUMENT_TOKENS
-        )
-        est_batches = _embedding_batch_estimate(
-            provider_name,
-            [document[2] for document in documents],
-            getattr(config, "embedding_max_batch_items", None),
-        )
-        return est_tokens, est_cost_tokens, est_batches
-
     if not apply:
         raw_documents = [
             (str(row["node_id"]), str(row["summary"]), count_tokens(row["summary"]))
@@ -4366,7 +3641,9 @@ def _embedding_backfill_summary_run(
         )
         if privacy_withheld:
             privacy_error = None
-        estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
+        estimated_tokens, estimated_cost_tokens, estimated_batches = _summary_backfill_estimates(
+            documents=documents, provider_name=provider_name, config=config,
+        )
         return dict(
             mode=mode,
             status="refused" if privacy_error else "dry-run",
@@ -4499,6 +3776,9 @@ def _embedding_backfill_summary_run(
                 getattr(config, "embedding_max_batch_items", None)
             )
             for offset in range(0, len(documents), batch_size):
+                if stop_event is not None and stop_event.is_set():
+                    stop_reason = "process_exit"
+                    break
                 # Renew the heartbeat lease; if it was stolen (TTL lapsed and a
                 # second owner took over), stop rather than write under a lease
                 # we no longer hold.
@@ -4534,16 +3814,9 @@ def _embedding_backfill_summary_run(
 
                 def before_dispatch(indexes: tuple[int, ...]) -> None:
                     nonlocal latest_request_id
-                    normalized = tuple(int(index) for index in indexes)
-                    if (
-                        not normalized
-                        or len(set(normalized)) != len(normalized)
-                        or any(index < 0 or index >= len(batch) for index in normalized)
-                        or any(index in request_by_index for index in normalized)
-                    ):
-                        raise EmbeddingProviderError(
-                            "provider dispatched invalid or duplicate document indexes"
-                        )
+                    normalized = _normalize_summary_backfill_indexes(
+                        indexes=indexes, batch=batch, request_by_index=request_by_index,
+                    )
                     if privacy_revision is not None:
                         try:
                             validate_embedding_privacy_dispatch(
@@ -4577,7 +3850,7 @@ def _embedding_backfill_summary_run(
                     for accepted_batch in _provider_document_batches(
                         provider,
                         [item[1] for item in batch],
-                        before_dispatch=before_dispatch,
+                        before_dispatch=before_dispatch, stop_event=stop_event,
                     ):
                         if len(accepted_batch.indexes) != len(accepted_batch.vectors):
                             raise EmbeddingProviderError(
@@ -4679,6 +3952,19 @@ def _embedding_backfill_summary_run(
                         if lease_lost or identity_superseded:
                             break
                     if lease_lost or identity_superseded:
+                        break
+                    if stop_event is not None and stop_event.is_set():
+                        stop_reason = "process_exit"
+                        # The accepted batch is committed. Only un-dispatched
+                        # claims may be cleared; ordinary discovery resumes them.
+                        for index, item in enumerate(batch):
+                            if index not in request_by_index and not _owned_inflight_transition(
+                                conn, identity, lease, None, embedded_id=item[0],
+                                authorized_uncertain_ids=batch_authorized_ids,
+                            ):
+                                lease_lost = True
+                                stop_reason = "lease_lost"
+                                break
                         break
                     skipped_indexes = {
                         int(index)
@@ -4801,7 +4087,9 @@ def _embedding_backfill_summary_run(
         skipped=len(skipped),
         privacy_withheld=privacy_withheld,
     )
-    estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
+    estimated_tokens, estimated_cost_tokens, estimated_batches = _summary_backfill_estimates(
+        documents=documents, provider_name=provider_name, config=config,
+    )
     return dict(
         mode=mode,
         status=status,
@@ -4827,6 +4115,24 @@ def _embedding_backfill_summary_run(
         privacy_blocked=privacy_blocked,
         privacy_withheld=privacy_withheld,
     )
+
+
+def _normalize_summary_backfill_indexes(
+    *, indexes: tuple[int, ...], batch: list[tuple[str, str, int]],
+    request_by_index: dict[int, str],
+) -> tuple[int, ...]:
+    """Normalize and validate one summary backfill request's page indexes."""
+    normalized = tuple(int(index) for index in indexes)
+    if (
+        not normalized
+        or len(set(normalized)) != len(normalized)
+        or any(index < 0 or index >= len(batch) for index in normalized)
+        or any(index in request_by_index for index in normalized)
+    ):
+        raise EmbeddingProviderError(
+            "provider dispatched invalid or duplicate document indexes"
+        )
+    return normalized
 
 
 def _embedding_backfill_remaining(
@@ -4932,6 +4238,8 @@ def _chunk_pending_rows(
     limit: int,
     *,
     incremental: bool = False,
+    record_progress: bool = False,
+    include_boundaries: bool = True,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
     """Discover policy-chunked messages whose chunks are not yet embedded.
 
@@ -4942,14 +4250,21 @@ def _chunk_pending_rows(
     as ``(chunk_id, text, tokens)``, and a metadata map for the selected chunks.
 
     ``incremental`` (the #1014 automatic pass) reads the frontier of
-    ``_chunk_frontier_rows``: new messages first, then history newest first.
+    ``_chunk_frontier_rows``: new messages first, then revision gaps and history
+    newest first. ``record_progress`` is only used under the writer's lease.
     It stops at a message boundary once ``limit`` chunks are found, so its cost
     tracks new messages rather than the store; the returned total then counts
     only what it saw.
     """
     if incremental:
-        already = inflight = set()
-        rows = _chunk_frontier_rows(conn, identity_hash, policy=policy)
+        seen_rows = set()
+        already = set()
+        inflight = _chunk_inflight_ids(conn, identity_hash)
+        boundary_ids = set(_chunk_cursor(conn, identity_hash) or ()) if include_boundaries else set()
+        rows = _chunk_frontier_rows(
+            conn, identity_hash, policy=policy, record_progress=record_progress,
+            include_boundaries=include_boundaries,
+        )
     else:
         already = _chunk_embedded_ids(conn, identity_hash)
         inflight = _chunk_inflight_ids(conn, identity_hash)
@@ -4962,6 +4277,19 @@ def _chunk_pending_rows(
     for row in rows:
         if incremental and len(documents) >= limit:
             break
+        if incremental:
+            # A cursor boundary can also be a revision-gap row.
+            if row[0] in seen_rows:
+                continue
+            seen_rows.add(row[0])
+            already = set()
+            if row[0] in boundary_ids:
+                # Exit may have published only the first batch of this message.
+                # Revisit its remaining chunks without re-embedding committed ones.
+                already = {str(item[0]) for item in conn.execute(
+                    "SELECT chunk_id FROM lcm_chunk_meta WHERE store_id=? AND identity_hash=?",
+                    (row[0], identity_hash),
+                )}
         for chunk in chunk_message(row[0], row[1], row[2], policy=policy):
             chunk_id = chunk.chunk_id
             if chunk_id in already or chunk_id in inflight:
@@ -5009,31 +4337,181 @@ def _chunk_cursor(
 _CHUNK_HISTORY_SCAN_MESSAGES = 2_000  # history rows one discovery reads; rows that never chunk are re-read
 
 
+def _chunk_policy_revision(conn: sqlite3.Connection, identity_hash: str | None) -> int:
+    """An unstamped populated identity used revision 1; an empty one needs no fill."""
+    if not identity_hash:
+        return CHUNK_POLICY_REVISION
+    row = conn.execute(
+        "SELECT value FROM metadata WHERE key = ?",
+        (f"chunk_policy_revision:{identity_hash}",),
+    ).fetchone()
+    if row is not None:
+        return int(row[0])
+    try:
+        populated = conn.execute(
+            "SELECT 1 FROM lcm_chunk_meta WHERE identity_hash = ? LIMIT 1", (identity_hash,)
+        ).fetchone()
+    except sqlite3.OperationalError:
+        populated = None  # chunk tables not created yet
+    return 1 if populated else CHUNK_POLICY_REVISION
+
+
+def _record_chunk_policy_revision(conn: sqlite3.Connection, identity_hash: str, through: int) -> None:
+    # Keep the revision an integer for older readers; coverage has its own key.
+    conn.executemany(
+        "INSERT INTO metadata(key, value) VALUES(?, ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value != excluded.value",
+        [(f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)),
+         (f"chunk_policy_revision_through:{identity_hash}", str(through))],
+    )
+
+
+def _chunk_gapfill_bounds(conn, identity_hash, bounds, revision):
+    """A revision proves only its recorded range; legacy markers need one full check."""
+    if bounds is None:
+        return None
+    low, high = bounds
+    if revision >= CHUNK_POLICY_REVISION:
+        through = conn.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            (f"chunk_policy_revision_through:{identity_hash}",),
+        ).fetchone()
+        if through is not None:
+            try:
+                low = max(low, int(through[0]) + 1)
+            except (TypeError, ValueError):
+                pass  # An unreadable bound proves nothing; revalidate the whole cursor range.
+    return (low, high) if low <= high else None
+
+
+def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_progress=False):
+    """Scan new territory once; revisit unpublished candidates by id until covered."""
+    low, high = bounds
+    scan_key = f"chunk_gapfill_scan:{identity_hash}"
+    saved = conn.execute("SELECT value FROM metadata WHERE key = ?", (scan_key,)).fetchone()
+    try:
+        scan = json.loads(saved[0]) if saved else {}
+        valid = (
+            isinstance(scan, dict)
+            and type(scan.get("revision")) is int and type(scan.get("high")) is int
+            and isinstance(scan.get("policy"), str)
+            and ("pending" not in scan or (isinstance(scan["pending"], list)
+                 and all(type(i) is int for i in scan["pending"])))
+            and ("ceiling" not in scan or type(scan["ceiling"]) is int)
+        )
+        if not valid:
+            scan = {}
+    except Exception:
+        scan = {}  # Unusable progress metadata requires the full gap revalidation.
+    if scan.get("revision") != CHUNK_POLICY_REVISION or scan.get("policy") != policy:
+        scan = {}
+    pending = []
+    ceiling = high + 1
+    if "pending" in scan and scan["high"] <= high:
+        ids = [i for i in scan["pending"] if i >= low]
+        for start in range(0, len(ids), 500):
+            batch = ids[start:start + 500]
+            pending.extend(conn.execute(
+                "SELECT store_id, role, content FROM messages AS p "
+                f"WHERE store_id IN ({','.join('?' for _ in batch)}) "
+                "AND NOT EXISTS (SELECT 1 FROM lcm_chunk_meta AS c "
+                "WHERE c.store_id = p.store_id AND c.identity_hash = ?)",
+                (*batch, identity_hash),
+            ).fetchall())
+        low = max(low, scan["high"] + 1)
+    elif scan.get("high") == high:
+        # Only our own scan can certify a zero-chunk prefix. Older writers can
+        # move the legacy skip key without updating any of our progress keys.
+        ceiling = scan.get("ceiling", ceiling)
+    roles = "'assistant', 'user', 'tool'" if policy == "heads" else "'assistant', 'user'"
+    rows = conn.execute(
+        f"SELECT store_id, role, content FROM messages AS m "
+        f"WHERE store_id >= ? AND store_id <= ? AND store_id < ? "
+        f"AND lower(trim(role)) IN ({roles}) AND trim(COALESCE(content, '')) != '' "
+        "AND NOT EXISTS (SELECT 1 FROM lcm_chunk_meta AS c "
+        "WHERE c.store_id = m.store_id AND c.identity_hash = ?) "
+        "ORDER BY store_id DESC LIMIT ?",
+        (low, high, ceiling, identity_hash, limit),
+    ).fetchall() if low <= high else []
+    candidates = []
+    for row in sorted([*rows, *pending], key=lambda r: r[0], reverse=True):
+        if any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
+            candidates.append(row)
+        elif not candidates:
+            ceiling = min(ceiling, row[0])
+    if record_progress:
+        progress = {"revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high}
+        values = []
+        if len(rows) < limit and len(candidates) < limit:
+            # Persist every candidate before yielding: selection is not publication,
+            # and interruption must leave all unpublished rows recoverable.
+            progress["pending"] = [r[0] for r in candidates]
+            through = min(progress["pending"], default=high + 1) - 1
+            values.append((f"chunk_policy_revision_through:{identity_hash}", str(through)))
+            if not candidates:
+                values.append((f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)))
+        elif ceiling < high + 1:
+            # A LIMIT-sized result does not prove the whole range.
+            progress["ceiling"] = ceiling
+        else:
+            progress = None
+        if progress is not None:
+            values.append((scan_key, json.dumps(progress)))
+            conn.execute(
+                "INSERT INTO metadata(key, value) VALUES " + ",".join("(?, ?)" for _ in values)
+                + " ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value != excluded.value",
+                tuple(item for pair in values for item in pair),
+            )
+    yield from candidates
+
+
 def _chunk_frontier_rows(
-    conn: sqlite3.Connection, identity_hash: str | None, history_limit: int | None = None, policy: str = ""
+    conn: sqlite3.Connection, identity_hash: str | None, history_limit: int | None = None, policy: str = "",
+    *, record_progress: bool = False, include_boundaries: bool = False,
 ):
-    """Messages the automatic chunk pass has not reached. New messages come first, oldest first; then up to
+    """Messages the automatic chunk pass has not reached. New messages come first, oldest first; then missing
+    eligible rows inside unproven cursor bounds, newest first and bounded; then up to
     ``_CHUNK_HISTORY_SCAN_MESSAGES`` of the history below the oldest embedded message, newest first. A store with no
     chunk under the identity reads that many of its newest messages, so turning embeddings on for an existing store
     covers recent messages before old history; `/lcm embed backfill` reaches the rest in one go. Under the
     conversational policy only non-empty user and assistant rows can chunk, so the bound counts only those: a long
     run of tool rows cannot hold the walk in place."""
     history_limit = _CHUNK_HISTORY_SCAN_MESSAGES if history_limit is None else history_limit
+    policy = normalize_content_policy(policy)
+    revision = _chunk_policy_revision(conn, identity_hash)
     eligible = ""
     if normalize_content_policy(policy) == "conversational":
         roles = ", ".join(f"'{role}'" for role in sorted(_CONVERSATIONAL_ROLES))
         eligible = f" AND lower(trim(role)) IN ({roles}) AND COALESCE(content, '') != ''"
     bounds = _chunk_cursor(conn, identity_hash)
     if bounds is None:
+        if record_progress and identity_hash and revision >= CHUNK_POLICY_REVISION:
+            _record_chunk_policy_revision(conn, identity_hash, 0)
         yield from conn.execute(
             f"SELECT store_id, role, content FROM messages WHERE 1{eligible} ORDER BY store_id DESC LIMIT ?",
             (history_limit,),
         )
         return
     low, high = bounds
+    # A stop at a provider boundary can leave either frontier message partial.
+    # The caller filters its already-published/in-flight chunks by exact id.
+    if include_boundaries:
+        yield from conn.execute(
+            f"SELECT store_id, role, content FROM messages WHERE store_id = ?{eligible}", (high,)
+        )
     yield from conn.execute(
         f"SELECT store_id, role, content FROM messages WHERE store_id > ?{eligible} ORDER BY store_id", (high,)
     )
+    gap_bounds = _chunk_gapfill_bounds(conn, identity_hash, bounds, revision) if policy != "full" else None
+    if gap_bounds is not None:
+        yield from _chunk_gapfill_rows(
+            conn, identity_hash, gap_bounds, policy, min(history_limit, _CHUNK_HISTORY_SCAN_MESSAGES),
+            record_progress=record_progress,
+        )
+    if include_boundaries and low != high:
+        yield from conn.execute(
+            f"SELECT store_id, role, content FROM messages WHERE store_id = ?{eligible}", (low,)
+        )
     yield from conn.execute(
         f"SELECT store_id, role, content FROM messages WHERE store_id < ?{eligible} ORDER BY store_id DESC LIMIT ?",
         (low, history_limit),
@@ -5046,17 +4524,25 @@ _STATUS_CHUNK_SCAN_MESSAGES = 2_000  # /lcm status chunks at most this many mess
 def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None, policy: str) -> str:
     """The automatic pass's pending chunks, read along its frontier and bounded for the status page."""
     total = 0
+    gap_bounds = _chunk_gapfill_bounds(
+        conn, identity_hash, _chunk_cursor(conn, identity_hash), _chunk_policy_revision(conn, identity_hash),
+    ) if normalize_content_policy(policy) != "full" else None
+    suffix = ""
+    inflight = _chunk_inflight_ids(conn, identity_hash) if gap_bounds is not None else set()
     rows = _chunk_frontier_rows(
         conn, identity_hash, history_limit=_STATUS_CHUNK_SCAN_MESSAGES + 1, policy=policy
     )
     for scanned, row in enumerate(rows):
         if scanned >= _STATUS_CHUNK_SCAN_MESSAGES:
-            return f"{total}+"
-        total += sum(
+            return f"{total}+{suffix}"
+        pending = sum(
             1 for chunk in chunk_message(row[0], row[1], row[2], policy=policy)
-            if chunk.char_end > chunk.char_start
+            if chunk.char_end > chunk.char_start and chunk.chunk_id not in inflight
         )
-    return str(total)
+        total += pending
+        if pending and gap_bounds is not None and gap_bounds[0] <= row[0] <= gap_bounds[1]:
+            suffix = " (gap-fill)"
+    return f"{total}{suffix}"
 
 
 def _rebuild_chunk_document(
@@ -5139,13 +4625,16 @@ def _chunk_authorized_uncertain_rows(
 
 def _chunk_backfill_remaining(
     db_path, identity_hash: str | None, policy: str, pending: int, embedded: int,
-    incremental: bool = False,
+    incremental: bool = False, *, include_boundaries: bool = False,
 ) -> tuple[int, int, int]:
     try:
         check_conn = _embedding_read_connection(db_path)
         try:
             remaining, _, _ = _chunk_pending_rows(
-                check_conn, identity_hash, policy, 1, incremental=incremental
+                check_conn, identity_hash, policy, 1, incremental=incremental,
+                # Selection already revisited the boundaries. Only an exit
+                # interrupt can leave part of this pass's message unfinished.
+                include_boundaries=include_boundaries,
             )
             if identity_hash:
                 try:
@@ -5197,10 +4686,40 @@ def _chunk_backfill_text(
     return str(result) if isinstance(result, str) else _embedding_backfill_report(**result)
 
 
+def _chunk_backfill_estimates(
+    *, documents: list[tuple[str, str, int]], provider_name, model, config,
+) -> tuple[int, int, int]:
+    # The contextualized (voyage-context) chunk apply path groups a message's
+    # chunks into one document, skips a chunk only above the 32K per-chunk
+    # context cap, and plans requests by the context budgets. Model that
+    # exactly so the cost/consent preview matches apply (FIX 4). Plain-voyage
+    # and local providers keep the flat per-document estimate.
+    if (
+        embedding_provider_id(provider_name.strip().lower()) == "voyage"
+        and _is_voyage_context_model(model)
+    ):
+        return _chunk_context_estimates(
+            documents, getattr(config, "embedding_max_batch_items", None)
+        )
+    est_tokens = sum(document[2] for document in documents)
+    est_cost_tokens = sum(
+        document[2]
+        for document in documents
+        if provider_name.lower() != "voyage"
+        or document[2] <= _VOYAGE_MAX_DOCUMENT_TOKENS
+    )
+    est_batches = _embedding_batch_estimate(
+        provider_name,
+        [document[2] for document in documents],
+        getattr(config, "embedding_max_batch_items", None),
+    )
+    return est_tokens, est_cost_tokens, est_batches
+
+
 def _chunk_backfill_run(
     config, db_path, *, apply: bool, limit: int, retry_uncertain: bool, policy: str,
     confirm_raw_text: bool = False, include_next_hint: bool = True,
-    expected_dtype: str | None = None, incremental: bool = False,
+    expected_dtype: str | None = None, incremental: bool = False, stop_event=None,
 ) -> str | dict[str, Any]:
     """Chunk backfill core: refusal text, or the report fields (#1014).
 
@@ -5272,33 +4791,6 @@ def _chunk_backfill_run(
     finally:
         read_conn.close()
 
-    def _estimates(documents: list[tuple[str, str, int]]) -> tuple[int, int, int]:
-        # The contextualized (voyage-context) chunk apply path groups a message's
-        # chunks into one document, skips a chunk only above the 32K per-chunk
-        # context cap, and plans requests by the context budgets. Model that
-        # exactly so the cost/consent preview matches apply (FIX 4). Plain-voyage
-        # and local providers keep the flat per-document estimate.
-        if (
-            provider_name.strip().lower() in {"voyage", "voyageai"}
-            and _is_voyage_context_model(model)
-        ):
-            return _chunk_context_estimates(
-                documents, getattr(config, "embedding_max_batch_items", None)
-            )
-        est_tokens = sum(document[2] for document in documents)
-        est_cost_tokens = sum(
-            document[2]
-            for document in documents
-            if provider_name.lower() != "voyage"
-            or document[2] <= _VOYAGE_MAX_DOCUMENT_TOKENS
-        )
-        est_batches = _embedding_batch_estimate(
-            provider_name,
-            [document[2] for document in documents],
-            getattr(config, "embedding_max_batch_items", None),
-        )
-        return est_tokens, est_cost_tokens, est_batches
-
     if not apply:
         expected_privacy_revision = profile_revision
         if (
@@ -5330,8 +4822,8 @@ def _chunk_backfill_run(
         )
         if privacy_withheld:
             privacy_error = None
-        estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(
-            documents
+        estimated_tokens, estimated_cost_tokens, estimated_batches = _chunk_backfill_estimates(
+            documents=documents, provider_name=provider_name, model=model, config=config,
         )
         return dict(
             mode=mode,
@@ -5440,7 +4932,8 @@ def _chunk_backfill_run(
             authorized_uncertain_ids = {row[0] for row in rows}
         else:
             pending, rows, chunk_meta = _chunk_pending_rows(
-                conn, identity, policy, limit, incremental=incremental
+                conn, identity, policy, limit, incremental=incremental,
+                record_progress=incremental,
             )
             authorized_uncertain_ids = set()
         (
@@ -5488,6 +4981,9 @@ def _chunk_backfill_run(
                 getattr(config, "embedding_max_batch_items", None)
             )
             for offset in range(0, len(documents), batch_size):
+                if stop_event is not None and stop_event.is_set():
+                    stop_reason = "process_exit"
+                    break
                 if not lease.renew():
                     lease_lost = True
                     stop_reason = "lease_lost"
@@ -5549,7 +5045,7 @@ def _chunk_backfill_run(
                     accepted_indexes: set[int] = set()
                     for accepted_batch in _provider_chunk_document_batches(
                         provider, batch, chunk_meta,
-                        before_dispatch=before_dispatch,
+                        before_dispatch=before_dispatch, stop_event=stop_event,
                     ):
                         if len(accepted_batch.indexes) != len(accepted_batch.vectors):
                             raise EmbeddingProviderError(
@@ -5642,6 +5138,19 @@ def _chunk_backfill_run(
                             break
                     if lease_lost or identity_superseded:
                         break
+                    if stop_event is not None and stop_event.is_set():
+                        stop_reason = "process_exit"
+                        # The accepted batch is committed. Only un-dispatched
+                        # claims may be cleared; ordinary discovery resumes them.
+                        for index, item in enumerate(batch):
+                            if index not in request_by_index and not _owned_inflight_transition(
+                                conn, identity, lease, None, embedded_id=item[0],
+                                authorized_uncertain_ids=batch_authorized_ids,
+                            ):
+                                lease_lost = True
+                                stop_reason = "lease_lost"
+                                break
+                        break
                     skipped_indexes = {
                         int(index)
                         for index in getattr(provider, "last_skipped_documents", [])
@@ -5716,6 +5225,12 @@ def _chunk_backfill_run(
                         error = str(exc)
                         stop_reason = "privacy_refused"
                         break
+        if (
+            not incremental and not retry_uncertain and pending == embedded
+            and not error and not failed and not skipped and not stop_reason
+            and not _chunk_inflight_ids(conn, identity)
+        ):
+            _record_chunk_policy_revision(conn, identity, (_chunk_cursor(conn, identity) or (0, 0))[1])
     except _BackfillLeaseLost:
         lease_lost = True
         stop_reason = "lease_lost"
@@ -5734,7 +5249,8 @@ def _chunk_backfill_run(
             store.close()
 
     remaining, in_flight_count, uncertain_count = _chunk_backfill_remaining(
-        db_path, identity, policy, pending, embedded, incremental
+        db_path, identity, policy, pending, embedded, incremental,
+        include_boundaries=stop_reason == "process_exit",
     )
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
@@ -5743,7 +5259,9 @@ def _chunk_backfill_run(
         failed=failed, uncertain=uncertain_count, skipped=len(skipped),
         privacy_withheld=privacy_withheld,
     )
-    estimated_tokens, estimated_cost_tokens, estimated_batches = _estimates(documents)
+    estimated_tokens, estimated_cost_tokens, estimated_batches = _chunk_backfill_estimates(
+        documents=documents, provider_name=provider_name, model=model, config=config,
+    )
     return dict(
         mode=mode, status=status, provider=provider_name, model=model,
         pending=pending, selected=len(documents) + privacy_withheld,
@@ -5795,124 +5313,35 @@ def handle_lcm_command(
     context_conversation_id: str = "",
 ) -> str:
     tokens = [part.strip() for part in (raw_args or "").strip().split() if part.strip()]
-    profiles_known = bool(session_profile and engine_profile)
-    if profiles_known and session_profile != engine_profile:
-        return (
-            "The command could not resolve this session's LCM engine in this process; "
-            "run it from a process launched for this profile."
+    invocation = CommandInvocation(
+        command=tuple(tokens),
+        session_engine_resolved=session_engine_resolved,
+        session_context_present=session_context_present,
+        session_profile=session_profile, engine_profile=engine_profile,
+        context_session_id=context_session_id,
+        context_conversation_id=context_conversation_id,
+    )
+    decision = authorize(invocation)
+    if decision is Decision.READ_BINDINGS:
+        invocation = dataclasses.replace(
+            invocation,
+            bound_session_id=str(getattr(engine, "_session_id", "") or ""),
+            bound_conversation_id=str(getattr(engine, "_conversation_id", "") or ""),
         )
-    if session_context_present:
-        path = " ".join(part.lower() for part in tokens) or "status"
-        if path.startswith("preset show "):
-            path = "preset show"
-        bound_session_id = str(getattr(engine, "_session_id", "") or "")
-        bound_conversation_id = str(getattr(engine, "_conversation_id", "") or "")
-        profiles_equal = profiles_known and session_profile == engine_profile
-        bound_to_invoker = bool(
-            (context_session_id and bound_session_id == context_session_id)
-            or (context_conversation_id and bound_conversation_id == context_conversation_id)
+        decision = authorize(invocation)
+    if decision is Decision.CHECK_RESIDENT:
+        invocation = dataclasses.replace(
+            invocation, resident_engine_present=has_resident_lcm_engine(),
         )
-        # Session-first, like the resolver: the conversation key decides only
-        # when the invocation carries no session id.
-        bound_to_invoker_strict = bool(
-            bound_session_id == context_session_id if context_session_id
-            else context_conversation_id and bound_conversation_id == context_conversation_id
-        )
-        if (
-            path not in READ_LCM_SUBCOMMANDS and not (
-                (session_engine_resolved and (profiles_equal or (not profiles_known and bound_to_invoker)))
-                or (not session_engine_resolved and profiles_equal and (
-                    bound_to_invoker_strict or (
-                        not bound_session_id and not bound_conversation_id and not has_resident_lcm_engine()
-                    )
-                ))
-            )
-        ):
-            return (
-                "The command could not prove ownership of this session's LCM engine; "
-                "retry after the session has started."
-            )
+        decision = authorize(invocation)
+    if decision in (Decision.PROFILE_MISMATCH, Decision.OWNERSHIP_UNPROVEN):
+        return decision.value
     if not session_engine_resolved:
         result = handle_lcm_command(raw_args, engine)
-        if profiles_known and session_profile == engine_profile:
-            return result
-        return result + f"\nstore: {engine._store.db_path}"
+        if decision is Decision.ALLOW_WITH_STORE:
+            return result + f"\nstore: {engine._store.db_path}"
+        return result
     if not tokens:
         return _status_text(engine)
 
-    head = tokens[0].lower()
-    rest = tokens[1:]
-
-    if head == "status":
-        if rest:
-            return _help_text("`/lcm status` does not accept extra arguments.")
-        return _status_text(engine)
-
-    if head == "doctor":
-        if not rest:
-            return _doctor_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "clean":
-            return _doctor_clean_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "repair":
-            return _doctor_repair_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "source":
-            return _doctor_source_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "retention":
-            return _doctor_retention_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "clean" and rest[1].lower() == "apply":
-            return _doctor_clean_apply_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "clean" and rest[1].lower() == "lifecycle":
-            return _doctor_clean_lifecycle_text(engine)
-        if len(rest) == 3 and rest[0].lower() == "clean" and rest[1].lower() == "lifecycle" and rest[2].lower() == "apply":
-            return _doctor_clean_lifecycle_apply_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "apply":
-            return _doctor_repair_apply_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "level3":
-            return _doctor_repair_level3_text(engine)
-        if len(rest) == 3 and [part.lower() for part in rest] == ["repair", "level3", "apply"]:
-            return _doctor_repair_level3_apply_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "repair" and rest[1].lower() == "schema-stamp":
-            return _doctor_repair_schema_stamp_text(engine)
-        if (
-            len(rest) == 3
-            and rest[0].lower() == "repair"
-            and rest[1].lower() == "schema-stamp"
-            and rest[2].lower() == "apply"
-        ):
-            return _doctor_repair_schema_stamp_apply_text(engine)
-        if len(rest) == 2 and rest[0].lower() == "source" and rest[1].lower() == "apply":
-            return _doctor_source_apply_text(engine)
-        return _help_text("`/lcm doctor` currently supports `clean`, `clean apply`, `clean lifecycle`, `clean lifecycle apply`, `repair`, `repair apply`, `repair schema-stamp`, `repair schema-stamp apply`, `source`, `source apply`, and `retention` as extra subcommands, plus `repair level3` and `repair level3 apply`.")
-
-    if head == "backup":
-        if rest:
-            return _help_text("`/lcm backup` does not accept extra arguments.")
-        return _backup_text(engine)
-
-    if head == "rotate":
-        if not rest:
-            return _rotate_text(engine)
-        if len(rest) == 1 and rest[0].lower() == "apply":
-            return _rotate_apply_text(engine)
-        return _help_text("`/lcm rotate` accepts an optional `apply` subcommand.")
-
-    if head == "rollups":
-        return _rollups_text(rest, engine)
-
-    if head == "assertions":
-        return _assertions_text(rest, engine)
-
-    if head == "preset":
-        return _preset_text(rest, engine)
-
-    if head == "embed":
-        if len(rest) == 1 and rest[0].lower() == "warmup":
-            return _embedding_warmup_text(engine)
-        if rest and rest[0].lower() == "backfill":
-            return _embedding_backfill_text(rest[1:], engine)
-        return _help_text("`/lcm embed` requires the `warmup` or `backfill` subcommand.")
-
-    if head == "help":
-        return _help_text()
-
-    return _help_text(f"Unknown subcommand: {tokens[0]}")
+    return route(tokens[0], tokens[1:], engine, globals())

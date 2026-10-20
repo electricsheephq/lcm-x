@@ -1,0 +1,14 @@
+--- a/survival_fit.py
++++ b/survival_fit.py
+@@ -461,10 +461,8 @@
+         text = normalize_content_value(row.get("content")) or ""
+         if len(text) > 2 * head:
+             text = f"{text[:head]}\n...\n{marker}\n...\n{text[-tail:]}"
+-        elif legacy and text:
++        elif text:
+             text = marker
+-        elif len(text) > head:
+-            text = f"{text[:head]}\n...\n{marker}"
+         calls = row.get("tool_calls")
+         if isinstance(calls, str):
+             try:

@@ -25,6 +25,7 @@ from .db_bootstrap import (
     refuse_schema_version_too_new,
     run_versioned_migrations,
 )
+from .sqlite_session import ConnectionPolicy, open_connection
 
 
 _OWNERSHIP_QUERY_MAX_RANGES = 200
@@ -107,15 +108,16 @@ class LifecycleStateStore:
         self._init_db()
 
     def _init_db(self) -> None:
-        self._conn = sqlite3.connect(
-            str(self.db_path),
-            timeout=30.0,
-            check_same_thread=False,
-            isolation_level=None,
-        )
-        refuse_schema_version_too_new(self._conn)
-        configure_connection(self._conn)
-        self._conn.row_factory = sqlite3.Row
+        open_connection(ConnectionPolicy(
+            database=str(self.db_path),
+            connect_kwargs=(
+                ("timeout", 30.0), ("check_same_thread", False), ("isolation_level", None),
+            ),
+            before_row_factory=(refuse_schema_version_too_new, configure_connection),
+            row_factory=sqlite3.Row,
+            on_open=lambda conn: setattr(self, "_conn", conn),
+            on_setup_error=None,
+        ))
         run_versioned_migrations(self._conn)
         self._conn.commit()
 
@@ -1013,6 +1015,7 @@ class LifecycleStateStore:
         excluded_store_ids: list[int] | None = None,
         filter_exclusion_proofs: dict[int, Any] | None = None,
         carried_ranges: list[tuple[str, int, int]] | None = None,
+        copy_exclusion_proofs: dict[int, int] | None = None,
     ) -> int:
         """Validate and stage one contiguous compaction-frontier advance.
 
@@ -1045,6 +1048,10 @@ class LifecycleStateStore:
                 "Compaction publication coverage overlaps an explicit exclusion"
             )
         exclusion_proofs = filter_exclusion_proofs or {}
+        copy_proofs = {int(c): int(t) for c, t in (copy_exclusion_proofs or {}).items()
+                       if expected_frontier < int(c) <= covered_end}
+        if not set(copy_proofs) <= set(excluded_ids):
+            raise LifecyclePublicationConflictError("Compaction publication copy proof is not excluded")
         allowed_carry_ranges = [
             (str(source_session_id), int(start), int(end))
             for source_session_id, start, end in (carried_ranges or [])
@@ -1060,11 +1067,12 @@ class LifecycleStateStore:
             )
 
         snapshot_ids = sorted(
-            set(all_covered_ids + excluded_ids + list(exclusion_proofs))
+            set(all_covered_ids + excluded_ids + list(exclusion_proofs) + list(copy_proofs.values()))
         )
         snapshot_rows = conn.execute(
             """
-            SELECT m.store_id, m.session_id, m.conversation_id, m.content
+            SELECT m.store_id, m.session_id, m.conversation_id, m.content, m.role,
+                   m.tool_call_id, m.tool_calls, m.tool_name
             FROM json_each(?) AS source
             CROSS JOIN messages AS m
             WHERE m.store_id = source.value
@@ -1091,6 +1099,18 @@ class LifecycleStateStore:
             raise LifecyclePublicationConflictError(
                 "Compaction publication filter exclusion changed"
             )
+        if copy_proofs:
+            twin_ids = sorted(set(copy_proofs.values()))
+            node_covered = {int(row[0]) for row in conn.execute(
+                "SELECT source.value FROM summary_nodes AS node, json_each(node.source_ids) AS source "
+                "WHERE node.source_type='messages' "
+                "AND source.value IN (SELECT value FROM json_each(?))",
+                (str(twin_ids),),
+            ).fetchall()}
+            for copy, twin in copy_proofs.items():
+                if (twin >= copy or tuple(snapshot_by_id[copy][3:]) != tuple(snapshot_by_id[twin][3:])
+                        or twin not in node_covered):
+                    raise LifecyclePublicationConflictError("Compaction publication copy exclusion changed")
         owned_ranges = [(session_id, expected_frontier, covered_end)]
         owned_ranges.extend(
             (source, max(expected_frontier, start), min(covered_end, end))

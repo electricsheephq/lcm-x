@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .config import embedding_provider_id
 from .embedding_provider import _is_loopback_url
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,7 @@ _STATE_LOCK = threading.Lock()
 _LAST_PASS: dict[str, tuple[float, str]] = {}
 _FAILURES = 0
 _FAILURE_WARNED = False
+_STOP_EMBEDDING_MAINTENANCE = threading.Event()
 
 
 def database_identity(db_path: str | Path) -> str:
@@ -65,14 +67,15 @@ def run_incremental_embedding_pass(db_path: str | Path, config: Any, *, breaker:
         outcome, failure = _run_pass(db_path, config, breaker)
     except Exception as exc:
         outcome, failure = "error", str(exc)
+    if outcome == "stopped":
+        logger.info("LCM embedding maintenance stopped for database=%s scope=embeddings", db_path)
     _record(db_path, outcome, failure)
     return outcome
 
 
 def _automatic_chunks_allowed(config: Any, command: Any) -> bool:
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
-    # resolve_provider accepts `fast-embed` for the provider whose id is `fastembed`.
-    provider = {"fast-embed": "fastembed"}.get(provider, provider)
+    provider = embedding_provider_id(provider)
     if not command._is_local_embedding_provider(provider):
         return False
     if provider != "ollama":
@@ -101,8 +104,10 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
     from . import command  # lazy: command imports most of the plugin
     from .embedding_provider import probe_provider_availability
 
+    if _STOP_EMBEDDING_MAINTENANCE.is_set():
+        return "stopped", None
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
-    local = provider in {"fastembed", "fast-embed"}
+    local = embedding_provider_id(provider) == "fastembed"
     read_conn = command._embedding_read_connection(db_path)
     try:
         no_profile = command._embedding_current_profile(read_conn) is None
@@ -128,15 +133,19 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
     )
     corpora = [("summaries", lambda: command._embedding_backfill_summary_run(
         config, db_path, apply=True, limit=limit, retry_uncertain=False,
+        stop_event=_STOP_EMBEDDING_MAINTENANCE,
     ))]
     if _automatic_chunks_allowed(config, command):
         corpora.append(("chunks", lambda: command._chunk_backfill_run(
             config, db_path, apply=True, limit=limit, retry_uncertain=False, policy="",
             incremental=True,
+            stop_event=_STOP_EMBEDDING_MAINTENANCE,
         )))
     outcomes: list[str] = []
     failures: list[str] = []
     for name, run in corpora:
+        if _STOP_EMBEDDING_MAINTENANCE.is_set():
+            return "stopped", None
         result = run()
         if isinstance(result, str):
             if getattr(result, "reason", "") == "lease_held":
@@ -146,6 +155,8 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
                 break
             outcomes.append(f"{name}=refused")
             continue
+        if result["stop_reason"] == "process_exit":
+            return "stopped", None
         failure = _corpus_failure(result)
         if failure is None:
             outcomes.append(f"{name}={result['status']}:{result['embedded']}")

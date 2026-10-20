@@ -19,6 +19,7 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.escalation import SummaryCircuitBreaker
 from hermes_lcm.tokens import count_tokens
+from tests.harness import make_engine
 
 WINDOW = 0.85
 PAD = " alpha beta gamma delta epsilon" * 40  # about 300 tokens per message
@@ -179,7 +180,13 @@ def test_t4_without_a_fit_the_rescue_writes_a_summary_not_a_truncation(tmp_path,
 
 def test_t5_a_fallback_route_that_fits_answers_without_a_rescue(tmp_path, monkeypatch, caplog):
     calls = _install_provider(monkeypatch, refuse_model="small-model")
-    engine = _engine(tmp_path, summary_model="small-model", summary_fallback_models=["big-model"])
+    # Rollups share the provider seam; count only this foreground fallback chain.
+    engine = make_engine(
+        tmp_path, window=200_000, conversation_id="conv", platform="telegram",
+        fresh_tail_count=2, leaf_chunk_tokens=2000, context_threshold=0.001,
+        threshold_full_sweep_enabled=False, summary_model="small-model",
+        summary_fallback_models=["big-model"], temporal_rollups_enabled=False,
+    )
     try:
         _compress(engine, _view(), caplog)
         nodes = engine._dag.get_session_nodes("S", limit=1000)

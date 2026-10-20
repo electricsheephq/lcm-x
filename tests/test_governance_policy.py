@@ -67,6 +67,8 @@ def test_pull_request_template_separates_behavior_and_release_evidence():
     assert "Artifact or redacted trace:" in template
     assert "Proof boundary—what this does not prove:" in template
     assert "## Release-note impact" in template
+    assert "When the hint names `turn-path`" in template
+    assert "`turn_path_probe_packet`" in template
     assert "accepted issue, PR head, checks, reviews, threads, and authorization" in template
     assert "immediately before any authorized GitHub write" in template
 

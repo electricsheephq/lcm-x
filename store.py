@@ -15,11 +15,13 @@ import math
 import sqlite3
 import threading
 import time
+from contextlib import AbstractContextManager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
 
 from .db_bootstrap import (
+    owned_conversation_clause,
     select_conversation_range,
     ExternalContentFtsSpec,
     add_column_if_missing,
@@ -52,6 +54,7 @@ from .search_query import (
     should_apply_directness_rank_adjustment,
 )
 from .message_content import normalize_content_value as _normalize_content_value
+from .sqlite_session import ConnectionPolicy, TransactionOwner, open_connection
 from .sqlite_util import (
     _run_sqlite_write_with_snapshot_retry,
     _temporary_sqlite_busy_timeout,
@@ -336,12 +339,21 @@ class MessageStore:
         # change semantics for single-threaded callers and adds only a single
         # uncontended ``RLock.acquire``/``release`` pair per operation.
         self._write_lock = threading.RLock()
+        self._transaction_owner = TransactionOwner(self._write_lock)
         self._init_db()
 
     def _init_db(self):
-        self._conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
-        refuse_schema_version_too_new(self._conn)
-        configure_connection(self._conn)
+        # #1159: reserve the write lock before FTS5 can read during re-prepare.
+        open_connection(ConnectionPolicy(
+            database=str(self.db_path),
+            connect_kwargs=(
+                ("timeout", 5.0), ("check_same_thread", False), ("isolation_level", "IMMEDIATE"),
+            ),
+            before_row_factory=(refuse_schema_version_too_new, configure_connection),
+            row_factory=None,
+            on_open=lambda conn: setattr(self, "_conn", conn),
+            on_setup_error=None,
+        ))
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS messages (
                 store_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -374,9 +386,9 @@ class MessageStore:
             self._conn,
             build_message_fts_spec(),
         )
+        # Also ensures conversation_id and its index on current-schema opens.
         run_versioned_migrations(self._conn)
         self._ensure_source_column()
-        self._ensure_conversation_id_column()
         self._ensure_time_contract_columns()
         self._conn.commit()
         # False: a busy writer deferred stem init, so this handle reads only the plain index.
@@ -392,18 +404,6 @@ class MessageStore:
         )
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_msg_source_session ON messages(source, session_id, store_id)"
-        )
-
-    def _ensure_conversation_id_column(self) -> None:
-        columns = {
-            row[1] for row in self._conn.execute("PRAGMA table_info(messages)").fetchall()
-        }
-        add_column_if_missing(
-            self._conn, columns, "conversation_id",
-            "ALTER TABLE messages ADD COLUMN conversation_id TEXT DEFAULT ''",
-        )
-        self._conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_msg_conversation_session ON messages(conversation_id, session_id, store_id)"
         )
 
     def _ensure_time_contract_columns(self) -> None:
@@ -503,7 +503,7 @@ class MessageStore:
                     "host_message_timestamp" if observed_at is not None else None,
                 ),
             )
-            self._conn.commit()
+            self._commit()
             return cur.lastrowid
 
     def append_batch(self, session_id: str,
@@ -626,7 +626,7 @@ class MessageStore:
                 "UPDATE messages SET session_id = ? WHERE session_id = ?",
                 (new_session_id, old_session_id),
             )
-            self._conn.commit()
+            self._commit()
             return cur.rowcount if cur.rowcount is not None else 0
 
     def delete_session_messages(self, session_id: str) -> int:
@@ -638,7 +638,7 @@ class MessageStore:
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
             )
-            self._conn.commit()
+            self._commit()
             deleted = cur.rowcount if cur.rowcount is not None else 0
             return deleted
 
@@ -681,7 +681,7 @@ class MessageStore:
             )
             if before_commit is not None:
                 before_commit(self._conn, store_id)
-            self._conn.commit()
+            self._commit()
             return True
 
     def pin(self, store_id: int) -> None:
@@ -691,14 +691,14 @@ class MessageStore:
             self._conn.execute(
                 "UPDATE messages SET pinned = 1 WHERE store_id = ?", (store_id,)
             )
-            self._conn.commit()
+            self._commit()
 
     def unpin(self, store_id: int) -> None:
         with self._write_lock:
             self._conn.execute(
                 "UPDATE messages SET pinned = 0 WHERE store_id = ?", (store_id,)
             )
-            self._conn.commit()
+            self._commit()
 
     # -- Read operations ----------------------------------------------------
 
@@ -708,6 +708,10 @@ class MessageStore:
             f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE store_id = ?", (store_id,)
         ).fetchone()
         return self._row_to_dict(row) if row else None
+
+    def max_store_id(self) -> int:
+        """The newest stored message id (0 for an empty store)."""
+        return int(self._conn.execute("SELECT COALESCE(MAX(store_id), 0) FROM messages").fetchone()[0])
 
     def get_batch(self, store_ids: List[int]) -> Dict[int, Dict[str, Any]]:
         """Retrieve multiple messages by store_id in a single query.
@@ -726,29 +730,33 @@ class MessageStore:
     def scan_evidence_rows(self, *, limit: int = 4096) -> Dict[str, Any]:
         """Return one bounded, read-only whole-corpus evidence snapshot.
 
-        The window metadata and rows come from one SQLite statement, so a
+        The window metadata and rows come from one read transaction, so a
         caller cannot accidentally certify finite coverage from a count and a
         row page taken at different corpus generations.  This API deliberately
         has no query or session filter: a narrower scan is not whole-corpus
         coverage.  Callers must treat ``truncated`` as an honest fallback.
         """
         bounded_limit = min(4096, max(1, int(limit)))
-        rows = self._conn.execute(
-            f"""
-            WITH snapshot AS (
-                SELECT {_MESSAGE_SELECT_COLUMNS},
-                       COUNT(*) OVER () AS snapshot_total_rows,
-                       MAX(store_id) OVER () AS snapshot_max_store_id,
-                       SUM(CASE WHEN observed_at IS NULL THEN 1 ELSE 0 END)
-                           OVER () AS snapshot_observed_at_missing_rows
-                FROM messages
-            )
-            SELECT * FROM snapshot
-            ORDER BY store_id
-            LIMIT ?
-            """,
-            (bounded_limit,),
-        ).fetchall()
+        with self._write_lock:
+            conn = self._conn
+            owns_transaction = not conn.in_transaction
+            if owns_transaction:
+                conn.execute("BEGIN")
+            try:
+                totals = conn.execute(
+                    "SELECT COUNT(*), MAX(store_id), "
+                    "SUM(CASE WHEN observed_at IS NULL THEN 1 ELSE 0 END) FROM messages"
+                ).fetchone()
+                rows = conn.execute(
+                    f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages ORDER BY store_id LIMIT ?",
+                    (bounded_limit,),
+                ).fetchall()
+                if owns_transaction:
+                    conn.commit()
+            except BaseException:
+                if owns_transaction:
+                    conn.rollback()
+                raise
         if not rows:
             return {
                 "rows": [],
@@ -758,11 +766,10 @@ class MessageStore:
                 "truncated": False,
                 "observed_at_missing_rows": 0,
             }
-        message_column_count = _MESSAGE_SELECT_COLUMN_COUNT
-        total_rows = int(rows[0][message_column_count] or 0)
-        snapshot_max_store_id = int(rows[0][message_column_count + 1] or 0)
-        observed_at_missing_rows = int(rows[0][message_column_count + 2] or 0)
-        messages = [self._row_to_dict(row[:message_column_count]) for row in rows]
+        total_rows = int(totals[0] or 0)
+        snapshot_max_store_id = int(totals[1] or 0)
+        observed_at_missing_rows = int(totals[2] or 0)
+        messages = [self._row_to_dict(row) for row in rows]
         return {
             "rows": messages,
             "snapshot_max_store_id": snapshot_max_store_id,
@@ -975,6 +982,29 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def find_session_tool_rows(self, session_id: str, tool_call_id: str, *, conversation_id: str,
+                               tool_name: str) -> List[Dict[str, Any]]:
+        """#773: this session's tool rows for ``tool_call_id`` in store order, in a conversation
+        ``conversation_id`` owns (db_bootstrap.owned_conversation_clause: it, blank, and legacy
+        unnormalized values of either), whose tool name is compatible with ``tool_name`` (the same
+        name, or an empty name on either side). Every filter is in SQL, so other rows that reuse the id
+        never hide one."""
+        owned_clause, owned_args = owned_conversation_clause(self._conn, conversation_id)
+        rows = self._conn.execute(
+            f"""SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages
+               WHERE session_id = ? AND role = 'tool' AND tool_call_id = ? AND {owned_clause}
+                 AND (? = '' OR COALESCE(tool_name, '') IN ('', ?))
+               ORDER BY store_id""",
+            (session_id, tool_call_id, *owned_args, tool_name, tool_name),
+        ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def write_generation(self) -> tuple:
+        """A token that changes whenever a committed write may have changed rows this connection reads:
+        this connection's own writes (``total_changes``) and another connection's commits
+        (``PRAGMA data_version``)."""
+        return self._conn.total_changes, self._conn.execute("PRAGMA data_version").fetchone()[0]
+
     # -- #436 identity anchor: host-time lookup and message relations ---------
 
     def _ensure_identity_anchor_schema(self) -> None:
@@ -1000,7 +1030,7 @@ class MessageStore:
             """)
         self._identity_anchor_schema_ready = True
 
-    # -- v0.26.0 host uid shadow bindings: a droppable side table, never read for a decision ----------
+    # -- Host uid shadow bindings: droppable; canonical evidence for #1124 exclusions / #1403 audits --
 
     def _host_uid_table_exists(self) -> bool:
         with self._write_lock:
@@ -1048,14 +1078,17 @@ class MessageStore:
                 out.setdefault(str(uid), []).append((int(store_id), str(kind)))
         return out
 
-    def host_uid_uids_of_stores(self, lineage_key: str, store_ids) -> dict[int, set[str]]:
-        """``{store_id: {uid, ...}}``: the canonical and version bindings of ``store_ids`` in a lineage."""
+    def host_uid_uids_of_stores(self, lineage_key: str, store_ids, kinds=("canonical", "version"),
+                                *, require_disagree: bool = False) -> dict[int, set[str]]:
+        """``{store_id: {uid, ...}}`` in a lineage; #1124 requests canonical twins, all bindings for copies."""
         ids, out = sorted({int(sid) for sid in store_ids}), {}
         for start in range(0, len(ids) if self._host_uid_table_exists() else 0, 500):
             chunk = ids[start:start + 500]
             for store_id, uid in self._conn.execute(
-                f"SELECT store_id, uid FROM host_uid_bindings WHERE store_id IN ({','.join('?' * len(chunk))}) "
-                "AND lineage_key = ? AND kind IN ('canonical', 'version')", [*chunk, lineage_key]):
+                f"SELECT store_id, uid FROM host_uid_bindings INDEXED BY idx_host_uid_store "
+                f"WHERE store_id IN ({','.join('?' * len(chunk))}) "
+                f"AND lineage_key = ? AND kind IN ({','.join('?' * len(kinds))}) "
+                "AND (? = 0 OR disagree_seen = 1)", [*chunk, lineage_key, *kinds, int(require_disagree)]):
                 out.setdefault(int(store_id), set()).add(str(uid))
         return out
 
@@ -1097,13 +1130,8 @@ class MessageStore:
         with self._write_lock:
             if conn.in_transaction:
                 raise sqlite3.OperationalError("host-uid shadow write skipped: the connection is in a transaction")
-            conn.execute("BEGIN IMMEDIATE")
-            try:
+            with self.atomic(immediate=True):
                 write(conn)
-                conn.commit()
-            except BaseException:
-                conn.rollback()
-                raise
 
     def count_host_uid_bindings(self, kinds=("canonical", "version", "alias_candidate")) -> Optional[int]:
         kinds = tuple(kinds)
@@ -1129,9 +1157,10 @@ class MessageStore:
                 f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE conversation_id IN (?, '') AND observed_at IN ({marks})",
                 [_normalize_conversation_id_value(conversation_id), *chunk],
             ).fetchall()
-            aliased = self._conn.execute(
-                f"SELECT store_id, observed_at FROM message_relations WHERE kind = 'alt_stamp' AND observed_at IN ({marks})",
-                chunk,
+            aliased = self._conn.execute(  # an alias names a row of exactly this conversation ('' is not a wildcard)
+                "SELECT r.store_id, r.observed_at FROM message_relations r JOIN messages m ON m.store_id = r.store_id "
+                f"WHERE r.kind = 'alt_stamp' AND r.observed_at IN ({marks}) AND m.conversation_id = ?",
+                [*chunk, _normalize_conversation_id_value(conversation_id)],
             ).fetchall()
             for r in rows:
                 row = self._row_to_dict(r)
@@ -1173,7 +1202,7 @@ class MessageStore:
                     [(int(s), k, r, o, ob, created_at) for s, k, r, o, ob in group],
                 )
                 added += len(group)
-            self._conn.commit()
+            self._commit()
         return added
 
     def get_message_relations(self, store_ids: List[int], kind: str, *, related: bool = False) -> List[Dict[str, Any]]:
@@ -1200,8 +1229,27 @@ class MessageStore:
                 "WHERE store_id = ? AND observed_at IS NULL",
                 (float(observed_at), int(store_id)),
             )
-            self._conn.commit()
+            self._commit()
             return cur.rowcount > 0
+
+    def backfill_observed_at_many(self, pairs) -> int:
+        """R5: batch proven ``(store_id, stamp)`` backfills, never overwriting a value."""
+        rows = [(float(stamp), int(store_id)) for store_id, stamp in pairs]
+        if not rows:  # no commit: an empty pass must not commit a caller's open transaction (the per-row loop did not)
+            return 0
+        with self._write_lock, self._conn:
+            return self._conn.executemany(
+                "UPDATE messages SET observed_at = ?, observed_at_source = 'host_message_timestamp' "
+                "WHERE store_id = ? AND observed_at IS NULL",
+                rows,
+            ).rowcount
+
+    def has_session_messages(self, session_id: str) -> bool:
+        """Whether a session contains any messages, without counting them."""
+        return bool(self._conn.execute(
+            "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id = ?)",
+            (session_id,),
+        ).fetchone()[0])
 
     def get_session_count(self, session_id: str) -> int:
         """Count messages in a session."""
@@ -1292,9 +1340,9 @@ class MessageStore:
         return self._conn.execute(
             """
             WITH session_ids AS (
-                SELECT session_id FROM messages
+                SELECT session_id FROM messages WHERE session_id = ?
                 UNION
-                SELECT session_id FROM summary_nodes
+                SELECT session_id FROM summary_nodes WHERE session_id = ?
             ),
             message_stats AS (
                 SELECT session_id,
@@ -1302,7 +1350,7 @@ class MessageStore:
                        COALESCE(SUM(token_estimate), 0) AS token_total,
                        MIN(timestamp) AS first_message_at,
                        MAX(timestamp) AS last_message_at
-                FROM messages
+                FROM messages WHERE session_id = ?
                 GROUP BY session_id
             ),
             node_stats AS (
@@ -1311,7 +1359,7 @@ class MessageStore:
                        COALESCE(SUM(token_count), 0) AS node_token_total,
                        MIN(COALESCE(earliest_at, created_at)) AS first_node_at,
                        MAX(COALESCE(latest_at, created_at)) AS last_node_at
-                FROM summary_nodes
+                FROM summary_nodes WHERE session_id = ?
                 GROUP BY session_id
             )
             SELECT s.session_id,
@@ -1329,7 +1377,7 @@ class MessageStore:
             WHERE s.session_id = ?
             ORDER BY s.session_id
             """,
-            (session_id,),
+            (session_id,) * 5,
         ).fetchall()
 
     def get_source_normalization_plan(self) -> Dict[str, Any]:
@@ -1357,7 +1405,7 @@ class MessageStore:
         """Normalize legacy NULL/blank source rows to the explicit unknown bucket."""
         stats_before = self.get_source_stats()
         blank_clause = _legacy_blank_source_clause("source")
-        with self._write_lock, self._conn:
+        with self.atomic():
             cur = self._conn.execute(
                 f"UPDATE messages SET source = ? WHERE {blank_clause}",
                 (_UNKNOWN_SOURCE,),
@@ -1457,8 +1505,26 @@ class MessageStore:
                 )
                 wrote = True
             if wrote:
-                conn.commit()
+                self._commit()
         return wrote
+
+    def _commit(self) -> None:
+        """Commit a standalone helper; an enclosing atomic block owns its commit."""
+        self._transaction_owner.commit(self._conn)
+
+    def atomic(self, *, immediate: bool = False) -> AbstractContextManager[None]:
+        """Own a transaction under the existing write lock, joining nested entries.
+
+        By default the first write opens the transaction. Explicit owners use
+        ``immediate=True`` to begin before reading. Simple write helpers defer
+        their commits here. Schema scripts, retry-owning writes, telemetry,
+        ``update_metadata_json`` and explicit commit/rollback operations retain
+        their own boundaries and must not be grouped through this primitive.
+        """
+        conn = self._conn
+        if conn is None:
+            raise RuntimeError("MessageStore connection is closed")
+        return self._transaction_owner.atomic(conn, immediate=immediate)
 
     def update_metadata_json(self, key: str, update: Any) -> Any:
         """Atomic read-modify-write of one metadata JSON value: ``update(current)`` (None when absent) runs

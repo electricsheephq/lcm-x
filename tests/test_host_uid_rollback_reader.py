@@ -17,7 +17,7 @@ from hermes_lcm.config import host_message_uid_mode
 from hermes_lcm.host_uid_emit import IDENTITY_KEYS
 from tests.test_host_uid_emit_carry import _call
 from tests.test_host_uid_engine_uids import _compress, _host
-from tests.test_host_uid_shadow import ROLLBACK_READERS, _engine, _m, _skip_or_fail_in_ci, _state_db
+from tests.test_host_uid_shadow import PRE_V026_READERS, ROLLBACK_READERS, _engine, _m, _skip_or_fail_in_ci, _state_db
 
 
 _OLD_READER = r"""
@@ -32,7 +32,7 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 assert store_mod.__file__.startswith(old)
 # v0.26 readers already ship host_uid; retain the pre-uid premise for older releases.
-if reader != "v0.26.2":
+if reader in ("v0.25.0-rc1", "v0.25.1"):
     assert importlib.util.find_spec("hermes_lcm.host_uid") is None
 with open(host_file) as stream:
     host = json.load(stream)
@@ -74,8 +74,8 @@ def test_persisted_shadow_uids_are_inert_to_rollback_reader(tmp_path, monkeypatc
     old = tmp_path / "old-reader"
     with tarfile.open(fileobj=io.BytesIO(archive)) as tar:
         tar.extractall(old, filter="data")
-    # v0.26.2 already has the feature whose absence guards the older-reader premise.
-    if reader != "v0.26.2":
+    # v0.26 and later already have the feature whose absence guards the older-reader premise.
+    if reader in PRE_V026_READERS:
         assert not (old / "host_uid.py").exists()
 
     monkeypatch.delenv("LCM_HOST_MESSAGE_UID", raising=False)

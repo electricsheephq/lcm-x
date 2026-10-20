@@ -7,7 +7,7 @@ own `benchmarking.standalone` fallback; no Hermes code is imported.
 """
 from __future__ import annotations
 
-import hashlib, importlib, importlib.util, os, shutil, subprocess, sys, threading, time, types, uuid  # noqa: E401
+import hashlib, importlib, importlib.util, os, re, shutil, subprocess, sys, threading, time, types, uuid  # noqa: E401
 from pathlib import Path
 
 WORKTREE = Path(os.environ.get("S2_PRODUCT_WORKTREE", ".")).resolve()
@@ -17,6 +17,25 @@ LOCK = threading.Lock()
 CALLS: list[dict] = []      # every seam call since the last take()
 SUMMARIES: list[dict] = []  # every summarize_with_escalation return since the last take()
 _LANE = {"lane": None}
+_FAULT = None
+LIMIT_RE = re.compile(r"429|usage limit|rate limit|too many requests", re.I)  # D5-A live brake marker
+
+def set_fault(mode=None):
+    """Reset the optional per-run fault; absent mode leaves legacy receipts untouched."""
+    global _FAULT
+    _FAULT = None if mode is None else {"mode": mode, "calling_event": 3, "calling_events": 0,
+                                       "event_index": None, "start_turn": None, "faulted_turns": [],
+                                       "faulted_calls": 0, "effective_sleep_s": []}
+    set_event(0, None)
+
+def set_event(index, turn):
+    """1-based compress invocation, including forced/cleanup-only events."""
+    if _FAULT is not None:
+        _FAULT.update(current_event=index, current_turn=turn, event_calls=0)
+
+def fault_receipt():
+    return {k: _FAULT[k] for k in ("mode", "calling_event", "event_index", "start_turn",
+                                  "faulted_turns", "faulted_calls", "effective_sleep_s")}
 
 def load_engine(arm=None):
     """Register the worktree as `hermes_lcm` (package __init__ not executed, as the harness and tests do)."""
@@ -105,6 +124,24 @@ def call_llm(**kwargs):
            "prompt_chars": sum(len(m.get("content") or "") for m in msgs)}
     t0 = time.monotonic()
     try:
+        if _FAULT is not None and kwargs.get("task") == "compression":
+            _FAULT["event_calls"] += 1
+            if _FAULT["event_calls"] == 1:
+                _FAULT["calling_events"] += 1
+                if _FAULT["calling_events"] == 3:
+                    _FAULT.update(start_turn=_FAULT["current_turn"], event_index=_FAULT["current_event"])
+            start, turn = _FAULT.get("start_turn"), _FAULT["current_turn"]
+            fire = (_FAULT["mode"] == "T" and _FAULT["calling_events"] == 3 and _FAULT["event_calls"] == 1)
+            fire = fire or (_FAULT["mode"] == "P" and start is not None and start <= turn <= start + 1)
+            if fire:
+                sleep_s = float(os.environ.get("S2_FAULT_SLEEP_S", timeout))
+                rec["fault"] = _FAULT["mode"]
+                _FAULT["faulted_calls"] += 1
+                if turn not in _FAULT["faulted_turns"]:
+                    _FAULT["faulted_turns"].append(turn)
+                _FAULT["effective_sleep_s"].append(sleep_s)
+                time.sleep(sleep_s)
+                raise TimeoutError("summary call timed out at the host compression deadline (fault seam)")
         if isinstance(lane, CodexEffortLane):
             reply = lane.call_with(system, user, timeout, effort)
         elif getattr(lane, "fake", False):
@@ -142,8 +179,8 @@ class CodexEffortLane:
         prompt, out = base / "prompt.txt", base / "last-message.txt"
         prompt.write_text(lanes.flat_prompt(system, user_parts))
         eff, limit = effort or "medium", float(timeout or lanes.CALL_TIMEOUT_S)
-        cmd = ["codex", "exec", "--skip-git-repo-check", "--sandbox", "read-only", "-m", self.model,
-               "-c", f"model_reasoning_effort={eff}", "--output-last-message", str(out), "-"]
+        cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "-m", self.model,
+               "-c", f"model_reasoning_effort={eff}", "-c", 'service_tier="default"', "--output-last-message", str(out), "-"]
         t0 = time.monotonic()
         try:
             with prompt.open() as stdin:
@@ -152,6 +189,9 @@ class CodexEffortLane:
             raise lanes.LaneError(f"timeout after {limit}s", limit)
         dt = round(time.monotonic() - t0, 2)
         if p.returncode != 0:
+            if LIMIT_RE.search(p.stderr or "") or LIMIT_RE.search(p.stdout or ""):  # one fixed line; never the output
+                print("codex lane: HTTP 429 usage limit marker", file=sys.stderr, flush=True)
+                raise lanes.LaneError(f"codex exit {p.returncode} LIMIT", dt)
             raise lanes.LaneError(f"codex exit {p.returncode}", dt)
         text = out.read_text() if out.exists() else ""
         shutil.rmtree(base, ignore_errors=True)

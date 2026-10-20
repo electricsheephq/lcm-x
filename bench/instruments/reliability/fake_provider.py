@@ -141,8 +141,15 @@ class FakeProvider:
             def do_POST(self):
                 if route_of("POST", self.path) != "completion":
                     return self.unrouted()
-                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
-                return provider.serve(self, body, COMPLETION_PATHS[self.path])
+                want = int(self.headers.get("Content-Length") or 0)
+                receive_start_ns = time.monotonic_ns()
+                raw = self.rfile.read(want)
+                receive_end_ns = time.monotonic_ns()
+                if len(raw) < want:  # client closed mid-send; accounting checks whether a harness kill explains it
+                    return provider.log(rid=provider.next_rid(), ts=time.time(), method="POST", path=self.path,
+                                        route="completion", role=None, truncated=[len(raw), want],
+                                        receive_start_ns=receive_start_ns, receive_end_ns=receive_end_ns)
+                return provider.serve(self, json.loads(raw or b"{}"), COMPLETION_PATHS[self.path])
 
             def unrouted(self):
                 """Every other method/path is logged (the accounting makes it an ERROR) and refused."""

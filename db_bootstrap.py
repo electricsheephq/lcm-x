@@ -19,7 +19,8 @@ import time
 from contextlib import closing, contextmanager
 from typing import Iterable, Sequence
 
-from .config import sqlite_mmap_size
+from .config import _parse_bool_env, lcm_env_get, sqlite_mmap_size
+from .schema_families import SchemaFinding
 
 logger = logging.getLogger(__name__)
 _wal_reset_warned = False  # no lock: a rare duplicate warning beats a lock a forked child could inherit held
@@ -1614,7 +1615,7 @@ def embedding_schema_missing(conn: sqlite3.Connection) -> set[str]:
     return required - present
 
 
-def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
+def embedding_schema_findings(conn: sqlite3.Connection) -> list[SchemaFinding]:
     """Return structural embedding-schema errors, not just missing names.
 
     Feature state is derived and rebuildable, but silently accepting a table
@@ -1623,7 +1624,7 @@ def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
     ``ensure_embedding_tables``; incompatible same-name objects are rejected
     before the named migration marker is published.
     """
-    errors = [f"missing object: {name}" for name in sorted(embedding_schema_missing(conn))]
+    errors = [SchemaFinding("missing object", name) for name in sorted(embedding_schema_missing(conn))]
     if errors:
         return errors
 
@@ -1639,7 +1640,7 @@ def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
             for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
         )
         if actual != expected:
-            errors.append(f"malformed table: {table}")
+            errors.append(SchemaFinding("malformed table", table))
 
     # CHECK expressions are not exposed by PRAGMA table_info, so fingerprint
     # their normalized expressions exactly rather than looking for a loose
@@ -1656,7 +1657,7 @@ def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
         sql = table_sql.get(table, "")
         actual_checks = _sql_check_expressions(sql)
         if actual_checks != expected_checks:
-            errors.append(f"malformed constraints: {table}")
+            errors.append(SchemaFinding("malformed constraints", table))
 
     for index, (table, expected_columns, predicate) in _EMBEDDING_INDEX_SHAPES.items():
         index_shape = tuple(
@@ -1690,8 +1691,13 @@ def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
             or partial != int(predicate is not None)
             or actual_predicate != predicate
         ):
-            errors.append(f"malformed index: {index}")
-    return sorted(set(errors))
+            errors.append(SchemaFinding("malformed index", index))
+    return sorted(set(errors), key=str)
+
+
+def verify_embedding_schema(conn: sqlite3.Connection) -> list[str]:
+    """Return the historical string findings in their original order."""
+    return [str(f) for f in embedding_schema_findings(conn)]
 
 
 def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
@@ -2006,14 +2012,10 @@ _ASSERTION_TRIGGER_FRAGMENTS: dict[str, tuple[str, ...]] = {
 }
 
 
-def ensure_assertion_tables(conn: sqlite3.Connection) -> None:
-    """Materialize the opt-in V4 assertion family in the existing ``lcm.db``."""
-    # This guard is owned by the rebuildable assertion family. Recreate it so
-    # databases opened after the optional source-time migration compare the
-    # derived observation time, with the legacy write timestamp as fallback.
-    conn.execute("DROP TRIGGER IF EXISTS lcm_assertion_source_insert_guard")
-    conn.executescript(
-        """
+@lru_cache(maxsize=1)
+def _assertion_schema_statements() -> dict[str, str]:
+    """Keep initialization and schema verification on the same DDL contract."""
+    schema_sql = """
         CREATE TABLE IF NOT EXISTS lcm_assertion_sources (
             source_store_id INTEGER NOT NULL,
             extraction_version TEXT NOT NULL
@@ -2227,7 +2229,58 @@ def ensure_assertion_tables(conn: sqlite3.Connection) -> None:
                AND source_content_sha256 = OLD.source_content_sha256;
         END;
         """
-    )
+    statements = {}
+    statement = ""
+    for line in schema_sql.splitlines(keepends=True):
+        statement += line
+        if sqlite3.complete_statement(statement):
+            match = re.match(
+                r"\s*CREATE (?:TABLE|(?:UNIQUE )?INDEX|TRIGGER) IF NOT EXISTS (\w+)",
+                statement,
+            )
+            assert match is not None
+            statements[match[1]] = statement.strip()
+            statement = ""
+    assert not statement.strip()
+    return statements
+
+
+def ensure_assertion_tables(conn: sqlite3.Connection) -> None:
+    """Materialize missing assertion objects; replace the source guard atomically."""
+    statements = _assertion_schema_statements()
+    guard = "lcm_assertion_source_insert_guard"
+
+    def pending() -> list[str]:
+        placeholders = ",".join("?" for _ in statements)
+        existing = dict(conn.execute(
+            f"SELECT name, sql FROM sqlite_master WHERE name IN ({placeholders})",
+            tuple(statements),
+        ).fetchall())
+        # Only the source-time guard has an in-place upgrade. Other malformed
+        # objects remain untouched and are rejected by verify_assertion_schema.
+        return [
+            name for name, sql in statements.items()
+            if name not in existing or (
+                name == guard
+                and _normalize_trigger_sql(existing[name]) != _normalize_trigger_sql(sql)
+            )
+        ]
+
+    if not pending():
+        return
+    # Do not use executescript here: its implicit commit would expose the gap
+    # between the DROP and CREATE to concurrent assertion/FTS connections.
+    conn.execute("BEGIN IMMEDIATE")
+    try:
+        # Another opener may have completed initialization while we waited.
+        for name in pending():
+            if name == guard:
+                conn.execute(f"DROP TRIGGER IF EXISTS {guard}")
+            conn.execute(statements[name])
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
 
 
 @lru_cache(maxsize=1)
@@ -2518,7 +2571,9 @@ def quote_sql_identifier(identifier: str) -> str:
     return f'"{identifier}"'
 
 
-def _fts_needs_rebuild_structural(conn: sqlite3.Connection, spec: ExternalContentFtsSpec) -> bool:
+def _fts_needs_rebuild_structural(
+    conn: sqlite3.Connection, spec: ExternalContentFtsSpec, *, _retry_schema: bool = True,
+) -> bool:
     shadow_tables = get_fts_shadow_table_names(spec.table_name)
     existing_tables = get_existing_table_names(conn, [spec.table_name, *shadow_tables])
     if spec.table_name not in existing_tables:
@@ -2568,6 +2623,12 @@ def _fts_needs_rebuild_structural(conn: sqlite3.Connection, spec: ExternalConten
         # turning lock exhaustion into destructive repair.
         if _is_sqlite_lock_error(exc):
             raise
+        # #1112: a racing schema change can make a healthy FTS5 connect fail.
+        if _retry_schema and (
+            getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_SCHEMA
+            or "vtable constructor failed" in str(exc).lower()
+        ):
+            return _fts_needs_rebuild_structural(conn, spec, _retry_schema=False)
         return True
 
     return False
@@ -2583,7 +2644,7 @@ def _integrity_check_interval_hours() -> float:
     ``0`` checks on every startup (previous behavior); a negative value never
     checks on startup (relies on structural checks + LIKE fallback + doctor).
     """
-    raw = os.environ.get(INTEGRITY_CHECK_INTERVAL_ENV)
+    raw = lcm_env_get(INTEGRITY_CHECK_INTERVAL_ENV)
     if raw is None:
         return DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS
     try:
@@ -2679,10 +2740,7 @@ _integrity_scan_threads: dict[tuple[str, str], threading.Thread] = {}
 def _background_integrity_enabled() -> bool:
     """Kill-switch: ``LCM_FTS_INTEGRITY_BACKGROUND=false`` restores the exact old
     synchronous integrity-check behavior on the startup path."""
-    raw = os.environ.get(BACKGROUND_INTEGRITY_ENV)
-    if raw is None:
-        return True
-    return raw.strip().lower() not in ("0", "false", "no", "off")
+    return _parse_bool_env(BACKGROUND_INTEGRITY_ENV, True, unknown=True, true_values=())
 
 
 def _integrity_failed_key(spec: ExternalContentFtsSpec) -> str:

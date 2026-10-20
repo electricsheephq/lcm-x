@@ -10,10 +10,13 @@ from types import SimpleNamespace
 import pytest
 
 import hermes_lcm.embedding_provider as providers
+import hermes_lcm.command as command_mod
 import hermes_lcm.ingest_protection as privacy
 import hermes_lcm.tools as tools
+from hermes_lcm.command import handle_lcm_command
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
+from hermes_lcm.engine import LCMEngine
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
 from hermes_lcm.store import MessageStore
 
@@ -21,7 +24,195 @@ REASON = (
     "embedding_identity_stale: stored vectors use an older embedding privacy "
     "revision; run /lcm embed warmup, then /lcm embed backfill --apply"
 )
+REPEAT_GUIDANCE = (
+    "; repeat the backfill apply only while remaining is above 0 and each run lowers it, "
+    "but stop and inspect its warnings and details on status: partial, status: error, "
+    "status: failed, or if remaining stops falling"
+)
 TEXT = "Zebrawood orchard has a beagle puppy named Biscuit."
+
+
+@pytest.fixture
+def diagnostic_engine(tmp_path):
+    config = LCMConfig(
+        database_path=str(tmp_path / "doctor.db"),
+        embeddings_enabled=True,
+        embedding_provider="voyage",
+        embedding_model="voyage-4-large",
+    )
+    engine = LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    engine._session_id = "session-a"
+    engine.context_length = 200000
+    engine.store_id = engine._store.append("session-a", {"role": "user", "content": TEXT})
+    engine.node_id = engine._dag.add_node(SummaryNode(
+        session_id="session-a", depth=0, summary=TEXT,
+        source_ids=[engine.store_id], source_type="messages", created_at=1, latest_at=1,
+    ))
+    try:
+        yield engine
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize(
+    ("stale_tasks", "remedy"),
+    [
+        (["summary"], "/lcm embed warmup, then /lcm embed backfill --apply"),
+        (["chunk"], "/lcm embed warmup, then /lcm embed backfill --corpus chunks --apply --confirm-raw-text"),
+        (["summary", "chunk"], "/lcm embed warmup, then /lcm embed backfill --corpus both --apply --confirm-raw-text"),
+    ],
+)
+def test_doctor_stale_corpus_remedy_on_every_surface(diagnostic_engine, monkeypatch, stale_tasks, remedy):
+    engine = diagnostic_engine
+    _seed(engine, "old" if "summary" in stale_tasks else "matching")
+    _seed(engine, "old" if "chunk" in stale_tasks else "matching", task="chunk")
+    monkeypatch.setenv("VOYAGE_API_KEY", "synthetic-test-key")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("doctor attempted to construct an embedding provider")
+
+    monkeypatch.setattr(tools, "resolve_provider", forbidden)
+    monkeypatch.setattr(providers, "resolve_provider", forbidden)
+    standalone = tools._embedding_provider_health_check(engine)
+    payload = json.loads(tools.lcm_doctor({}, engine=engine))
+    emitted = next(check for check in payload["checks"] if check["check"] == "embedding_provider_health")
+    assert emitted == standalone
+    assert emitted["detail"]["stale_tasks"] == stale_tasks
+    assert emitted["detail"]["remedy"] == remedy
+    reason = (
+        "embedding_identity_stale: stored vectors use an older embedding privacy "
+        f"revision; run {remedy}"
+    )
+    if "chunk" in stale_tasks:
+        reason += (
+            "; --confirm-raw-text acknowledges sending raw message text to the "
+            "'voyage' cloud embedding provider"
+        )
+    reason += REPEAT_GUIDANCE
+    assert emitted["detail"]["reason"] == reason
+    text = handle_lcm_command("doctor", engine)
+    assert f"embedding_provider_health: warn ({reason})" in text
+
+
+@pytest.mark.parametrize("stale_tasks", [["chunk"], ["summary", "chunk"]])
+def test_named_doctor_backfill_rebuilds_stale_chunks(engine, monkeypatch, stale_tasks):
+    from tests.test_chunk_backfill import FakeProvider
+    import hermes_lcm.chunking as chunking
+
+    monkeypatch.setattr(chunking, "count_tokens", lambda text: len(str(text)))
+    monkeypatch.setattr(command_mod, "count_tokens", lambda text: len(str(text)))
+
+    store_ids = []
+    node_ids = []
+    for index in range(2):
+        if index:
+            engine.store_id = engine._store.append("session-a", {"role": "user", "content": TEXT})
+            engine.node_id = engine._dag.add_node(SummaryNode(
+                session_id="session-a", depth=0, summary=TEXT,
+                source_ids=[engine.store_id], source_type="messages", created_at=1, latest_at=1,
+            ))
+        _seed(engine, "old" if "summary" in stale_tasks else "matching")
+        _seed(engine, "old", task="chunk")
+        store_ids.append(engine.store_id)
+        node_ids.append(str(engine.node_id))
+
+    parse_options = command_mod._embedding_backfill_options
+
+    def one_row_page(tokens):
+        options = parse_options(tokens)
+        assert not isinstance(options, str)
+        assert options[1] == 200
+        return (options[0], 1, *options[2:])
+
+    monkeypatch.setattr(command_mod, "_embedding_backfill_options", one_row_page)
+    monkeypatch.setenv("VOYAGE_API_KEY", "synthetic-test-key")
+    instances = {}
+
+    def resolve(config, **kwargs):
+        if config.embedding_model not in instances:
+            provider = FakeProvider()
+            provider.provider_id = "voyage"
+            provider.model_id = config.embedding_model
+            provider.embed_query = lambda _text: [1.0, 0.0]
+            instances[config.embedding_model] = provider
+        return instances[config.embedding_model]
+
+    monkeypatch.setattr(command_mod, "resolve_provider", resolve)
+    detail = tools._embedding_provider_health_check(engine)["detail"]
+    warmup, backfill = detail["remedy"].split(", then ")
+    assert "status: ready" in handle_lcm_command(warmup.removeprefix("/lcm "), engine)
+    # Execute the emitted arguments unchanged; the handler receives the text after /lcm.
+    for page in range(2):
+        result = handle_lcm_command(backfill.removeprefix("/lcm "), engine)
+        assert "status: complete" in result
+        remaining = [int(line.split(": ")[1]) for line in result.splitlines() if line.startswith("remaining: ")]
+        assert remaining == [1 - page] * len(stale_tasks)
+        conn = sqlite3.connect(engine._store.db_path)
+        try:
+            current_chunks = conn.execute(
+                "SELECT v.chunk_id FROM lcm_chunk_vectors v "
+                "JOIN lcm_embedding_profile p ON p.identity_hash = v.identity_hash "
+                "WHERE p.active = 1 AND p.task = 'chunk' AND p.revision = ? ORDER BY v.chunk_id",
+                (privacy.embedding_privacy_revision(engine._config),),
+            ).fetchall()
+            assert len(current_chunks) == page + 1
+            if page == 1:
+                assert current_chunks == sorted((f"{store_id}:0",) for store_id in store_ids)
+                assert current_chunks == conn.execute(
+                    "SELECT DISTINCT chunk_id FROM lcm_chunk_meta ORDER BY chunk_id"
+                ).fetchall()
+            assert conn.execute("SELECT store_id, content FROM messages ORDER BY store_id").fetchall() == [
+                (store_id, TEXT) for store_id in store_ids
+            ]
+            if "summary" in stale_tasks:
+                current_summaries = conn.execute(
+                    "SELECT v.embedded_id FROM lcm_embedding_vectors v "
+                    "JOIN lcm_embedding_profile p ON p.identity_hash = v.identity_hash "
+                    "WHERE p.active = 1 AND p.task = 'summary' AND p.revision = ? ORDER BY v.embedded_id",
+                    (privacy.embedding_privacy_revision(engine._config),),
+                ).fetchall()
+                assert len(current_summaries) == page + 1
+                if page == 1:
+                    assert current_summaries == sorted((node_id,) for node_id in node_ids)
+        finally:
+            conn.close()
+    assert instances["voyage-context-4"].calls == [[TEXT], [TEXT]]
+
+
+def test_doctor_guidance_stops_when_backfill_leaves_overcap_rows_pending(engine, monkeypatch):
+    from tests.test_embedding_backfill import FakeProvider
+
+    _seed(engine, "old")
+    monkeypatch.setenv("VOYAGE_API_KEY", "synthetic-test-key")
+    reason = tools._embedding_provider_health_check(engine)["detail"]["reason"]
+    _seed(engine, "matching")
+    node_id = engine._dag.add_node(SummaryNode(
+        session_id="session-a", depth=0, summary=TEXT,
+        source_ids=[engine.store_id], source_type="messages", created_at=2, latest_at=2,
+    ))
+    provider = FakeProvider()
+    provider.provider_id = "voyage"
+    provider.model_id = engine._config.embedding_model
+
+    def skip_overcap(texts):
+        provider.calls.append(list(texts))
+        provider.last_skipped_documents = list(range(len(texts)))
+        return []
+
+    provider.embed_documents = skip_overcap
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: provider)
+    monkeypatch.setattr(command_mod, "count_tokens", lambda text: len(str(text)))
+    for _ in range(2):
+        result = handle_lcm_command("embed backfill --apply", engine)
+        assert "status: partial" in result
+        assert "embedded: 0" in result
+        assert "skipped_overcap: 1" in result
+        assert "remaining: 1" in result
+        assert f"skipped_detail: node_id={node_id} reason=provider_document_token_cap" in result
+    assert provider.calls == [[TEXT], [TEXT]]
+    assert "only while remaining is above 0 and each run lowers it" in reason
+    assert "stop and inspect its warnings and details on status: partial, status: error" in reason
+    assert "status: failed, or if remaining stops falling" in reason
 
 
 class CloudProvider:
@@ -225,7 +416,7 @@ def test_doctor_identity_health_is_inert(engine, monkeypatch, state):
         assert check["status"] == "warn"
         detail = check["detail"]
         assert detail["embedding_identity_stale"] is True
-        assert detail["reason"] == REASON
+        assert detail["reason"] == REASON + REPEAT_GUIDANCE
         assert detail["impact"] == "lcm_recall skips the stale semantic arm until the profile is re-registered"
         assert detail["remedy"] == "/lcm embed warmup, then /lcm embed backfill --apply"
     elif state == "invalid":
@@ -503,7 +694,13 @@ def test_doctor_reports_a_stale_chunk_identity_when_chunk_vectors_exist(engine, 
     else:
         assert check["status"] == "warn"
         assert check["detail"]["stale_tasks"] == expected
-        assert check["detail"]["reason"] == REASON
+        corpus = "both" if "summary" in expected else "chunks"
+        assert check["detail"]["reason"] == (
+            REASON.replace("backfill --apply", f"backfill --corpus {corpus} --apply --confirm-raw-text")
+            + "; --confirm-raw-text acknowledges sending raw message text to the "
+            "'voyage' cloud embedding provider"
+            + REPEAT_GUIDANCE
+        )
 
 
 @pytest.mark.parametrize("orphan", ["vector", "source"])
