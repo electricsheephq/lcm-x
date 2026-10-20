@@ -164,6 +164,8 @@ def run(a):
                     final = "RUNNING"
                 next_progress = now+a.progress_interval
             time.sleep(1)
+    except ProcessLookupError:
+        final, reason = "ABORTED", "worker_exit"
     finally:
         loop_end = time.monotonic()
         stop(p)

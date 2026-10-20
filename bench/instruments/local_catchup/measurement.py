@@ -223,7 +223,7 @@ def catchup_activity(root, start, end, coverage_start, coverage_end, require_pre
         and e.get("foreground") is False and e.get("embedded", 0) > 0
         and start <= e.get("at", -1) <= e.get("end", -1) <= end for e in events)
     delta = sum(coverage_end.values())-sum(coverage_start.values())
-    active = delta > 0 and (prior or during) if require_prepared else delta > 0 or runs > 0
+    active = delta > 0 and (not require_prepared or prior or during)
     return dict(coverage_start=coverage_start, coverage_end=coverage_end, coverage_delta=delta,
         model_prepared_at_start=prior, background_prepared=during, active_backfills=runs,
         catchup_activity=active, activity_window=dict(start=start, end=end))

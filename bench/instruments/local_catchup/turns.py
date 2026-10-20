@@ -69,6 +69,7 @@ def main(a):
         for bar in bars.values():
             bar["state"] = "NOT_JUDGED"
     dump(a.out/"summary.json", dict(state=state, label=SMOKE if a.smoke else a.label,
+        shape=a.shape, baseline=a.baseline,
         blocks=results, order=order*a.blocks, seed=a.seed, bars=bars, first_bind=binds,
         reason="on_no_catchup_activity" if any(not r["ON"]["catchup_activity"] for r in results) else None,
         validity="600 samples/state/block, >=2 paired blocks, compaction, ON incomplete throughout with positive coverage delta and background preparation"))

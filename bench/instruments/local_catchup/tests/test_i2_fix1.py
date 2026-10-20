@@ -16,6 +16,9 @@ pytest_plugins = ["bench.instruments.local_catchup.tests.test_corpus_audit"]
 def test_backfill_event_preserves_refusal_or_report(tmp_path, monkeypatch, result):
     monkeypatch.setattr(socket.socket, "connect", socket.socket.connect)
     monkeypatch.setattr(socket.socket, "connect_ex", socket.socket.connect_ex)
+    monkeypatch.setattr(socket.socket, "sendto", socket.socket.sendto)
+    for name in ("getaddrinfo", "gethostbyname", "gethostbyname_ex"):
+        monkeypatch.setattr(socket, name, getattr(socket, name))
     monkeypatch.setattr(common.threading, "current_thread", lambda: object())
     provider = SimpleNamespace(_FASTEMBED_THREADS=2,
         FastembedProvider=SimpleNamespace(_construct=lambda *args, **kw: None))
@@ -32,7 +35,8 @@ def test_inactive_turn_pair_is_invalid_even_at_full_volume(tmp_path, monkeypatch
     monkeypatch.setattr(turns, "cell", lambda *args: dict(
         bind_ms=1, p90=dict(ingest_preflight_ms=1, dispatch_ms=1),
         catching_up=True, compression_turns=10, catchup_activity=False))
-    turns.main(SimpleNamespace(out=tmp_path, seed=1586, blocks=2, samples=600, smoke=False, label="test"))
+    turns.main(SimpleNamespace(out=tmp_path, seed=1586, blocks=2, samples=600, smoke=False,
+                               label="test", shape="short", baseline="empty"))
     result = common.load(tmp_path/"summary.json")
     assert result["state"] == "INVALID"
     assert result["reason"] == "on_no_catchup_activity"
@@ -51,7 +55,7 @@ def test_turn_activity_requires_progress_and_preparation(tmp_path, delta, prepar
 
 
 @pytest.mark.parametrize("at,foreground,embedded,expected", [
-    (1, False, 1, False), (3, True, 1, False), (3, False, 0, False), (3, False, 1, True)])
+    (1, False, 1, False), (3, True, 1, False), (3, False, 0, False), (3, False, 1, False)])
 def test_recall_activity_is_inside_overlap_window(tmp_path, at, foreground, embedded, expected):
     common.append(tmp_path/"events.jsonl", dict(event="_chunk_backfill_run", at=at,
         end=at+.1, foreground=foreground, embedded=embedded))

@@ -130,7 +130,7 @@ def main(a):
                for b in range(a.blocks) for s in ("OFF", "ON-catching-up", "ON-covered")]
     states = [r["result"]["state"] for r in results]
     dump(a.out/"summary.json", dict(state="INVALID" if "INVALID" in states else "FAIL" if "FAIL" in states else "PASS",
-        label=SMOKE if a.smoke else a.label, blocks=results, seed=a.seed))
+        label=SMOKE if a.smoke else a.label, blocks=results, seed=a.seed, shape=a.shape, baseline=a.baseline))
 
 
 if __name__ == "__main__":

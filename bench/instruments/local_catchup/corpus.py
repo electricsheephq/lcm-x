@@ -24,6 +24,7 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
     identity = mod("vector_store").EmbeddingIdentity.canonical("fastembed", MODEL, "", 384,
                                                              "float32", "little", "chunk")
     expected, tokens, chunks = {"chunks": {}, "leaves": {}}, Counter(), []
+    chunk_metadata, leaf_metadata = {}, {}
     canaries, sessions, long_count = [], [], 0
     reader = connect(db)
     for shard, offset in enumerate(range(0, rows // 2, 250)):
@@ -46,6 +47,7 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
             msg["content"] = reader.execute("SELECT content FROM messages WHERE store_id=?", (ident,)).fetchone()[0]
             parts = mod("chunking").chunk_message(ident, msg["role"], msg["content"], policy="conversational")
             expected["chunks"].update({c.chunk_id: c.token_estimate for c in parts})
+            chunk_metadata.update({c.chunk_id: [c.store_id, c.chunk_index, c.char_start, c.char_end, c.token_estimate] for c in parts})
             if baseline == "upgrade" and ((shard == 0 and ident == ids[0]) or ident % 4 == 0):
                 selected = parts[:1] if ident == 1 else parts
                 if ident == 1:
@@ -54,7 +56,9 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
         leaf = mod("dag").SummaryNode(session_id=name, summary=f"{name}: {fixture.canaries[0].value}",
             source_ids=ids, token_count=20, source_token_count=sum(counts), created_at=1700000000+offset,
             earliest_at=1700000000+offset*2, latest_at=messages[-1]["timestamp"])
-        expected["leaves"][str(dag.add_node(leaf))] = leaf.token_count
+        leaf_id = str(dag.add_node(leaf))
+        expected["leaves"][leaf_id] = leaf.token_count
+        leaf_metadata[leaf_id] = [leaf.source_token_count]
     reader.close()
     for c in chunks:
         values = asdict(c)
@@ -75,6 +79,7 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
         "stripped_system_rows": len(sessions), "shape": shape, "baseline": baseline, "seed": seed,
         "sessions": sessions, "canaries": canaries, "token_distribution": dict(sorted(tokens.items())),
         "input_tokens": sum(k*v for k, v in tokens.items()), "expected": expected,
+        "expected_metadata": {"chunks": chunk_metadata, "leaves": leaf_metadata},
         "identities": identities, "dim": 384, "preimage": pre, "database_bytes": db.stat().st_size,
         "upgrade_long_chunks": long_count, "estimator": "product tokens.count_tokens"}
     manifest["baseline_classes"] = audit(db, manifest)["classes"]

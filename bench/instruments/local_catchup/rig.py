@@ -35,7 +35,7 @@ def main():
     immutable_cache(a.model_cache)
     a.out.mkdir(parents=True, exist_ok=False)
     a.scratch.mkdir(parents=True, exist_ok=False)
-    n, duration = (16, 60) if a.screen16 else (a.processes, a.max_wall)
+    n, duration = (16 if a.screen16 else a.processes), a.max_wall
     pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", pilot_rows(1000, a.rows, a.shape), a.shape, a.baseline)
     estimate = n*3*(pilot["database_bytes"]+len(pilot["expected"]["chunks"])*2048)*a.rows/pilot["rows"]
     dump(a.out/"allocation.json", {"estimate_bytes": estimate, "peak_disk_gb": a.peak_disk_gb})
@@ -76,7 +76,8 @@ def main():
         next_progress = 0.
         last_change, fingerprints = [started]*n, [None]*n
         aggregate_start = time.monotonic() if a.screen16 else max((meter.windows[q.pid][0] for q in processes), default=started)
-        while reason == "max_wall" and time.monotonic()-started < duration:
+        deadline = aggregate_start+60 if a.screen16 else started+duration
+        while reason == "max_wall" and time.monotonic() < deadline:
             breach = meter.breach
             if breach or any(q.poll() is not None for q in processes):
                 reason = breach or "worker_exit"
@@ -102,7 +103,8 @@ def main():
                     if fingerprint != fingerprints[i]:
                         fingerprints[i], last_change[i] = fingerprint, time.monotonic()
                 if any(not r["complete"] and time.monotonic()-last_change[i] >= 600
-                       and any(e.get("event") == "prepared" for e in events[i]) for i, r in enumerate(progress)):
+                    and any(e.get("event") == "prepared" and e.get("generation") == generations[i]
+                            for e in events[i]) for i, r in enumerate(progress)):
                     reason = "stalled_provider_ready"
                     break
                 if not a.screen16 and all(r["complete"] for r in progress):
@@ -127,12 +129,14 @@ def main():
                     last_change[i], fingerprints[i] = time.monotonic(), None
                 if reason == "restart_integrity_or_residue":
                     break
-            time.sleep(1)
+            time.sleep(min(1, max(0, deadline-time.monotonic())))
+    except ProcessLookupError:
+        reason = "worker_exit"
     finally:
         loop_end = time.monotonic()
+        meter.close()
         for q in processes:
             stop(q)
-        meter.close()
     progress = [audit(j.db, m) for j, m in zip(jobs, manifests)]
     for j, g, r in zip(jobs, generations, progress):
         dump(j.out/"final-audit.json", r)
@@ -149,7 +153,8 @@ def main():
                  reason="final_integrity_or_residue" if audit_failed(r) else "full_expected_id_audit" if r["complete"] else reason)
     aggregate_end = min((meter.windows[q.pid][1] or loop_end for q in processes), default=loop_end)
     cpu = meter.summary(state, n, aggregate_start if a.screen16 else 0, end=loop_end, aggregate_window=(aggregate_start, aggregate_end))
-    worst = {k: max((r[k] or 0 for r in cpu["per_process"].values()), default=None)
+    worst = {k: max((r[k] for r in cpu["per_process"].values()), default=None)
+             if all(r[k] is not None for r in cpu["per_process"].values()) else None
              for k in ("mean_cores", "p95_rolling60_cores", "peak1s_cores", "peak_rss")}
     dump(a.out/"summary.json", {"state": state, "screen_only_never_gated": a.screen16, "reason": reason,
          "per_process_progress": progress, "per_process_bind": [load(j.out/f"worker-{g}.json") if (j.out/f"worker-{g}.json").exists() else None for j, g in zip(jobs, generations)],

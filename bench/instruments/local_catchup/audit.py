@@ -22,6 +22,10 @@ def connect(db):
 
 def preimage(c):
     raw = digest(c.execute("SELECT * FROM messages ORDER BY store_id"))
+    provenance = {table: digest(c.execute(f"SELECT * FROM {table} ORDER BY {order}"))
+                  for table, order in (("summary_nodes", "node_id"), ("summary_node_provenance", "node_id"),
+                                       ("lcm_rollup_sources", "rollup_id,node_id"))
+                  if c.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone()}
     vectors, metadata = {}, {}
     for kind, table, key in (("chunks", "lcm_chunk_vectors", "chunk_id"),
                              ("leaves", "lcm_embedding_vectors", "embedded_id")):
@@ -34,11 +38,12 @@ def preimage(c):
             fields = dict(zip(columns, row))
             suffix = "/"+fields["embedded_kind"] if kind == "leaves" else ""
             metadata[f"{kind}/{fields['identity_hash']}/{fields[key]}{suffix}"] = digest([row])
-    return {"raw_digest": raw, "vectors": vectors, "metadata": metadata}
+    return {"raw_digest": raw, "vectors": vectors, "metadata": metadata, "provenance": provenance}
 
 
 def audit(db, manifest):
     with connect(db) as c:
+        c.execute("BEGIN")
         before = manifest["preimage"]
         now = preimage(c)
         changed = [k for k, v in before["vectors"].items() if now["vectors"].get(k) != v]
@@ -54,12 +59,17 @@ def audit(db, manifest):
         paired_meta = {k.removesuffix("/summary") if k.startswith("leaves/") else k for k in new_meta}
         unpaired = sorted(new_vectors ^ paired_meta)
         result = {"changed_metadata": changed_meta, "unexpected_rows": unexpected, "unpaired_rows": unpaired,
-                  "raw_unchanged": now["raw_digest"] == before["raw_digest"],
+                  "raw_unchanged": now["raw_digest"] == before["raw_digest"] and now["provenance"] == before["provenance"],
                   "changed_vectors": changed, "classes": {}}
         for kind, table, meta, key, task in (
             ("chunks", "lcm_chunk_vectors", "lcm_chunk_meta", "chunk_id", "chunk"),
             ("leaves", "lcm_embedding_vectors", "lcm_embedding_meta", "embedded_id", "summary")):
             identity = manifest["identities"][task]
+            fields = "store_id,chunk_index,char_start,char_end,token_estimate" if kind == "chunks" else "source_token_count"
+            for row in c.execute(f"SELECT {key},{fields} FROM {meta} WHERE identity_hash=?", (identity,)):
+                ident = str(row[0])
+                if ident in manifest["expected"][kind] and list(row[1:]) != manifest["expected_metadata"][kind][ident]:
+                    changed_meta.append(f"{kind}/{identity}/{ident}")
             actual = {str(r[0]) for r in c.execute(
                 f"SELECT v.{key} FROM {table} v JOIN {meta} m USING ({key},identity_hash) "
                 "WHERE v.identity_hash=? AND m.archived=0 AND length(v.vec)=?",

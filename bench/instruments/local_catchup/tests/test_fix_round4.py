@@ -127,6 +127,8 @@ def test_corpus_reuses_reader_and_preserves_bytes(tmp_path, monkeypatch):
     # The separate provenance-audit extension adds metadata to the manifest.
     # Everything emitted by the old builder and the entire store stays identical.
     manifest["preimage"].pop("metadata", None)
+    manifest["preimage"].pop("provenance", None)
+    manifest.pop("expected_metadata", None)
     assert hashlib.sha256(json.dumps(manifest, sort_keys=True).encode()).hexdigest() == (
         "fa81d53f9f53a91e9fba3ea6aaad7c9eee09f247ea127fd731ad7cd1d27e5b88")
     # Normalize only setup clocks; compare canonical schema/row bytes (page counters vary).

@@ -66,7 +66,11 @@ def foreign_files(pid, home, db, cache, user_home=None, out=None, scratch=None):
     store = [db.resolve(), *[Path(str(db.resolve())+s) for s in ("-wal", "-shm", "-journal")]]
     user_home = (user_home or Path.home()).resolve()
     found = []
-    for f in psutil.Process(pid).open_files():
+    try:
+        opened = psutil.Process(pid).open_files()
+    except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+        raise ProcessLookupError(pid) from exc
+    for f in opened:
         path = Path(f.path).resolve()
         if ".hermes" not in path.parts and (path in store or any(path.is_relative_to(r) for r in roots)):
             continue
@@ -100,6 +104,8 @@ def guards(mod, events, generation=0):
         append(events, {"violation": "network_attempt", "thread": threading.current_thread().name})
         raise RuntimeError("offline instrument denies network")
     socket.socket.connect = socket.socket.connect_ex = deny
+    socket.socket.sendto = deny
+    socket.getaddrinfo = socket.gethostbyname = socket.gethostbyname_ex = deny
     provider = mod("embedding_provider")
     if provider._FASTEMBED_THREADS > 2:
         raise RuntimeError("product ORT thread count exceeds two")

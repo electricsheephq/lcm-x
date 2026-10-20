@@ -19,7 +19,9 @@ def rolling(samples, window=60):
     result, selected, pos = [], [], 0
     if not samples:
         return result
-    for end in range(math.ceil(samples[0][0]-samples[0][1]+window), math.floor(samples[-1][0])+1):
+    first = samples[0][0]-samples[0][1]+window
+    for offset in range(max(0, math.floor(samples[-1][0]-first+1e-6)+1)):
+        end = first+offset
         while pos < len(samples) and samples[pos][0]-samples[pos][1] < end:
             selected.append(samples[pos])
             pos += 1
@@ -94,7 +96,10 @@ class Supervisor:
 
     def close(self):
         self.halt.set()
-        self.thread.join()
+        if hasattr(self, "thread"):
+            self.thread.join()
+            with self.lock:
+                self.sample(tuple(self.windows))
 
 
     def sample(self, pids):
