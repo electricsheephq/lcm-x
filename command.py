@@ -3783,7 +3783,8 @@ def _embedding_backfill_summary_run(
                     lease_lost = True
                     stop_reason = "lease_lost"
                     break
-                if budget_s > 0 and (time.monotonic() - started) > budget_s:
+                if (budget_s > 0 and (time.monotonic() - started) > budget_s
+                        and not (maintenance_slice and offset == 0)):
                     budget_exhausted = True
                     stop_reason = "op_budget_exhausted"
                     break
