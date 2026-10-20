@@ -244,3 +244,107 @@ def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch)
         thread = getattr(maintenance, "_PREPARE_THREAD", None)
         if thread is not None:
             thread.join(5)
+
+
+def test_retire_snapshots_owner_before_concurrent_rearm(make_engine, monkeypatch):
+    engine = make_engine("race")
+    old_owner = engine._embedding_maintenance_owner
+    retired = []
+    monkeypatch.setattr(engines._EMBEDDING_MAINTENANCE_SCHEDULER, "retire_owner",
+                        lambda owner, timeout=0: retired.append(owner))
+    real_lock = engine._embedding_maintenance_lock
+
+    class RearmOnRelease:
+        """Runs one rearm right after retire releases the lock: the race window."""
+        fired = False
+
+        def __enter__(self):
+            real_lock.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            real_lock.release()
+            if not RearmOnRelease.fired:
+                RearmOnRelease.fired = True
+                engine._rearm_embedding_maintenance()
+            return False
+
+    engine._embedding_maintenance_lock = RearmOnRelease()
+    try:
+        engine._retire_embedding_maintenance(wait=False)
+    finally:
+        engine._embedding_maintenance_lock = real_lock
+    assert retired == [old_owner]
+    assert engine._embedding_maintenance_owner is not old_owner
+    assert engine._embedding_maintenance_retired is False
+
+
+def test_doctor_reports_preparing_while_cached_probe_fails(make_engine, monkeypatch):
+    engine = make_engine("preparing", **local_config())
+    key = maintenance._local_model_key(engine._config)
+    assert key
+    monkeypatch.setitem(maintenance._PREPARE, key, ("preparing", ""))
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: {
+        "available": False, "provider": "fastembed", "model": "fixture-local", "probed": True,
+        "detail": "model files are not cached"})
+    check = tools._embedding_provider_health_check(engine)
+    assert check["status"] == "warn"
+    assert check["detail"]["readiness"].startswith("model: preparing;")
+    assert "prepares in the background" in check["detail"]["impact"]
+
+
+def test_prepare_keeps_every_owner_callback_for_one_database(monkeypatch, tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "shared.db"), **local_config())
+    ran, release = [], threading.Event()
+
+    class Model:
+        def warmup(self):  # preparation warms only the model; hold it until both owners registered
+            assert release.wait(5)
+            return [1.0, 0.0]
+
+    monkeypatch.setattr(command, "resolve_provider", lambda *_a, **_k: Model())
+    owner_a, owner_b = object(), object()
+    assert maintenance.start_local_model_prepare(config.database_path, config,
+                                                 on_ready=lambda: ran.append("a"), owner=owner_a)
+    # A second engine on the same database, e.g. after a rearm, must not displace the first owner.
+    assert not maintenance.start_local_model_prepare(config.database_path, config,
+                                                     on_ready=lambda: ran.append("b"), owner=owner_b)
+    release.set()
+    maintenance._PREPARE_THREAD.join(5)
+    assert sorted(ran) == ["a", "b"]
+
+
+@pytest.mark.parametrize(("model", "expected"), [
+    ("other-local", "not prepared (run /lcm embed warmup)"), ("fixture-local", "present")])
+def test_doctor_present_needs_the_configured_local_model(make_engine, monkeypatch, model, expected):
+    from hermes_lcm.vector_store import VectorStore
+
+    engine = make_engine("stale-profile", **local_config())
+    vectors = VectorStore(engine._store.db_path, config=engine._config)
+    try:
+        vectors.register_profile(model, "fastembed", 2)
+    finally:
+        vectors.close()
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: {
+        "available": True, "provider": "fastembed", "model": "fixture-local", "probed": True, "detail": "fixture"})
+    readiness = tools._embedding_provider_health_check(engine)["detail"]["readiness"]
+    assert readiness.startswith(f"model: {expected};")
+
+
+def test_process_present_state_does_not_vouch_for_another_database(make_engine, monkeypatch):
+    from hermes_lcm.vector_store import VectorStore
+
+    prepared, other = make_engine("db-a", **local_config()), make_engine("db-b", **local_config())
+    vectors = VectorStore(prepared._store.db_path, config=prepared._config)
+    try:
+        vectors.register_profile("fixture-local", "fastembed", 2)
+    finally:
+        vectors.close()
+    other._dag.add_node(SummaryNode(session_id="db-b", depth=0, summary="unembedded summary",
+                                    created_at=1.0, latest_at=1.0))
+    monkeypatch.setitem(maintenance._PREPARE, maintenance._local_model_key(other._config), ("present", ""))
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: {
+        "available": True, "provider": "fastembed", "model": "fixture-local", "probed": True, "detail": "fixture"})
+    assert tools._embedding_provider_health_check(prepared)["detail"]["readiness"].startswith("model: present;")
+    readiness = tools._embedding_provider_health_check(other)["detail"]["readiness"]
+    assert readiness == "model: not prepared (run /lcm embed warmup); coverage: 0/1 summaries"

@@ -35,7 +35,9 @@ _FAILURE_WARNED = False
 _STOP_EMBEDDING_MAINTENANCE = threading.Event()
 _PREPARE: dict[tuple[str, str, int], tuple[str, str]] = {}
 _PREPARE_THREAD: threading.Thread | None = None
-_PREPARE_READY: dict[tuple[str, str, int], dict[Any, Callable[[], None]]] = {}
+# model key -> (database, owner token) -> enqueue; one entry per live owner, so a retiring engine
+# never displaces another engine's callback for the same database.
+_PREPARE_READY: dict[tuple[str, str, int], dict[tuple[str, object], Callable[[], None]]] = {}
 _PREPARE_RETRY: dict[tuple[str, str, int], tuple[int, float]] = {}
 # #1586 v1 CPU bars: target at most 40% maintenance duty, without a new setting.
 _LOCAL_IDLE_MULTIPLIER = 1.5
@@ -92,7 +94,8 @@ def note_local_model_present(config: Any) -> None:
 
 
 def start_local_model_prepare(
-    db_path: str | Path, config: Any, *, on_ready: Callable[[], None] | None = None, owner=None,
+    db_path: str | Path, config: Any, *, on_ready: Callable[[], None] | None = None,
+    owner: object | None = None,
 ) -> bool:
     """Start this process's one background prepare of the local model (#1186).
 
@@ -111,7 +114,8 @@ def start_local_model_prepare(
         state = _PREPARE.get(key)
         if on_ready is not None and (state is None or state[0] != "present"):
             if state is not None or _PREPARE_THREAD is None or not _PREPARE_THREAD.is_alive():
-                _PREPARE_READY.setdefault(key, {})[(database_identity(db_path), owner)] = on_ready
+                token = on_ready if owner is None else owner
+                _PREPARE_READY.setdefault(key, {})[(database_identity(db_path), token)] = on_ready
         attempts, retry_at = _PREPARE_RETRY.get(key, (0, 0.0))
         if (state is not None and state[0] != "unavailable") or sum(n for n, _ in _PREPARE_RETRY.values()) >= 6 or time.monotonic() < retry_at:
             return False
@@ -144,7 +148,7 @@ def _prepare_local_model(key: tuple[str, str, int], db_path: str | Path, config:
         with _STATE_LOCK:
             _PREPARE[key] = ("present", "")
             callbacks = _PREPARE_READY.pop(key, {})
-        for enqueue in callbacks.values():
+        for enqueue in list(callbacks.values()):
             try:
                 enqueue()
             except Exception:

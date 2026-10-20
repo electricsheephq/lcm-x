@@ -4358,19 +4358,27 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
     from .embedding_maintenance import local_model_state
 
     state = local_model_state(engine._config)
-    if not probe.get("available"):
+    if state is not None and state[0] == "preparing":
+        # Background preparation owns this window; a cached-only probe is expected to fail until it ends.
+        model = "preparing"
+    elif not probe.get("available"):
         model = f"unavailable({probe.get('detail')})"
-    elif state is not None:
-        model = state[0] if state[0] != "unavailable" else f"unavailable({state[1]})"
-    elif _active_embedding_profile_exists(engine):
-        model = "present"
+    elif state is not None and state[0] == "unavailable":
+        model = f"unavailable({state[1]})"
     else:
-        model = "not prepared (run /lcm embed warmup)"
+        # Process state is shared by every database on this model: "present" needs this database's profile too.
+        model = None
     try:
         conn = command._embedding_read_connection(engine._store.db_path)
         try:
             command._register_summary_has_text(conn)
             profile = command._embedding_current_profile(conn)
+            wanted = str(probe.get("model") or getattr(engine._config, "embedding_model", "") or "")
+            if profile is not None and not (embedding_provider_id(str(profile["provider"] or "")) == "fastembed"
+                                            and str(profile["model_name"] or "") == wanted):
+                profile = None  # another model's vectors are not coverage for the configured one
+            if model is None:
+                model = "present" if profile is not None else "not prepared (run /lcm embed warmup)"
             vectors = "SELECT 1 WHERE 0" if profile is None else (
                 "SELECT 1 FROM lcm_embedding_meta AS m WHERE m.embedded_id = CAST(n.node_id AS TEXT) "
                 "AND m.embedded_kind = 'summary' AND m.identity_hash = :identity"
@@ -4385,6 +4393,8 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
         coverage = f"{embedded}/{eligible} summaries"
     except sqlite3.Error as exc:
         coverage = f"unavailable ({exc})"
+        if model is None:
+            model = "present" if _active_embedding_profile_exists(engine) else "not prepared (run /lcm embed warmup)"
     last, _ = command.incremental_embedding_state(engine._store.db_path)
     return f"model: {model}; coverage: {coverage}" + (f"; maintenance: {last[1]}" if last else "")
 
@@ -4440,6 +4450,16 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
     }
     if embedding_provider_id(str(probe.get("provider") or "")) == "fastembed":
         detail["readiness"] = _embedding_readiness(engine, probe)
+    if str(detail.get("readiness", "")).startswith("model: preparing;"):
+        detail["impact"] = (
+            "semantic retrieval is degraded while the local model prepares in the background; "
+            "lcm_recall keeps answering from full text"
+        )
+        return {
+            "check": "embedding_provider_health",
+            "status": "warn",
+            "detail": detail,
+        }
     # An unavailable provider is the prerequisite blocker: warmup cannot succeed until it is fixed.
     if not probe.get("available") or str(detail.get("readiness", "")).startswith("model: unavailable("):
         detail["impact"] = (
