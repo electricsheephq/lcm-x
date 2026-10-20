@@ -1947,6 +1947,7 @@ class FastembedReranker(FastembedProvider):
     def __init__(self, model: str, **kwargs: Any) -> None:
         super().__init__(model, **kwargs)
         self._infer_lock = threading.Lock()
+        self._warmup_lock = threading.Lock()
 
     def _construct(self, *, allow_download: bool) -> Any:
         try:
@@ -1962,6 +1963,10 @@ class FastembedReranker(FastembedProvider):
                 threads=_FASTEMBED_THREADS, local_files_only=not allow_download,
             )
         except Exception as exc:
+            if isinstance(exc, ValueError) and "not supported in TextCrossEncoder" in str(exc):
+                reason = f"FastEmbed rerank model {self.model_id!r} is not supported in TextCrossEncoder"
+                warn_rerank_once(reason)
+                raise ProviderUnavailable(reason) from exc
             if allow_download:
                 raise EmbeddingProviderError(f"FastEmbed rerank warmup failed for {self.model_id}: {exc}") from exc
             warn_rerank_once("rerank model not prepared", warmup_fixes=True)
@@ -1977,8 +1982,9 @@ class FastembedReranker(FastembedProvider):
         return self._model if self._model is not None else self._publish(self._construct(allow_download=False))
 
     def warmup(self) -> Any:
-        # The download runs outside every lock so recall and doctor never wait on it.
-        return self._model if self._model is not None else self._publish(self._construct(allow_download=True))
+        # Only warmups wait here; recall and doctor never take this lock.
+        with self._warmup_lock:
+            return self._model if self._model is not None else self._publish(self._construct(allow_download=True))
 
     def files_cached(self) -> bool:
         snapshots = self.cache_dir / f"models--{self.model_id.replace('/', '--')}" / "snapshots"
@@ -2002,10 +2008,10 @@ class FastembedReranker(FastembedProvider):
 
 def local_reranker(model: str) -> FastembedReranker:
     global _LOCAL_RERANKER
-    cache_dir = Path(os.environ.get("FASTEMBED_CACHE_PATH", "").strip() or _DEFAULT_FASTEMBED_CACHE)
+    candidate = FastembedReranker(model)  # Main's constructor owns process-wide cache selection; no model load.
     with _RERANK_LOCK:
-        if _LOCAL_RERANKER is None or (_LOCAL_RERANKER.model_id, _LOCAL_RERANKER.cache_dir) != (model, cache_dir):
-            _LOCAL_RERANKER = FastembedReranker(model, cache_dir=cache_dir)
+        if _LOCAL_RERANKER is None or (_LOCAL_RERANKER.model_id, _LOCAL_RERANKER.cache_dir) != (model, candidate.cache_dir):
+            _LOCAL_RERANKER = candidate
         return _LOCAL_RERANKER
 
 
@@ -2020,7 +2026,7 @@ def rerank_readiness(config: Any) -> str:
         if reranker._model is not None:
             return f"{provider}:{model} ready"
         return f"{provider}:{model} cached" if reranker.files_cached() else "not prepared"
-    return f"{provider}:{model} ready" if os.environ.get("VOYAGE_API_KEY", "").strip() else "not prepared"
+    return f"{provider}:{model} ready" if lcm_env_get("VOYAGE_API_KEY", "").strip() else "not prepared"
 
 
 def resolve_provider(

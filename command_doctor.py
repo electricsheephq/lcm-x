@@ -699,7 +699,8 @@ def render_doctor(facts: DoctorFacts) -> str:
         if isinstance(detail, str):
             suffix = f" {detail}"
         lines.append(f"embedding_provider_health: {facts.embedding_check['status']}{suffix}")
-        lines.append(f"rerank: {facts.embedding_check.get('rerank', 'unknown')}")
+        if "rerank" in facts.embedding_check:
+            lines.append(f"rerank: {facts.embedding_check['rerank']}")
     if issues:
         lines.append(f"issues: {', '.join(issues)}")
     else:

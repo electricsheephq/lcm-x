@@ -449,3 +449,41 @@ def test_slot_exhaustion_names_rerank_stage(local, monkeypatch):
     monkeypatch.setattr(tools, "_lcm_semantic_worker_slots", slots)
     config = LCMConfig(rerank_enabled=True, rerank_model=f"fastembed:{LOCAL_MODEL}")
     assert run_rerank(config)[1] == "skipped: lcm-recall-rerank worker capacity is exhausted"
+
+
+def test_unsupported_local_model_has_no_warmup_hint(local, monkeypatch, caplog):
+    def unsupported(**kwargs):
+        raise ValueError("Model unsupported is not supported in TextCrossEncoder.")
+    monkeypatch.setattr(sys.modules["fastembed.rerank.cross_encoder"], "TextCrossEncoder", unsupported)
+    config = LCMConfig(rerank_enabled=True, rerank_model="fastembed:unsupported")
+    assert "not supported" in run_rerank(config)[1]
+    assert "warmup" not in caplog.text
+
+
+def test_concurrent_warmups_construct_once(local):
+    from concurrent.futures import ThreadPoolExecutor
+
+    local.download_delay = 0.1
+    reranker = ep.local_reranker(LOCAL_MODEL)
+    barrier = threading.Barrier(2)
+
+    def warm():
+        barrier.wait(timeout=2)
+        return reranker.warmup()
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first, second = pool.submit(warm), pool.submit(warm)
+        assert first.result(timeout=2) is second.result(timeout=2)
+    assert len(local.calls) == 1
+
+
+@pytest.mark.parametrize("profile_key", [False, True])
+def test_rerank_readiness_uses_profile_key(monkeypatch, profile_key):
+    from hermes_lcm import config as config_module
+
+    monkeypatch.setenv("VOYAGE_API_KEY", "synthetic-process-key")
+    monkeypatch.setattr(config_module, "lcm_env",
+                        lambda: {"VOYAGE_API_KEY": "synthetic-profile-key"} if profile_key else {})
+    config = LCMConfig(rerank_enabled=True, rerank_model="voyage:rerank-2.5-lite")
+    expected = "voyage:rerank-2.5-lite ready" if profile_key else "not prepared"
+    assert ep.rerank_readiness(config) == expected
