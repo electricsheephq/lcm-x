@@ -19,14 +19,14 @@ Canonical install path: clone LCM-X into the plugin directory `hermes-lcm-x`.
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ${HOME}/.hermes/plugins/hermes-lcm-x
+  "${HOME}/.hermes/plugins/hermes-lcm-x"
 ```
 
 For a profile-specific install:
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x
+  "${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x"
 ```
 
 From an existing checkout, install a symlink:
@@ -71,13 +71,13 @@ Restart Hermes after changing plugin or context-engine config.
 If you cloned directly into the plugin directory:
 
 ```bash
-cd ${HOME}/.hermes/plugins/hermes-lcm-x && git pull --ff-only
+cd "${HOME}/.hermes/plugins/hermes-lcm-x" && git pull --ff-only
 ```
 
 For a profile-specific install:
 
 ```bash
-cd ${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x && git pull --ff-only
+cd "${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x" && git pull --ff-only
 ```
 
 A clone from v0.23.x or earlier still lives at `plugins/hermes-lcm`. Stop
@@ -87,9 +87,9 @@ directory), then make the config change in
 starting Hermes again:
 
 ```bash
-cd ${HOME}/.hermes/plugins/hermes-lcm && git pull --ff-only
+cd "${HOME}/.hermes/plugins/hermes-lcm" && git pull --ff-only
 # profile-specific:
-cd ${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm && git pull --ff-only
+cd "${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm" && git pull --ff-only
 ```
 
 If you installed a symlink from a separate checkout, update that checkout and
@@ -1443,14 +1443,14 @@ The default is a dry run:
 
 ```bash
 python scripts/backfill_externalized_tool_outputs.py \
-  --database ${HOME}/.hermes/lcm.db \
-  --hermes-home ${HOME}/.hermes \
+  --database "${HOME}/.hermes/lcm.db" \
+  --hermes-home "${HOME}/.hermes" \
   --manifest ./externalization-backfill.json
 
 # Create only eligible sidecars after reviewing the scrubbed manifest.
 python scripts/backfill_externalized_tool_outputs.py \
-  --database ${HOME}/.hermes/lcm.db \
-  --hermes-home ${HOME}/.hermes \
+  --database "${HOME}/.hermes/lcm.db" \
+  --hermes-home "${HOME}/.hermes" \
   --manifest ./externalization-backfill.json \
   --apply
 ```
@@ -1500,8 +1500,8 @@ references it:
 
 ```bash
 python scripts/backfill_externalized_tool_outputs.py \
-  --database ${HOME}/.hermes/lcm.db \
-  --hermes-home ${HOME}/.hermes \
+  --database "${HOME}/.hermes/lcm.db" \
+  --hermes-home "${HOME}/.hermes" \
   --rollback ./externalization-backfill.json
 ```
 
@@ -1537,22 +1537,22 @@ Examples:
 ```bash
 # SQLite source, dry-run
 python scripts/import_lossless_claw.py \
-  --source-db ${HOME}/.openclaw/path/to/lcm.db \
-  --target-db ${HOME}/.hermes/lcm.db \
+  --source-db "${HOME}/.openclaw/path/to/lcm.db" \
+  --target-db "${HOME}/.hermes/lcm.db" \
   --agent sammy \
   --json
 
 # JSONL source directory, dry-run
 python scripts/import_lossless_claw.py \
-  --source-jsonl-dir ${HOME}/.openclaw/agents/sammy/sessions \
-  --target-db ${HOME}/.hermes/lcm.db \
+  --source-jsonl-dir "${HOME}/.openclaw/agents/sammy/sessions" \
+  --target-db "${HOME}/.hermes/lcm.db" \
   --agent sammy \
   --json
 
 # Apply only after reviewing the report
 python scripts/import_lossless_claw.py \
-  --source-jsonl-dir ${HOME}/.openclaw/agents/sammy/sessions \
-  --target-db ${HOME}/.hermes/lcm.db \
+  --source-jsonl-dir "${HOME}/.openclaw/agents/sammy/sessions" \
+  --target-db "${HOME}/.hermes/lcm.db" \
   --agent sammy \
   --import-id sammy-jsonl-2026-07 \
   --apply

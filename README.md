@@ -193,14 +193,14 @@ Canonical install path: clone LCM-X as a general user plugin into
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ${HOME}/.hermes/plugins/hermes-lcm-x
+  "${HOME}/.hermes/plugins/hermes-lcm-x"
 ```
 
 For a profile-specific install:
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x
+  "${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x"
 ```
 
 From an existing checkout, install a symlink:
@@ -291,13 +291,13 @@ there.
 If you cloned directly into the plugin directory:
 
 ```bash
-cd ${HOME}/.hermes/plugins/hermes-lcm-x && git pull --ff-only
+cd "${HOME}/.hermes/plugins/hermes-lcm-x" && git pull --ff-only
 ```
 
 For a profile-specific install:
 
 ```bash
-cd ${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x && git pull --ff-only
+cd "${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x" && git pull --ff-only
 ```
 
 A clone from v0.23.x or earlier still lives at `plugins/hermes-lcm`. Stop
@@ -307,9 +307,9 @@ directory), then make the config change in
 before you start Hermes again:
 
 ```bash
-cd ${HOME}/.hermes/plugins/hermes-lcm && git pull --ff-only
+cd "${HOME}/.hermes/plugins/hermes-lcm" && git pull --ff-only
 # profile-specific:
-cd ${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm && git pull --ff-only
+cd "${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm" && git pull --ff-only
 ```
 
 If you installed a symlink from a separate checkout, update that checkout and
@@ -997,8 +997,8 @@ SQLite source example:
 
 ```bash
 python scripts/import_lossless_claw.py \
-  --source-db ${HOME}/.openclaw/path/to/lcm.db \
-  --target-db ${HOME}/.hermes/lcm.db \
+  --source-db "${HOME}/.openclaw/path/to/lcm.db" \
+  --target-db "${HOME}/.hermes/lcm.db" \
   --agent sammy
 ```
 
@@ -1006,8 +1006,8 @@ JSONL source example:
 
 ```bash
 python scripts/import_lossless_claw.py \
-  --source-jsonl ${HOME}/.openclaw/agents/sammy/sessions/session-a.jsonl \
-  --target-db ${HOME}/.hermes/lcm.db \
+  --source-jsonl "${HOME}/.openclaw/agents/sammy/sessions/session-a.jsonl" \
+  --target-db "${HOME}/.hermes/lcm.db" \
   --agent sammy \
   --json
 ```
@@ -1016,8 +1016,8 @@ For a directory of session exports:
 
 ```bash
 python scripts/import_lossless_claw.py \
-  --source-jsonl-dir ${HOME}/.openclaw/agents/sammy/sessions \
-  --target-db ${HOME}/.hermes/lcm.db \
+  --source-jsonl-dir "${HOME}/.openclaw/agents/sammy/sessions" \
+  --target-db "${HOME}/.hermes/lcm.db" \
   --agent sammy
 ```
 
