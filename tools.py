@@ -1768,7 +1768,13 @@ def _lcm_embedding_query_metric(provider: Any) -> dict[str, Any]:
 def _lcm_grep_resolve_provider(
     engine: "LCMEngine", *, deadline: float | None = None
 ) -> Any:
+    from .embedding_maintenance import local_model_state
+
     config = engine._config
+    state = local_model_state(config)
+    if state is not None and state[0] in {"preparing", "unavailable"}:
+        reason = f" ({state[1]})" if state[1] else ""
+        raise RuntimeError(f"local embedding model is {state[0]}{reason}; retrieval uses full text")
     cache_key = (
         str(getattr(config, "embedding_provider", "") or "").strip().lower(),
         str(getattr(config, "embedding_model", "") or "").strip(),
@@ -1802,11 +1808,6 @@ def _resolve_recall_provider(
     tool calls are byte-identical.
     """
     override = str(provider_override or "").strip()
-    from .embedding_maintenance import local_model_state
-
-    state = local_model_state(engine._config) if not override else None
-    if state is not None and state[0] == "preparing":
-        raise RuntimeError("local embedding model is preparing; recall uses full text")
     if not override:
         return _lcm_grep_resolve_provider(engine, deadline=deadline)
     config = engine._config

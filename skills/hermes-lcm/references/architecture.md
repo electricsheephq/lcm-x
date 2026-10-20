@@ -69,9 +69,10 @@ steady between a session end and the next rebind is this designed pause, not a s
 
 With fastembed configured explicitly, the first maintenance trigger in a process starts one background
 preparation of the local model (#1586). It runs the warmup path, the only path allowed to download, then
-registers the profiles and enqueues a catch-up pass for every live engine on that database. Recall never
-waits for it: while the model prepares, `lcm_recall` answers from full text and reports degraded with a
-`preparing` reason. A failed preparation warns once and leaves the model `unavailable` with its reason for
+registers the profiles and enqueues a catch-up pass for every live engine on that database. Retrieval never
+waits for it: while the model prepares or is unavailable, `lcm_recall` and semantic/hybrid `lcm_grep` answer
+from full text and report degraded with the model state. Neither starts model construction on the request
+path during these states. A failed preparation warns once and leaves the model `unavailable` with its reason for
 this process; the next process start retries. Only one preparation runs per process.
 
 Vector identity binds provider, model, dimension, storage shape, and the active

@@ -363,6 +363,10 @@ class _RollupMaintenanceScheduler:
                 )
                 return False
             if key in self._queued_keys or key in self._deferred_jobs:
+                if delay > 0:
+                    self._not_before[key] = max(
+                        self._not_before.get(key, 0), time.monotonic() + delay,
+                    )
                 self._track_owner_locked(key, owner, job if handoff else None)
                 return True
             if delay > 0:
