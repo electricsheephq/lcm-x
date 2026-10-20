@@ -51,6 +51,11 @@ def cached_call(cache, **kwargs):
     return cache.call("codex:fixture@low", [{"role": "user", "content": "synthetic"}], [], **(args | kwargs))
 
 
+@pytest.fixture(autouse=True)
+def synthetic_codex_version(monkeypatch):
+    monkeypatch.setattr(dev_cache, "_CODEX_VERSION", "codex-cli fixture", raising=False)
+
+
 def test_identical_request_hits_without_model_call_and_digest_is_checked(tmp_path):
     backend = Backend()
     cache = Responses(tmp_path, backend, time.monotonic() + 10, {"renderer": "a"})
@@ -143,7 +148,8 @@ def test_d50_changes_actual_delivery_and_observes_caps(tmp_path, monkeypatch, de
 
     def dispatch(name, args, engine, offered=None):
         candidate_limit, rerank_window = args["limit"] * 4, 50  # noqa: F841 - observed caller locals
-        kw = recall_delivery.deliver_recall([], limit_cap=tools._LCM_RECALL_LIMIT_CAP,
+        kw = recall_delivery.deliver_recall([], limit=args["limit"], requested_limit=args["limit"],
+             limit_cap=tools._LCM_RECALL_LIMIT_CAP,
              per_session_limit=tools._LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT,
              expanded_hit_limit=tools._LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT)
         return json.dumps(dict(limit=args["limit"], hits=[], total_results=0, degraded=degraded,
@@ -184,7 +190,8 @@ def test_source_identity_includes_dirty_product_bytes_but_not_bench(tmp_path, mo
 
 
 @pytest.mark.parametrize("expired", [False, True])
-def test_synthetic_end_to_end_cache_and_deadline_receipt(tmp_path, monkeypatch, expired):
+@pytest.mark.parametrize("no_op", [False, True])
+def test_synthetic_end_to_end_cache_and_deadline_receipt(tmp_path, monkeypatch, expired, no_op):
     q = Question("fixture-id", "lme-s", "single-session-user", "synthetic question", "synthetic gold", "", False, [])
     item = dict(id=q.qid, cluster="fixture-cluster")
     monkeypatch.setattr(dev, "load_lcm", lambda repo: None)
@@ -197,7 +204,8 @@ def test_synthetic_end_to_end_cache_and_deadline_receipt(tmp_path, monkeypatch, 
     def worker_run(cmd, **kwargs):
         spec = json.loads(Path(cmd[-1]).read_bytes())
         Path(spec["receipt"]).write_text(json.dumps(dict(product="synthetic-sha", rows=[
-            dict(id=q.qid, cache_key="fixture", sources={}, retrieval_sha256="synthetic-hash")])) )
+            dict(id=q.qid, cache_key="fixture", sources={}, retrieval_sha256="synthetic-hash",
+                 delivered_sha256="same" if no_op else "candidate" if "candidate" in spec["receipt"] else "baseline")])) )
         if expired:
             time.sleep(.01)
         return SimpleNamespace(returncode=0)
@@ -229,9 +237,13 @@ def test_synthetic_end_to_end_cache_and_deadline_receipt(tmp_path, monkeypatch, 
         assert result == 2 and report["verdict"] == "INCOMPLETE"
         assert "primary" not in report and len(report["remaining_ids"]) == 2 and backend.calls == 0
     else:
-        assert result == 0 and report["verdict"] == "NO-SIGNAL" and report["remaining_ids"] == []
+        assert result == (2 if no_op else 0)
+        assert report["verdict"] == ("INCOMPLETE" if no_op else "NO-SIGNAL") and report["remaining_ids"] == []
+        if no_op:
+            assert report["reason"] == "no-op-arm"
         assert report["calls"] == {"reader": {"fresh": 1, "cached": 1}, "judge": {"fresh": 1, "cached": 1}}
         assert backend.calls == 2
+        assert report["guard_margin"] == 2 and "kill/futility" in (args.output / "RESULT.md").read_text()
     for name in ("report.json", "report.md", "rows.json", "RESULT.md"):
         assert "synthetic question" not in (args.output / name).read_text()
 

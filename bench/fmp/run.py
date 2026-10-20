@@ -338,7 +338,7 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
         destination = args.output / "answers.jsonl"
         source = questions
     else:
-        rows = [json.loads(line) for line in (args.output / "answers.jsonl").read_text().splitlines()]
+        rows = [json.loads(line) for line in (args.output / "answers.jsonl").read_text().split("\n") if line.strip()]
         if {r["qid"] for r in rows} != {q.qid for q in questions}:
             raise ValueError("answer ids mismatch")
         by_id = {q.qid: q for q in questions}
@@ -364,7 +364,7 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             row = yield
     manifest[args.command + "_wall_s"] = timing["active_s"]
     manifest["wall_s"] = manifest.get("answer_wall_s", 0) + manifest.get("judge_wall_s", 0)
-    written = [json.loads(line) for line in destination.read_text().splitlines()]
+    written = [json.loads(line) for line in destination.read_text().split("\n") if line.strip()]
     manifest.update(end_utc=utc(), not_run=sum(r["status"] == "not_run" for r in written),
                     status="incomplete" if any(r["status"] == "not_run" for r in written) else
                     "complete" if args.command == "judge" else "answered")

@@ -23,6 +23,23 @@ from .dev_panel import PANELS, encoded, freeze, load
 from .stores import Stores
 
 
+# Recall call sites in tools.py: scan bounds, lcm_recall and _lcm_recall_rerank.
+# Embedding identity/privacy and ingestion settings stay bound to the frozen store.
+RECALL_CONFIG_KEYS = frozenset({
+    "recall_scan_max_rows", "recall_scan_budget_s", "recall_scan_rows", "recall_reference_strict",
+    "recall_query_timeout_s", "recall_arm_weights", "recall_fts_anchor", "rerank_window_limit",
+    "rerank_enabled", "rerank_model", "rerank_margin", "embeddings_enabled",
+})
+
+
+def validate_overrides(overrides):
+    if not isinstance(overrides, dict):
+        raise ValueError("candidate config must be a JSON object")
+    unsupported = set(overrides) - RECALL_CONFIG_KEYS - {"recall_depth"}
+    if unsupported:
+        raise ValueError("unsupported recall-time override keys: " + ", ".join(sorted(unsupported)))
+
+
 def renderer_identity():
     return {p: digest_file(Path(__file__).with_name(p)) for p in
             ("dev.py", "dev_panel.py", "dev_cache.py", "delivery.py", "judges.py", "prompts.py", "models.py")}
@@ -36,10 +53,11 @@ def caps(depth):
 def retrieve(q, store, overrides):
     """Promoted depth-screen cap observation, with the existing FMP single renderer."""
     from hermes_lcm import recall_delivery, tools
-    depth = overrides.get("recall_depth", 25)
-    if type(depth) is not int or not 1 <= depth <= 100:
+    validate_overrides(overrides)
+    depth = overrides.get("recall_depth")
+    if "recall_depth" in overrides and (type(depth) is not int or not 1 <= depth <= 100):
         raise ValueError("invalid recall depth")
-    expected, observed, payload = caps(depth), {}, {}
+    expected, observed, payload, effective = caps(depth) if depth is not None else None, {}, {}, {}
     original, dispatch = recall_delivery.deliver_recall, delivery.dispatch
 
     def observe(ordered, **kw):
@@ -47,10 +65,14 @@ def retrieve(q, store, overrides):
         observed.update(limit=kw["limit_cap"], candidate_pool=caller["candidate_limit"],
                         rerank_window=caller["rerank_window"], per_session=kw["per_session_limit"],
                         expanded=kw["expanded_hit_limit"])
+        effective.update(limit=kw["limit"], requested_limit=kw["requested_limit"])
         return original(ordered, **kw)
 
     def recall(name, arguments, engine, offered=None):
-        raw = dispatch(name, {**arguments, "limit": depth, "detail": "answer_ready"}, engine, offered)
+        arguments = {**arguments, "detail": "answer_ready"}
+        if depth is not None:
+            arguments["limit"] = depth
+        raw = dispatch(name, arguments, engine, offered)
         payload.update(json.loads(raw))
         return raw
 
@@ -58,13 +80,14 @@ def retrieve(q, store, overrides):
         for key, value in overrides.items():
             if key == "recall_depth":
                 continue
-            if key not in vars(engine._config) or key.startswith(("database", "embedding")):
-                raise ValueError("unsupported config override")
+            if key not in vars(engine._config):
+                raise ValueError("recall-time override unavailable in selected checkout: " + key)
             setattr(engine._config, key, value)
-        for name, value in (("_LCM_RECALL_LIMIT_CAP", depth),
-                ("_LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT", expected["per_session"]),
-                ("_LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT", expected["expanded"])):
-            stack.enter_context(patch.object(tools, name, value))
+        if depth is not None:
+            for name, value in (("_LCM_RECALL_LIMIT_CAP", depth),
+                    ("_LCM_RECALL_ANSWER_READY_PER_SESSION_LIMIT", expected["per_session"]),
+                    ("_LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT", expected["expanded"])):
+                stack.enter_context(patch.object(tools, name, value))
         stack.enter_context(patch.object(recall_delivery, "deliver_recall", observe))
         stack.enter_context(patch.object(delivery, "dispatch", recall))
         speakers = json.loads((store.directory(q) / "speakers.json").read_bytes())
@@ -72,10 +95,15 @@ def retrieve(q, store, overrides):
             evidence, raw = delivery.single(q, engine, speakers)
     hits = payload.get("hits", [])
     expansion = payload.get("provenance", {}).get("answer_ready", {})
+    expected = expected if expected is not None else observed
     counts = {sid: sum(h.get("session_id") == sid for h in hits) for sid in {h.get("session_id") for h in hits}}
-    valid = (observed == expected and payload.get("limit") == depth and "limit_clamped_from" not in payload
+    response_limit = effective.get("limit")
+    valid = (bool(observed) and observed == expected and payload.get("limit") == response_limit
+             and response_limit == min(effective["requested_limit"], observed["limit"])
+             and payload.get("limit_clamped_from", effective["requested_limit"]) == effective["requested_limit"]
+             and (depth is None or "limit_clamped_from" not in payload)
              and "error" not in payload and not payload.get("timeout")
-             and payload.get("total_results") == len(hits) and len(hits) <= depth
+             and payload.get("total_results") == len(hits) and len(hits) <= response_limit
              and expansion.get("per_session_limit") == expected["per_session"]
              and expansion.get("expanded_hit_limit") == expected["expanded"]
              and expansion.get("expanded_hit_count") == sum("content" in h for h in hits)
@@ -92,6 +120,7 @@ def retrieve(q, store, overrides):
 
 
 def worker(spec):
+    validate_overrides(spec["overrides"])
     lme = load_lcm(spec["repo"])
     questions, panel, guard = load(spec["panel"], spec["guard"], spec["lme"], spec["locomo"], lme)
     product = source_identity(spec["repo"])
@@ -154,20 +183,56 @@ def judge_messages(q, hypothesis):
 def compare(items, rows):
     if not items:
         return dict(n=0, clusters=0, correct_count_difference=0, delta=None, ci95=None)
-    groups = {}
+    strata = {}
     b, a = [], []
     for item in sorted(items, key=lambda e: e["id"]):
         x, y = [int(rows[(arm, item["id"])]["correct"]) for arm in ("baseline", "candidate")]
         b.append(x)
         a.append(y)
-        groups.setdefault(item["cluster"], []).append(y - x)
-    # score_heldout_expansion.py at 2b9ea632: seeded, question-weighted paired cluster percentile bootstrap.
-    sums, ns = np.array([sum(v) for v in groups.values()]), np.array([len(v) for v in groups.values()])
-    draws = np.random.default_rng(1188).integers(0, len(ns), size=(10_000, len(ns)))
-    boot = sums[draws].sum(axis=1) / ns[draws].sum(axis=1)
-    return dict(n=len(items), clusters=len(ns), baseline_correct=sum(b), candidate_correct=sum(a),
+        strata.setdefault(item.get("dataset", "unknown"), {}).setdefault(item["cluster"], []).append(y - x)
+    rng = np.random.default_rng(1188)
+    boot = np.zeros(10_000)
+    for dataset in sorted(strata):
+        groups = strata[dataset]
+        sums, ns = np.array([sum(v) for v in groups.values()]), np.array([len(v) for v in groups.values()])
+        draws = rng.integers(0, len(ns), size=(10_000, len(ns)))
+        # Keep the frozen panel's dataset weights, despite unequal cluster sizes.
+        boot += (ns.sum() / len(items)) * sums[draws].sum(axis=1) / ns[draws].sum(axis=1)
+    discordant = sum(x != y for x, y in zip(b, a))
+    counts = {ds: len(groups) for ds, groups in strata.items()}
+    return dict(n=len(items), clusters=sum(counts.values()), strata_clusters=counts,
+                interval_note=f"LoCoMo part rests on {counts.get('locomo', 0)} conversations; its interval is approximate",
+                discordant=discordant, minimum_detectable_effect_items=2.8 * math.sqrt(discordant),
+                baseline_correct=sum(b), candidate_correct=sum(a),
                 correct_count_difference=sum(a) - sum(b), delta=(sum(a) - sum(b)) / len(items),
                 ci95=np.percentile(boot, [2.5, 97.5]).tolist())
+
+
+def disclosure(min_gain, guard_margin):
+    return dict(screen="kill/futility screen, not a promotion instrument", guard_margin=guard_margin,
+        minimum_useful_correct_count=min_gain, lme_abstention_guard_items=5,
+        mde_note="At n=100, about 7-11 items for 7-15% discordance; 2.8*sqrt(discordant)/1 items",
+        interval_note="LoCoMo part rests on 2 conversations; its interval is approximate",
+        rules={"DIRECTIONAL-WIN": f"diff >= {min_gain} items AND stratified ci95 lower bound > 0; no GUARD-RISK",
+            "GUARD-RISK": f"combined guard panel net paired delta <= -{guard_margin} items; ci95 reported only",
+            "INCOMPLETE": "missing/error rows, invalid judge/readback, deadline, cache/store/transport failure, "
+                          "or every delivered evidence sha256 identical (no-op-arm)"})
+
+
+def evaluate(items, guard, rows, *, min_gain, guard_margin):
+    report = disclosure(min_gain, guard_margin)
+    report.update(primary=compare(items, rows), guard=compare(guard, rows),
+        guards={name: compare([e for e in guard if e["dataset"] == ds], rows)
+                for name, ds in (("adversarial", "locomo"), ("abstention", "lme-s"))})
+    if rows and all(rows[("candidate", e["id"])]["retrieval"]["delivered_sha256"] ==
+                    rows[("baseline", e["id"])]["retrieval"]["delivered_sha256"] for e in items + guard):
+        report.update(verdict="INCOMPLETE", reason="no-op-arm")
+    else:
+        risk = report["guard"]["correct_count_difference"] <= -guard_margin
+        primary = report["primary"]
+        win = primary["correct_count_difference"] >= min_gain and primary["ci95"][0] > 0
+        report["verdict"] = "GUARD-RISK" if risk else "DIRECTIONAL-WIN" if win else "NO-SIGNAL"
+    return report
 
 
 def finish(output, report, rows, started, command):
@@ -188,6 +253,9 @@ def finish(output, report, rows, started, command):
            "--claim-class", "advisory", "--local-raw", "false")
     (output / "RESULT.md").write_text("# Development timing receipt\n\n| Metric | Receipt |\n|---|---|\n"
         f"| {report['verdict']} / wall seconds | report.json |\n\n"
+        f"{report['screen']}. Guard margin: {report['guard_margin']} items (ci95 reported only).\n"
+        f"Measured MDE: {report.get('primary', {}).get('minimum_detectable_effect_items')} items.\n"
+        f"{report['interval_note']}. LME abstention has only 5 guard items.\n"
         "Not proven: citable quality, independent placebo/confirmation, publication, release or runtime readiness.\n"
         "T1: unpublished. T2: unpublished.\n")
     invoke("headline", "--benchmark", "FMP/dev-timing", "--metric", "wall_seconds", "--value",
@@ -208,7 +276,8 @@ def execute(args):
     if args.freeze_panels:
         freeze(args.lme_data, args.locomo_data, lme, args.split_file)
         return 0
-    if not args.cache_root or not args.output or not 1 <= args.workers <= 4 or args.deadline_min <= 0 or args.min_gain < 1:
+    if (not args.cache_root or not args.output or not 1 <= args.workers <= 4 or args.deadline_min <= 0
+            or args.min_gain < 1 or args.guard_margin < 1):
         raise ValueError("cache/output, 1..4 workers and positive deadline required")
     if any(models.parse_spec(s)[0] != "codex" for s in (args.reader, args.judge)):
         raise ValueError("Codex subscription specs required; no metered API")
@@ -227,8 +296,9 @@ def execute(args):
     deadline = started + args.deadline_min * 60
     arms = [("baseline", args.baseline, {}), ("candidate", args.candidate or args.baseline,
              json.loads(args.candidate_config or "{}"))]
+    validate_overrides(arms[1][2])
     report = dict(verdict="INCOMPLETE", remaining_ids=[], calls={}, panels={"dev": digest_file(args.panel),
-                  "guard": digest_file(args.guard)}, minimum_useful_correct_count=args.min_gain, arms={})
+                  "guard": digest_file(args.guard)}, arms={}, **disclosure(args.min_gain, args.guard_margin))
     rows = {}
     try:
         retrievals = {}
@@ -272,6 +342,7 @@ def execute(args):
                         sources=sources, max_tokens=models.READER_MAX_TOKENS, tool_choice="none")
                     jm, dataset = judge_messages(q, answer["content"])
                     judgment = cache.call(args.judge, jm, calls, role="judge", rubric=sha(encoded(jm)), sources=sources,
+                                          validate=lambda r: judges.parse(r["content"], dataset) is not None,
                                           temperature=None if dataset.startswith("lme") else 0)
                     correct = judges.parse(judgment["content"], dataset)
                     if correct is None:
@@ -290,12 +361,8 @@ def execute(args):
             report["calls"] = cache.counts
         complete = len(rows) == 2 * len(questions) and time.monotonic() < deadline
         if complete:
-            report["primary"] = compare(panel["items"], rows)
-            report["guards"] = {name: compare([e for e in guard["items"] if e["dataset"] == ds], rows)
-                                for name, ds in (("adversarial", "locomo"), ("abstention", "lme-s"))}
-            risk = any(g["delta"] is not None and g["delta"] < 0 for g in report["guards"].values())
-            win = report["primary"]["correct_count_difference"] >= args.min_gain and report["primary"]["ci95"][0] > 0
-            report["verdict"] = "GUARD-RISK" if risk else "DIRECTIONAL-WIN" if win else "NO-SIGNAL"
+            report.update(evaluate(panel["items"], guard["items"], rows,
+                                   min_gain=args.min_gain, guard_margin=args.guard_margin))
             if time.monotonic() >= deadline:
                 report["verdict"] = "INCOMPLETE"
     except Exception as exc:
@@ -318,6 +385,7 @@ def parser():
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--deadline-min", type=float, default=30)
     p.add_argument("--min-gain", type=int, default=1)
+    p.add_argument("--guard-margin", type=int, default=2, help="net guard loss in items that triggers GUARD-RISK")
     p.add_argument("--prepare", action="store_true")
     p.add_argument("--freeze-panels", action="store_true")
     return p
@@ -337,7 +405,8 @@ def main():
             write_json(Path(spec["receipt"]), dict(status="INCOMPLETE", error=type(exc).__name__,
                 frames=[dict(file=Path(f.filename).name, line=f.lineno, function=f.name)
                         for f in traceback.extract_tb(exc.__traceback__)]))
-        print(json.dumps(dict(status="INCOMPLETE", error=type(exc).__name__)), file=sys.stderr)
+        reason = str(exc) if isinstance(exc, ValueError) and str(exc).startswith("unsupported recall-time override") else None
+        print(json.dumps(dict(status="INCOMPLETE", error=type(exc).__name__, reason=reason)), file=sys.stderr)
         return 2
 
 

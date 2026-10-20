@@ -182,8 +182,8 @@ directly; the model CLI environment, arguments, prompts and MCP configuration ne
 ## Cached development loop
 
 `python -m bench.fmp.dev` compares one baseline checkout with a candidate checkout
-or JSON configuration arm. This is an outcome-blind frozen development screen,
-with directional/futility results only. It does not replace confirmation, board
+or JSON configuration arm. This is an outcome-blind frozen development screen:
+**kill/futility screen, not a promotion instrument**. It does not replace confirmation, board
 measurements, or release gates. The frozen panel contains 25 IDs in each of four
 strata; a separate guard retains all development LoCoMo category 5 and LME
 abstention items. Main/guard overlap is intentional and evaluated once per arm.
@@ -210,21 +210,60 @@ nice -n 19 python -m bench.fmp.dev --baseline BASELINE --cache-root CACHE \
 Default reader/judge are `codex:gpt-6.1-sol@medium` / `codex:gpt-6.1-sol@low`;
 only Codex subscription transport is admitted. Default stores use `local` with
 summaries disabled, speaker-prefixed text, and FMP's single-delivery renderer.
-`recall_depth` promotes the depth-screen limit/pool/session/expansion caps and
-checks their effective readback. Other supported config overrides affect recall
-only; database and embedding overrides are refused. A different product source
+Only an explicit `recall_depth` override promotes the depth-screen
+limit/pool/session/expansion caps and checks their effective readback. Otherwise
+the renderer keeps its normal request (limit 25), without patching product caps;
+observed product defaults, including a changed checkout's caps, are recorded and
+strictly checked against response limits and expansion counts.
+
+The recall-time configuration allowlist is derived from `tools.py`'s
+`lcm_recall`, `_lcm_recall_scan_bounds`, summary/chunk scans and
+`_lcm_recall_rerank` (the delivery module uses their passed values):
+`recall_scan_max_rows`, `recall_scan_budget_s`, `recall_scan_rows`,
+`recall_reference_strict`, `recall_query_timeout_s`, `recall_arm_weights`,
+`recall_fts_anchor`, `rerank_window_limit`, `rerank_enabled`, `rerank_model`,
+`rerank_margin`, `embeddings_enabled`. These and the harness-only `recall_depth`
+are the only override keys. Ingestion-only `leaf_chunk_tokens`,
+`extraction_enabled`, `assertion_extraction_enabled`, unknown keys, and
+embedding identity/privacy settings are refused with a clear error: a frozen
+store cannot measure an ingestion change. Rerank still needs a supported provider;
+an allowed knob can be inert on a given store, so identical delivered evidence
+SHA256s for every paired row yield `INCOMPLETE` with reason `no-op-arm`.
+A different product source
 requires preparation for that checkout (`--candidate CANDIDATE --prepare`).
 Store generations conservatively hash product Python, schema/config/embedding
 inputs and ingestion adapters. Retrieval keys also cover query/date, rendered
-source identities and overrides. Response keys cover complete messages, endpoint,
+source identities and overrides. Response keys cover complete messages, endpoint
+(including `codex --version`, read once per process),
 model/effort, temperature, output limit, tools, rubric and renderer/source hashes.
 Private caches contain response/evidence bytes; reports contain IDs/hashes and
-numeric metadata. Failed or uncertain sends stop reuse without automatic replay.
+numeric metadata. Failed/uncertain sends and unparseable judge replies are stored
+as errors, never cache hits, without automatic replay.
 
-Reports expose paired correct-count changes, question-weighted conversation-cluster
-bootstrap intervals (10,000 draws, seed 1188), separate guard deltas, per-ID caps
-and estimated delivered tokens, call-cache counts and timing. Any missing/error
-row or deadline yields `INCOMPLETE` with remaining IDs; complete screens report
-`DIRECTIONAL-WIN`, `NO-SIGNAL`, or `GUARD-RISK`. A warm cached A/A is an identity
-control, never an independent placebo sample. Result cards cover advisory timing;
+Reports expose paired correct-count changes and stratified cluster bootstrap
+ci95 intervals (10,000 draws, seed 1188): resample LoCoMo conversations and LME
+clusters separately, preserving each stratum's cluster count per draw, then
+combine question-weighted. The LoCoMo part rests on **2 conversations**, so its
+interval is approximate. The combined guard and both guard breakdowns have
+reported ci95 intervals; **LME abstention has only 5 guard items**.
+Gains confined to just one LoCoMo conversation can still have a zero lower
+bound: stratification does not guarantee a directional win for every +20 pattern.
+
+Rules (guard risk takes precedence over a directional win):
+- `DIRECTIONAL-WIN`: diff ≥ `--min-gain` (default 1 item) AND stratified
+  ci95 lower bound > 0.
+- `GUARD-RISK`: the combined guard panel's net paired delta is ≤
+  −`--guard-margin` (integer items, default 2). Guard ci95 is reported only;
+  it is not part of this rule.
+- `INCOMPLETE`: missing/error rows, invalid judge or recall readback, deadline,
+  cache/store/transport failure, or all delivered evidence hashes identical
+  (`no-op-arm`). Other complete comparisons report `NO-SIGNAL`.
+
+At n=100 the minimum detectable effect is about **7–11 items** for 7–15%
+discordance. Each report computes and prints the approximation
+`2.8·sqrt(discordant)/1` items from its measured paired discordance; this is
+a screen sensitivity estimate, not independent confirmation.
+Reports also retain per-ID caps/tokens, call-cache counts and timing; result
+cards name the guard margin and measured MDE. A warm cached A/A is an identity
+control (`INCOMPLETE/no-op-arm`), never an independent placebo sample. Result cards cover advisory timing;
 publication and the full acceptance pilot remain separate owner actions.

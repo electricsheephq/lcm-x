@@ -10,6 +10,17 @@ from .common import digest_file, sha, write_json
 from .dev_panel import encoded
 from .models import Codex, JUDGE_MAX_TOKENS, parse_spec, render
 
+_CODEX_VERSION = None
+_VERSION_LOCK = threading.Lock()
+
+
+def endpoint():
+    global _CODEX_VERSION
+    with _VERSION_LOCK:
+        if _CODEX_VERSION is None:
+            _CODEX_VERSION = subprocess.check_output(["codex", "--version"], text=True).strip()
+    return dict(transport="codex-exec/chatgpt-plan", codex_version=_CODEX_VERSION)
+
 
 class Incomplete(Exception):
     pass
@@ -53,14 +64,15 @@ class Responses:
         self.root, self.backend, self.deadline, self.renderer = Path(root), backend, deadline, renderer
         self.root.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
+        self.endpoint = endpoint()
         self.counts = {r: {"fresh": 0, "cached": 0} for r in ("reader", "judge")}
 
     def call(self, spec, messages, records, tools=None, max_tokens=JUDGE_MAX_TOKENS,
-             tool_choice="auto", temperature=None, *, role, rubric, sources):
+             tool_choice="auto", temperature=None, *, role, rubric, sources, validate=None):
         kind, _, effort = parse_spec(spec)
         if kind != "codex":
             raise ValueError("development loop currently admits Codex subscription only")
-        identity = request_identity(spec, messages, endpoint="codex-exec/chatgpt-plan", effort=effort,
+        identity = request_identity(spec, messages, endpoint=self.endpoint, effort=effort,
             temperature=temperature, max_tokens=max_tokens, tools=tools, tool_choice=tool_choice,
             rubric=rubric, renderer=self.renderer, sources=sources)
         key = sha(encoded(identity))
@@ -73,6 +85,10 @@ class Responses:
                     raise Incomplete("cache attempt incomplete")
                 if sha(encoded(cached["response"])) != cached["response_sha256"]:
                     raise Incomplete("response digest mismatch")
+                if validate is not None and not validate(cached["response"]):
+                    cached.update(status="error", error="invalid judge verdict")
+                    write_json(path, cached)
+                    raise Incomplete("invalid judge verdict")
                 with self.lock:
                     self.counts[role]["cached"] += 1
                 records.extend({**r, "cache": "cached", "cache_key": key} for r in cached["attempts"])
@@ -89,6 +105,8 @@ class Responses:
                     tool_choice=tool_choice, temperature=temperature)
                 if not response.get("content") or any(r.get("status") != "ok" for r in calls):
                     raise Incomplete("invalid model response")
+                if validate is not None and not validate(response):
+                    raise Incomplete("invalid judge verdict")
                 state.update(status="ok", response=response, response_sha256=sha(encoded(response)))
             except Exception as exc:
                 state.update(status="error", error=type(exc).__name__)
