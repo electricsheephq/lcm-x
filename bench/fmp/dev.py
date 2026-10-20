@@ -59,7 +59,8 @@ def recorded_command(args):
             continue
         command.append("--" + name.replace("_", "-"))
         if value is not True:
-            command.append(value.name if isinstance(value, Path) else str(value))
+            # Paths become role labels: basenames can name private repos or local sessions.
+            command.append("<" + name.replace("_", "-") + ">" if isinstance(value, Path) else str(value))
     return shlex.join(command)
 
 
@@ -151,6 +152,27 @@ def worker(spec):
             rows=[], prepare=spec["prepare"], status="INCOMPLETE", reason="checkout-changed"))
         raise Incomplete("checkout-changed")
     written = []
+    try:
+        receipt = _worker_rows(spec, product, written)
+    except BaseException as exc:
+        # A drifted checkout can surface as any failure; never leave this worker's writes reusable.
+        if source_identity(spec["repo"]) == product:
+            raise
+        quarantine(Path(spec["cache"]), written)
+        write_json(Path(spec["receipt"]), dict(product=product, rows=[], prepare=spec["prepare"],
+            status="INCOMPLETE", reason="checkout-changed", quarantined=len(written)))
+        raise Incomplete("checkout-changed") from exc
+    product_after = source_identity(spec["repo"])
+    changed = product_after != product
+    held = quarantine(Path(spec["cache"]), written) if changed else None
+    write_json(Path(spec["receipt"]), dict(product=product, product_after=product_after,
+        rows=receipt, prepare=spec["prepare"], status="INCOMPLETE" if changed else "COMPLETE",
+        reason="checkout-changed" if changed else None, quarantined=len(written) if held else 0))
+    if changed:
+        raise Incomplete("checkout-changed")
+
+
+def _worker_rows(spec, product, written):
     lme = load_lcm(spec["repo"])
     questions, panel, guard = load(spec["panel"], spec["guard"], spec["lme"], spec["locomo"], lme)
     renderer = renderer_identity()
@@ -199,14 +221,7 @@ def worker(spec):
                 written.append(cache)
             receipt.append(dict(id=q.qid, cache_key=key, cache="cached" if hit else "fresh",
                                 sources=store_id, retrieval_sha256=value["source_sha256"], **value["metadata"]))
-    product_after = source_identity(spec["repo"])
-    changed = product_after != product
-    held = quarantine(Path(spec["cache"]), written) if changed else None
-    write_json(Path(spec["receipt"]), dict(product=product, product_after=product_after,
-        rows=receipt, prepare=spec["prepare"], status="INCOMPLETE" if changed else "COMPLETE",
-        reason="checkout-changed" if changed else None, quarantined=len(written) if held else 0))
-    if changed:
-        raise Incomplete("checkout-changed")
+    return receipt
 
 
 def judge_messages(q, hypothesis):
@@ -355,9 +370,8 @@ def execute(args):
             write_json(spec_path, spec)
             write_json(inputs / spec_path.name, dict(spec_sha256=digest_file(spec_path),
                 config=spec["config"], overrides=overrides, prepare=spec["prepare"],
-                repo=Path(spec["repo"]).name, cache=Path(spec["cache"]).name,
-                receipt=Path(spec["receipt"]).name,
-                files={key: dict(name=Path(spec[key]).name, sha256=digest_file(spec[key]))
+                product_sha256=spec["expected_product"], receipt=Path(spec["receipt"]).name,
+                files={key: dict(sha256=digest_file(spec[key]))
                        for key in ("lme", "locomo", "panel", "guard")}))
             timeout = None if args.prepare else max(.001, deadline - time.monotonic())
             proc = subprocess.run([sys.executable, "-m", "bench.fmp.dev", "--worker", str(spec_path)],

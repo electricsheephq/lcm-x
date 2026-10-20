@@ -37,8 +37,10 @@ def test_packaged_card_contains_only_identity_specs(screen, monkeypatch):
         raw = json.loads(raw_path.read_bytes())
         assert raw_path not in packaged
         assert public["spec_sha256"] == digest_file(raw_path)
-        assert public["files"]["panel"] == dict(name=args.panel.name, sha256=digest_file(args.panel))
-        assert public["repo"] == args.baseline.name
+        assert public["files"]["panel"] == dict(sha256=digest_file(args.panel))
+        assert public["product_sha256"] == raw["expected_product"]
+        assert not {"repo", "cache"} & set(public)
+        assert all(set(entry) == {"sha256"} for entry in public["files"].values())
         assert Path(raw["repo"]).is_absolute()
 
 
@@ -194,3 +196,35 @@ def test_parent_pins_identity_across_all_workers(screen, worker_setup, monkeypat
     assert report["verdict"] == "INCOMPLETE" and report["reason"] == "checkout-changed"
     assert not (args.output / "prepare.json").exists()
     assert calls[0] == 0 and len(calls) == 2
+
+
+@pytest.mark.parametrize("drifted", [False, True])
+def test_worker_failure_after_drift_quarantines_earlier_writes(worker_setup, monkeypatch, drifted):
+    spec, store, product, _ = worker_setup
+    cache = Path(spec["cache"])
+    first = SimpleNamespace(qid="first", dataset="lme-s", question="one", question_date="")
+    second = SimpleNamespace(qid="second", dataset="lme-s", question="two", question_date="")
+    monkeypatch.setattr(dev, "load", lambda *a: ([first, second], {"dataset_sha256": {"lme-s": "a", "locomo": "b"}}, {}))
+
+    def build(q):
+        if q is first:
+            if drifted:
+                product.write_text("after")
+            return "built"
+        raise RuntimeError("later step failed")
+
+    store.build = build
+    spec["prepare"] = True
+    if drifted:
+        with pytest.raises(dev.Incomplete, match="checkout-changed"):
+            dev.worker(spec)
+        receipt = json.loads(Path(spec["receipt"]).read_bytes())
+        assert receipt["reason"] == "checkout-changed" and receipt["quarantined"] == 1
+        assert not (cache / "store").exists()
+        assert {p.name for p in (cache / "quarantine").rglob("*") if p.is_file()} == {
+            "build-manifest.json", "lcm.db", "speakers.json"}
+    else:
+        with pytest.raises(RuntimeError, match="later step failed"):
+            dev.worker(spec)
+        assert (cache / "store" / "lcm.db").exists()
+        assert not (cache / "quarantine").exists()

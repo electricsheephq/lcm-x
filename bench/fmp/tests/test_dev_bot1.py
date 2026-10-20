@@ -107,7 +107,8 @@ def test_recorded_command_tracks_parsed_invocation(screen):
                  "config", "candidate_config"):
         assert tokens[tokens.index("--" + name.replace("_", "-")) + 1] == str(getattr(first, name))
     for name in ("panel", "guard", "cache_root", "baseline", "output", "lme_data", "locomo_data"):
-        assert tokens[tokens.index("--" + name.replace("_", "-")) + 1] == getattr(first, name).name
+        flag = "--" + name.replace("_", "-")
+        assert tokens[tokens.index(flag) + 1] == "<" + flag[2:] + ">"
     assert str(first.output.parent) not in commands[0]
 
 
