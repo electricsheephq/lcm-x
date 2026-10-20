@@ -289,14 +289,22 @@ def wait_covered(a, mod, engine, manifest):
     failures = []
     def fill():
         try:
+            from .audit import vector_counts
+            checked = audit(a.db, manifest)
+            append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_setup", audit=checked))
+            if checked["complete"]:
+                return
             start, changed, previous = time.monotonic(), time.monotonic(), None
             while True:
-                checked = audit(a.db, manifest)
-                append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_setup", audit=checked))
-                if checked["complete"]:
+                counts = vector_counts(a.db, manifest)
+                if all(counts[k] >= len(v) for k, v in manifest["expected"].items()):
+                    checked = audit(a.db, manifest)
+                    append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_setup", audit=checked))
+                    if not checked["complete"]:
+                        raise RuntimeError("covered setup final audit failed")
                     return
                 safety(a)
-                fingerprint = str(progress(a.db, manifest, False))
+                fingerprint = str(counts)
                 if fingerprint != previous:
                     changed, previous = time.monotonic(), fingerprint
                 if time.monotonic()-changed >= 600 or time.monotonic()-start > a.max_seconds:
