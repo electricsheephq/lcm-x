@@ -13,6 +13,7 @@ No live profile is used. Never pass a live DB or home.
 python -m pytest bench/instruments/local_catchup/tests -q
 ruff check --no-cache bench/instruments/local_catchup
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.corpus --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --out "$SCRATCH/corpus" --rows 250000 --shape short --baseline empty --pilot 1000 --peak-disk-gb 8
+nice -n 19 "$PY" -B -m bench.instruments.local_catchup.corpus --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --out "$SCRATCH/corpus-mixed" --rows 250000 --shape mixed --baseline empty --pilot 1000 --peak-disk-gb 12
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.catchup --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/corpus/store.db" --manifest "$SCRATCH/corpus/manifest.json" --home "$SCRATCH/homes" --model-cache "$CACHE" --scratch "$SCRATCH" --out "$RUN/catchup" --max-wall 24h
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes drain96 --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/probe/store.db" --manifest "$RUN/probe-manifest.json" --home "$SCRATCH/probe/homes" --model-cache "$CACHE" --scratch "$SCRATCH" --out "$RUN/probe" --max-wall 20m --restart-after 30s
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes cold --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/corpus/pilot.db" --manifest "$SCRATCH/corpus/pilot.json" --home "$SCRATCH/cold/home" --model-cache "$CACHE" --scratch "$SCRATCH" --out "$RUN/cold"
@@ -20,7 +21,7 @@ nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes screen16 --lcmx-re
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.rig --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/rig" --model-cache "$CACHE" --out "$RUN/rig" --processes 14 --rows 250000 --peak-disk-gb 80
 ```
 
-Repeat corpus/catchup for `--shape mixed` and `--baseline upgrade` in new directories.
+Use the matching corpus directory for catchup; repeat with `--baseline upgrade` in new directories.
 `--pilot 1000 --pilot-only` builds only a pilot and records the full-size disk estimate.
 The estimate includes float32 vectors, SQLite overhead, WAL/copy margin; excessive
 estimates refuse allocation. The rig estimates the entire N-store allocation first.

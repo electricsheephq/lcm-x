@@ -5,7 +5,7 @@ import shutil
 import time
 
 from .audit import audit, baseline, connect, progress as read_progress
-from .catchup import audit_failed, final_copy, launch, restart_trigger, stop, wall
+from .catchup import audit_failed, final_copy, launch, restart_audit_failed, restart_trigger, stop, wall
 from .common import append, dump, foreign_files, immutable_cache, load, parser, safe_paths
 from .corpus import build, pilot_rows
 from .cpu import flags, supervisor
@@ -109,7 +109,7 @@ def main():
                         continue
                     checked = audit(j.db, manifests[i])
                     dump(j.out/"restart-audit.json", checked)
-                    if audit_failed(checked):
+                    if restart_audit_failed(checked):
                         reason = "restart_integrity_or_residue"
                         break
                     append(j.out/"restarts.jsonl", {"reason": trigger, "elapsed_s": time.monotonic()-started, "fraction": fraction})
@@ -136,6 +136,8 @@ def main():
     state = screen_state(fractions) if a.screen16 and reason == "max_wall" else "COMPLETE" if reason == "complete" else "INCOMPLETE" if reason == "max_wall" else "STALLED" if reason == "stalled_provider_ready" else "ABORTED"
     if any(audit_failed(r) for r in progress):
         state, reason = "ABORTED", "final_integrity_or_residue"
+    elif reason == "complete" and not all(r["complete"] for r in progress):
+        state, reason = "ABORTED", "final_coverage_regressed"
     for r in progress:
         r.update(state="ABORTED" if audit_failed(r) else "COMPLETE" if r["complete"] else state,
                  reason="final_integrity_or_residue" if audit_failed(r) else "full_expected_id_audit" if r["complete"] else reason)

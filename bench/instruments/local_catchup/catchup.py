@@ -89,8 +89,12 @@ def final_copy(a, generation):
     return a.scratch/f"{a.out.name}-{cell}-g{generation}-final.db"
 
 
+def restart_audit_failed(result):
+    return not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] != "ok"
+
+
 def audit_failed(result):
-    return not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] != "ok" or result["residue"]
+    return restart_audit_failed(result) or result["residue"]
 
 
 def run(a):
@@ -145,11 +149,12 @@ def run(a):
                 if final == "RUNNING" and not restarted and trigger:
                     checked = audit(a.db, manifest)
                     dump(a.out/"restart-audit.json", checked)
-                    if audit_failed(checked):
+                    if restart_audit_failed(checked):
                         final, reason = "ABORTED", "restart_corruption"
                         break
                     append(a.out/"restarts.jsonl", {"elapsed_s": now-started, "fraction": fraction,
                         "reason": trigger})
+                    meter.windows[p.pid][1] = time.monotonic()
                     stop(p)
                     generation, restarted = 1, True
                     p = launch(a, generation)
@@ -165,6 +170,8 @@ def run(a):
     result = audit(a.db, manifest)
     if audit_failed(result):
         final, reason = "ABORTED", "final_integrity_or_residue"
+    elif final == "COMPLETE" and not result["complete"]:
+        final, reason = "ABORTED", "final_coverage_regressed"
     elapsed = time.monotonic()-started
     covered = sum(x["covered"] for x in result["classes"].values())
     initial = sum(history[0]["audit"]["classes"][k]["covered"] for k in result["classes"]) if history else 0
