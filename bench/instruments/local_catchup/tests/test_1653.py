@@ -70,6 +70,22 @@ def test_03_summary_provenance_is_immutable(corpus, table, change):
     assert catchup.audit_failed(result) and not result["complete"]
 
 
+def test_03_lazy_empty_source_table_preserves_provenance(corpus):
+    db, manifest, mod = corpus
+    fill(db, manifest, mod)
+    with sqlite3.connect(db) as c:
+        mod("db_bootstrap").ensure_temporal_rollup_tables(c)
+    assert audit.audit(db, manifest)["complete"]
+    # Once a mapping exists, changing it must still invalidate the preimage.
+    with sqlite3.connect(db) as c:
+        c.execute("INSERT INTO lcm_rollup_sources VALUES(1,1)")
+    with audit.connect(db) as c:
+        manifest["preimage"] = audit.preimage(c)
+    with sqlite3.connect(db) as c:
+        c.execute("UPDATE lcm_rollup_sources SET node_id=2")
+    assert catchup.audit_failed(audit.audit(db, manifest))
+
+
 @pytest.mark.parametrize("build_failure", [False, True])
 def test_04_close_before_start_and_build_exception(fake_rig, monkeypatch, tmp_path, build_failure):
     monkeypatch.setattr(cpu, "swap", lambda: 0)

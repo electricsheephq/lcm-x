@@ -22,10 +22,10 @@ def connect(db):
 
 def preimage(c):
     raw = digest(c.execute("SELECT * FROM messages ORDER BY store_id"))
-    provenance = {table: digest(c.execute(f"SELECT * FROM {table} ORDER BY {order}"))
+    provenance = {table: digest(c.execute(f"SELECT * FROM {table} ORDER BY {order}")
+                               if c.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone() else [])
                   for table, order in (("summary_nodes", "node_id"), ("summary_node_provenance", "node_id"),
-                                       ("lcm_rollup_sources", "rollup_id,node_id"))
-                  if c.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone()}
+                                       ("lcm_rollup_sources", "rollup_id,node_id"))}
     vectors, metadata = {}, {}
     for kind, table, key in (("chunks", "lcm_chunk_vectors", "chunk_id"),
                              ("leaves", "lcm_embedding_vectors", "embedded_id")):
