@@ -32,7 +32,7 @@ def worker(request):
         def check():
             safety(a)
             coverage.append(progress(a.db, manifest, False)["complete"])
-        trace(engine, mod, a.samples, a.seed+a.block, observe, check)
+        manifest["trace_rows"] = trace(engine, mod, a.samples, a.seed+a.block, observe, check)
         final = progress(a.db, manifest, False)
         coverage.append(final["complete"])
         end = time.perf_counter()
@@ -40,8 +40,8 @@ def worker(request):
             {k: v["covered"] for k, v in initial["classes"].items()},
             {k: v["covered"] for k, v in final["classes"].items()}, require_prepared=True)
         evidence = safety(a)
-        engine.shutdown()
         closed = True
+        engine.shutdown()
         integrity(a, manifest)
         summary = dict(state="NOT_JUDGED", bind_ms=bind, samples=len(rows),
             p90={k: percentile([r[k] for r in rows], .9) for k in ("ingest_preflight_ms", "dispatch_ms")},

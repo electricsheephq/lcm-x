@@ -155,8 +155,9 @@ def runtime(request):
     guards(mod, a.root/"events.jsonl")
     original_join = threading.Thread.join
     def join(thread, *args, **kw):
-        if REQUEST.get() and threading.current_thread() is threading.main_thread() and any(
-                name in thread.name.lower() for name in ("embed", "backfill")):
+        name = thread.name.lower()
+        if REQUEST.get() == threading.get_ident() and name != "lcm-query-embed" and any(
+                part in name for part in ("embed", "backfill")):
             append(a.root/"events.jsonl", {"violation": "foreground_join", "thread": thread.name})
             raise RuntimeError("foreground embedding join forbidden")
         return original_join(thread, *args, **kw)
@@ -182,11 +183,16 @@ def runtime(request):
 
 def trace(engine, mod, count, seed, observe, check):
     from bench.instruments.compaction_probe.bgprep.replay import workload
-    view, batch = [], []
+    view, batch, expected = [], [], []
     for i in range(count):
         if i % 64 == 0:
             batch = workload(seed+i//64)
         pair = batch[i % 64]
+        # Record generated input, not successful writes: ingest can fail silently.
+        for message in pair:
+            expected.append([engine.current_session_id, engine._conversation_id,
+                message["role"], message["timestamp"],
+                hashlib.sha256(message["content"].encode()).hexdigest()])
         view.append(pair[0])
         t0 = time.perf_counter()
         with foreground_request():
@@ -205,6 +211,7 @@ def trace(engine, mod, count, seed, observe, check):
         engine.note_turn_complete()
         engine._prepare_leaves_after_turn(view)
         check()
+    return expected
 
 
 def integrity(a, manifest):
@@ -215,6 +222,33 @@ def integrity(a, manifest):
         from .audit import digest
         if digest(original) != manifest["preimage"]["raw_digest"]:
             raise RuntimeError("corpus row corruption")
+        expected_trace = manifest.get("trace_rows") or []
+        trace_roles = {row[2] for row in expected_trace}
+        actual_trace, other_role_rows = [], {}
+        for session, conversation, role, observed, content in c.execute(
+                "SELECT session_id,conversation_id,role,observed_at,content FROM messages WHERE store_id>? ORDER BY store_id",
+                (manifest["rows"],)):
+            actual = [session, conversation, role, observed,
+                      hashlib.sha256((content or "").encode()).hexdigest()]
+            if role in trace_roles:
+                actual_trace.append(actual)
+            else:
+                other_role_rows[role] = other_role_rows.get(role, 0)+1
+        if "trace_rows" in manifest:
+            for i in range(max(len(expected_trace), len(actual_trace))):
+                if i >= len(expected_trace):
+                    kind = "extra/duplicate"
+                elif i >= len(actual_trace):
+                    kind = "missing"
+                elif actual_trace[i] == expected_trace[i]:
+                    continue
+                elif actual_trace[i] in expected_trace[i+1:]:
+                    kind = "out-of-order" if expected_trace[i] in actual_trace[i+1:] else "missing"
+                elif expected_trace[i] in actual_trace[i+1:]:
+                    kind = "extra/duplicate"
+                else:
+                    kind = "altered"
+                raise RuntimeError(f"trace row corruption: {kind} at real-turn index {i}")
         now = preimage(c, len(manifest["expected"]["leaves"]))
         if now["provenance"] != manifest["preimage"]["provenance"]:
             raise RuntimeError("corpus provenance corruption")
@@ -223,7 +257,7 @@ def integrity(a, manifest):
         dump(a.root/"final-integrity.json", dict(corpus_raw_digest=digest(original),
             expected_raw_digest=manifest["preimage"]["raw_digest"],
             unpaired_rows=checked["unpaired_rows"], residue=checked["residue"],
-            changed_metadata=changed_metadata,
+            changed_metadata=changed_metadata, other_role_rows=other_role_rows,
             vector_digest=hashlib.sha256(json.dumps(now["vectors"], sort_keys=True).encode()).hexdigest()))
         if any(now["vectors"].get(k) != v for k, v in (manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"]).items()):
             raise RuntimeError("pre-existing vector corruption")
@@ -305,9 +339,17 @@ def wait_covered(a, mod, engine, manifest):
                 if all(counts[k] >= len(v) for k, v in manifest["expected"].items()):
                     checked = audit(a.db, manifest)
                     append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_setup", audit=checked))
-                    if not checked["complete"]:
+                    if checked["complete"]:
+                        return
+                    transient = (checked["raw_unchanged"] and not checked["changed_vectors"]
+                                 and not checked["changed_metadata"] and not checked["unexpected_rows"]
+                                 and checked["integrity"] == "ok"
+                                 and all(v["missing_count"] == 0 for v in checked["classes"].values()))
+                    if not transient or time.monotonic()-start > a.max_seconds:
                         raise RuntimeError("covered setup final audit failed")
-                    return
+                    safety(a)
+                    time.sleep(.1)
+                    continue
                 safety(a)
                 fingerprint = str(counts)
                 if fingerprint != previous:
