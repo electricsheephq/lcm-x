@@ -178,3 +178,53 @@ and `RESULT.md`; an unavailable writer fails scoring. Use a new score output dir
 records the exact re-score command and inputs. T1/T2 publication remains a separate owner action.
 For Voyage MCP retrieval, the trusted reader loads the existing `VOYAGE_API_KEY` Keychain service
 directly; the model CLI environment, arguments, prompts and MCP configuration never carry its value.
+
+## Cached development loop
+
+`python -m bench.fmp.dev` compares one baseline checkout with a candidate checkout
+or JSON configuration arm. This is an outcome-blind frozen development screen,
+with directional/futility results only. It does not replace confirmation, board
+measurements, or release gates. The frozen panel contains 25 IDs in each of four
+strata; a separate guard retains all development LoCoMo category 5 and LME
+abstention items. Main/guard overlap is intentional and evaluated once per arm.
+LoCoMo guards use FMP's abstention rubric, without the adversarial decoy as gold.
+
+Set `FMP_LME_DATA`, `FMP_LOCOMO`, and `FMP_RESULT_CARD_TOOL` to the dataset files
+and installed card writer. Use the existing FMP environment and local embedding
+cache, offline mode, an isolated `TMPDIR`, and a new output directory per command.
+The baseline and candidate must provide the supported FMP/product import contract.
+
+```sh
+# Cold ingestion is separate from the timed comparison; no model calls here.
+nice -n 19 python -m bench.fmp.dev --baseline BASELINE --cache-root CACHE \
+  --output PREPARE_OUTPUT --prepare --workers 2
+# Cold A/A, then repeat with a new output for warm A/A.
+nice -n 19 python -m bench.fmp.dev --baseline BASELINE --cache-root CACHE \
+  --output COLD_AA_OUTPUT --workers 2 --deadline-min 30
+nice -n 19 python -m bench.fmp.dev --baseline BASELINE --cache-root CACHE \
+  --output WARM_AA_OUTPUT --workers 2 --deadline-min 30
+nice -n 19 python -m bench.fmp.dev --baseline BASELINE --cache-root CACHE \
+  --output D50_OUTPUT --candidate-config '{"recall_depth":50}' --workers 2
+```
+
+Default reader/judge are `codex:gpt-6.1-sol@medium` / `codex:gpt-6.1-sol@low`;
+only Codex subscription transport is admitted. Default stores use `local` with
+summaries disabled, speaker-prefixed text, and FMP's single-delivery renderer.
+`recall_depth` promotes the depth-screen limit/pool/session/expansion caps and
+checks their effective readback. Other supported config overrides affect recall
+only; database and embedding overrides are refused. A different product source
+requires preparation for that checkout (`--candidate CANDIDATE --prepare`).
+Store generations conservatively hash product Python, schema/config/embedding
+inputs and ingestion adapters. Retrieval keys also cover query/date, rendered
+source identities and overrides. Response keys cover complete messages, endpoint,
+model/effort, temperature, output limit, tools, rubric and renderer/source hashes.
+Private caches contain response/evidence bytes; reports contain IDs/hashes and
+numeric metadata. Failed or uncertain sends stop reuse without automatic replay.
+
+Reports expose paired correct-count changes, question-weighted conversation-cluster
+bootstrap intervals (10,000 draws, seed 1188), separate guard deltas, per-ID caps
+and estimated delivered tokens, call-cache counts and timing. Any missing/error
+row or deadline yields `INCOMPLETE` with remaining IDs; complete screens report
+`DIRECTIONAL-WIN`, `NO-SIGNAL`, or `GUARD-RISK`. A warm cached A/A is an identity
+control, never an independent placebo sample. Result cards cover advisory timing;
+publication and the full acceptance pilot remain separate owner actions.
