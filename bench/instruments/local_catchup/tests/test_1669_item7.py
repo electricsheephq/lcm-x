@@ -14,5 +14,6 @@ def test_item7_workflow_records_and_enforces_runner_temp_headroom():
     measured = next(i for i, s in enumerate(steps) if s.get("name", "").startswith("Enforce 4 GiB"))
     setup = "\n".join(s.get("run", "") for s in steps[:measured])
     assert 'df -' in setup and '"$RUNNER_TEMP"' in setup
-    assert "26" in setup and "::error::" in setup and "rm -rf" in setup
+    # 26 GiB per-cell headroom plus the corpus build (live-store estimate cap 6 GiB).
+    assert "required=$((34 * 1024 * 1024 * 1024))" in setup and "::error::" in setup and "rm -rf" in setup
     assert '--scratch "$RUNNER_TEMP/floor-scratch"' in steps[measured]["run"]

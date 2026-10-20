@@ -87,15 +87,17 @@ jobs:
           git -C host rev-parse HEAD > evidence/host-sha.txt
       - name: Record and ensure runner temp disk headroom
         run: |
+          # Each measured cell refuses to start under 26 GiB free, and the corpus build before the
+          # first cell may use up to the 6 GiB live-store estimate cap, so require 34 GiB up front.
           df -B1 "$RUNNER_TEMP" | tee evidence/disk-before.txt
-          required=$((26 * 1024 * 1024 * 1024))
+          required=$((34 * 1024 * 1024 * 1024))
           free=$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n 1)
           if (( free < required )); then
             sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
           fi
           df -B1 "$RUNNER_TEMP" | tee evidence/disk-after.txt
           free=$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n 1)
-          (( free >= required )) || { echo "::error::floor requires 26 GiB free in RUNNER_TEMP"; exit 1; }
+          (( free >= required )) || { echo "::error::floor requires 34 GiB free in RUNNER_TEMP (26 GiB per-cell headroom + corpus build)"; exit 1; }
       - name: Enforce 4 GiB cgroup and run on CPUs 0 and 1
         run: |
           sudo mkdir /sys/fs/cgroup/lcmx-floor
