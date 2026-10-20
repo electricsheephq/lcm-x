@@ -139,7 +139,7 @@ def test_retired_maintain_does_not_restore_prepare_callback(local_store, monkeyp
     monkeypatch.setattr(scheduler, "schedule", lambda key, job, **kw: jobs.append(job) or True)
     key = maintenance._local_model_key(engine._config)
     maintenance._PREPARE[key] = ("unavailable", "offline fixture")
-    maintenance._PREPARE_RETRY[key] = (6, float("inf"))
+    maintenance._PREPARE_RETRY[key] = (5, float("inf"))
     monkeypatch.setattr(engines, "run_incremental_embedding_pass", lambda *a, **kw: passes.append(1))
     with pytest.MonkeyPatch.context() as prepare_patch:
         prepare_patch.setattr(maintenance, "start_local_model_prepare", REAL_PREPARE)

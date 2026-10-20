@@ -102,7 +102,7 @@ def start_local_model_prepare(
     The thread runs the warmup path, the only one allowed to download, and
     leaves profile registration to owner-tracked jobs. Recall never waits on it:
     until the model is ready it serves full text and reports degraded. Failures
-    retry at ten-minute intervals, up to six attempts per process. A model requested
+    retry at ten-minute intervals, up to six attempts per model per process. A model requested
     while another is preparing is admitted by a later trigger.
     ``on_ready`` only enqueues maintenance; it must never run a pass inline.
     """
@@ -112,12 +112,13 @@ def start_local_model_prepare(
         return False
     with _STATE_LOCK:
         state = _PREPARE.get(key)
-        if on_ready is not None and (state is None or state[0] != "present"):
+        attempts, retry_at = _PREPARE_RETRY.get(key, (0, 0.0))
+        exhausted = attempts >= 6 and (state is None or state[0] != "preparing")
+        if on_ready is not None and not exhausted and (state is None or state[0] != "present"):
             if state is not None or _PREPARE_THREAD is None or not _PREPARE_THREAD.is_alive():
                 token = on_ready if owner is None else owner
                 _PREPARE_READY.setdefault(key, {})[(database_identity(db_path), token)] = on_ready
-        attempts, retry_at = _PREPARE_RETRY.get(key, (0, 0.0))
-        if (state is not None and state[0] != "unavailable") or sum(n for n, _ in _PREPARE_RETRY.values()) >= 6 or time.monotonic() < retry_at:
+        if (state is not None and state[0] != "unavailable") or attempts >= 6 or time.monotonic() < retry_at:
             return False
         if _PREPARE_THREAD is not None and _PREPARE_THREAD.is_alive():
             return False
@@ -147,6 +148,7 @@ def _prepare_local_model(key: tuple[str, str, int], db_path: str | Path, config:
     if isinstance(result, dict):
         with _STATE_LOCK:
             _PREPARE[key] = ("present", "")
+            _PREPARE_RETRY.pop(key, None)
             callbacks = _PREPARE_READY.pop(key, {})
         for enqueue in list(callbacks.values()):
             try:
@@ -157,11 +159,13 @@ def _prepare_local_model(key: tuple[str, str, int], db_path: str | Path, config:
     reason = str(result).rsplit("error: ", 1)[-1].strip()
     with _STATE_LOCK:
         _PREPARE[key] = ("unavailable", reason)
+        if _PREPARE_RETRY.get(key, (0, 0.0))[0] >= 6:
+            _PREPARE_READY.pop(key, None)
         first = not _FAILURE_WARNED
         _FAILURE_WARNED = True
     (logger.warning if first else logger.debug)(
         "LCM local embedding model %s is unavailable (%s); recall uses full text. "
-        "Check `/lcm doctor` (embedding_provider_health); retry is bounded to six attempts",
+        "Check `/lcm doctor` (embedding_provider_health); retry is bounded to six attempts per model per process",
         key,
         reason,
     )
@@ -243,7 +247,7 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any, slice_state=None) 
     if state is not None and state[0] == "preparing":
         return "model_preparing", None
     if state is not None and state[0] == "unavailable":
-        attempts = sum(n for n, _ in _PREPARE_RETRY.values())
+        attempts = _PREPARE_RETRY.get(_local_model_key(config), (0, 0.0))[0]
         return ("model_prepare_exhausted" if attempts >= 6 else "model_unavailable"), None
     read_conn = command._embedding_read_connection(db_path)
     try:
