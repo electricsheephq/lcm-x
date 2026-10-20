@@ -40,7 +40,8 @@ def measured_limits(cgroup):
 def rate(summary, seconds, rows):
     speed = summary.get("rows_s", 0)
     hours = rows/speed/3600 if speed > 0 else None
-    valid = seconds >= 7200 and summary.get("state") == "INCOMPLETE" and rows >= 250000
+    valid = (seconds >= 7200 and summary.get("state") == "INCOMPLETE" and rows >= 250000
+             and summary.get("audit", {}).get("complete") is False)
     return dict(label=LABEL, state="INVALID" if not valid else "PASS" if hours is not None and hours <= 72 else "FAIL",
                 sustained_rows_s=speed, implied_hours=hours, measured_seconds=seconds, bar_hours=72,
                 validity="at least two hours, backlog present throughout, declared corpus size")

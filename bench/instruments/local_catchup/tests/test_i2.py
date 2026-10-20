@@ -60,6 +60,6 @@ def test_floor_command_and_effective_limits():
 
 
 def test_floor_rate_needs_sustained_incomplete_two_hours():
-    assert rate(dict(state='INCOMPLETE',rows_s=10),7200,250000)['state'] == 'PASS'
+    assert rate(dict(state='INCOMPLETE',rows_s=10,audit=dict(complete=False)),7200,250000)['state'] == 'PASS'
     assert rate(dict(state='COMPLETE',rows_s=10),7200,250000)['state'] == 'INVALID'
-    assert rate(dict(state='INCOMPLETE',rows_s=.1),7200,250000)['state'] == 'FAIL'
+    assert rate(dict(state='INCOMPLETE',rows_s=.1,audit=dict(complete=False)),7200,250000)['state'] == 'FAIL'
