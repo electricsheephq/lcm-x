@@ -3,7 +3,7 @@ on:
   workflow_dispatch:
     inputs:
       lcmx_ref:
-        description: Product ref to test (resolved SHA recorded)
+        description: Product commit SHA to test (40-hex)
         required: true
         type: string
       cell:
@@ -22,7 +22,7 @@ on:
         options: [empty, upgrade]
         default: empty
       host_ref:
-        description: Hermes host ref (Mac bench pin)
+        description: Hermes host commit SHA (Mac bench pin, 40-hex)
         type: string
         default: 71d34bad1045610252eda02ee79549436896e784
       rows:
@@ -49,16 +49,28 @@ jobs:
       HF_HUB_DISABLE_TELEMETRY: '1'
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
+      # Refs must be full commit SHAs: the run executes the checked-out code, so a movable ref is refused.
+      - name: Require pinned commit SHAs
+        env:
+          HOST_REF: ${{ inputs.host_ref }}
+        run: |
+          for ref in "$PRODUCT_REF" "$HOST_REF"; do
+            [[ "$ref" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::refs must be 40-hex commit SHAs"; exit 1; }
+          done
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.lcmx_ref }}
           path: product
+          persist-credentials: false
       - uses: actions/checkout@v4
         with:
           repository: NousResearch/hermes-agent
           ref: ${{ inputs.host_ref }}
           path: host
+          persist-credentials: false
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
