@@ -362,7 +362,9 @@ class Codex(Harness):
                 continue  # counted from the rollout below
             if kind not in ("agent_message", "reasoning", "error", None):
                 violations.append(kind)
-        lines = rollout.read_text().splitlines() if rollout else []
+        lines = rollout.read_text().split("\n") if rollout else []
+        while lines and not lines[-1]:
+            lines.pop()
         for line in lines:
             entry = json.loads(line)
             payload = entry.get("payload") or {}
@@ -410,7 +412,7 @@ class Codex(Harness):
         except subprocess.TimeoutExpired:
             records.append({**record, "status": "error", "error": "timeout", "latency_s": time.monotonic() - started})
             raise RuntimeError("codex_call_failed") from None
-        events = [json.loads(line) for line in proc.stdout.splitlines() if line.startswith("{")]
+        events = [json.loads(line) for line in proc.stdout.split("\n") if line.startswith("{")]
         thread = next((e.get("thread_id") for e in events if e.get("type") == "thread.started"), None)
         rollout = self.rollout(thread)
         violations, mcp_calls, info = self.inspect(events, rollout)
@@ -514,7 +516,7 @@ class Claude(Harness):
         finally:
             env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
             env.pop("ANTHROPIC_AUTH_TOKEN", None)
-        events = [json.loads(line) for line in proc.stdout.splitlines() if line.startswith("{")]
+        events = [json.loads(line) for line in proc.stdout.split("\n") if line.strip()]
         result = next((e for e in reversed(events) if e.get("type") == "result"), None) or {}
         violations, mcp_calls, models = [], 0, set()
         for event in events:
@@ -528,7 +530,7 @@ class Claude(Harness):
                         else:
                             violations.append(block.get("name"))
         denied = call / "denied.jsonl"
-        violations += [json.loads(line)["tool"] for line in denied.read_text().splitlines()] if denied.exists() else []
+        violations += [json.loads(line)["tool"] for line in denied.read_text().split("\n") if line.strip()] if denied.exists() else []
         violations += [d.get("tool_name") for d in result.get("permission_denials") or []]
         usage = result.get("usage") or {}
         # Every reply must come from the requested model. Claude Code's own side calls (Haiku, e.g. on

@@ -158,7 +158,17 @@ def test_interrupted_multichunk_message_resumes(tmp_path, scheduler, monkeypatch
         assert provider.completed == 1
         maintenance_mod._STOP_EMBEDDING_MAINTENANCE.clear()
         provider.delay = 0
-        run()
+        # #1650 reserves half of each pass for new work, so a recorded partial
+        # drains across bounded passes rather than monopolising one pass.
+        published = 2
+        for _ in range(expected):
+            run()
+            with sqlite3.connect(config.database_path) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM lcm_chunk_meta").fetchone()[0]
+            assert published < count <= expected
+            published = count
+            if published == expected:
+                break
         with sqlite3.connect(config.database_path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM lcm_chunk_meta").fetchone()[0] == expected
             assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_backfill_inflight").fetchone()[0] == 0
