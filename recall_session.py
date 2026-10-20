@@ -34,7 +34,7 @@ def session_schema(schema):
 def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, seen_refs,
                     delta_requested, event_time_fields, occurrence, summary_leads):
     encoder = tokens._get_encoder()
-    count = partial(tokens.count_tokens, encoder=encoder)
+    count = partial(tokens.count_tokens_with_encoder, encoder=encoder)
     delivery = dict(unit="session", seed_limit=response["limit"], requested_seed_limit=response.get(
         "limit_clamped_from", response["limit"]), token_budget=TOKEN_BUDGET, char_budget=CHAR_BUDGET,
         estimator="cl100k_base" if encoder is not None else "fallback", response_tokens=0,

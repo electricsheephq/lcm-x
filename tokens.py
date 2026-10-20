@@ -141,15 +141,17 @@ def _count_tokens_cached(text: str, generation: int) -> int:
 _MAX_CACHEABLE_TOKEN_TEXT_CHARS = 32_768
 
 
-_LIVE_ENCODER = object()
+def count_tokens_with_encoder(text, *, encoder) -> int:
+    """Count with a response's fixed estimator without changing legacy calls."""
+    if not text:
+        return 0
+    return len(encoder.encode(text, disallowed_special=())) if encoder is not None else _fallback_token_estimate(text)
 
 
-def count_tokens(text, *, encoder=_LIVE_ENCODER) -> int:
+def count_tokens(text) -> int:
     """Count tokens in a string."""
     if not text:
         return 0
-    if encoder is not _LIVE_ENCODER:
-        return len(encoder.encode(text, disallowed_special=())) if encoder is not None else _fallback_token_estimate(text)
     # Only strings are memoized. Callers may pass non-string, unhashable values
     # (e.g. tool_call arguments as a dict); preserve the legacy tolerance by
     # counting those uncached rather than feeding them to the LRU.
