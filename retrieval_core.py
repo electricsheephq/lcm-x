@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import sqlite3
 import threading
 import time
@@ -527,8 +528,7 @@ def collapse_duplicate_candidates(
 ) -> list[dict[str, Any]]:
     """Group exact message copies before delivery quotas, without changing rows.
 
-    Keep the group's first ranked position, best-ranked stamped representation
-    (or best-ranked member if none is stamped),
+    Keep the group's first ranked position and best-ranked representation,
     maximum fused score and union of best arm ranks. Missing source identity
     degrades to ungrouped delivery. Singleton entries remain untouched.
     """
@@ -544,10 +544,15 @@ def collapse_duplicate_candidates(
             and row.get("session_id")
             and row.get("role")
             and isinstance(row.get("content"), str)
+            # Content alone cannot distinguish replay from real repetition.
+            # Unstamped occurrences retain their own delivery identity.
+            and row.get("observed_at") is not None
         ):
             key = (
                 "message", row["session_id"], row.get("conversation_id") or "",
                 row["role"], row.get("tool_call_id") or "",
+                row.get("source") or "",
+                json.dumps(row.get("tool_calls"), sort_keys=True),
                 hashlib.sha256(row["content"].encode("utf-8")).digest(),
             )
         groups.setdefault(key, []).append(entry)
@@ -621,7 +626,7 @@ def duplicate_identity_rows(
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
         placeholders = ",".join("?" for _ in ids)
         rows = conn.execute(
-            "SELECT store_id, session_id, conversation_id, role, tool_call_id, content, observed_at "
+            "SELECT store_id, session_id, conversation_id, role, tool_call_id, source, tool_calls, content, observed_at "
             f"FROM messages WHERE store_id IN ({placeholders})", ids,
         ).fetchall()
         if time.monotonic() >= deadline:

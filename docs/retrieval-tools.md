@@ -192,13 +192,16 @@ No external reranker is called.
 
 Exact stored copies of a message count once against delivery limits, per-session
 quotas, expansion quotas and response budgets. The key is the session and
-conversation identity, role, tool-call id (empty when absent), and SHA-256 of the
+conversation identity, source, role, tool-call id (empty when absent), assistant
+tool calls, and SHA-256 of the
 **full stored content**. Summaries are never grouped; chunks of the same message
 still fuse by `store_id` first.
-Rows repeating the same text at different recorded times are not collapsed; unstamped repeats in one session are.
+Only stamped rows with the same recorded occurrence time can collapse. Unstamped
+rows remain separate, including a stamped original's unstamped replay copies:
+content equality alone cannot distinguish a copy from a real repeated turn.
+Groups with multiple recorded occurrence times remain separate in full.
 
-The representative is the best-ranked stamped member, or the best-ranked member
-if none is stamped. The group keeps its best-ranked position. Recall keeps the
+The representative is the best-ranked member. The group keeps its best-ranked position. Recall keeps the
 maximum fused score and union of retrieval arms. Only grouped hits carry
 `duplicate_store_ids`: sorted other store ids, excluding the representative.
 For example, `{"store_id": 12, "duplicate_store_ids": [19, 27]}` identifies

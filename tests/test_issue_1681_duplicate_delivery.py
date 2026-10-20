@@ -43,9 +43,15 @@ def recall(engine, **args):
     return json.loads(tools.lcm_recall({"query": "quartz", **args}, engine=engine))
 
 
+def stamped_copy(engine, content="quartz reply", **fields):
+    """Known same-occurrence copies; plain append deliberately stays unstamped."""
+    return append(engine, content, timestamp=1_700_000_000, **fields)
+
+
 @pytest.mark.parametrize("delivery", ["grep-recency", "grep-hybrid", "snippets", "answer_ready"])
 @pytest.mark.parametrize("stamps", [(None, None, None), (1_700_000_000, None, None),
-                                    (1_700_000_000, None, 1_700_000_000)])
+                                    (1_700_000_000, None, 1_700_000_000),
+                                    (1_700_000_000,) * 3])
 def test_ranked_representative_prefers_best_stamped_member(engine, monkeypatch, delivery, stamps):
     first = append(engine, timestamp=stamps[0])
     other = append(engine, "quartz other")
@@ -74,9 +80,16 @@ def test_ranked_representative_prefers_best_stamped_member(engine, monkeypatch, 
             return entries, arms, weights
         monkeypatch.setattr(tools, "fuse_candidates", ranked_fuse)
         hits = recall(engine, detail=delivery)["hits"]
-    expected = third if stamps[2] is not None else first if stamps[0] is not None else second
-    assert [hit["store_id"] for hit in hits] == [expected, other]
-    assert hits[0]["duplicate_store_ids"] == sorted({first, second, third} - {expected})
+    stamped = {sid for sid, stamp in zip((first, second, third), stamps) if stamp is not None}
+    expected = next((sid for sid in ranked if sid in stamped), None)
+    assert [hit["store_id"] for hit in hits] == [
+        sid for sid in ranked if sid not in stamped or sid == expected
+    ]
+    for hit in hits:
+        if hit["store_id"] == expected and len(stamped) > 1:
+            assert hit["duplicate_store_ids"] == sorted(stamped - {expected})
+        else:
+            assert "duplicate_store_ids" not in hit
     assert engine._store.get_batch([first, other, second, third]) == before
 
 
@@ -99,8 +112,56 @@ def test_distinct_recorded_times_preserve_latest_restatement(engine, delivery):
 
 
 @pytest.mark.parametrize("delivery", ["snippets", "answer_ready", "grep"])
+def test_unstamped_real_user_turns_preserve_repetition_and_order(engine, delivery):
+    first = append(engine, "quartz do it again", role="user")
+    middle = append(engine, "quartz done", role="assistant")
+    last = append(engine, "quartz do it again", role="user")
+    ids = [first, middle, last]
+    # Distinct storage positions/times are not proof of a replay copy.
+    for index, store_id in enumerate(ids):
+        engine._store._conn.execute(
+            "UPDATE messages SET timestamp = ? WHERE store_id = ?",
+            (1_700_000_000 + index, store_id),
+        )
+    engine._store._conn.commit()
+    before = engine._store.get_batch(ids)
+    assert all(row["observed_at"] is None for row in before.values())
+    if delivery == "grep":
+        hits = json.loads(tools.lcm_grep({"query": "quartz"}, engine=engine))["results"]
+    else:
+        hits = recall(engine, detail=delivery)["hits"]
+    assert {hit["store_id"] for hit in hits} == set(ids)
+    assert [hit["store_id"] for hit in sorted(hits, key=lambda hit: hit["timestamp"])] == ids
+    assert sum("do it again" in hit.get("content", hit.get("snippet", "")) for hit in hits) == 2
+    assert all("duplicate_store_ids" not in hit for hit in hits)
+    assert engine._store.get_batch(ids) == before
+
+
+@pytest.mark.parametrize("delivery", ["snippets", "answer_ready", "grep"])
+@pytest.mark.parametrize("dimension", ["tool_calls", "source"])
+def test_stamped_distinct_provenance_is_not_a_replay(engine, delivery, dimension):
+    ids = []
+    for index in range(2):
+        fields = {"role": "assistant", "content": "quartz reply", "timestamp": 1_700_000_000}
+        if dimension == "tool_calls":
+            fields["tool_calls"] = [{"id": f"call-{index}", "type": "function",
+                                     "function": {"name": "lookup", "arguments": "{}"}}]
+        ids.append(engine._store.append(
+            "s0", fields, source=f"source-{index}" if dimension == "source" else "",
+        ))
+    before = engine._store.get_batch(ids)
+    if delivery == "grep":
+        hits = json.loads(tools.lcm_grep({"query": "quartz"}, engine=engine))["results"]
+    else:
+        hits = recall(engine, detail=delivery)["hits"]
+    assert {hit["store_id"] for hit in hits} == set(ids)
+    assert all("duplicate_store_ids" not in hit for hit in hits)
+    assert engine._store.get_batch(ids) == before
+
+
+@pytest.mark.parametrize("delivery", ["snippets", "answer_ready", "grep"])
 @pytest.mark.parametrize("copy_timestamp", [None, 1_700_000_000])
-def test_stamped_original_with_replay_copy_still_collapses(engine, delivery, copy_timestamp):
+def test_only_stamped_same_occurrence_copies_collapse(engine, delivery, copy_timestamp):
     first = append(engine, timestamp=1_700_000_000)
     second = append(engine, timestamp=copy_timestamp)
     before = engine._store.get_batch([first, second])
@@ -110,23 +171,25 @@ def test_stamped_original_with_replay_copy_still_collapses(engine, delivery, cop
         hits = json.loads(tools.lcm_grep({"query": "quartz"}, engine=engine))["results"]
     else:
         hits = recall(engine, detail=delivery)["hits"]
-    assert len(hits) == 1
-    representative = first if copy_timestamp is None else second
-    assert hits[0]["store_id"] == representative
-    assert hits[0]["duplicate_store_ids"] == sorted({first, second} - {representative})
+    if copy_timestamp is None:
+        assert {hit["store_id"] for hit in hits} == {first, second}
+        assert all("duplicate_store_ids" not in hit for hit in hits)
+    else:
+        assert len(hits) == 1
+        assert hits[0]["store_id"] == second
+        assert hits[0]["duplicate_store_ids"] == [first]
     assert engine._store.get_batch([first, second]) == before
 
 
 @pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
-def test_unstamped_replay_shape_and_expand_own_row(engine, detail):
+def test_unstamped_replay_shape_is_ambiguous_and_expand_keeps_own_row(engine, detail):
     # #1674 is unmerged at the base: minimal D5 shape, a kept plain reply
     # appended again after unstamped host history is replayed.
     ids = [append(engine), append(engine)]
     before = engine._store.get_batch(ids)
     payload = recall(engine, detail=detail)
-    assert len(payload["hits"]) == 1
-    assert payload["hits"][0]["store_id"] == ids[-1]
-    assert payload["hits"][0]["duplicate_store_ids"] == ids[:-1]
+    assert {hit["store_id"] for hit in payload["hits"]} == set(ids)
+    assert all("duplicate_store_ids" not in hit for hit in payload["hits"])
     for store_id in ids:
         expanded = json.loads(tools.lcm_expand({"store_id": store_id}, engine=engine))
         assert expanded["store_id"] == store_id
@@ -136,8 +199,8 @@ def test_unstamped_replay_shape_and_expand_own_row(engine, detail):
 
 @pytest.mark.parametrize("dimension", ["role", "tool_call_id", "session", "conversation_id", "content"])
 def test_group_key_uses_full_identity(engine, dimension):
-    base = append(engine, "quartz " + "x" * 500, role="tool", tool_call_id="call-a")
-    duplicate = append(engine, "quartz " + "x" * 500, role="tool", tool_call_id="call-a")
+    base = stamped_copy(engine, "quartz " + "x" * 500, role="tool", tool_call_id="call-a")
+    duplicate = stamped_copy(engine, "quartz " + "x" * 500, role="tool", tool_call_id="call-a")
     fields = {"role": "tool", "tool_call_id": "call-a"}
     session = "s0"
     content = "quartz " + "x" * 500
@@ -147,7 +210,7 @@ def test_group_key_uses_full_identity(engine, dimension):
         content += "different suffix beyond the snippet"
     else:
         fields[dimension] = {"role": "assistant", "tool_call_id": "call-b", "conversation_id": "other"}[dimension]
-    distinct = append(engine, content, session=session, **fields)
+    distinct = stamped_copy(engine, content, session=session, **fields)
     hits = recall(engine)["hits"]
     assert {hit["store_id"] for hit in hits} == {duplicate, distinct}
     assert next(hit for hit in hits if hit["store_id"] == duplicate)["duplicate_store_ids"] == [base]
@@ -157,8 +220,8 @@ def test_group_key_uses_full_identity(engine, dimension):
 @pytest.mark.parametrize("sort", ["recency", "relevance", "hybrid"])
 def test_grep_groups_before_limit(engine, mode, sort):
     other = append(engine, "quartz other")
-    first = append(engine)
-    second = append(engine)
+    first = stamped_copy(engine)
+    second = stamped_copy(engine)
     payload = json.loads(tools.lcm_grep({"query": "quartz", "limit": 2, "mode": mode, "sort": sort}, engine=engine))
     assert {hit["store_id"] for hit in payload["results"]} == {other, second}
     assert next(hit for hit in payload["results"] if hit["store_id"] == second)["duplicate_store_ids"] == [first]
@@ -170,9 +233,9 @@ def test_caps_count_groups_once(engine, strict):
     for session in range(4):
         for index in range(5):
             text = f"quartz fact {session}-{index}"
-            append(engine, text, session=f"s{session}")
+            stamped_copy(engine, text, session=f"s{session}")
             if session < 2:
-                append(engine, text, session=f"s{session}")
+                stamped_copy(engine, text, session=f"s{session}")
     engine._config.recall_reference_strict = strict
     snippets = recall(engine, limit=25)
     assert len(snippets["hits"]) == 20
@@ -185,7 +248,7 @@ def test_caps_count_groups_once(engine, strict):
 
 
 def test_fusion_max_score_union_arms_best_rank_and_summary_exemption(engine):
-    first, second = append(engine), append(engine)
+    first, second = stamped_copy(engine), stamped_copy(engine)
     rows = engine._store.get_batch([first, second])
     def hit(sid):
         return {"kind": "message_excerpt", "store_id": sid, "snippet": "quartz reply"}
@@ -206,7 +269,7 @@ def test_fusion_max_score_union_arms_best_rank_and_summary_exemption(engine):
 
 
 def test_group_keeps_citable_duplicate_chunk_after_expansion_cap(engine):
-    first, second = append(engine), append(engine)
+    first, second = stamped_copy(engine), stamped_copy(engine)
     arms = {
         "fts": [{"kind": "message_excerpt", "store_id": first,
                  "session_id": "s0", "snippet": ">>>quartz<<< reply", "content_offset": 0}],
