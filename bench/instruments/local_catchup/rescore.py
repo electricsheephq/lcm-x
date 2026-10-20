@@ -6,6 +6,8 @@ from .common import load
 
 
 def verdict(path, max_wall):
+    if path.with_name("cross-profile.json").exists() and load(path.with_name("cross-profile.json")).get("paths"):
+        return "ABORTED"
     previous, last_change, generation, final = None, 0., 0, "RUNNING"
     for row in map(json.loads, path.read_text().splitlines()):
         fingerprint = str(([v["covered"] for v in row["audit"]["classes"].values()], row["audit"]["scan"]))

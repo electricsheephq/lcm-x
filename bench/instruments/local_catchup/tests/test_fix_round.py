@@ -145,3 +145,11 @@ def test_6_worker_native_home_isolated(tmp_path, monkeypatch):
     catchup.launch(a, 0)
     assert seen["env"]["HOME"] == str(a.home/"0")
     assert seen["env"]["CFFIXED_USER_HOME"] == str(a.home/"0")
+
+
+def test_11_rescore_observed_guard_stop(tmp_path):
+    from bench.instruments.local_catchup.rescore import verdict
+    progress = tmp_path/"progress.jsonl"
+    progress.write_text("")
+    (tmp_path/"cross-profile.json").write_text(json.dumps({"paths": ["/fixture/native-cache"]}))
+    assert verdict(progress, 1200) == "ABORTED"
