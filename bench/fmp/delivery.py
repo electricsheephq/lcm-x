@@ -118,7 +118,10 @@ def single(q, engine, speakers=None):
             stamp = row.get("observed_at")
             date = datetime.fromtimestamp(stamp, timezone.utc).isoformat() if stamp else "unknown"
             role = (speakers or {}).get(str(row["store_id"]), row["role"])
-            lines.append(f"[{date}] {role}: {row['content']}")
+            content = row["content"]
+            if str(row["store_id"]) in (speakers or {}) and content.startswith(role + ": "):
+                content = content[len(role) + 2:]
+            lines.append(f"[{date}] {role}: {content}")
         else:
             lines.append(f"[{hit.get('event_time', 'unknown')}] summary: {hit.get('snippet', '')}")
     return "\n".join(lines), raw
@@ -182,7 +185,7 @@ def _answer(q, mode, client, reader, engine, speakers, tool_budget, input_budget
     elif mode == "full_context":
         user = "History evidence:\n" + full_context(q) + "\n" + user
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    if mode == "full_context" and input_bound(messages) > context_length(client, reader) - 16_000:
+    if mode == "full_context" and input_bound(messages) > context_length(client, reader) - READER_MAX_TOKENS:
         return {**result, "status": "skipped", "reason": "does not fit"}
     offered = schemas(engine) if mode == "agentic" else None
     used, last, sent, reserve = 0, 0, 0, TOOL_RESULT_RESERVE

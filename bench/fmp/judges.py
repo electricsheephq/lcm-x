@@ -13,7 +13,7 @@ JSON_OBJECT = re.compile(r"\{[^{}]*\}")
 LABEL_FIELD = re.compile(r'"label"\s*:\s*["\']([^"\']*)["\']')
 FINAL_LABEL = re.compile(r"(CORRECT|WRONG)", re.IGNORECASE)
 LABEL_WORD = re.compile(r"\b(CORRECT|WRONG)\b")
-LEADING_YES_NO = re.compile(r"(yes|no)", re.IGNORECASE)
+LEADING_YES_NO = re.compile(r"[\s*_`\"']*(yes|no)\b", re.IGNORECASE)
 
 
 def prompt(q, hypothesis):
@@ -29,8 +29,11 @@ def messages(q, hypothesis):
 
 def parse(text, dataset):
     if dataset.startswith("lme"):
-        match = LEADING_YES_NO.fullmatch((text.strip().splitlines() or [""])[-1])
-        return match.group(1).lower() == "yes" if match else None
+        lines = text.strip().splitlines() or [""]
+        match = LEADING_YES_NO.match(lines[0]) or LEADING_YES_NO.fullmatch(lines[-1])
+        if not match or {w.lower() for w in re.findall(r"\b(yes|no)\b", text, re.IGNORECASE)} - {match.group(1).lower()}:
+            return None
+        return match.group(1).lower() == "yes"
     labels = set()
     for block in JSON_OBJECT.findall(text):
         try:

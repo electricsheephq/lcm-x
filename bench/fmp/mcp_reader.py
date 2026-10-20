@@ -6,6 +6,7 @@ Every call is logged as metadata only (tool, argument hash, latency, output size
 """
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -74,6 +75,11 @@ class Reader:
 def serve(spec, stdin, stdout):
     from . import datasets, delivery
     from .stores import Stores
+    if spec["config"].partition("+rerank:")[0] == "voyage" and not os.environ.get("VOYAGE_API_KEY"):
+        # Read only in this trusted process, never in the model CLI or its MCP configuration.
+        os.environ["VOYAGE_API_KEY"] = subprocess.run(
+            ["security", "find-generic-password", "-s", "VOYAGE_API_KEY", "-w"],
+            capture_output=True, text=True, check=True).stdout.strip()
     lme = load_lcm(spec["repo"])
     question = datasets.Question(spec["question"]["qid"], spec["question"]["dataset"], "", "", "",
                                  spec["question"]["question_date"], False, [], spec["question"]["store_id"],

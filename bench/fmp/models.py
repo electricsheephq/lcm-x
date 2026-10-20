@@ -4,6 +4,8 @@ import fcntl
 import json
 import math
 import os
+import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -453,7 +455,7 @@ class Claude(Harness):
                "--strict-mcp-config", "--no-session-persistence", "--disable-slash-commands", "--tools", "",
                "--system-prompt", system]
         if mcp:
-            hook = f"{sys.executable} -I {DENY_HOOK} {call / 'denied.jsonl'}"
+            hook = shlex.join(map(str, (sys.executable, "-I", DENY_HOOK, call / "denied.jsonl")))
             cmd += ["--mcp-config", json.dumps({"mcpServers": {SERVER: mcp}}),
                     "--allowedTools", f"mcp__{SERVER}", "--max-turns", str(AGENTIC_TOOL_CAP + 10),
                     "--settings", json.dumps({"hooks": {"PreToolUse": [
@@ -532,8 +534,9 @@ class Claude(Harness):
                       cached_input_tokens=usage.get("cache_read_input_tokens"), output_tokens=usage.get("output_tokens"),
                       reasoning_tokens=(usage.get("output_tokens_details") or {}).get("thinking_tokens"),
                       identity_source="response", wrapper_overhead_tokens=None, input_tokens_label="total incl. retrieved evidence")
-        glm_limited = auth and (proc.returncode != 0 or result.get("is_error")) and any(
-            t in (proc.stdout + proc.stderr).lower() for t in (*USAGE_LIMIT, "429", "rate-limit", "rate_limit"))
+        glm_limited = auth and (proc.returncode != 0 or result.get("is_error")) and (
+            limited(result.get("result")) or limited(proc.stderr)
+            or re.search(r"\b(?:http|status|error)[ :=]*429\b|rate[-_ ]limit", proc.stderr, re.IGNORECASE))
         if rejected or glm_limited or (result.get("is_error") and (result.get("api_error_status") == 429 or limited(result.get("result")))):
             self.quota.stop(self.kind)
             records.append({**record, "status": "error", "error": "usage_limit"})
