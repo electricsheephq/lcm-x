@@ -67,6 +67,14 @@ stops at the next provider batch boundary and waits up to 10 s for that batch to
 short there reports `stop_reason: process_exit`, and the next pass picks up the unsent work. A backlog that holds
 steady between a session end and the next rebind is this designed pause, not a stalled pass.
 
+With fastembed configured explicitly, the first maintenance trigger in a process starts one background
+preparation of the local model (#1586). It runs the warmup path, the only path allowed to download, then
+registers the profiles and enqueues a catch-up pass for every live engine on that database. Retrieval never
+waits for it: while the model prepares or is unavailable, `lcm_recall` and semantic/hybrid `lcm_grep` answer
+from full text and report degraded with the model state. Neither starts model construction on the request
+path during these states. A failed preparation warns once and leaves the model `unavailable` with its reason for
+this process; the next process start retries. Only one preparation runs per process.
+
 Vector identity binds provider, model, dimension, storage shape, and the active
 privacy revision. A policy change requires a new warmup/identity rather than
 mixing vectors. Evidence and status expose aggregate policy state, never matched
@@ -86,6 +94,13 @@ endpoint locality must not be inferred solely from the provider name (#337).
 - Hermes `session_search` covers host-tracked history outside `lcm.db`.
 
 Do not silently treat those stores or scopes as interchangeable.
+
+## Explicit LOCAL catch-up
+
+Embeddings remain off by default. Explicit FastEmbed alternates summary/chunk maintenance slices, up to 32 items (keeping the first message whole if it exceeds that limit) and a one-second soft budget, and re-enqueues at the queue tail after at least 1.5 times the slice's active time. An already started message may overrun across bounded batches; its progress reports that overrun. SQLite connections and leases close before the interruptible wait. Remote providers retain one pass per trigger.
+Model preparation warms only the shared model; owner-tracked jobs register stores. Preparation retries at ten-minute intervals, at most six attempts per model per process; uncertain rows retain timestamp-based retry backoff. No progress, refusal or error stops catch-up visibly. Lease contention and open circuits defer work; restart resumes from persisted vectors/scan state. The default bge-small model uses one intra-op thread per process, which is not a CPU quota.
+The one-intra-op-thread ORT setting for `BAAI/bge-small-en-v1.5` intentionally applies process-wide to background maintenance, manual backfill, and foreground query embeddings through the shared model cache.
+The ready queue admits 64 databases and retains up to 64 overflow databases for automatic re-admission. Exhausting both bounded banks explicitly refuses admission with a database-scoped reason.
 
 ## V4 derived state
 

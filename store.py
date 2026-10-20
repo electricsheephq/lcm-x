@@ -15,7 +15,7 @@ import math
 import sqlite3
 import threading
 import time
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
@@ -312,6 +312,14 @@ def delete_host_uid_bindings(conn: sqlite3.Connection, rows_sql: str, args: tupl
         conn.execute(f"DELETE FROM host_uid_bindings WHERE store_id IN ({rows_sql})", args)
 
 
+def delete_chunk_inflight(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='lcm_embedding_backfill_inflight'").fetchone():
+        conn.execute(
+            "DELETE FROM lcm_embedding_backfill_inflight WHERE instr(embedded_id, ':') > 0 "
+            f"AND CAST(substr(embedded_id, 1, instr(embedded_id, ':') - 1) AS INTEGER) IN ({rows_sql})", args,
+        )
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
@@ -340,6 +348,7 @@ class MessageStore:
         # uncontended ``RLock.acquire``/``release`` pair per operation.
         self._write_lock = threading.RLock()
         self._transaction_owner = TransactionOwner(self._write_lock)
+        self._manual_chunk_backlog_pending = False
         self._init_db()
 
     def _init_db(self):
@@ -463,6 +472,33 @@ class MessageStore:
     def clear_context_windows(self) -> None:
         self._context_window_tokens.clear()
 
+    def _mark_manual_chunk_backlog(self) -> None:
+        was_in_transaction = self._conn.in_transaction
+        try:
+            config = self._ingest_protection_config
+            if not config.embeddings_enabled:
+                return
+            from . import command, embedding_maintenance
+            if embedding_maintenance._automatic_chunks_allowed(config, command):
+                return
+            if self._conn.in_transaction:
+                self._manual_chunk_backlog_pending = True
+                return  # An enclosing atomic owner has not committed ingest yet.
+            self._manual_chunk_backlog_pending = False
+            self._conn.execute(
+                "UPDATE metadata SET value=json_set(value, '$.remaining', json('true'), '$.updated_at', ?) "
+                "WHERE key='embedding_catchup:chunk:' || (SELECT identity_hash FROM lcm_embedding_profile "
+                "WHERE active=1 AND archived_at IS NULL AND task='chunk' "
+                "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1) "
+                "AND json_type(value, '$.remaining') IS NOT 'true'",
+                (time.time(),),
+            )
+            self._conn.commit()
+        except Exception:
+            if not was_in_transaction and self._conn.in_transaction:
+                self._conn.rollback()
+            logging.getLogger(__name__).debug("Could not mark manual chunk backlog", exc_info=True)
+
     def append(self, session_id: str, msg: Dict[str, Any],
                token_estimate: int = 0, source: str = "",
                conversation_id: str = "") -> int:
@@ -504,6 +540,7 @@ class MessageStore:
                 ),
             )
             self._commit()
+            self._mark_manual_chunk_backlog()
             return cur.lastrowid
 
     def append_batch(self, session_id: str,
@@ -611,11 +648,14 @@ class MessageStore:
             return ids
 
         with self._write_lock:
-            return _run_sqlite_write_with_snapshot_retry(
+            ids = _run_sqlite_write_with_snapshot_retry(
                 conn,
                 insert_messages,
                 operation_name="message_store.append_protected_batch",
             )
+            if ids:
+                self._mark_manual_chunk_backlog()
+            return ids
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
@@ -634,6 +674,7 @@ class MessageStore:
         with self._write_lock:
             delete_message_relations(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
+            delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),
@@ -1524,7 +1565,20 @@ class MessageStore:
         conn = self._conn
         if conn is None:
             raise RuntimeError("MessageStore connection is closed")
-        return self._transaction_owner.atomic(conn, immediate=immediate)
+        @contextmanager
+        def marked():
+            with self._write_lock:
+                try:
+                    with self._transaction_owner.atomic(conn, immediate=immediate):
+                        yield
+                except BaseException:
+                    if not conn.in_transaction:
+                        self._manual_chunk_backlog_pending = False
+                    raise
+                if self._manual_chunk_backlog_pending:
+                    self._mark_manual_chunk_backlog()
+        return marked()
+
 
     def update_metadata_json(self, key: str, update: Any) -> Any:
         """Atomic read-modify-write of one metadata JSON value: ``update(current)`` (None when absent) runs

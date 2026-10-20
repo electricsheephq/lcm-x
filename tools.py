@@ -1768,7 +1768,13 @@ def _lcm_embedding_query_metric(provider: Any) -> dict[str, Any]:
 def _lcm_grep_resolve_provider(
     engine: "LCMEngine", *, deadline: float | None = None
 ) -> Any:
+    from .embedding_maintenance import local_model_state
+
     config = engine._config
+    state = local_model_state(config)
+    if state is not None and state[0] in {"preparing", "unavailable"}:
+        reason = f" ({state[1]})" if state[1] else ""
+        raise RuntimeError(f"local embedding model is {state[0]}{reason}; retrieval uses full text")
     cache_key = (
         str(getattr(config, "embedding_provider", "") or "").strip().lower(),
         str(getattr(config, "embedding_model", "") or "").strip(),
@@ -2440,6 +2446,33 @@ def _lcm_recall_verified_span(
     return offset, len(text)
 
 
+def _lcm_recall_fts_match_span(
+    snippet: Any, content: str,
+) -> tuple[int, int] | None:
+    """Map a marked FTS snippet to an unambiguous span in the raw row.
+
+    SQLite's ellipses and highlight delimiters are presentation, not source
+    bytes. Use a contiguous snippet fragment as the anchor, and decline stale,
+    ambiguous or delimiter-colliding text rather than inventing an offset.
+    """
+    if ">>>" in content or "<<<" in content:
+        return None
+    for fragment in str(snippet or "").split("..."):
+        # Recall clips previews at 300 chars, possibly inside a highlight.
+        if fragment.count(">>>") > fragment.count("<<<"):
+            fragment = fragment[:fragment.rfind(">>>")]
+        match = re.search(r">>>(.+?)<<<", fragment, re.DOTALL)
+        if match is None:
+            continue
+        plain = fragment.replace(">>>", "").replace("<<<", "")
+        offset = content.find(plain)
+        if offset < 0 or content.find(plain, offset + 1) >= 0:
+            continue
+        start = offset + len(fragment[:match.start()].replace(">>>", "").replace("<<<", ""))
+        return start + len(match[1]) - len(match[1].lstrip(">")), start + len(match[1])
+    return None
+
+
 def _lcm_recall_citable_entries(
     ordered: list[dict[str, Any]],
     *,
@@ -2584,9 +2617,9 @@ class _LcmRecallStrictSelector:
     proof and the same snapshot is handed to hydration. Past that budget the hit
     ships its own excerpt, so the excerpt must be found at its offset. When a row
     surfaced through several arms, each arm's representation is tried in turn: an
-    FTS match window is not a verbatim prefix and will not verify, but the chunk
-    or summary-source representation of the same row does, and delivering that is
-    not a swap -- it is the same row, quoted somewhere it really says.
+    FTS match window is mapped back to the raw row before verification; a chunk
+    or summary-source representation can also supply a verified excerpt. Each
+    representation quotes the same row somewhere it really says the text.
     """
 
     def __init__(
@@ -2743,13 +2776,29 @@ class _LcmRecallStrictSelector:
                 "content_offset": candidate.get("content_offset"),
             }
             span = _lcm_recall_verified_span(probe, row)
+            used_fts_window = False
+            if span is None:
+                match_span = _lcm_recall_fts_match_span(
+                    candidate.get("_fts_snippet", candidate.get("snippet")),
+                    str(row.get("content") or ""),
+                )
+                if match_span is not None:
+                    window = _lcm_recall_content_window(
+                        row["content"], match_start=match_span[0], match_end=match_span[1],
+                        char_cap=_LCM_RECALL_SNIPPET_CHARS,
+                    )
+                    probe.update(snippet=window["content"], content_offset=window["content_offset"])
+                    span = _lcm_recall_verified_span(probe, row)
+                    used_fts_window = span is not None
             if span is None:
                 continue
-            if candidate is not hit:
+            if used_fts_window or candidate is not hit or probe["snippet"] != hit.get("snippet"):
                 # Same row, quoted where it really says it.
-                hit["snippet"] = candidate.get("snippet")
-                hit["content_offset"] = candidate.get("content_offset")
-                if candidate.get("chunk_span"):
+                hit["snippet"] = probe["snippet"]
+                hit["content_offset"] = probe["content_offset"]
+                if used_fts_window:
+                    hit.pop("chunk_span", None)
+                elif candidate.get("chunk_span"):
                     hit["chunk_span"] = candidate["chunk_span"]
                 hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
             entry["_strict_span"] = span
@@ -3040,6 +3089,16 @@ def _lcm_recall_answer_ready_content(
             continue
         content = str(stored.get("content") or "")
         span = hit.get("chunk_span") or {}
+        if not span and fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
+            # Fusion may retain a chunk preview; use the FTS representation of
+            # this same row when it is available, before the literal fallback.
+            for candidate in [hit, *entry.get("_alternates", [])]:
+                match_span = _lcm_recall_fts_match_span(
+                    candidate.get("_fts_snippet", candidate.get("snippet")), content,
+                )
+                if match_span is not None:
+                    span = {"char_start": match_span[0], "char_end": match_span[1]}
+                    break
         try:
             match_start = int(span["char_start"])
             match_end = int(span["char_end"])
@@ -3168,6 +3227,7 @@ def _lcm_recall_fts_arm(
             "timestamp": row.get("timestamp") or 0,
             "content_offset": 0,
             "snippet": (row.get("snippet") or "")[:_LCM_RECALL_SNIPPET_CHARS],
+            "_fts_snippet": row.get("snippet") or "",
             "from_current_session": bool(row.get("from_current_session")),
         }
         hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
@@ -3317,6 +3377,38 @@ def _lcm_recall_summary_source_hits(
     finally:
         if conn is not None:
             conn.close()
+
+
+def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
+    """One keyed advisory read per requested identity, never a corpus count."""
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=0.05)
+        try:
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE key = ? || ("
+                "SELECT identity_hash FROM lcm_embedding_profile "
+                "WHERE model_name=? AND provider=? AND task=? "
+                "ORDER BY (active=1 AND archived_at IS NULL) DESC, "
+                "registered_at DESC, identity_hash DESC LIMIT 1)",
+                (f"embedding_catchup:{task}:", str(provider.model_id).strip(),
+                 str(provider.provider_id).strip().lower(), task),
+            ).fetchone()
+        finally:
+            conn.close()
+        record = json.loads(row[0]) if row else {}
+        remaining = record.get("remaining", 0)
+        reasons = []
+        if remaining > 0:
+            detail = "" if isinstance(remaining, bool) else f" ({remaining} rows not yet embedded)"
+            reasons.append(f"{task} semantic index catching up{detail}")
+        if (operator_retry := record.get("operator_retry", 0)) > 0:
+            corpus = "chunks" if task == "chunk" else "summary"
+            reasons.append(f"{task} semantic index has {operator_retry} rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus {corpus}")
+        return "; ".join(reasons) or None
+    except Exception:
+        logger.debug("Could not read embedding catch-up state", exc_info=True)
+    return None
 
 
 def _lcm_recall_summary_arm(
@@ -4129,6 +4221,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
             if query_vector is not None:
                 if run_summary:
+                    reason = _lcm_recall_catchup_reason(engine, provider, "summary")
+                    if reason:
+                        degraded_reasons.append(reason)
                     try:
                         hits, cov, scanned, total, summary_leads = _lcm_recall_summary_arm(
                             engine,
@@ -4173,6 +4268,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 _run_fts_arm(fallback=True)
             if chunk_query_vector is not None:
                 if run_chunk:
+                    reason = _lcm_recall_catchup_reason(engine, chunk_provider, "chunk")
+                    if reason:
+                        degraded_reasons.append(reason)
                     try:
                         hits, cov, scanned, total = _lcm_recall_chunk_arm(
                             engine,
@@ -4347,6 +4445,53 @@ def _lcm_store_has_live_chunk_vectors(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
+    """#1186 readiness: model present / preparing / unavailable(reason), and summary coverage."""
+    from . import command
+    from .embedding_maintenance import local_model_state
+
+    state = local_model_state(engine._config)
+    if state is not None and state[0] == "preparing":
+        # Background preparation owns this window; a cached-only probe is expected to fail until it ends.
+        model = "preparing"
+    elif not probe.get("available"):
+        model = f"unavailable({probe.get('detail')})"
+    elif state is not None and state[0] == "unavailable":
+        model = f"unavailable({state[1]})"
+    else:
+        # Process state is shared by every database on this model: "present" needs this database's profile too.
+        model = None
+    try:
+        conn = command._embedding_read_connection(engine._store.db_path)
+        try:
+            command._register_summary_has_text(conn)
+            profile = command._embedding_current_profile(conn)
+            wanted = str(probe.get("model") or getattr(engine._config, "embedding_model", "") or "")
+            if profile is not None and not (embedding_provider_id(str(profile["provider"] or "")) == "fastembed"
+                                            and str(profile["model_name"] or "") == wanted):
+                profile = None  # another model's vectors are not coverage for the configured one
+            if model is None:
+                model = "present" if profile is not None else "not prepared (run /lcm embed warmup)"
+            vectors = "SELECT 1 WHERE 0" if profile is None else (
+                "SELECT 1 FROM lcm_embedding_meta AS m WHERE m.embedded_id = CAST(n.node_id AS TEXT) "
+                "AND m.embedded_kind = 'summary' AND m.identity_hash = :identity"
+            )
+            eligible, embedded = conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(EXISTS ({vectors})), 0) FROM summary_nodes AS n "
+                "WHERE n.depth = 0 AND lcm_summary_has_text(n.summary) = 1",
+                {"identity": str(profile["identity_hash"]) if profile is not None else ""},
+            ).fetchone()
+        finally:
+            conn.close()
+        coverage = f"{embedded}/{eligible} summaries"
+    except sqlite3.Error as exc:
+        coverage = f"unavailable ({exc})"
+        if model is None:
+            model = "present" if _active_embedding_profile_exists(engine) else "not prepared (run /lcm embed warmup)"
+    last, _ = command.incremental_embedding_state(engine._store.db_path)
+    return f"model: {model}; coverage: {coverage}" + (f"; maintenance: {last[1]}" if last else "")
+
+
 def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
     """Return the ``embedding_provider_health`` lcm_doctor check (#672).
 
@@ -4396,8 +4541,20 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
         "reachability_probed": bool(probe.get("probed")),
         "reason": probe.get("detail"),
     }
+    if embedding_provider_id(str(probe.get("provider") or "")) == "fastembed":
+        detail["readiness"] = _embedding_readiness(engine, probe)
+    if str(detail.get("readiness", "")).startswith("model: preparing;"):
+        detail["impact"] = (
+            "semantic retrieval is degraded while the local model prepares in the background; "
+            "lcm_recall keeps answering from full text"
+        )
+        return {
+            "check": "embedding_provider_health",
+            "status": "warn",
+            "detail": detail,
+        }
     # An unavailable provider is the prerequisite blocker: warmup cannot succeed until it is fixed.
-    if not probe.get("available"):
+    if not probe.get("available") or str(detail.get("readiness", "")).startswith("model: unavailable("):
         detail["impact"] = (
             "semantic retrieval is degraded: lcm_recall reports degraded=true and "
             "lcm_grep mode=semantic falls back to full-text"
