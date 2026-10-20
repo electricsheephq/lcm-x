@@ -60,9 +60,10 @@ def execute(service, op, body, deadline=None):
 
 
 @contextmanager
-def running_server(tmp_path, service=None, v2=None):
+def running_server(tmp_path, service=None, v2=None, v1_to_v2=False):
     service = service or Service(tmp_path, 'synthetic-token', runner=stub_runner)
     server = Server(service, port=0, v2=v2)
+    server.v1_to_v2 = v1_to_v2
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -528,6 +529,137 @@ def wire(base, path, body=None, method=None, headers=None):
     head, payload = b''.join(chunks).split(b'\r\n\r\n', 1)
     assert payload.count(b'HTTP/1.0 ') == 0, 'second response on connection'
     return int(head.split()[1]), payload
+
+
+@pytest.mark.parametrize('prefix,v2', [('/aml/', False), ('/aml/v1/', False),
+                                     ('/aml/v2/', True), ('/aml/v1/', True)])
+def test_private_capture_preserves_wire(tmp_path, monkeypatch, capsys, prefix, v2):
+    capture_dir = tmp_path / 'private'
+    capture_file = capture_dir / 'capture.jsonl'
+    body = addition(content='synthetic private λ\n    return 1')
+    body['messages'].append(dict(role='assistant', content='second private item'))
+    query = dict(user_id=body['user_id'], query='private λ', top_k=999)
+
+    def runner(root, operation, request, deadline):
+        if operation == 'add':
+            return stub_runner(root, operation, request, deadline)
+        rows = json.loads((root / digest(request['user_id']) / 'messages.json').read_text())
+        if v2:
+            hits = [dict(content=row['content'], role=row['role'], trajectory=1,
+                         event_time=None, summary=False) for row in rows]
+            return aml_server.v2_search_response(hits, digest(request['user_id']),
+                                                 request['top_k'], request['query'])
+        return aml_server.coding_search_response('\n'.join(row['content'] for row in rows),
+                                                  digest(request['user_id']), request['top_k'])
+
+    service = Service(tmp_path / 'db', 'synthetic-token', runner=runner)
+    two = Service(tmp_path / 'v2', 'synthetic-token', runner=runner) if v2 else None
+    observed = []
+    for mode in ('off', 'on', 'denied'):
+        with monkeypatch.context() as patcher:
+            patcher.delenv('AML_CAPTURE_DIR', raising=False)
+            if mode != 'off':
+                patcher.setenv('AML_CAPTURE_DIR', str(capture_dir))
+            if mode == 'denied':
+                import builtins
+
+                def denied_open(path, *args, **kwargs):
+                    if Path(path) == capture_file:
+                        raise PermissionError('synthetic capture failure')
+                    return builtins.open(path, *args, **kwargs)
+
+                patcher.setattr(aml_server, 'open', denied_open, raising=False)
+            with running_server(tmp_path, service, two, v1_to_v2=v2) as base:
+                observed.append([wire(base, prefix + 'add', body),
+                                 wire(base, prefix + 'search', query)])
+            assert all(status == 200 for status, _ in observed[-1])
+            if mode == 'off':
+                assert not capture_file.exists() and not capture_dir.exists()
+            elif mode == 'on':
+                assert capture_dir.stat().st_mode & 0o777 == 0o700
+                assert capture_file.stat().st_mode & 0o777 == 0o600
+                before_failure = capture_file.read_bytes()
+            else:
+                assert capture_file.read_bytes() == before_failure
+    assert observed[0] == observed[1] == observed[2]
+    records = [json.loads(line) for line in capture_file.read_text().splitlines()]
+    assert len(records) == 2
+    added, searched = records
+    common = {'ts', 'op', 'route', 'user_digest'}
+    assert set(added) == common | {'items'}
+    assert added['op'] == 'add' and added['route'] == prefix + 'add'
+    assert added['items'] == [dict(chars=len(row['content']), sha256=digest(row['content']))
+                              for row in body['messages']]
+    assert set(searched) == common | {'query', 'top_k_requested', 'returned'}
+    assert searched['op'] == 'search' and searched['route'] == prefix + 'search'
+    assert searched['query'] == query['query'] and searched['top_k_requested'] == 999
+    assert searched['returned'] == json.loads(observed[1][1][1])['data']
+    receipt = json.loads((service.root / 'receipts.jsonl').read_text().splitlines()[-1])
+    assert added['user_digest'] == searched['user_digest'] == receipt['user_digest']
+    assert all(record['ts'] for record in records)
+    assert 'synthetic-token' not in capture_file.read_text()
+    assert capsys.readouterr().err.splitlines() == ['AML capture unavailable: PermissionError'] * 2
+
+
+@pytest.mark.parametrize('case', ['file-link', 'fifo', 'shared-dir', 'dir-link'])
+def test_capture_refuses_unsafe_targets(tmp_path, monkeypatch, case):
+    capture_dir, victim = tmp_path / 'private', tmp_path / 'victim.txt'
+    victim.write_bytes(b'victim')
+    victim.chmod(0o644)
+    if case == 'dir-link':
+        real = tmp_path / 'elsewhere'
+        real.mkdir(mode=0o700)
+        capture_dir.symlink_to(real, target_is_directory=True)
+    else:
+        capture_dir.mkdir(mode=0o700)
+        if case == 'file-link':
+            (capture_dir / 'capture.jsonl').symlink_to(victim)
+        elif case == 'fifo':
+            os.mkfifo(capture_dir / 'capture.jsonl', 0o600)
+        else:
+            capture_dir.chmod(0o777)
+    body, query = addition(), dict(user_id='user/a', query='moonflower', top_k=5)
+    monkeypatch.delenv('AML_CAPTURE_DIR', raising=False)
+    with running_server(tmp_path / 'off') as base:
+        expected = [wire(base, '/aml/add', body), wire(base, '/aml/search', query)]
+    monkeypatch.setenv('AML_CAPTURE_DIR', str(capture_dir))
+    started = time.monotonic()
+    with running_server(tmp_path / 'on') as base:
+        observed = [wire(base, '/aml/add', body), wire(base, '/aml/search', query)]
+    assert time.monotonic() - started < 5
+    assert observed == expected and all(status == 200 for status, _ in observed)
+    assert victim.read_bytes() == b'victim' and victim.stat().st_mode & 0o777 == 0o644
+    if case == 'dir-link':
+        assert list(real.iterdir()) == []
+    if case == 'shared-dir':
+        assert list(capture_dir.iterdir()) == []
+
+
+def test_capture_runs_after_the_reply(tmp_path, monkeypatch):
+    capture_file = tmp_path / 'private' / 'capture.jsonl'
+    monkeypatch.setenv('AML_CAPTURE_DIR', str(capture_file.parent))
+    release, original = threading.Event(), aml_server.Handler.capture
+
+    def slow_capture(self, body, response):
+        release.wait(10)
+        original(self, body, response)
+
+    monkeypatch.setattr(aml_server.Handler, 'capture', slow_capture)
+    data = json.dumps(addition()).encode()
+    request = ('POST /aml/add HTTP/1.0\r\nX-Api-Key: synthetic-token\r\n'
+               f'Content-Type: application/json\r\nContent-Length: {len(data)}\r\n\r\n').encode() + data
+    with running_server(tmp_path / 'db') as base:
+        with socket.create_connection(('127.0.0.1', int(base.rsplit(':', 1)[1])), timeout=3) as connection:
+            connection.sendall(request)
+            response = HTTPResponse(connection)
+            response.begin()  # the whole reply arrives while capture is still blocked
+            status, payload = response.status, response.read()
+            release.set()
+        deadline = time.monotonic() + 5
+        while not capture_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+    assert status == 200 and json.loads(payload)
+    assert [json.loads(line)['op'] for line in capture_file.read_text().splitlines()] == ['add']
 
 
 @pytest.mark.parametrize('mode', ['coding', 'textual'])
