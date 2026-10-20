@@ -228,3 +228,26 @@ def test_worker_failure_after_drift_quarantines_earlier_writes(worker_setup, mon
             dev.worker(spec)
         assert (cache / "store" / "lcm.db").exists()
         assert not (cache / "quarantine").exists()
+
+
+def test_failed_store_build_leaves_no_consumable_store(tmp_path, monkeypatch):
+    """A build that writes and then raises (e.g. after checkout drift) never lands at the store path."""
+    from bench.fmp.tests import test_switches
+    lme = dev.load_lcm(test_switches.REPO)
+    store = test_switches.make_store(tmp_path, lme, monkeypatch)
+    q = test_switches.conversations()[0]
+
+    def drifted(*args, **kwargs):
+        raise RuntimeError("checkout changed mid-build")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(lme, "deterministic_session_summary", drifted)
+        with pytest.raises(RuntimeError):
+            store.build(q)
+    assert not store.directory(q).exists()
+    staged = list(store.directory(q).parent.glob("*.building-*"))
+    assert len(staged) == 1 and (staged[0] / "lcm.db").exists()
+    assert not (staged[0] / "build-manifest.json").exists()
+    # A later prepare rebuilds from scratch; the partial stage is never reused.
+    assert store.build(q) == "built"
+    assert json.loads((store.directory(q) / "build-manifest.json").read_text()) == store.expected(q)
