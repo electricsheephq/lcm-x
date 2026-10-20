@@ -19,14 +19,14 @@ Canonical install path: clone LCM-X into the plugin directory `hermes-lcm-x`.
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ~/.hermes/plugins/hermes-lcm-x
+  "${HOME}/.hermes/plugins/hermes-lcm-x"
 ```
 
 For a profile-specific install:
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ~/.hermes/profiles/myprofile/plugins/hermes-lcm-x
+  "${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x"
 ```
 
 From an existing checkout, install a symlink:
@@ -71,13 +71,13 @@ Restart Hermes after changing plugin or context-engine config.
 If you cloned directly into the plugin directory:
 
 ```bash
-cd ~/.hermes/plugins/hermes-lcm-x && git pull --ff-only
+cd "${HOME}/.hermes/plugins/hermes-lcm-x" && git pull --ff-only
 ```
 
 For a profile-specific install:
 
 ```bash
-cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm-x && git pull --ff-only
+cd "${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x" && git pull --ff-only
 ```
 
 A clone from v0.23.x or earlier still lives at `plugins/hermes-lcm`. Stop
@@ -87,9 +87,9 @@ directory), then make the config change in
 starting Hermes again:
 
 ```bash
-cd ~/.hermes/plugins/hermes-lcm && git pull --ff-only
+cd "${HOME}/.hermes/plugins/hermes-lcm" && git pull --ff-only
 # profile-specific:
-cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm && git pull --ff-only
+cd "${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm" && git pull --ff-only
 ```
 
 If you installed a symlink from a separate checkout, update that checkout and
@@ -309,10 +309,10 @@ Provider Plugins:
 
 Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
-and tag. `0.28.1` is the forward identity of the next patch release: the `v0.28.1-rc1`
-tag carries it first, the gauntlet runs at the last rc tag, and the GA tree must be
-that rc tree plus the GA release-notes file (`v0.26.0` at `867eb587` shipped the same way).
-The rollback target for this candidate is `v0.28.0`. Chunk gap-fill bookkeeping
+and tag. The current stable release is
+[v0.28.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1)
+at `77b2b4f795fb6a4f84c55abf6d0441da4469971e` (2026-10-20); see [project status](project-status.md).
+The rollback target for v0.28.1 is `v0.28.0`. Chunk gap-fill bookkeeping
 is additive metadata, not a SQL schema migration. An old reader ignores the new
 coverage and scan records; re-upgrade revalidates short-turn coverage (#1536, #1548).
 Raw rows and FTS remain available during rollback. Keep a SQLite-safe backup and
@@ -469,7 +469,7 @@ Useful environment variables:
 | `LCM_ROLLUP_AGGREGATE_MAX_TOKENS` | `20000` | Hard token ceiling for weekly and monthly rollups |
 | `LCM_ROLLUP_BUILDS_PER_PASS` | `2` | Maximum rollups built by one automatic pass or `/lcm rollups rebuild` command |
 | `LCM_EXPANSION_TIMEOUT_MS` | `120000` | Timeout for one `lcm_expand_query` synthesis call |
-| `LCM_DATABASE_PATH` | auto | SQLite database path. Empty config resolves to `HERMES_HOME/lcm.db`; plugin installs or operators may set this env var to another profile-scoped path such as `~/.hermes/hermes-lcm.db`. |
+| `LCM_DATABASE_PATH` | auto | SQLite database path. Empty config resolves to `HERMES_HOME/lcm.db`; plugin installs or operators may set this env var to another profile-scoped path such as `${HOME}/.hermes/hermes-lcm.db`. |
 | `LCM_SQLITE_MMAP_SIZE` | `268435456` | SQLite mapped-read size in bytes; `0` disables mapping. Invalid or negative values fall back with one WARNING per process. |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup (previous behavior); a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
@@ -1420,7 +1420,7 @@ claiming `coverage='full'`.
 
 The int8 path trades additional recall for roughly a quarter of the disk
 footprint of stored vectors (quantized bytes vs. float32), making it the option
-for disk-constrained installs; the float32+binary path keeps full-precision
+for installs with limited disk space; the float32+binary path keeps full-precision
 vectors on disk and gives up less recall for the same query-time and RAM win.
 
 **Current limitation.** Enabling `LCM_EMBEDDING_BINARY_PRESCREEN` (or switching
@@ -1443,14 +1443,14 @@ The default is a dry run:
 
 ```bash
 python scripts/backfill_externalized_tool_outputs.py \
-  --database ~/.hermes/lcm.db \
-  --hermes-home ~/.hermes \
+  --database "${HOME}/.hermes/lcm.db" \
+  --hermes-home "${HOME}/.hermes" \
   --manifest ./externalization-backfill.json
 
 # Create only eligible sidecars after reviewing the scrubbed manifest.
 python scripts/backfill_externalized_tool_outputs.py \
-  --database ~/.hermes/lcm.db \
-  --hermes-home ~/.hermes \
+  --database "${HOME}/.hermes/lcm.db" \
+  --hermes-home "${HOME}/.hermes" \
   --manifest ./externalization-backfill.json \
   --apply
 ```
@@ -1500,8 +1500,8 @@ references it:
 
 ```bash
 python scripts/backfill_externalized_tool_outputs.py \
-  --database ~/.hermes/lcm.db \
-  --hermes-home ~/.hermes \
+  --database "${HOME}/.hermes/lcm.db" \
+  --hermes-home "${HOME}/.hermes" \
   --rollback ./externalization-backfill.json
 ```
 
@@ -1537,22 +1537,22 @@ Examples:
 ```bash
 # SQLite source, dry-run
 python scripts/import_lossless_claw.py \
-  --source-db ~/.openclaw/path/to/lcm.db \
-  --target-db ~/.hermes/lcm.db \
+  --source-db "${HOME}/.openclaw/path/to/lcm.db" \
+  --target-db "${HOME}/.hermes/lcm.db" \
   --agent sammy \
   --json
 
 # JSONL source directory, dry-run
 python scripts/import_lossless_claw.py \
-  --source-jsonl-dir ~/.openclaw/agents/sammy/sessions \
-  --target-db ~/.hermes/lcm.db \
+  --source-jsonl-dir "${HOME}/.openclaw/agents/sammy/sessions" \
+  --target-db "${HOME}/.hermes/lcm.db" \
   --agent sammy \
   --json
 
 # Apply only after reviewing the report
 python scripts/import_lossless_claw.py \
-  --source-jsonl-dir ~/.openclaw/agents/sammy/sessions \
-  --target-db ~/.hermes/lcm.db \
+  --source-jsonl-dir "${HOME}/.openclaw/agents/sammy/sessions" \
+  --target-db "${HOME}/.hermes/lcm.db" \
   --agent sammy \
   --import-id sammy-jsonl-2026-07 \
   --apply
