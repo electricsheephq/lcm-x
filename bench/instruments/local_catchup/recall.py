@@ -131,6 +131,7 @@ def worker(request):
                     with foreground_request():
                         payload = json.loads(mod("tools").lcm_recall({"query": queries[q["id"]]}, engine=reader))
                     end = time.perf_counter()
+                    after = vector_counts(a.db, manifest) if before else {}
                     coverage = payload.get("provenance", {}).get("coverage", {})
                     health = "timeout" if payload.get("timeout") else "error" if "error" in payload else "degraded" if payload.get("degraded") else "ok"
                     row = dict(query_id=q["id"], start=start, end=end, seconds=end-start, health=health,
@@ -138,8 +139,8 @@ def worker(request):
                         fts_hits=any("fts" in h.get("arms", []) for h in payload.get("hits", [])),
                         semantic_healthy=semantic_healthy(payload, incomplete_arms if a.state == "ON-catching-up" else ()),
                         semantic_empty=bool(empty_arms(payload, incomplete_arms)), honest_coverage=honest_coverage(payload, incomplete_arms),
-                        incomplete=bool(incomplete_arms), coverage_start=before,
-                        coverage_end=vector_counts(a.db, manifest) if before else {})
+                        incomplete=bool(incomplete_arms) and any(after[k] < len(v) for k, v in manifest["expected"].items()),
+                        coverage_start=before, coverage_end=after)
                     rows.append(row)
                     append(a.root/"recalls.jsonl", row)
                     i += 1
@@ -171,7 +172,8 @@ def worker(request):
             min(counted, key=lambda r: r["start"])["coverage_start"],
             max(counted, key=lambda r: r["end"])["coverage_end"]) if counted else dict(catchup_activity=False)
         result = score(rows, publications, a.seed, a.state, activity)
-        if a.smoke or a.rows < 250000 or len(pinned) < 200 or (a.state == "ON-catching-up" and not all(r["incomplete"] for r in overlapping(rows, publications))):
+        if a.smoke or a.rows < 250000 or len(pinned) < 200 or (a.state == "ON-catching-up" and
+                (final.get("complete") or not all(r["incomplete"] for r in overlapping(rows, publications)))):
             result["state"] = "INVALID"
         result.update(bind_ms=bind, safety=safety(a), queries=len(pinned), **activity)
         dump(a.root/"raw-summary.json", result)
