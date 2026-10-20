@@ -13,6 +13,8 @@ from hermes_lcm import embedding_provider as providers, engine as engines, tools
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.dag import SummaryNode
+from hermes_lcm.ingest_protection import embedding_privacy_revision
+from hermes_lcm.vector_store import VectorStore
 
 
 @pytest.fixture
@@ -87,7 +89,16 @@ def test_profile_capture_completion_and_retirement(make_engine, monkeypatch, ret
         return {}
 
     monkeypatch.setattr(scheduler, "schedule", schedule)
-    monkeypatch.setattr(command, "_embedding_register_profiles", prepare)
+    class Model:
+        def __init__(self, config):
+            self.config = config
+
+        def warmup(self):
+            # Preparation now warms only the model; owner-tracked slices register stores.
+            prepare(self.config, self.config.database_path, allow_download=True)
+            return [1.0, 0.0]
+
+    monkeypatch.setattr(command, "resolve_provider", lambda config: Model(config))
     monkeypatch.setattr(engines, "run_incremental_embedding_pass",
                         lambda db, *_a, **_k: passes.append((Path(db).name, profile.get())))
     a, b = make_engine("a", **local_config()), make_engine("b", **local_config())
@@ -209,7 +220,8 @@ def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch)
     try:
         engine._schedule_embedding_maintenance()
         assert entered.wait(5), "explicit LOCAL did not start preparation"
-        assert engine.drain_embedding_maintenance(5)
+        # LOCAL now retains its continuation while model preparation is pending.
+        assert not engine.drain_embedding_maintenance(0)
         assert maintenance.local_model_state(engine._config) == ("preparing", "")
         text = command.handle_lcm_command("doctor", engine)
         assert "embedding_readiness: model: preparing; coverage: 0/1 summaries" in text
@@ -234,6 +246,121 @@ def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch)
         thread = getattr(maintenance, "_PREPARE_THREAD", None)
         if thread is not None:
             thread.join(5)
+
+
+@pytest.mark.parametrize("prepare_fails", [False, True])
+@pytest.mark.parametrize("mode", ["hybrid", "semantic"])
+def test_grep_defers_process_cold_local_model(make_engine, monkeypatch, tmp_path, prepare_fails, mode):
+    entered, release = threading.Event(), threading.Event()
+    cache = tmp_path / "disk-warm-model"
+    cache.mkdir()
+    (cache / "model.onnx").write_bytes(b"offline fixture")
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(cache))
+    engine = make_engine("grep", **local_config())
+    engine._store.append("grep", {"role": "user", "content": "canary full-text hit"})
+    node_id = engine._dag.add_node(SummaryNode(
+        session_id="grep", depth=0, summary="semantic-only result", created_at=1.0, latest_at=1.0,
+    ))
+    vectors = VectorStore(engine._store.db_path, config=engine._config)
+    try:
+        vectors.register_profile("fixture-local", "fastembed", 2)
+        identity = vectors.capture_identity("fixture-local", provider="fastembed")
+        vectors.record_embedding(str(node_id), "summary", "fixture-local", [1.0, 0.0], identity=identity)
+    finally:
+        vectors.close()
+    calls = []
+
+    class Model:
+        def __init__(self, *, cache_dir, local_files_only, **kwargs):
+            assert (Path(cache_dir) / "model.onnx").is_file()
+            calls.append((threading.current_thread().name, local_files_only))
+
+        def query_embed(self, texts):
+            return [[1.0, 0.0] for _ in texts]
+
+        embed = query_embed
+
+    original_warmup = providers.FastembedProvider.warmup
+
+    def held_warmup(provider):
+        entered.set()
+        assert release.wait(5)
+        if prepare_fails:
+            raise RuntimeError("fixture preparation failed")
+        return original_warmup(provider)
+
+    monkeypatch.setattr(providers, "_load_fastembed", lambda: Model)
+    monkeypatch.setattr(providers.FastembedProvider, "warmup", held_warmup)
+    # An inert provider cache must not bypass readiness while its model is cold.
+    engine._lcm_embedding_provider_cache = (
+        ("fastembed", "fixture-local"), providers.resolve_provider(engine._config),
+    )
+    assert not providers._FASTEMBED_MODELS
+    args = {"query": "canary", "mode": mode}
+    try:
+        assert maintenance.start_local_model_prepare(engine._store.db_path, engine._config)
+        assert entered.wait(5)
+        result = json.loads(tools.lcm_grep(args, engine=engine))
+        assert calls == [], f"{mode} grep constructed a process-cold model on the request path"
+        assert result["results"] and "full-text hit" in result["results"][0]["snippet"]
+        assert result["degraded_to_fts"] and "preparing" in result["degraded_reason"]
+        release.set()
+        maintenance._PREPARE_THREAD.join(5)
+        assert not maintenance._PREPARE_THREAD.is_alive()
+        result = json.loads(tools.lcm_grep(args, engine=engine))
+        if prepare_fails:
+            assert calls == []
+            assert result["results"] and result["degraded_to_fts"]
+            assert "full-text hit" in result["results"][0]["snippet"]
+            assert "unavailable" in result["degraded_reason"]
+            assert "fixture preparation failed" in result["degraded_reason"]
+        else:
+            assert calls == [("lcm-embedding-prepare", True)]
+            assert not result["degraded_to_fts"]
+            if mode == "hybrid":
+                assert any(hit.get("node_id") == node_id and "semantic_rank" in hit for hit in result["results"])
+            else:
+                # Direct semantic hits expose cosine_score, not hybrid fusion rank.
+                assert any(hit.get("node_id") == node_id and hit.get("cosine_score") == 1.0
+                           for hit in result["results"])
+    finally:
+        release.set()
+        thread = maintenance._PREPARE_THREAD
+        if thread is not None:
+            thread.join(5)
+
+
+def test_hybrid_grep_cloud_provider_ignores_local_preparation(make_engine, monkeypatch):
+    engine = make_engine("cloud", embeddings_enabled=True, embedding_provider="voyage",
+                         embedding_model="fixture-cloud")
+    node_id = engine._dag.add_node(SummaryNode(
+        session_id="cloud", depth=0, summary="semantic-only result", created_at=1.0, latest_at=1.0,
+    ))
+    vectors = VectorStore(engine._store.db_path, config=engine._config)
+    try:
+        vectors.register_profile("fixture-cloud", "voyage", 2,
+                                 revision=embedding_privacy_revision(engine._config))
+        identity = vectors.capture_identity("fixture-cloud", provider="voyage")
+        vectors.record_embedding(str(node_id), "summary", "fixture-cloud", [1.0, 0.0], identity=identity)
+    finally:
+        vectors.close()
+    calls = []
+
+    class CloudProvider:
+        provider_id, model_id = "voyage", "fixture-cloud"
+
+        def embed_query(self, text):
+            calls.append(text)
+            return [1.0, 0.0]
+
+    local = LCMConfig(**local_config())
+    monkeypatch.setitem(maintenance._PREPARE, maintenance._local_model_key(local), ("preparing", ""))
+    monkeypatch.setattr(tools, "resolve_provider", lambda _config: CloudProvider())
+    result = json.loads(tools.lcm_grep({"query": "canary", "mode": "hybrid"}, engine=engine))
+    assert calls == ["canary"]
+    assert not result["degraded_to_fts"]
+    assert result["results"][0]["node_id"] == node_id
+    assert "semantic_rank" in result["results"][0]
 
 
 def test_retire_snapshots_owner_before_concurrent_rearm(make_engine, monkeypatch):
@@ -287,11 +414,12 @@ def test_prepare_keeps_every_owner_callback_for_one_database(monkeypatch, tmp_pa
     config = LCMConfig(database_path=str(tmp_path / "shared.db"), **local_config())
     ran, release = [], threading.Event()
 
-    def register(_config, _db, **kwargs):
-        assert release.wait(5)
-        return {}
+    class Model:
+        def warmup(self):  # preparation warms only the model; hold it until both owners registered
+            assert release.wait(5)
+            return [1.0, 0.0]
 
-    monkeypatch.setattr(command, "_embedding_register_profiles", register)
+    monkeypatch.setattr(command, "resolve_provider", lambda *_a, **_k: Model())
     owner_a, owner_b = object(), object()
     assert maintenance.start_local_model_prepare(config.database_path, config,
                                                  on_ready=lambda: ran.append("a"), owner=owner_a)

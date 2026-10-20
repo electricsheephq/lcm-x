@@ -1768,7 +1768,13 @@ def _lcm_embedding_query_metric(provider: Any) -> dict[str, Any]:
 def _lcm_grep_resolve_provider(
     engine: "LCMEngine", *, deadline: float | None = None
 ) -> Any:
+    from .embedding_maintenance import local_model_state
+
     config = engine._config
+    state = local_model_state(config)
+    if state is not None and state[0] in {"preparing", "unavailable"}:
+        reason = f" ({state[1]})" if state[1] else ""
+        raise RuntimeError(f"local embedding model is {state[0]}{reason}; retrieval uses full text")
     cache_key = (
         str(getattr(config, "embedding_provider", "") or "").strip().lower(),
         str(getattr(config, "embedding_model", "") or "").strip(),
@@ -1802,11 +1808,6 @@ def _resolve_recall_provider(
     tool calls are byte-identical.
     """
     override = str(provider_override or "").strip()
-    from .embedding_maintenance import local_model_state
-
-    state = local_model_state(engine._config) if not override else None
-    if state is not None and state[0] == "preparing":
-        raise RuntimeError("local embedding model is preparing; recall uses full text")
     if not override:
         return _lcm_grep_resolve_provider(engine, deadline=deadline)
     config = engine._config
@@ -3324,6 +3325,38 @@ def _lcm_recall_summary_source_hits(
             conn.close()
 
 
+def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
+    """One keyed advisory read per requested identity, never a corpus count."""
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=0.05)
+        try:
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE key = ? || ("
+                "SELECT identity_hash FROM lcm_embedding_profile "
+                "WHERE model_name=? AND provider=? AND task=? "
+                "ORDER BY (active=1 AND archived_at IS NULL) DESC, "
+                "registered_at DESC, identity_hash DESC LIMIT 1)",
+                (f"embedding_catchup:{task}:", str(provider.model_id).strip(),
+                 str(provider.provider_id).strip().lower(), task),
+            ).fetchone()
+        finally:
+            conn.close()
+        record = json.loads(row[0]) if row else {}
+        remaining = record.get("remaining", 0)
+        reasons = []
+        if remaining > 0:
+            detail = "" if isinstance(remaining, bool) else f" ({remaining} rows not yet embedded)"
+            reasons.append(f"{task} semantic index catching up{detail}")
+        if (operator_retry := record.get("operator_retry", 0)) > 0:
+            corpus = "chunks" if task == "chunk" else "summary"
+            reasons.append(f"{task} semantic index has {operator_retry} rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus {corpus}")
+        return "; ".join(reasons) or None
+    except Exception:
+        logger.debug("Could not read embedding catch-up state", exc_info=True)
+    return None
+
+
 def _lcm_recall_summary_arm(
     engine: "LCMEngine",
     *,
@@ -4134,6 +4167,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
             if query_vector is not None:
                 if run_summary:
+                    reason = _lcm_recall_catchup_reason(engine, provider, "summary")
+                    if reason:
+                        degraded_reasons.append(reason)
                     try:
                         hits, cov, scanned, total, summary_leads = _lcm_recall_summary_arm(
                             engine,
@@ -4178,6 +4214,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 _run_fts_arm(fallback=True)
             if chunk_query_vector is not None:
                 if run_chunk:
+                    reason = _lcm_recall_catchup_reason(engine, chunk_provider, "chunk")
+                    if reason:
+                        degraded_reasons.append(reason)
                     try:
                         hits, cov, scanned, total = _lcm_recall_chunk_arm(
                             engine,
@@ -4395,7 +4434,8 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
         coverage = f"unavailable ({exc})"
         if model is None:
             model = "present" if _active_embedding_profile_exists(engine) else "not prepared (run /lcm embed warmup)"
-    return f"model: {model}; coverage: {coverage}"
+    last, _ = command.incremental_embedding_state(engine._store.db_path)
+    return f"model: {model}; coverage: {coverage}" + (f"; maintenance: {last[1]}" if last else "")
 
 
 def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
