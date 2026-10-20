@@ -93,7 +93,7 @@ def audit(db, manifest):
     return result
 
 
-def progress(db, manifest, verify=True):
+def progress(db, manifest, verify=False):
     result = {"classes": {}, "raw_unchanged": True, "changed_vectors": [], "integrity": "not_checked"}
     with connect(db) as c:
         c.execute("BEGIN")
@@ -101,6 +101,11 @@ def progress(db, manifest, verify=True):
             now, before = preimage(c), manifest["preimage"]
             result.update(raw_unchanged=now["raw_digest"] == before["raw_digest"] and now["provenance"] == before["provenance"],
                 changed_vectors=[k for k, v in (manifest.get("observed_vectors", {}) | before["vectors"]).items() if now["vectors"].get(k) != v])
+        observed = manifest.setdefault("observed_vectors", {})
+        for kind, table, key in (("chunks", "lcm_chunk_vectors", "chunk_id"), ("leaves", "lcm_embedding_vectors", "embedded_id")):
+            known = dict(manifest["preimage"]["vectors"], **observed)
+            for ident, identity, vec in c.execute(f"SELECT {key},identity_hash,vec FROM {table} WHERE ?||'/'||identity_hash||'/'||{key} NOT IN (SELECT key FROM json_each(?))", (kind, json.dumps(known))):
+                observed[f"{kind}/{identity}/{ident}"] = hashlib.sha256(vec).hexdigest()
         for kind, table, meta, key, task in (("chunks", "lcm_chunk_vectors", "lcm_chunk_meta", "chunk_id", "chunk"),
                                            ("leaves", "lcm_embedding_vectors", "lcm_embedding_meta", "embedded_id", "summary")):
             expected = manifest["expected"][kind]

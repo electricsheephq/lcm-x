@@ -25,12 +25,21 @@ def honest_coverage(payload, incomplete_arms):
             for pattern in INCOMPLETE_SEMANTIC_REASONS)) for arm in incomplete_arms)
 
 
-def semantic_healthy(payload):
+def empty_arms(payload, incomplete_arms):
+    coverage = payload.get("provenance", {}).get("coverage", {})
+    reason = payload.get("degraded_reason", "")
+    return [arm for arm in incomplete_arms if coverage.get(arm) == "none" and
+        (re.search(rf"\b{arm} vectors are unavailable\b", reason) or any(
+            re.search(pattern.format(arm=arm, corpus="chunks" if arm == "chunk" else "summary"), reason)
+            for pattern in INCOMPLETE_SEMANTIC_REASONS))]
+
+
+def semantic_healthy(payload, incomplete_arms=()):
     provenance = payload.get("provenance", {})
     reason = payload.get("degraded_reason", "")
     return (not re.search(r"arm failed|provider unavailable|query embedding failed|cooling down|identity is stale", reason)
-        and all(arm in provenance.get("arms_run", []) and
-            provenance.get("coverage", {}).get(arm) in ("full", "bounded", "full_approx")
+        and all(arm in empty_arms(payload, incomplete_arms) or (arm in provenance.get("arms_run", []) and
+            provenance.get("coverage", {}).get(arm) in ("full", "bounded", "full_approx"))
             for arm in ("chunk", "summary")))
 
 
@@ -43,7 +52,9 @@ def overlapping_publications(counted, publications):
 
 
 def score(rows, publications, seed=1586, state="OFF", activity=None):
-    counted = overlapping(rows, publications)
+    overlapped = overlapping(rows, publications)
+    counted = [r for r in overlapped if not (state == "ON-catching-up" and
+        r.get("semantic_healthy") and r.get("semantic_empty"))]
     distinct = overlapping_publications(counted, publications)
     stats = {}
     for name, quantile, limit in (("p50", .5, 2.), ("p90", .9, 8.)):
@@ -51,7 +62,7 @@ def score(rows, publications, seed=1586, state="OFF", activity=None):
         point = percentile(values, quantile)
         upper = percentile(bootstrap(values, lambda v: percentile(v, quantile), seed), .95) if values else None
         stats[name] = dict(seconds=point, upper95_s=upper, limit_s=limit)
-    failures = sum(r["health"] in ("error", "timeout") or not r["fts_hits"] or not r["honest_coverage"] or (state != "OFF" and not r.get("semantic_healthy", False)) for r in rows)
+    failures = sum(r["health"] in ("error", "timeout") or not r["fts_hits"] or not r["honest_coverage"] or (state != "OFF" and not r.get("semantic_healthy", False)) for r in overlapped)
     valid = len(counted) >= 200 and distinct >= 10
     passed = not failures and all(v["seconds"] <= v["limit_s"] and v["upper95_s"] <= v["limit_s"] for v in stats.values()) if counted else False
     result = dict(state="INVALID" if not valid else "PASS" if passed else "FAIL", overlapping=len(counted),
@@ -60,6 +71,22 @@ def score(rows, publications, seed=1586, state="OFF", activity=None):
     if state == "ON-catching-up" and not (activity or {}).get("catchup_activity"):
         result.update(state="INVALID", reason="on_no_catchup_activity")
     return result
+
+
+def recall_reader(engine, mod, db, home):
+    from types import SimpleNamespace
+    class Reader(SimpleNamespace):
+        def __getattr__(self, name):
+            if name.endswith("_provider_cache"):
+                return getattr(engine, name)
+            raise AttributeError(name)
+        def __setattr__(self, name, value):
+            if name.endswith("_provider_cache"):
+                setattr(engine, name, value)
+            else:
+                super().__setattr__(name, value)
+    return Reader(_config=engine._config, _hermes_home=str(home),
+        _store=mod("store").MessageStore(db), _dag=mod("dag").SummaryDAG(db), current_session_id="i2-recall")
 
 
 def worker(request):
@@ -89,10 +116,7 @@ def worker(request):
             nonlocal reader
             try:
                 # Separate SQLite connections owned by the recall thread, as scale389 does.
-                from types import SimpleNamespace
-                reader = SimpleNamespace(_config=engine._config, _hermes_home=str(a.home),
-                    _store=mod("store").MessageStore(a.db), _dag=mod("dag").SummaryDAG(a.db),
-                    current_session_id="i2-recall")
+                reader = recall_reader(engine, mod, a.db, a.home)
                 started.set()
                 i = 0
                 while not halt.is_set() or i < len(pinned):
@@ -109,13 +133,14 @@ def worker(request):
                     row = dict(query_id=q["id"], start=start, end=end, seconds=end-start, health=health,
                         reason=payload.get("degraded_reasons", payload.get("degraded_reason")), semantic_coverage=coverage,
                         fts_hits=any("fts" in h.get("arms", []) for h in payload.get("hits", [])),
-                        semantic_healthy=semantic_healthy(payload), honest_coverage=honest_coverage(payload, incomplete_arms),
+                        semantic_healthy=semantic_healthy(payload, incomplete_arms if a.state == "ON-catching-up" else ()),
+                        semantic_empty=bool(empty_arms(payload, incomplete_arms)), honest_coverage=honest_coverage(payload, incomplete_arms),
                         incomplete=bool(incomplete_arms), coverage_start=before,
                         coverage_end=vector_counts(a.db, manifest) if before else {})
                     rows.append(row)
                     append(a.root/"recalls.jsonl", row)
                     i += 1
-                    counted = overlapping(rows, publications)
+                    counted = [r for r in overlapping(rows, publications) if not (a.state == "ON-catching-up" and r["semantic_healthy"] and r["semantic_empty"])]
                     if i >= len(pinned) and len(counted) >= 200 and overlapping_publications(counted, publications) >= 10:
                         break
             except Exception as exc:

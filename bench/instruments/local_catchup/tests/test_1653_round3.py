@@ -233,12 +233,12 @@ def test_midrun_progress_detects_corruption(corpus, kind):
     fill(db, manifest, mod)
     with audit.connect(db) as c:
         manifest["preimage"] = audit.preimage(c)
-    assert audit.progress(db, manifest)["raw_unchanged"]
+    assert audit.progress(db, manifest, verify=True)["raw_unchanged"]
     with sqlite3.connect(db) as c:
         c.execute({"raw": "UPDATE messages SET content='changed' WHERE store_id=1",
                    "provenance": "UPDATE summary_nodes SET source_ids='[2]' WHERE node_id=1",
                    "vector": "UPDATE lcm_chunk_vectors SET vec=zeroblob(1536) WHERE chunk_id='1:0'"}[kind])
-    result = audit.progress(db, manifest)
+    result = audit.progress(db, manifest, verify=True)
     assert not result["raw_unchanged"] or result["changed_vectors"]
 
 

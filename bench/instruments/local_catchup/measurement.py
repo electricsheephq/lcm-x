@@ -233,7 +233,7 @@ def safety(a):
     return {"events": "events.jsonl", "prepare_and_backfill_wrapped": True,
             "embedding_thread_join_wrapped": True, "python_socket_calls_denied":
             "connect, connect_ex, sendto, sendmsg, getaddrinfo, gethostbyname, gethostbyname_ex, gethostbyaddr, getnameinfo",
-            "subprocess_launches_recorded": True, "native_and_subprocess_network_guarded": False, "violations": 0}
+            "subprocess_launches_recorded": "subprocess.Popen", "native_and_subprocess_network_guarded": False, "violations": 0}
 
 
 def catchup_activity(root, start, end, coverage_start, coverage_end, require_prepared=False):

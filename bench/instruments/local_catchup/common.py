@@ -127,6 +127,16 @@ def guards(mod, events, generation=0):
         append(events, {"event": "subprocess_launch", "thread": threading.current_thread().name})
         original_init(self, *args, **kwargs)
     subprocess.Popen.__init__ = launched
+    engine = getattr(mod("engine"), "LCMEngine", None)
+    if engine is not None:
+        original_schedule = engine._schedule_embedding_maintenance
+        def schedule(self, *a, **kw):
+            token = REQUEST.set(False)  # Clear before profile_bound captures scheduled jobs.
+            try:
+                return original_schedule(self, *a, **kw)
+            finally:
+                REQUEST.reset(token)
+        engine._schedule_embedding_maintenance = schedule
     provider = mod("embedding_provider")
     if provider._FASTEMBED_THREADS > 2:
         raise RuntimeError("product ORT thread count exceeds two")
