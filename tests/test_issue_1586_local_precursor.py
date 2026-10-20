@@ -318,3 +318,22 @@ def test_doctor_present_needs_the_configured_local_model(make_engine, monkeypatc
         "available": True, "provider": "fastembed", "model": "fixture-local", "probed": True, "detail": "fixture"})
     readiness = tools._embedding_provider_health_check(engine)["detail"]["readiness"]
     assert readiness.startswith(f"model: {expected};")
+
+
+def test_process_present_state_does_not_vouch_for_another_database(make_engine, monkeypatch):
+    from hermes_lcm.vector_store import VectorStore
+
+    prepared, other = make_engine("db-a", **local_config()), make_engine("db-b", **local_config())
+    vectors = VectorStore(prepared._store.db_path, config=prepared._config)
+    try:
+        vectors.register_profile("fixture-local", "fastembed", 2)
+    finally:
+        vectors.close()
+    other._dag.add_node(SummaryNode(session_id="db-b", depth=0, summary="unembedded summary",
+                                    created_at=1.0, latest_at=1.0))
+    monkeypatch.setitem(maintenance._PREPARE, maintenance._local_model_key(other._config), ("present", ""))
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: {
+        "available": True, "provider": "fastembed", "model": "fixture-local", "probed": True, "detail": "fixture"})
+    assert tools._embedding_provider_health_check(prepared)["detail"]["readiness"].startswith("model: present;")
+    readiness = tools._embedding_provider_health_check(other)["detail"]["readiness"]
+    assert readiness == "model: not prepared (run /lcm embed warmup); coverage: 0/1 summaries"
