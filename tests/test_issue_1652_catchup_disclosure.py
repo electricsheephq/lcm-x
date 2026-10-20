@@ -1,6 +1,8 @@
 """Recorded catch-up backlog is distinct from kNN coverage and ordinary ingest lag."""
 import json
 import sqlite3
+import threading
+import time
 
 import pytest
 
@@ -27,8 +29,8 @@ def engine(tmp_path, monkeypatch):
     engine.shutdown()
 
 
-def backfill(engine, task, limit=1, incremental=False):
-    kwargs = dict(apply=True, limit=limit, retry_uncertain=False)
+def backfill(engine, task, limit=1, incremental=False, retry=False):
+    kwargs = dict(apply=True, limit=limit, retry_uncertain=retry)
     if task == "chunk":
         return command._chunk_backfill_run(engine._config, engine._store.db_path,
                                           policy="", incremental=incremental, **kwargs)
@@ -143,3 +145,121 @@ def test_metadata_write_failure_does_not_fail_pass(engine, task):
     result = backfill(engine, task)
     assert result["error"] is None
     assert result["embedded"] > 0
+
+
+def mark_uncertain(engine, task, embedded_id):
+    with sqlite3.connect(engine._store.db_path) as conn:
+        identity = conn.execute("SELECT identity_hash FROM lcm_embedding_profile WHERE active=1 AND task=?", (task,)).fetchone()[0]
+        conn.execute(
+            "INSERT INTO lcm_embedding_backfill_inflight "
+            "(embedded_id, identity_hash, lease_id, generation, claimed_at, state, updated_at) "
+            "VALUES (?, ?, 'dead-lease', 1, ?, 'uncertain', ?)",
+            (str(embedded_id), identity, time.time() - 3600, time.time() - 3600),
+        )
+
+
+@pytest.mark.parametrize("source", ["deleted", "policy"])
+def test_orphan_uncertain_chunk_does_not_hold_backlog(engine, source):
+    backfill(engine, "chunk", limit=100)
+    store_id = engine._store.append("doomed", {"role": "user", "content": "cobalt doomed " + "detail " * 60})
+    mark_uncertain(engine, "chunk", f"{store_id}:{0 if source == 'deleted' else 999}")
+    if source == "deleted":
+        engine._store.delete_session_messages("doomed")
+        with sqlite3.connect(engine._store.db_path) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_backfill_inflight").fetchone()[0] == 0
+    backfill(engine, "chunk", limit=100)
+    assert record(engine, "chunk")["remaining"] == 0
+    assert recall(engine, "chunk")["degraded"] is False
+    backfill(engine, "chunk", limit=100, retry=True)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_backfill_inflight").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("task", ["summary", "chunk"])
+def test_uncertain_rows_name_operator_retry(engine, task):
+    backfill(engine, task, limit=100)
+    if task == "summary":
+        row = engine._dag.add_node(SummaryNode(session_id="seed", depth=0, summary="cobalt timeout row", created_at=9.0, latest_at=9.0))
+        embedded_id = getattr(row, "node_id", row)
+    else:
+        row = engine._store.append("seed", {"role": "user", "content": "cobalt timeout " + "detail " * 60})
+        embedded_id = f"{row}:0"
+    mark_uncertain(engine, task, embedded_id)
+    for _ in range(4):
+        embedding_maintenance.run_incremental_embedding_pass(engine._store.db_path, engine._config)
+    reason = recall(engine, task)["degraded_reason"]
+    assert f"{task} semantic index has 1 rows awaiting /lcm embed backfill --retry-uncertain" in reason
+    assert "catching up" not in reason
+    backfill(engine, task, limit=100, retry=True)
+    assert recall(engine, task)["degraded"] is False
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_remote_chunk_ingest_marks_backlog_until_manual_backfill(engine, batch):
+    engine._config.ollama_base_url = "http://192.0.2.1:11434"
+    assert not embedding_maintenance._automatic_chunks_allowed(engine._config, command)
+    backfill(engine, "chunk", limit=100)
+    assert recall(engine, "chunk")["degraded"] is False
+    message = {"role": "user", "content": "cobalt later " + "detail " * 60}
+    if batch:
+        engine._store.append_batch("seed", [message])
+    else:
+        engine._store.append("seed", message)
+    for _ in range(3):
+        embedding_maintenance.run_incremental_embedding_pass(engine._store.db_path, engine._config)
+    assert record(engine, "chunk")["remaining"] > 0
+    assert recall(engine, "chunk")["degraded"] is True
+    backfill(engine, "chunk", limit=100)
+    assert record(engine, "chunk")["remaining"] == 0
+    assert recall(engine, "chunk")["degraded"] is False
+
+
+def test_completing_record_write_waits_for_foreground_transaction(engine, monkeypatch):
+    backfill(engine, "summary")
+    assert record(engine, "summary")["remaining"] > 0
+    write = command._record_embedding_catchup
+    held = threading.Event()
+
+    def hold_lock():
+        with sqlite3.connect(engine._store.db_path) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            held.set()
+            time.sleep(0.3)
+
+    def contended(*args, **kwargs):
+        thread = threading.Thread(target=hold_lock)
+        thread.start()
+        try:
+            assert held.wait(5)
+            write(*args, **kwargs)
+        finally:
+            thread.join(5)
+
+    monkeypatch.setattr(command, "_record_embedding_catchup", contended)
+    result = backfill(engine, "summary", limit=100)
+    assert result["remaining"] == 0
+    assert record(engine, "summary")["remaining"] == 0
+    assert recall(engine, "summary")["degraded"] is False
+
+
+def test_unrebuildable_summary_is_not_counted(engine):
+    backfill(engine, "summary", limit=100)
+    mark_uncertain(engine, "summary", 999999)
+    backfill(engine, "summary", limit=100)
+    assert record(engine, "summary")["remaining"] == 0
+    assert record(engine, "summary")["operator_retry"] == 0
+    assert recall(engine, "summary")["degraded"] is False
+
+
+def test_remote_chunk_metadata_failure_does_not_fail_ingest(engine):
+    engine._config.ollama_base_url = "http://192.0.2.1:11434"
+    backfill(engine, "chunk", limit=100)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("CREATE TRIGGER refuse_catchup BEFORE UPDATE ON metadata "
+                     "WHEN NEW.key LIKE 'embedding_catchup:%' "
+                     "BEGIN SELECT RAISE(ABORT, 'simulated metadata failure'); END")
+    message = {"role": "user", "content": "cobalt survives advisory failure"}
+    single = engine._store.append("seed", message)
+    batch = engine._store.append_batch("seed", [message])
+    for store_id in [single, *batch]:
+        assert engine._store.get(store_id)["content"] == message["content"]

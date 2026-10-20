@@ -271,8 +271,11 @@ fused ranking for an exhaustive exact one.
 A backlog recorded by the last embedding backfill pass also sets `degraded: true`
 with a `summary semantic index catching up` or `chunk semantic index catching up`
 reason (and remaining rows when known). The record is per corpus and embedding
-identity; completing catch-up clears it. Ordinary ingest lag after catch-up and
-an identity with no recorded pass add no reason. Recall uses a keyed metadata
+identity; completing catch-up clears it. Non-FastEmbed uncertain rows instead report
+`<corpus> semantic index has N rows awaiting /lcm embed backfill --retry-uncertain`.
+Ingest marks an existing chunk record when automatic chunk passes cannot run;
+a manual backfill clears it. Ordinary automatic ingest lag and no recorded pass
+add no reason. Recall uses a keyed metadata
 lookup, without counting corpus rows; coverage enums still describe the kNN scan.
 
 ### Privacy-policy errors are not a degrade

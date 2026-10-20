@@ -3341,10 +3341,15 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
             ).fetchone()
         finally:
             conn.close()
-        remaining = json.loads(row[0])["remaining"] if row else 0
+        record = json.loads(row[0]) if row else {}
+        remaining = record.get("remaining", 0)
+        reasons = []
         if remaining > 0:
             detail = "" if isinstance(remaining, bool) else f" ({remaining} rows not yet embedded)"
-            return f"{task} semantic index catching up{detail}"
+            reasons.append(f"{task} semantic index catching up{detail}")
+        if (operator_retry := record.get("operator_retry", 0)) > 0:
+            reasons.append(f"{task} semantic index has {operator_retry} rows awaiting /lcm embed backfill --retry-uncertain")
+        return "; ".join(reasons) or None
     except Exception:
         logger.debug("Could not read embedding catch-up state", exc_info=True)
     return None

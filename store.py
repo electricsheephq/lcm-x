@@ -312,6 +312,14 @@ def delete_host_uid_bindings(conn: sqlite3.Connection, rows_sql: str, args: tupl
         conn.execute(f"DELETE FROM host_uid_bindings WHERE store_id IN ({rows_sql})", args)
 
 
+def delete_chunk_inflight(conn: sqlite3.Connection, rows_sql: str, args: tuple = ()) -> None:
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='lcm_embedding_backfill_inflight'").fetchone():
+        conn.execute(
+            "DELETE FROM lcm_embedding_backfill_inflight WHERE instr(embedded_id, ':') > 0 "
+            f"AND CAST(substr(embedded_id, 1, instr(embedded_id, ':') - 1) AS INTEGER) IN ({rows_sql})", args,
+        )
+
+
 class MessageStore:
     """SQLite-backed immutable message store."""
 
@@ -463,6 +471,24 @@ class MessageStore:
     def clear_context_windows(self) -> None:
         self._context_window_tokens.clear()
 
+    def _mark_manual_chunk_backlog(self) -> None:
+        try:
+            config = self._ingest_protection_config
+            if not config.embeddings_enabled:
+                return
+            from . import command, embedding_maintenance
+            if embedding_maintenance._automatic_chunks_allowed(config, command):
+                return
+            self._conn.execute(
+                "UPDATE metadata SET value=json_set(value, '$.remaining', json('true'), '$.updated_at', ?) "
+                "WHERE key='embedding_catchup:chunk:' || (SELECT identity_hash FROM lcm_embedding_profile "
+                "WHERE active=1 AND archived_at IS NULL AND task='chunk' "
+                "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1)",
+                (time.time(),),
+            )
+        except Exception:
+            logging.getLogger(__name__).debug("Could not mark manual chunk backlog", exc_info=True)
+
     def append(self, session_id: str, msg: Dict[str, Any],
                token_estimate: int = 0, source: str = "",
                conversation_id: str = "") -> int:
@@ -503,6 +529,7 @@ class MessageStore:
                     "host_message_timestamp" if observed_at is not None else None,
                 ),
             )
+            self._mark_manual_chunk_backlog()
             self._commit()
             return cur.lastrowid
 
@@ -608,6 +635,8 @@ class MessageStore:
                             """,
                             (key, value),
                         )
+            if ids:
+                self._mark_manual_chunk_backlog()
             return ids
 
         with self._write_lock:
@@ -634,6 +663,7 @@ class MessageStore:
         with self._write_lock:
             delete_message_relations(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             delete_host_uid_bindings(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
+            delete_chunk_inflight(self._conn, "SELECT store_id FROM messages WHERE session_id = ?", (session_id,))
             cur = self._conn.execute(
                 "DELETE FROM messages WHERE session_id = ?",
                 (session_id,),

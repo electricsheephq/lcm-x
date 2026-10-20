@@ -81,7 +81,7 @@ from .assertion_store import AssertionSchemaUnavailableError, AssertionStore
 from . import rollup_builder
 from .rollup_store import RollupStore
 from .session_patterns import build_session_match_keys, matches_session_pattern
-from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_host_uid_bindings, delete_message_relations
+from .store import build_message_fts_spec, build_message_stem_fts_spec, delete_chunk_inflight, delete_host_uid_bindings, delete_message_relations
 from .survival_fit import SURVIVAL_FIT_COUNTER_KEY as SURVIVAL_FIT_COUNTER_KEY
 from .host_uid import host_uid_doctor_lines as host_uid_doctor_lines
 from .chunking import (
@@ -1426,6 +1426,10 @@ def _delete_clean_candidates_atomically(engine, session_ids: set[str]) -> dict[s
         delete_host_uid_bindings(conn, (
             f"SELECT store_id FROM messages WHERE EXISTS ("
             f"SELECT 1 FROM {scope_table} AS scope "
+            "WHERE scope.session_id = messages.session_id)"
+        ))
+        delete_chunk_inflight(conn, (
+            f"SELECT store_id FROM messages WHERE EXISTS (SELECT 1 FROM {scope_table} AS scope "
             "WHERE scope.session_id = messages.session_id)"
         ))
         msg_cur = conn.execute(
@@ -3547,17 +3551,17 @@ def _summary_backfill_estimates(
     return est_tokens, est_cost_tokens, est_batches
 
 
-def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int | bool) -> None:
-    """Best-effort advisory state after publication; never block embedding work."""
+def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int | bool, *, operator_retry: int = 0) -> None:
+    """Best-effort advisory state after publication; never fail embedding work."""
     try:
-        conn = sqlite3.connect(db_path, timeout=0.05)
+        conn = sqlite3.connect(db_path, timeout=5.0)
         try:
             with conn:
                 conn.execute(
                     "INSERT INTO metadata(key, value) VALUES(?, ?) "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
                     (f"embedding_catchup:{task}:{identity}",
-                     json.dumps({"remaining": remaining, "updated_at": time.time()})),
+                     json.dumps({"remaining": remaining, "operator_retry": operator_retry, "updated_at": time.time()})),
                 )
         finally:
             conn.close()
@@ -4089,7 +4093,8 @@ def _embedding_backfill_summary_run(
     remaining, in_flight_count, uncertain_count = _embedding_backfill_remaining(
         db_path, identity, pending, embedded
     )
-    _record_embedding_catchup(db_path, "summary", identity, remaining + in_flight_count)
+    operator_retry = uncertain_count if embedding_provider_id(provider_name) != "fastembed" else 0
+    _record_embedding_catchup(db_path, "summary", identity, remaining + in_flight_count - operator_retry, operator_retry=operator_retry)
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
         error=error,
@@ -4160,12 +4165,14 @@ def _embedding_backfill_remaining(
             remaining, _ = _embedding_pending_rows(check_conn, identity_hash, 1)
             try:
                 in_flight = int(check_conn.execute(
-                    "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight WHERE identity_hash = ?",
+                    "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight WHERE identity_hash = ? "
+                    "AND embedded_id IN (SELECT CAST(node_id AS TEXT) FROM summary_nodes WHERE depth=0 AND lcm_summary_has_text(summary)=1)",
                     (identity_hash,),
                 ).fetchone()[0])
                 uncertain = int(check_conn.execute(
                     "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight "
-                    "WHERE identity_hash = ? AND state IN ('dispatched', 'uncertain')",
+                    "WHERE identity_hash = ? AND state IN ('dispatched', 'uncertain') "
+                    "AND embedded_id IN (SELECT CAST(node_id AS TEXT) FROM summary_nodes WHERE depth=0 AND lcm_summary_has_text(summary)=1)",
                     (identity_hash,),
                 ).fetchone()[0])
             except sqlite3.OperationalError:
@@ -4595,7 +4602,7 @@ def _chunk_authorized_uncertain_rows(
     limit: int,
     retry_before: float | None = None,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
-    """Select uncertain chunk rows without consuming their durable markers."""
+    """Keep retry markers for rebuildable chunks; discard unrebuildable orphans."""
     rows = conn.execute(
         f"""
         SELECT f.embedded_id
@@ -4617,7 +4624,12 @@ def _chunk_authorized_uncertain_rows(
     for row in rows:
         chunk_id = str(row[0])
         rebuilt = _rebuild_chunk_document(conn, chunk_id, policy)
-        if rebuilt is None:
+        if rebuilt is None or rebuilt[3] <= rebuilt[2]:
+            conn.execute(
+                "DELETE FROM lcm_embedding_backfill_inflight WHERE identity_hash=? AND embedded_id=? AND state='uncertain'",
+                (identity_hash, chunk_id),
+            )
+            conn.commit()
             continue
         text, tokens, char_start, char_end = rebuilt
         # Write-seam guard: never persist a degenerate/zero span — it yields an
@@ -4654,16 +4666,14 @@ def _chunk_backfill_remaining(
             )
             if identity_hash:
                 try:
-                    in_flight = int(check_conn.execute(
-                        "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight "
+                    actionable = [row for row in check_conn.execute(
+                        "SELECT embedded_id, state FROM lcm_embedding_backfill_inflight "
                         "WHERE identity_hash = ?",
                         (identity_hash,),
-                    ).fetchone()[0])
-                    uncertain = int(check_conn.execute(
-                        "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight "
-                        "WHERE identity_hash = ? AND state IN ('dispatched', 'uncertain')",
-                        (identity_hash,),
-                    ).fetchone()[0])
+                    ) if (rebuilt := _rebuild_chunk_document(check_conn, row[0], policy)) is not None
+                        and rebuilt[3] > rebuilt[2]]
+                    in_flight = len(actionable)
+                    uncertain = sum(row[1] in ('dispatched', 'uncertain') for row in actionable)
                 except sqlite3.OperationalError:
                     in_flight = 0
                     uncertain = 0
@@ -5292,8 +5302,9 @@ def _chunk_backfill_run(
         db_path, identity, policy, pending, embedded, incremental,
         include_boundaries=stop_reason == "process_exit",
     )
-    backlog = remaining + in_flight_count
-    _record_embedding_catchup(db_path, "chunk", identity, bool(backlog) if incremental else backlog)
+    operator_retry = uncertain_count if embedding_provider_id(provider_name) != "fastembed" else 0
+    backlog = remaining + in_flight_count - operator_retry
+    _record_embedding_catchup(db_path, "chunk", identity, bool(backlog) if incremental else backlog, operator_retry=operator_retry)
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
         error=error, lease_lost=lease_lost, budget_exhausted=budget_exhausted,
