@@ -2965,9 +2965,11 @@ class LCMEngine(
     def _retire_embedding_maintenance(self, wait: bool) -> None:
         with self._embedding_maintenance_lock:
             self._embedding_maintenance_retired = True
+            # Snapshot under the lock: a concurrent rearm mints a new owner, which must stay live.
+            owner = self._embedding_maintenance_owner
         try:
             _EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
-                self._embedding_maintenance_owner,
+                owner,
                 timeout=_EMBEDDING_RETIRE_TIMEOUT_S if wait else 0,
             )
         except Exception:

@@ -234,3 +234,50 @@ def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch)
         thread = getattr(maintenance, "_PREPARE_THREAD", None)
         if thread is not None:
             thread.join(5)
+
+
+def test_retire_snapshots_owner_before_concurrent_rearm(make_engine, monkeypatch):
+    engine = make_engine("race")
+    old_owner = engine._embedding_maintenance_owner
+    retired = []
+    monkeypatch.setattr(engines._EMBEDDING_MAINTENANCE_SCHEDULER, "retire_owner",
+                        lambda owner, timeout=0: retired.append(owner))
+    real_lock = engine._embedding_maintenance_lock
+
+    class RearmOnRelease:
+        """Runs one rearm right after retire releases the lock: the race window."""
+        fired = False
+
+        def __enter__(self):
+            real_lock.acquire()
+            return self
+
+        def __exit__(self, *exc):
+            real_lock.release()
+            if not RearmOnRelease.fired:
+                RearmOnRelease.fired = True
+                engine._rearm_embedding_maintenance()
+            return False
+
+    engine._embedding_maintenance_lock = RearmOnRelease()
+    try:
+        engine._retire_embedding_maintenance(wait=False)
+    finally:
+        engine._embedding_maintenance_lock = real_lock
+    assert retired == [old_owner]
+    assert engine._embedding_maintenance_owner is not old_owner
+    assert engine._embedding_maintenance_retired is False
+
+
+def test_doctor_reports_preparing_while_cached_probe_fails(make_engine, monkeypatch):
+    engine = make_engine("preparing", **local_config())
+    key = maintenance._local_model_key(engine._config)
+    assert key
+    monkeypatch.setitem(maintenance._PREPARE, key, ("preparing", ""))
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: {
+        "available": False, "provider": "fastembed", "model": "fixture-local", "probed": True,
+        "detail": "model files are not cached"})
+    check = tools._embedding_provider_health_check(engine)
+    assert check["status"] == "warn"
+    assert check["detail"]["readiness"].startswith("model: preparing;")
+    assert "prepares in the background" in check["detail"]["impact"]

@@ -4358,7 +4358,10 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
     from .embedding_maintenance import local_model_state
 
     state = local_model_state(engine._config)
-    if not probe.get("available"):
+    if state is not None and state[0] == "preparing":
+        # Background preparation owns this window; a cached-only probe is expected to fail until it ends.
+        model = "preparing"
+    elif not probe.get("available"):
         model = f"unavailable({probe.get('detail')})"
     elif state is not None:
         model = state[0] if state[0] != "unavailable" else f"unavailable({state[1]})"
@@ -4439,6 +4442,16 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
     }
     if embedding_provider_id(str(probe.get("provider") or "")) == "fastembed":
         detail["readiness"] = _embedding_readiness(engine, probe)
+    if str(detail.get("readiness", "")).startswith("model: preparing;"):
+        detail["impact"] = (
+            "semantic retrieval is degraded while the local model prepares in the background; "
+            "lcm_recall keeps answering from full text"
+        )
+        return {
+            "check": "embedding_provider_health",
+            "status": "warn",
+            "detail": detail,
+        }
     # An unavailable provider is the prerequisite blocker: warmup cannot succeed until it is fixed.
     if not probe.get("available") or str(detail.get("readiness", "")).startswith("model: unavailable("):
         detail["impact"] = (
