@@ -3325,6 +3325,38 @@ def _lcm_recall_summary_source_hits(
             conn.close()
 
 
+def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
+    """One keyed advisory read per requested identity, never a corpus count."""
+    try:
+        db_path = Path(engine._store.db_path).resolve()
+        conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=0.05)
+        try:
+            row = conn.execute(
+                "SELECT value FROM metadata WHERE key = ? || ("
+                "SELECT identity_hash FROM lcm_embedding_profile "
+                "WHERE model_name=? AND provider=? AND task=? "
+                "ORDER BY (active=1 AND archived_at IS NULL) DESC, "
+                "registered_at DESC, identity_hash DESC LIMIT 1)",
+                (f"embedding_catchup:{task}:", str(provider.model_id).strip(),
+                 str(provider.provider_id).strip().lower(), task),
+            ).fetchone()
+        finally:
+            conn.close()
+        record = json.loads(row[0]) if row else {}
+        remaining = record.get("remaining", 0)
+        reasons = []
+        if remaining > 0:
+            detail = "" if isinstance(remaining, bool) else f" ({remaining} rows not yet embedded)"
+            reasons.append(f"{task} semantic index catching up{detail}")
+        if (operator_retry := record.get("operator_retry", 0)) > 0:
+            corpus = "chunks" if task == "chunk" else "summary"
+            reasons.append(f"{task} semantic index has {operator_retry} rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus {corpus}")
+        return "; ".join(reasons) or None
+    except Exception:
+        logger.debug("Could not read embedding catch-up state", exc_info=True)
+    return None
+
+
 def _lcm_recall_summary_arm(
     engine: "LCMEngine",
     *,
@@ -4135,6 +4167,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
             if query_vector is not None:
                 if run_summary:
+                    reason = _lcm_recall_catchup_reason(engine, provider, "summary")
+                    if reason:
+                        degraded_reasons.append(reason)
                     try:
                         hits, cov, scanned, total, summary_leads = _lcm_recall_summary_arm(
                             engine,
@@ -4179,6 +4214,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                 _run_fts_arm(fallback=True)
             if chunk_query_vector is not None:
                 if run_chunk:
+                    reason = _lcm_recall_catchup_reason(engine, chunk_provider, "chunk")
+                    if reason:
+                        degraded_reasons.append(reason)
                     try:
                         hits, cov, scanned, total = _lcm_recall_chunk_arm(
                             engine,
