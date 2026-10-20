@@ -182,7 +182,8 @@ def worker(request):
             max(counted, key=lambda r: r["end"])["coverage_end"]) if counted else dict(catchup_activity=False)
         result = score(rows, publications, a.seed, a.state, activity)
         if a.smoke or a.rows < 250000 or len(pinned) < 200 or (a.state == "ON-catching-up" and
-                (final.get("complete") or not all(r["incomplete"] for r in overlapping(rows, publications)))):
+                (all(final["classes"][kind]["missing_count"] == 0 for kind in manifest["expected"])
+                 or not all(r["incomplete"] for r in overlapping(rows, publications)))):
             result["state"] = "INVALID"
         result.update(bind_ms=bind, safety=evidence, queries=len(pinned), **activity)
         dump(a.root/"raw-summary.json", result)

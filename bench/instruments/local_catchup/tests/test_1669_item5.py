@@ -30,7 +30,9 @@ def test_item5_completion_during_recall_or_by_final_audit_invalidates(tmp_path, 
         calls.append(1)
         return dict(chunks=int(post_complete and len(calls) % 2 == 0), leaves=1)
     monkeypatch.setattr(recall, "vector_counts", counts)
-    monkeypatch.setattr(recall, "audit", lambda *a: dict(complete=final_complete))
+    monkeypatch.setattr(recall, "audit", lambda *a: dict(complete=final_complete,
+        classes={kind: dict(covered=int(final_complete), expected=1, missing_count=int(not final_complete))
+                 for kind in ("chunks", "leaves")}))
     monkeypatch.setattr(recall, "integrity", lambda *a: None)
     monkeypatch.setattr(recall, "safety", lambda *a: {})
     monkeypatch.setattr(recall, "trace", lambda *a: None)
