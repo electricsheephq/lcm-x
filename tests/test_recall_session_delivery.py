@@ -85,7 +85,8 @@ def test_whole_session_rank_and_dates(session_engine, monkeypatch, detail):
 
 
 @pytest.mark.parametrize("encoder", [False, True])
-def test_budget_late_anchor_and_multiple_windows(session_engine, monkeypatch, encoder):
+@pytest.mark.parametrize("detail", ["snippets", "answer_ready"])
+def test_budget_late_anchor_and_multiple_windows(session_engine, monkeypatch, encoder, detail):
     # RED: no late-hit neighborhoods, fixed whole-JSON budget or partial ranges.
     engine = session_engine
     monkeypatch.setattr(tokens, "_get_encoder", lambda: type("Encoder", (), {
@@ -96,7 +97,7 @@ def test_budget_late_anchor_and_multiple_windows(session_engine, monkeypatch, en
         return original(ordered, **kw)
     monkeypatch.setattr(recall_delivery, "deliver_recall", giant_echo)
     ids = [add(engine, ("needle " if i in (60, 90) else "context ") + "界" * 600) for i in range(100)]
-    result = recall(engine, limit=2)
+    result = recall(engine, limit=2, detail=detail)
     raw = json.dumps(result, ensure_ascii=False)
     assert len(raw) <= 64000
     assert result["provenance"]["delivery"]["response_tokens"] <= 16000
@@ -125,7 +126,7 @@ def test_oversized_tool_group_and_next_session(session_engine, monkeypatch):
     assert any(s["omission_reason"] == "oversized_group" for s in result["provenance"]["delivery"]["sessions"])
 
 
-def test_atomic_tool_delta_and_duplicates(session_engine):
+def test_atomic_tool_delta_and_duplicates(session_engine, monkeypatch):
     # RED: no atomic source groups / full-row delta after filtering.
     e = session_engine
     call = {"id": "c", "function": {"name": "read", "arguments": "{}"}}
@@ -133,8 +134,16 @@ def test_atomic_tool_delta_and_duplicates(session_engine):
     b = add(e, "needle", role="tool", tool_call_id="c")
     c = add(e, "same")
     d = add(e, "needle same", sid="two")
+    equal = add(e, "same", sid="two")
+    original = tools._lcm_recall_rerank
+    def chunks(*args, **kw):
+        ordered, status, scores = original(*args, **kw)
+        duplicate = dict(ordered[0], hit={**ordered[0]["hit"], "chunk_span": [0, 6]})
+        return [ordered[0], duplicate, *ordered[1:]], status, scores
+    monkeypatch.setattr(tools, "_lcm_recall_rerank", chunks)
     result = recall(e, limit=3, detail="answer_ready", seen_refs=[])
-    assert [h["store_id"] for h in result["hits"]] == [a, b, c, d]
+    assert [h["store_id"] for h in result["hits"]] == [a, b, c, d, equal]
+    assert result["hits"][2]["content"] == result["hits"][-1]["content"] == "same"
     assert result["hits"][0]["tool_calls"] == [call]
     assert result["hits"][1]["tool_call_id"] == "c"
     refs = result["delta"]["novel_refs"]
