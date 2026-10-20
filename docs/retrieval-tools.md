@@ -197,7 +197,8 @@ conversation identity, role, tool-call id (empty when absent), and SHA-256 of th
 still fuse by `store_id` first.
 Rows repeating the same text at different recorded times are not collapsed; unstamped repeats in one session are.
 
-The representative has the smallest matching `store_id`. Recall keeps the
+The representative is the best-ranked stamped member, or the best-ranked member
+if none is stamped. The group keeps its best-ranked position. Recall keeps the
 maximum fused score and union of retrieval arms. Only grouped hits carry
 `duplicate_store_ids`: sorted other store ids, excluding the representative.
 For example, `{"store_id": 12, "duplicate_store_ids": [19, 27]}` identifies

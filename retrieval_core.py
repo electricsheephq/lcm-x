@@ -185,9 +185,9 @@ def _shape_message_hit(
         "snippet": hit.get("snippet", hit.get("content", "")[:200]),
         "from_current_session": has_current_session
         and hit["session_id"] == current_session_id,
-        "_sort_ts": timestamp_value,
-        "_sort_rank": hit.get("search_rank"),
-        "_sort_directness": hit.get("_directness_score") or 0.0,
+        "_sort_ts": hit.get("_duplicate_rank_hit", hit).get("timestamp", 0) or 0,
+        "_sort_rank": hit.get("_duplicate_rank_hit", hit).get("search_rank"),
+        "_sort_directness": hit.get("_duplicate_rank_hit", hit).get("_directness_score") or 0.0,
     }
     if hit.get("duplicate_store_ids"):
         result["duplicate_store_ids"] = hit["duplicate_store_ids"]
@@ -527,7 +527,8 @@ def collapse_duplicate_candidates(
 ) -> list[dict[str, Any]]:
     """Group exact message copies before delivery quotas, without changing rows.
 
-    Keep the group's first ranked position, earliest stored representation,
+    Keep the group's first ranked position, best-ranked stamped representation
+    (or best-ranked member if none is stamped),
     maximum fused score and union of best arm ranks. Missing source identity
     degrades to ungrouped delivery. Singleton entries remain untouched.
     """
@@ -563,8 +564,12 @@ def collapse_duplicate_candidates(
         if len(members) == 1:
             output.append((positions[id(members[0])], members[0]))
             continue
-        representative = min(members, key=lambda e: int(e["hit"]["store_id"]))
+        representative = next((
+            member for member in members
+            if rows[member["hit"]["store_id"]].get("observed_at") is not None
+        ), members[0])
         entry = {**representative, "hit": dict(representative["hit"]), "ranks": {}}
+        entry["_rank_hit"] = members[0]["hit"]
         # Full content is identical, so another copy's verified excerpt can
         # cite the representative row too, including past the hydration cap.
         entry["_alternates"] = [
@@ -590,7 +595,10 @@ def collapse_duplicate_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Use already-loaded full MessageStore search rows for grep grouping."""
     rows = {hit["store_id"]: hit for hit in hits}
     entries = [{"hit": hit, "rrf_score": 0.0, "ranks": {}} for hit in hits]
-    return [entry["hit"] for entry in collapse_duplicate_candidates(entries, rows)]
+    return [
+        {**entry["hit"], "_duplicate_rank_hit": entry.get("_rank_hit", entry["hit"])}
+        for entry in collapse_duplicate_candidates(entries, rows)
+    ]
 
 
 def duplicate_identity_rows(

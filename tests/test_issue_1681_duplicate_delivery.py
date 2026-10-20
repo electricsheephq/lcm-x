@@ -43,6 +43,43 @@ def recall(engine, **args):
     return json.loads(tools.lcm_recall({"query": "quartz", **args}, engine=engine))
 
 
+@pytest.mark.parametrize("delivery", ["grep-recency", "grep-hybrid", "snippets", "answer_ready"])
+@pytest.mark.parametrize("stamps", [(None, None, None), (1_700_000_000, None, None),
+                                    (1_700_000_000, None, 1_700_000_000)])
+def test_ranked_representative_prefers_best_stamped_member(engine, monkeypatch, delivery, stamps):
+    first = append(engine, timestamp=stamps[0])
+    other = append(engine, "quartz other")
+    second = append(engine, timestamp=stamps[1])
+    third = append(engine, timestamp=stamps[2])
+    # Storage time controls ranking independently of source occurrence time.
+    for store_id, timestamp in [(first, 1_700_000_000), (other, 1_700_000_200),
+                                (second, 1_700_000_300), (third, 1_700_000_100)]:
+        engine._store._conn.execute("UPDATE messages SET timestamp = ? WHERE store_id = ?",
+                                    (timestamp, store_id))
+    engine._store._conn.commit()
+    before = engine._store.get_batch([first, other, second, third])
+    ranked = [second, other, third, first]
+    if delivery.startswith("grep"):
+        sort = delivery.split("-")[1]
+        assert [hit["store_id"] for hit in engine._store.search("quartz", sort=sort)] == ranked
+        hits = json.loads(tools.lcm_grep({"query": "quartz", "sort": sort}, engine=engine))["results"]
+    else:
+        # Exercise recall delivery with a deterministic ranked FTS arm.
+        fuse = tools.fuse_candidates
+        def ranked_fuse(*args):
+            entries, arms, weights = fuse(*args)
+            entries.sort(key=lambda entry: ranked.index(entry["hit"]["store_id"]))
+            for index, entry in enumerate(entries):
+                entry["rrf_score"] = 1.0 / (index + 1)
+            return entries, arms, weights
+        monkeypatch.setattr(tools, "fuse_candidates", ranked_fuse)
+        hits = recall(engine, detail=delivery)["hits"]
+    expected = third if stamps[2] is not None else first if stamps[0] is not None else second
+    assert [hit["store_id"] for hit in hits] == [expected, other]
+    assert hits[0]["duplicate_store_ids"] == sorted({first, second, third} - {expected})
+    assert engine._store.get_batch([first, other, second, third]) == before
+
+
 @pytest.mark.parametrize("delivery", ["snippets", "answer_ready", "grep"])
 def test_distinct_recorded_times_preserve_latest_restatement(engine, delivery):
     ids = [
@@ -74,8 +111,9 @@ def test_stamped_original_with_replay_copy_still_collapses(engine, delivery, cop
     else:
         hits = recall(engine, detail=delivery)["hits"]
     assert len(hits) == 1
-    assert hits[0]["store_id"] == first
-    assert hits[0]["duplicate_store_ids"] == [second]
+    representative = first if copy_timestamp is None else second
+    assert hits[0]["store_id"] == representative
+    assert hits[0]["duplicate_store_ids"] == sorted({first, second} - {representative})
     assert engine._store.get_batch([first, second]) == before
 
 
@@ -87,8 +125,8 @@ def test_unstamped_replay_shape_and_expand_own_row(engine, detail):
     before = engine._store.get_batch(ids)
     payload = recall(engine, detail=detail)
     assert len(payload["hits"]) == 1
-    assert payload["hits"][0]["store_id"] == ids[0]
-    assert payload["hits"][0]["duplicate_store_ids"] == ids[1:]
+    assert payload["hits"][0]["store_id"] == ids[-1]
+    assert payload["hits"][0]["duplicate_store_ids"] == ids[:-1]
     for store_id in ids:
         expanded = json.loads(tools.lcm_expand({"store_id": store_id}, engine=engine))
         assert expanded["store_id"] == store_id
@@ -111,8 +149,8 @@ def test_group_key_uses_full_identity(engine, dimension):
         fields[dimension] = {"role": "assistant", "tool_call_id": "call-b", "conversation_id": "other"}[dimension]
     distinct = append(engine, content, session=session, **fields)
     hits = recall(engine)["hits"]
-    assert {hit["store_id"] for hit in hits} == {base, distinct}
-    assert next(hit for hit in hits if hit["store_id"] == base)["duplicate_store_ids"] == [duplicate]
+    assert {hit["store_id"] for hit in hits} == {duplicate, distinct}
+    assert next(hit for hit in hits if hit["store_id"] == duplicate)["duplicate_store_ids"] == [base]
 
 
 @pytest.mark.parametrize("mode", ["full_text", "semantic", "hybrid"])
@@ -122,8 +160,8 @@ def test_grep_groups_before_limit(engine, mode, sort):
     first = append(engine)
     second = append(engine)
     payload = json.loads(tools.lcm_grep({"query": "quartz", "limit": 2, "mode": mode, "sort": sort}, engine=engine))
-    assert {hit["store_id"] for hit in payload["results"]} == {other, first}
-    assert next(hit for hit in payload["results"] if hit["store_id"] == first)["duplicate_store_ids"] == [second]
+    assert {hit["store_id"] for hit in payload["results"]} == {other, second}
+    assert next(hit for hit in payload["results"] if hit["store_id"] == second)["duplicate_store_ids"] == [first]
 
 
 @pytest.mark.parametrize("strict", [False, True])
@@ -145,7 +183,7 @@ def test_caps_count_groups_once(engine, strict):
     assert max(sum(hit["session_id"] == f"s{s}" for hit in answer["hits"]) for s in range(4)) == 5
 
 
-def test_fusion_max_score_union_arms_earliest_id_and_summary_exemption(engine):
+def test_fusion_max_score_union_arms_best_rank_and_summary_exemption(engine):
     first, second = append(engine), append(engine)
     rows = engine._store.get_batch([first, second])
     def hit(sid):
@@ -158,8 +196,8 @@ def test_fusion_max_score_union_arms_earliest_id_and_summary_exemption(engine):
     messages = [entry for entry in grouped if entry["hit"]["kind"] != "summary"]
     assert len(messages) == 1
     entry = messages[0]
-    assert entry["hit"]["store_id"] == first
-    assert entry["hit"]["duplicate_store_ids"] == [second]
+    assert entry["hit"]["store_id"] == second
+    assert entry["hit"]["duplicate_store_ids"] == [first]
     assert entry["rrf_score"] == max(e["rrf_score"] for e in original if e["hit"]["kind"] != "summary")
     assert set(entry["ranks"]) == {0, 2}
     assert len([e for e in grouped if e["hit"]["kind"] == "summary"]) == 2
