@@ -72,7 +72,7 @@ def invalid(row, models):
 EXCLUDED = ("skipped", "not_run")  # skips: explicit denominators; not_run: spend stops (D7)
 IDENTITY = ("lcmx_commit", "harness_commit", "split_label", "dataset_sha256", "id_list_sha256", "judges",
             "agreement_judge", "summaries", "agreement_sample", "agreement_seed", "agreement_fraction",
-            "harness_tree_sha256", "toolset")
+            "harness_tree_sha256", "toolset", "store_text", "hit_label")
 TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "wrapper_overhead_tokens")
 
 
@@ -113,6 +113,8 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         if len({r["qid"] for r in rows}) != len(rows):
             raise ValueError("duplicate result ids")
         arm = "/".join([manifest["config"], manifest["delivery"], manifest["reader"]])
+        if "store_text" in manifest or "hit_label" in manifest:
+            arm += "/" + manifest["store_text"] + "/" + manifest["hit_label"]
         if pair_across_commits:
             identity = manifest["lcmx_commit"]
             arm += "@" + (identity if identity.endswith("-dirty") else identity[:12])
@@ -123,6 +125,8 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
     if not sets or any(ids != sets[0] for ids in sets):
         raise ValueError("paired runs require identical question ids")
     for key in IDENTITY:
+        if key in ("store_text", "hit_label"):  # Experimental arm axes, compared within cross-commit pairs.
+            continue
         if pair_across_commits and key in ("lcmx_commit", "toolset"):
             continue
         if len({json.dumps(m.get(key)) for m in manifests.values()}) != 1:
@@ -192,7 +196,7 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
             accuracies["primary"] = mean(list(accuracies.values())) if all(v is not None for v in accuracies.values()) else None
     for left, right in itertools.combinations(arms, 2):
         if pair_across_commits and (manifests[left]["lcmx_commit"] == manifests[right]["lcmx_commit"] or any(
-                manifests[left][key] != manifests[right][key] for key in ("config", "delivery", "reader"))):
+                manifests[left].get(key) != manifests[right].get(key) for key in ("config", "delivery", "reader", "store_text", "hit_label"))):
             continue
         # An error in either arm (reader error, budget or tool violation) removes the question
         # from both arms: the paired tests compare answers, not failure rates.
