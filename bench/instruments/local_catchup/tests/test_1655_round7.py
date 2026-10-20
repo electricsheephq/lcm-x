@@ -148,6 +148,7 @@ def test_g2_expected_trace_rows_survive_ingest_and_shutdown(corpus, tmp_path, mo
 @pytest.mark.parametrize("outcome", ["drain", "deadline", "corruption"])
 def test_f2_full_counts_wait_for_clean_boundary_audit(corpus, tmp_path, monkeypatch, outcome):
     db, manifest, mod = corpus
+    monkeypatch.setattr(measurement, "safety", lambda _: None)
     fill(db, manifest, mod)
     with sqlite3.connect(db) as c:
         mod("command")._ensure_inflight_table(c)
