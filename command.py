@@ -4246,9 +4246,32 @@ def _chunk_partial_ids(conn, identity_hash):
     except (ValueError, TypeError):
         warning_key = (identity_hash, saved[0])
         if warning_key not in _CHUNK_PARTIAL_WARNED:
-            logging.getLogger("hermes_lcm").debug("Preserving malformed partial-message record; backlog unknown")
+            logging.getLogger("hermes_lcm").warning(
+                "Preserving malformed partial-message record; backlog unknown; repair with "
+                "`/lcm embed backfill --corpus chunks --apply` (cloud providers also require --confirm-raw-text)"
+            )
             _CHUNK_PARTIAL_WARNED.add(warning_key)
         return None
+
+
+def _repair_chunk_partial_messages(conn, identity_hash, lease):
+    """Only a full operator scan can safely rediscover malformed intent coverage."""
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        if _chunk_partial_ids(conn, identity_hash) is None:
+            key = f"chunk_partial_messages:{identity_hash}"
+            fence = ("EXISTS (SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+                     "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?)")
+            owner = (_EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation)
+            conn.execute(
+                "INSERT OR IGNORE INTO metadata(key, value) SELECT ?, value FROM metadata WHERE key=? AND " + fence,
+                (f"chunk_partial_messages_malformed:{identity_hash}", key, *owner),
+            )
+            conn.execute("UPDATE metadata SET value='[]' WHERE key=? AND " + fence, (key, *owner))
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def _prune_chunk_partial_messages(conn, identity_hash, lease, chunk_cache, policy=""):
@@ -5060,6 +5083,8 @@ def _chunk_backfill_run(
                 "or after the lease TTL expires"
             ), reason="lease_held")
         _prepare_inflight_for_lease(conn, identity, lease)
+        if not incremental:
+            _repair_chunk_partial_messages(conn, identity, lease)
         _prune_chunk_partial_messages(conn, identity, lease, chunk_cache, policy=policy)
         partial_window, partial_turn = _chunk_partial_window(conn, identity, lease, limit, chunk_cache, policy,
                                                             advance=not retry_uncertain)
