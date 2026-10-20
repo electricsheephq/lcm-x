@@ -41,6 +41,7 @@ def test_source_identity_hashes_tracked_deletion(tmp_path, monkeypatch):
 def screen(tmp_path, monkeypatch):
     questions = [SimpleNamespace(qid=f"q{i}", question_date="", question=f"question {i}") for i in range(4)]
     monkeypatch.setattr(dev, "load_lcm", lambda repo: None)
+    monkeypatch.setattr(dev, "source_identity", lambda repo: "fixture")
     monkeypatch.setattr(dev, "load", lambda *a: (questions, {"items": []}, {"items": []}))
     monkeypatch.setattr(dev.shutil, "disk_usage", lambda p: SimpleNamespace(free=200 * 1024 ** 3))
     panel = tmp_path / "panel.json"

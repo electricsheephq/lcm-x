@@ -66,7 +66,8 @@ def worker_setup(tmp_path, monkeypatch):
     store = SimpleNamespace(identity={}, expected=lambda q: {}, directory=lambda q: store_dir)
     monkeypatch.setattr(dev, "Stores", lambda *a: store)
     spec = dict(repo=str(tmp_path), panel="panel", guard="guard", lme="lme", locomo="locomo",
-                cache=str(tmp_path), config="off", overrides={}, receipt=str(tmp_path / "receipt.json"))
+                cache=str(tmp_path), config="off", overrides={}, receipt=str(tmp_path / "receipt.json"),
+                expected_product=sha(b"before"))
     return spec, store, product, identities
 
 
@@ -124,3 +125,72 @@ def test_checkout_change_reaches_run_report(screen, worker_setup, monkeypatch):
     receipt = json.loads((args.output / "inputs" / "baseline-retrieval.json").read_bytes())
     assert receipt["product"] != receipt["product_after"]
     assert receipt["status"] == "INCOMPLETE" and receipt["reason"] == "checkout-changed"
+
+
+def test_worker_rejects_checkout_that_differs_from_parent_pin(worker_setup):
+    spec, store, _, _ = worker_setup
+    store.build = lambda q: pytest.fail("worker must stop before touching stores")
+    spec.update(prepare=True, expected_product="pinned-by-parent")
+    with pytest.raises(dev.Incomplete, match="checkout-changed"):
+        dev.worker(spec)
+    receipt = json.loads(Path(spec["receipt"]).read_bytes())
+    assert receipt["status"] == "INCOMPLETE" and receipt["reason"] == "checkout-changed"
+    assert receipt["rows"] == []
+
+
+@pytest.mark.parametrize("prepare", [False, True])
+def test_drift_quarantines_artifacts_written_by_the_worker(worker_setup, monkeypatch, prepare):
+    spec, store, product, _ = worker_setup
+    cache = Path(spec["cache"])
+
+    def drift(*a):
+        product.write_text("after")
+        return "built" if prepare else dict(evidence="synthetic", source_sha256="digest", metadata={})
+
+    store.build = drift
+    monkeypatch.setattr(dev, "retrieve", drift)
+    spec["prepare"] = prepare
+    with pytest.raises(dev.Incomplete, match="checkout-changed"):
+        dev.worker(spec)
+    receipt = json.loads(Path(spec["receipt"]).read_bytes())
+    assert receipt["quarantined"] == 1
+    held = [p for p in (cache / "quarantine").rglob("*") if p.is_file()]
+    if prepare:
+        assert not (cache / "store").exists()
+        assert {p.name for p in held} == {"build-manifest.json", "lcm.db", "speakers.json"}
+    else:
+        assert not list((cache / "retrieval").glob("*.json"))
+        assert len(held) == 1 and held[0].parent.name == "retrieval"
+
+
+@pytest.mark.parametrize("drift_after_call", [0, 1])
+def test_parent_pins_identity_across_all_workers(screen, worker_setup, monkeypatch, drift_after_call):
+    spec, store, product, _ = worker_setup
+    store.build = lambda q: "reused"
+    calls = []
+
+    def worker_run(cmd, **kw):
+        operational = json.loads(Path(cmd[-1]).read_bytes())
+        operational.update({k: v for k, v in spec.items() if k != "expected_product"},
+                           receipt=operational["receipt"], prepare=True)
+        write_json(Path(cmd[-1]), operational)
+        with monkeypatch.context() as worker_patch:
+            worker_patch.setattr(sys, "argv", ["dev", "--worker", cmd[-1]])
+            code = dev.main()
+        if len(calls) == drift_after_call:
+            product.write_text("after")
+        calls.append(code)
+        return SimpleNamespace(returncode=code)
+
+    monkeypatch.setattr(dev.subprocess, "run", worker_run)
+    root = Path(spec["cache"])
+    panel = root / "panel.json"
+    write_json(panel, {})
+    args = dev.parser().parse_args(["--baseline", str(root), "--cache-root", str(root / "cache"),
+        "--output", str(root / "pinned"), "--panel", str(panel), "--guard", str(panel),
+        "--lme-data", str(panel), "--locomo-data", str(panel), "--prepare"])
+    assert dev.execute(args) == 2
+    report = json.loads((args.output / "report.json").read_bytes())
+    assert report["verdict"] == "INCOMPLETE" and report["reason"] == "checkout-changed"
+    assert not (args.output / "prepare.json").exists()
+    assert calls[0] == 0 and len(calls) == 2
