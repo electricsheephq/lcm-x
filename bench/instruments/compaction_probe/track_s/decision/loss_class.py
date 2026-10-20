@@ -21,7 +21,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scorer"))
-from score_s import normalize  # noqa: E402
+from score_s import checkpoint_facts, normalize  # noqa: E402
 
 
 def ro(db: Path):
@@ -48,9 +48,7 @@ def load(run: Path):
 
 def classify_loss(score: dict) -> dict:
     run, mat = Path(score["run_dir"]), Path(score["material"])
-    facts = {f["id"]: f for f in json.loads((mat / "facts.json").read_text())}
-    if (mat / "lifecycle_probes.jsonl").exists():
-        facts = {fid: f for fid, f in facts.items() if f["row_index"] <= score["checkpoint_row"]}
+    facts = {f["id"]: f for f in checkpoint_facts(mat, score["checkpoint_row"])}
     admitted_lost = set(score["metrics"]["facts_kept"].get("lost_before_compaction", {}).get("ids") or [])
     lost = [fid for fid, f in facts.items() if fid in admitted_lost or
             score["probes"].get(fid, {}).get("class") not in ("CORRECT", "READER_TRUNCATED")]

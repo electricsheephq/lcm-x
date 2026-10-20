@@ -105,6 +105,20 @@ def jload(p: Path):
     return json.loads(p.read_text(encoding="utf-8"))
 
 
+def checkpoint_facts(material: Path, stop=None):
+    """Use the deep material's admitted, versioned answer key at this exact row."""
+    facts = jload(material / "facts.json")
+    if (material / "deep_metadata.json").exists():
+        answers = jload(material / "deep_metadata.json")["checkpoint_answers"]
+        if stop is None or str(stop) not in answers:
+            raise ValueError(f"deep checkpoint answer key absent for row {stop}")
+        selected = answers[str(stop)]
+        return list(selected.values()) if isinstance(selected, dict) else selected
+    if (material / "lifecycle_probes.jsonl").exists() and stop is not None:
+        return [f for f in facts if f["row_index"] <= stop]
+    return facts
+
+
 def cont_files(run_dir: Path) -> dict:
     """S6 A2: per-event continuity text written by the writers -> {event index: record}."""
     d = run_dir / "continuity"
@@ -336,6 +350,17 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
                 (i for i, r in enumerate(source_rows) if c["value"] in (r.get("content") or "")),
                 default=c.get("row_index", 0)))
     summ = jload(run_dir / "summary.json") if (run_dir / "summary.json").exists() else {}
+    deep = (material / "deep_metadata.json").exists()
+    if deep:
+        stop = summ.get("stop_row_index", summ.get("checkpoint"))
+        stop = stop.get("row") if isinstance(stop, dict) else stop
+        facts = checkpoint_facts(material, stop)
+        eligible = {f["id"] for f in facts} | {t["id"] for t in traps}
+        if cont_state["row_index"] > stop:
+            cont_state = {k: v for k, v in cont_state.items() if k in CONT_META}
+        eligible.update(f"{cont_state['id']}.{k}" for k in cont_state if k not in CONT_META)
+        batches = [dict(b, probes=[p for p in b["probes"] if p["id"] in eligible]) for b in batches]
+        batches = [b for b in batches if b["probes"]]
     lifecycle = []
     if (material / "lifecycle_probes.jsonl").exists():
         stop = summ.get("stop_row_index", man["decision_checkpoint"]["row_index"])
@@ -427,6 +452,22 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
                              base + ([("INCOMPLETE", f"no row for {ms}")] if ms else []) + ([] if sup else [("INCOMPLETE", "no superseded facts")]),
                              lower_is_better=True, stale_ids=stale_ids, denominator=len(sup),
                              diagnostic_value_token_only_ids=head_ids)
+    if deep:
+        corrected = [f for f in facts if len(f.get("versions", [])) > 1 or f.get("stale")]
+        old_hits, kept = [], []
+        for f in corrected:
+            answer = normalize((by_id.get(f["id"]) or {}).get("answer"))
+            old = [v["value"] for v in f.get("versions", []) if v["value"] != f["value"]]
+            old += [f["stale"]] if f.get("stale") else []
+            stale = any(normalize(v) and normalize(v) in answer for v in old)
+            if stale:
+                old_hits.append(f["id"])
+            if probes[f["id"]].get("success") and not stale:
+                kept.append(f["id"])
+        absent = missing(f["id"] for f in corrected)
+        m["deep_corrected"] = metric(len(kept) / len(corrected) if corrected else None,
+            base + ([("INCOMPLETE", f"no corrected-value row for {absent}")] if absent else []),
+            correct=len(kept), denominator=len(corrected), stale_ids=old_hits)
     # traps
     abst = [t["id"] for t in traps if judge(t["id"], None, True)[0] == "ABSTAIN"]
     mt = missing(t["id"] for t in traps)

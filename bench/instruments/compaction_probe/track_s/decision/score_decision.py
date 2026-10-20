@@ -33,6 +33,15 @@ CPS = (176, 304)
 def runs(n: int, args):
     """(arm, run label, run dir, checkpoint -> probe dir or None)"""
     s = f"seed-{n}"
+    if (args.material / s / "deep_metadata.json").exists():
+        last = len([x for x in (args.material / s / "transcript.jsonl").read_text().splitlines() if x.strip()]) - 1
+        declared = sorted(jload(args.material / s / "deep_metadata.json")["checkpoint_answers"], key=int)
+        cps = {last if str(c) == "last" else int(c): f"cp-{last if str(c) == 'last' else int(c)}"
+               for c in (args.checkpoints or declared)}
+        for arm in args.arms or ("LCMX-fleet-rc3", "H"):
+            label = f"d{n}-r1"
+            yield arm, label, args.run_root / arm / s / label, cps
+        return
     if (args.material / s / "lifecycle_probes.jsonl").exists():
         cps = {c["id"]: f"cp-{c['id']}" for c in CP.select(args.material / s, ",".join(args.checkpoints) if args.checkpoints else "lifecycle")}
         for arm in args.arms or ("L0", "L1", "L1-H", "L1-noptr", "H", "codex-native"):
@@ -70,6 +79,12 @@ def main():
         ap.error("provide --material/--out or TRACK_S_MATERIAL/TRACK_S_OUT")
     args.external_root = args.external_root or args.run_root.parent
     args.logs = args.logs or args.run_root.parent / "decision" / "logs"
+    if (args.material / f"seed-{args.seeds[0] if args.seeds else 1}" / "deep_metadata.json").exists():
+        from score_deep import write_deep
+        args.seeds = args.seeds or [1, 2, 3]
+        args.arms = args.arms or ["LCMX-fleet-rc3", "H"]
+        write_deep(args)
+        return
     v4 = (args.material / f"seed-{args.seeds[0] if args.seeds else 1}" / "lifecycle_probes.jsonl").exists()
     args.seeds = args.seeds or list(range(1, 9) if v4 else range(1, 4))
     if not v4:
