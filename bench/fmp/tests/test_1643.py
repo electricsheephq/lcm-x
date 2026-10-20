@@ -164,3 +164,10 @@ def test_7_projection_names_and_totals_only_supplied_arms(tmp_path):
     assert next(iter(result["arms"])) in estimate["matrix"]
     assert "6000 answers, 12000 judgments" not in estimate["matrix"]
     assert estimate["matrix"] in (output / "report.md").read_text()
+
+
+def test_2_unattributed_judge_failure_stays_row_wide():
+    from bench.fmp import score
+    row = {"status": "ok", "calls": [], "judge_calls": [{"error": "timeout"}],
+           "judges": {m: {"status": "ok", "correct": True, "verdict": "valid"} for m in ("codex:a@low", "glm:b")}}
+    assert score.invalid(row, ["codex:a@low"]) and score.invalid(row, ["glm:b"])

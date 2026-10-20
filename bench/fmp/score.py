@@ -52,7 +52,9 @@ def correct(row, model):
 
 def invalid(row, models):
     requested = set(models) | {parse_spec(m)[1] for m in models if parse_spec(m)[0] == "openrouter"}
-    calls = row.get("calls", []) + [c for c in row.get("judge_calls", []) if c.get("requested_model") in requested]
+    # Judge-call failures count against their own judge; a call without attribution (older records) stays row-wide.
+    calls = row.get("calls", []) + [c for c in row.get("judge_calls", [])
+                                    if not c.get("requested_model") or c.get("requested_model") in requested]
     reasons = {c.get("error") for c in calls} & {"timeout", "model_mismatch"}
     if row["status"] == "tool_violation" or any(c.get("violations") or c.get("status") == "tool_violation" for c in calls):
         reasons.add("tool_violation")
