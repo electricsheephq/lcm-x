@@ -4,6 +4,7 @@ import contextlib
 import json
 import math
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -46,8 +47,19 @@ def renderer_identity():
 
 
 def caps(depth):
-    return dict(limit=depth, candidate_pool=4 * depth, rerank_window=50,
+    return dict(limit=depth, candidate_pool=min(500, max(50, 4 * depth)), rerank_window=min(50, max(1, 4 * depth)),
                 per_session=math.ceil(5 * depth / 25), expanded=math.ceil(8 * depth / 25))
+
+
+def recorded_command(args):
+    command = ["python", "-m", "bench.fmp.dev"]
+    for name, value in vars(args).items():
+        if value is None or value is False:
+            continue
+        command.append("--" + name.replace("_", "-"))
+        if value is not True:
+            command.append(value.name if isinstance(value, Path) else str(value))
+    return shlex.join(command)
 
 
 def retrieve(q, store, overrides):
@@ -327,8 +339,9 @@ def execute(args):
         cache = Responses(args.cache_root / "responses", backend, deadline, renderer_identity())
         stop = threading.Event()
 
-        def work(q):
-            for arm, _, _ in arms:
+        def work(indexed_question):
+            index, q = indexed_question
+            for arm, _, _ in (arms if index % 2 == 0 else arms[::-1]):
                 if stop.is_set() or time.monotonic() >= deadline:
                     return
                 try:
@@ -355,7 +368,7 @@ def execute(args):
                     return
         try:
             with ThreadPoolExecutor(max_workers=args.workers) as pool:
-                list(pool.map(work, questions))
+                list(pool.map(work, enumerate(questions)))
         finally:
             backend.close()
             report["calls"] = cache.counts
@@ -368,7 +381,7 @@ def execute(args):
     except Exception as exc:
         report["error"] = type(exc).__name__
     report["remaining_ids"] = [dict(arm=arm, id=q.qid) for arm, _, _ in arms for q in questions if (arm, q.qid) not in rows]
-    finish(args.output, report, rows, started, "python -m bench.fmp.dev (arguments in inputs/*-spec.json)")
+    finish(args.output, report, rows, started, recorded_command(args))
     return 0 if report["verdict"] != "INCOMPLETE" else 2
 
 

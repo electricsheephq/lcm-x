@@ -37,7 +37,7 @@ def request_identity(spec, messages, *, endpoint, effort, temperature, max_token
 def source_identity(repo):
     names = subprocess.check_output(["git", "-C", str(repo), "ls-files", "--cached", "--others",
                                      "--exclude-standard", "-z"], text=False).split(b"\0")
-    files = {n.decode(): digest_file(Path(repo) / n.decode()) for n in names
+    files = {n.decode(): digest_file(path) if (path := Path(repo) / n.decode()).exists() else sha(b"deleted") for n in names
              if n.endswith(b".py") and not n.startswith((b"bench/", b"tests/", b"scripts/"))}
     return sha(encoded(files))
 
