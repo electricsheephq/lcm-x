@@ -253,6 +253,9 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
             "scope_bias": 0.0,
             "include_occurrence_time": True,
         },
+        min_sessions=0,
+        session_hints=False,
+        recall_guidance="v1",
     )
     recalled = json.loads(raw) if isinstance(raw, str) else raw
     hits = recalled.get("hits") if isinstance(recalled, dict) else None
@@ -329,7 +332,8 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
                 baseline_refs=baseline_refs,
                 question_as_of=question_date,
                 retrieve=lambda recall_args: active_engine.handle_tool_call(
-                    "lcm_recall", recall_args
+                    "lcm_recall", recall_args,
+                    min_sessions=0, session_hints=False, recall_guidance="v1",
                 ),
                 enabled=True,
                 render_baseline_context=baseline_was_internal,
@@ -537,6 +541,7 @@ def register(ctx):
         use_cold_lcm_engine,
         use_lcm_engine,
     )
+    from .schemas import recall_guidance_schemas
     from .tool_registry import TOOL_REGISTRY
 
     # A separate pre-rename copy (plugin ``hermes-lcm``) that loaded first owns
@@ -692,7 +697,8 @@ def register(ctx):
     # names through the plugin registry (Path A) on message-blind hosts would
     # shadow Path B and lose current-turn ingest, so the Path B fallback is the
     # expected healthy behavior there.
-    _TOOLS = [(spec.name, spec.schema, spec.emoji) for spec in TOOL_REGISTRY]
+    guidance = recall_guidance_schemas(getattr(engine._config, "recall_guidance", "v1"))
+    _TOOLS = [(spec.name, guidance.get(spec.name, spec.schema), spec.emoji) for spec in TOOL_REGISTRY]
     # Share the loaded-config filter with the native context-engine path:
     # explicitly disabled and flag-dormant tools cost no schema tokens.
     _disabled = engine._omitted_tool_names()

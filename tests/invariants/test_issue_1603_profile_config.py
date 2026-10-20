@@ -211,7 +211,7 @@ def test_scope_failure_uses_defaults(host, load_profile, tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("api", ["full", "floor", "absent", "nonrouting_failure"])
 def test_no_scope_snapshot_matches_main(host, load_profile, monkeypatch, tmp_path, api):
-    """All dataclass fields equal the main d411e404 fixture, not selected values."""
+    """All original fields match d411e404; the opt-in recall fields retain defaults."""
     fixture = json.loads((ROOT / "tests/fixtures/issue_1603_single_profile.json").read_text())
     for key, value in fixture["env"].items():
         monkeypatch.setenv(key, value)
@@ -231,7 +231,9 @@ def test_no_scope_snapshot_matches_main(host, load_profile, monkeypatch, tmp_pat
     module, _ = load_profile(register=False)
     config = importlib.import_module(module.__name__ + ".config")
     with host.bind(tmp_path):
-        assert asdict(config.LCMConfig.from_env()) == fixture["expected"]
+        assert asdict(config.LCMConfig.from_env()) == fixture["expected"] | {
+            "recall_min_sessions": 0, "recall_session_hints": False, "recall_guidance": "v1",
+        }
         for key in ("VOYAGE_API_KEY", "SILICONFLOW_API_KEY", "LCM_EMBEDDING_API_KEY"):
             assert config.lcm_env_get(key) == fixture["env"][key]
         command = importlib.import_module(module.__name__ + ".command")

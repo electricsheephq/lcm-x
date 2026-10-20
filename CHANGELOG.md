@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Add: opt-in recall levers under evaluation for v0.28: session breadth (`LCM_RECALL_MIN_SESSIONS=0`), session-window hints (`LCM_RECALL_SESSION_HINTS=false`), and shared multi-session tool guidance plus continuation signals (`LCM_RECALL_GUIDANCE=v1`; opt in with `v2`). All effects default off; recall output under defaults is unchanged. `lcm_load_session` also accepts an exact anchor and bounded before/after windows, with existing cursor paging. (#1188)
+
 ## v0.28.1 (session continuity and profile settings)
 
 - Deferred: the pending-predecessor capture for #1508 shipped in the rc1 and rc2 prereleases (PR #1610, PR #1627) and is removed. With the identity anchor off it lost a turn's reply when a trailing user run repeated an earlier message (#1632), and stored duplicates after the agent was recreated in the same process (#1633). v0.28.1 keeps v0.28.0 behaviour on that path; the crash-only #1508 fix moves to v0.29.0. The rc1-only #1625 goes with the removed code. (PR #1634)

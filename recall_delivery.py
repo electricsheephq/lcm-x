@@ -57,12 +57,16 @@ def deliver_recall(
     event_time_fields: Callable[[dict[str, Any] | None], dict[str, str]],
     read_occurrence_source: Callable[[int], tuple[dict, dict | None]],
     rerank_enabled: Callable[[], bool],
+    session_floor_info: dict[str, Any] | None = None,
+    session_hint: Callable[[dict[str, Any]], str | None] | None = None,
+    guidance_v2: bool = False,
 ) -> str:
     """Deliver ranked entries without changing retrieval or host-read policy."""
     # -- Response shaping (char-capped). The default snippets path retains the
     # historical order and serialized response exactly. answer_ready applies
     # stable post-rank diversity before bounded exact-ref hydration.
     diversity_dropped = 0
+    selection_has_more = False
     if detail == "answer_ready":
         # Take only what the response can hold. Delta used to select the whole
         # 25-candidate cap up front and filter afterwards, which walked the
@@ -89,6 +93,7 @@ def deliver_recall(
                 limit=selection_limit,
                 per_session_limit=per_session_limit,
             )
+            selection_has_more = len(ordered) > len(selected_entries)
             strict_rows = None
         answer_ready_content = hydrate(
             selected_entries,
@@ -209,6 +214,10 @@ def deliver_recall(
             if _hit_identity(hit) not in answer_ready_content and hit.get("store_id") is not None:
                 item.update(event_time_fields(event_time_rows.get(int(hit["store_id"]))))
         if detail == "answer_ready":
+            if session_hint:
+                hint = session_hint(hit)
+                if hint:
+                    item["session_hint"] = hint
             item["role"] = hit.get("role")
             item["source"] = hit.get("source") or (
                 "summary" if hit.get("kind") == "summary" else ""
@@ -353,6 +362,9 @@ def deliver_recall(
         response["event_time_unavailable_reason"] = event_time_unavailable_reason
     if requested_limit > limit_cap:
         response["limit_clamped_from"] = requested_limit
+    if session_floor_info is not None:
+        session_floor_info["delivered"] = _sessions(hits_out)
+        response["provenance"]["session_floor"] = session_floor_info
     if detail == "answer_ready":
         expansion = {
             "expanded_hit_count": sum("content" in hit for hit in hits_out),
@@ -370,6 +382,11 @@ def deliver_recall(
             "response_truncated": response_cap_truncated,
         }
         if reference_strict:
+            if session_hint:
+                for lead in summary_leads:
+                    hint = session_hint(lead)
+                    if hint:
+                        lead["session_hint"] = hint
             expansion["reference_strict"] = True
             expansion["diversity_dropped_count"] = strict_selector.diversity_dropped
             expansion["unreferenced_dropped_count"] = (
@@ -385,6 +402,23 @@ def deliver_recall(
                 "evidence -- their relevance reaches the ranking through the "
                 "source messages beneath them, and the nodes themselves come "
                 "back here as non-evidence drill-down leads"
+            )
+        if guidance_v2:
+            # One opt-in lookahead proves that an unvisited tail contains usable
+            # evidence. Verified density-blocked rows also mean more remains;
+            # they are deliberately not made deliverable by relaxing the cap.
+            if reference_strict:
+                more = bool(strict_selector.take(strict_selector.ledger.live_count + 1))
+                more = more or bool(strict_selector.diversity_dropped)
+                # Post-budget rejections can be hydrated on a later call; they
+                # are remaining evidence, unlike unusable in-budget rows.
+                more = more or any(value is False for value in strict_selector._rejected.values())
+            else:
+                more = selection_has_more
+            expansion.update(
+                sessions_delivered=_sessions(hits_out),
+                sessions_in_pool=_sessions([entry["hit"] for entry in ordered]),
+                more_available=bool(more or response_cap_truncated),
             )
         response["detail"] = detail
         response["provenance"]["detail"] = detail
@@ -451,6 +485,11 @@ def _fit_answer_ready_response(
         expansion["expanded_hit_count"] = sum(
             "content" in hit for hit in response["hits"]
         )
+        if "sessions_delivered" in expansion:
+            expansion["sessions_delivered"] = _sessions(response["hits"])
+            expansion["more_available"] = True
+        if "session_floor" in response["provenance"]:
+            response["provenance"]["session_floor"]["delivered"] = _sessions(response["hits"])
         encoded = json.dumps(response, ensure_ascii=False)
     if event_time_marker_deferred is not None:
         # Put the marker back with its original reason, only if it fits.
@@ -616,3 +655,7 @@ def _fts_anchor_delivered(
     """Whether the FTS arm's anchored hit is among the returned ``hits`` (#950)."""
     anchor = _hit_identity(arm_hits["fts"][0])
     return any(_hit_identity(hit) == anchor for hit in hits)
+
+
+def _sessions(hits: list[dict[str, Any]]) -> int:
+    return len({hit.get("session_id") for hit in hits} - {None, ""})

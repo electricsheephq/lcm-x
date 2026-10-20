@@ -119,6 +119,7 @@ from .assertion_extraction import ModelAssertionExtractor
 from .assertion_store import AssertionStore, SourceSnapshot
 from .adaptive_retrieval import AdaptiveRetrievalRegistry
 from .query_view_store import QueryViewStore
+from .schemas import recall_guidance_schemas
 from .tool_registry import TOOL_REGISTRY
 from .sanitize import (
     _clean_active_assistant_message,
@@ -5509,7 +5510,8 @@ class LCMEngine(
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         disabled = self._omitted_tool_names()
-        schemas = [spec.schema for spec in TOOL_REGISTRY]
+        guidance = recall_guidance_schemas(getattr(self._config, "recall_guidance", "v1"))
+        schemas = [guidance.get(spec.name, spec.schema) for spec in TOOL_REGISTRY]
         if disabled:
             return [s for s in schemas if s.get("name") not in disabled]
         return schemas
@@ -5555,6 +5557,11 @@ class LCMEngine(
         }
         handler = handlers.get(name)
         if handler:
+            if name == "lcm_recall":
+                options = {key: kwargs[key] for key in (
+                    "min_sessions", "session_hints", "recall_guidance"
+                ) if key in kwargs}
+                return handler(args, engine=self, **options)
             return handler(args, engine=self)
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
@@ -8635,6 +8642,9 @@ class LCMEngine(
                 # relevance floor below filters the 6 hits without refill, so an
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
+                min_sessions=0,
+                session_hints=False,
+                recall_guidance="v1",
             )
             payload = json.loads(raw)
         except EmbeddingPrivacyPolicyError as exc:

@@ -890,10 +890,11 @@ class MessageStore:
         anchor_store_id: int,
         before: int = 2,
         after: int = 3,
+        window_cap: int = 12,
     ) -> List[Dict[str, Any]]:
         """Load one bounded ordered window around an exact message anchor."""
-        before = min(12, max(0, int(before)))
-        after = min(12, max(0, int(after)))
+        before = min(window_cap, max(0, int(before)))
+        after = min(window_cap, max(0, int(after)))
         prior = self._conn.execute(
             f"""SELECT {_MESSAGE_SELECT_COLUMNS}
                 FROM messages

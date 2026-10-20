@@ -58,6 +58,9 @@ CONFIG_ROWS = (
     ('rerank_enabled', 'LCM_RERANK_ENABLED', 'bool', False),
     ('recall_reference_strict', 'LCM_RECALL_REFERENCE_STRICT', 'bool', True),
     ('recall_fts_anchor', 'LCM_RECALL_FTS_ANCHOR', 'bool', True),
+    ('recall_session_hints', 'LCM_RECALL_SESSION_HINTS', 'bool', False),
+    ('recall_min_sessions', 'LCM_RECALL_MIN_SESSIONS', 'int', 0),
+    ('recall_guidance', 'LCM_RECALL_GUIDANCE', 'str', 'v1'),
     ('proactive_recall_enabled', 'LCM_PROACTIVE_RECALL_ENABLED', 'bool', False),
     ('preanswer_evidence_enabled', 'LCM_PREANSWER_EVIDENCE_ENABLED', 'bool', False),
     ('selective_compiler_enabled', 'LCM_SELECTIVE_COMPILER_ENABLED', 'bool', False),
@@ -168,8 +171,10 @@ EXTRA_CONFIG_ROWS = (
     ("ignore_message_patterns", "LCM_IGNORE_MESSAGE_PATTERNS", "list", []),
 )
 
-# from_env has validation after the primitive reader for these six fields.
+# from_env has validation after the primitive reader for these fields.
 SPECIAL = {
+    "recall_min_sessions": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, 10),
+    "recall_guidance": ("v1",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),
     "leaf_target_min_tokens": (D, D, D, D, 1, D, D, D, D, D, D, D, D, D, D, D),

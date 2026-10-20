@@ -218,6 +218,42 @@ erroring the tool. `lcm_grep`'s hybrid RRF is unaffected: it keeps implicit
 actually applied to the arms that ran are echoed back under
 `provenance.arm_weights`.
 
+#### Recall breadth evaluation (v0.28)
+
+Four independent levers are under evaluation for v0.28; all effects default
+off. There are three configuration keys: continuation shares the guidance key.
+
+| Lever | Key and default | Opt-in behavior |
+| --- | --- | --- |
+| Session breadth | `LCM_RECALL_MIN_SESSIONS=0` | 0..10, overridden by per-call `min_sessions`; a positive value widens the candidate pool to `min(500, max(100, limit*8))` and promotes the best hits of missing sessions in fused order. Scores and the five-hit ceiling stay unchanged. |
+| Session hints | `LCM_RECALL_SESSION_HINTS=false` | `answer_ready` hits and summary leads add `session_hint`; snippets and existing `expand_hint` strings stay unchanged. |
+| Multi-session guidance | `LCM_RECALL_GUIDANCE=v1` | `v2` adds combine/compare and stopping guidance to tool descriptions. |
+| Continuation | `LCM_RECALL_GUIDANCE=v1` | With `v2`, `provenance.answer_ready` adds `sessions_delivered`, `sessions_in_pool` and `more_available`. These describe this candidate pool, not exhaustive corpus coverage. |
+
+`provenance.session_floor` reports requested breadth, promoted entries, and the
+distinct sessions finally delivered. `session_floor.achieved` = distinct sessions
+in the delivered window and may exceed `requested`.
+Verification and response caps may reduce delivery below the floor; a window
+cannot represent more sessions than its `limit`. Proactive recall and the
+pre-answer baseline, evidence-pack, compile-evidence and requirements retrieval
+explicitly retain their previous behavior with these keys on.
+
+The v1 tool schemas remain byte-identical to v0.27.0-rc5. With
+`LCM_RECALL_GUIDANCE=v2`, schemas additionally expose `min_sessions` on
+`lcm_recall` and `anchor_store_id`/`before`/`after` on `lcm_load_session`.
+Handlers accept these arguments in both modes. The anchor mode is:
+
+```text
+lcm_load_session(session_id='earlier', anchor_store_id=123, before=6, after=12)
+```
+
+The anchor must belong to the requested session. `before`/`after` default to
+6/12 and clamp to 0..40. Rows retain their order, filters and per-row serialization;
+`limit` still bounds returned rows. Pass the last row's `next_cursor` as
+`after_store_id` on a subsequent ordinary page to continue. Existing page mode
+and internal window callers keep their defaults. No default changes or recall
+quality gains are asserted by this evaluation surface.
+
 #### FTS anchor slot (`LCM_RECALL_FTS_ANCHOR`)
 
 `LCM_RECALL_FTS_ANCHOR` (default `true`) keeps the full-text arm's best match in

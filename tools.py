@@ -992,17 +992,44 @@ def lcm_load_session(args: Dict[str, Any], **kwargs) -> str:
         time_from=time_from,
         time_to=time_to,
     )
-    rows = engine._store.load_session_page(
-        session_id,
-        after_store_id=after_store_id,
-        limit=limit + 1,
-        roles=roles or None,
-        time_from=time_from,
-        time_to=time_to,
-    )
-    page_rows = rows[:limit]
-    has_more = len(rows) > limit
-    next_cursor = page_rows[-1]["store_id"] if has_more and page_rows else None
+    if "anchor_store_id" in args:
+        anchor, error = _parse_strict_int(args["anchor_store_id"], "anchor_store_id")
+        if error:
+            return json.dumps({"error": error})
+        anchor_row = engine._store.get(anchor) if anchor is not None else None
+        if not anchor_row or anchor_row.get("session_id") != session_id:
+            return json.dumps({"error": "anchor_store_id must identify a message in session_id"})
+        window = {}
+        for key, default in (("before", 6), ("after", 12)):
+            value, error = _parse_strict_int(args.get(key, default), key)
+            if error:
+                return json.dumps({"error": error})
+            window[key] = max(0, min(40, value))
+        rows = engine._store.load_session_window(
+            session_id, anchor_store_id=anchor, window_cap=40, **window
+        )
+        page_rows = [row for row in rows
+                     if (not roles or row.get("role") in roles)
+                     and (time_from is None or row["timestamp"] >= time_from)
+                     and (time_to is None or row["timestamp"] <= time_to)
+                     and row["store_id"] > after_store_id][:limit]
+        next_cursor = page_rows[-1]["store_id"] if page_rows else None
+        has_more = bool(next_cursor is not None and engine._store.load_session_page(
+            session_id, after_store_id=next_cursor, limit=1, roles=roles or None,
+            time_from=time_from, time_to=time_to,
+        ))
+    else:
+        rows = engine._store.load_session_page(
+            session_id,
+            after_store_id=after_store_id,
+            limit=limit + 1,
+            roles=roles or None,
+            time_from=time_from,
+            time_to=time_to,
+        )
+        page_rows = rows[:limit]
+        has_more = len(rows) > limit
+        next_cursor = page_rows[-1]["store_id"] if has_more and page_rows else None
 
     response: dict[str, Any] = {
         "session_id": session_id,
@@ -3608,6 +3635,63 @@ def _lcm_recall_rerank(
 _lcm_recall_fts_anchor = place_fts_anchor
 
 
+def _lcm_recall_session_floor(
+    ordered: list[dict[str, Any]], limit: int, requested: int,
+    *, protected_entry: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Promote unseen sessions in fused order; retain every entry and score.
+
+    Replace only a redundant (or sessionless) window slot, so each promotion
+    increases breadth without losing an already represented session. The floor
+    describes ranking, not a guarantee that verification will deliver the hit.
+    """
+    result = list(ordered)
+    pool = {entry["hit"].get("session_id") for entry in ordered} - {None, ""}
+    target = min(requested, limit, len(pool))
+    promoted = 0
+    for candidate in ordered:
+        represented = {entry["hit"].get("session_id") for entry in result[:limit]} - {None, ""}
+        if len(represented) >= target:
+            break
+        sid = candidate["hit"].get("session_id")
+        if not sid or sid in represented:
+            continue
+        seen = set()
+        cut = None
+        for i, entry in enumerate(result[:limit]):
+            session = entry["hit"].get("session_id")
+            if entry is not protected_entry and (not session or session in seen):
+                cut = i
+            seen.add(session)
+        if cut is None:
+            break
+        index = next(i for i, entry in enumerate(result) if entry is candidate)
+        result.pop(index)
+        displaced = result.pop(cut)
+        result.insert(limit - 1, candidate)
+        result.insert(limit, displaced)
+        promoted += 1
+    achieved = len({entry["hit"].get("session_id") for entry in result[:limit]} - {None, ""})
+    return result, {"requested": requested, "achieved": achieved,
+                    "promoted": promoted, "delivered": None}
+
+
+def _lcm_recall_session_hint(engine: "LCMEngine", hit: dict[str, Any]) -> str | None:
+    store_id = hit.get("store_id")
+    if hit.get("node_id") is not None and (hit.get("kind") == "summary" or store_id is None):
+        sources = engine._dag.source_message_ids(hit["node_id"], limit=1)
+        store_id = sources[0] if sources else None
+    row = engine._store.get(store_id) if store_id is not None else None
+    session = row.get("session_id") if row else None
+    if not session:
+        return None
+    return f"lcm_load_session(session_id={session!r}, anchor_store_id={store_id})"
+
+
+def _lcm_recall_sessions(hits: list[dict[str, Any]]) -> int:
+    return len({hit.get("session_id") for hit in hits} - {None, ""})
+
+
 def _lcm_recall_preflight_scan_deadline(now: float, deadline: float) -> float:
     """Derive the corpus preflight's independent scan deadline.
 
@@ -3828,6 +3912,13 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     requested_limit = parsed_limit
     limit = min(requested_limit, _LCM_RECALL_LIMIT_CAP)
 
+    min_sessions_arg = kwargs.get("min_sessions", args.get("min_sessions"))
+    if min_sessions_arg is None:
+        min_sessions_arg = getattr(engine._config, "recall_min_sessions", 0)
+    min_sessions = max(0, min(10, _parse_int_value(min_sessions_arg, 0)))
+    session_hints = bool(kwargs.get("session_hints", getattr(engine._config, "recall_session_hints", False)))
+    guidance_v2 = kwargs.get("recall_guidance", getattr(engine._config, "recall_guidance", "v1")) == "v2"
+
     scope_bias, scope_bias_error = _parse_optional_float(args.get("scope_bias"), "scope_bias")
     if scope_bias_error:
         return json.dumps({"error": scope_bias_error})
@@ -3879,6 +3970,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     )
 
     candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(50, limit * 4))
+    if min_sessions:
+        candidate_limit = min(_LCM_GREP_HYBRID_CANDIDATE_CAP, max(100, limit * 8))
     rerank_window = min(50, max(1, limit * 4))
     rerank_window_limit = int(getattr(engine._config, "rerank_window_limit", 0))
     if rerank_window_limit > 0:
@@ -4234,6 +4327,14 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
+    session_floor_info = None
+    if min_sessions:
+        protected_entry = None
+        if fts_anchor_info and fts_anchor_info["fired"]:
+            protected_entry = ordered[fts_anchor_info["position"] - 1]
+        ordered, session_floor_info = _lcm_recall_session_floor(
+            ordered, limit, min_sessions, protected_entry=protected_entry)
+
     return recall_delivery.deliver_recall(
         ordered,
         query=query,
@@ -4260,6 +4361,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         timed_out=timed_out,
         fts_anchor_info=fts_anchor_info,
         summary_leads=summary_leads,
+        session_floor_info=session_floor_info,
+        session_hint=partial(_lcm_recall_session_hint, engine) if session_hints else None,
+        guidance_v2=guidance_v2,
         limit_cap=_LCM_RECALL_LIMIT_CAP,
         snippet_chars=_LCM_RECALL_SNIPPET_CHARS,
         response_char_cap=_LCM_RECALL_RESPONSE_CHAR_CAP,
