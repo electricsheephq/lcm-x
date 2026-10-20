@@ -34,11 +34,13 @@ def test_rig_verifies_transient_vector_and_final_poll(corpus, fake_rig, monkeypa
                 original = c.execute("SELECT vec FROM lcm_chunk_vectors WHERE chunk_id='1:0'").fetchone()[0]
                 c.execute("UPDATE lcm_chunk_vectors SET vec=zeroblob(1536) WHERE chunk_id='1:0'")
         calls.append(verify)
-        return dict(audit.progress(target, m, verify), complete=False)
-    def final(target, m):
-        if original is not None:
+        result = dict(audit.progress(target, m, verify), complete=False)
+        if original is not None and verify:
             with SQL_CONNECT(target) as c:
                 c.execute("UPDATE lcm_chunk_vectors SET vec=? WHERE chunk_id='1:0'", (original,))
+            original = None
+        return result
+    def final(target, m):
         result = audit.audit(target, m)
         restored.append(result)
         return result
@@ -48,6 +50,8 @@ def test_rig_verifies_transient_vector_and_final_poll(corpus, fake_rig, monkeypa
     result = common.load(a.out/"summary.json")
     assert all(r["complete"] and not r["changed_vectors"] for r in restored)
     if corrupt:
+        n = result["verify_every_polls"]
+        assert len(calls) == n+1 and calls[-2:] == [True, True]
         assert result["reason"] == "row_or_vector_corruption"
         assert result["state"] != "COMPLETE"
     else:
@@ -107,9 +111,12 @@ def test_synchronous_provider_bind_is_invalid_and_experiment_continues(tmp_path,
     assert common.load(tmp_path/"summary.json")["state"] == "INVALID"
 
 
-def test_unknown_runtime_error_still_raises(tmp_path):
+@pytest.mark.parametrize("old_event", [None, {"violation": "network_attempt", "detail": "préexisting"}])
+def test_unknown_runtime_error_still_raises(tmp_path, old_event):
     request = tmp_path/"request.json"
     common.dump(request, dict(root=str(tmp_path)))
+    if old_event is not None:
+        common.append(tmp_path/"events.jsonl", old_event)
     def worker(_):
         raise RuntimeError("unrelated bug")
     with pytest.raises(RuntimeError, match="unrelated bug"):

@@ -106,6 +106,9 @@ def cell(a, state, block, kind):
 
 
 def guarded_worker(worker, request):
+    root = Path(load(request)["root"])
+    events_path = root/"events.jsonl"
+    event_offset = events_path.stat().st_size if events_path.exists() else 0
     try:
         worker(request)
     except RuntimeError as exc:
@@ -115,8 +118,11 @@ def guarded_worker(worker, request):
                    "foreground backfill forbidden": "foreground_backfill_forbidden",
                    "foreground embedding join forbidden": "foreground_embedding_join_forbidden",
                    "offline instrument denies network": "offline_network_forbidden"}
-        root = Path(load(request)["root"])
-        events = [json.loads(s) for s in (root/"events.jsonl").read_text().splitlines()] if (root/"events.jsonl").exists() else []
+        events = []
+        if events_path.exists():
+            with events_path.open("rb") as stream:
+                stream.seek(event_offset)
+                events = [json.loads(s) for s in stream.read().splitlines()]
         event_reasons = {"network_attempt": "offline_network_forbidden", "subprocess_launch": "offline_subprocess_launch",
                          "foreground_join": "foreground_embedding_join_forbidden"}
         for event in events:
