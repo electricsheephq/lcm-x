@@ -98,7 +98,7 @@ The plan:
    2. delivery depth step 2 (#1607): BEAM-100K conversations 3–20 (360 questions, 36 event-ordering questions), a re-used parameter-selection holdout. Event-ordering reference-event coverage was 34.87%, 38.65% and 40.47% at 25, 50 and 100 hits. The declared ≥50% bar fails at every depth, so this arm cannot pass and sets no depth default;
    3. the time-order slice (#1589) remains conditional on a chosen depth and BEAM event coverage above 40%, because the ordering score cannot exceed coverage; depth step 2 selected no default;
    4. rerank on the frozen pool (#1187): no arm passes its declared bar. Rerank moves behind breadth; #1200 stays open as off-by-default plumbing, not a candidate default;
-   5. within-session depth and breadth (#1188): the next v0.29.0 screen;
+   5. within-session depth and breadth (#1188): step 2 failed as declared. On held-out LoCoMo it gained 5.65 points overall but lost 10.93 points on adversarial questions, so neither depth nor breadth gets a default; both return in v0.30.0 together with the abstention lever (#1591);
    6. sender and role (#995): step 1 is declared, not yet run.
 
    Only winners land. Every delivery change carries no-loss guards on abstention, adversarial and knowledge-update questions, degraded recalls (#1591, #1609) and recall latency (measured with #1586's instrument). The development split overlaps the board sets, so a board rerun after these choices reports the held-out score beside the total. Measured offline and rejected against pre-declared bars earlier: session-level scoring (#1039), a session-aware hit cap (#1040), time ranges read from the query (#1025), hit diversity (#1023), session score (#1022), entity and identifier postings, and returning neighbours with each hit.
