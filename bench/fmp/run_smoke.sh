@@ -19,6 +19,10 @@ LOCOMO_DATA="${FMP_LOCOMO:?set FMP_LOCOMO to locomo10.json}"
 SOL=codex:gpt-6.1-sol@high
 OPUS=claude:claude-opus-5-5
 cd "$REPO"
+case "$OUT" in /*) ;; *) OUT="$REPO/$OUT";; esac
+case "$OUT/" in "$REPO/"*) echo "FMP output must be outside the checkout" >&2; exit 1;; esac
+OUT="$("$PYTHON" -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' "$OUT")"
+case "$OUT/" in "$REPO/"*) echo "FMP output must be outside the checkout" >&2; exit 1;; esac
 mkdir -p "$OUT"
 # 30 LME-S ids stratified over question type plus abstention (seed 1189); LoCoMo conv-30 without
 # category 5; a seeded 10 of the 30 for the Opus agentic arm. Ids only, no corpus text.

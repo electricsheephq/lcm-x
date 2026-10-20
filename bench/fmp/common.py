@@ -24,10 +24,19 @@ def utc():
 
 
 def commit(repo):
-    # A dirty tree is not the named commit: mark it so runs refuse it and stores never reuse it.
+    # A dirty tree is not the named commit: hash its content so different states cannot share stores.
     head = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
     dirty = subprocess.check_output(["git", "-C", str(repo), "status", "--porcelain"], text=True).strip()
-    return head + ("-dirty" if dirty else "")
+    if not dirty:
+        return head
+    h = hashlib.sha256(subprocess.check_output(
+        ["git", "-C", str(repo), "diff", "--no-ext-diff", "--binary", "HEAD"]))
+    names = subprocess.check_output(["git", "-C", str(repo), "ls-files", "--others", "--exclude-standard", "-z"])
+    for name in sorted(n for n in names.split(b"\0") if n):
+        path = Path(repo) / name.decode()
+        content = str(path.readlink()).encode() if path.is_symlink() else digest_file(path).encode()
+        h.update(name + b"\0" + content + b"\0")
+    return head + "-" + h.hexdigest() + "-dirty"
 
 
 def write_json(path, data):

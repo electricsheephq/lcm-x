@@ -289,7 +289,10 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
         manifest = json.loads(manifest_path.read_text())
         for key, value in (("dataset_sha256", dataset_sha), ("id_list_sha256", ids_sha),
                            ("split_label", args.split_label), ("question_ids", [q.qid for q in questions]),
-                           ("prompts_sha256", prompt_hashes())):
+                           ("prompts_sha256", prompt_hashes()),
+                           ("harness_commit", commit(Path(__file__).resolve().parents[2])),
+                           ("harness_tree_sha256", sha(b"".join(p.read_bytes() for p in sorted(Path(__file__).parent.glob("*.py"))))),
+                           ("lcmx_commit", commit(args.lcmx_repo))):
             if manifest[key] != value:
                 raise ValueError("judging run identity mismatch")
     manifest.setdefault("endpoint_hosts", {}).update({s: GLM_HOST for s in specs(args) if parse_spec(s)[0] == "glm"})
@@ -335,6 +338,9 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
         destination = args.output / "judged.jsonl"
         source = rows
     with destination.open("x") as stream:
+        if args.command == "judge":
+            manifest["status"] = "judging"
+            write_json(manifest_path, manifest)
         row = yield work, source
         while row is not None:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
