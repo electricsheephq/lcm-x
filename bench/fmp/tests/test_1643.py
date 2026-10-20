@@ -103,15 +103,14 @@ def test_4_pairing_binds_toolset_except_explicit_cross_commit(tmp_path):
 
 
 @pytest.mark.parametrize("reader", ["codex:unknown@high", "claude:unknown", "openrouter:unknown"])
-def test_5_unsupported_reader_rejected_at_parse_time(tmp_path, monkeypatch, capsys, reader):
+def test_5_unsupported_reader_rejected_at_execution(tmp_path, monkeypatch, reader):
     import httpx
     monkeypatch.setattr(models.httpx, "get", lambda *a, **k: httpx.Response(
         200, json={"data": []}, request=httpx.Request("GET", "https://example.invalid")))
-    with pytest.raises(SystemExit) as exc:
-        run.parser().parse_args(["answer", "--reader", reader, "--split-label", "smoke",
-                               "--store-root", str(tmp_path), "--output", str(tmp_path / "out")])
-    assert exc.value.code == 2
-    assert "context length" in capsys.readouterr().err
+    args = run.parser().parse_args(["answer", "--reader", reader, "--split-label", "smoke",
+                                   "--store-root", str(tmp_path), "--output", str(tmp_path / "out")])
+    with pytest.raises(ValueError, match="reader context length unavailable; use a supported model spec"):
+        run.execute(args)
 
 
 def test_6_paired_wall_time_counts_each_arms_active_work(tmp_path, monkeypatch):
@@ -169,5 +168,5 @@ def test_7_projection_names_and_totals_only_supplied_arms(tmp_path):
 def test_2_unattributed_judge_failure_stays_row_wide():
     from bench.fmp import score
     row = {"status": "ok", "calls": [], "judge_calls": [{"error": "timeout"}],
-           "judges": {m: {"status": "ok", "correct": True, "verdict": "valid"} for m in ("codex:a@low", "glm:b")}}
-    assert score.invalid(row, ["codex:a@low"]) and score.invalid(row, ["glm:b"])
+           "judges": {m: {"status": "ok", "correct": True, "verdict": "valid"} for m in ("codex:a@low", "glm:glm-5.3")}}
+    assert score.invalid(row, ["codex:a@low"]) and score.invalid(row, ["glm:glm-5.3"])
