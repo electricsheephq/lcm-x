@@ -1,5 +1,6 @@
 """Single automatic bind per interpreter; restart once; audit outside foreground."""
 import os
+import hashlib
 from pathlib import Path
 import signal
 import subprocess
@@ -83,6 +84,15 @@ def restart_trigger(a, fraction, elapsed):
     return "fraction" if fraction >= a.restart_fraction else "declared_time_fallback" if elapsed >= (a.restart_after if a.restart_after is not None else a.max_wall*.25) else None
 
 
+def final_copy(a, generation):
+    cell = hashlib.sha256(str(a.out.resolve()).encode()).hexdigest()[:16]
+    return a.scratch/f"{a.out.name}-{cell}-g{generation}-final.db"
+
+
+def audit_failed(result):
+    return not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] != "ok" or result["residue"]
+
+
 def run(a):
     safe_paths(a.home, a.db)
     initial_audit = baseline(a.db, load(a.manifest))
@@ -109,7 +119,7 @@ def run(a):
                 break
             if now >= next_progress:
                 result = progress(a.db, manifest)
-                if foreign := foreign_files(p.pid, a.home/str(generation), a.db, a.model_cache):
+                if foreign := foreign_files(p.pid, a.home/str(generation), a.db, a.model_cache, out=a.out, scratch=final_copy(a, generation)):
                     dump(a.out/"cross-profile.json", {"paths": foreign})
                     final, reason = "ABORTED", "cross_profile_access"
                     break
@@ -135,7 +145,7 @@ def run(a):
                 if final == "RUNNING" and not restarted and trigger:
                     checked = audit(a.db, manifest)
                     dump(a.out/"restart-audit.json", checked)
-                    if not checked["raw_unchanged"] or checked["changed_vectors"] or checked["integrity"] != "ok":
+                    if audit_failed(checked):
                         final, reason = "ABORTED", "restart_corruption"
                         break
                     append(a.out/"restarts.jsonl", {"elapsed_s": now-started, "fraction": fraction,
@@ -149,10 +159,11 @@ def run(a):
                 next_progress = now+a.progress_interval
             time.sleep(1)
     finally:
+        loop_end = time.monotonic()
         stop(p)
         meter.close()
     result = audit(a.db, manifest)
-    if not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] != "ok" or result["residue"]:
+    if audit_failed(result):
         final, reason = "ABORTED", "final_integrity_or_residue"
     elapsed = time.monotonic()-started
     covered = sum(x["covered"] for x in result["classes"].values())
@@ -160,13 +171,13 @@ def run(a):
     first = initial_audit
     summary = {"state": final, "reason": reason, "audit": result, "restarted": restarted, "restart": "once" if restarted else "none", "max_wall": a.max_wall,
         "end_to_end_s": elapsed, "coverage_fraction": covered/max(1, sum(x["expected"] for x in result["classes"].values())),
-        "new_ids_s": (covered-initial)/elapsed, "cpu": meter.summary(final, 1), "effective_config": (load(a.out/f"worker-{generation}.json")["effective_config"] if (a.out/f"worker-{generation}.json").exists() else None), "rows": manifest["rows"]}
+        "new_ids_s": (covered-initial)/elapsed, "cpu": meter.summary(final, 1, end=loop_end), "effective_config": (load(a.out/f"worker-{generation}.json")["effective_config"] if (a.out/f"worker-{generation}.json").exists() else None), "rows": manifest["rows"]}
     summary.update(rows_s=(result["covered_rows"]-first["covered_rows"])/elapsed,
         chunks_s=(result["classes"]["chunks"]["covered"]-first["classes"]["chunks"]["covered"])/elapsed,
         tokens_s=sum(v["covered_tokens"]-first["classes"][k]["covered_tokens"] for k, v in result["classes"].items())/elapsed,
         model_preparation_s=sum(e.get("seconds", 0) for e in events if e.get("event") == "prepared"))
     from .audit import connect
-    with connect(a.db) as c, __import__("sqlite3").connect(a.scratch/(a.out.name+"-final.db")) as dest:
+    with connect(a.db) as c, __import__("sqlite3").connect(final_copy(a, generation)) as dest:
         c.backup(dest)
     dump(a.out/"final-audit.json", result)
     dump(a.out/"manifest.json", manifest)

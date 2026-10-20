@@ -16,7 +16,7 @@ nice -n 19 "$PY" -B -m bench.instruments.local_catchup.corpus --lcmx-repo "$PROD
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.catchup --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/corpus/store.db" --manifest "$SCRATCH/corpus/manifest.json" --home "$SCRATCH/homes" --model-cache "$CACHE" --scratch "$SCRATCH" --out "$RUN/catchup" --max-wall 24h
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes drain96 --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/probe/store.db" --manifest "$RUN/probe-manifest.json" --home "$SCRATCH/probe/homes" --model-cache "$CACHE" --scratch "$SCRATCH" --out "$RUN/probe" --max-wall 20m --restart-after 30s
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes cold --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/corpus/pilot.db" --manifest "$SCRATCH/corpus/pilot.json" --home "$SCRATCH/cold/home" --model-cache "$CACHE" --scratch "$SCRATCH" --out "$RUN/cold"
-nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes screen16 --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/screen" --model-cache "$CACHE" --out "$RUN/screen" --rows 250000
+nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes screen16 --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/screen" --model-cache "$CACHE" --out "$RUN/screen" --rows 250000 --peak-disk-gb 96
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.rig --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/rig" --model-cache "$CACHE" --out "$RUN/rig" --processes 14 --rows 250000 --peak-disk-gb 80
 ```
 

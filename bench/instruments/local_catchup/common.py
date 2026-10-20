@@ -54,7 +54,7 @@ def safe_paths(*paths):
         raise ValueError("live .hermes paths forbidden")
 
 
-def foreign_files(pid, home, db, cache, user_home=None):
+def foreign_files(pid, home, db, cache, user_home=None, out=None, scratch=None):
     """Open files that reach another profile's data (the declaration's cross-profile stop).
 
     That is any path under a `.hermes` directory, or under the real user home (other profiles,
@@ -62,13 +62,13 @@ def foreign_files(pid, home, db, cache, user_home=None):
     runtime. OS-managed per-user caches outside the home (e.g. macOS's URL cache) are not profiles.
     """
     import psutil
-    roots = [p.resolve() for p in (home, cache, Path(sys.prefix), Path(sys.base_prefix))]
+    roots = [p.resolve() for p in (home, cache, Path(sys.prefix), Path(sys.base_prefix), out, scratch) if p is not None]
     store = [db.resolve(), *[Path(str(db.resolve())+s) for s in ("-wal", "-shm", "-journal")]]
     user_home = (user_home or Path.home()).resolve()
     found = []
     for f in psutil.Process(pid).open_files():
         path = Path(f.path).resolve()
-        if path in store or any(path.is_relative_to(r) for r in roots):
+        if ".hermes" not in path.parts and (path in store or any(path.is_relative_to(r) for r in roots)):
             continue
         if ".hermes" in path.parts or path.is_relative_to(user_home):
             found.append(f.path)

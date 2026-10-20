@@ -81,7 +81,7 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
 
 
 def pilot_rows(pilot, rows, shape):
-    return min(rows, max(pilot, 1002 if shape == "mixed" else 2))
+    return min(rows, ((max(pilot, 2)+1499)//1500)*1500 if shape == "mixed" else max(pilot, 2))
 
 
 def main():
