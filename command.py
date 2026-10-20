@@ -5008,7 +5008,8 @@ def _chunk_backfill_run(
                     stop_reason = "lease_lost"
                     break
                 continuing_message = maintenance_slice and chunk_meta[batch[0][0]][0] == previous_message
-                if budget_s > 0 and (time.monotonic() - started) > budget_s and not continuing_message:
+                if (budget_s > 0 and (time.monotonic() - started) > budget_s
+                        and not continuing_message and not (maintenance_slice and previous_message is None)):
                     budget_exhausted = True
                     stop_reason = "op_budget_exhausted"
                     break
