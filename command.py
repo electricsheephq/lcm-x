@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 import dataclasses
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -4226,46 +4227,46 @@ def _chunk_inflight_ids(conn: sqlite3.Connection, identity_hash: str | None) -> 
     }
 
 
+_CHUNK_PARTIAL_WARNED = set()
+
+
 def _chunk_partial_ids(conn, identity_hash):
     saved = conn.execute(
         "SELECT value FROM metadata WHERE key=?", (f"chunk_partial_messages:{identity_hash}",),
     ).fetchone()
-    return set(json.loads(saved[0])) if saved else set()
+    try:
+        ids = json.loads(saved[0]) if saved else []
+        if not isinstance(ids, list) or any(type(i) is not int for i in ids):
+            raise ValueError("invalid message ids")
+        return set(ids)
+    except (ValueError, TypeError):
+        warning_key = (identity_hash, saved[0])
+        if warning_key not in _CHUNK_PARTIAL_WARNED:
+            logging.getLogger("hermes_lcm").warning("Ignoring malformed partial-message record")
+            _CHUNK_PARTIAL_WARNED.add(warning_key)
+        return set()
 
 
-def _chunk_partial_rows(conn, identity_hash, policy, *, record_progress=False):
-    """Re-chunk durable dispatch intents; only full publication retires an id."""
-    rows, complete = [], []
-    for store_id in sorted(_chunk_partial_ids(conn, identity_hash), reverse=True):
-        row = conn.execute(
-            "SELECT store_id, role, content FROM messages WHERE store_id=?", (store_id,),
-        ).fetchone()
-        published = conn.execute(
-            "SELECT chunk_id, chunk_index, char_start, char_end FROM lcm_chunk_meta "
-            "WHERE store_id=? AND identity_hash=?",
-            (store_id, identity_hash),
-        ).fetchall()
-        already = {str(item[0]) for item in published}
-        # A single full-source chunk proves completion without a second chunking
-        # call on the ordinary short-message path (#1014's discovery bound).
-        whole = row is not None and any(
-            item[1] == 0 and item[2] == 0 and item[3] == len(row[2]) for item in published
-        )
-        if row is not None and not whole and any(
-            c.char_end > c.char_start and c.chunk_id not in already
-            for c in chunk_message(*row, policy=policy)
-        ):
-            rows.append(row)
-        else:
-            complete.append(store_id)
-    if record_progress and complete:
-        # Remove only proven-complete ids, preserving any concurrently added intent.
-        conn.execute(
-            "UPDATE metadata SET value=(SELECT json_group_array(value) FROM json_each(metadata.value) "
-            "WHERE value NOT IN (SELECT value FROM json_each(?))) WHERE key=?",
-            (json.dumps(complete), f"chunk_partial_messages:{identity_hash}"),
-        )
-    return rows
+def _prune_chunk_partial_messages(conn, identity_hash, lease, chunk_cache):
+    """Drop unpublished intents and proven completions without re-chunking."""
+    ids = _chunk_partial_ids(conn, identity_hash)
+    published = {}
+    for sid, cid in conn.execute(
+        "SELECT store_id, chunk_id FROM lcm_chunk_meta JOIN messages USING (store_id) WHERE identity_hash=? "
+        "AND store_id IN (SELECT value FROM json_each(?))", (identity_hash, json.dumps(sorted(ids))),
+    ):
+        published.setdefault(sid, set()).add(cid)
+    complete = {sid for sid, chunks in chunk_cache.items()
+                if all(c.chunk_id in published.get(sid, ()) for c in chunks if c.char_end > c.char_start)}
+    # Cloud withholding/token-cap skips can retain partials indefinitely; the
+    # half-pass selection quota prevents them starving new local-only work.
+    conn.execute(
+        "UPDATE metadata SET value=? WHERE key=? AND (NOT EXISTS (SELECT 1 FROM metadata WHERE key=?) "
+        "OR EXISTS (SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+        "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?))",
+        (json.dumps(sorted(ids & published.keys() - complete)), f"chunk_partial_messages:{identity_hash}",
+         _EMBEDDING_BACKFILL_CLAIM_KEY, _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
+    )
 
 
 def _record_chunk_partial_messages(conn, identity_hash, lease, store_ids):
@@ -4293,7 +4294,7 @@ def _chunk_pending_rows(
     *,
     incremental: bool = False,
     record_progress: bool = False,
-    include_boundaries: bool = True,
+    include_boundaries: bool = True, include_partials: bool = True, chunk_cache=None,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
     """Discover policy-chunked messages whose chunks are not yet embedded.
 
@@ -4310,15 +4311,18 @@ def _chunk_pending_rows(
     tracks new messages rather than the store; the returned total then counts
     only what it saw.
     """
+    chunk_cache = {} if chunk_cache is None else chunk_cache
+    partial_ids = _chunk_partial_ids(conn, identity_hash) if incremental else set()
+    partial_limit, partial_selected = max(1, limit // 2), 0
     if incremental:
         seen_rows = set()
         already = set()
         inflight = _chunk_inflight_ids(conn, identity_hash)
         boundary_ids = set(_chunk_cursor(conn, identity_hash) or ()) if include_boundaries else set()
-        revisit_ids = boundary_ids | _chunk_partial_ids(conn, identity_hash)
+        revisit_ids = boundary_ids | partial_ids
         rows = _chunk_frontier_rows(
             conn, identity_hash, policy=policy, record_progress=record_progress,
-            include_boundaries=include_boundaries,
+            include_boundaries=include_boundaries, partial_limit=partial_limit if include_partials else 0,
         )
     else:
         already = _chunk_embedded_ids(conn, identity_hash)
@@ -4337,6 +4341,8 @@ def _chunk_pending_rows(
             if row[0] in seen_rows:
                 continue
             seen_rows.add(row[0])
+            if row[0] in partial_ids and (not include_partials or partial_selected >= partial_limit):
+                continue
             already = set()
             if row[0] in revisit_ids:
                 # Exit may have published only the first batch of this message.
@@ -4345,7 +4351,9 @@ def _chunk_pending_rows(
                     "SELECT chunk_id FROM lcm_chunk_meta WHERE store_id=? AND identity_hash=?",
                     (row[0], identity_hash),
                 )}
-        for chunk in chunk_message(row[0], row[1], row[2], policy=policy):
+        if row[0] not in chunk_cache:
+            chunk_cache[row[0]] = chunk_message(*row, policy=policy)
+        for chunk in chunk_cache[row[0]]:
             chunk_id = chunk.chunk_id
             if chunk_id in already or chunk_id in inflight:
                 continue
@@ -4353,6 +4361,10 @@ def _chunk_pending_rows(
             # persist an empty snippet + bogus lcm_expand offset (F3).
             if chunk.char_end <= chunk.char_start:
                 continue
+            if incremental and row[0] in partial_ids:
+                if partial_selected >= partial_limit:
+                    break
+                partial_selected += 1
             total += 1
             if len(documents) < limit or incremental:
                 documents.append((chunk_id, chunk.text, chunk.token_estimate))
@@ -4522,7 +4534,7 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
 
 def _chunk_frontier_rows(
     conn: sqlite3.Connection, identity_hash: str | None, history_limit: int | None = None, policy: str = "",
-    *, record_progress: bool = False, include_boundaries: bool = False,
+    *, record_progress: bool = False, include_boundaries: bool = False, partial_limit: int = 0,
 ):
     """Messages the automatic chunk pass has not reached. New messages come first, oldest first; then missing
     eligible rows inside unproven cursor bounds, newest first and bounded; then up to
@@ -4533,7 +4545,12 @@ def _chunk_frontier_rows(
     run of tool rows cannot hold the walk in place."""
     history_limit = _CHUNK_HISTORY_SCAN_MESSAGES if history_limit is None else history_limit
     policy = normalize_content_policy(policy)
-    yield from _chunk_partial_rows(conn, identity_hash, policy, record_progress=record_progress)
+    if partial_limit:
+        yield from conn.execute(
+            "SELECT store_id, role, content FROM messages WHERE store_id IN "
+            "(SELECT value FROM json_each(?)) ORDER BY store_id DESC LIMIT ?",
+            (json.dumps(sorted(_chunk_partial_ids(conn, identity_hash))), partial_limit),
+        )
     revision = _chunk_policy_revision(conn, identity_hash)
     eligible = ""
     if normalize_content_policy(policy) == "conversational":
@@ -4579,7 +4596,7 @@ _STATUS_CHUNK_SCAN_MESSAGES = 2_000  # /lcm status chunks at most this many mess
 
 def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None, policy: str) -> str:
     """The automatic pass's pending chunks, read along its frontier and bounded for the status page."""
-    total = 0
+    total = len(_chunk_partial_ids(conn, identity_hash))
     gap_bounds = _chunk_gapfill_bounds(
         conn, identity_hash, _chunk_cursor(conn, identity_hash), _chunk_policy_revision(conn, identity_hash),
     ) if normalize_content_policy(policy) != "full" else None
@@ -4608,11 +4625,11 @@ def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None,
         total += pending
         if pending and gap_bounds is not None and gap_bounds[0] <= row[0] <= gap_bounds[1]:
             suffix = " (gap-fill)"
-    return f"{total}{suffix}"
+    return f"{total}{'+' if partial_ids else ''}{suffix}"
 
 
 def _rebuild_chunk_document(
-    conn: sqlite3.Connection, chunk_id: str, policy: str
+    conn: sqlite3.Connection, chunk_id: str, policy: str, chunk_cache=None
 ) -> tuple[str, int, int, int] | None:
     """Reconstruct one chunk's text/tokens/span by re-chunking its source message.
 
@@ -4633,7 +4650,10 @@ def _rebuild_chunk_document(
     ).fetchone()
     if row is None:
         return None
-    for chunk in chunk_message(store_id, row[0], row[1], policy=policy):
+    chunk_cache = {} if chunk_cache is None else chunk_cache
+    if store_id not in chunk_cache:
+        chunk_cache[store_id] = chunk_message(store_id, *row, policy=policy)
+    for chunk in chunk_cache[store_id]:
         if chunk.chunk_index == chunk_index:
             return chunk.text, chunk.token_estimate, chunk.char_start, chunk.char_end
     return None
@@ -4644,7 +4664,7 @@ def _chunk_authorized_uncertain_rows(
     identity_hash: str,
     policy: str,
     limit: int,
-    retry_before: float | None = None,
+    retry_before: float | None = None, chunk_cache=None,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
     """Select uncertain chunk rows without consuming their durable markers."""
     rows = conn.execute(
@@ -4667,7 +4687,7 @@ def _chunk_authorized_uncertain_rows(
     meta: dict[str, tuple[int, int, int, int]] = {}
     for row in rows:
         chunk_id = str(row[0])
-        rebuilt = _rebuild_chunk_document(conn, chunk_id, policy)
+        rebuilt = _rebuild_chunk_document(conn, chunk_id, policy, chunk_cache)
         if rebuilt is None:
             continue
         text, tokens, char_start, char_end = rebuilt
@@ -4692,7 +4712,7 @@ def _chunk_authorized_uncertain_rows(
 
 def _chunk_backfill_remaining(
     db_path, identity_hash: str | None, policy: str, pending: int, embedded: int,
-    incremental: bool = False, *, include_boundaries: bool = False,
+    incremental: bool = False, *, include_boundaries: bool = False, chunk_cache=None,
 ) -> tuple[int, int, int]:
     try:
         check_conn = _embedding_read_connection(db_path)
@@ -4701,10 +4721,10 @@ def _chunk_backfill_remaining(
                 check_conn, identity_hash, policy, 1, incremental=incremental,
                 # Selection already revisited the boundaries. Only an exit
                 # interrupt can leave part of this pass's message unfinished.
-                include_boundaries=include_boundaries,
+                include_boundaries=include_boundaries, include_partials=False, chunk_cache=chunk_cache,
             )
             # Even held/uncertain chunks leave their recorded message incomplete.
-            remaining = max(remaining, len(_chunk_partial_rows(check_conn, identity_hash, policy)))
+            remaining = max(remaining, len(_chunk_partial_ids(check_conn, identity_hash)))
             if identity_hash:
                 try:
                     in_flight = int(check_conn.execute(
@@ -4954,6 +4974,7 @@ def _chunk_backfill_run(
     documents: list[tuple[str, str, int]] = []
     chunk_meta: dict[str, tuple[int, int, int, int]] = {}
     partial_messages = False
+    chunk_cache = {}
     pending = 0
     embedded = 0
     skipped: list[tuple[str, str]] = []
@@ -4983,6 +5004,7 @@ def _chunk_backfill_run(
                 "or after the lease TTL expires"
             ), reason="lease_held")
         _prepare_inflight_for_lease(conn, identity, lease)
+        _prune_chunk_partial_messages(conn, identity, lease, chunk_cache)
         captured_identity = EmbeddingIdentity.canonical(
             provider_name,
             model,
@@ -4998,13 +5020,14 @@ def _chunk_backfill_run(
             )
         if retry_uncertain:
             pending, rows, chunk_meta = _chunk_authorized_uncertain_rows(
-                conn, identity, policy, limit, **({"retry_before": time.time() - 600.0} if maintenance_slice else {}),
+                conn, identity, policy, limit, chunk_cache=chunk_cache,
+                **({"retry_before": time.time() - 600.0} if maintenance_slice else {}),
             )
             authorized_uncertain_ids = {row[0] for row in rows}
         else:
             pending, rows, chunk_meta = _chunk_pending_rows(
                 conn, identity, policy, limit, incremental=incremental,
-                record_progress=incremental,
+                record_progress=incremental, chunk_cache=chunk_cache,
             )
             authorized_uncertain_ids = set()
         if maintenance_slice:
@@ -5323,8 +5346,6 @@ def _chunk_backfill_run(
                         error = str(exc)
                         stop_reason = "privacy_refused"
                         break
-        if not lease_lost and not identity_superseded:
-            partial_messages = bool(_chunk_partial_rows(conn, identity, policy, record_progress=True))
         if (
             not incremental and not retry_uncertain and pending == embedded
             and not error and not failed and not skipped and not stop_reason
@@ -5338,6 +5359,9 @@ def _chunk_backfill_run(
         error = str(exc)
     finally:
         if store is not None:
+            if lease is not None:
+                _prune_chunk_partial_messages(conn, identity, lease, chunk_cache)
+                partial_messages = bool(_chunk_partial_ids(conn, identity))
             if lease is not None and not lease_lost and not identity_superseded:
                 try:
                     lease.release()
@@ -5350,7 +5374,7 @@ def _chunk_backfill_run(
 
     remaining, in_flight_count, uncertain_count = _chunk_backfill_remaining(
         db_path, identity, policy, pending, embedded, incremental,
-        include_boundaries=stop_reason == "process_exit",
+        include_boundaries=stop_reason == "process_exit", chunk_cache=chunk_cache,
     )
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
