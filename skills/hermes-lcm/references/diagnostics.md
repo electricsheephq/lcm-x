@@ -1,5 +1,11 @@
 # Diagnostics
 
+`lcm_recall` reports `degraded: true` with a `summary semantic index catching up`
+or `chunk semantic index catching up` reason while the last backfill pass recorded
+a backlog for that identity. A count is included when known; bounded chunk passes
+record only whether work remains. Successful catch-up clears the reason. Fresh
+ingest alone and identities with no recorded pass do not add this reason.
+
 Use read-only product tools before changing configuration or running an apply path.
 
 ## Fast path

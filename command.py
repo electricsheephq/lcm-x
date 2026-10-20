@@ -9,6 +9,7 @@ from enum import Enum
 from pathlib import Path
 import dataclasses
 import json
+import logging
 import math
 import re
 import sqlite3
@@ -3546,6 +3547,24 @@ def _summary_backfill_estimates(
     return est_tokens, est_cost_tokens, est_batches
 
 
+def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int | bool) -> None:
+    """Best-effort advisory state after publication; never block embedding work."""
+    try:
+        conn = sqlite3.connect(db_path, timeout=0.05)
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    (f"embedding_catchup:{task}:{identity}",
+                     json.dumps({"remaining": remaining, "updated_at": time.time()})),
+                )
+        finally:
+            conn.close()
+    except Exception:
+        logging.getLogger(__name__).debug("Could not record embedding catch-up state", exc_info=True)
+
+
 def _embedding_backfill_summary_run(
     config, db_path, *, apply: bool, limit: int, retry_uncertain: bool,
     include_next_hint: bool = True, expected_dtype: str | None = None, stop_event=None,
@@ -4070,6 +4089,7 @@ def _embedding_backfill_summary_run(
     remaining, in_flight_count, uncertain_count = _embedding_backfill_remaining(
         db_path, identity, pending, embedded
     )
+    _record_embedding_catchup(db_path, "summary", identity, remaining + in_flight_count)
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
         error=error,
@@ -5272,6 +5292,8 @@ def _chunk_backfill_run(
         db_path, identity, policy, pending, embedded, incremental,
         include_boundaries=stop_reason == "process_exit",
     )
+    backlog = remaining + in_flight_count
+    _record_embedding_catchup(db_path, "chunk", identity, bool(backlog) if incremental else backlog)
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
         error=error, lease_lost=lease_lost, budget_exhausted=budget_exhausted,

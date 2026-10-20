@@ -268,6 +268,13 @@ the caveat â€” the same disclosure mechanism as `lcm_grep`'s `degraded_reason` â
 so a caller never mistakes a truncated or approximate arm's contribution to the
 fused ranking for an exhaustive exact one.
 
+A backlog recorded by the last embedding backfill pass also sets `degraded: true`
+with a `summary semantic index catching up` or `chunk semantic index catching up`
+reason (and remaining rows when known). The record is per corpus and embedding
+identity; completing catch-up clears it. Ordinary ingest lag after catch-up and
+an identity with no recorded pass add no reason. Recall uses a keyed metadata
+lookup, without counting corpus rows; coverage enums still describe the kNN scan.
+
 ### Privacy-policy errors are not a degrade
 
 A missing active cloud profile or an older registered privacy revision degrades
