@@ -231,9 +231,12 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
             factor = 500 / max(1, summary["n"])
             estimates[arm] = {"usd_500": factor * summary["cost"],
                               "wall_500_s_at_observed_workers": factor * summary["wall_s"]}
+        agreement_judgments = sum(math.ceil(m.get("agreement_fraction", 0) * 500)
+                                  for m in manifests.values() if m.get("agreement_judge"))
         report["full_run_estimate"] = {"arms": estimates,
             "matrix": f"500 questions x {len(estimates)} supplied arms = {500 * len(estimates)} answers, "
-                      f"{500 * len(estimates) * len(full)} judgments; arms: " + "; ".join(estimates),
+                      f"{500 * len(estimates) * len(full)} required judgments, "
+                      f"{agreement_judgments} agreement judgments; arms: " + "; ".join(estimates),
             "total_usd": sum(e["usd_500"] for e in estimates.values()),
             "wall_s_at_observed_workers": sum(e["wall_500_s_at_observed_workers"] for e in estimates.values()),
             "assumptions": "Linear smoke extrapolation for supplied arms only, identical token counts and latency; "

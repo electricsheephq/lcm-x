@@ -17,11 +17,11 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
     __package__ = "bench.fmp"
 
-from . import datasets, delivery, judges
+from . import datasets, delivery, judges, models
 from .common import commit, digest_file, load_lcm, quiet, sha, utc, write_json
 from .models import (AGENTIC_TOOL_CAP, CLAUDE_AGREEMENT_JUDGE, CODEX_DEFAULT_JUDGE, CODEX_DEFAULT_READER,
                      CODEX_DISABLED, GLM_HOST, JUDGE_MAX_TOKENS, READER_MAX_TOKENS, READERS, REASONING, Backends, BudgetStopped,
-                     OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec, reader_spec)
+                     OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec)
 from .score import score
 from .stores import Stores
 
@@ -46,7 +46,7 @@ def parser():
     p.add_argument("--delivery", choices=("agentic", "single", "full_context"), default="agentic")
     # Default matrix is all-Codex on the ChatGPT plan; OpenRouter is an explicit opt-in
     # (`openrouter:<id>`, with --max-spend and --spend-ledger).
-    p.add_argument("--reader", type=reader_spec, default=CODEX_DEFAULT_READER, help="codex:<model>@<effort> | claude:<model> | glm:<model> | "
+    p.add_argument("--reader", type=str, default=CODEX_DEFAULT_READER, help="codex:<model>@<effort> | claude:<model> | glm:<model> | "
                    "openrouter:<id>; opt-in ids: " + ", ".join(READERS))
     p.add_argument("--judge", nargs="+", default=[CODEX_DEFAULT_JUDGE], help="judges applied to every answer")
     p.add_argument("--agreement-judge", default=CLAUDE_AGREEMENT_JUDGE, help="judge on a seeded sample; 'none' disables")
@@ -180,6 +180,11 @@ def canary(args, client, dataset_sha, q):
 def execute(args):
     if not 1 <= args.workers <= 64:
         raise ValueError("invalid worker count")
+    if args.command in ("answer", "canary"):
+        try:
+            models.reader_spec(args.reader)
+        except argparse.ArgumentTypeError as exc:
+            raise ValueError(str(exc)) from exc
     if args.command == "score":
         score(args.runs or [], args.output, args.allow_partial, args.pair_across_commits)
         return

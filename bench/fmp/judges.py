@@ -59,8 +59,9 @@ def judge(q, hypothesis, client, records=None, models=JUDGES, agreement_model=No
             try:
                 message = client.call(model, messages(q, hypothesis), records,
                                       temperature=None if q.dataset.startswith("lme") else 0)
-            except BudgetStopped:
+            except BudgetStopped as exc:
                 if model in models:
+                    exc.partial = dict(results)
                     raise
                 error = "budget_stopped"  # only the optional agreement judge can stop without voiding the row
                 break
@@ -84,6 +85,7 @@ def judge_row(row, q, client, models=JUDGES, agreement_model=None):
     records = []
     try:
         result, _ = judge(q, row["hypothesis"], client, records, models, agreement_model)
-    except BudgetStopped:
-        return {**row, "status": "not_run", "reason": "budget_stopped_at_judge", "judge_calls": records}
+    except BudgetStopped as exc:
+        return {**row, "status": "not_run", "reason": "budget_stopped_at_judge", "judge_calls": records,
+                "judges_partial": exc.partial}
     return {**row, "judges": result, "judge_calls": records}

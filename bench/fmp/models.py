@@ -162,6 +162,7 @@ CODEX_DEFAULT_READER, CODEX_DEFAULT_JUDGE = "codex:gpt-6.1-sol@high", "codex:gpt
 CLAUDE_AGREEMENT_JUDGE = "claude:claude-opus-5-5"
 # Context windows the harnesses report (codex task_started model_context_window; claude modelUsage).
 CONTEXT = {"gpt-6.1-sol": 475_000, "claude-opus-5-5": 1_000_000, "claude-fable-5-1": 1_000_000}
+GLM_CONTEXT = {"glm-5.3": 128_000}  # conservative harness admission cap, not a provider capacity claim
 # Every Codex built-in that is not the code-mode wrapper is off. Code mode stays on: in this Codex
 # it is the only route to MCP tools, and its JS runtime has no file system or imports (canary-proven).
 CODEX_DISABLED = ("shell_tool", "unified_exec", "view_image", "image_generation", "multi_agent", "multi_agent_v2",
@@ -204,7 +205,7 @@ def reader_spec(spec):
             response.raise_for_status()
             context = next((m.get("context_length") for m in response.json()["data"] if m["id"] == model), None)
         else:
-            context = 128_000 if kind == "glm" else CONTEXT.get(model)
+            context = (GLM_CONTEXT if kind == "glm" else CONTEXT).get(model)
         if not isinstance(context, int) or context <= 0:
             raise ValueError("unknown context length")
     except (ValueError, KeyError, httpx.HTTPError) as exc:
@@ -615,7 +616,7 @@ class Backends:
     def context_length(self, spec):
         backend, model = self.backend(spec)
         if parse_spec(spec)[0] == "glm":
-            return 128_000  # conservative harness admission cap, not a provider capacity claim
+            return GLM_CONTEXT[model]
         return backend.metadata[model]["context_length"] if backend is self.openrouter else CONTEXT[model]
 
     def close(self):
