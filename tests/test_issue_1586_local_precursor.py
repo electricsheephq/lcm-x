@@ -87,7 +87,16 @@ def test_profile_capture_completion_and_retirement(make_engine, monkeypatch, ret
         return {}
 
     monkeypatch.setattr(scheduler, "schedule", schedule)
-    monkeypatch.setattr(command, "_embedding_register_profiles", prepare)
+    class Model:
+        def __init__(self, config):
+            self.config = config
+
+        def warmup(self):
+            # Preparation now warms only the model; owner-tracked slices register stores.
+            prepare(self.config, self.config.database_path, allow_download=True)
+            return [1.0, 0.0]
+
+    monkeypatch.setattr(command, "resolve_provider", lambda config: Model(config))
     monkeypatch.setattr(engines, "run_incremental_embedding_pass",
                         lambda db, *_a, **_k: passes.append((Path(db).name, profile.get())))
     a, b = make_engine("a", **local_config()), make_engine("b", **local_config())
@@ -209,7 +218,8 @@ def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch)
     try:
         engine._schedule_embedding_maintenance()
         assert entered.wait(5), "explicit LOCAL did not start preparation"
-        assert engine.drain_embedding_maintenance(5)
+        # LOCAL now retains its continuation while model preparation is pending.
+        assert not engine.drain_embedding_maintenance(0)
         assert maintenance.local_model_state(engine._config) == ("preparing", "")
         text = command.handle_lcm_command("doctor", engine)
         assert "embedding_readiness: model: preparing; coverage: 0/1 summaries" in text

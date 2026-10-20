@@ -752,7 +752,9 @@ def test_embedding_worker_is_named_for_embeddings_not_rollups(caplog):
         assert started.wait(5)  # the first job is active, so the queue is empty
         assert scheduler.schedule(("db-2", "embeddings"), lambda: None)
         with caplog.at_level(logging.WARNING, logger=lcm_engine.__name__):
-            assert not scheduler.schedule(("db-3", "embeddings"), lambda: None)
+            # #1586 retains bounded overflow for automatic re-admission.
+            assert scheduler.schedule(("db-3", "embeddings"), lambda: None)
+            assert not scheduler.schedule(("db-4", "embeddings"), lambda: None)
         full = [r.getMessage() for r in caplog.records if "queue is full" in r.getMessage()]
         assert full and full[0].startswith("LCM incremental embedding maintenance queue is full")
         assert scheduler._worker.name == "lcm-embedding-maintenance"

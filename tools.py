@@ -4385,7 +4385,8 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
         coverage = f"{embedded}/{eligible} summaries"
     except sqlite3.Error as exc:
         coverage = f"unavailable ({exc})"
-    return f"model: {model}; coverage: {coverage}"
+    last, _ = command.incremental_embedding_state(engine._store.db_path)
+    return f"model: {model}; coverage: {coverage}" + (f"; maintenance: {last[1]}" if last else "")
 
 
 def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:

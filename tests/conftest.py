@@ -128,6 +128,7 @@ def _isolate_embedding_process_state(request):
             patch.setattr(provider, "_FASTEMBED_BUILD_LOCKS", {})
         if maintenance is not None:
             patch.setattr(maintenance, "_PREPARE", {})
+            patch.setattr(maintenance, "_PREPARE_RETRY", {}, raising=False)
             patch.setattr(maintenance, "_PREPARE_READY", {})
             patch.setattr(maintenance, "_PREPARE_THREAD", None)
             if request.node.path.name != "test_issue_1586_local_precursor.py":

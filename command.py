@@ -2531,6 +2531,7 @@ def _embedding_authorized_uncertain_rows(
     conn: sqlite3.Connection,
     identity_hash: str,
     limit: int,
+    retry_before: float | None = None,
 ) -> tuple[int, list[sqlite3.Row]]:
     """Select exact uncertain rows without consuming their durable markers."""
     _register_summary_has_text(conn)
@@ -2547,6 +2548,8 @@ def _embedding_authorized_uncertain_rows(
               AND m.identity_hash = f.identity_hash
         )
     """
+    if retry_before is not None:
+        where += f" AND COALESCE(f.updated_at, 0) <= {float(retry_before)}"
     total = int(
         conn.execute(
             "SELECT COUNT(*) "
@@ -3546,6 +3549,7 @@ def _summary_backfill_estimates(
 def _embedding_backfill_summary_run(
     config, db_path, *, apply: bool, limit: int, retry_uncertain: bool,
     include_next_hint: bool = True, expected_dtype: str | None = None, stop_event=None,
+    maintenance_slice: float = 0.0,
 ) -> str | dict[str, Any]:
     """Summary backfill core: refusal text, or the report fields (#1014).
 
@@ -3661,7 +3665,7 @@ def _embedding_backfill_summary_run(
 
     ttl_s = _embedding_backfill_lease_ttl_s()
     heartbeat_s = _embedding_backfill_heartbeat_s()
-    budget_s = _embedding_backfill_budget_s()
+    budget_s = min(1.0, maintenance_slice) if maintenance_slice else _embedding_backfill_budget_s()
 
     store: VectorStore | None = None
     lease: _BackfillLease | None = None
@@ -3710,7 +3714,7 @@ def _embedding_backfill_summary_run(
         # can never displace an older authorized row under --limit.
         if retry_uncertain:
             pending, rows = _embedding_authorized_uncertain_rows(
-                conn, identity, limit
+                conn, identity, limit, **({"retry_before": time.time() - 600.0} if maintenance_slice else {}),
             )
             authorized_uncertain_ids = {
                 str(row["node_id"]) for row in rows
@@ -4569,6 +4573,7 @@ def _chunk_authorized_uncertain_rows(
     identity_hash: str,
     policy: str,
     limit: int,
+    retry_before: float | None = None,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
     """Select uncertain chunk rows without consuming their durable markers."""
     rows = conn.execute(
@@ -4577,6 +4582,7 @@ def _chunk_authorized_uncertain_rows(
         FROM lcm_embedding_backfill_inflight AS f
         WHERE f.identity_hash = ?
           AND f.state = 'uncertain'
+          AND (? IS NULL OR COALESCE(f.updated_at, 0) <= ?)
           AND NOT EXISTS (
               SELECT 1 FROM lcm_chunk_meta AS m
               WHERE m.chunk_id = f.embedded_id
@@ -4585,7 +4591,7 @@ def _chunk_authorized_uncertain_rows(
         ORDER BY f.updated_at, f.embedded_id
         LIMIT ?
         """,
-        (identity_hash, max(0, int(limit))),
+        (identity_hash, retry_before, retry_before, max(0, int(limit))),
     ).fetchall()
     documents: list[tuple[str, str, int]] = []
     meta: dict[str, tuple[int, int, int, int]] = {}
@@ -4711,6 +4717,7 @@ def _chunk_backfill_run(
     config, db_path, *, apply: bool, limit: int, retry_uncertain: bool, policy: str,
     confirm_raw_text: bool = False, include_next_hint: bool = True,
     expected_dtype: str | None = None, incremental: bool = False, stop_event=None,
+    maintenance_slice: float = 0.0,
 ) -> str | dict[str, Any]:
     """Chunk backfill core: refusal text, or the report fields (#1014).
 
@@ -4868,7 +4875,7 @@ def _chunk_backfill_run(
 
     ttl_s = _embedding_backfill_lease_ttl_s()
     heartbeat_s = _embedding_backfill_heartbeat_s()
-    budget_s = _embedding_backfill_budget_s()
+    budget_s = min(1.0, maintenance_slice) if maintenance_slice else _embedding_backfill_budget_s()
 
     store: VectorStore | None = None
     lease: _BackfillLease | None = None
@@ -4918,7 +4925,7 @@ def _chunk_backfill_run(
             )
         if retry_uncertain:
             pending, rows, chunk_meta = _chunk_authorized_uncertain_rows(
-                conn, identity, policy, limit
+                conn, identity, policy, limit, **({"retry_before": time.time() - 600.0} if maintenance_slice else {}),
             )
             authorized_uncertain_ids = {row[0] for row in rows}
         else:
@@ -4927,6 +4934,8 @@ def _chunk_backfill_run(
                 record_progress=incremental,
             )
             authorized_uncertain_ids = set()
+        if maintenance_slice:
+            rows = rows[:min(limit, 32)]
         (
             documents,
             privacy_revision,
