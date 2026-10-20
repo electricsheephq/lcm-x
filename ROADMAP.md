@@ -1,8 +1,6 @@
 # LCM-X roadmap
 
-<!-- Post-GA draft: publish only after the v0.28.1 tag; fill GA date and SHA from the release. -->
-
-Status: reconciled {{GA_DATE}}. [v0.28.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1) is the current stable release, at `{{GA_SHA}}`. v0.29.0 (agentic memory, the evidence release) is next. The [vision](VISION.md) says what we are building and why. Issue [#658](https://github.com/electricsheephq/lcm-x/issues/658) is the tracker; GitHub milestones hold the issues for each release. The current stable release is recorded in [docs/project-status.md](docs/project-status.md).
+Status: reconciled 2026-10-20. [v0.28.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1) is the current stable release, at `77b2b4f795fb6a4f84c55abf6d0441da4469971e`. v0.29.0 (agentic memory, the evidence release) is next. The [vision](VISION.md) says what we are building and why. Issue [#658](https://github.com/electricsheephq/lcm-x/issues/658) is the tracker; GitHub milestones hold the issues for each release. The current stable release is recorded in [docs/project-status.md](docs/project-status.md).
 
 ## How releases work
 

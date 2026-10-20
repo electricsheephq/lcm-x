@@ -1,8 +1,6 @@
 # LCM-X project state
 
-<!-- Post-GA draft: publish only after the v0.28.1 tag; verify GA headings and fill GA date and SHA. -->
-
-This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05 and is updated at every release; the latest update is {{GA_DATE}}, for v0.28.1 GA.
+This page separates released product identity, current development source, evaluation evidence, and later roadmap work. GitHub issues, pull requests, tags, releases, and exact commit heads are the live source of truth. This snapshot was reconciled on 2026-09-05 and is updated at every release; the latest update is 2026-10-20, for v0.28.1 GA.
 
 ## Naming and compatibility
 
@@ -14,17 +12,26 @@ The project is **LCM-X — Lossless Context Memory eXtension**. From v0.24.0 (#4
 | Plugin manifest and install directory | `hermes-lcm-x` (legacy, v0.23.x and earlier: `hermes-lcm`) |
 | Runtime context engine | `lcm-x` (legacy alias `lcm` accepted with a deprecation warning) |
 | Bundled skill | `hermes-lcm` (unchanged) |
-| Latest stable | `v0.28.1@{{GA_SHA}}` (ships `hermes-lcm-x` / `lcm-x`; GA date {{GA_DATE}}) |
+| Latest stable | `v0.28.1@77b2b4f795fb6a4f84c55abf6d0441da4469971e` (ships `hermes-lcm-x` / `lcm-x`; GA date 2026-10-20) |
 
 The rename is a breaking change with a documented migration path; see the operator guide's migration section. Historical notes and upstream evidence retain the names and identities used when they were created.
 
 ## Released product and development source
 
-The latest stable release is [v0.28.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1), released {{GA_DATE}} at `{{GA_SHA}}`. The previous stable release is `v0.28.0` at `709099b3a397a7893a7abae8802ebe7bf605f79e`.
+The latest stable release is [v0.28.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1), released 2026-10-20 at `77b2b4f795fb6a4f84c55abf6d0441da4469971e`. The previous stable release is `v0.28.0` at `709099b3a397a7893a7abae8802ebe7bf605f79e`.
 
-<!-- Release manager: the GA notes were unavailable when this draft was prepared. Add the release-content summary from the final GA notes headings only; do not infer it from release-candidate notes. -->
+The [published GA notes](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1) describe session continuity, replay matching and profile settings:
 
-The source snapshot used for this draft is `main@e224094fa3f4403d11c932dbc1978e901ea720b3`. Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits. Releases with product code are rc-first under `bench/specs/RELEASE-READINESS-V1.md`.
+- **Upgrade:** Hermes 0.21.3 or newer remains required, with 0.21.5 or newer recommended; there is no SQL schema migration, but chunk gap-fill adds coverage and scan metadata. Rollback targets v0.28.0 with a SQLite-safe backup and ordered-message and summary-DAG checks; derived vectors can lag, and the inherited low-side gap after a second downgrade remains open (#1543).
+- **Data integrity and session continuity:** CLI `/new` binds the next unfiltered session after an ignored or stateless session, and middle-window replay matches literal and proven aliased placeholders without copying the durable tool window. Warm proof preserves the newest two literal results for fresh retries; the older-result sibling remains open (#1540).
+- **Recall and operator behavior:** The doctor checks integrity on a fresh connection and avoids duplicate threshold warnings, while chunk coverage is revalidated after rollback. Routed profiles use their own settings and provider keys, including in background jobs; the containment root stays process-wide.
+- **Repeated compaction and slow summarisers:** Empty leaf input distinguishes missing source rows from a contiguity cut, and retained-occurrence stops identify the blocking row. This is diagnostics, not wedge recovery.
+- **Bench and instruments:** Real-host CI covers CLI reset and filtered-session `/new`, and previous-GA differentials and rollback readers pin v0.28.0. Written rules cover inconclusive D2 results, reference-agent windows, D4 scheduling and resume, and injected-crash duplicates; these instruments change no runtime behavior.
+- **Qualification:** The notes disclose release-manager decisions departing from the written gate: Phase A passes, Phase B reports no release-blocking defects, and Phase C and the integrity-only reference-agent window are accepted with dispositions. Raw host suites and the final reference-agent read remain failed, D2 remains inconclusive, D5-B passes with dispositions, and strict #1501 acceptance fails; no aggregate Phase D pass is established, and the reference-agent compaction-activity requirement is waived.
+- **Known follow-ups:** Replay duplicates (#1674, planned for v0.28.2), host review-fork detach refusals (#1675), crash and interrupted-turn persistence shapes, coverage costs, wedge recovery and other listed continuity work remain open. Local recall and background leaf preparation remain optional and off by default, with no default change or new dependency.
+- **Benchmark boundary:** The gauntlet ran at v0.28.1-rc3; v0.28.0 provides comparison evidence rather than carry-forward qualification. Controlled latency and regression rows do not establish an aggregate gauntlet pass, reference-agent latency, strict #1501 acceptance, or runtime or customer readiness; no improvement is claimed.
+
+The source snapshot used for this reconciliation is `main@ab608663`. Stable and main are different proof planes: stable is the released product baseline, while main contains later development and documentation work. Do not describe a main checkout as the installed stable release merely because it contains stable commits. Releases with product code are rc-first under `bench/specs/RELEASE-READINESS-V1.md`.
 
 ## Reference-agent acceptance state
 

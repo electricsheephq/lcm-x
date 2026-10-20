@@ -120,11 +120,12 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 
 ## Project status
 
-<!-- Post-GA draft: publish only after the v0.28.1 tag; fill GA date and SHA. -->
 The latest stable release is
 [`v0.28.1`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1)
-at `{{GA_SHA}}`, released {{GA_DATE}} (plugin `hermes-lcm-x`, engine `lcm-x`).
-See [project status](docs/project-status.md) for the release summary and current work.
+at `77b2b4f795fb6a4f84c55abf6d0441da4469971e`, released 2026-10-20 (plugin `hermes-lcm-x`, engine `lcm-x`).
+This patch covers session continuity, replay matching, doctor diagnostics, short-turn
+coverage after rollback and routed-profile settings. See [project status](docs/project-status.md)
+for the release summary, disclosed qualification exceptions and current work.
 It requires Hermes 0.21.3 or newer (#1080). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
@@ -133,7 +134,6 @@ is an independent flag that transforms only the provider-bound copy — see
 loud privacy-policy failures on the recall path, and the rc-first release
 gauntlet, while preserving the 15-tool surface, schema-5 core store, and
 default-off experimental features.
-
 
 Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
@@ -349,7 +349,6 @@ name fails warmup and dispatch loudly). Dry-run the backfill first;
 raw-chunk cloud backfill also requires explicit raw-text consent.
 See [the operator upgrade and privacy notes](docs/operator-guide.md#upgrade-to-v0231)
 before enabling embeddings.
-
 
 ### Migrating from hermes-lcm (v0.23.x and earlier)
 
@@ -730,7 +729,6 @@ route with `LCM_ABSOLUTE_THRESHOLD_TOKENS`. The pin also applies to routes with
 a smaller window, so keep it below the smallest window you use. `/lcm status`
 reports the resolved `context_length`, `threshold_tokens` and
 `context_threshold_source` for the active route.
-
 
 If startup/status output shows a host-side compression percentage that disagrees
 with LCM, trust live LCM status after a normal message has initialized the

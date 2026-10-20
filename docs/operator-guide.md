@@ -311,8 +311,7 @@ Older `v0.23.x` stable tags report `hermes-lcm v0.23.x (15 tools)` and
 engine `lcm`. Version text alone is not release proof; verify the loaded commit
 and tag. The current stable release is
 [v0.28.1](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1)
-at `{{GA_SHA}}` ({{GA_DATE}}); see [project status](project-status.md).
-<!-- Post-GA draft: fill the identity from the published release before merging. -->
+at `77b2b4f795fb6a4f84c55abf6d0441da4469971e` (2026-10-20); see [project status](project-status.md).
 The rollback target for v0.28.1 is `v0.28.0`. Chunk gap-fill bookkeeping
 is additive metadata, not a SQL schema migration. An old reader ignores the new
 coverage and scan records; re-upgrade revalidates short-turn coverage (#1536, #1548).
