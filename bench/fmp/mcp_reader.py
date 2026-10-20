@@ -79,7 +79,7 @@ def serve(spec, stdin, stdout):
         # Read only in this trusted process, never in the model CLI or its MCP configuration.
         os.environ["VOYAGE_API_KEY"] = subprocess.run(
             ["security", "find-generic-password", "-s", "VOYAGE_API_KEY", "-w"],
-            capture_output=True, text=True, check=True).stdout.strip()
+            capture_output=True, text=True, check=True, timeout=60).stdout.strip()  # a Keychain prompt stops, never hangs
     lme = load_lcm(spec["repo"])
     question = datasets.Question(spec["question"]["qid"], spec["question"]["dataset"], "", "", "",
                                  spec["question"]["question_date"], False, [], spec["question"]["store_id"],
