@@ -165,7 +165,7 @@ def test_final_sample_failure_stops_workers(fake_rig, monkeypatch, tmp_path, ori
     stops = []
     monkeypatch.setattr(rig, "stop", lambda proc: stops.append(proc.pid))
     if original_error:
-        def broken(*args):
+        def broken(*args, **kw):
             raise ValueError("original failure")
         monkeypatch.setattr(rig, "read_progress", broken)
         with pytest.raises(ValueError, match="original failure"):

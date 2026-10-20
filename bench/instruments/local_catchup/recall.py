@@ -26,6 +26,8 @@ def honest_coverage(payload, incomplete_arms):
 
 
 def empty_arms(payload, incomplete_arms):
+    if payload.get("degraded") is not True:
+        return []
     coverage = payload.get("provenance", {}).get("coverage", {})
     reason = payload.get("degraded_reason", "")
     return [arm for arm in incomplete_arms if coverage.get(arm) == "none" and

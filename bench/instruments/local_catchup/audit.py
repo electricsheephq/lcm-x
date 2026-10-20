@@ -50,7 +50,7 @@ def audit(db, manifest):
         changed = [k for k, v in (observed | before["vectors"]).items() if now["vectors"].get(k) != v]
         for k, v in now["vectors"].items():
             observed.setdefault(k, v)
-        changed_meta = [k for k, v in before["metadata"].items() if now["metadata"].get(k) != v]
+        changed_meta = [k for k, v in (manifest.get("observed_metadata", {}) | before["metadata"]).items() if now["metadata"].get(k) != v]
         expected_ids = {f"{kind}/{manifest['identities'][task]}/{ident}"
                         for kind, task in (("chunks", "chunk"), ("leaves", "summary"))
                         for ident in manifest["expected"][kind]}
@@ -94,13 +94,17 @@ def audit(db, manifest):
 
 
 def progress(db, manifest, verify=False):
-    result = {"classes": {}, "raw_unchanged": True, "changed_vectors": [], "integrity": "not_checked"}
+    result = {"classes": {}, "raw_unchanged": True, "changed_vectors": [], "changed_metadata": [], "integrity": "not_checked"}
     with connect(db) as c:
         c.execute("BEGIN")
         if verify:
             now, before = preimage(c), manifest["preimage"]
             result.update(raw_unchanged=now["raw_digest"] == before["raw_digest"] and now["provenance"] == before["provenance"],
-                changed_vectors=[k for k, v in (manifest.get("observed_vectors", {}) | before["vectors"]).items() if now["vectors"].get(k) != v])
+                changed_vectors=[k for k, v in (manifest.get("observed_vectors", {}) | before["vectors"]).items() if now["vectors"].get(k) != v],
+                changed_metadata=[k for k, v in (manifest.get("observed_metadata", {}) | before["metadata"]).items() if now["metadata"].get(k) != v])
+            observed_meta = manifest.setdefault("observed_metadata", {})
+            for k in now["metadata"].keys() - before["metadata"].keys():
+                observed_meta.setdefault(k, now["metadata"][k])
         observed = manifest.setdefault("observed_vectors", {})
         for kind, table, key in (("chunks", "lcm_chunk_vectors", "chunk_id"), ("leaves", "lcm_embedding_vectors", "embedded_id")):
             known = dict(manifest["preimage"]["vectors"], **observed)

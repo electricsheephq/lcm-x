@@ -128,7 +128,7 @@ def run(a):
                     dump(a.out/"cross-profile.json", {"paths": foreign})
                     final, reason = "ABORTED", "cross_profile_access"
                     break
-                if not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] not in ("ok", "not_checked"):
+                if not result["raw_unchanged"] or result["changed_vectors"] or result.get("changed_metadata") or result["integrity"] not in ("ok", "not_checked"):
                     final, reason = "ABORTED", "row_or_vector_corruption"
                     break
                 fingerprint = (sum(x["covered"] for x in result["classes"].values()), str(result["scan"]))
