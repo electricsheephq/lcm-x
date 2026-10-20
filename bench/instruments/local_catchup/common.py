@@ -112,7 +112,8 @@ def guards(mod, events, generation=0):
             raise RuntimeError("foreground/download preparation forbidden")
         started = time.monotonic()
         model = original(self, allow_download=allow_download)
-        append(events, {"event": "prepared", "generation": generation, "seconds": time.monotonic()-started})
+        append(events, {"event": "prepared", "generation": generation, "seconds": time.monotonic()-started,
+                        "foreground": foreground, "at": time.perf_counter()})
         return model
     provider.FastembedProvider._construct = construct
     command = mod("command")
@@ -123,7 +124,11 @@ def guards(mod, events, generation=0):
             append(events, {"event": _name, "foreground": foreground})
             if foreground:
                 raise RuntimeError("foreground backfill forbidden")
-            return _run(*a, **kw)
+            start = time.perf_counter()
+            result = _run(*a, **kw)
+            append(events, {"event": _name, "foreground": foreground, "at": start,
+                            "end": time.perf_counter(), "embedded": result.get("embedded", 0) if isinstance(result, dict) else 0})
+            return result
         setattr(command, name, run)
 
 

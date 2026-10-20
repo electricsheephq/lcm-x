@@ -82,6 +82,9 @@ first-bind deltas must each be at most 500 ms. Wrappers observe preparation,
 backfill, embedding-thread joins and denied network attempts. ON completion
 before the trace ends invalidates catch-up evidence. At least two pairs are
 needed for judgment; short smoke blocks are INVALID.
+ON blocks also require a positive corpus covered-count delta and evidence of
+background model preparation unless already prepared at block start. Raw summaries
+record start/end counts; inactive blocks are INVALID (`on_no_catchup_activity`).
 
 Recall uses product recall defaults, a pinned query-ID manifest derived from
 corpus canaries, separate thread-owned connections, and the bgprep deterministic
@@ -93,8 +96,12 @@ missing FTS hits or undisclosed incomplete coverage fail health. ON-covered
 explicitly prepares vectors in a setup thread before measurement; this is not
 autonomous coverage evidence. Repeated canaries in small smoke stores do not
 qualify the 200-query full-size cell. Raw samples and per-block summaries persist.
+ON-catching-up requires positive coverage progress or a background backfill that
+embedded rows within the overlapping recall window. Per-recall identity counts
+exclude new trace rows; full expected-ID audits run at block start and end.
 
-Dispatch `lcmx-1586-floor.yml` manually with `lcmx_ref`, `cell`, `rows`, and
+Dispatch `lcmx-1586-floor.yml` manually with `lcmx_ref`, `host_ref`, `cell`, `rows`,
+`shape` (`short`/`mixed`), `baseline` (`empty`/`upgrade`), and
 `max_minutes` (121–330). It prepares the cache before measurement, then enters
 a cgroup v2 with MemoryMax=4 GiB and runs under `taskset -c 0,1`. The measured
 process verifies its effective cgroup and CPU list before starting. All rows are
@@ -102,5 +109,10 @@ labelled **floor surrogate**. Coverage-rate requires a backlog lasting at least
 two hours; early completion is INVALID for the sustained-rate estimate. Recall
 uses the same three states and bars. Workflow artifacts include limits, SHAs,
 summaries and raw samples; the release manager owns result-card publication.
+The host defaults to the Mac bench pin `71d34bad1045610252eda02ee79549436896e784`;
+artifacts also record `pip freeze`. Each summary's PASS/FAIL covers only its named
+shape and baseline. The floor bar is met only when every declared shape and
+baseline has a PASS row. The workflow moves its shell into the cgroup as root,
+then executes the unprivileged Python process; Python only verifies the limits.
 Neither synthetic summaries nor functional smoke establish live summary-route,
 quiet-host timing, smallest-host, release, customer, or default-flip readiness.

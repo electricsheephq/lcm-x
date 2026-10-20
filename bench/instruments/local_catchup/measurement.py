@@ -28,6 +28,7 @@ def arguments(description):
     for name, default in (("rows", 250000), ("blocks", 3), ("seed", 1586), ("samples", 600), ("queries", 200)):
         p.add_argument("--"+name, type=int, default=default)
     p.add_argument("--shape", choices=("short", "mixed"), default="short")
+    p.add_argument("--baseline", choices=("empty", "upgrade"), default="empty")
     p.add_argument("--max-seconds", type=float, default=18000)
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--label", default="Mac")
@@ -48,11 +49,11 @@ def prepare(a):
     # Isolate corpus construction too, before any product import.
     isolated(a.scratch/"builder-home", a.model_cache)
     os.environ["HOME"] = str(a.scratch/"builder-home")
-    pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", min(1000, a.rows), a.shape)
+    pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", min(1000, a.rows), a.shape, a.baseline)
     estimate = 5*(pilot["database_bytes"]+len(pilot["expected"]["chunks"])*2048)*a.rows/pilot["rows"]
     if estimate > 6*2**30:
         raise RuntimeError("estimated live stores exceed 6 GB; declare a larger runner budget first")
-    manifest = build(a.lcmx_repo, a.hermes_source, a.scratch/"baseline.db", a.rows, a.shape)
+    manifest = build(a.lcmx_repo, a.hermes_source, a.scratch/"baseline.db", a.rows, a.shape, a.baseline)
     dump(a.out/"manifest.json", manifest)
     return manifest
 
@@ -211,6 +212,21 @@ def safety(a):
             raise RuntimeError("zero progress for ten minutes while work remains")
     return {"events": "events.jsonl", "prepare_and_backfill_wrapped": True,
             "embedding_thread_join_wrapped": True, "network_denied": True, "violations": 0}
+
+
+def catchup_activity(root, start, end, coverage_start, coverage_end, require_prepared=False):
+    events = [json.loads(s) for s in (root/"events.jsonl").read_text().splitlines()] if (root/"events.jsonl").exists() else []
+    prepared = [e for e in events if e.get("event") == "prepared" and e.get("foreground") is False]
+    prior = any(e.get("at", float("inf")) <= start for e in prepared)
+    during = any(start <= e.get("at", -1) <= end for e in prepared)
+    runs = sum(e.get("event") in ("_embedding_backfill_summary_run", "_chunk_backfill_run")
+        and e.get("foreground") is False and e.get("embedded", 0) > 0
+        and start <= e.get("at", -1) <= e.get("end", -1) <= end for e in events)
+    delta = sum(coverage_end.values())-sum(coverage_start.values())
+    active = delta > 0 and (prior or during) if require_prepared else delta > 0 or runs > 0
+    return dict(coverage_start=coverage_start, coverage_end=coverage_end, coverage_delta=delta,
+        model_prepared_at_start=prior, background_prepared=during, active_backfills=runs,
+        catchup_activity=active, activity_window=dict(start=start, end=end))
 
 
 def wait_covered(a, mod, engine, manifest):

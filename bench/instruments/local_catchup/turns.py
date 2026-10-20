@@ -1,7 +1,9 @@
 """Bar 2: paired block bootstrap of host turn latency during LOCAL catch-up."""
+import time
+
 from .common import append, dump, load
 from .cpu import percentile
-from .measurement import SMOKE, arguments, bootstrap, cell, integrity, prepare, runtime, safety, trace
+from .measurement import SMOKE, arguments, bootstrap, catchup_activity, cell, integrity, prepare, runtime, safety, trace
 
 
 def paired_bar(pairs, seed=1586):
@@ -23,16 +25,26 @@ def worker(request):
             rows.append(row)
             append(a.root/"turns.jsonl", row)
         from .audit import progress
+        start = time.perf_counter()
+        initial = progress(a.db, manifest)
+        coverage.append(initial["complete"])
         def check():
             safety(a)
             coverage.append(progress(a.db, manifest)["complete"])
         trace(engine, mod, a.samples, a.seed+a.block, observe, check)
+        final = progress(a.db, manifest)
+        end = time.perf_counter()
+        activity = catchup_activity(a.root, start, end,
+            {k: v["covered"] for k, v in initial["classes"].items()},
+            {k: v["covered"] for k, v in final["classes"].items()}, require_prepared=True)
         integrity(a, manifest)
         evidence = safety(a)
         summary = dict(state="NOT_JUDGED", bind_ms=bind, samples=len(rows),
             p90={k: percentile([r[k] for r in rows], .9) for k in ("ingest_preflight_ms", "dispatch_ms")},
             compression_turns=sum(r["compression_due"] for r in rows), join_evidence=evidence,
-            catching_up=not any(coverage) if a.state == "ON" else None)
+            catching_up=not any(coverage) if a.state == "ON" else None, **activity)
+        if a.state == "ON" and not activity["catchup_activity"]:
+            summary.update(state="INVALID", reason="on_no_catchup_activity")
         dump(a.root/"raw-summary.json", summary)
     finally:
         engine.shutdown()
@@ -50,7 +62,7 @@ def main(a):
             for k in ("ingest_preflight_ms", "dispatch_ms")}
     binds = [dict(block=i, added_ms=r["ON"]["bind_ms"]-r["OFF"]["bind_ms"]) for i, r in enumerate(results)]
     valid = a.samples >= 600 and a.blocks >= 2 and all(
-        r["ON"]["catching_up"] and all(v["compression_turns"] for v in r.values()) for r in results)
+        r["ON"]["catching_up"] and r["ON"]["catchup_activity"] and all(v["compression_turns"] for v in r.values()) for r in results)
     passed = all(v["state"] == "PASS" for v in bars.values()) and all(v["added_ms"] <= 500 for v in binds)
     state = "INVALID" if a.smoke or not valid else "PASS" if passed else "FAIL"
     if state == "INVALID":
@@ -58,7 +70,8 @@ def main(a):
             bar["state"] = "NOT_JUDGED"
     dump(a.out/"summary.json", dict(state=state, label=SMOKE if a.smoke else a.label,
         blocks=results, order=order*a.blocks, seed=a.seed, bars=bars, first_bind=binds,
-        validity="600 samples/state/block, >=2 paired blocks, compaction, ON incomplete throughout"))
+        reason="on_no_catchup_activity" if any(not r["ON"]["catchup_activity"] for r in results) else None,
+        validity="600 samples/state/block, >=2 paired blocks, compaction, ON incomplete throughout with positive coverage delta and background preparation"))
 
 
 if __name__ == "__main__":

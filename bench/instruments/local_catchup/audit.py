@@ -95,6 +95,23 @@ def progress(db, manifest):
     return result
 
 
+def vector_counts(db, manifest):
+    """Cheap identity counts within the generated corpus; exclude new trace rows/leaves.
+
+    The builder allocates contiguous store/node IDs from 1. Boundary expected-ID
+    audits remain authoritative; these counts only track incompleteness in flight.
+    """
+    counts = {}
+    with connect(db) as c:
+        for kind, table, meta, key, task, scope, bound in (
+            ("chunks", "lcm_chunk_vectors", "lcm_chunk_meta", "chunk_id", "chunk", "m.store_id", manifest["rows"]),
+            ("leaves", "lcm_embedding_vectors", "lcm_embedding_meta", "embedded_id", "summary", "CAST(m.embedded_id AS INTEGER)", len(manifest["expected"]["leaves"]))):
+            counts[kind] = c.execute(f"SELECT count(*) FROM {table} v JOIN {meta} m USING ({key},identity_hash) "
+                f"WHERE v.identity_hash=? AND m.archived=0 AND length(v.vec)=? AND {scope} BETWEEN 1 AND ?",
+                (manifest["identities"][task], manifest["dim"]*4, bound)).fetchone()[0]
+    return counts
+
+
 def baseline(db, manifest):
     result = audit(db, manifest)
     with connect(db) as c:

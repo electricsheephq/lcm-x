@@ -63,13 +63,14 @@ def main():
         p.add_argument("--"+name, type=Path, required=True)
     p.add_argument("--cell", choices=("coverage-rate", "recall"), required=True)
     p.add_argument("--rows", type=int, default=250000)
+    p.add_argument("--shape", choices=("short", "mixed"), default="short")
+    p.add_argument("--baseline", choices=("empty", "upgrade"), default="empty")
     p.add_argument("--max-minutes", type=int, default=150)
     p.add_argument("--limited", action="store_true")
     a = p.parse_args()
     if sys.platform != "linux" or not 121 <= a.max_minutes <= 330:
         raise ValueError("Linux and max minutes in [121,330] required")
     if not a.limited:
-        (a.cgroup/"cgroup.procs").write_text(str(os.getpid()))
         subprocess.run(command(sys.argv[1:]), check=True, timeout=a.max_minutes*60)
         return
     a.out.mkdir(parents=True, exist_ok=False)
@@ -79,14 +80,15 @@ def main():
         subprocess.run([sys.executable, "-B", "-m", "bench.instruments.local_catchup.recall",
             "--lcmx-repo", str(a.lcmx_repo), "--hermes-source", str(a.hermes_source),
             "--scratch", str(a.scratch), "--out", str(a.out/"recall"), "--rows", str(a.rows),
-            "--model-cache", str(a.model_cache), "--label", LABEL], check=True, timeout=a.max_minutes*60)
+            "--model-cache", str(a.model_cache), "--shape", a.shape, "--baseline", a.baseline,
+            "--label", LABEL], check=True, timeout=a.max_minutes*60)
         summary = __import__("json").loads((a.out/"recall/summary.json").read_text())
     else:
         a.scratch.mkdir(parents=True, exist_ok=False)
         isolated(a.scratch/"builder-home", a.model_cache)
         os.environ["HOME"] = str(a.scratch/"builder-home")
         db = a.scratch/"store.db"
-        manifest = build(a.lcmx_repo, a.hermes_source, db, a.rows)
+        manifest = build(a.lcmx_repo, a.hermes_source, db, a.rows, a.shape, a.baseline)
         dump(a.out/"manifest.json", manifest)
         start = time.monotonic()
         measured = run(Namespace(**{**vars(a), "db": db, "manifest": a.out/"manifest.json",
@@ -95,7 +97,7 @@ def main():
             "cpu_cap": 1.5, "cpu_sustained": 10, "per_mean": .6, "per_p95": .75,
             "aggregate_mean": 7., "aggregate_p95": 8.75}))
         summary = rate(measured, time.monotonic()-start, a.rows)
-    dump(a.out/"summary.json", dict(summary, label=LABEL))
+    dump(a.out/"summary.json", dict(summary, label=LABEL, shape=a.shape, baseline=a.baseline))
 
 
 if __name__ == "__main__":

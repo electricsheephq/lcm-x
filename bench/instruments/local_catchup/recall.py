@@ -4,17 +4,17 @@ import random
 import threading
 import time
 
-from .audit import audit, progress
+from .audit import audit, vector_counts
 from .common import append, dump, load
 from .cpu import percentile
-from .measurement import SMOKE, arguments, bootstrap, cell, integrity, prepare, runtime, safety, trace, wait_covered
+from .measurement import SMOKE, arguments, bootstrap, catchup_activity, cell, integrity, prepare, runtime, safety, trace, wait_covered
 
 
 def overlapping(rows, publications):
     return [r for r in rows if any(r["start"] < p["end"] and p["start"] < r["end"] for p in publications)]
 
 
-def score(rows, publications, seed=1586):
+def score(rows, publications, seed=1586, state="OFF", activity=None):
     counted = overlapping(rows, publications)
     stats = {}
     for name, quantile, limit in (("p50", .5, 2.), ("p90", .9, 8.)):
@@ -25,8 +25,11 @@ def score(rows, publications, seed=1586):
     failures = sum(r["health"] in ("error", "timeout") or not r["fts_hits"] or not r["honest_coverage"] for r in rows)
     valid = len(counted) >= 200 and len(publications) >= 10
     passed = not failures and all(v["seconds"] <= v["limit_s"] and v["upper95_s"] <= v["limit_s"] for v in stats.values()) if counted else False
-    return dict(state="INVALID" if not valid else "PASS" if passed else "FAIL", overlapping=len(counted),
+    result = dict(state="INVALID" if not valid else "PASS" if passed else "FAIL", overlapping=len(counted),
                 publications=len(publications), failures=failures, statistics=stats, seed=seed, resamples=10000)
+    if state == "ON-catching-up" and not (activity or {}).get("catchup_activity"):
+        result.update(state="INVALID", reason="on_no_catchup_activity")
+    return result
 
 
 def worker(request):
@@ -64,7 +67,8 @@ def worker(request):
                 i = 0
                 while not halt.is_set() or i < len(pinned):
                     q = pinned[i % len(pinned)]
-                    incomplete = not progress(a.db, manifest)["complete"] if a.state != "OFF" else False
+                    before = vector_counts(a.db, manifest) if a.state != "OFF" else {}
+                    incomplete = any(before[k] < len(v) for k, v in manifest["expected"].items()) if before else False
                     start = time.perf_counter()
                     payload = json.loads(mod("tools").lcm_recall({"query": queries[q["id"]]}, engine=reader))
                     end = time.perf_counter()
@@ -74,7 +78,8 @@ def worker(request):
                         reason=payload.get("degraded_reason"), semantic_coverage=coverage,
                         fts_hits=any("fts" in h.get("arms", []) for h in payload.get("hits", [])),
                         honest_coverage=not incomplete or bool(payload.get("degraded") and payload.get("degraded_reason")),
-                        incomplete=incomplete)
+                        incomplete=incomplete, coverage_start=before,
+                        coverage_end=vector_counts(a.db, manifest) if before else {})
                     rows.append(row)
                     append(a.root/"recalls.jsonl", row)
                     i += 1
@@ -98,10 +103,16 @@ def worker(request):
         if thread.is_alive() or errors:
             raise RuntimeError(f"recall worker failure: {errors}")
         integrity(a, manifest)
-        result = score(rows, publications, a.seed)
+        final = audit(a.db, manifest)
+        dump(a.root/"final-audit.json", final)
+        counted = overlapping(rows, publications)
+        activity = catchup_activity(a.root, min(r["start"] for r in counted), max(r["end"] for r in counted),
+            min(counted, key=lambda r: r["start"])["coverage_start"],
+            max(counted, key=lambda r: r["end"])["coverage_end"]) if counted else dict(catchup_activity=False)
+        result = score(rows, publications, a.seed, a.state, activity)
         if a.smoke or a.rows < 250000 or len(pinned) < 200 or (a.state == "ON-catching-up" and not all(r["incomplete"] for r in overlapping(rows, publications))):
             result["state"] = "INVALID"
-        result.update(bind_ms=bind, safety=safety(a), queries=len(pinned))
+        result.update(bind_ms=bind, safety=safety(a), queries=len(pinned), **activity)
         dump(a.root/"raw-summary.json", result)
     finally:
         halt.set()

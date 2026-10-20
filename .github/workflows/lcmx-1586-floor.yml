@@ -11,6 +11,20 @@ on:
         required: true
         type: choice
         options: [coverage-rate, recall]
+      shape:
+        description: Declared corpus shape
+        type: choice
+        options: [short, mixed]
+        default: short
+      baseline:
+        description: Declared corpus baseline
+        type: choice
+        options: [empty, upgrade]
+        default: empty
+      host_ref:
+        description: Hermes host ref (Mac bench pin)
+        type: string
+        default: 71d34bad1045610252eda02ee79549436896e784
       rows:
         description: Eligible rows (qualification requires at least 250000)
         type: number
@@ -28,6 +42,8 @@ jobs:
     env:
       PRODUCT_REF: ${{ inputs.lcmx_ref }}
       CELL: ${{ inputs.cell }}
+      SHAPE: ${{ inputs.shape }}
+      BASELINE: ${{ inputs.baseline }}
       ROWS: ${{ inputs.rows }}
       MINUTES: ${{ inputs.max_minutes }}
       HF_HUB_DISABLE_TELEMETRY: '1'
@@ -41,7 +57,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: NousResearch/hermes-agent
-          ref: main
+          ref: ${{ inputs.host_ref }}
           path: host
       - uses: actions/setup-python@v5
         with:
@@ -53,6 +69,7 @@ jobs:
           python -c 'from fastembed import TextEmbedding; TextEmbedding("BAAI/bge-small-en-v1.5", cache_dir="model-cache", threads=2)'
           chmod -R a-w model-cache
           mkdir -p evidence
+          python -m pip freeze > evidence/pip-freeze.txt
           git -C . rev-parse HEAD > evidence/harness-sha.txt
           git -C product rev-parse HEAD > evidence/product-sha.txt
           git -C host rev-parse HEAD > evidence/host-sha.txt
@@ -60,14 +77,14 @@ jobs:
         run: |
           sudo mkdir /sys/fs/cgroup/lcmx-floor
           echo 4294967296 | sudo tee /sys/fs/cgroup/lcmx-floor/memory.max
-          sudo chown "$(id -u):$(id -g)" /sys/fs/cgroup/lcmx-floor/cgroup.procs
-          nice -n 19 python -B -m bench.instruments.local_catchup.floor \
+          echo $$ | sudo tee /sys/fs/cgroup/lcmx-floor/cgroup.procs
+          exec nice -n 19 python -B -m bench.instruments.local_catchup.floor \
             --lcmx-repo "$GITHUB_WORKSPACE/product" --hermes-source "$GITHUB_WORKSPACE/host" \
             --model-cache "$GITHUB_WORKSPACE/model-cache" --scratch "$RUNNER_TEMP/floor-scratch" \
             --out "$GITHUB_WORKSPACE/evidence/cell" --cgroup /sys/fs/cgroup/lcmx-floor \
-            --cell "$CELL" --rows "$ROWS" --max-minutes "$MINUTES"
+            --cell "$CELL" --rows "$ROWS" --shape "$SHAPE" --baseline "$BASELINE" --max-minutes "$MINUTES"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: lcmx-1586-floor-surrogate-${{ inputs.cell }}
+          name: lcmx-1586-floor-surrogate-${{ inputs.cell }}-${{ inputs.shape }}-${{ inputs.baseline }}
           path: evidence/
