@@ -120,13 +120,12 @@ copy-paste setups per agent type. Externalization and temporal rollups are on by
 
 ## Project status
 
+<!-- Post-GA draft: publish only after the v0.28.1 tag; fill GA date and SHA. -->
 The latest stable release is
-`v0.27.0@c67d7633d963a2ffd24cf90995189ee58e2f88c7` (plugin `hermes-lcm-x`, engine
-`lcm-x`; the rename shipped in v0.24.0, #471), a minor release on v0.26.2 with the
-theme summary quality: leaf summaries see the middle of long messages (#611),
-full-text recall stems its queries (#1035), and the defaults match the managed
-deployment, with a 24,000-token leaf chunk and a 2,000-token summary target
-(#1013, #1123). It requires Hermes 0.21.3 or newer (#1080). It carries
+[`v0.28.1`](https://github.com/electricsheephq/lcm-x/releases/tag/v0.28.1)
+at `{{GA_SHA}}`, released {{GA_DATE}} (plugin `hermes-lcm-x`, engine `lcm-x`).
+See [project status](docs/project-status.md) for the release summary and current work.
+It requires Hermes 0.21.3 or newer (#1080). It carries
 the v0.23.2 lossless
 default (durable sensitive-pattern redaction is opt-in; cloud-embedding privacy
 is an independent flag that transforms only the provider-bound copy — see
@@ -135,12 +134,13 @@ loud privacy-policy failures on the recall path, and the rc-first release
 gauntlet, while preserving the 15-tool surface, schema-5 core store, and
 default-off experimental features.
 
+
 Stable release identity and the continuing `main` development line are
 separate proof planes; do not describe an arbitrary `main` checkout as the
 installed stable product.
 
-The `main` line carries the forward identity `hermes-lcm-x v0.28.1` — session continuity and profile settings — which the
-`v0.28.1-rc1` tag carries first, on top of `v0.28.0` (patch releases of v0.26.x were cut from `release/v0.26.x` and carry their own identity). An identity is never a restamp of any past commit's own recorded identity
+The `main` line and v0.28.1 carry the `hermes-lcm-x v0.28.1` identity.
+An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
 The manifest declares 15 tools; runtime discovery advertises 13 by default,
 or 15 with both assertion and adaptive-retrieval flags on.
@@ -193,14 +193,14 @@ Canonical install path: clone LCM-X as a general user plugin into
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ~/.hermes/plugins/hermes-lcm-x
+  ${HOME}/.hermes/plugins/hermes-lcm-x
 ```
 
 For a profile-specific install:
 
 ```bash
 git clone https://github.com/electricsheephq/lcm-x \
-  ~/.hermes/profiles/myprofile/plugins/hermes-lcm-x
+  ${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x
 ```
 
 From an existing checkout, install a symlink:
@@ -291,13 +291,13 @@ there.
 If you cloned directly into the plugin directory:
 
 ```bash
-cd ~/.hermes/plugins/hermes-lcm-x && git pull --ff-only
+cd ${HOME}/.hermes/plugins/hermes-lcm-x && git pull --ff-only
 ```
 
 For a profile-specific install:
 
 ```bash
-cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm-x && git pull --ff-only
+cd ${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm-x && git pull --ff-only
 ```
 
 A clone from v0.23.x or earlier still lives at `plugins/hermes-lcm`. Stop
@@ -307,9 +307,9 @@ directory), then make the config change in
 before you start Hermes again:
 
 ```bash
-cd ~/.hermes/plugins/hermes-lcm && git pull --ff-only
+cd ${HOME}/.hermes/plugins/hermes-lcm && git pull --ff-only
 # profile-specific:
-cd ~/.hermes/profiles/myprofile/plugins/hermes-lcm && git pull --ff-only
+cd ${HOME}/.hermes/profiles/myprofile/plugins/hermes-lcm && git pull --ff-only
 ```
 
 If you installed a symlink from a separate checkout, update that checkout and
@@ -589,7 +589,7 @@ use the default with one WARNING per process. `/lcm doctor` shows the effective
 | `LCM_FOREGROUND_SOFT_SECONDS` | `60` | Sweep soft target, counted from `compress()` entry: after the first stored leaf or condensed node, no summariser call starts unless its recent duration says it ends by then (`0` = none; at most the hard bound) |
 | `LCM_FOREGROUND_HARD_SECONDS` | `120` | Sweep hard bound, counted from `compress()` entry: no summariser call starts unless it is expected to end, with a finalize reserve, by then, and none gets a timeout past it (`0` or invalid = `120`) |
 | `LCM_NEW_SESSION_RETAIN_DEPTH` | `2` | DAG depth retained after manual `/new` (`-1` all, `0` none) |
-| `LCM_DATABASE_PATH` | auto | SQLite database path. Empty config resolves to `HERMES_HOME/lcm.db`; plugin installs or operators may set this env var to another profile-scoped path such as `~/.hermes/hermes-lcm.db`. |
+| `LCM_DATABASE_PATH` | auto | SQLite database path. Empty config resolves to `HERMES_HOME/lcm.db`; plugin installs or operators may set this env var to another profile-scoped path such as `${HOME}/.hermes/hermes-lcm.db`. |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `24` | Minimum hours between startup FTS5 deep integrity-checks (O(index size)). `0` checks every startup; a negative value never checks on startup. Structural checks always run regardless. |
 | `LCM_ENABLE_SLASH_COMMAND` | `false` | Enable the optional `/lcm` operator command surface |
 
@@ -999,8 +999,8 @@ SQLite source example:
 
 ```bash
 python scripts/import_lossless_claw.py \
-  --source-db ~/.openclaw/path/to/lcm.db \
-  --target-db ~/.hermes/lcm.db \
+  --source-db ${HOME}/.openclaw/path/to/lcm.db \
+  --target-db ${HOME}/.hermes/lcm.db \
   --agent sammy
 ```
 
@@ -1008,8 +1008,8 @@ JSONL source example:
 
 ```bash
 python scripts/import_lossless_claw.py \
-  --source-jsonl ~/.openclaw/agents/sammy/sessions/session-a.jsonl \
-  --target-db ~/.hermes/lcm.db \
+  --source-jsonl ${HOME}/.openclaw/agents/sammy/sessions/session-a.jsonl \
+  --target-db ${HOME}/.hermes/lcm.db \
   --agent sammy \
   --json
 ```
@@ -1018,8 +1018,8 @@ For a directory of session exports:
 
 ```bash
 python scripts/import_lossless_claw.py \
-  --source-jsonl-dir ~/.openclaw/agents/sammy/sessions \
-  --target-db ~/.hermes/lcm.db \
+  --source-jsonl-dir ${HOME}/.openclaw/agents/sammy/sessions \
+  --target-db ${HOME}/.hermes/lcm.db \
   --agent sammy
 ```
 
@@ -1174,7 +1174,7 @@ See [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) for project conduct expectations
 and [SECURITY.md](SECURITY.md) for vulnerability reporting.
 See the [releases page](https://github.com/electricsheephq/lcm-x/releases),
 [tags page](https://github.com/electricsheephq/lcm-x/tags), and
-[CHANGELOG](CHANGELOG.md) for version history. `v0.27.0` is the latest stable
+[CHANGELOG](CHANGELOG.md) for version history. `v0.28.1` is the latest stable
 GitHub Release; verify its exact SHA before installation.
 
 ## License
