@@ -22,11 +22,13 @@ import re
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
 import time
 import uuid
+from unittest.mock import patch
 
 MAX_BYTES = 30 * 1024 * 1024
 MAX_SECONDS = 1800
@@ -127,6 +129,173 @@ def coding_search_response(text, user_key, top_k):
         rows.append(dict(id=digest(user_key + '\0' + line), content=content, score=1.0 / (rank + 1)))
         total += len(content)
     return {'data': rows}
+
+
+CODING_ITEM_MAX_CHARS = 10240   # grow up to a whole 10,000-char stored row plus its header
+CODING_SNAP_CHARS = 200         # how far a window edge may move to land on a line break
+# FTS message snippets wrap each match as >>>term<<< (store snippet()); summary snippets are plain
+# summary text. Only a whole pair on one line is a marker; a bare >>> or <<< is code and stays.
+_FTS_MARK = re.compile(r'>>>(\S(?:[^\n<>]{0,198}\S)?)<<<')
+_CODING_WORD = re.compile(r'\w+')
+_CODING_TERM = re.compile(r'[A-Za-z0-9_][A-Za-z0-9_.:/\\-]*[A-Za-z0-9_]')
+_CODING_STOPWORDS = frozenset(
+    'the and for with that this from into when then than have has had was were are not but '
+    'you your our its can how what why which where there their them they will would should '
+    'could does did done about after before over under also just only some any all'.split())
+
+
+def coding_hits(client, query, user_key, top_k):
+    """Observe the adapter's actual search, including recall order and stored rows.
+
+    Workers run one request at a time, so the temporary recall observer cannot
+    cross requests. The adapter still owns every retrieval argument and store.
+    """
+    import hermes_lcm.tools as tools
+    payload, stored = {}, {}
+    recall, opened = tools.lcm_recall, client._open
+
+    def observe(*args, **kwargs):
+        result = recall(*args, **kwargs)
+        payload.update(json.loads(result))
+        return result
+
+    def open_store(*args):
+        config, store, dag, vectors = opened(*args)
+        get_batch = store.get_batch
+
+        def rows(ids):
+            result = get_batch(ids)
+            stored.update(result)
+            return result
+
+        store.get_batch = rows
+        return config, store, dag, vectors
+
+    with patch.object(tools, 'lcm_recall', observe), patch.object(client, '_open', open_store):
+        client.search(query, user_key, top_k)
+    sessions = client._load_sessions(user_key)
+    hits = []
+    for hit in payload.get('hits', [])[:top_k]:
+        summary = hit.get('kind') == 'summary'
+        row = {} if summary else stored.get(hit.get('store_id'), {})
+        content = str(row.get('content') or hit.get('snippet') or '')
+        if not row.get('content') and not summary:
+            content = _FTS_MARK.sub(r'\1', content)
+        if not content.strip():
+            continue
+        session = sessions.get(str(hit.get('session_id'))) or {}
+        chunk = hit.get('chunk_span') or {}
+        start, end = chunk.get('char_start'), chunk.get('char_end')
+        span = (start, end) if (isinstance(start, int) and isinstance(end, int)
+                                and 0 <= start < end <= len(content)) else None
+        stored_id = f"summary:{hit['node_id']}" if summary and hit.get('node_id') is not None else row.get('store_id')
+        marks = [] if summary else _FTS_MARK.findall(str(hit.get('snippet') or ''))
+        hits.append(dict(content=content, stored_id=stored_id, marks=marks,
+                         role=row.get('role'), summary=summary, span=span,
+                         event_time=hit.get('event_time') or session.get('time'),
+                         trajectory=session.get('order')))
+    return hits
+
+
+def _coding_header(hit):
+    label = 'session summary' if hit['summary'] else (hit.get('role') or 'message')
+    if hit.get('trajectory'):
+        label += f" (trajectory {hit['trajectory']})"
+    return (f"[{hit['event_time']}] " if hit.get('event_time') else '') + label
+
+
+def query_span(content, query, width, strict=True):
+    """Densest width-char span of distinct query terms in content, or None.
+
+    strict keeps ASCII identifiers of 3+ chars; the relaxed pass (a fallback before
+    the row prefix) keeps any Unicode word, so short or non-ASCII matches still count."""
+    found = _CODING_TERM.findall(query) if strict else _CODING_WORD.findall(query)
+    terms = sorted({term.lower() for term in found
+                    if (3 if strict else 1) <= len(term) <= width and term.lower() not in _CODING_STOPWORDS})
+    lowered = content.lower()
+    occurrences = []
+    for index, term in enumerate(terms):
+        if strict:  # identifiers may sit inside longer names (parse in parse_rows)
+            position = lowered.find(term)
+            while position != -1 and len(occurrences) < 20000:
+                occurrences.append((position, position + len(term), index))
+                position = lowered.find(term, position + 1)
+        else:  # short words count only as whole tokens (id, not the id in valid)
+            for match in re.finditer(r'(?<!\w)' + re.escape(term) + r'(?!\w)', lowered):
+                if len(occurrences) >= 20000:
+                    break
+                occurrences.append((match.start(), match.end(), index))
+    occurrences.sort()
+    counts, weight, best, left = {}, 0, None, 0
+    for right, (_start, end, term) in enumerate(occurrences):
+        counts[term] = counts.get(term, 0) + 1
+        weight += len(terms[term]) if counts[term] == 1 else 0
+        while end - occurrences[left][0] > width:
+            gone = occurrences[left][2]
+            counts[gone] -= 1
+            weight -= len(terms[gone]) if counts[gone] == 0 else 0
+            left += 1
+        if best is None or weight > best[0]:
+            best = (weight, occurrences[left][0], max(e for _s, e, _t in occurrences[left:right + 1]))
+    return best and best[1:]
+
+
+def coding_excerpt(hit, query, budget):
+    """Render one hit in at most budget chars: provenance header, then verbatim text,
+    windowed around LCM-X's matched chunk (else the densest query terms) when long."""
+    header, content = _coding_header(hit), hit['content']
+    if len(header) + 1 + len(content) <= budget:
+        return header + '\n' + content
+    before_max = f'[... {len(content)} earlier chars omitted]\n'
+    after_max = f'\n[... {len(content)} later chars omitted]'
+    width = max(1, budget - len(header) - 1 - len(before_max) - len(after_max))
+    # LCM-X's matched chunk, then query identifiers, then the FTS-marked terms of the
+    # hit's own snippet, then any query word; the row prefix only when none is found.
+    span = (hit.get('span') or query_span(content, query, width)
+            or query_span(content, ' '.join(hit.get('marks') or ()), width, strict=False)
+            or query_span(content, query, width, strict=False) or (0, 0))
+    start = (span[0] + span[1] - width) // 2
+    start = max(0, min(start, len(content) - width))
+    end = start + width
+    if start > 0:
+        newline = content.find('\n', start, min(span[0], start + CODING_SNAP_CHARS))
+        start = newline + 1 if newline != -1 else start
+    if end < len(content):
+        newline = content.rfind('\n', max(span[1], end - CODING_SNAP_CHARS), end)
+        end = newline if newline > start else end
+    text = content[start:end]
+    if start:
+        text = f'[... {start} earlier chars omitted]\n' + text
+    if end < len(content):
+        text += f'\n[... {len(content) - end} later chars omitted]'
+    return header + '\n' + text
+
+
+def v2_search_response(hits, user_key, top_k, query=''):
+    """At most min(top_k, 10) hits and 40,000 content chars, in LCM-X rank order."""
+    chosen, seen = [], set()
+    for hit in hits:
+        stored_key = str(hit['stored_id']) if hit.get('stored_id') is not None else hit['content']
+        key = digest(user_key + '\0' + stored_key)
+        if key not in seen:
+            seen.add(key)
+            chosen.append((key, hit, len(_coding_header(hit)) + 1 + len(hit['content'])))
+        if len(chosen) >= min(top_k, CODING_TOP_K):
+            break
+    shares, total = [], 0
+    for _key, _hit, size in chosen:
+        share = min(size, CODING_ITEM_CHARS)
+        if shares and total + share > CODING_TOTAL_CHARS:
+            break
+        shares.append(share)
+        total += share
+    spare = CODING_TOTAL_CHARS - total
+    for index, (_key, _hit, size) in enumerate(chosen[:len(shares)]):
+        grow = max(0, min(spare, min(size, CODING_ITEM_MAX_CHARS) - shares[index]))
+        shares[index] += grow
+        spare -= grow
+    return {'data': [dict(id=key, content=coding_excerpt(hit, query, share), score=1.0 / (rank + 1))
+                     for rank, ((key, hit, _size), share) in enumerate(zip(chosen, shares))]}
 
 
 def fsync_dir(path):
@@ -300,9 +469,13 @@ def worker():
                 user_key = digest(body['user_id'])
                 with user_lock(root, user_key):
                     client = configure_adapter(root)
-                    response = coding_search_response if payload['search_mode'] == 'coding' else search_response
-                    result = response(client.search(body['query'], user_key, body['top_k']),
-                                      user_key, body['top_k'])
+                    if payload['search_mode'] == 'v2':
+                        result = v2_search_response(coding_hits(client, body['query'], user_key, body['top_k']),
+                                                    user_key, body['top_k'], body['query'])
+                    else:
+                        response = coding_search_response if payload['search_mode'] == 'coding' else search_response
+                        result = response(client.search(body['query'], user_key, body['top_k']),
+                                          user_key, body['top_k'])
             reply = {'status': 200, 'body': result}
         except APIError as error:
             reply = {'status': error.status, 'body': {'detail': {'reason': error.reason}}}
@@ -316,6 +489,9 @@ def run_worker(root, operation, body, deadline, search_mode='textual'):
     env = dict(os.environ)
     env.pop('AML_ADDSEARCH_TOKEN', None)
     env['PYTHONDONTWRITEBYTECODE'] = '1'
+    if search_mode == 'v2':
+        env.update(LCM_LONGMEMEVAL_FASTEMBED_CACHE=str(root / '.model-cache'),
+                   FASTEMBED_CACHE_PATH=str(root / '.model-cache'))
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         raise APIError(408, 'request deadline exceeded')
@@ -376,6 +552,8 @@ class Handler(BaseHTTPRequestHandler):
     def handle_one_request(self):
         self.started = time.monotonic()
         self.deadline = self.started + self.server.service.timeout
+        self.original_path = None
+        self.metrics = dict(top_k=None, hits=0, response_bytes=0, rows_with_newline=0)
         self.logged, self.user_hash, self.request_hash = False, None, None
         timer = threading.Timer(self.server.service.timeout, self.expire)
         timer.daemon = True
@@ -396,17 +574,71 @@ class Handler(BaseHTTPRequestHandler):
         if self.logged:
             return
         self.logged = True
+        route = self.original_path or getattr(self, 'path', '')
+        if route not in ('/aml/health', '/aml/add', '/aml/search', *self.V1_ALIASES,
+                         '/aml/v2/health', '/aml/v2/add', '/aml/v2/search'):
+            route = '<unknown>'
+        record = dict(timestamp=datetime.now(timezone.utc).isoformat(), route=route,
+                      op=route.rsplit('/', 1)[-1], status=status,
+                      ms=round((time.monotonic() - self.started) * 1000, 3),
+                      user_digest=self.user_hash, **self.metrics)
+        try:
+            with self.server.receipt_lock, open(self.server.receipts, 'ab') as receipt:
+                receipt.write(encoded(record) + b'\n')
+        except Exception as error:
+            with self.server.receipt_lock:
+                kind = (type(error).__name__, getattr(error, 'errno', None))
+                if kind not in self.server.receipt_failures:
+                    self.server.receipt_failures.add(kind)
+                    with contextlib.suppress(Exception):
+                        print('AML receipt unavailable: ' + kind[0], file=sys.stderr, flush=True)
         ms = round((time.monotonic() - self.started) * 1000, 3)
         path = getattr(self, 'path', '')
         path = path if path in ('/aml/health', '/aml/add', '/aml/search') else '<unknown>'
         method = getattr(self, 'command', '')
         method = method if method in ('GET', 'POST', 'HEAD', 'PUT', 'DELETE', 'OPTIONS', 'PATCH') else '<unknown>'
-        print(json.dumps(dict(method=method, path=path, user_hash=self.user_hash,
-                              status=status, ms=ms, request_id_hash=self.request_hash,
-                              slow=ms >= self.server.slow_seconds * 1000)), flush=True)
+        with contextlib.suppress(Exception):
+            print(json.dumps(dict(method=method, path=path, user_hash=self.user_hash,
+                                  status=status, ms=ms, request_id_hash=self.request_hash,
+                                  slow=ms >= self.server.slow_seconds * 1000)), flush=True)
+
+    def capture(self, body, response):
+        if not self.server.capture_dir:
+            return
+        try:
+            operation = self.path.rsplit('/', 1)[-1]
+            record = dict(ts=datetime.now(timezone.utc).isoformat(), op=operation,
+                          route=self.original_path, user_digest=self.user_hash)
+            if operation == 'search':
+                record.update(query=body['query'], top_k_requested=self.metrics['top_k'],
+                              returned=response['data'])
+            else:
+                record['items'] = [dict(chars=len(row['content']), sha256=digest(row['content']))
+                                   for row in body['messages']]
+            folder = Path(self.server.capture_dir)
+            with self.server.receipt_lock:
+                folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+                # Only a private directory of ours: not a link, no group or other access.
+                info = os.lstat(folder)
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    raise PermissionError('capture directory is not private')
+                # Never follow a link or wait on a FIFO; append only to a regular file.
+                with open(folder / 'capture.jsonl', 'ab',
+                          opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                                             0o600)) as capture:
+                    if not stat.S_ISREG(os.fstat(capture.fileno()).st_mode):
+                        raise PermissionError('capture target is not a regular file')
+                    os.fchmod(capture.fileno(), 0o600)
+                    capture.write(encoded(record) + b'\n')
+        except Exception as error:
+            with contextlib.suppress(Exception):
+                print('AML capture unavailable: ' + type(error).__name__, file=sys.stderr, flush=True)
 
     def respond(self, status, body):
         data = encoded(body)
+        rows = body.get('data', []) if isinstance(body, dict) else []
+        self.metrics.update(response_bytes=len(data), hits=len(rows),
+                            rows_with_newline=sum('\n' in row['content'] for row in rows))
         try:
             self.send_response(status)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
@@ -415,7 +647,10 @@ class Handler(BaseHTTPRequestHandler):
             if status == 429:
                 self.send_header('Retry-After', '60')
             self.end_headers()
-            self.wfile.write(data)
+            if self.command != 'HEAD' or self.path != '/aml/v2/health':
+                self.wfile.write(data)
+            else:
+                self.metrics['response_bytes'] = 0
         except (BrokenPipeError, ConnectionResetError, TimeoutError, OSError):
             pass
         finally:
@@ -427,7 +662,32 @@ class Handler(BaseHTTPRequestHandler):
     # AML's v0.27.0 binding uses /aml/v1/<op>; accept it as an alias of /aml/<op>.
     V1_ALIASES = {'/aml/v1/health': '/aml/health', '/aml/v1/add': '/aml/add', '/aml/v1/search': '/aml/search'}
 
+    # AML binds one endpoint per key, so a new version reuses /aml/v1/<op>. With
+    # AML_V1_ROUTES=v2 those bound paths are served by v2 (never by the frozen path).
+    V1_TO_V2 = {'/aml/v1/health': '/aml/v2/health', '/aml/v1/add': '/aml/v2/add', '/aml/v1/search': '/aml/v2/search'}
+
+    def route_v1_to_v2(self):
+        if getattr(self.server, 'v1_to_v2', False):
+            self.path = self.V1_TO_V2.get(self.path, self.path)
+
+    def do_HEAD(self):
+        self.original_path = self.path
+        self.route_v1_to_v2()
+        if self.path == '/aml/v2/health' and (self.server.v2 or self.server.v2_failed):
+            self.do_GET()
+        else:
+            self.send_error(501)
+
     def do_GET(self):
+        if self.command != 'HEAD':  # do_HEAD already kept the incoming path
+            self.original_path = self.path
+        self.route_v1_to_v2()
+        if self.server.v2_failed and self.path.startswith('/aml/v2/'):
+            self.respond(503, {'detail': {'reason': 'v2 unavailable'}})
+            return
+        if self.path == '/aml/v2/health' and self.server.v2:
+            self.respond(200, {'status': 'ok'})
+            return
         self.path = self.V1_ALIASES.get(self.path, self.path)
         if self.path == '/aml/health':
             self.respond(200, {'status': 'ok'})
@@ -435,12 +695,19 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(404, {'detail': {'reason': 'unknown endpoint'}})
 
     def do_POST(self):
+        self.original_path = self.path
+        self.route_v1_to_v2()
+        if self.server.v2_failed and self.path.startswith('/aml/v2/'):
+            self.respond(503, {'detail': {'reason': 'v2 unavailable'}})
+            return
+        v2 = self.path in ('/aml/v2/add', '/aml/v2/search') and self.server.v2 is not None
+        service = self.server.v2 if v2 else self.server.service
         self.path = self.V1_ALIASES.get(self.path, self.path)
         slot = None
         try:
-            if self.path not in ('/aml/add', '/aml/search'):
+            if not v2 and self.path not in ('/aml/add', '/aml/search'):
                 raise APIError(404, 'unknown endpoint')
-            if not authenticated(self.headers, self.server.service.token):
+            if not authenticated(self.headers, service.token):
                 raise APIError(401, 'authentication required')
             lengths = self.headers.get_all('Content-Length', [])
             if (self.headers.get('Transfer-Encoding') or len(lengths) != 1
@@ -449,9 +716,9 @@ class Handler(BaseHTTPRequestHandler):
             length = int(lengths[0])
             if length > MAX_BYTES:
                 raise APIError(413, 'request exceeds 30 MiB')
-            if not self.server.service.slots.acquire(blocking=False):
+            if not service.slots.acquire(blocking=False):
                 raise APIError(429, 'worker capacity exhausted; retry later')
-            slot = self.server.service.slots
+            slot = service.slots
             self.connection.settimeout(max(0.001, self.deadline - time.monotonic()))
             raw = self.rfile.read(length)
             if len(raw) != length:
@@ -461,12 +728,15 @@ class Handler(BaseHTTPRequestHandler):
             except (ValueError, UnicodeError, RecursionError):
                 raise APIError(400, 'invalid JSON') from None
             if isinstance(body, dict):
+                value = body.get('top_k', 100) if self.path.endswith('/search') else None
+                self.metrics['top_k'] = value if type(value) is int else None
                 self.user_hash = digest(body['user_id']) if isinstance(body.get('user_id'), str) else None
                 self.request_hash = digest(body['request_id']) if isinstance(body.get('request_id'), str) else None
             reserved_slot, slot = slot, None
-            response = self.server.service.execute(self.path.rsplit('/', 1)[1], body,
+            response = service.execute(self.path.rsplit('/', 1)[1], body,
                                                    self.deadline, reserved_slot)
             self.respond(200, response)
+            self.capture(body, response)  # after the reply, so capture can never delay it
         except APIError as error:
             self.respond(error.status, {'detail': {'reason': error.reason}})
         except (TimeoutError, OSError):
@@ -482,8 +752,14 @@ class Server(ThreadingHTTPServer):
     daemon_threads = True
     block_on_close = False
 
-    def __init__(self, service, port=8791, slow_seconds=10):
-        self.service, self.slow_seconds = service, slow_seconds
+    def __init__(self, service, port=8791, slow_seconds=10, v2=None, v2_failed=False):
+        self.service, self.slow_seconds, self.v2 = service, slow_seconds, v2
+        if v2 is not None:
+            v2.slots = service.slots  # AML_WORKERS bounds both route families together
+        self.v2_failed, self.receipt_failures = v2_failed, set()
+        self.receipts = Path(os.environ.get('AML_RECEIPTS', str(service.root / 'receipts.jsonl')))
+        self.receipt_lock = threading.Lock()
+        self.capture_dir = os.environ.get('AML_CAPTURE_DIR')
         super().__init__(('127.0.0.1', port), Handler)
 
     def handle_error(self, request, client_address):
@@ -501,6 +777,9 @@ def main():
     search_mode = os.environ.get('AML_SEARCH_MODE') or 'textual'
     if search_mode not in ('textual', 'coding'):
         parser.exit(1, 'AML_SEARCH_MODE must be textual or coding\n')
+    v1_routes = os.environ.get('AML_V1_ROUTES') or 'frozen'
+    if v1_routes not in ('frozen', 'v2') or (v1_routes == 'v2' and not os.environ.get('AML_V2_DB_ROOT')):
+        parser.exit(1, 'AML_V1_ROUTES must be frozen, or v2 with AML_V2_DB_ROOT set\n')
     local_network_only()
     os.umask(0o077)
     token = os.environ.get('AML_ADDSEARCH_TOKEN', '')
@@ -509,13 +788,41 @@ def main():
                       float(os.environ.get('AML_REQUEST_TIMEOUT_SECONDS', '1800')),
                       runner=partial(run_worker, search_mode=search_mode))
     # One server per database root; worker file locks also survive parent exit.
-    with open(root / '.server.lock', 'a') as lease:
+    with contextlib.ExitStack() as stack:
+        lease = stack.enter_context(open(root / '.server.lock', 'a'))
         fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         prune_generations(root)
         prepare_model_cache(root)
+        v2, v2_failed = None, False
+        if os.environ.get('AML_V2_DB_ROOT'):
+            try:
+                with contextlib.ExitStack() as v2stack:
+                    v2root = Path(os.environ['AML_V2_DB_ROOT']).expanduser().resolve()
+                    if v2root == root or v2root in root.parents or root in v2root.parents:
+                        raise ValueError('v1 and v2 roots must be disjoint')
+                    v2root.mkdir(parents=True, exist_ok=True)
+                    v2root.chmod(0o700)
+                    lease2 = v2stack.enter_context(open(v2root / '.server.lock', 'a'))
+                    fcntl.flock(lease2, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    prune_generations(v2root)
+                    prepare_model_cache(v2root)
+                    v2 = Service(v2root, token, int(os.environ.get('AML_WORKERS', '4')), service.timeout,
+                                 partial(run_worker, search_mode='v2'))
+                    stack.enter_context(v2stack.pop_all())
+            except Exception:
+                v2_failed = True
+                with contextlib.suppress(Exception):
+                    print('AML v2 unavailable: preparation failed', file=sys.stderr, flush=True)
+            finally:
+                os.environ.update(LCM_LONGMEMEVAL_FASTEMBED_CACHE=str(root / '.model-cache'),
+                                  FASTEMBED_CACHE_PATH=str(root / '.model-cache'))
         with Server(service, int(os.environ.get('AML_PORT', '8791')),
-                    float(os.environ.get('AML_SLOW_SECONDS', '10'))) as server:
-            print(json.dumps(dict(event='start', search_mode=search_mode)), flush=True)
+                    float(os.environ.get('AML_SLOW_SECONDS', '10')), v2=v2, v2_failed=v2_failed) as server:
+            server.v1_to_v2 = v1_routes == 'v2'
+            start = dict(event='start', search_mode=search_mode)
+            if server.v1_to_v2:
+                start['v1_routes'] = 'v2'
+            print(json.dumps(start), flush=True)
             server.serve_forever()
 
 
