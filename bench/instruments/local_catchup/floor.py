@@ -20,12 +20,13 @@ def command(arguments):
             "bench.instruments.local_catchup.floor", *arguments, "--limited"]
 
 
-def verify_limits(memory_text, affinity_text):
+def verify_limits(memory_text, affinity_text, swap_text="max"):
     memory = int(memory_text.strip()) if memory_text.strip().isdigit() else None
+    swap = int(swap_text.strip()) if swap_text.strip().isdigit() else None
     cpus = affinity_text.strip()
-    if memory != 4*2**30 or cpus not in ("0-1", "0,1"):
+    if memory != 4*2**30 or swap != 0 or cpus not in ("0-1", "0,1"):
         raise RuntimeError("floor surrogate limits did not take effect")
-    return dict(label=LABEL, memory_max_bytes=memory, cpus=cpus, verified=True)
+    return dict(label=LABEL, memory_max_bytes=memory, memory_swap_max_bytes=swap, cpus=cpus, verified=True)
 
 
 def measured_limits(cgroup):
@@ -34,7 +35,7 @@ def measured_limits(cgroup):
     if effective.resolve() != cgroup.resolve():
         raise RuntimeError("process did not enter requested cgroup")
     cpus = next(line.split(":", 1)[1].strip() for line in Path("/proc/self/status").read_text().splitlines() if line.startswith("Cpus_allowed_list:"))
-    return verify_limits((effective/"memory.max").read_text(), cpus)
+    return verify_limits((effective/"memory.max").read_text(), cpus, (effective/"memory.swap.max").read_text())
 
 
 def rate(summary, seconds, rows):

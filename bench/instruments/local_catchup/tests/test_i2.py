@@ -53,7 +53,7 @@ def test_floor_command_and_effective_limits():
     cmd = command(['--cell','recall'])
     assert cmd[:3] == ['taskset','-c','0,1']
     assert cmd[-1] == '--limited'
-    assert verify_limits('4294967296\n','0-1\n')['verified']
+    assert verify_limits('4294967296\n','0-1\n','0\n')['verified']
     for memory, cpus in [('max','0-1'),('4294967296','0-3'),('2147483648','0,1')]:
         with pytest.raises(RuntimeError):
             verify_limits(memory,cpus)

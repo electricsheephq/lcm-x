@@ -100,6 +100,7 @@ jobs:
         run: |
           sudo mkdir /sys/fs/cgroup/lcmx-floor
           echo 4294967296 | sudo tee /sys/fs/cgroup/lcmx-floor/memory.max
+          echo 0 | sudo tee /sys/fs/cgroup/lcmx-floor/memory.swap.max
           echo $$ | sudo tee /sys/fs/cgroup/lcmx-floor/cgroup.procs
           exec nice -n 19 python -B -m bench.instruments.local_catchup.floor \
             --lcmx-repo "$GITHUB_WORKSPACE/product" --hermes-source "$GITHUB_WORKSPACE/host" \
