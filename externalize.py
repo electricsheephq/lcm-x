@@ -22,6 +22,11 @@ import time
 from pathlib import Path
 from typing import Any, BinaryIO, Dict
 
+try:
+    from .config import containment_base_dir
+except ImportError:  # Standalone reliability scorer / older bench imports.
+    from config import containment_base_dir
+
 DEFAULT_LARGE_OUTPUT_DIRNAME = "lcm-large-outputs"
 _EXTERNALIZED_REF_RE = re.compile(
     r"\[(?:Externalized|GC'd externalized) (?:tool output|payload):.*?;\s*ref=([^;\]\s]+)\]"
@@ -187,7 +192,7 @@ def get_large_output_storage_dir(config, hermes_home: str = "", *, create: bool)
     if configured:
         path = Path(configured).expanduser().resolve()
         # Check containment for configured paths when LCM_HERMES_BASE_DIR is set
-        env_base = os.environ.get("LCM_HERMES_BASE_DIR")
+        env_base = containment_base_dir()
         if env_base:
             allowed_base = Path(env_base).expanduser().resolve()
             try:
@@ -209,7 +214,7 @@ def get_large_output_storage_dir(config, hermes_home: str = "", *, create: bool)
         path = base / DEFAULT_LARGE_OUTPUT_DIRNAME
         # Check containment within allowed base for default/hermes_home-based paths
         # Only enforced when LCM_HERMES_BASE_DIR is explicitly set
-        env_base = os.environ.get("LCM_HERMES_BASE_DIR")
+        env_base = containment_base_dir()
         if env_base:
             allowed_base = Path(env_base).expanduser().resolve()
             try:
@@ -1307,6 +1312,7 @@ def maybe_externalize_tool_output(
     force: bool = False,
     tool_name: str = "",
     write: bool = True,
+    create_storage: bool = True,
 ) -> Dict[str, Any] | None:
     return maybe_externalize_payload(
         content,
@@ -1319,6 +1325,7 @@ def maybe_externalize_tool_output(
         force=force,
         tool_name=tool_name,
         write=write,
+        **({} if create_storage else {"create_storage": False}),
     )
 
 
@@ -1335,8 +1342,10 @@ def maybe_externalize_payload(
     metadata: Dict[str, Any] | None = None,
     tool_name: str = "",
     write: bool = True,
+    create_storage: bool = True,
 ) -> Dict[str, Any] | None:
-    """Externalize one normalized payload if configured (``write=False``: the placeholder it would get, no file).
+    """Externalize one normalized payload if configured (``write=False``: the placeholder it would get, no file;
+    ``create_storage=False``, #787 background preparation only: no storage directory is created either).
 
     Returns a dict with a compact placeholder and the durable JSON payload path,
     or ``None`` when disabled, below threshold and not forced, or storage is
@@ -1351,7 +1360,11 @@ def maybe_externalize_payload(
         return None
 
     try:
-        storage_dir = resolve_large_output_storage_dir(config, hermes_home=hermes_home)
+        storage_dir = (
+            resolve_large_output_storage_dir(config, hermes_home=hermes_home)
+            if create_storage
+            else get_large_output_storage_dir(config, hermes_home=hermes_home, create=False)  # #787 worker
+        )
     except OSError as exc:
         logger.warning("Large payload externalization skipped (non-blocking): %s", exc)
         return None

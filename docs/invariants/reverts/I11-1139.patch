@@ -1,0 +1,12 @@
+--- a/compaction.py
++++ b/compaction.py
+@@ -1433,9 +1433,6 @@
+             sweep_target_tokens = configured_sweep_target
+         else:
+             sweep_target_tokens = int(self._config.leaf_chunk_tokens)
+-            if self.threshold_tokens > 0:
+-                # Default to one leaf budget capped at a quarter of the threshold, so a small window's prefix cannot fill it (rc3 compacted on every 32K call).
+-                sweep_target_tokens = min(sweep_target_tokens, int(self.threshold_tokens * _DEFAULT_SWEEP_TARGET_THRESHOLD_SHARE))
+         sweep_target_tokens = max(1, sweep_target_tokens)
+         sweep_summary_prefix_before = (
+             self._summary_frontier_tokens() if threshold_full_sweep_active else 0

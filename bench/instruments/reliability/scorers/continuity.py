@@ -1,4 +1,6 @@
-"""First provider request after each committed R2 compaction; diagnostic only.
+"""First provider request after each committed compaction.
+
+R2 F1-F4 remain diagnostic; score_window supplies opt-in R1 C1/full-request F4 bars.
 
 Tag presence is literal anywhere in the request, not proof of an operative
 instruction. Missing observations are unknown, never a successful check.
@@ -188,3 +190,43 @@ def score_probes(cell: dict, pairs: list, main: list[dict], observations: list[d
 
 def score_dir(cell: dict, directory: Path) -> dict:
     return score(cell, read(directory / "provider-requests.jsonl"), read(directory / "observer.jsonl"))
+
+
+def score_window(events: list[dict]) -> tuple[dict, dict, dict]:
+    """R1 ordered records, opt-in C1/F4. Final/cron passes do not count.
+
+    Each provider_request after the first committed compaction is one model
+    call; one or more commits since the previous call count once in C1's
+    numerator. Noop passes do not erase a pending commit. F4 checks the first
+    request after EVERY commit, even when several commits share a request.
+    """
+    active, pending, calls, preceded = False, 0, 0, 0
+    f4 = {"observed": 0, "present": 0, "absent": 0, "unknown": 0}
+    for e in events:
+        if e.get("final") or e.get("session_prefix", "T") != "T":
+            continue
+        if e.get("event") == "compaction" and e.get("compression_status") in ("compacted", "host_native"):
+            active = True
+            pending += 1
+        elif e.get("event") == "provider_request" and active:
+            calls += 1
+            preceded += bool(pending)
+            if pending:
+                value = (e.get("continuity") or {}).get("current_request_present")
+                f4["observed"] += pending
+                f4["present" if value is True else "absent" if value is False else "unknown"] += pending
+            pending = 0
+    f4["unknown"] += pending
+    numbers = {"C1": {"model_calls": calls, "preceded_by_compaction": preceded}, "F4": f4}
+    failed, incomplete = {}, {}
+    if preceded * 2 > calls:
+        failed["C1"] = numbers["C1"]
+    if not calls:
+        incomplete["C1"] = "no model calls after a committed compaction"
+    elif pending:  # the run ended before the call after its last commit: the ratio's denominator is incomplete
+        incomplete["C1"] = "the model call after the last committed compaction was not observed"
+    if f4["absent"]:
+        failed["F4"] = f4
+    if not f4["observed"] or f4["unknown"]:
+        incomplete["F4"] = "a compaction or its first request was not observed completely"
+    return failed, incomplete, numbers

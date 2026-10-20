@@ -1,0 +1,21 @@
+--- a/identity_anchor.py
++++ b/identity_anchor.py
+@@ -316,10 +316,6 @@
+         for idx in range(start, n if wanted else start):  # nothing stamped: only the #633 audit below
+             identity = identity_at(idx) if idx in stamps and idx not in plan["replayed"] else None
+             if identity is not None and identity[0] == "user":
+-                group = emitted_carrier(idx)  # #1000: Hermes 0.21.5 stamps the adopted carrier with its own clock;
+-                if group is not None:  # the claim is the descriptor's and the stored text's, never the stamp's
+-                    self._identity_anchor_take(idx, group, consumed, matched, plan)
+-                    continue
+                 row = self._identity_anchor_ws_row(identity, stamps[idx], [r for r, _f in by_stamp[stamps[idx]]], consumed)
+                 if row is not None:  # R1-ws: the host persisted this occurrence without its edge whitespace
+                     plan.setdefault("ws", []).append((row, identity_messages[idx]))
+@@ -330,7 +326,6 @@
+                                                shown)
+             elif idx not in stamps and idx not in plan["replayed"]:  # D-D plan (ii): H1 merged LCM's carrier
+                 group = self._identity_anchor_carrier_group(identity_messages[idx], consumed)
+-                group = group if group is not None else emitted_carrier(idx)  # #1000: a survival fit's carrier
+                 if group is not None:
+                     self._identity_anchor_take(idx, group, consumed, matched, plan)
+         for idx in sorted(plan["replayed"]):  # a replayed survival-fit projection: its stored replies follow it

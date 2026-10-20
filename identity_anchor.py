@@ -25,12 +25,23 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import sqlite3
-from collections import Counter, defaultdict, deque
+from collections import Counter, defaultdict
 from difflib import SequenceMatcher
 from typing import Any, Dict, Optional
 
+from .recognition_matching import (
+    _MAX_DECOMPOSITIONS as _MAX_DECOMPOSITIONS,
+    _DECOMPOSE_BUDGET as _DECOMPOSE_BUDGET,
+    _DECOMPOSE_MAX_PARTS as _DECOMPOSE_MAX_PARTS,
+    _MATCH_WORK_PER_ITEM as _MATCH_WORK_PER_ITEM,
+    _MATCH_WORK_FLOOR as _MATCH_WORK_FLOOR,
+    _decompositions as _decompositions,
+    _match_occurrences as _match_occurrences,
+    _reserve_shown as _reserve_shown,
+    _reroute_for_null as _reroute_for_null,
+)
+from .config import _parse_bool_env
 from .fresh_tail import tool_group_safe_end
 from .message_content import normalize_content_value, text_content_for_pattern_matching
 from .store import _normalize_observed_at
@@ -41,62 +52,12 @@ logger = logging.getLogger(__name__)
 _CARRY_PREFIX = "identity_anchor_carry"
 _RECENT_CAP = 16  # rows this process stored lately: the R5 current-turn window
 _POOL_WINDOW = 256  # store ids either side of a stamp donor searched for a composite's constituents
-_MAX_DECOMPOSITIONS = 3
-_DECOMPOSE_BUDGET = 2048  # T3: prefixes visited per decomposition (ingest thread)
-_DECOMPOSE_MAX_PARTS = 64
 _INSERT_DIFF_BUDGET = 1_000_000  # #633: old x new rows compared per insertion diff (quadratic worst case ~40 ms)
 _CARRIER_LEDGER_CAP = 256  # #1000: carrier emission keys remembered as seen / retired (process-local)
-_MATCH_WORK_PER_ITEM, _MATCH_WORK_FLOOR = 32, 4096  # matching search budget per row + occurrence + key (see below)
 
 
 def identity_anchor_enabled() -> bool:
-    return (os.environ.get("LCM_IDENTITY_ANCHOR") or "").strip().lower() not in {"0", "false", "no", "off"}
-
-
-def _decompositions(content: str, texts: set, *, partial: bool) -> Optional[list]:
-    """Ordered splits of ``content`` into ``"\\n\\n"``-joined whole ``texts`` (at least two parts).
-    ``partial`` also returns ``(parts, remainder)`` for a held prefix followed by a new remainder.
-    Stops after ``_MAX_DECOMPOSITIONS`` (the caller only needs to know whether one is unique).
-    Iterative and bounded (T3): more than ``_DECOMPOSE_BUDGET`` visited prefixes or
-    ``_DECOMPOSE_MAX_PARTS`` parts returns None, "ambiguous": the row is stored whole."""
-    out: list = []
-    by_head: dict[str, list] = defaultdict(list)
-    short = [text for text in texts if 0 < len(text) < 16]
-    for text in texts:
-        if len(text) >= 16:
-            by_head[text[:16]].append(text)
-    stack: list = []  # (pos, parts, texts left to try): the recursive walk, iteratively (T3)
-    visited = 0
-
-    def enter(pos: int, parts: list) -> bool:
-        """One walk() call: False once the budget is spent."""
-        nonlocal visited
-        if len(out) >= _MAX_DECOMPOSITIONS:
-            return True
-        visited += 1
-        if visited > _DECOMPOSE_BUDGET or len(stack) >= _DECOMPOSE_MAX_PARTS:
-            return False
-        if partial and parts and pos < len(content):
-            out.append((list(parts), content[pos:]))
-        stack.append((pos, parts, iter(by_head.get(content[pos:pos + 16], []) + short)))
-        return True
-
-    if not enter(0, []):
-        return None
-    while stack:
-        pos, parts, pending = stack[-1]
-        text = next(pending, None)
-        if text is None:
-            stack.pop()
-            continue
-        end = pos + len(text)
-        if not content.startswith(text, pos):
-            continue
-        if end == len(content) and len(parts) >= 1:
-            out.append((parts + [text], ""))
-        elif content.startswith("\n\n", end) and end + 2 < len(content) and not enter(end + 2, parts + [text]):
-            return None
-    return out
+    return _parse_bool_env("LCM_IDENTITY_ANCHOR", True, unknown=True, true_values=())
 
 
 class IdentityAnchorMixin:
@@ -223,20 +184,24 @@ class IdentityAnchorMixin:
             memo[store_id] = {form[1] for form in forms if not _lossy(form)}
         return memo[store_id]
 
-    def _identity_anchor_prematch(self, messages, identity_messages, cursor: int, audit_from: Optional[int] = None) -> Dict[str, Any]:
+    def _identity_anchor_prematch(self, messages, identity_messages, cursor: int, audit_from: Optional[int] = None,
+                                  *, accepted_prefix: int = 0) -> Dict[str, Any]:
         """Rows at or after ``cursor`` recognised as replays of stored occurrences, plus the R3
         remainders to store, the relations to record and the R5 backfills. ``audit_from``: the host
         changed its list before the cursor from there (a positional cursor no longer proves those rows
         stored): a stamped row -- or an unstamped user row (#633) -- there that no stored occurrence
-        explains moves ``plan["cursor"]`` back."""
+        explains moves ``plan["cursor"]`` back. ``accepted_prefix`` is the compaction boundary
+        already verified in this ingest call, even if the cached pre-compaction list differs."""
+        accepted_prefix = max(0, min(accepted_prefix, cursor, len(messages)))
         plan: Dict[str, Any] = {"replayed": set(), "remainders": {}, "relations": [], "carry": [], "backfill": [],
-                                "cursor": cursor}
+                                "cursor": cursor, "accepted_prefix": accepted_prefix}
         self._identity_anchor_text_memo: dict[int, set[str]] = {}
         n = len(messages)
         start = cursor if audit_from is None else max(0, min(audit_from, cursor))
         rewritten = self._identity_anchor_rewritten(messages, cursor)
         if rewritten:  # R6: a rewritten host object is examined like a new row (a merge survivor, ...)
             start = min(start, min(rewritten))
+        start = max(start, accepted_prefix)
         if not identity_anchor_enabled() or not self._session_id or start >= n:
             return plan
         stamps = {}
@@ -253,6 +218,7 @@ class IdentityAnchorMixin:
             str(self._conversation_id or ""), [str(self._session_id), *chain], sorted(wanted)
         ) if wanted else []
         self._load_host_rewrite_overrides(rows)
+        plan["stamped_users"] = {int(row["store_id"]) for row in rows if row.get("role") == "user"}
         by_stamp: dict[float, list] = defaultdict(list)
         for row in rows:
             by_stamp[float(row["observed_at"])].append((row, self._stored_row_forms(row)))
@@ -339,8 +305,31 @@ class IdentityAnchorMixin:
                     if k in plan["replayed"] or int(row["store_id"]) in consumed:
                         break
                     self._identity_anchor_take(k, [row], consumed, matched, plan)
+        for idx in range(cursor, n):  # a cold restart can have no positional prefix to audit
+            if idx in plan["replayed"] or idx not in stamps or messages[idx].get("role") != "user":
+                continue
+            copies = [row for row, forms in by_stamp.get(stamps.get(idx - 1), ())
+                      if int(row["store_id"]) not in consumed and identity_at(idx) in forms]
+            carried = self._identity_anchor_carried_stamp(messages, idx, stamps, copies, matched.get(idx - 1, ()), chain,
+                                                          distinct=_distinct_from_predecessor(identity_at, idx))
+            carried = self._identity_anchor_durable_stamp(carried, matched.get(idx - 1, ()), stamps.get(idx - 1))
+            if carried:
+                self._identity_anchor_take(idx, carried, consumed, matched, plan)
+            elif any(r["row"] is messages[idx] for r in getattr(self, "_identity_anchor_recoveries", ())):
+                # No intermediate ingest: the rewritten recovery may be after the cursor already.
+                from .reconcile import _proof_user_identity
+
+                copies = [{"store_id": entry[2]} for entry in getattr(self, "_identity_anchor_recent", ())
+                          if entry[0] in [str(self._session_id), *chain] and identity_at(idx) is not None
+                          and _proof_user_identity(entry[1]) == _proof_user_identity(identity_at(idx))
+                          and entry[2] not in consumed]
+                recovery = self._identity_anchor_recovery_stamp(messages, idx, stamps, copies, chain)
+                if recovery:
+                    plan["relations"].append(("alt_stamp", stamps[idx], recovery, None))
+                    self._identity_anchor_take(idx, recovery, consumed, matched, plan)
         if start < cursor:
-            self._identity_anchor_audit(messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan)
+            self._identity_anchor_audit(messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan,
+                                        matched)
         self._identity_anchor_tool_segments(messages, plan["cursor"], plan["replayed"], matched, plan.get("positional", ()))
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
@@ -358,21 +347,47 @@ class IdentityAnchorMixin:
         plan["matched"] = {**plan.get("matched", {}), **matched}  # read only by the v0.26.0 host-uid shadow
         return plan
 
-    def _identity_anchor_audit(self, messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan) -> None:
+    def _identity_anchor_audit(self, messages, identity_messages, cursor, start, stamps, identity_at, consumed, plan,
+                               matched) -> None:
         """Rows in ``[start, cursor)`` of a list the host changed before the cursor: a stamped host row,
-        or an unstamped user row the host inserted there (#633: a /steer row; by content alone), that
+        or an unstamped user row the host inserted there (#633: a /steer row), that
         no stored occurrence explains (key, witness, alias, or a stored copy of its content -- up to
-        edge whitespace, under another stamp or none -- in the tail of this session or a verified
-        ancestor, each copy used once) and no ignore pattern drops was never stored. The cursor moves back
+        edge whitespace, with the same stamp or a canonical host-uid binding for a NULL stamp --
+        in the tail of this session or a verified ancestor, each copy used once) and no ignore pattern drops was never stored. The cursor moves back
         to the first such row; every other row of that range stays a replay (today's positional proof)."""
         from .reconcile import _proof_user_identity
 
         span = max(64, 2 * (cursor - start))
         held: dict = defaultdict(list)
-        for session in [str(self._session_id), *self._identity_anchor_chain()]:
+        chain = self._identity_anchor_chain()
+        for session in [str(self._session_id), *chain]:
             for row in self._store.get_session_tail(session, limit=span):
                 if int(row["store_id"]) not in consumed:
                     held[_proof_user_identity(self._message_replay_identity(row, stored_row=True))].append(row)
+        bindings = None
+
+        def bound_null(idx, row):
+            # #1403: content (even unique content) cannot identify a NULL-stamp occurrence.
+            # Read only existing canonical host bindings in this verified home/lineage.
+            from .host_uid import _valid_uid
+
+            nonlocal bindings
+            uid = messages[idx].get("message_uid")
+            if not _valid_uid(uid):
+                return False
+            if bindings is None:
+                bindings = {}
+                try:
+                    lineage, _problem = self._host_uid_lineage_key()
+                    if lineage is not None:
+                        uids = {m.get("message_uid") for m in messages[start:cursor]
+                                if _valid_uid(m.get("message_uid"))}
+                        bindings = self._store.host_uid_bindings_for(lineage, uids, ("canonical",))
+                except Exception as exc:
+                    # Do not let the outer pre-match fallback restore an unproven cursor.
+                    logger.warning("LCM audit uid proof unavailable (%s); retaining unproven rows", type(exc).__name__)
+            return (int(row["store_id"]), "canonical") in bindings.get(uid, ())
+
         missed, deferred, audited = [], [], set()
         inserted = None
         for idx in range(start, cursor):
@@ -401,6 +416,25 @@ class IdentityAnchorMixin:
                 plan.setdefault("matched", {})[idx] = [ws]  # host-uid shadow only
                 plan.setdefault("ws", []).append((ws, identity_messages[idx]))
                 continue
+            previous = matched.get(idx - 1, plan.get("matched", {}).get(idx - 1, ()))
+            carried = self._identity_anchor_carried_stamp(
+                messages, idx, stamps, copies, previous, chain, distinct=_distinct_from_predecessor(identity_at, idx))
+            carried = self._identity_anchor_durable_stamp(carried, previous, stamps.get(idx - 1))
+            recovery_candidates = copies
+            if not copies and any(r["row"] is messages[idx] for r in getattr(self, "_identity_anchor_recoveries", ())):
+                # A recovery can drop more orphan followers than the audit tail holds.
+                recovery_candidates = [{"store_id": entry[2]} for entry in getattr(self, "_identity_anchor_recent", ())
+                                       if entry[0] in [str(self._session_id), *chain] and entry[2] not in consumed
+                                       and _proof_user_identity(entry[1]) == _proof_user_identity(identity)]
+            # #1328: equal content at a different known stamp is a different occurrence.
+            # A NULL copy needs independent occurrence proof before consumption or unique backfill.
+            copies = [row for row in copies if row.get("observed_at") == stamps[idx]
+                      or row.get("observed_at") is None and bound_null(idx, row)]
+            if not copies:
+                copies = carried or self._identity_anchor_recovery_stamp(
+                    messages, idx, stamps, recovery_candidates, chain)
+                if copies and not carried:
+                    plan["relations"].append(("alt_stamp", stamps[idx], copies, None))
             if copies:
                 consumed.add(int(copies[0]["store_id"]))
                 plan.setdefault("matched", {})[idx] = [copies[0]]  # host-uid shadow only
@@ -420,7 +454,8 @@ class IdentityAnchorMixin:
                         or self._matches_ignore_message_patterns(messages[idx])):
                     continue
                 key = _proof_user_identity(identity)
-                copies = [row for row in held.get(key, ()) if int(row["store_id"]) not in consumed]
+                copies = [row for row in held.get(key, ()) if int(row["store_id"]) not in consumed
+                          and (row.get("observed_at") is not None or bound_null(idx, row))]
                 if len(copies) > reserved[key]:
                     consumed.add(int(copies[-1]["store_id"]))
                     plan.setdefault("matched", {})[idx] = [copies[-1]]  # host-uid shadow only
@@ -432,6 +467,164 @@ class IdentityAnchorMixin:
             plan["replayed"].update(plan["positional"])
             logger.info("LCM identity-anchor: host changed its list before the cursor; %d unstored rows from %d: session=%s",
                         len(missed), min(missed), self._session_id)
+
+    def _identity_anchor_record_recovery(self, result, emissions) -> None:
+        """#1505: keep the actual published recovery object, never a displaced-occurrence mapping."""
+        entries = [d for d in emissions if d.get("kind") == "recovery"]
+        if len(entries) != 1:
+            return
+        idx = entries[0]["output_occurrence"]["index"]
+        row = result[idx]
+        receipt = {"row": row, "content": row["content"], "index": idx,
+                   "session": str(self._session_id), "keys": self._identity_anchor_occurrence_keys(row),
+                   "store": self._store, "home": str(self._hermes_home), "conversation": str(self._conversation_id),
+                   "generation": getattr(self, "_identity_anchor_user_generation", 0), "stamp": None, "used": False,
+                   "max_store_id": self._store.max_store_id()}  # the recovered turn was stored before its recovery
+        receipts = list(getattr(self, "_identity_anchor_recoveries", ()))
+        for previous in receipts:
+            if (previous["row"] is row or previous["store"] is self._store
+                    and previous["generation"] == receipt["generation"]):
+                previous["blocked"] = receipt["blocked"] = True
+        self._identity_anchor_recoveries = (receipts + [receipt])[-4:]
+        self._identity_anchor_recovery = receipt
+
+    @staticmethod
+    def _identity_anchor_occurrence_keys(row) -> dict:
+        # _row_id is the host's insertion address, reassigned during compaction, not an event id.
+        return {key: value for key, value in row.items()
+                if (key.endswith("_id") or key.endswith("_uid")) and key != "_row_id"}
+
+    def _identity_anchor_observe_recovery(self) -> None:
+        """Capture the emitted object's own host stamp while its generated bytes still survive."""
+        for receipt in getattr(self, "_identity_anchor_recoveries", ()):
+            if receipt.get("blocked") or receipt["used"] or receipt["stamp"] is not None:
+                continue
+            row = receipt["row"]
+            if (row.get("role") == "user" and row.get("content") == receipt["content"]
+                    and self._identity_anchor_occurrence_keys(row) == receipt["keys"]):
+                receipt["stamp"] = _normalize_observed_at(row.get("timestamp"))
+
+    def _identity_anchor_recovery_stamp(self, messages, idx, stamps, copies, chain) -> list:
+        """One live positional replacement of LCM's own recovery row; every uncertainty stores.
+
+        Equal stamps, equal normalized text, alternate stamps and copied dicts cannot stand in for
+        the exact emitted object. Only the stamp observed while its generated bytes survived proves the
+        rewrite; a stamp first seen after it could be a distinct resend, so it stores. Persist the alias
+        through the caller's plan; cold replays use R1.
+        """
+        from .reconcile import _proof_user_identity
+        from .store import _normalize_conversation_id_value
+
+        receipts = getattr(self, "_identity_anchor_recoveries", ())
+        own = [r for r in receipts if r["row"] is messages[idx]]
+        if len(own) != 1:
+            return []
+        receipt, stamp = own[0], stamps.get(idx)
+        if (receipt.get("blocked") or receipt["used"] or stamp is None
+                or receipt["store"] is not self._store or receipt["home"] != str(self._hermes_home)
+                or receipt["conversation"] != str(self._conversation_id)
+                or idx != receipt["index"] or messages[idx].get("role") != "user"
+                or self._identity_anchor_occurrence_keys(messages[idx]) != receipt["keys"]
+                or receipt["stamp"] is None or stamp != receipt["stamp"] or len(copies) != 1):
+            return []
+        scope = [str(self._session_id), *chain]
+        if receipt["session"] not in scope:
+            return []
+        store_id = int(copies[0]["store_id"])
+        if any(r.get("store_id") == store_id for r in receipts) or store_id > receipt["max_store_id"]:
+            return []
+        row = self._store.get_batch([store_id]).get(store_id)
+        conversation = _normalize_conversation_id_value(self._conversation_id)
+        if (not row or row.get("session_id") not in scope or row.get("role") != "user"
+                or _normalize_conversation_id_value(row.get("conversation_id")) != conversation
+                or row.get("observed_at") is None or row["observed_at"] == stamp
+                or _proof_user_identity(self._message_replay_identity(row, stored_row=True))
+                != _proof_user_identity(self._message_replay_identity(messages[idx], strip_carrier=False))):
+            return []
+        for session in scope:
+            followers = self._store.get_range(session, start_id=store_id + 1, limit=257,
+                                              conversation_id=conversation, include_blank_conversation=True)
+            if len(followers) == 257 or any(r.get("role") not in {"assistant", "tool"} for r in followers):
+                return []
+        receipt.update(used=True, store_id=store_id)
+        return [row]
+
+    @staticmethod
+    def _identity_anchor_carried_stamp(messages, idx, stamps, copies, previous, chain, *, distinct=False) -> list:
+        """#1501: exact adjacent occurrence proof for the host's carried predecessor stamp.
+
+        Candidates already have today's content identity, verified scope and single-consumption filter.
+        A tolerated copy keeps its stamp, so it cannot independently prove the next carried copy.
+        The host folds consecutive user content only: the predecessor and its match must be user rows,
+        the stamp must move forward, and an identical predecessor text gives no positional proof
+        (``distinct``: the caller compares both rows in the matching identity form).
+        """
+        if (idx < 1 or not distinct or not chain or messages[idx].get("message_uid") or messages[idx].get("role") != "user"
+                or len(previous) != 1 or stamps.get(idx - 1) is None or stamps.get(idx) is None
+                or stamps[idx] <= stamps[idx - 1] or messages[idx - 1].get("role") != "user"
+                or messages[idx - 1].get("content") == messages[idx].get("content")):
+            return []
+        prior = previous[0]
+        if prior.get("role") != "user" or prior.get("observed_at") != stamps[idx - 1]:
+            return []
+        return [row for row in copies if int(row["store_id"]) == int(prior["store_id"]) + 1
+                and row.get("observed_at") == stamps[idx - 1]]
+
+    def _identity_anchor_durable_stamp(self, rows, previous, stamp) -> list:
+        """#1501: the carried candidates whose own stored row holds ``stamp``, when the proven predecessor's
+        own stored row holds it too, with store-time positional-replacement provenance. A recorded
+        alternate stamp (``find_rows_by_observed_at``'s R5 projection) proves another occurrence, never
+        a carried stamp, on either row."""
+        if not rows or len(previous) != 1:
+            return []
+        prior = int(previous[0]["store_id"])
+        stored = self._store.get_batch(sorted({prior, *(int(row["store_id"]) for row in rows)}))
+        if prior not in stored or stored[prior].get("observed_at") != stamp:
+            return []
+        marked = {int(rel["store_id"]) for rel in self._store.get_message_relations(
+            [int(row["store_id"]) for row in rows], "carried_stamp")
+            if rel["related_store_id"] == prior and rel["observed_at"] == stamp}
+        return [row for row in rows if (stored.get(int(row["store_id"])) or {}).get("observed_at") == stamp
+                and int(row["store_id"]) in marked]
+
+    def _identity_anchor_mark_carried(self, messages, stored_at, plan) -> None:
+        """Record a new user row taking its absent predecessor's slot at that predecessor's stamp.
+
+        The preceding list row must still be the stored predecessor's predecessor, in this session
+        or its verified compression chain. Absence alone (trim, compaction, /new) is not proof.
+        Read stored rows right after R is stored; an R3 remainder is stored with a NULL stamp. Only a
+        predecessor the prematch's stamp lookup returned can qualify, so other rows cost no read.
+        """
+        stamped_users = plan.get("stamped_users", ())
+        candidates = {idx: store_id for idx, store_id in stored_at.items()
+                      if idx > 0 and messages[idx].get("role") == "user" and not messages[idx].get("message_uid")
+                      and store_id - 1 in stamped_users}
+        if not candidates:
+            return
+        scope = [str(self._session_id), *self._identity_anchor_chain()]
+        stored = self._store.get_batch(sorted({sid for store_id in candidates.values() for sid in (store_id - 1, store_id)}))
+        stamps = [_normalize_observed_at(message.get("timestamp")) for message in messages]
+        identities = [self._message_replay_identity(message, strip_carrier=False) for message in messages]
+        groups = []
+        for idx, store_id in candidates.items():
+            row, prior = stored.get(store_id) or {}, stored.get(store_id - 1) or {}
+            stamp = row.get("observed_at")
+            if (row.get("role") != "user" or stamp is None or prior.get("role") != "user"
+                    or prior.get("session_id") not in scope or prior.get("observed_at") != stamp):
+                continue
+            if any(at == stamp and self._anchor_row_admits(identity, prior)
+                   for at, identity in zip(stamps, identities)):
+                continue
+            predecessors = [r for session in scope
+                            for r in self._store.get_session_rows_through(session, store_id - 2, 1)]
+            before = max(predecessors, key=lambda r: int(r["store_id"]), default=None)
+            if (before is None or before.get("observed_at") is None or stamps[idx - 1] != before.get("observed_at")
+                    or self._identity_is_lcm_scaffold(messages[idx - 1])
+                    or not self._anchor_row_admits(identities[idx - 1], before)):
+                continue
+            groups.append([(store_id, "carried_stamp", store_id - 1, None, stamp)])
+        if groups:
+            self._store.add_message_relations(groups)
 
     def _identity_anchor_inserted(self, messages, start: int, cursor: int) -> set:
         """#633: indexes in ``[start, cursor)`` the host inserted into the last list LCM ingested (Hermes
@@ -847,7 +1040,7 @@ class IdentityAnchorMixin:
                 index += 1
 
     def _identity_anchor_backfill_prefix(self, messages, identity_messages, cursor: int) -> list:
-        """R5 NULL backfill for the reconciled prefix: a stamped row whose occurrence-bound mapped row
+        """R5 NULL backfill for a reconciled or same-call accepted compaction prefix: a stamped row whose occurrence-bound mapped row
         (#488 mapper) has ``observed_at`` NULL and the exact identity, when no other mapped NULL row shares
         that identity and no stored row already holds it at that stamp."""
         pairs = [(idx, _normalize_observed_at(messages[idx].get("timestamp"))) for idx in range(min(cursor, len(messages)))]
@@ -884,7 +1077,7 @@ class IdentityAnchorMixin:
     # -- R4: coverage bound to the summarizer input ----------------------------
 
     def _identity_anchor_summary_input(self, chunk, full_map, view=(), raw_chunk=(), budget=None,
-                                       accounted_ids=()) -> Optional[list]:
+                                       accounted_ids=(), copy_lookup=None) -> Optional[list]:
         """The summarizer input for ``chunk`` built TOGETHER with what each input row may claim:
         ``[(input_row, [store_id, ...]), ...]``, ``[]`` (no leaf can start), or None (today's input).
         - A live composite LCM recorded (R2 witness) claims its constituents: their text is in it.
@@ -972,7 +1165,8 @@ class IdentityAnchorMixin:
         if budget is None:
             budget = count_messages_tokens(chunk)
         return self._store_complete_input(chunk, claims, full_map, view, raw_chunk, frontier, carry,
-                                          max(budget, count_messages_tokens(chunk)), accounted_ids)
+                                          max(budget, count_messages_tokens(chunk)), accounted_ids,
+                                          copy_lookup=copy_lookup)
 
     def _identity_anchor_view_key(self, message) -> Optional[tuple]:
         """A view row's occurrence key ``(stamp, form)`` as the ingest site keys it; None for LCM's own scaffold
@@ -1035,7 +1229,7 @@ class IdentityAnchorMixin:
           row it re-flushed later before it): coverage would skip that occurrence. The chunk takes it."""
         if not chunk or len(chunk) >= len(candidates) or not identity_anchor_enabled():
             return chunk
-        full_map, self._identity_anchor_text_memo = self._current_compress_store_ids_by_message_id or {}, {}
+        full_map, self._identity_anchor_text_memo = self._compress_run.store_ids_by_message_id or {}, {}
         end = len(chunk)
         if all(self._identity_anchor_covered_view(message, full_map) for message in chunk):
             while end < len(candidates) and self._identity_anchor_covered_view(candidates[end], full_map):
@@ -1071,8 +1265,7 @@ class IdentityAnchorMixin:
             self._store.add_message_relations(groups)
         for row, message in plan.get("ws", ()) if remainder_ids is None else ():
             self._record_ws_host_rewrite(row, message)
-        for store_id, stamp in plan["backfill"] if remainder_ids is None else ():
-            self._store.backfill_observed_at(store_id, stamp)
+        self._store.backfill_observed_at_many(plan["backfill"] if remainder_ids is None else ())
         if remainder_ids is None and plan["carry"]:
             self._register_identity_anchor_carry(plan["carry"])
 
@@ -1104,7 +1297,7 @@ class IdentityAnchorMixin:
         proof)."""
         cursor = plan["cursor"]
         rewritten = [idx for idx in self._identity_anchor_rewritten(messages, cursor)
-                     if idx not in plan.get("explained", ())]
+                     if idx >= plan.get("accepted_prefix", 0) and idx not in plan.get("explained", ())]
         if not rewritten:
             return
         for idx in rewritten:  # a rewound row is a new store now; the host-uid shadow sees it via its store id
@@ -1131,172 +1324,30 @@ class IdentityAnchorMixin:
     def _identity_anchor_remember(self, stored) -> None:
         """R5 current-turn window: (session, identity, store_id, observed_at) of user rows just stored."""
         recent = list(getattr(self, "_identity_anchor_recent", ()))
+        before = len(recent)
         for identity, store_id, message in stored:
             if identity is not None and identity[0] == "user":
                 recent.append((self._session_id, identity, int(store_id), _normalize_observed_at(message.get("timestamp"))))
+        if len(recent) > before:
+            self._identity_anchor_user_generation = getattr(self, "_identity_anchor_user_generation", 0) + 1
         self._identity_anchor_recent = recent[-_RECENT_CAP:]
-
-
-def _match_occurrences(rows, keys_of, occurrences) -> dict:
-    """``{store_id: occurrence}``: a maximum matching of stored ``rows`` (store order; a row listed twice, e.g.
-    under an alternate stamp, is one row) to view ``occurrences`` ``[(occurrence, key)]`` (view order) by any key
-    of ``keys_of(row)``, each side once. A row takes its first key with a free occurrence, else an augmenting
-    path frees one; each key's rows then take its occurrences in store order <-> view order, so rows with one
-    admissible key get what an in-order walk gave them. Deterministic; O(rows + occurrences + keys) memory.
-    Rows with the same keys are one type and a search walks types, not rows. The searches of one call share a
-    work budget (key and type visits); once it is spent the remaining rows take only a free key of their own, the
-    result stays a valid deterministic matching that may fall short of maximum, and one WARNING (counts) is logged."""
-    slots: dict = defaultdict(list)
-    for occurrence, key in occurrences:
-        slots[key].append(occurrence)
-    merged: dict = {}
-    for row in rows:
-        merged.setdefault(int(row["store_id"]), set()).update(keys_of(row))
-    kinds = {sid: tuple(sorted((k for k in ks if k in slots), key=repr)) for sid, ks in merged.items()}
-    load: Counter = Counter()
-    units: dict = defaultdict(Counter)  # type -> key -> its rows on that key
-    matched: set = set()
-    movable: dict = defaultdict(dict)  # key -> multi-key types with a unit on it (ordered set); nothing else moves
-    dead: set = set()  # never an endpoint or a waypoint again (load never falls; Kuhn's lemma for failed searches)
-    budget, work, spent = _MATCH_WORK_PER_ITEM * (len(kinds) + len(occurrences) + len(slots)) + _MATCH_WORK_FLOOR, 0, False
-    for sid, own in kinds.items():
-        found = next((k for k in own if load[k] < len(slots[k])), None)
-        parent: dict = {}
-        if found is None and own and not spent:
-            queue = []
-            for k in own:
-                if k not in dead:
-                    parent[k] = (None, None)
-                    (queue.append if movable[k] else dead.add)(k)  # full with nothing that can leave: dead
-            seen: set = set()
-            for k in queue:  # BFS over keys; the queue grows while it is walked
-                gone = []
-                for kind in movable[k]:
-                    spent = work == budget
-                    if spent:
-                        break
-                    work += 1
-                    others = [other for other in kind if other != k and other not in dead]
-                    if not others:
-                        gone.append(kind)  # stuck on k for good
-                    elif kind not in seen:
-                        seen.add(kind)
-                        for other in others:
-                            if other in parent:
-                                continue
-                            spent = work == budget
-                            if spent:
-                                break
-                            work += 1
-                            parent[other] = (kind, k)
-                            if load[other] < len(slots[other]):
-                                found = other
-                                break
-                            (queue.append if movable[other] else dead.add)(other)
-                    if found is not None or spent:
-                        break
-                for kind in gone:
-                    del movable[k][kind]
-                if found is not None or spent:
-                    break
-            if found is None and not spent:
-                dead.update(parent)
-        if found is None:
-            continue
-        load[found] += 1
-        kind, previous = parent.get(found, (None, None))
-        while previous is not None:  # one unit of each type on the path moves one key along
-            units[kind][previous] -= 1
-            if not units[kind][previous]:
-                movable[previous].pop(kind, None)
-            units[kind][found] += 1
-            movable[found][kind] = None
-            found = previous
-            kind, previous = parent[found]
-        matched.add(sid)
-        units[own][found] += 1
-        if len(own) > 1:
-            movable[found][own] = None
-    given: dict = defaultdict(Counter)  # type -> key -> its rows given that key so far
-    taken: Counter = Counter()
-    result = {}
-    for sid, kind in kinds.items():  # store order: a type's rows fill its keys by units, keys in order
-        if sid in matched:
-            k = next(k for k in kind if given[kind][k] < units[kind][k])
-            given[kind][k] += 1
-            result[sid] = slots[k][taken[k]]
-            taken[k] += 1
-    if spent:
-        logger.warning("LCM identity-anchor matching spent its work budget %d: rows=%d occurrences=%d keys=%d matched=%d",
-                       budget, len(kinds), len(occurrences), len(slots), len(result))
-    return result
-
-
-def _reserve_shown(pool, forms_of, occurrences, aliases=None) -> set:
-    """B-ID-1: store ids of ``pool`` rows (store order) the host view shows as their own occurrences
-    ``[(occurrence, (stamp, form))]``. A stamped row answers only its own stamp and its recorded alias stamps
-    (``aliases``: store id -> stamps, B-ID-3), a NULL-stamped (legacy) row an unstamped occurrence. #583: then a
-    NULL row LCM stored before the host stamped it answers a stamped occurrence of its form still unmatched,
-    keyed by form alone (a row's keys are its forms, never its stamps: linear), in store order."""
-    aliases = aliases or {}
-
-    def keys_of(row) -> set:
-        stamps = {_normalize_observed_at(row.get("observed_at")), *aliases.get(int(row["store_id"]), ())}
-        return {(stamp, form) for stamp in stamps for form in forms_of(row)}
-
-    first = _match_occurrences(pool, keys_of, occurrences)
-    null = [row for row in pool if _normalize_observed_at(row.get("observed_at")) is None and int(row["store_id"]) not in first]
-    taken = set(first.values())
-    left = [(occurrence, ("null", key[1])) for occurrence, key in occurrences if key[0] is not None and occurrence not in taken]
-    reserved = set(first)
-    if null and left:  # over-reservation only stores a composite whole: duplication, never loss
-        second = _match_occurrences(null, lambda row: {("null", form) for form in forms_of(row)}, left)
-        reserved.update(second)
-        rest = [row for row in null if int(row["store_id"]) not in second]
-        if rest:
-            reserved |= _reroute_for_null(pool, rest, first, taken | set(second.values()), dict(occurrences), keys_of, forms_of)
-    return reserved
-
-
-def _reroute_for_null(pool, rest, first, taken, key_of, keys_of, forms_of) -> set:
-    """PR #590: augmentation from pass one for the NULL rows ``rest`` still unreserved. One takes an occurrence of
-    its form a stamped row holds only when that row can move to a free occurrence of another of its OWN keys, so a
-    stamped row is never unmatched. Free occurrences only fall here: a holder that cannot move never can, and
-    leaves the index after one look. Bounded like ``_match_occurrences``; a spent budget keeps what was found."""
-    free = Counter(key for occurrence, key in key_of.items() if key[0] is not None and occurrence not in taken)
-    current = {int(row["store_id"]): key_of[first[int(row["store_id"])]] for row in pool
-               if int(row["store_id"]) in first and key_of[first[int(row["store_id"])]][0] is not None}
-    holders: dict = defaultdict(deque)  # form -> stamped rows holding an occurrence of it, store order
-    rows = {int(row["store_id"]): row for row in pool}
-    for sid, key in current.items():
-        holders[key[1]].append(sid)
-    out: set = set()
-    budget, work = _MATCH_WORK_PER_ITEM * (len(pool) + len(key_of)) + _MATCH_WORK_FLOOR, 0
-    for row in rest:
-        for form in sorted(forms_of(row), key=repr):
-            queue = holders.get(form)
-            while queue and int(row["store_id"]) not in out and work < budget:
-                sid = queue.popleft()
-                work += 1
-                target = next((k for k in sorted(keys_of(rows[sid]), key=repr) if k != current[sid] and free[k] > 0), None)
-                if target is not None:  # the holder moves; this NULL row takes the occurrence it left
-                    free[target] -= 1
-                    current[sid] = target
-                    holders[target[1]].append(sid)
-                    out.add(int(row["store_id"]))
-            if int(row["store_id"]) in out:
-                break
-        if work >= budget:
-            logger.warning("LCM identity-anchor NULL re-route spent its work budget %d: rows=%d occurrences=%d reserved=%d",
-                           budget, len(pool), len(key_of), len(out))
-            break
-    return out
 
 
 def _composite_relation(group, stamp) -> list:
     """One composite relation group, keyed by the constituent whose host stamp the composite carries."""
     head = next((row for row in group if row.get("observed_at") == stamp), group[0])
     return [(int(head["store_id"]), "composite", int(row["store_id"]), ordinal, stamp) for ordinal, row in enumerate(group)]
+
+
+def _distinct_from_predecessor(identity_at, idx: int) -> bool:
+    """#1501: the view rows ``idx - 1`` and ``idx`` differ in the form occurrence matching compares
+    (edge whitespace stripped, structured content canonical); an unknown identity is never distinct."""
+    from .reconcile import _proof_user_identity
+
+    if idx < 1:
+        return False
+    previous, current = identity_at(idx - 1), identity_at(idx)
+    return previous is not None and current is not None and _proof_user_identity(previous) != _proof_user_identity(current)
 
 
 def _lossy(identity) -> bool:

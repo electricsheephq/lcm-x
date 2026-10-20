@@ -10,6 +10,7 @@ _PRESET_ENV_VARS = (
     "LCM_CONTEXT_THRESHOLD",
     "LCM_FRESH_TAIL_COUNT",
     "LCM_LEAF_CHUNK_TOKENS",
+    "LCM_LEAF_TARGET_MAX_TOKENS",
     "LCM_CONDENSATION_FANIN",
     "LCM_INCREMENTAL_MAX_DEPTH",
 )
@@ -49,12 +50,31 @@ def test_lcm_preset_show_exposes_codex_provenance_without_mutating_config(tmp_pa
 
     assert "LCM preset show" in result
     assert "preset: codex_gpt_long_context" in result
-    assert "policy_version: 1" in result
-    assert "benchmark_version: 2" in result
-    assert "scrubbed_operator_coding_tool_heavy" in result
-    assert "codex_pressure_probe:42:4:1000" in result
-    assert "score: 92.941" in result
-    assert "baseline_score: 82.941" in result
+    assert "policy_version: 2" in result
+    assert "benchmark_version: pmw-1" in result
+    assert "Track S" in result
+    assert "6 runs per arm" in result
+    assert "--turn-end-notify" in result
+    assert "evidence: v0.27.0 per-message-wait replay cell" in result and "vs 8k" in result  # names the baseline_* arm
+    assert "120 s summary timeout" in result
+    assert get_preset("codex_gpt_long_context").provenance["metric_summary"] == {
+        "compactions_per_100_messages": 20.0,
+        "baseline_compactions_per_100_messages": 87.0,
+        "mean_wait_per_message_s": 10.0,
+        "baseline_mean_wait_per_message_s": 52.4,
+        "waited_message_share": 0.20,
+        "baseline_waited_message_share": 0.85,
+        "facts_kept_cp304": 0.853,
+        "baseline_facts_kept_cp304": 0.683,
+        "summary_call_failures": 0,
+        "baseline_summary_call_failures": 124,
+        "dropped_rows": 0,
+        "baseline_dropped_rows": 47,
+    }
+    assert "compactions_per_100_messages: 20.0" in result
+    assert "baseline_compactions_per_100_messages: 87.0" in result
+    assert "facts_kept_cp304: 0.853" in result
+    assert "(unknown)" not in result.split("applies_to:")[0]
     assert "policy_path: benchmarks/policies/codex_gpt_long_context.yaml" in result
     assert "operator_config_precedence: explicit preset-managed LCM_* overrides win" in result
     assert "runtime_mutation: no" in result
@@ -70,17 +90,21 @@ def test_lcm_preset_show_exposes_spark_provenance_without_mutating_config(tmp_pa
 
     assert "LCM preset show" in result
     assert "preset: codex_spark_context" in result
-    assert "policy_version: 1" in result
-    assert "benchmark_version: 2" in result
-    assert "scrubbed_operator_chatter_repeated_compaction" in result
-    assert "spark_pressure_probe:42:4:1000" in result
-    assert "score: 92.941" in result
-    assert "baseline_score: 82.941" in result
+    assert "policy_version: 2" in result
+    assert "benchmark_version: pmw-1" in result
+    assert "Inherited long-context replay cell (#1123, #1128)" in result
+    assert "no separate 128k cell has run yet" in result
+    assert "headroom metrics are omitted" in result
+    assert "description: Provisional candidate for GPT-5.3 Codex Spark" in result
+    assert get_preset("codex_spark_context").provenance["metric_summary"] == {}
+    assert "metric_summary: (none recorded for this preset)" in result
+    assert "score: (unknown)" not in result
     assert "policy_path: benchmarks/policies/codex_spark_context.yaml" in result
     assert "large context windows near 128k tokens" in result
     assert "LCM_CONTEXT_THRESHOLD=0.75" in result
     assert "LCM_FRESH_TAIL_COUNT=16" in result
-    assert "LCM_LEAF_CHUNK_TOKENS=8000" in result
+    assert "LCM_LEAF_CHUNK_TOKENS=24000" in result
+    assert "LCM_LEAF_TARGET_MAX_TOKENS=2000" in result
     assert "runtime_mutation: no" in result
     assert before == (engine._config.context_threshold, engine._config.fresh_tail_count, engine._config.leaf_chunk_tokens)
 
@@ -120,7 +144,8 @@ def test_lcm_preset_suggest_does_not_lower_codex_gpt55_autoraised_threshold(tmp_
 
     assert "LCM_CONTEXT_THRESHOLD: keep runtime auto-raised value 0.85 (preset 0.75)" in result
     assert "LCM_FRESH_TAIL_COUNT=24" in result
-    assert "LCM_LEAF_CHUNK_TOKENS=8000" in result
+    assert "LCM_LEAF_CHUNK_TOKENS=24000" in result
+    assert "LCM_LEAF_TARGET_MAX_TOKENS=2000" in result
     context_delta = next(item for item in payload["dry_run_delta"] if item["field"] == "context_threshold")
     assert context_delta == {
         "field": "context_threshold",
@@ -143,7 +168,8 @@ def test_lcm_preset_suggest_reports_spark_for_128k_context_window(tmp_path, monk
     assert "match_confidence: context-only" in result
     assert "LCM_CONTEXT_THRESHOLD=0.75" in result
     assert "LCM_FRESH_TAIL_COUNT=16" in result
-    assert "LCM_LEAF_CHUNK_TOKENS=8000" in result
+    assert "LCM_LEAF_CHUNK_TOKENS=24000" in result
+    assert "LCM_LEAF_TARGET_MAX_TOKENS=2000" in result
     assert "note: suggestion only; no live config was changed" in result
 
 
@@ -163,7 +189,10 @@ def test_lcm_preset_suggest_reports_benchmark_backed_route_confidence_when_host_
     assert "match_confidence: benchmark-backed-route" in result
     assert "provider=openai-codex; model=gpt-5.3-codex-spark" in result
     assert payload["match_confidence"] == "benchmark-backed-route"
-    assert any("benchmark evidence: score=92.941" in reason for reason in payload["confidence_reasons"])
+    assert any(
+        "benchmark evidence: inherited 24k chunk; no separate 128k cell" in reason
+        for reason in payload["confidence_reasons"]
+    )
 
 
 def test_lcm_preset_suggest_keeps_non_spark_gpt5_128k_context_only(tmp_path, monkeypatch):
@@ -225,8 +254,9 @@ def test_lcm_preset_apply_requires_dry_run_and_does_not_mutate_config(tmp_path, 
     assert "would_set:" in dry_run
     assert "LCM_CONTEXT_THRESHOLD=0.75" in dry_run
     assert "LCM_FRESH_TAIL_COUNT=24" in dry_run
-    assert "LCM_LEAF_CHUNK_TOKENS=8000" in dry_run
-    assert "unsupported_runtime_fields: target_after_compaction=0.55" in dry_run
+    assert "LCM_LEAF_CHUNK_TOKENS=24000" in dry_run
+    assert "LCM_LEAF_TARGET_MAX_TOKENS=2000" in dry_run
+    assert "unsupported_runtime_fields: (none)" in dry_run
     assert "note: no live config was changed" in dry_run
     assert before == (engine._config.context_threshold, engine._config.fresh_tail_count, engine._config.leaf_chunk_tokens)
 
@@ -243,8 +273,9 @@ def test_lcm_preset_apply_spark_dry_run_uses_benchmarked_128k_values(tmp_path, m
     assert "preset: codex_spark_context" in result
     assert "LCM_CONTEXT_THRESHOLD=0.75" in result
     assert "LCM_FRESH_TAIL_COUNT=16" in result
-    assert "LCM_LEAF_CHUNK_TOKENS=8000" in result
-    assert "unsupported_runtime_fields: target_after_compaction=0.55" in result
+    assert "LCM_LEAF_CHUNK_TOKENS=24000" in result
+    assert "LCM_LEAF_TARGET_MAX_TOKENS=2000" in result
+    assert "unsupported_runtime_fields: (none)" in result
     assert before == (engine._config.context_threshold, engine._config.fresh_tail_count, engine._config.leaf_chunk_tokens)
 
 
@@ -257,9 +288,23 @@ def test_lcm_preset_apply_dry_run_keeps_explicit_managed_env_values(tmp_path, mo
     result = handle_lcm_command("preset apply codex_gpt_long_context --dry-run", engine)
 
     assert "status: dry-run" in result
-    assert "LCM_LEAF_CHUNK_TOKENS: keep explicit value 12000 (preset 8000)" in result
+    assert "LCM_LEAF_CHUNK_TOKENS: keep explicit value 12000 (preset 24000)" in result
     assert "LCM_FRESH_TAIL_COUNT=24" in result
     assert engine._config.leaf_chunk_tokens == 12_000
+
+
+def test_lcm_preset_apply_dry_run_keeps_explicit_summary_cap(tmp_path, monkeypatch):
+    _clear_preset_env(monkeypatch)
+    monkeypatch.setenv("LCM_LEAF_TARGET_MAX_TOKENS", "12000")
+    engine = _engine(tmp_path)
+    engine._config.leaf_target_max_tokens = 12_000
+
+    result = handle_lcm_command("preset apply codex_gpt_long_context --dry-run", engine)
+
+    assert "status: dry-run" in result
+    assert "LCM_LEAF_TARGET_MAX_TOKENS: keep explicit value 12000 (preset 2000)" in result
+    assert "LCM_LEAF_TARGET_MAX_TOKENS=2000" not in result
+    assert engine._config.leaf_target_max_tokens == 12_000
 
 
 def test_lcm_preset_dry_run_does_not_honor_invalid_env_overrides(tmp_path, monkeypatch):

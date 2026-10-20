@@ -285,7 +285,7 @@ def patch_engine(agent):
         try:
             secs = elapsed(started)
             _p8_pin(result)
-            status = getattr(self, "_last_compression_status", None)
+            status = getattr(self, "last_compression_status", getattr(self, "_last_compression_status", None))
             cover = store_cover()  # leaves written by this call and the stored rows they newly cover (hidden or host)
             delta = [None if a is None or b is None else b - a for a, b in zip(cover0, cover)]
             counters["compactions"].append({"turn": cur["turn"], **list_counts(given, result), "status": status,
@@ -312,7 +312,7 @@ def patch_engine(agent):
                      if fitted else None, compacted_reply_tags=tags)
             event(turn=cur["turn"], event="compaction", session=getattr(self, "_session_id", None), final=cur["final"],
                   session_prefix=cur["prefix"], compression_status=status,
-                  noop_reason=getattr(self, "_last_compression_noop_reason", None),
+                  noop_reason=getattr(self, "last_compression_noop_reason", getattr(self, "_last_compression_noop_reason", None)),
                   depth0_nodes=depth0() if status == "compacted" else None, rejection=_r1.rejection(self),
                   native_attempts=cur["native"])
         except Exception as exc:
@@ -431,7 +431,7 @@ def final_attempt(agent, entry, run, status_of):
     finally:
         rec["engine_calls"] = getattr(engine, "_probe_calls", 0) - calls0
         rec["engine_status"] = getattr(engine, "_probe_status", None) if rec["engine_calls"] else None
-        rec["noop_reason"] = getattr(engine, "_last_compression_noop_reason", None)
+        rec["noop_reason"] = getattr(engine, "last_compression_noop_reason", getattr(engine, "_last_compression_noop_reason", None))
         rec["rejection"] = _r1.rejection(engine)
         note("final_attempt", **rec)
         snapshot()

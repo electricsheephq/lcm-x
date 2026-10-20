@@ -230,7 +230,7 @@ def test_positive_control_same_harness_resumes(tmp_path, monkeypatch):
     today = _control_run(tmp_path / "today", monkeypatch, lambda engine, replay: None, resume=False)
     assert fixed["resumed"] == [110]
     assert (fixed["status"], fixed["calls"], fixed["rows"], fixed["duplicates"]) == ("compacted", 1, 142, 0)
-    assert (today["status"], today["calls"], today["rows"]) == ("error", 2, 142)
+    assert (today["status"], today["calls"], today["rows"]) == ("sanitized", 1, 142)
 
 
 # -- a cancel between leaf passes: the retry summarizes only the remainder ---------------------

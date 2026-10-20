@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field as dataclass_field
-import os
 from typing import Any, Mapping
 
-from .config import ENV_FIELD_SPECS
+from .config import ENV_FIELD_SPECS, lcm_env
 
 
 @dataclass(frozen=True)
@@ -40,6 +39,7 @@ _PRESET_FIELDS = (
     "context_threshold",
     "fresh_tail_count",
     "leaf_chunk_tokens",
+    "leaf_target_max_tokens",
     "condensation_fanin",
     "incremental_max_depth",
 )
@@ -52,41 +52,42 @@ _CODEX_GPT_LONG_CONTEXT = LCMPreset(
     family="GPT/Codex long-context",
     description="Benchmark-backed candidate for GPT/Codex-style long-context routes.",
     policy_path="benchmarks/policies/codex_gpt_long_context.yaml",
-    policy_version="1",
+    policy_version="2",
     runtime_env={
         "context_threshold": 0.75,
         "fresh_tail_count": 24,
-        "leaf_chunk_tokens": 8_000,
+        "leaf_chunk_tokens": 24_000,
+        "leaf_target_max_tokens": 2_000,
     },
-    unsupported_runtime_fields={
-        "target_after_compaction": 0.55,
-    },
+    unsupported_runtime_fields={},
     applies_to=(
         "Codex/OpenAI-style long-context routes",
         "large context windows near 272k tokens",
         "workloads where repeated compaction risk matters more than keeping a 64-message fresh tail",
     ),
     provenance={
-        "benchmark_version": "2",
+        "benchmark_version": "pmw-1",
         "fixture_suite": [
-            "long_history_canaries",
-            "repeated_compaction_chatter",
-            "summary_timeout_probe",
-            "summary_refusal_probe",
-            "scrubbed_operator_coding_tool_heavy",
-            "scrubbed_operator_chatter_repeated_compaction",
-            "codex_pressure_probe:42:4:1000",
-            "spark_pressure_probe:42:4:1000",
+            "Track S",
+            "Sol summary route",
+            "--turn-end-notify",
+            "6 runs per arm",
         ],
         "metric_summary": {
-            "score": 92.941,
-            "baseline_score": 82.941,
-            "retrieval_canary_recall": 1.0,
-            "baseline_repeated_compaction_risk_count": 4,
-            "candidate_repeated_compaction_risk_count": 0,
-            "candidate_min_post_compaction_headroom_tokens": 89_288,
+            "compactions_per_100_messages": 20.0,
+            "baseline_compactions_per_100_messages": 87.0,
+            "mean_wait_per_message_s": 10.0,
+            "baseline_mean_wait_per_message_s": 52.4,
+            "waited_message_share": 0.20,
+            "baseline_waited_message_share": 0.85,
+            "facts_kept_cp304": 0.853,
+            "baseline_facts_kept_cp304": 0.683,
+            "summary_call_failures": 0,
+            "baseline_summary_call_failures": 124,
+            "dropped_rows": 0,
+            "baseline_dropped_rows": 47,
         },
-        "evidence": "Fresh-main deterministic suite with scrubbed operator-shape replays; aggregate export omits raw transcript content.",
+        "evidence": "v0.27.0 per-message-wait replay cell (#1123, #1128): 24k chunk with a 2,000-token summary cap vs 8k, Sol summary route, 120 s summary timeout (the shipped LCM_SUMMARY_TIMEOUT_MS default)",
     },
     notes=(
         "Benchmark-only candidate until the preset surface matures. "
@@ -97,47 +98,30 @@ _CODEX_GPT_LONG_CONTEXT = LCMPreset(
 _CODEX_SPARK_CONTEXT = LCMPreset(
     name="codex_spark_context",
     family="GPT/Codex Spark 128k",
-    description="Benchmark-backed candidate for GPT-5.3 Codex Spark / 128k Codex-style routes.",
+    description="Provisional candidate for GPT-5.3 Codex Spark / 128k Codex-style routes; inherits the long-context 24k cell (no 128k cell yet).",
     policy_path="benchmarks/policies/codex_spark_context.yaml",
-    policy_version="1",
+    policy_version="2",
     runtime_env={
         "context_threshold": 0.75,
         "fresh_tail_count": 16,
-        "leaf_chunk_tokens": 8_000,
+        "leaf_chunk_tokens": 24_000,
+        "leaf_target_max_tokens": 2_000,
     },
-    unsupported_runtime_fields={
-        "target_after_compaction": 0.55,
-    },
+    unsupported_runtime_fields={},
     applies_to=(
         "GPT-5.3 Codex Spark on Codex OAuth routes",
         "large context windows near 128k tokens",
         "workloads where Spark's smaller effective window needs more post-compaction headroom",
     ),
     provenance={
-        "benchmark_version": "2",
-        "fixture_suite": [
-            "long_history_canaries",
-            "repeated_compaction_chatter",
-            "summary_timeout_probe",
-            "summary_refusal_probe",
-            "scrubbed_operator_coding_tool_heavy",
-            "scrubbed_operator_chatter_repeated_compaction",
-            "codex_pressure_probe:42:4:1000",
-            "spark_pressure_probe:42:4:1000",
-        ],
-        "metric_summary": {
-            "score": 92.941,
-            "baseline_score": 82.941,
-            "retrieval_canary_recall": 1.0,
-            "baseline_repeated_compaction_risk_count": 4,
-            "candidate_repeated_compaction_risk_count": 0,
-            "candidate_min_post_compaction_headroom_tokens": 26_432,
-            "candidate_prompt_tokens_after": 69_568,
-        },
-        "evidence": "Fresh-main deterministic suite with scrubbed operator-shape replays; Spark min headroom stayed above 25k while avoiding repeated-compaction risk.",
+        "benchmark_version": "pmw-1",
+        "fixture_suite": ["Inherited long-context replay cell (#1123, #1128)"],
+        "metric_summary": {},
+        "evidence": "Inherits the long-context cell's 24k chunk; #1139 bounds the effective chunk at a quarter of the threshold, equal to 24,000 at a 96k threshold. No separate 128k cell has run yet.",
     },
     notes=(
-        "Benchmark-only candidate for the 128k Codex Spark route. "
+        "Inherits the measured long-context chunk; no separate 128k cell has run yet. "
+        "Prior 8k headroom metrics are omitted because they are unverified at 24k. "
         "No live provider tuning or automatic config mutation is performed."
     ),
 )
@@ -174,7 +158,7 @@ def _valid_override_value(field: str, raw: str) -> bool:
 def explicit_operator_overrides(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return parseable runtime preset fields explicitly set by LCM_* env vars."""
 
-    env = environ if environ is not None else os.environ
+    env = environ if environ is not None else lcm_env()
     return {
         field: env_var
         for field, env_var in _FIELD_ENV.items()
@@ -185,7 +169,7 @@ def explicit_operator_overrides(environ: Mapping[str, str] | None = None) -> dic
 def invalid_operator_overrides(environ: Mapping[str, str] | None = None) -> dict[str, str]:
     """Return present but unparsable runtime preset env vars."""
 
-    env = environ if environ is not None else os.environ
+    env = environ if environ is not None else lcm_env()
     return {
         field: env_var
         for field, env_var in _FIELD_ENV.items()
@@ -227,9 +211,11 @@ def preset_confidence_reasons(engine: Any, preset: LCMPreset | None, reason: str
         f"provider={provider}; model={model}",
         (
             "benchmark evidence: "
-            f"score={metric_summary.get('score', '(unknown)')}, "
-            f"retrieval_canary_recall={metric_summary.get('retrieval_canary_recall', '(unknown)')}, "
-            f"repeated_compaction_risk_count={metric_summary.get('candidate_repeated_compaction_risk_count', '(unknown)')}"
+            f"compactions/100 messages={metric_summary['compactions_per_100_messages']}, "
+            f"mean wait/message={metric_summary['mean_wait_per_message_s']}s, "
+            f"facts kept={metric_summary['facts_kept_cp304']}"
+            if metric_summary
+            else "benchmark evidence: inherited 24k chunk; no separate 128k cell"
         ),
         "dry-run only; explicit parseable LCM_* operator overrides are preserved",
     ]
@@ -248,7 +234,7 @@ def preset_env_diff(
 ) -> list[str]:
     """Render env-var changes a preset would suggest without applying them."""
 
-    env = environ if environ is not None else os.environ
+    env = environ if environ is not None else lcm_env()
     explicit = explicit_operator_overrides(env)
     invalid = invalid_operator_overrides(env)
     lines: list[str] = []
@@ -289,7 +275,7 @@ def _preset_dry_run_delta(
 ) -> list[dict[str, Any]]:
     """Return structured preset dry-run actions without mutating runtime state."""
 
-    env = environ if environ is not None else os.environ
+    env = environ if environ is not None else lcm_env()
     explicit = explicit_operator_overrides(env)
     invalid = invalid_operator_overrides(env)
     delta: list[dict[str, Any]] = []
@@ -344,7 +330,7 @@ def preset_status_payload(
 ) -> dict[str, Any]:
     """Return read-only, machine-readable preset suggestion metadata."""
 
-    env = environ if environ is not None else os.environ
+    env = environ if environ is not None else lcm_env()
     preset, reason = suggest_preset_for_engine(engine)
     explicit = explicit_operator_overrides(env)
     invalid = invalid_operator_overrides(env)

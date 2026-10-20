@@ -85,6 +85,8 @@ def read_jsonl(path: Path) -> list[dict]:
 
 
 def unsupported(cell: dict, transport: str) -> str | None:
+    if cell["id"].startswith("default-window/"):
+        return "default-window bars require R1 ordered provider_request telemetry; R2 is not covered"
     if transport == "gateway-process":
         return None if cell["transport"] == "gateway" else "an R1 acp-transport cell; it runs under acp-process"
     if transport == "api-server":
@@ -273,7 +275,10 @@ class ProcessCell:
 
     def crash(self, t: int) -> None:
         """Called by the provider while it holds turn t's request: a TRUE mid-turn crash of the host."""
-        self.fire("crash_after_compaction_before_reply", t)
+        kind = "crash_after_compaction_before_reply"
+        # Record every phase-dependent piece before the signal: once the host is gone, run_phase may advance the
+        # phase and finish the run. The host waits on this held request meanwhile, so the crash point is unchanged.
+        self.fire(kind, t, phase=self.phase, kill_monotonic_ns=time.monotonic_ns())
         self.proc.kill()
 
     def cancel(self) -> None:
@@ -406,7 +411,7 @@ class ProcessCell:
         except (AD.DriverError, OSError, ValueError) as exc:
             if self.deadline is not None and time.monotonic() >= self.deadline and not isinstance(exc, PhaseDeadline):
                 exc = PhaseDeadline(f"phase {self.phase} exceeded its {self.phase_timeout}s deadline ({exc})")
-            return {"exit": "error", "reason": f"{type(exc).__name__}: {exc}; stderr: {self.stderr_tail()}"[:600]}
+            return {"exit": "error", "reason": f"{f'{type(exc).__name__}: {exc}'[:280]}; stderr: {self.stderr_tail(150)}"}
         finally:
             if not closed:
                 rc = self.proc.close()
@@ -415,9 +420,12 @@ class ProcessCell:
     def low_backlog(self, last_turn: int) -> bool:
         return P1.backlog_low(self.d, last_turn, self.backlog_log)
 
-    def stderr_tail(self) -> str:
+    def stderr_tail(self, edge: int = 1000) -> str:
+        """The host's stderr for an error reason: its first and last ``edge`` characters (#985: a bare tail
+        cut off which installer or command a host that exits early asks the operator to run)."""
         path = self.d / f"host-{self.phase}.stderr"
-        return path.read_text(errors="replace")[-300:] if path.exists() else ""
+        text = path.read_text(errors="replace") if path.exists() else ""
+        return text if len(text) <= 2 * edge else f"{text[:edge]} … {text[-edge:]}"
 
     def phase_record(self, first: int, result: dict) -> dict:
         notes = [n for n in read_jsonl(self.d / "observer.jsonl") if n["phase"] == self.phase]
@@ -439,14 +447,22 @@ class ProcessCell:
         return rec
 
 
+# The provider stamps a request's receive start in its handler thread. On a loaded runner that thread can run after
+# the kill that already cut the body short, so a start up to this long after the kill still counts as in flight.
+RECEIVE_START_SLACK_NS = 1_000_000_000
+
+
 def accounting(d: Path, events: list[dict]) -> dict:
     """The provider log is the complete request set. Every distinct request is a model-role completion, a
     ``/models`` catalog read, or unexpected (an unrouted path/method or an unknown role: the cell ERRORs). Each main
     request is exactly one scripted step (a reply, a tool-call step, a crash hold or an unexpected main request)."""
     reqs = read_jsonl(d / "provider-requests.jsonl")
-    by_role, by_route, unexpected = {}, {}, []
+    by_role, by_route, unexpected, truncated = {}, {}, [], []
     for r in {r["rid"]: r for r in reqs}.values():
         route = FP.route_of(r.get("method"), r.get("path"))  # re-derived, not trusted from the log
+        if route == "completion" and r.get("truncated"):  # no body, never served; match the receive interval below
+            truncated.append(r)
+            continue
         by_route[route] = by_route.get(route, 0) + 1
         if route == "completion":
             by_role[r["role"]] = by_role.get(r["role"], 0) + 1
@@ -456,7 +472,18 @@ def accounting(d: Path, events: list[dict]) -> dict:
                "tool_steps": len({(e["phase"], e["id"].rsplit("_", 1)[0]) for e in events if e["event"] == "tool_issue"}),
                "crash_holds": sum(1 for e in events if e.get("fault") == "crash_after_compaction_before_reply"),
                "unexpected": len({r["rid"] for r in reqs if r.get("unexpected")})}
+    kills = sorted(e["kill_monotonic_ns"] for e in events
+                   if e.get("event") == "crash" and e.get("kill_monotonic_ns") is not None)
+    matched = set()
+    for kill in kills:
+        candidates = [r for r in truncated if r["rid"] not in matched
+                      and r.get("receive_start_ns") is not None and r.get("receive_end_ns") is not None
+                      and r["receive_start_ns"] <= kill + RECEIVE_START_SLACK_NS and kill <= r["receive_end_ns"]]
+        if candidates:  # earliest end preserves later kills for requests still receiving then
+            matched.add(min(candidates, key=lambda r: r["receive_end_ns"])["rid"])
+    unexpected += [{"rid": r["rid"], "route": "truncated"} for r in truncated if r["rid"] not in matched]
     return {"requests_by_role": by_role, "requests_by_route": by_route, "unexpected_requests": unexpected[:20],
+            "truncated_requests": [r["rid"] for r in truncated],
             "main_implied": implied, "faults": sorted({(r["rid"], r["fault"]) for r in reqs if r.get("fault")}),
             "ok": by_role.get("main", 0) == sum(implied.values()) and not unexpected}
 

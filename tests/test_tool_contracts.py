@@ -1,10 +1,7 @@
 """Public lcm_* tool contract drift guards."""
 
-import ast
 import importlib
-import inspect
 import sys
-import textwrap
 from pathlib import Path
 from types import ModuleType
 
@@ -98,27 +95,6 @@ def _engine_tool_schemas(tmp_path) -> list[dict]:
         engine.shutdown()
 
 
-def _dispatch_tool_names() -> list[str]:
-    source = textwrap.dedent(inspect.getsource(LCMEngine.handle_tool_call))
-    tree = ast.parse(source)
-
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assign):
-            continue
-        if not any(isinstance(target, ast.Name) and target.id == "handlers" for target in node.targets):
-            continue
-        if not isinstance(node.value, ast.Dict):
-            raise AssertionError("handle_tool_call handlers must be a dict literal")
-        tool_names = []
-        for key in node.value.keys:
-            if not isinstance(key, ast.Constant) or not isinstance(key.value, str):
-                raise AssertionError("handle_tool_call handler keys must be string literals")
-            tool_names.append(key.value)
-        return tool_names
-
-    raise AssertionError("handle_tool_call must define a handlers dispatch map")
-
-
 def _assert_unique(surface: str, tool_names: list[str]) -> None:
     duplicates = sorted({name for name in tool_names if tool_names.count(name) > 1})
     assert duplicates == [], f"duplicate tools in {surface}: {duplicates}"
@@ -129,15 +105,12 @@ def test_public_tool_names_are_synchronized_across_contract_surfaces(tmp_path):
     schema_by_name = _schema_by_tool_name()
     engine_schemas = _engine_tool_schemas(tmp_path)
     engine_tools = [schema["name"] for schema in engine_schemas]
-    dispatch_tools = _dispatch_tool_names()
 
     _assert_unique("plugin.yaml provides_tools", manifest_tools)
     _assert_unique("schemas.py", list(schema_by_name))
     _assert_unique("LCMEngine.get_tool_schemas", engine_tools)
-    _assert_unique("LCMEngine.handle_tool_call", dispatch_tools)
 
     assert manifest_tools == engine_tools
-    assert manifest_tools == dispatch_tools
     assert set(manifest_tools) == set(schema_by_name)
 
     engine_schema_by_name = {schema["name"]: schema for schema in engine_schemas}
@@ -198,3 +171,9 @@ def test_public_tools_are_documented_in_readme_and_retrieval_reference():
     assert "lcm_inspect" in retrieval_reference
     assert "metadata only" in retrieval_reference
     assert "use `lcm_load_session`/`lcm_expand` when you need content" in retrieval_reference
+
+
+def test_manifest_tool_order_matches_registry():
+    from hermes_lcm.tool_registry import TOOL_REGISTRY
+
+    assert _manifest_tool_names() == [spec.name for spec in TOOL_REGISTRY]

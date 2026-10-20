@@ -1,0 +1,147 @@
+name: Full suite on pinned Hermes hosts
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Product tag or SHA to test
+        required: true
+        type: string
+      hosts:
+        description: Comma-separated host keys from hosts.ci.json, or all
+        required: false
+        default: all
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  hosts:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+      sha: ${{ steps.pin.outputs.sha }}
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Pin the requested ref to one commit for every host
+        id: pin
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Select pinned hosts at the product ref
+        id: select
+        env:
+          REQUESTED_HOSTS: ${{ inputs.hosts }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          from pathlib import Path
+
+          available = json.loads(Path("bench/instruments/reliability/hosts.ci.json").read_text())["hosts"]
+          requested = os.environ["REQUESTED_HOSTS"].strip()
+          selected = list(available) if requested == "all" else [key.strip() for key in requested.split(",")]
+          if not selected or any(key not in available for key in selected):
+              raise SystemExit(f"Select all or host keys from: {', '.join(available)}")
+          if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", key) for key in selected):
+              raise SystemExit("Host keys must be safe path components")
+          selected = list(dict.fromkeys(selected))
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"matrix={json.dumps({'host': selected})}\n")
+          PY
+
+  suite:
+    needs: hosts
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.hosts.outputs.matrix) }}
+    env:
+      HOST: ${{ matrix.host }}
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ needs.hosts.outputs.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python (harness)
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install harness dependencies
+        run: pip install uv==0.11.26 pytest numpy
+
+      - name: Use the runtime SQLite library
+        uses: ./.github/actions/sqlite-runtime
+
+      - name: Prepare the pinned Hermes tree
+        run: python -m bench.instruments.reliability.ci prep --host "$HOST" --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
+
+      - name: Export prepared host paths
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          hosts = json.loads((Path(os.environ["RUNNER_TEMP"]) / "hosts.json").read_text())
+          host = hosts["hosts"][os.environ["HOST"]]
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"HERMES_HOME={os.environ['RUNNER_TEMP']}/hermes-home\n")
+              env.write(f"FASTEMBED_CACHE_PATH={os.environ['RUNNER_TEMP']}/fastembed-empty\n")
+              env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}\n")
+              env.write(f"LCM_REAL_HERMES_SRC={host['src']}\n")
+              env.write(f"LCM_REAL_HERMES_SHA={host['sha']}\n")
+              env.write(f"PYTHONPATH={os.environ['GITHUB_WORKSPACE']}:{host['src']}\n")
+          PY
+
+      - name: Install CI test dependencies in the host venv
+        run: uv pip install --python "$LCM_REAL_HERMES_PYTHON" pytest==9.1.1 numpy ruff==0.15.13 hypothesis==6.141.1
+
+      - name: Print host SQLite version
+        run: |
+          "$LCM_REAL_HERMES_PYTHON" -c "import sqlite3; print('sqlite', sqlite3.sqlite_version)"
+
+      - name: Run the full suite with the host Python
+        shell: bash
+        run: |
+          mkdir -p "$HERMES_HOME"
+          ulimit -n 1024
+          "$LCM_REAL_HERMES_PYTHON" -m pytest tests -q -p no:xdist -p no:cacheprovider -ra \
+            --junitxml="suite-$HOST.xml" 2>&1 | tee "$RUNNER_TEMP/suite-$HOST.log"
+
+      - name: Record tested identities and pytest summary
+        if: always()
+        run: |
+          {
+            echo "### Full host suite: $HOST"
+            echo "Product SHA: $(git rev-parse HEAD)"
+            echo "Host SHA: ${LCM_REAL_HERMES_SHA:-not prepared}"
+          } >> "$GITHUB_STEP_SUMMARY"
+          python - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          log = Path(os.environ["RUNNER_TEMP"]) / f"suite-{os.environ['HOST']}.log"
+          lines = log.read_text(errors="replace").splitlines() if log.exists() else []
+          summaries = [line for line in lines if re.search(r"\b\d+ (?:passed|failed|skipped|error|errors|deselected|xfailed|xpassed)\b.*\bin \d", line)]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write((summaries[-1] if summaries else "No pytest summary produced; inspect the failed step.") + "\n")
+          PY
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: host-suite-${{ matrix.host }}
+          path: suite-${{ matrix.host }}.xml
+          if-no-files-found: warn

@@ -122,10 +122,12 @@ def main():
                 if arm.startswith("LCMX"):
                     events = json.loads((rdir / sub / "summary.json").read_text())["events"]
                     recorded = {nd["node_id"]: nd for e in events for nd in e.get("nodes", [])}
+                    sid = jload(rdir / "summary.json").get("session_id")  # D5-A: a seeded store holds other sessions
                     with sqlite3.connect(f"file:{rdir / sub / 'store' / 'lcm.db'}?mode=ro", uri=True) as db:
                         tables = {t[0] for t in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                         nodes = list(db.execute("SELECT n.node_id, n.depth, p.escalation_level FROM summary_nodes n LEFT JOIN "
-                                                "summary_node_provenance p USING(node_id)")) if "summary_node_provenance" in tables else [
+                                                "summary_node_provenance p USING(node_id) WHERE ? IS NULL OR n.session_id = ?",
+                                                (sid, sid))) if "summary_node_provenance" in tables else [
                             (nd["node_id"], nd["depth"], nd.get("level")) for nd in recorded.values()]
                     l3 = [nid for nid, depth, level in nodes if level == 3]
                     verbatim = sum(recorded[nid].get("l3_kind") == "verbatim" for nid in l3)

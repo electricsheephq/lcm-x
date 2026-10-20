@@ -3,9 +3,17 @@
 Patches the plugin modules so they can be imported both as a package
 (relative imports during plugin loading) and directly during testing.
 """
+import hashlib
 import sys
 import importlib.util
 from pathlib import Path
+
+from tests.phase0_hygiene import product_env_keys
+
+_IMPORT_FAILURES = {}
+# Measured with/without the CI host stub: only engine needs agent.context_engine.
+# Allow that missing host dependency, never arbitrary errors in engine itself.
+_OPTIONAL_HOST_IMPORTS = {"hermes_lcm.engine": {"agent", "agent.context_engine"}}
 
 # Make the repo root importable (for agent.context_engine etc.)
 repo_root = str(Path(__file__).resolve().parent.parent.parent.parent)
@@ -35,18 +43,19 @@ if pkg_name not in sys.modules:
             continue
         sub_name = f"{pkg_name}.{py_file.stem}"
         if sub_name not in sys.modules:
-            sub_spec = importlib.util.spec_from_file_location(
-                sub_name, str(py_file),
-                submodule_search_locations=[],
-            )
+            # A plain module spec: its parent is the package, matching __package__ below (a
+            # submodule_search_locations spec made each module a package and warned on every relative import).
+            sub_spec = importlib.util.spec_from_file_location(sub_name, str(py_file))
             sub_mod = importlib.util.module_from_spec(sub_spec)
             sub_mod.__package__ = pkg_name
             sys.modules[sub_name] = sub_mod
             setattr(mod, py_file.stem, sub_mod)
             try:
                 sub_spec.loader.exec_module(sub_mod)
-            except Exception:
-                pass  # some modules may fail (e.g. engine needs agent)
+            except Exception as exc:
+                _IMPORT_FAILURES[sub_name] = exc
+                sys.modules.pop(sub_name, None)
+                delattr(mod, py_file.stem)
 
 
 def load_cli():
@@ -58,6 +67,41 @@ def load_cli():
 
 
 import pytest  # noqa: E402
+
+
+@pytest.fixture(params=[False, pytest.param(True, marks=pytest.mark.latency, id="latency")], ids=["correctness", "latency"])
+def latency_check(request):
+    """Keep correctness in PR CI; enable elapsed bounds only in the nightly cell."""
+    return request.param
+
+
+def pytest_report_header(config):
+    return [
+        f"LCM import failure: {name}: {type(exc).__name__}: {exc}"
+        for name, exc in sorted(_IMPORT_FAILURES.items())
+    ]
+
+
+def pytest_sessionstart(session):
+    unexpected = [
+        name for name, exc in _IMPORT_FAILURES.items()
+        if not (
+            isinstance(exc, ModuleNotFoundError)
+            and exc.name in _OPTIONAL_HOST_IMPORTS.get(name, ())
+        )
+    ]
+    if unexpected:
+        raise pytest.UsageError("Unexpected plugin import failures:\n" + "\n".join(pytest_report_header(None)))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_product_environment(monkeypatch, request, tmp_path_factory):
+    for key in product_env_keys(plugin_dir):
+        monkeypatch.delenv(key, raising=False)
+    # A unique, not-yet-created home per test; requesting tmp_path here would create ~7,600 directories.
+    test_id = hashlib.sha1(request.node.nodeid.encode()).hexdigest()[:16]
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path_factory.getbasetemp() / "hermes-home" / test_id))
+
 
 _MAINTENANCE_SCHEDULERS = ("_ROLLUP_MAINTENANCE_SCHEDULER", "_EMBEDDING_MAINTENANCE_SCHEDULER")
 

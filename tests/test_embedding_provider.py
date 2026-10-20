@@ -10,6 +10,8 @@ import pytest
 
 import hermes_lcm.command as command_mod
 import hermes_lcm.embedding_provider as provider_mod
+from tests.timing_helpers import deadline_block, returns_while_blocked
+
 from hermes_lcm.command import handle_lcm_command
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.embedding_provider import (
@@ -909,19 +911,35 @@ def test_query_path_rate_limit_surfaces_typed_reason(monkeypatch):
     assert len(transport.calls) == 1
 
 
-def test_voyage_document_splits_share_one_absolute_deadline(monkeypatch):
+def test_voyage_document_splits_share_one_absolute_deadline(monkeypatch, latency_check):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: 1)
     calls: list[float] = []
+    now = [0.0]
+    if not latency_check:
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
+        original_join = threading.Thread.join
+
+        def join(worker, timeout=None):
+            assert timeout is not None and 0 < timeout <= 0.02
+            return original_join(worker, timeout=10)  # scheduling guard, no elapsed assertion
+
+        monkeypatch.setattr(threading.Thread, "join", join)
+
+    def pause(delay):
+        if latency_check:
+            time.sleep(delay)
+        else:
+            now[0] += delay
 
     def transport(**kwargs):
         timeout = float(kwargs["timeout"])
         calls.append(timeout)
         delay = 0.015
         if timeout < delay:
-            time.sleep(max(0.0, timeout))
+            pause(max(0.0, timeout))
             raise TimeoutError("request exceeded remaining budget")
-        time.sleep(delay)
+        pause(delay)
         return _voyage_success(1, dim=2)
 
     provider = VoyageProvider(
@@ -936,28 +954,27 @@ def test_voyage_document_splits_share_one_absolute_deadline(monkeypatch):
         provider.embed_documents(["first", "second"])
     elapsed = time.monotonic() - started
     assert 1 <= len(calls) <= 2
+    assert all(0 < timeout <= 0.02 for timeout in calls)
     if len(calls) == 2:
         assert calls[1] < calls[0]
-    assert elapsed < 0.06
+    if latency_check:
+        assert elapsed < 0.06
 
 
-def test_voyage_token_preprocessing_is_inside_absolute_deadline(monkeypatch):
+def test_voyage_token_preprocessing_is_inside_absolute_deadline(monkeypatch, latency_check):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
-
-    def slow_count(_text):
-        time.sleep(0.1)
-        return 1
-
-    monkeypatch.setattr(provider_mod, "count_tokens", slow_count)
     transport = FakeTransport(_voyage_success(1))
     provider = VoyageProvider("voyage-test", transport=transport, timeout=0.02)
 
-    started = time.monotonic()
-    with pytest.raises(VoyageError, match="document preprocessing"):
-        provider.embed_documents(["slow"])
+    with deadline_block(monkeypatch, "lcm-voyage document preprocessing-embedding", 0.02, latency_check) as block:
+        monkeypatch.setattr(provider_mod, "count_tokens", lambda _text: (block(), 1)[1])
+        started = time.monotonic() if latency_check else None
+        with pytest.raises(VoyageError, match="document preprocessing"):
+            provider.embed_documents(["slow"])
 
-    assert time.monotonic() - started < 0.08
-    assert transport.calls == []
+        if latency_check:
+            assert time.monotonic() - started < 0.08
+        assert transport.calls == []
 
 
 def test_voyage_does_not_dispatch_next_split_after_deadline(monkeypatch):
@@ -1086,14 +1103,14 @@ def test_http_provider_does_not_decode_response_after_deadline(
     assert decode_calls == 0
 
 
-def test_voyage_slow_response_decode_is_inside_absolute_deadline(monkeypatch):
+def test_voyage_slow_response_decode_is_inside_absolute_deadline(monkeypatch, latency_check):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     decode_started = threading.Event()
     original_decode = provider_mod._response_json
 
     def slow_decode(*args, **kwargs):
         decode_started.set()
-        time.sleep(0.05)
+        block()
         return original_decode(*args, **kwargs)
 
     monkeypatch.setattr(provider_mod, "_response_json", slow_decode)
@@ -1101,25 +1118,25 @@ def test_voyage_slow_response_decode_is_inside_absolute_deadline(monkeypatch):
         "voyage-test", transport=FakeTransport(_voyage_success(1)), timeout=0.01
     )
 
-    started = time.monotonic()
-    with pytest.raises(VoyageError) as exc_info:
-        provider.embed_query("slow decode")
+    with deadline_block(monkeypatch, "lcm-voyage response processing-embedding", 0.01, latency_check) as block:
+        started = time.monotonic() if latency_check else None
+        with pytest.raises(VoyageError) as exc_info:
+            provider.embed_query("slow decode")
 
-    assert exc_info.value.kind == "timeout"
-    assert decode_started.is_set()
-    assert time.monotonic() - started < 0.04
-    # Let the side-effect-free parser worker exit before monkeypatch teardown.
-    time.sleep(0.06)
+        assert exc_info.value.kind == "timeout"
+        assert decode_started.is_set()
+        if latency_check:
+            assert time.monotonic() - started < 0.04
 
 
-def test_voyage_slow_error_body_scrub_is_bounded_and_never_resent(monkeypatch):
+def test_voyage_slow_error_body_scrub_is_bounded_and_never_resent(monkeypatch, latency_check):
     monkeypatch.setenv("VOYAGE_API_KEY", "test-key")
     scrub_started = threading.Event()
     original_scrub = provider_mod._scrub_response_body
 
     def slow_scrub(body):
         scrub_started.set()
-        time.sleep(0.05)
+        block()
         return original_scrub(body)
 
     monkeypatch.setattr(provider_mod, "_scrub_response_body", slow_scrub)
@@ -1129,15 +1146,16 @@ def test_voyage_slow_error_body_scrub_is_bounded_and_never_resent(monkeypatch):
     )
     provider = VoyageProvider("voyage-test", transport=transport, timeout=0.01)
 
-    started = time.monotonic()
-    with pytest.raises(VoyageError) as exc_info:
-        provider.embed_query("slow error body")
+    with deadline_block(monkeypatch, "lcm-voyage error response processing-embedding", 0.01, latency_check) as block:
+        started = time.monotonic() if latency_check else None
+        with pytest.raises(VoyageError) as exc_info:
+            provider.embed_query("slow error body")
 
-    assert exc_info.value.kind == "server_error"
-    assert scrub_started.is_set()
-    assert len(transport.calls) == 1
-    assert time.monotonic() - started < 0.04
-    time.sleep(0.06)
+        assert exc_info.value.kind == "server_error"
+        assert scrub_started.is_set()
+        assert len(transport.calls) == 1
+        if latency_check:
+            assert time.monotonic() - started < 0.04
 
 
 def test_voyage_timeout_after_possible_acceptance_is_not_resent(monkeypatch):
@@ -1170,28 +1188,79 @@ def test_ollama_timeout_after_possible_acceptance_is_not_resent():
     assert len(transport.calls) == 1
 
 
-def test_fastembed_normal_operation_is_deadline_bounded(monkeypatch, tmp_path):
+def test_fastembed_normal_operation_is_deadline_bounded(monkeypatch, tmp_path, latency_check):
     class SlowFastembedModel:
         def __init__(self, **_kwargs):
             pass
 
         def query_embed(self, texts):
-            time.sleep(0.05)
+            block()
             return ([1.0, 0.0] for _ in texts)
 
         def embed(self, texts):
-            time.sleep(0.05)
+            block()
             return ([1.0, 0.0] for _ in texts)
 
     monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: SlowFastembedModel)
     provider = FastembedProvider("local", cache_dir=tmp_path, timeout=0.01)
-    started = time.monotonic()
-    with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
-        provider.embed_query("slow")
-    assert time.monotonic() - started < 0.04
+    with deadline_block(monkeypatch, "lcm-fastembed-embedding", 0.01, latency_check) as block:
+        started = time.monotonic() if latency_check else None
+        with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
+            provider.embed_query("slow")
+        if latency_check:
+            assert time.monotonic() - started < 0.04
 
 
 def test_fastembed_timeout_capacity_is_bounded_until_worker_exits(monkeypatch, tmp_path):
+    calls = 0
+    worker_started = threading.Event()
+    release_worker = threading.Event()
+
+    class SlowFastembedModel:
+        def __init__(self, **_kwargs):
+            pass
+
+        def query_embed(self, texts):
+            nonlocal calls
+            calls += 1
+            worker_started.set()
+            release_worker.wait()
+            return ([1.0, 0.0] for _ in texts)
+
+    monkeypatch.setattr(provider_mod, "_load_fastembed", lambda: SlowFastembedModel)
+    monkeypatch.setattr(
+        provider_mod, "_LOCAL_EMBED_WORKER_SLOTS", threading.BoundedSemaphore(1)
+    )
+    first = FastembedProvider("local", cache_dir=tmp_path, timeout=0.01)
+    second = FastembedProvider("local", cache_dir=tmp_path, timeout=0.01)
+
+    slots = provider_mod._LOCAL_EMBED_WORKER_SLOTS
+    original_acquire = slots.acquire
+    capacity_timeouts = []
+
+    def bounded_acquire(blocking=True, timeout=None):
+        capacity_timeouts.append(timeout)
+        assert timeout is not None and 0 < timeout <= 0.01, "capacity acquisition must use the request budget"
+        return original_acquire(blocking=blocking, timeout=timeout)
+
+    monkeypatch.setattr(slots, "acquire", bounded_acquire)
+    try:
+        with pytest.raises(EmbeddingProviderError, match="deadline exceeded"):
+            first.embed_query("slow")
+        assert worker_started.is_set()
+        def rejected_call():
+            with pytest.raises(EmbeddingProviderError, match="worker capacity exhausted"):
+                second.embed_query("must-not-start")
+
+        returns_while_blocked(rejected_call, release_worker)
+        assert len(capacity_timeouts) == 2
+        assert calls == 1
+    finally:
+        release_worker.set()
+
+
+@pytest.mark.latency
+def test_fastembed_timeout_capacity_is_bounded_until_worker_exits_latency(monkeypatch, tmp_path):
     calls = 0
     worker_started = threading.Event()
     release_worker = threading.Event()
