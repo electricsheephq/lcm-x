@@ -14,7 +14,7 @@ import time
 
 from .audit import audit, connect, preimage, progress
 from .catchup import stop
-from .common import append, config, dump, foreign_files, foreground_request, guards, immutable_cache, isolated, load, parser, product, safe_paths
+from .common import REQUEST, append, config, dump, foreign_files, foreground_request, guards, immutable_cache, isolated, load, parser, product, safe_paths
 from .corpus import build, pilot_rows
 from .cpu import Supervisor
 
@@ -155,7 +155,7 @@ def runtime(request):
     guards(mod, a.root/"events.jsonl")
     original_join = threading.Thread.join
     def join(thread, *args, **kw):
-        if threading.current_thread() is threading.main_thread() and any(
+        if REQUEST.get() and threading.current_thread() is threading.main_thread() and any(
                 name in thread.name.lower() for name in ("embed", "backfill")):
             append(a.root/"events.jsonl", {"violation": "foreground_join", "thread": thread.name})
             raise RuntimeError("foreground embedding join forbidden")
