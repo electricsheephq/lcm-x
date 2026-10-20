@@ -90,7 +90,8 @@ def final_copy(a, generation):
 
 
 def restart_audit_failed(result):
-    return not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] != "ok"
+    return (not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] != "ok"
+            or any(result.get(k) for k in ("changed_metadata", "unexpected_rows", "unpaired_rows")))
 
 
 def audit_failed(result):
@@ -105,7 +106,7 @@ def run(a):
     manifest = load(a.manifest)
     meter = supervisor(a, a.out/"cpu.jsonl")
     started, last_change, next_progress, generation = time.monotonic(), time.monotonic(), 0., 0
-    previous, history, restarted = None, [], False
+    previous, history, restarted, events = None, [], False, []
     meter.start()
     p = launch(a, generation)
     meter.watch(p.pid)
@@ -167,6 +168,7 @@ def run(a):
         loop_end = time.monotonic()
         stop(p)
         meter.close()
+    events = [__import__("json").loads(s) for s in (a.out/"events.jsonl").read_text().splitlines()] if (a.out/"events.jsonl").exists() else []
     result = audit(a.db, manifest)
     if audit_failed(result):
         final, reason = "ABORTED", "final_integrity_or_residue"
@@ -174,7 +176,7 @@ def run(a):
         final, reason = "ABORTED", "final_coverage_regressed"
     elapsed = time.monotonic()-started
     covered = sum(x["covered"] for x in result["classes"].values())
-    initial = sum(history[0]["audit"]["classes"][k]["covered"] for k in result["classes"]) if history else 0
+    initial = sum(initial_audit["classes"][k]["covered"] for k in result["classes"])
     first = initial_audit
     summary = {"state": final, "reason": reason, "audit": result, "restarted": restarted, "restart": "once" if restarted else "none", "max_wall": a.max_wall,
         "end_to_end_s": elapsed, "coverage_fraction": covered/max(1, sum(x["expected"] for x in result["classes"].values())),

@@ -57,20 +57,26 @@ def main():
             dump(out/"initial-audit.json", baseline(db, manifest))
             manifests.append(manifest)
         meter.start()
+        started, reason, progress, generations = time.monotonic(), "max_wall", [], [0]*n
         for job in jobs:
+            if time.monotonic()-started >= duration:
+                reason = f"bind_timeout:{job.out.name}"
+                break
             processes.append(launch(job, 0))
             meter.watch(processes[-1].pid)
-            time.sleep(a.stagger)
-        while not all((j.out/"worker-0.json").exists() for j in jobs):
+            time.sleep(min(a.stagger, max(0, duration-(time.monotonic()-started))))
+        while reason == "max_wall" and (pending := next((j for j in jobs if not (j.out/"worker-0.json").exists()), None)):
             if meter.breach or any(q.poll() is not None for q in processes):
-                raise RuntimeError(meter.breach or "worker exited before bind")
-            time.sleep(1)
-        started, reason, progress = time.monotonic(), "max_wall", []
+                reason = meter.breach or "worker exited before bind"
+                break
+            if time.monotonic()-started >= duration:
+                reason = f"bind_timeout:{pending.out.name}"
+                break
+            time.sleep(min(1, max(0, duration-(time.monotonic()-started))))
         next_progress = 0.
         last_change, fingerprints = [started]*n, [None]*n
-        generations = [0]*n
-        aggregate_start = started if a.screen16 else max(meter.windows[q.pid][0] for q in processes)
-        while time.monotonic()-started < duration:
+        aggregate_start = time.monotonic() if a.screen16 else max((meter.windows[q.pid][0] for q in processes), default=started)
+        while reason == "max_wall" and time.monotonic()-started < duration:
             breach = meter.breach
             if breach or any(q.poll() is not None for q in processes):
                 reason = breach or "worker_exit"
@@ -142,11 +148,11 @@ def main():
         r.update(state="ABORTED" if audit_failed(r) else "COMPLETE" if r["complete"] else state,
                  reason="final_integrity_or_residue" if audit_failed(r) else "full_expected_id_audit" if r["complete"] else reason)
     aggregate_end = min((meter.windows[q.pid][1] or loop_end for q in processes), default=loop_end)
-    cpu = meter.summary(state, n, started if a.screen16 else 0, end=loop_end, aggregate_window=(aggregate_start, aggregate_end))
+    cpu = meter.summary(state, n, aggregate_start if a.screen16 else 0, end=loop_end, aggregate_window=(aggregate_start, aggregate_end))
     worst = {k: max((r[k] or 0 for r in cpu["per_process"].values()), default=None)
              for k in ("mean_cores", "p95_rolling60_cores", "peak1s_cores", "peak_rss")}
     dump(a.out/"summary.json", {"state": state, "screen_only_never_gated": a.screen16, "reason": reason,
-         "per_process_progress": progress, "per_process_bind": [load(j.out/f"worker-{g}.json") for j, g in zip(jobs, generations)],
+         "per_process_progress": progress, "per_process_bind": [load(j.out/f"worker-{g}.json") if (j.out/f"worker-{g}.json").exists() else None for j, g in zip(jobs, generations)],
          "worst_process_fraction": min(fractions), "worst_process_cpu_rss": worst, "cpu": cpu})
 
 

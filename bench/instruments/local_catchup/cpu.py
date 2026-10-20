@@ -66,7 +66,7 @@ class Supervisor:
                  aggregate_mean=7., aggregate_p95=8.75):
         self.path, self.cap, self.sustained = path, cap, sustained
         self.limits = (per_mean, per_p95, aggregate_mean, aggregate_p95)
-        self.previous, self.samples, self.rss, self.threads = {}, defaultdict(list), defaultdict(int), defaultdict(int)
+        self.previous, self.samples, self.rss, self.threads = {}, defaultdict(list), defaultdict(list), defaultdict(list)
         self.excess, self.swap_start = 0., swap()
         self.aggregate, self.windows, self.loads = [], {}, []
         self.breach, self.halt, self.lock = None, threading.Event(), threading.RLock()
@@ -109,12 +109,13 @@ class Supervisor:
                 dt = now-then
                 cores = max(0, cpu-previous_cpu)/dt
                 self.samples[pid].append((now, dt, cores))
+                self.rss[pid].append((now, dt, rss))
+                self.threads[pid].append((now, dt, threads))
                 total += cores
                 intervals.append(dt)
                 raw[str(pid)] = {"cores": cores, "rss": rss, "threads": threads,
                                  "cpu_seconds": cpu, "dt": dt}
             self.previous[pid] = (now, cpu)
-            self.rss[pid], self.threads[pid] = max(self.rss[pid], rss), max(self.threads[pid], threads)
         dt = min(intervals, default=0.)
         self.aggregate.append((now, dt, total))
         self.excess = self.excess+dt if total > self.cap else 0.
@@ -126,13 +127,14 @@ class Supervisor:
 
     def summary(self, state="INCOMPLETE", n=None, since=0, end=None, aggregate_window=None):
         end = time.monotonic() if end is None else end
-        windows = {p: (max(since, w[0]), w[1] or end) for p, w in self.windows.items()}
+        windows = {p: (max(since, w[0]), min(w[1] if w[1] is not None else end, end)) for p, w in self.windows.items()}
         active = {p: clip(s, *windows.get(p, (since, end))) for p, s in self.samples.items()}
         lo, hi = max((w[0] for w in windows.values()), default=since), min((w[1] for w in windows.values()), default=end)
         if aggregate_window is not None:
             lo, hi = aggregate_window
         max_dt = max((dt for s in self.samples.values() for _, dt, _ in s), default=0)
-        per = {str(p): dict(statistics(s), peak_rss=self.rss[p], peak_threads=self.threads[p], tail=statistics(clip(self.samples[p], windows.get(p, (since, end))[1], end)))
+        per = {str(p): dict(statistics(s), peak_rss=max((v for _, _, v in clip(self.rss[p], *windows.get(p, (since, end)))), default=None),
+                           peak_threads=max((v for _, _, v in clip(self.threads[p], *windows.get(p, (since, end)))), default=None), tail=statistics(clip(self.samples[p], windows.get(p, (since, end))[1], end)))
                for p, s in active.items()}
         agg = statistics(clip(self.aggregate, lo, hi))
         def bar(s, mean, p95):
