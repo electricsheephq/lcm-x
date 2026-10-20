@@ -112,7 +112,7 @@ def test_glm_fake_executable_judge_and_leak(client, tmp_path, monkeypatch, failu
             return {"content": "CORRECT"} if spec == primary else original(spec, *args, **kwargs)
 
         monkeypatch.setattr(client, "call", routed)
-        result, _ = judges.judge(q, "4", client, records, models=[primary, SPEC])
+        result, _ = judges.judge(q, "4", client, records, models=[primary], agreement_model=SPEC)
         assert result[primary]["correct"] is True and result[SPEC]["status"] == "not_run"
         assert client.quota.state["glm"]["stopped"] and not client.quota.state["claude"]["stopped"]
         with pytest.raises(models.BudgetStopped):

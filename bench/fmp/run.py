@@ -21,7 +21,7 @@ from . import datasets, delivery, judges
 from .common import commit, digest_file, load_lcm, quiet, sha, utc, write_json
 from .models import (AGENTIC_TOOL_CAP, CLAUDE_AGREEMENT_JUDGE, CODEX_DEFAULT_JUDGE, CODEX_DEFAULT_READER,
                      CODEX_DISABLED, GLM_HOST, JUDGE_MAX_TOKENS, READER_MAX_TOKENS, READERS, REASONING, Backends, BudgetStopped,
-                     OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec)
+                     OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec, reader_spec)
 from .score import score
 from .stores import Stores
 
@@ -44,7 +44,7 @@ def parser():
     p.add_argument("--delivery", choices=("agentic", "single", "full_context"), default="agentic")
     # Default matrix is all-Codex on the ChatGPT plan; OpenRouter is an explicit opt-in
     # (`openrouter:<id>`, with --max-spend and --spend-ledger).
-    p.add_argument("--reader", default=CODEX_DEFAULT_READER, help="codex:<model>@<effort> | claude:<model> | glm:<model> | "
+    p.add_argument("--reader", type=reader_spec, default=CODEX_DEFAULT_READER, help="codex:<model>@<effort> | claude:<model> | glm:<model> | "
                    "openrouter:<id>; opt-in ids: " + ", ".join(READERS))
     p.add_argument("--judge", nargs="+", default=[CODEX_DEFAULT_JUDGE], help="judges applied to every answer")
     p.add_argument("--agreement-judge", default=CLAUDE_AGREEMENT_JUDGE, help="judge on a seeded sample; 'none' disables")
@@ -236,15 +236,19 @@ def execute(args):
 def run_jobs(jobs, workers):
     prepared = [next(job) for job in jobs]
     if len(jobs) == 1:
+        started = time.monotonic()
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            for row in pool.map(*prepared[0]):
+            for row in pool.map(*prepared[0][:2]):
                 jobs[0].send(row)
+        prepared[0][2]["active_s"] += time.monotonic() - started
     else:
         start = random.Random(1189).randrange(len(jobs))
-        for i, items in enumerate(zip(*(source for _, source in prepared), strict=True)):
+        for i, items in enumerate(zip(*(source for _, source, _ in prepared), strict=True)):
             for j in range(len(jobs)):
                 index = (start + i + j) % len(jobs)
+                started = time.monotonic()
                 jobs[index].send(prepared[index][0](items[index]))
+                prepared[index][2]["active_s"] += time.monotonic() - started
     for job in jobs:
         try:
             job.send(None)
@@ -296,7 +300,7 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             if manifest[key] != value:
                 raise ValueError("judging run identity mismatch")
     manifest.setdefault("endpoint_hosts", {}).update({s: GLM_HOST for s in specs(args) if parse_spec(s)[0] == "glm"})
-    started = time.monotonic()
+    timing = {"active_s": 0.0}
     if args.command == "answer":
         def work(q):
             calls = []
@@ -333,20 +337,20 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
                         agreement_fraction=args.agreement_fraction)
 
         def work(row):
-            models = [*args.judge, *([args.agreement_judge] if row["qid"] in agreement else [])]
-            return judges.judge_row(row, by_id[row["qid"]], client, models)
+            extra = args.agreement_judge if row["qid"] in agreement else None
+            return judges.judge_row(row, by_id[row["qid"]], client, args.judge, agreement_model=extra)
         destination = args.output / "judged.jsonl"
         source = rows
     with destination.open("x") as stream:
         if args.command == "judge":
             manifest["status"] = "judging"
             write_json(manifest_path, manifest)
-        row = yield work, source
+        row = yield work, source, timing
         while row is not None:
             stream.write(json.dumps(row, ensure_ascii=False) + "\n")
             stream.flush()
             row = yield
-    manifest[args.command + "_wall_s"] = time.monotonic() - started
+    manifest[args.command + "_wall_s"] = timing["active_s"]
     manifest["wall_s"] = manifest.get("answer_wall_s", 0) + manifest.get("judge_wall_s", 0)
     written = [json.loads(line) for line in destination.read_text().splitlines()]
     manifest.update(end_utc=utc(), not_run=sum(r["status"] == "not_run" for r in written),

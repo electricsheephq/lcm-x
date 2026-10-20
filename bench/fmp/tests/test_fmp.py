@@ -859,7 +859,7 @@ def test_agreement_judge_on_sample_and_secondary_stop_keeps_primary(question):
             if model == OPUS:
                 raise BudgetStopped()
             return {"content": "yes"}
-    result, _ = judges.judge(question, "x", Routed([]), models=[SOL_JUDGE, OPUS])
+    result, _ = judges.judge(question, "x", Routed([]), models=[SOL_JUDGE], agreement_model=OPUS)
     assert result[SOL_JUDGE]["correct"] is True and result[OPUS]["status"] == "not_run"
 
 

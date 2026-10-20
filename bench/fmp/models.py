@@ -1,5 +1,6 @@
 """Subscription-plan harness backends (codex exec, claude -p) and the opt-in OpenRouter path
 with its process-safe reservation/spend ledger."""
+import argparse
 import fcntl
 import json
 import math
@@ -192,6 +193,23 @@ def parse_spec(spec):
     if not model or (kind == "codex") != bool(effort):
         raise ValueError("invalid model spec")
     return kind, model, effort or None
+
+
+def reader_spec(spec):
+    """CLI admission: every accepted reader must have a known context length."""
+    try:
+        kind, model, _ = parse_spec(spec)
+        if kind == "openrouter":
+            response = httpx.get("https://openrouter.ai/api/v1/models", timeout=30)
+            response.raise_for_status()
+            context = next((m.get("context_length") for m in response.json()["data"] if m["id"] == model), None)
+        else:
+            context = 128_000 if kind == "glm" else CONTEXT.get(model)
+        if not isinstance(context, int) or context <= 0:
+            raise ValueError("unknown context length")
+    except (ValueError, KeyError, httpx.HTTPError) as exc:
+        raise argparse.ArgumentTypeError("reader context length unavailable; use a supported model spec") from exc
+    return spec
 
 
 def harness(spec):
