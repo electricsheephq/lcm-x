@@ -170,6 +170,8 @@ def run(a):
         loop_end = time.monotonic()
         stop(p)
         meter.close()
+    if meter.breach:
+        final, reason = "ABORTED", meter.breach
     events = [__import__("json").loads(s) for s in (a.out/"events.jsonl").read_text().splitlines()] if (a.out/"events.jsonl").exists() else []
     result = audit(a.db, manifest)
     if audit_failed(result):

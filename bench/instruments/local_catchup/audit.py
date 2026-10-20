@@ -20,9 +20,9 @@ def connect(db):
     return c
 
 
-def preimage(c):
+def preimage(c, node_bound=None):
     raw = digest(c.execute("SELECT * FROM messages ORDER BY store_id"))
-    provenance = {table: digest(c.execute(f"SELECT * FROM {table} ORDER BY {order}")
+    provenance = {table: digest(c.execute(f"SELECT * FROM {table}" + (f" WHERE node_id<={int(node_bound)}" if node_bound is not None else "") + f" ORDER BY {order}")
                                if c.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone() else [])
                   for table, order in (("summary_nodes", "node_id"), ("summary_node_provenance", "node_id"),
                                        ("lcm_rollup_sources", "rollup_id,node_id"))}
@@ -46,7 +46,10 @@ def audit(db, manifest):
         c.execute("BEGIN")
         before = manifest["preimage"]
         now = preimage(c)
-        changed = [k for k, v in before["vectors"].items() if now["vectors"].get(k) != v]
+        observed = manifest.setdefault("observed_vectors", {}) if now["vectors"] else manifest.get("observed_vectors", {})
+        changed = [k for k, v in (observed | before["vectors"]).items() if now["vectors"].get(k) != v]
+        for k, v in now["vectors"].items():
+            observed.setdefault(k, v)
         changed_meta = [k for k, v in before["metadata"].items() if now["metadata"].get(k) != v]
         expected_ids = {f"{kind}/{manifest['identities'][task]}/{ident}"
                         for kind, task in (("chunks", "chunk"), ("leaves", "summary"))
@@ -90,9 +93,14 @@ def audit(db, manifest):
     return result
 
 
-def progress(db, manifest):
+def progress(db, manifest, verify=True):
     result = {"classes": {}, "raw_unchanged": True, "changed_vectors": [], "integrity": "not_checked"}
     with connect(db) as c:
+        c.execute("BEGIN")
+        if verify:
+            now, before = preimage(c), manifest["preimage"]
+            result.update(raw_unchanged=now["raw_digest"] == before["raw_digest"] and now["provenance"] == before["provenance"],
+                changed_vectors=[k for k, v in (manifest.get("observed_vectors", {}) | before["vectors"]).items() if now["vectors"].get(k) != v])
         for kind, table, meta, key, task in (("chunks", "lcm_chunk_vectors", "lcm_chunk_meta", "chunk_id", "chunk"),
                                            ("leaves", "lcm_embedding_vectors", "lcm_embedding_meta", "embedded_id", "summary")):
             expected = manifest["expected"][kind]

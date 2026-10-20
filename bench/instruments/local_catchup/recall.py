@@ -6,25 +6,32 @@ import threading
 import time
 
 from .audit import audit, vector_counts
-from .common import append, dump, load
+from .common import append, dump, foreground_request, load
 from .cpu import percentile
-from .measurement import SMOKE, arguments, bootstrap, catchup_activity, cell, integrity, prepare, runtime, safety, trace, wait_covered
+from .measurement import SMOKE, arguments, bootstrap, catchup_activity, cell, guarded_worker, integrity, prepare, runtime, safety, trace, wait_covered
 
 INCOMPLETE_SEMANTIC_REASONS = (
-    r"\b(?:chunk|summary) semantic index catching up\b",
-    r"\b(?:chunk|summary) semantic index has \d+ rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus (?:chunks|summary)\b",
+    r"\b{arm} semantic index catching up\b",
+    r"\b{arm} semantic index has \d+ rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus {corpus}\b",
 )
 
 
 def honest_coverage(payload, incomplete_arms):
-    if not incomplete_arms:
-        return True
-    reasons = [*payload.get("degraded_reasons", []), payload.get("degraded_reason", "")]
-    disclosed = payload.get("degraded") and any(
-        re.search(pattern, reason) for reason in reasons if isinstance(reason, str)
-        for pattern in INCOMPLETE_SEMANTIC_REASONS)
+    reason = payload.get("degraded_reason", "")
     coverage = payload.get("provenance", {}).get("coverage", {})
-    return bool(disclosed or any(arm in coverage and coverage[arm] != "full" for arm in incomplete_arms))
+    return all(coverage.get(arm) in ("bounded", "full_approx", "none", "disabled") or
+        (payload.get("degraded") and any(re.search(pattern.format(arm=arm,
+            corpus="chunks" if arm == "chunk" else "summary"), reason)
+            for pattern in INCOMPLETE_SEMANTIC_REASONS)) for arm in incomplete_arms)
+
+
+def semantic_healthy(payload):
+    provenance = payload.get("provenance", {})
+    reason = payload.get("degraded_reason", "")
+    return (not re.search(r"arm failed|provider unavailable|query embedding failed|cooling down|identity is stale", reason)
+        and all(arm in provenance.get("arms_run", []) and
+            provenance.get("coverage", {}).get(arm) in ("full", "bounded", "full_approx")
+            for arm in ("chunk", "summary")))
 
 
 def overlapping(rows, publications):
@@ -44,7 +51,7 @@ def score(rows, publications, seed=1586, state="OFF", activity=None):
         point = percentile(values, quantile)
         upper = percentile(bootstrap(values, lambda v: percentile(v, quantile), seed), .95) if values else None
         stats[name] = dict(seconds=point, upper95_s=upper, limit_s=limit)
-    failures = sum(r["health"] in ("error", "timeout") or not r["fts_hits"] or not r["honest_coverage"] for r in rows)
+    failures = sum(r["health"] in ("error", "timeout") or not r["fts_hits"] or not r["honest_coverage"] or (state != "OFF" and not r.get("semantic_healthy", False)) for r in rows)
     valid = len(counted) >= 200 and distinct >= 10
     passed = not failures and all(v["seconds"] <= v["limit_s"] and v["upper95_s"] <= v["limit_s"] for v in stats.values()) if counted else False
     result = dict(state="INVALID" if not valid else "PASS" if passed else "FAIL", overlapping=len(counted),
@@ -94,14 +101,15 @@ def worker(request):
                     incomplete_arms = [arm for kind, arm in (("chunks", "chunk"), ("leaves", "summary"))
                                        if before and before[kind] < len(manifest["expected"][kind])]
                     start = time.perf_counter()
-                    payload = json.loads(mod("tools").lcm_recall({"query": queries[q["id"]]}, engine=reader))
+                    with foreground_request():
+                        payload = json.loads(mod("tools").lcm_recall({"query": queries[q["id"]]}, engine=reader))
                     end = time.perf_counter()
                     coverage = payload.get("provenance", {}).get("coverage", {})
                     health = "timeout" if payload.get("timeout") else "error" if "error" in payload else "degraded" if payload.get("degraded") else "ok"
                     row = dict(query_id=q["id"], start=start, end=end, seconds=end-start, health=health,
                         reason=payload.get("degraded_reasons", payload.get("degraded_reason")), semantic_coverage=coverage,
                         fts_hits=any("fts" in h.get("arms", []) for h in payload.get("hits", [])),
-                        honest_coverage=honest_coverage(payload, incomplete_arms),
+                        semantic_healthy=semantic_healthy(payload), honest_coverage=honest_coverage(payload, incomplete_arms),
                         incomplete=bool(incomplete_arms), coverage_start=before,
                         coverage_end=vector_counts(a.db, manifest) if before else {})
                     rows.append(row)
@@ -160,4 +168,4 @@ def main(a):
 
 if __name__ == "__main__":
     a = arguments(__doc__)
-    worker(a.worker) if a.worker else main(a)
+    guarded_worker(worker, a.worker) if a.worker else main(a)

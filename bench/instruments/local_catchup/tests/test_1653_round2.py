@@ -27,7 +27,8 @@ def test_13_recall_thread_provider_build_is_foreground(tmp_path, monkeypatch):
     common.guards(lambda name: provider if name == "embedding_provider" else command, events)
     def build():
         try:
-            provider.FastembedProvider._construct(None, allow_download=False)
+            with common.foreground_request():
+                provider.FastembedProvider._construct(None, allow_download=False)
         except RuntimeError as exc:
             errors.append(str(exc))
     thread = threading.Thread(target=build, name="i2-recall")
@@ -96,13 +97,13 @@ def test_16_upgrade_metadata_only_change_fails(corpus, tmp_path, table, column):
 
 @pytest.mark.parametrize("payload,expected", [
     ({"degraded": True, "degraded_reason": "summary query timeout"}, False),
-    ({"degraded": True, "degraded_reasons": ["chunk semantic index catching up (2 rows not yet embedded)"]}, True),
-    ({"degraded": True, "degraded_reason": "summary semantic index catching up"}, True),
+    ({"degraded": True, "degraded_reason": "chunk semantic index catching up (2 rows not yet embedded)"}, True),
+    ({"degraded": True, "degraded_reason": "summary semantic index catching up"}, False),
     ({"degraded": False, "degraded_reason": "chunk semantic index catching up"}, False),
     ({"degraded": True, "degraded_reason": "chunk semantic index has 2 rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus chunks"}, True),
-    ({"degraded": True, "degraded_reasons": ["timeout"], "degraded_reason": "chunk semantic index catching up"}, True),
-    ({"provenance": {"coverage": {"chunk": "partial", "summary": "full"}}}, True),
-    ({"provenance": {"coverage": {"chunk": "full", "summary": "none"}}}, False),
+    ({"degraded": True, "degraded_reason": "chunk semantic index catching up"}, True),
+    ({"degraded": True, "degraded_reason": "chunk arm coverage bounded: scored the 10 most-recent of 99 vectors (older vectors excluded)", "provenance": {"coverage": {"chunk": "bounded", "summary": "full"}}}, True),
+    ({"degraded": True, "degraded_reason": "summary vectors are unavailable", "provenance": {"coverage": {"chunk": "full", "summary": "none"}}}, False),
     ({"provenance": {"coverage": {"chunk": "full"}}}, False),
 ])
 def test_17_payload_disclosure_requires_semantic_coverage(tmp_path, monkeypatch, payload, expected):

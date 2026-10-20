@@ -24,6 +24,7 @@ def main():
     p.add_argument("--shape", choices=("short", "mixed"), default="short")
     p.add_argument("--baseline", choices=("empty", "upgrade"), default="empty")
     p.add_argument("--max-wall", type=wall, default=86400)
+    p.add_argument("--bind-timeout", type=wall, default=900)
     p.add_argument("--restart-fraction", type=float, default=.4)
     p.add_argument("--restart-after", type=wall, default=None)
     p.add_argument("--stagger", type=float, default=2.)
@@ -35,7 +36,7 @@ def main():
     immutable_cache(a.model_cache)
     a.out.mkdir(parents=True, exist_ok=False)
     a.scratch.mkdir(parents=True, exist_ok=False)
-    n, duration = (16 if a.screen16 else a.processes), a.max_wall
+    n, duration = (16 if a.screen16 else a.processes), min(a.max_wall, getattr(a, "bind_timeout", 900)) if a.screen16 else a.max_wall
     pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", pilot_rows(1000, a.rows, a.shape), a.shape, a.baseline)
     estimate = n*3*(pilot["database_bytes"]+len(pilot["expected"]["chunks"])*2048)*a.rows/pilot["rows"]
     dump(a.out/"allocation.json", {"estimate_bytes": estimate, "peak_disk_gb": a.peak_disk_gb})
@@ -95,6 +96,9 @@ def main():
                     reason = "cross_profile_access"
                     break
                 progress = [read_progress(j.db, m) for j, m in zip(jobs, manifests)]
+                if any(not r["raw_unchanged"] or r["changed_vectors"] for r in progress):
+                    reason = "row_or_vector_corruption"
+                    break
                 append(a.out/"progress.jsonl", {"elapsed_s": time.monotonic()-started, "per_process": progress})
                 for i, r in enumerate(progress):
                     if r["complete"] and meter.windows[processes[i].pid][1] is None:
@@ -134,9 +138,12 @@ def main():
         reason = "worker_exit"
     finally:
         loop_end = time.monotonic()
-        meter.close()
-        for q in processes:
-            stop(q)
+        try:
+            meter.close()
+        finally:
+            for q in processes:
+                stop(q)
+    reason = meter.breach or reason
     progress = [audit(j.db, m) for j, m in zip(jobs, manifests)]
     for j, g, r in zip(jobs, generations, progress):
         dump(j.out/"final-audit.json", r)
@@ -144,6 +151,8 @@ def main():
             c.backup(dest)
     fractions = [sum(v["covered"] for v in r["classes"].values())/sum(v["expected"] for v in r["classes"].values()) for r in progress]
     state = screen_state(fractions) if a.screen16 and reason == "max_wall" else "COMPLETE" if reason == "complete" else "INCOMPLETE" if reason == "max_wall" else "STALLED" if reason == "stalled_provider_ready" else "ABORTED"
+    if a.screen16 and reason.startswith("bind_timeout:"):
+        state = "INVALID"
     if any(audit_failed(r) for r in progress):
         state, reason = "ABORTED", "final_integrity_or_residue"
     elif reason == "complete" and not all(r["complete"] for r in progress):

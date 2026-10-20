@@ -14,7 +14,7 @@ import time
 
 from .audit import audit, connect, preimage, progress
 from .catchup import stop
-from .common import append, config, dump, foreign_files, guards, immutable_cache, isolated, load, parser, product, safe_paths
+from .common import append, config, dump, foreign_files, foreground_request, guards, immutable_cache, isolated, load, parser, product, safe_paths
 from .corpus import build, pilot_rows
 from .cpu import Supervisor
 
@@ -91,6 +91,7 @@ def cell(a, state, block, kind):
         finally:
             stop(proc)
             meter.close()
+    reason = meter.breach or reason
     result = load(root/"raw-summary.json") if (root/"raw-summary.json").exists() else {}
     if reason or proc.returncode:
         result.update(state="ABORTED", reason=reason or f"worker_exit:{proc.returncode}")
@@ -102,6 +103,16 @@ def cell(a, state, block, kind):
     if result.get("state") == "ABORTED":
         raise RuntimeError(f"cell stopped: {root.name}: {result.get('reason')}")
     return result
+
+
+def guarded_worker(worker, request):
+    try:
+        worker(request)
+    except RuntimeError as exc:
+        if str(exc) != "foreground preparation/backfill/join or network":
+            raise
+        dump(Path(load(request)["root"])/"raw-summary.json",
+             dict(state="INVALID", reason="foreground_preparation_backfill_join_or_network"))
 
 
 def runtime(request):
@@ -149,16 +160,18 @@ def trace(engine, mod, count, seed, observe, check):
         pair = batch[i % 64]
         view.append(pair[0])
         t0 = time.perf_counter()
-        engine.ingest(view)
-        due = engine.should_compress_preflight(view)
-        t1 = time.perf_counter()
-        if due:
-            view = engine.compress(view, current_tokens=mod("tokens").count_messages_tokens(view))
-        t2 = time.perf_counter()
+        with foreground_request():
+            engine.ingest(view)
+            due = engine.should_compress_preflight(view)
+            t1 = time.perf_counter()
+            if due:
+                view = engine.compress(view, current_tokens=mod("tokens").count_messages_tokens(view))
+            t2 = time.perf_counter()
         observe(dict(turn=i, start=t0, end=t2, ingest_preflight_ms=(t1-t0)*1000,
                      dispatch_ms=(t2-t0)*1000, compression_due=bool(due)))
         view.append(pair[1])
-        engine.ingest(view)
+        with foreground_request():
+            engine.ingest(view)
         engine.last_prompt_tokens = mod("tokens").count_messages_tokens(view)
         engine.note_turn_complete()
         engine._prepare_leaves_after_turn(view)
@@ -168,11 +181,14 @@ def trace(engine, mod, count, seed, observe, check):
 def integrity(a, manifest):
     # New trace rows are expected. Audit the immutable corpus subset and old vectors.
     with connect(a.db) as c:
+        c.execute("BEGIN")
         original = list(c.execute("SELECT * FROM messages WHERE store_id<=? ORDER BY store_id", (manifest["rows"],)))
         from .audit import digest
         if digest(original) != manifest["preimage"]["raw_digest"]:
             raise RuntimeError("corpus row corruption")
-        now = preimage(c)
+        now = preimage(c, len(manifest["expected"]["leaves"]))
+        if now["provenance"] != manifest["preimage"]["provenance"]:
+            raise RuntimeError("corpus provenance corruption")
         changed_metadata = [k for k, v in manifest["preimage"]["metadata"].items() if now["metadata"].get(k) != v]
         dump(a.root/"final-integrity.json", dict(corpus_raw_digest=digest(original),
             expected_raw_digest=manifest["preimage"]["raw_digest"],
@@ -207,7 +223,7 @@ def safety(a):
     if now >= getattr(a, "_next_progress", 0):
         a._next_progress = now+30
         manifest = load(a.out/"manifest.json")
-        value = progress(a.db, manifest)
+        value = progress(a.db, manifest, False)
         fingerprint = str((value["classes"], value["scan"]))
         if fingerprint != getattr(a, "_fingerprint", None):
             a._fingerprint, a._changed = fingerprint, now
@@ -215,7 +231,9 @@ def safety(a):
         if not value["complete"] and now-a._changed >= 600 and a._ready():
             raise RuntimeError("zero progress for ten minutes while work remains")
     return {"events": "events.jsonl", "prepare_and_backfill_wrapped": True,
-            "embedding_thread_join_wrapped": True, "network_denied": True, "violations": 0}
+            "embedding_thread_join_wrapped": True, "python_socket_calls_denied":
+            "connect, connect_ex, sendto, sendmsg, getaddrinfo, gethostbyname, gethostbyname_ex, gethostbyaddr, getnameinfo",
+            "subprocess_launches_recorded": True, "native_and_subprocess_network_guarded": False, "violations": 0}
 
 
 def catchup_activity(root, start, end, coverage_start, coverage_end, require_prepared=False):
@@ -245,7 +263,7 @@ def wait_covered(a, mod, engine, manifest):
                 if checked["complete"]:
                     return
                 safety(a)
-                fingerprint = str(progress(a.db, manifest))
+                fingerprint = str(progress(a.db, manifest, False))
                 if fingerprint != previous:
                     changed, previous = time.monotonic(), fingerprint
                 if time.monotonic()-changed >= 600 or time.monotonic()-start > a.max_seconds:

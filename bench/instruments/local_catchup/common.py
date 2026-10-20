@@ -1,16 +1,29 @@
 """Isolation and product loading; never execute the plugin registration entrypoint."""
 import argparse
+from contextlib import contextmanager
+from contextvars import ContextVar
 import importlib
 import json
 import os
 from pathlib import Path
 import socket
 import sys
+import subprocess
 import threading
 import time
 import types
 
 MODEL = "BAAI/bge-small-en-v1.5"
+REQUEST = ContextVar("instrument_foreground_request", default=False)
+
+
+@contextmanager
+def foreground_request():
+    token = REQUEST.set(True)
+    try:
+        yield
+    finally:
+        REQUEST.reset(token)
 
 
 def dump(path, value):
@@ -101,13 +114,19 @@ def config(mod, db, enabled=True):
 def guards(mod, events, generation=0):
     """Observe real product calls, fail closed on network or foreground backfill/prepare."""
     def foreground_thread():
-        return threading.current_thread() is threading.main_thread() or getattr(threading.current_thread(), "name", "") == "i2-recall"
+        return REQUEST.get() or threading.current_thread() is threading.main_thread()
     def deny(*a, **kw):
         append(events, {"violation": "network_attempt", "thread": threading.current_thread().name})
         raise RuntimeError("offline instrument denies network")
     socket.socket.connect = socket.socket.connect_ex = deny
-    socket.socket.sendto = deny
+    socket.socket.sendto = socket.socket.sendmsg = deny
     socket.getaddrinfo = socket.gethostbyname = socket.gethostbyname_ex = deny
+    socket.gethostbyaddr = socket.getnameinfo = deny
+    original_init = subprocess.Popen.__init__
+    def launched(self, *args, **kwargs):
+        append(events, {"event": "subprocess_launch", "thread": threading.current_thread().name})
+        original_init(self, *args, **kwargs)
+    subprocess.Popen.__init__ = launched
     provider = mod("embedding_provider")
     if provider._FASTEMBED_THREADS > 2:
         raise RuntimeError("product ORT thread count exceeds two")

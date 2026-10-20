@@ -100,7 +100,7 @@ def test_6_open_file_allowlist(tmp_path, monkeypatch):
 def test_7_progress_has_no_hash_or_integrity_scan(fixture_corpus, monkeypatch):
     db, manifest, _ = fixture_corpus
     monkeypatch.setattr(audit, "preimage", lambda _: pytest.fail("progress hashes full store"))
-    r = audit.progress(db, manifest)
+    r = audit.progress(db, manifest, False)
     assert not r["complete"] and r["classes"]["chunks"]["covered"] == 0
 
 

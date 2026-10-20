@@ -7,7 +7,7 @@ import threading
 import time
 
 from .catchup import arguments, run
-from .common import config, dump, guards, isolated, product, safe_paths
+from .common import config, dump, foreground_request, guards, isolated, product, safe_paths
 from .corpus import build
 
 
@@ -28,9 +28,10 @@ def cold_side(a, enabled):
         engine.on_session_start(manifest["sessions"][0], platform="cli", context_length=200000)
         bind = (time.monotonic()-start)*1000
         start = time.monotonic()
-        recall = {"payload": json.loads(mod("tools").lcm_grep(
-            {"query": manifest["canaries"][0]["id"], "mode": "hybrid"}, engine=engine)),
-            "elapsed_ms": (time.monotonic()-start)*1000}
+        with foreground_request():
+            recall = {"payload": json.loads(mod("tools").lcm_grep(
+                {"query": manifest["canaries"][0]["id"], "mode": "hybrid"}, engine=engine)),
+                "elapsed_ms": (time.monotonic()-start)*1000}
     finally:
         engine.shutdown()
     dump(a.out/f"side-{enabled}.json", dict(bind_ms=bind, recall=recall,

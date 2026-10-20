@@ -98,8 +98,11 @@ class Supervisor:
         self.halt.set()
         if hasattr(self, "thread"):
             self.thread.join()
-            with self.lock:
-                self.sample(tuple(self.windows))
+            try:
+                with self.lock:
+                    self.breach = self.sample(tuple(self.windows)) or self.breach
+            except Exception as exc:
+                self.breach = f"sampler_error:{type(exc).__name__}"
 
 
     def sample(self, pids):
