@@ -2948,7 +2948,7 @@ class LCMEngine(
                         _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(maintenance_key, bound_maintain, owner=owner)
 
             bound_enqueue = profile_bound(enqueue)
-            start_local_model_prepare(database_path, config, on_ready=bound_enqueue)
+            start_local_model_prepare(database_path, config, on_ready=bound_enqueue, owner=owner)
             bound_enqueue()
         except Exception:
             logger.warning(

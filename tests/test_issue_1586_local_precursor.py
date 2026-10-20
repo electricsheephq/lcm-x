@@ -281,3 +281,40 @@ def test_doctor_reports_preparing_while_cached_probe_fails(make_engine, monkeypa
     assert check["status"] == "warn"
     assert check["detail"]["readiness"].startswith("model: preparing;")
     assert "prepares in the background" in check["detail"]["impact"]
+
+
+def test_prepare_keeps_every_owner_callback_for_one_database(monkeypatch, tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "shared.db"), **local_config())
+    ran, release = [], threading.Event()
+
+    def register(_config, _db, **kwargs):
+        assert release.wait(5)
+        return {}
+
+    monkeypatch.setattr(command, "_embedding_register_profiles", register)
+    owner_a, owner_b = object(), object()
+    assert maintenance.start_local_model_prepare(config.database_path, config,
+                                                 on_ready=lambda: ran.append("a"), owner=owner_a)
+    # A second engine on the same database, e.g. after a rearm, must not displace the first owner.
+    assert not maintenance.start_local_model_prepare(config.database_path, config,
+                                                     on_ready=lambda: ran.append("b"), owner=owner_b)
+    release.set()
+    maintenance._PREPARE_THREAD.join(5)
+    assert sorted(ran) == ["a", "b"]
+
+
+@pytest.mark.parametrize(("model", "expected"), [
+    ("other-local", "not prepared (run /lcm embed warmup)"), ("fixture-local", "present")])
+def test_doctor_present_needs_the_configured_local_model(make_engine, monkeypatch, model, expected):
+    from hermes_lcm.vector_store import VectorStore
+
+    engine = make_engine("stale-profile", **local_config())
+    vectors = VectorStore(engine._store.db_path, config=engine._config)
+    try:
+        vectors.register_profile(model, "fastembed", 2)
+    finally:
+        vectors.close()
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: {
+        "available": True, "provider": "fastembed", "model": "fixture-local", "probed": True, "detail": "fixture"})
+    readiness = tools._embedding_provider_health_check(engine)["detail"]["readiness"]
+    assert readiness.startswith(f"model: {expected};")

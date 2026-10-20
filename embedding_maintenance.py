@@ -35,7 +35,9 @@ _FAILURE_WARNED = False
 _STOP_EMBEDDING_MAINTENANCE = threading.Event()
 _PREPARE: dict[tuple[str, str, int], tuple[str, str]] = {}
 _PREPARE_THREAD: threading.Thread | None = None
-_PREPARE_READY: dict[tuple[str, str, int], dict[str, Callable[[], None]]] = {}
+# model key -> database -> owner token -> enqueue; one entry per live owner, so a retiring engine
+# never displaces another engine's callback for the same database.
+_PREPARE_READY: dict[tuple[str, str, int], dict[str, dict[object, Callable[[], None]]]] = {}
 
 
 def database_identity(db_path: str | Path) -> str:
@@ -90,6 +92,7 @@ def note_local_model_present(config: Any) -> None:
 
 def start_local_model_prepare(
     db_path: str | Path, config: Any, *, on_ready: Callable[[], None] | None = None,
+    owner: object | None = None,
 ) -> bool:
     """Start this process's one background prepare of the local model (#1186).
 
@@ -108,7 +111,8 @@ def start_local_model_prepare(
         state = _PREPARE.get(key)
         if on_ready is not None and (state is None or state[0] == "preparing"):
             if state is not None or _PREPARE_THREAD is None or not _PREPARE_THREAD.is_alive():
-                _PREPARE_READY.setdefault(key, {})[database_identity(db_path)] = on_ready
+                waiting = _PREPARE_READY.setdefault(key, {}).setdefault(database_identity(db_path), {})
+                waiting[on_ready if owner is None else owner] = on_ready
         if key in _PREPARE or (_PREPARE_THREAD is not None and _PREPARE_THREAD.is_alive()):
             return False
         _PREPARE[key] = ("preparing", "")
@@ -133,7 +137,7 @@ def _prepare_local_model(key: tuple[str, str, int], db_path: str | Path, config:
         with _STATE_LOCK:
             _PREPARE[key] = ("present", "")
             callbacks = _PREPARE_READY.pop(key, {})
-        for enqueue in callbacks.values():
+        for enqueue in [cb for owners in callbacks.values() for cb in owners.values()]:
             try:
                 enqueue()
             except Exception:

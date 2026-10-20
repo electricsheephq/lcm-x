@@ -67,6 +67,13 @@ stops at the next provider batch boundary and waits up to 10 s for that batch to
 short there reports `stop_reason: process_exit`, and the next pass picks up the unsent work. A backlog that holds
 steady between a session end and the next rebind is this designed pause, not a stalled pass.
 
+With fastembed configured explicitly, the first maintenance trigger in a process starts one background
+preparation of the local model (#1586). It runs the warmup path, the only path allowed to download, then
+registers the profiles and enqueues a catch-up pass for every live engine on that database. Recall never
+waits for it: while the model prepares, `lcm_recall` answers from full text and reports degraded with a
+`preparing` reason. A failed preparation warns once and leaves the model `unavailable` with its reason for
+this process; the next process start retries. Only one preparation runs per process.
+
 Vector identity binds provider, model, dimension, storage shape, and the active
 privacy revision. A policy change requires a new warmup/identity rather than
 mixing vectors. Evidence and status expose aggregate policy state, never matched
