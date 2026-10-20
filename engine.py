@@ -9491,8 +9491,12 @@ class LCMEngine(
                 "role": "user",
                 "content": f"{summary_message['content']}\n\n{tail_selected[0]['content']}",
             }
-            end = self._verified_lcm_summary_prefix_end(carrier["content"])
-            if end is not None and carrier["content"][end:] == "\n\n" + tail_selected[0]["content"]:
+            if user_carry.HEADER in summary_message["content"]:
+                end = self._verified_lcm_summary_prefix_end(carrier["content"])
+                remainder = carrier["content"][end + 2:] if end is not None and carrier["content"][end:].startswith("\n\n") else None
+            else:
+                remainder = self._generated_context_carrier_remainder(carrier)
+            if remainder == tail_selected[0]["content"]:
                 source_ids = self._get_store_ids_for_messages([tail_selected[0]])
                 result[-1], carried_tail = carrier, tail_selected[0]
                 if summary_candidate is not None:

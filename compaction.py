@@ -179,10 +179,11 @@ class _LeafState:
 def select_oldest_leaf_chunk(
     candidate_raw: List[Dict[str, Any]],
     working_leaf_chunk_tokens: int,
-    counter=count_message_tokens,
+    counter=None,
 ) -> List[Dict[str, Any]]:
     selected: list[Dict[str, Any]] = []
     used = 0
+    counter = counter or count_message_tokens
     for msg in candidate_raw:
         msg_tokens = counter(msg)
         if used + msg_tokens > working_leaf_chunk_tokens and selected:
@@ -193,6 +194,11 @@ def select_oldest_leaf_chunk(
 
 
 class CompactionMixin:
+    def _raw_messages_tokens(self, messages, occurrences=None):
+        if not any("[Earlier user messages, verbatim reference;" in str(m.get("content", "")) for m in messages):
+            return count_messages_tokens(messages)
+        return sum(self._raw_message_tokens(m, (occurrences or {}).get(id(m))) for m in messages)
+
     def _carry_emission_proof(self, view, candidates):
         binding = self._emission_binding()
         return {"version": 4, **binding, "output": [_emission_identity(m) for m in view],
@@ -649,7 +655,7 @@ class CompactionMixin:
 
         occurrences = dict(zip(map(id, messages), self._replay_occurrences(messages)[0])) \
             if any("[Earlier user messages, verbatim reference;" in str(m.get("content", "")) for m in messages) else {}
-        raw_tokens_outside_tail = sum(self._raw_message_tokens(m, occurrences.get(id(m))) for m in candidate_raw)
+        raw_tokens_outside_tail = self._raw_messages_tokens(candidate_raw, occurrences)
         if allow_partial_leaf:
             return True, "eligible partial threshold-sweep leaf", raw_tokens_outside_tail
         if self._config.dynamic_leaf_chunk_enabled:
@@ -705,7 +711,9 @@ class CompactionMixin:
         candidate_raw: List[Dict[str, Any]],
         working_leaf_chunk_tokens: int,
     ) -> List[Dict[str, Any]]:
-        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens, self._raw_message_tokens)
+        counter = self._raw_message_tokens if any(
+            "[Earlier user messages, verbatim reference;" in str(m.get("content", "")) for m in candidate_raw) else None
+        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens, counter)
 
     def compress(self, messages: List[Dict[str, Any]],
                  current_tokens: int = None,
@@ -2673,7 +2681,7 @@ class CompactionMixin:
         sources, anchor_claims = leaf.sources, leaf.anchor_claims
         if not leaf.summary_input_chunk:
             leaf.compacted_chunk = leaf.selected_raw_chunk
-            leaf.source_tokens = sum(self._raw_message_tokens(m) for m in leaf.selected_raw_chunk)
+            leaf.source_tokens = self._raw_messages_tokens(leaf.selected_raw_chunk)
             leaf.summary_text = (
                 "Filtered replies derived from ignored messages.\n"
                 "[Expand for details: ignored-dependent reply]"
@@ -2777,7 +2785,7 @@ class CompactionMixin:
                                    dependent_reply_message_ids))
         leaf.selected_raw_len = len(leaf.source_lookup_chunk)
         leaf.remaining_messages = state.working_messages[leaf.leading_anchor_count + leaf.selected_raw_len:]
-        leaf.source_tokens = sum(self._raw_message_tokens(m) for m in leaf.source_lookup_chunk)
+        leaf.source_tokens = self._raw_messages_tokens(leaf.source_lookup_chunk)
         if not leaf.consumed_store_ids:  # #1141: oldest-prefix rescue can discard the last durable source.
             self._warn_unattributed_leaf(leaf.compacted_chunk)  # #1147 r1: keep the publication backstop.
             state.noop_reason, state.unattributed_leaf_refused = "selected leaf chunk lacks raw store lineage", True
@@ -2893,7 +2901,7 @@ class CompactionMixin:
         if leaf.prepared is not None:  # #787: a promoted pass spends no summariser pass
             leaf_prep.promoted(str(self._store.db_path), self._conversation_id, leaf.prepared)
             state.promoted_leaves, state.max_leaf_passes = state.promoted_leaves + 1, state.max_leaf_passes + 1
-            state.prep_freed += sum(self._raw_message_tokens(m) for m in leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
+            state.prep_freed += self._raw_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3
         state.estimated_active_tokens = max(0, state.estimated_active_tokens - leaf.source_tokens + leaf.summary_tokens)
         self._update_carry_estimate(state)
@@ -2966,7 +2974,7 @@ class CompactionMixin:
             pressure_remaining_raw = state.pressure_messages[
                 leaf.leading_anchor_count:remaining_fresh_tail_start
             ]
-            remaining_raw_tokens = sum(self._raw_message_tokens(m) for m in pressure_remaining_raw)
+            remaining_raw_tokens = self._raw_messages_tokens(pressure_remaining_raw)
             remaining_threshold = self._working_leaf_chunk_tokens(remaining_raw_tokens)
             if remaining_raw_tokens < remaining_threshold:
                 if not (state.deferred_maintenance_active and state.critical_budget_pressure):
@@ -3029,7 +3037,7 @@ class CompactionMixin:
             return "break", None
 
         pressure_candidate_raw = state.pressure_messages[leaf.leading_anchor_count:leaf.fresh_tail_start]
-        raw_tokens_outside_tail = sum(self._raw_message_tokens(m) for m in pressure_candidate_raw)
+        raw_tokens_outside_tail = self._raw_messages_tokens(pressure_candidate_raw)
         if leaf.hidden_backlog:
             leaf.to_compact = []
         elif state.threshold_full_sweep_active:
