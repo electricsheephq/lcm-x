@@ -38,6 +38,8 @@ def parser():
     p.add_argument("--config", default="off")
     p.add_argument("--paired-config", help="interleave this config with --config; output is a parent directory")
     p.add_argument("--summaries", choices=("none", "deterministic"), default="none")
+    p.add_argument("--store-text", choices=("speaker-prefix", "plain", "name-date"), default="speaker-prefix")
+    p.add_argument("--hit-label", choices=("speaker", "role"), default="speaker")
     p.add_argument("--embed-cache", type=Path)
     p.add_argument("--store-root", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
@@ -104,9 +106,14 @@ def estimate(args, n):
     return data
 
 
+def switches(args):
+    return {"store_text": getattr(args, "store_text", "speaker-prefix"),
+            "hit_label": getattr(args, "hit_label", "speaker") if getattr(args, "delivery", "agentic") == "single" else "n/a"}
+
+
 def server_spec(args, dataset_sha, q):
     return {"repo": str(args.lcmx_repo), "store_root": str(args.store_root), "config": args.config,
-            "summaries": args.summaries, "dataset_sha": dataset_sha,
+            "summaries": args.summaries, "dataset_sha": dataset_sha, **switches(args),
             "embed_cache": str(args.embed_cache) if args.embed_cache else None, "max_calls": AGENTIC_TOOL_CAP,
             "question": {"qid": q.qid, "dataset": q.dataset, "store_id": q.store_id, "session_map": q.session_map,
                          "question_date": q.question_date}}
@@ -165,7 +172,7 @@ def canary(args, client, dataset_sha, q):
                         "passed": status in ("ok", "no_tool_to_call") and not leaked and not violations and bool(paths)})
         # Positive control: in MCP mode the reader must reach the lcmx tools, or the run proves nothing.
         results[-1]["passed"] &= mode != "mcp" or results[-1]["mcp_calls"] > 0
-    write_json(args.output / "canary.json", {"at": utc(), "results": results, "versions": versions()})
+    write_json(args.output / "canary.json", {"at": utc(), "results": results, "versions": versions(), **switches(args)})
     if not all(r["passed"] for r in results):
         raise RuntimeError("canary_failed")
 
@@ -193,14 +200,14 @@ def execute(args):
     if args.command == "canary":
         questions = questions[:1]
     if args.command in ("build-stores", "canary", "answer"):
-        store = Stores(args.store_root, args.config, args.lcmx_repo, dataset_sha, lme, args.summaries, args.embed_cache)
+        store = Stores(args.store_root, args.config, args.lcmx_repo, dataset_sha, lme, args.summaries, args.embed_cache, args.store_text)
         seen = set()
         for q in questions:
             if q.store_id not in seen:
                 store.build(q)
                 seen.add(q.store_id)
     if args.command == "build-stores":
-        write_json(args.output / "build-receipt.json", {"stores": len(seen), "identity": store.identity})
+        write_json(args.output / "build-receipt.json", {"stores": len(seen), "identity": store.identity, **switches(args)})
         return
     if args.command != "canary":
         estimate(args, len(questions))
@@ -223,7 +230,7 @@ def execute(args):
                 arm.output = args.output / f"{config}-{args.delivery}" if args.paired_config else args.output
                 arm.output.mkdir(parents=True, exist_ok=True)
                 arm_store = store if config == args.config else Stores(args.store_root, config, args.lcmx_repo,
-                    dataset_sha, lme, args.summaries, args.embed_cache)
+                    dataset_sha, lme, args.summaries, args.embed_cache, args.store_text)
                 if config != args.config and args.command == "answer":
                     for q in questions:
                         arm_store.build(q)
@@ -267,7 +274,7 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             "harness_tree_sha256": sha(b"".join(p.read_bytes() for p in sorted(Path(__file__).parent.glob("*.py")))),
             "lcmx_commit": commit(args.lcmx_repo), "dataset_sha256": dataset_sha, "id_list_sha256": ids_sha,
             "question_ids": [q.qid for q in questions], "split_label": args.split_label, "config": args.config,
-            "summaries": args.summaries, "delivery": args.delivery, "reader": args.reader,
+            "summaries": args.summaries, "delivery": args.delivery, "reader": args.reader, **switches(args),
             "excluded": excluded, "store_generation": store.generation, "toolset": toolset,
             "prompts_sha256": prompt_hashes(),
             "start_utc": utc(), "end_utc": None, "spend": 0, "status": "running"}
@@ -291,13 +298,13 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
         write_json(manifest_path, manifest)
     else:
         manifest = json.loads(manifest_path.read_text())
-        for key, value in (("dataset_sha256", dataset_sha), ("id_list_sha256", ids_sha),
+        for key, value in (*switches(args).items(), ("dataset_sha256", dataset_sha), ("id_list_sha256", ids_sha),
                            ("split_label", args.split_label), ("question_ids", [q.qid for q in questions]),
                            ("prompts_sha256", prompt_hashes()),
                            ("harness_commit", commit(Path(__file__).resolve().parents[2])),
                            ("harness_tree_sha256", sha(b"".join(p.read_bytes() for p in sorted(Path(__file__).parent.glob("*.py"))))),
                            ("lcmx_commit", commit(args.lcmx_repo))):
-            if manifest[key] != value:
+            if manifest.get(key) != value:
                 raise ValueError("judging run identity mismatch")
     manifest.setdefault("endpoint_hosts", {}).update({s: GLM_HOST for s in specs(args) if parse_spec(s)[0] == "glm"})
     timing = {"active_s": 0.0}
@@ -313,9 +320,9 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
                                                server=server_spec(args, dataset_sha, q)))
                 else:
                     with store.engine(q) as (engine, _):
-                        speakers = json.loads((store.directory(q) / "speakers.json").read_text())
+                        speakers = json.loads((store.directory(q) / "speakers.json").read_text()) if args.hit_label == "speaker" else None
                         row.update(delivery.answer(q, args.delivery, client, args.reader, engine, speakers,
-                                                   records=calls))
+                                                   records=calls, hit_label=args.hit_label, store_text=args.store_text))
             except BudgetStopped:  # D7: a run state (spend or plan quota), excluded from scoring
                 row.update(status="not_run", reason="budget_stopped")
             except ToolViolation:  # the harness used a non-MCP tool: a failed question

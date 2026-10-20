@@ -85,7 +85,7 @@ def serve(spec, stdin, stdout):
                                  spec["question"]["question_date"], False, [], spec["question"]["store_id"],
                                  spec["question"]["session_map"])
     stores = Stores(spec["store_root"], spec["config"], spec["repo"], spec["dataset_sha"], lme,
-                    spec["summaries"], spec.get("embed_cache"))
+                    spec["summaries"], spec.get("embed_cache"), spec.get("store_text", "speaker-prefix"))
     with stores.engine(question) as (engine, _):
         reader = Reader(spec, engine, delivery.schemas(engine), spec["log"])
         for line in stdin:

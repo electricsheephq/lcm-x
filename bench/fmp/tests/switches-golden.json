@@ -1,0 +1,12 @@
+[
+  {
+    "db_sha256": "ede392e7b82e2346077befaa32a16d3fc9f903cda19f789d77e1fe5c84787a51",
+    "speakers": "{\n  \"1\": \"Ada\",\n  \"2\": \"Bo\",\n  \"3\": \"Ada\"\n}\n",
+    "delivery": "[2025-01-01T22:30:00+00:00] Bo: Ada: keep this literal prefix\n[2025-01-01T22:30:00+00:00] Ada: teal key 0\n[2025-01-03T12:00:00+00:00] Ada: key in the drawer"
+  },
+  {
+    "db_sha256": "876114a7e17dd22f2bf9b647212e490211c82dc9f34a81fb3a9616e74ee5f887",
+    "speakers": "{\n  \"1\": \"Ada\",\n  \"2\": \"Bo\",\n  \"3\": \"Ada\"\n}\n",
+    "delivery": "[2025-01-01T22:30:00+00:00] Bo: Ada: keep this literal prefix\n[2025-01-01T22:30:00+00:00] Ada: teal key 1\n[2025-01-03T12:00:00+00:00] Ada: key in the drawer"
+  }
+]
