@@ -78,3 +78,43 @@ Run the synthetic tests from the LCM-X repository root:
 ```
 
 Delete evaluation data within 30 days, including retained copies and backups.
+
+## Opt-in v2 coding delivery
+
+Set `AML_V2_DB_ROOT=/path/to/separate-v2-data` to enable `/aml/v2/add`,
+`/aml/v2/search`, and `/aml/v2/health` (GET or HEAD). Roots must be disjoint.
+The frozen routes retain their mode and per-request workers. V2 uses the same
+adapter retrieval with verbatim code, role/time/trajectory headers and matched
+windows: 4,000 chars per hit, spare budget up to 10,240, at most 10 hits and
+40,000 content chars with stable stored-row IDs and duplicate rows removed.
+V2 uses the same killable per-request workers as the frozen routes. Health is
+200 once its root/cache is prepared; a v2 preparation failure returns 503 on v2
+routes while frozen routes remain available. Adds retain atomic generations
+and user serialization. Both route families append metadata-only
+receipts to `AML_RECEIPTS` (default `<AML_DB_ROOT>/receipts.jsonl`); receipts
+contain no queries, content or tokens; write failures never affect responses.
+The product's embedding thread constant is unchanged; this adapter exposes no
+thread configuration knob.
+
+AML binds one endpoint URL per leaderboard key, so a new version cannot point
+at `/aml/v2/*`. Set `AML_V1_ROUTES=v2` (with `AML_V2_DB_ROOT`) to serve the
+bound `/aml/v1/add`, `/aml/v1/search` and `/aml/v1/health` with v2 delivery;
+the default `frozen` keeps them on the frozen routes. Other values, or `v2`
+without `AML_V2_DB_ROOT`, prevent startup. Receipts keep the incoming route.
+Register a new version before switching, because the delivery changes.
+
+## Private request capture (debugging only)
+
+Set `AML_CAPTURE_DIR=/path/to/private-dir` to append one JSON line per
+successful add or search to `capture.jsonl` in that directory, written after
+the reply is sent. Search lines hold the query, the requested `top_k` and the
+exact returned `data`; add lines hold only each item's size and SHA-256, never
+its content. The directory must be a private directory owned by the service
+user: it is created 0700 when missing, and a link or any group or other access
+disables capture. The file is created 0600 and must be a regular file (never a
+link or FIFO). A capture failure never changes a response and logs only the
+exception type. Unset, nothing is captured.
+
+Captured lines are evaluation data. Use them only to debug that evaluation,
+keep them off shared or synced storage, and delete them with the rest of the
+evaluation data, including any copies made for analysis.
