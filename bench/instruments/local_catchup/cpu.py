@@ -124,11 +124,13 @@ class Supervisor:
                           "swap_bytes": used, "load": __import__("os").getloadavg()})
         return "swap_increased" if used > self.swap_start else "sustained_cpu_breach" if self.excess >= self.sustained-1e-3 else None
 
-    def summary(self, state="INCOMPLETE", n=None, since=0, end=None):
+    def summary(self, state="INCOMPLETE", n=None, since=0, end=None, aggregate_window=None):
         end = time.monotonic() if end is None else end
         windows = {p: (max(since, w[0]), w[1] or end) for p, w in self.windows.items()}
         active = {p: clip(s, *windows.get(p, (since, end))) for p, s in self.samples.items()}
         lo, hi = max((w[0] for w in windows.values()), default=since), min((w[1] for w in windows.values()), default=end)
+        if aggregate_window is not None:
+            lo, hi = aggregate_window
         max_dt = max((dt for s in self.samples.values() for _, dt, _ in s), default=0)
         per = {str(p): dict(statistics(s), peak_rss=self.rss[p], peak_threads=self.threads[p], tail=statistics(clip(self.samples[p], windows.get(p, (since, end))[1], end)))
                for p, s in active.items()}

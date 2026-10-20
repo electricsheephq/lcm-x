@@ -69,6 +69,7 @@ def main():
         next_progress = 0.
         last_change, fingerprints = [started]*n, [None]*n
         generations = [0]*n
+        aggregate_start = started if a.screen16 else max(meter.windows[q.pid][0] for q in processes)
         while time.monotonic()-started < duration:
             breach = meter.breach
             if breach or any(q.poll() is not None for q in processes):
@@ -138,7 +139,8 @@ def main():
     for r in progress:
         r.update(state="ABORTED" if audit_failed(r) else "COMPLETE" if r["complete"] else state,
                  reason="final_integrity_or_residue" if audit_failed(r) else "full_expected_id_audit" if r["complete"] else reason)
-    cpu = meter.summary(state, n, started if a.screen16 else 0, end=loop_end)
+    aggregate_end = min((meter.windows[q.pid][1] or loop_end for q in processes), default=loop_end)
+    cpu = meter.summary(state, n, started if a.screen16 else 0, end=loop_end, aggregate_window=(aggregate_start, aggregate_end))
     worst = {k: max((r[k] or 0 for r in cpu["per_process"].values()), default=None)
              for k in ("mean_cores", "p95_rolling60_cores", "peak1s_cores", "peak_rss")}
     dump(a.out/"summary.json", {"state": state, "screen_only_never_gated": a.screen16, "reason": reason,

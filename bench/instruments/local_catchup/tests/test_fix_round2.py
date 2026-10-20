@@ -20,7 +20,8 @@ def fake_rig(tmp_path, monkeypatch):
                    complete=False, scan=[], classes={"chunks": {"covered": 1, "expected": 2}})
     final = {**checked, "complete": True}
     meter = Namespace(windows={}, breach=None, start=lambda: None, close=lambda: None)
-    meter.summary = lambda *args, **kw: {"per_process": {}, "end": kw.get("end")}
+    meter.summary = lambda *args, **kw: {"per_process": {}, "end": kw.get("end"),
+                                        "aggregate_window": kw.get("aggregate_window")}
     monkeypatch.setattr(rig, "parser", lambda _: Namespace(add_argument=lambda *a, **kw: None,
                                                           parse_args=lambda: a))
     monkeypatch.setattr(rig, "immutable_cache", lambda _: None)
@@ -64,6 +65,8 @@ def test_a_full_audit_at_start_restart_end(fake_rig):
     a, _, _, calls, launched, _ = fake_rig
     rig.main()
     assert [g for _, g in launched] == [0, 0, 1, 1]
+    summary = common.load(a.out/"summary.json")
+    assert summary["cpu"]["aggregate_window"] == [0., 30.]
     for i in range(2):
         assert [(kind, db) for kind, db in calls if db == a.scratch/str(i)/"store.db"] == [
             ("start", a.scratch/str(i)/"store.db"),
@@ -147,3 +150,13 @@ def test_e_documented_screen_budget():
     args = shlex.split(line)
     assert "--peak-disk-gb" in args
     assert float(args[args.index("--peak-disk-gb")+1]) >= 90
+
+
+def test_b_restarted_rig_keeps_aggregate_window(tmp_path, monkeypatch):
+    monkeypatch.setattr(cpu, "swap", lambda: 0)
+    m = cpu.Supervisor(tmp_path/"cpu.jsonl")
+    m.windows = {1: [0, 30], 2: [35, 100], 3: [10, 40], 4: [45, None]}
+    m.aggregate = [(i, 1, 1) for i in range(1, 101)]
+    s = m.summary(end=100, aggregate_window=(10, 100))
+    assert s["aggregate"]["seconds"] == 90
+    assert s["aggregate"]["mean_cores"] == 1
