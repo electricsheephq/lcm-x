@@ -37,7 +37,8 @@ def empty_arms(payload, incomplete_arms):
 def semantic_healthy(payload, incomplete_arms=()):
     provenance = payload.get("provenance", {})
     reason = payload.get("degraded_reason", "")
-    return (not re.search(r"arm failed|provider unavailable|query embedding failed|cooling down|identity is stale", reason)
+    return (not payload.get("timeout") and not re.search(
+        r"arm failed|provider unavailable|query embedding failed|cooling down|identity is stale|timeout|timed out|deadline exhausted|latency budget", reason)
         and all(arm in empty_arms(payload, incomplete_arms) or (arm in provenance.get("arms_run", []) and
             provenance.get("coverage", {}).get(arm) in ("full", "bounded", "full_approx"))
             for arm in ("chunk", "summary")))
@@ -91,7 +92,7 @@ def recall_reader(engine, mod, db, home):
 
 def worker(request):
     a, mod, engine, bind = runtime(request)
-    manifest = load(a.out/"manifest.json")
+    manifest = a._manifest = load(a.out/"manifest.json")
     pinned = load(a.out/"queries.json")
     queries = {q["id"]: manifest["canaries"][q["canary"]]["value"] for q in pinned}
     rows, publications, errors = [], [], []

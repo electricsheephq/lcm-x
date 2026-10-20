@@ -194,13 +194,15 @@ def test_extra_socket_paths_denied(tmp_path, name):
     assert common.load(events)["violation"] == "network_attempt"
 
 
-def test_subprocess_launch_recorded_without_arguments(tmp_path):
+def test_subprocess_launch_denied_and_recorded_without_arguments(tmp_path):
     provider = NS(_FASTEMBED_THREADS=2, FastembedProvider=NS(_construct=lambda *a, **kw: None))
     command = NS(_chunk_backfill_run=lambda: {}, _embedding_backfill_summary_run=lambda: {})
     events = tmp_path/"events.jsonl"
     common.guards(lambda name: provider if name == "embedding_provider" else command, events)
-    subprocess.run([sys.executable, "-B", "-c", "pass"], check=True)
+    with pytest.raises(RuntimeError, match="offline subprocess launch"):
+        subprocess.run([sys.executable, "-B", "-c", "pass"], check=True)
     assert common.load(events)["event"] == "subprocess_launch"
+    assert common.load(events)["violation"] == "subprocess_launch"
     assert "args" not in common.load(events)
 
 

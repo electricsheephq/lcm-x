@@ -18,7 +18,7 @@ def paired_bar(pairs, seed=1586):
 
 def worker(request):
     a, mod, engine, bind = runtime(request)
-    manifest = load(a.out/"manifest.json")
+    manifest = a._manifest = load(a.out/"manifest.json")
     rows, coverage = [], []
     try:
         def observe(row):

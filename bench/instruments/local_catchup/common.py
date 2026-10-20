@@ -122,10 +122,10 @@ def guards(mod, events, generation=0):
     socket.socket.sendto = socket.socket.sendmsg = deny
     socket.getaddrinfo = socket.gethostbyname = socket.gethostbyname_ex = deny
     socket.gethostbyaddr = socket.getnameinfo = deny
-    original_init = subprocess.Popen.__init__
     def launched(self, *args, **kwargs):
-        append(events, {"event": "subprocess_launch", "thread": threading.current_thread().name})
-        original_init(self, *args, **kwargs)
+        append(events, {"event": "subprocess_launch", "violation": "subprocess_launch",
+                        "thread": threading.current_thread().name})
+        raise RuntimeError("offline subprocess launch")
     subprocess.Popen.__init__ = launched
     engine = getattr(mod("engine"), "LCMEngine", None)
     if engine is not None:

@@ -109,10 +109,12 @@ def guarded_worker(worker, request):
     try:
         worker(request)
     except RuntimeError as exc:
-        if str(exc) != "foreground preparation/backfill/join or network":
+        reasons = {"foreground preparation/backfill/join or network": "foreground_preparation_backfill_join_or_network",
+                   "offline subprocess launch": "offline_subprocess_launch"}
+        if str(exc) not in reasons:
             raise
         dump(Path(load(request)["root"])/"raw-summary.json",
-             dict(state="INVALID", reason="foreground_preparation_backfill_join_or_network"))
+             dict(state="INVALID", reason=reasons[str(exc)]))
 
 
 def runtime(request):
@@ -194,7 +196,7 @@ def integrity(a, manifest):
             expected_raw_digest=manifest["preimage"]["raw_digest"],
             changed_metadata=changed_metadata,
             vector_digest=hashlib.sha256(json.dumps(now["vectors"], sort_keys=True).encode()).hexdigest()))
-        if any(now["vectors"].get(k) != v for k, v in manifest["preimage"]["vectors"].items()):
+        if any(now["vectors"].get(k) != v for k, v in (manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"]).items()):
             raise RuntimeError("pre-existing vector corruption")
         if changed_metadata:
             raise RuntimeError("pre-existing metadata corruption")
@@ -204,6 +206,8 @@ def integrity(a, manifest):
 
 def safety(a):
     events = [json.loads(s) for s in (a.root/"events.jsonl").read_text().splitlines()] if (a.root/"events.jsonl").exists() else []
+    if any(e.get("event") == "subprocess_launch" for e in events):
+        raise RuntimeError("offline subprocess launch")
     if any(e.get("violation") or e.get("foreground") or e.get("download") for e in events):
         raise RuntimeError("foreground preparation/backfill/join or network")
     foreign = foreign_files(os.getpid(), a.home, a.db, a.model_cache, user_home=Path(a.user_home), out=a.root, scratch=a.scratch)
@@ -222,8 +226,9 @@ def safety(a):
     now = time.monotonic()
     if now >= getattr(a, "_next_progress", 0):
         a._next_progress = now+30
-        manifest = load(a.out/"manifest.json")
-        value = progress(a.db, manifest, False)
+        if not hasattr(a, "_manifest"):
+            a._manifest = load(a.out/"manifest.json")
+        value = progress(a.db, a._manifest, False)
         fingerprint = str((value["classes"], value["scan"]))
         if fingerprint != getattr(a, "_fingerprint", None):
             a._fingerprint, a._changed = fingerprint, now
@@ -233,7 +238,8 @@ def safety(a):
     return {"events": "events.jsonl", "prepare_and_backfill_wrapped": True,
             "embedding_thread_join_wrapped": True, "python_socket_calls_denied":
             "connect, connect_ex, sendto, sendmsg, getaddrinfo, gethostbyname, gethostbyname_ex, gethostbyaddr, getnameinfo",
-            "subprocess_launches_recorded": "subprocess.Popen", "native_and_subprocess_network_guarded": False, "violations": 0}
+            "subprocess_launches_recorded": "subprocess.Popen", "subprocess_launches_denied": "subprocess.Popen",
+            "native_and_subprocess_network_guarded": False, "violations": 0}
 
 
 def catchup_activity(root, start, end, coverage_start, coverage_end, require_prepared=False):
