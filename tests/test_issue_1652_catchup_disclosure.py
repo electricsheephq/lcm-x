@@ -350,8 +350,9 @@ def test_operator_retry_reason_is_executable_for_its_corpus(engine, monkeypatch,
 
 
 @pytest.mark.parametrize("initial", [0, False, 7])
-def test_backlog_mark_preserves_count_and_does_not_rewrite(engine, initial):
-    # Supplied F4 probe: preserve known counts and stop rewriting once marked.
+def test_backlog_mark_makes_count_unknown_and_does_not_rewrite(engine, initial):
+    # A known count goes stale once new rows arrive, so ingest turns it into the
+    # unknown-backlog marker; once marked, later ingest does not rewrite the row.
     engine._config.ollama_base_url = "http://192.0.2.1:11434"
     backfill(engine, "chunk", limit=100)
     with sqlite3.connect(engine._store.db_path) as conn:
@@ -364,9 +365,9 @@ def test_backlog_mark_preserves_count_and_does_not_rewrite(engine, initial):
                      "BEGIN UPDATE mark_updates SET n=n+1; END")
     for _ in range(3):
         engine._store.append("seed", {"role": "user", "content": "cobalt later"})
-    assert record(engine, "chunk")["remaining"] == (7 if initial == 7 else True)
+    assert record(engine, "chunk")["remaining"] is True
     with sqlite3.connect(engine._store.db_path) as conn:
-        assert conn.execute("SELECT n FROM mark_updates").fetchone()[0] == (0 if initial == 7 else 1)
+        assert conn.execute("SELECT n FROM mark_updates").fetchone()[0] == 1
 
 
 def test_import_marks_cloud_chunk_backlog_after_commit(engine, tmp_path, monkeypatch):

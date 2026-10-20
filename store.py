@@ -490,7 +490,7 @@ class MessageStore:
                 "WHERE key='embedding_catchup:chunk:' || (SELECT identity_hash FROM lcm_embedding_profile "
                 "WHERE active=1 AND archived_at IS NULL AND task='chunk' "
                 "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1) "
-                "AND json_extract(value, '$.remaining') = 0",
+                "AND json_type(value, '$.remaining') IS NOT 'true'",
                 (time.time(),),
             )
             self._conn.commit()
