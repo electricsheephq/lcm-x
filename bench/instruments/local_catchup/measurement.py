@@ -14,7 +14,7 @@ import time
 
 from .audit import audit, connect, preimage, progress
 from .catchup import stop
-from .common import append, config, dump, foreign_files, foreground_request, guards, immutable_cache, isolated, load, parser, product, safe_paths
+from .common import REQUEST, append, config, dump, foreign_files, foreground_request, guards, immutable_cache, isolated, load, parser, product, safe_paths
 from .corpus import build, pilot_rows
 from .cpu import Supervisor
 
@@ -155,7 +155,7 @@ def runtime(request):
     guards(mod, a.root/"events.jsonl")
     original_join = threading.Thread.join
     def join(thread, *args, **kw):
-        if threading.current_thread() is threading.main_thread() and any(
+        if REQUEST.get() and threading.current_thread() is threading.main_thread() and any(
                 name in thread.name.lower() for name in ("embed", "backfill")):
             append(a.root/"events.jsonl", {"violation": "foreground_join", "thread": thread.name})
             raise RuntimeError("foreground embedding join forbidden")
@@ -219,14 +219,18 @@ def integrity(a, manifest):
         if now["provenance"] != manifest["preimage"]["provenance"]:
             raise RuntimeError("corpus provenance corruption")
         changed_metadata = [k for k, v in (manifest.get("observed_metadata", {}) | manifest["preimage"]["metadata"]).items() if now["metadata"].get(k) != v]
+        checked = audit(a.db, manifest)
         dump(a.root/"final-integrity.json", dict(corpus_raw_digest=digest(original),
             expected_raw_digest=manifest["preimage"]["raw_digest"],
+            unpaired_rows=checked["unpaired_rows"], residue=checked["residue"],
             changed_metadata=changed_metadata,
             vector_digest=hashlib.sha256(json.dumps(now["vectors"], sort_keys=True).encode()).hexdigest()))
         if any(now["vectors"].get(k) != v for k, v in (manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"]).items()):
             raise RuntimeError("pre-existing vector corruption")
         if changed_metadata:
             raise RuntimeError("pre-existing metadata corruption")
+        if checked["unpaired_rows"] or checked["residue"]:
+            raise RuntimeError("vector/metadata pairing or in-flight residue")
         if c.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RuntimeError("database corruption")
 
@@ -237,7 +241,8 @@ def safety(a):
         raise RuntimeError("offline subprocess launch")
     if any(e.get("violation") or e.get("foreground") for e in events):
         raise RuntimeError("foreground preparation/backfill/join or network")
-    foreign = foreign_files(os.getpid(), a.home, a.db, a.model_cache, user_home=Path(a.user_home), out=a.root, scratch=a.scratch)
+    foreign = foreign_files(os.getpid(), a.home, a.db, a.model_cache, user_home=Path(a.user_home),
+                            out=a.root, protected_roots=(a.scratch,))
     source_reads, unexpected = [], []
     for value in foreign:
         path = Path(value)
@@ -289,14 +294,22 @@ def wait_covered(a, mod, engine, manifest):
     failures = []
     def fill():
         try:
+            from .audit import vector_counts
+            checked = audit(a.db, manifest)
+            append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_setup", audit=checked))
+            if checked["complete"]:
+                return
             start, changed, previous = time.monotonic(), time.monotonic(), None
             while True:
-                checked = audit(a.db, manifest)
-                append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_setup", audit=checked))
-                if checked["complete"]:
+                counts = vector_counts(a.db, manifest)
+                if all(counts[k] >= len(v) for k, v in manifest["expected"].items()):
+                    checked = audit(a.db, manifest)
+                    append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_setup", audit=checked))
+                    if not checked["complete"]:
+                        raise RuntimeError("covered setup final audit failed")
                     return
                 safety(a)
-                fingerprint = str(progress(a.db, manifest, False))
+                fingerprint = str(counts)
                 if fingerprint != previous:
                     changed, previous = time.monotonic(), fingerprint
                 if time.monotonic()-changed >= 600 or time.monotonic()-start > a.max_seconds:

@@ -19,6 +19,9 @@ INCOMPLETE_SEMANTIC_REASONS = (
 def honest_coverage(payload, incomplete_arms):
     reason = payload.get("degraded_reason", "")
     coverage = payload.get("provenance", {}).get("coverage", {})
+    if (payload.get("degraded") is True and re.search(r"\blocal embedding model is (preparing|unavailable)\b", reason)
+            and all(coverage.get(arm) in (None, "none") for arm in ("chunk", "summary"))):
+        return True  # Provider unavailability discloses coverage, not a legitimately empty index.
     return all(coverage.get(arm) in ("bounded", "full_approx", "none", "disabled") or
         (payload.get("degraded") and any(re.search(pattern.format(arm=arm,
             corpus="chunks" if arm == "chunk" else "summary"), reason)
@@ -100,6 +103,7 @@ def worker(request):
     rows, publications, errors = [], [], []
     halt, started = threading.Event(), threading.Event()
     reader = None
+    closed = False
     try:
         if a.state == "ON-covered":
             wait_covered(a, mod, engine, manifest)
@@ -131,15 +135,18 @@ def worker(request):
                     with foreground_request():
                         payload = json.loads(mod("tools").lcm_recall({"query": queries[q["id"]]}, engine=reader))
                     end = time.perf_counter()
+                    after = vector_counts(a.db, manifest) if before else {}
+                    honesty_arms = [arm for kind, arm in (("chunks", "chunk"), ("leaves", "summary"))
+                                    if arm in incomplete_arms and after[kind] < len(manifest["expected"][kind])]
                     coverage = payload.get("provenance", {}).get("coverage", {})
                     health = "timeout" if payload.get("timeout") else "error" if "error" in payload else "degraded" if payload.get("degraded") else "ok"
                     row = dict(query_id=q["id"], start=start, end=end, seconds=end-start, health=health,
                         reason=payload.get("degraded_reasons", payload.get("degraded_reason")), semantic_coverage=coverage,
                         fts_hits=any("fts" in h.get("arms", []) for h in payload.get("hits", [])),
                         semantic_healthy=semantic_healthy(payload, incomplete_arms if a.state == "ON-catching-up" else ()),
-                        semantic_empty=bool(empty_arms(payload, incomplete_arms)), honest_coverage=honest_coverage(payload, incomplete_arms),
-                        incomplete=bool(incomplete_arms), coverage_start=before,
-                        coverage_end=vector_counts(a.db, manifest) if before else {})
+                        semantic_empty=bool(empty_arms(payload, incomplete_arms)), honest_coverage=honest_coverage(payload, honesty_arms),
+                        incomplete=bool(incomplete_arms) and any(after[k] < len(v) for k, v in manifest["expected"].items()),
+                        coverage_start=before, coverage_end=after)
                     rows.append(row)
                     append(a.root/"recalls.jsonl", row)
                     i += 1
@@ -163,6 +170,9 @@ def worker(request):
         thread.join(engine._config.recall_query_timeout_s*len(pinned)+30)
         if thread.is_alive() or errors:
             raise RuntimeError(f"recall worker failure: {errors}")
+        evidence = safety(a)
+        engine.shutdown()
+        closed = True
         integrity(a, manifest)
         final = audit(a.db, manifest)
         dump(a.root/"final-audit.json", final)
@@ -171,13 +181,16 @@ def worker(request):
             min(counted, key=lambda r: r["start"])["coverage_start"],
             max(counted, key=lambda r: r["end"])["coverage_end"]) if counted else dict(catchup_activity=False)
         result = score(rows, publications, a.seed, a.state, activity)
-        if a.smoke or a.rows < 250000 or len(pinned) < 200 or (a.state == "ON-catching-up" and not all(r["incomplete"] for r in overlapping(rows, publications))):
+        if a.smoke or a.rows < 250000 or len(pinned) < 200 or (a.state == "ON-catching-up" and
+                (all(final["classes"][kind]["missing_count"] == 0 for kind in manifest["expected"])
+                 or not all(r["incomplete"] for r in overlapping(rows, publications)))):
             result["state"] = "INVALID"
-        result.update(bind_ms=bind, safety=safety(a), queries=len(pinned), **activity)
+        result.update(bind_ms=bind, safety=evidence, queries=len(pinned), **activity)
         dump(a.root/"raw-summary.json", result)
     finally:
         halt.set()
-        engine.shutdown()
+        if not closed:
+            engine.shutdown()
 
 
 def main(a):

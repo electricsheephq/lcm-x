@@ -96,8 +96,10 @@ def test_worker_semantic_arms_cannot_pass_fts_only(tmp_path, monkeypatch, state,
     monkeypatch.setattr(recall, "runtime", lambda _: (a, mod, engine, 1))
     reads = iter([dict(chunks=0, leaves=0) if i % 2 == 0 else dict(chunks=1, leaves=0) for i in range(400)])
     monkeypatch.setattr(recall, "vector_counts", lambda *args: dict(chunks=2, leaves=1) if state == "ON-covered" else next(reads))
-    for name in ("audit", "safety"):
-        monkeypatch.setattr(recall, name, lambda *args: {})
+    monkeypatch.setattr(recall, "audit", lambda *args: dict(classes=dict(
+        chunks=dict(covered=1, expected=2, missing_count=1),
+        leaves=dict(covered=0, expected=1, missing_count=1))))
+    monkeypatch.setattr(recall, "safety", lambda *args: {})
     monkeypatch.setattr(recall, "integrity", lambda *args: None)
     monkeypatch.setattr(recall, "wait_covered", lambda *args: None)
     monkeypatch.setattr(recall, "trace", lambda *args: None)

@@ -20,6 +20,7 @@ def worker(request):
     a, mod, engine, bind = runtime(request)
     manifest = a._manifest = load(a.out/"manifest.json")
     rows, coverage = [], []
+    closed = False
     try:
         def observe(row):
             rows.append(row)
@@ -38,8 +39,10 @@ def worker(request):
         activity = catchup_activity(a.root, start, end,
             {k: v["covered"] for k, v in initial["classes"].items()},
             {k: v["covered"] for k, v in final["classes"].items()}, require_prepared=True)
-        integrity(a, manifest)
         evidence = safety(a)
+        engine.shutdown()
+        closed = True
+        integrity(a, manifest)
         summary = dict(state="NOT_JUDGED", bind_ms=bind, samples=len(rows),
             p90={k: percentile([r[k] for r in rows], .9) for k in ("ingest_preflight_ms", "dispatch_ms")},
             compression_turns=sum(r["compression_due"] for r in rows), join_evidence=evidence,
@@ -48,7 +51,8 @@ def worker(request):
             summary.update(state="INVALID", reason="on_no_catchup_activity")
         dump(a.root/"raw-summary.json", summary)
     finally:
-        engine.shutdown()
+        if not closed:
+            engine.shutdown()
 
 
 def main(a):

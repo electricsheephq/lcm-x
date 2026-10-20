@@ -1,9 +1,9 @@
 """Linux floor surrogate: taskset + verified cgroup v2 4 GiB, never a hardware claim."""
 from argparse import Namespace
-import atexit
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -20,12 +20,13 @@ def command(arguments):
             "bench.instruments.local_catchup.floor", *arguments, "--limited"]
 
 
-def verify_limits(memory_text, affinity_text):
+def verify_limits(memory_text, affinity_text, swap_text="max"):
     memory = int(memory_text.strip()) if memory_text.strip().isdigit() else None
+    swap = int(swap_text.strip()) if swap_text.strip().isdigit() else None
     cpus = affinity_text.strip()
-    if memory != 4*2**30 or cpus not in ("0-1", "0,1"):
+    if memory != 4*2**30 or swap != 0 or cpus not in ("0-1", "0,1"):
         raise RuntimeError("floor surrogate limits did not take effect")
-    return dict(label=LABEL, memory_max_bytes=memory, cpus=cpus, verified=True)
+    return dict(label=LABEL, memory_max_bytes=memory, memory_swap_max_bytes=swap, cpus=cpus, verified=True)
 
 
 def measured_limits(cgroup):
@@ -34,13 +35,14 @@ def measured_limits(cgroup):
     if effective.resolve() != cgroup.resolve():
         raise RuntimeError("process did not enter requested cgroup")
     cpus = next(line.split(":", 1)[1].strip() for line in Path("/proc/self/status").read_text().splitlines() if line.startswith("Cpus_allowed_list:"))
-    return verify_limits((effective/"memory.max").read_text(), cpus)
+    return verify_limits((effective/"memory.max").read_text(), cpus, (effective/"memory.swap.max").read_text())
 
 
 def rate(summary, seconds, rows):
     speed = summary.get("rows_s", 0)
     hours = rows/speed/3600 if speed > 0 else None
-    valid = seconds >= 7200 and summary.get("state") == "INCOMPLETE" and rows >= 250000
+    valid = (seconds >= 7200 and summary.get("state") == "INCOMPLETE" and rows >= 250000
+             and summary.get("audit", {}).get("complete") is False)
     return dict(label=LABEL, state="INVALID" if not valid else "PASS" if hours is not None and hours <= 72 else "FAIL",
                 sustained_rows_s=speed, implied_hours=hours, measured_seconds=seconds, bar_hours=72,
                 validity="at least two hours, backlog present throughout, declared corpus size")
@@ -70,11 +72,56 @@ def main():
     a = p.parse_args()
     if sys.platform != "linux" or not 121 <= a.max_minutes <= 330:
         raise ValueError("Linux and max minutes in [121,330] required")
+    if a.cell == "coverage-rate" and a.max_minutes < 150:
+        raise ValueError("coverage-rate requires at least 150 minutes: build + 2h window + final audit")
     if not a.limited:
-        subprocess.run(command(sys.argv[1:]), check=True, timeout=a.max_minutes*60)
+        proc = subprocess.Popen(command(sys.argv[1:]), start_new_session=True)
+        timed_out = False
+        try:
+            try:
+                code = proc.wait(timeout=a.max_minutes*60+120)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    code = proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    code = None
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)  # Reap surviving grandchildren too.
+            except ProcessLookupError:
+                pass
+            proc.wait()
+        if timed_out:
+            a.out.mkdir(parents=True, exist_ok=True)
+            if not (a.out/"summary.json").exists():
+                dump(a.out/"summary.json", dict(state="ABORTED", reason="outer_deadline", label=LABEL))
+            label_results(a.out)
+            raise SystemExit(3)
+        if code:
+            raise subprocess.CalledProcessError(code, proc.args)
         return
     a.out.mkdir(parents=True, exist_ok=False)
-    atexit.register(label_results, a.out)
+    def deadline(*_):
+        raise TimeoutError("floor deadline")
+    previous = signal.signal(signal.SIGTERM, deadline)
+    alarm = signal.signal(signal.SIGALRM, deadline)
+    signal.alarm(a.max_minutes*60)
+    try:
+        limited(a)
+    except (TimeoutError, subprocess.TimeoutExpired):
+        dump(a.out/"summary.json", dict(state="ABORTED", reason="floor_deadline", label=LABEL,
+            shape=a.shape, baseline=a.baseline))
+        raise SystemExit(3)
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGTERM, previous)
+        signal.signal(signal.SIGALRM, alarm)
+        label_results(a.out)
+
+
+def limited(a):
     dump(a.out/"limits.json", measured_limits(a.cgroup))
     if a.cell == "recall":
         subprocess.run([sys.executable, "-B", "-m", "bench.instruments.local_catchup.recall",
