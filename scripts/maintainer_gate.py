@@ -49,7 +49,7 @@ TURN_PATH_FILES = {
     "leaf_prep.py", "lifecycle_state.py", "message_analysis.py", "message_content.py", "placeholder_ledger.py",
     "prefix_matching.py", "reconcile.py", "sanitize.py", "store_complete.py",
     "summary_attempt.py", "summary_input_clip.py", "summary_outcome.py", "survival_codec.py",
-    "survival_fit.py", "tokens.py", "tool_pairs.py",
+    "survival_fit.py", "tokens.py", "tool_pairs.py", "user_carry.py",
     "config.py",  # Defaults and loaders set fresh-tail cuts, filters and summary requests.
     "db_bootstrap.py",  # Conversation-range selection shapes compaction inputs and ownership.
     "diagnostics.py",  # State-db path resolution decides foreground branch restoration/rebind.

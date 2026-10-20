@@ -69,6 +69,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     'context_length', 'last_prompt_tokens',
     '_host_rewrite_overrides', '_host_rewrite_store', '_host_rewrite_watch',
     '_engine_uids_pending', '_host_uid_lineage_cache',
+    '_compress_occurrences', '_last_user_carry', '_lifecycle',
 })
 EXTERNAL_ATTRIBUTES = frozenset({'_host_rewrite_overrides', '_host_rewrite_store', '_host_rewrite_watch',
                                  '_engine_uids_pending', '_host_uid_lineage_cache'})
@@ -428,6 +429,8 @@ def snapshot(engine: Any, canonical: Canonical, result: Any = None) -> dict[str,
                      for table in ('messages', 'metadata')}
         elif name == '_dag':
             value = engine._dag.get_session_nodes('S', limit=10000)
+        elif name == '_lifecycle':
+            value = engine._lifecycle.get_by_conversation(engine._conversation_id)
         elif name == '_host_rewrite_store':
             value = {'present': value is not None}
         elif name == '_kept_reply_mark' and value is not None:

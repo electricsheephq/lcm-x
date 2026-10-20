@@ -310,7 +310,7 @@ e.shutdown()
         authored._config.leaf_chunk_tokens = count_messages_tokens([*original, message])
         authored.compress([*original, message, {"role": "assistant", "content": "Quoted packet reply"},
                           {"role": "user", "content": "Newest request"}, {"role": "assistant", "content": "Reply"}], force=True)
-        assert any(quote in text for text in seen), "authored no-proof packet must reach the summarizer verbatim"
+        assert any(quote in text for text in seen), ("authored no-proof packet must reach the summarizer verbatim", budget, seen, authored.last_compression_noop_reason, authored._config.leaf_chunk_tokens)
 
 
 def test_carry_scaffold_and_scope_filter(factory):

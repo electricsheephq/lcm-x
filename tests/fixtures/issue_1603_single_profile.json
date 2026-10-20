@@ -303,6 +303,7 @@
     "survival_fit": true,
     "survival_reserve": 0.15,
     "temporal_rollups_enabled": true,
-    "threshold_full_sweep_enabled": true
+    "threshold_full_sweep_enabled": true,
+    "user_carry_tokens": 0
   }
 }
