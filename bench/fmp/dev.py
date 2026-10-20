@@ -133,9 +133,9 @@ def retrieve(q, store, overrides):
 
 def worker(spec):
     validate_overrides(spec["overrides"])
+    product = source_identity(spec["repo"])
     lme = load_lcm(spec["repo"])
     questions, panel, guard = load(spec["panel"], spec["guard"], spec["lme"], spec["locomo"], lme)
-    product = source_identity(spec["repo"])
     renderer = renderer_identity()
     receipt = []
     for dataset in ("lme-s", "locomo"):
@@ -179,7 +179,13 @@ def worker(spec):
                 write_json(cache, dict(identity=identity, value=value, value_sha256=sha(encoded(value))))
             receipt.append(dict(id=q.qid, cache_key=key, cache="cached" if hit else "fresh",
                                 sources=store_id, retrieval_sha256=value["source_sha256"], **value["metadata"]))
-    write_json(Path(spec["receipt"]), dict(product=product, rows=receipt, prepare=spec["prepare"]))
+    product_after = source_identity(spec["repo"])
+    changed = product != product_after
+    write_json(Path(spec["receipt"]), dict(product=product, product_after=product_after,
+        rows=receipt, prepare=spec["prepare"], status="INCOMPLETE" if changed else "COMPLETE",
+        reason="checkout-changed" if changed else None))
+    if changed:
+        raise Incomplete("checkout-changed")
 
 
 def judge_messages(q, hypothesis):
@@ -320,12 +326,21 @@ def execute(args):
                 cache=str(args.cache_root.resolve()), prepare=args.prepare, lme=str(args.lme_data.resolve()),
                 locomo=str(args.locomo_data.resolve()), panel=str(args.panel.resolve()), guard=str(args.guard.resolve()),
                 receipt=str(receipt.resolve()))
-            spec_path = inputs / (arm + "-spec.json")
+            # Operational paths stay local; only identity copies enter the card.
+            spec_path = args.output / "local" / (arm + "-spec.json")
             write_json(spec_path, spec)
+            write_json(inputs / spec_path.name, dict(spec_sha256=digest_file(spec_path),
+                config=spec["config"], overrides=overrides, prepare=spec["prepare"],
+                repo=Path(spec["repo"]).name, cache=Path(spec["cache"]).name,
+                receipt=Path(spec["receipt"]).name,
+                files={key: dict(name=Path(spec[key]).name, sha256=digest_file(spec[key]))
+                       for key in ("lme", "locomo", "panel", "guard")}))
             timeout = None if args.prepare else max(.001, deadline - time.monotonic())
             proc = subprocess.run([sys.executable, "-m", "bench.fmp.dev", "--worker", str(spec_path)],
                                   capture_output=True, timeout=timeout)
             if proc.returncode:
+                if receipt.exists() and json.loads(receipt.read_bytes()).get("reason") == "checkout-changed":
+                    report["reason"] = "checkout-changed"
                 raise Incomplete("retrieval worker failed")
             data = json.loads(receipt.read_bytes())
             retrievals[arm] = {r["id"]: r for r in data["rows"]}
@@ -415,9 +430,13 @@ def main():
         if args.worker:
             spec = json.loads(args.worker.read_bytes())
             import traceback
-            write_json(Path(spec["receipt"]), dict(status="INCOMPLETE", error=type(exc).__name__,
+            receipt = Path(spec["receipt"])
+            state = json.loads(receipt.read_bytes()) if receipt.exists() else {}
+            state.update(status="INCOMPLETE", error=type(exc).__name__,
+                reason="checkout-changed" if isinstance(exc, Incomplete) and str(exc) == "checkout-changed" else None,
                 frames=[dict(file=Path(f.filename).name, line=f.lineno, function=f.name)
-                        for f in traceback.extract_tb(exc.__traceback__)]))
+                        for f in traceback.extract_tb(exc.__traceback__)])
+            write_json(receipt, state)
         reason = str(exc) if isinstance(exc, ValueError) and str(exc).startswith("unsupported recall-time override") else None
         print(json.dumps(dict(status="INCOMPLETE", error=type(exc).__name__, reason=reason)), file=sys.stderr)
         return 2
