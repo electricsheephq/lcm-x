@@ -60,9 +60,9 @@ def execute(service, op, body, deadline=None):
 
 
 @contextmanager
-def running_server(tmp_path, service=None):
+def running_server(tmp_path, service=None, v2=None):
     service = service or Service(tmp_path, 'synthetic-token', runner=stub_runner)
-    server = Server(service, port=0)
+    server = Server(service, port=0, v2=v2)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -227,7 +227,8 @@ def test_http_contract_and_private_logs(tmp_path, capsys):
     assert all(set(row) == {'method', 'path', 'user_hash', 'status', 'ms', 'request_id_hash', 'slow'} for row in receipts)
 
 
-def test_worker_timeout_kills_process(tmp_path, monkeypatch):
+@pytest.mark.parametrize('mode', ['textual', 'v2'])
+def test_worker_timeout_kills_process(tmp_path, monkeypatch, mode):
     real_popen = subprocess.Popen
     processes = []
 
@@ -238,7 +239,7 @@ def test_worker_timeout_kills_process(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, 'Popen', sleeping_worker)
     with pytest.raises(APIError) as error:
-        run_worker(tmp_path, 'add', addition(), time.monotonic() + 0.05)
+        run_worker(tmp_path, 'add', addition(), time.monotonic() + 0.05, mode)
     assert error.value.status == 408
     assert processes[0].poll() is not None
 
@@ -486,3 +487,397 @@ def test_t6_startup_receipt_mode_and_privacy(tmp_path):
             line = process.stdout.readline()
             assert json.loads(line) == {'event': 'start', 'search_mode': mode}
             assert all(value not in line for value in ('synthetic-token', str(tmp_path)))
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FROZEN_COMMIT = '39757f7e'  # merge of #1569: the frozen gateway these tests pin
+
+
+@pytest.fixture
+def frozen(tmp_path):
+    import importlib.util
+    source = f'{FROZEN_COMMIT}:bench/aml/aml_server.py'
+    if subprocess.run(['git', '-C', str(REPO_ROOT), 'cat-file', '-e', source],
+                      capture_output=True).returncode:
+        pytest.skip(f'frozen gateway {FROZEN_COMMIT} is not in this checkout (shallow clone?)')
+    path = tmp_path / 'frozen.py'
+    path.write_bytes(subprocess.check_output(['git', '-C', str(REPO_ROOT), 'show', source]))
+    spec = importlib.util.spec_from_file_location('frozen', path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def v2module(request):
+    return request.getfixturevalue('frozen') if os.environ.get('AML_TEST_FROZEN') else aml_server
+
+
+def wire(base, path, body=None, method=None, headers=None):
+    data = b'' if body is None else json.dumps(body).encode()
+    headers = dict(headers or {'X-Api-Key': 'synthetic-token'})
+    if body is not None:
+        headers.setdefault('Content-Length', str(len(data)))
+    request = f"{method or ('GET' if body is None else 'POST')} {path} HTTP/1.0\r\n"
+    request += ''.join(f'{key}: {value}\r\n' for key, value in headers.items())
+    with socket.create_connection(('127.0.0.1', int(base.rsplit(':', 1)[1])), timeout=5) as connection:
+        connection.sendall(request.encode() + b'\r\n' + data)
+        chunks = []
+        while chunk := connection.recv(65536):
+            chunks.append(chunk)
+    head, payload = b''.join(chunks).split(b'\r\n\r\n', 1)
+    assert payload.count(b'HTTP/1.0 ') == 0, 'second response on connection'
+    return int(head.split()[1]), payload
+
+
+@pytest.mark.parametrize('mode', ['coding', 'textual'])
+@pytest.mark.parametrize('sink', ['ok', 'directory', 'permission', 'full'])
+def test_frozen_wire_golden(tmp_path, frozen, mode, sink, capsys):
+    from functools import partial
+    observed = []
+    for index, module in enumerate((frozen, aml_server)):
+        env, _ = gateway_environment(tmp_path / str(index), mode)
+        factory = Path(env['AML_OMNIMEMEVAL_REPO']) / 'scripts/client_factory/lcmx_client.py'
+        with factory.open('a') as stub:
+            stub.write('    def add(self, *args, **kwargs): pass\n')
+        with pytest.MonkeyPatch.context() as patcher:
+            for key, value in env.items():
+                patcher.setenv(key, value)
+            service = module.Service(env['AML_DB_ROOT'], 'synthetic-token',
+                                     runner=partial(module.run_worker, search_mode=mode))
+            server = module.Server(service, port=0)
+            if sink != 'ok':
+                server.receipts = tmp_path
+                if sink != 'directory' and module is aml_server:
+                    def fail_open(*args, **kwargs):
+                        import errno
+                        raise OSError(errno.EACCES if sink == 'permission' else errno.ENOSPC, 'synthetic')
+                    patcher.setattr(module, 'open', fail_open, raising=False)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base = 'http://127.0.0.1:' + str(server.server_port)
+            try:
+                cases = [case for prefix in ('/aml/', '/aml/v1/')
+                         for case in [
+                             (prefix + 'health', None, 'GET'), (prefix + 'health', None, 'HEAD'),
+                             (prefix + 'add', {}, None), (prefix + 'add', addition(), None),
+                             (prefix + 'search', [], None), (prefix + 'missing', {}, None),
+                             (prefix + 'search', dict(user_id='u', query='a\nb' + 'x' * 5000), None),
+                             (prefix + 'search', dict(user_id='u', query='q', top_k=0), None),
+                             (prefix + 'search', {}, None, {'Authorization': 'bad'}),
+                             (prefix + 'search', {}, None, {'X-Api-Key': 'synthetic-token', 'Transfer-Encoding': 'chunked'}),
+                             (prefix + 'add', {}, None, {'X-Api-Key': 'synthetic-token', 'Content-Length': str(MAX_BYTES + 1)})]]
+                observed.append([wire(base, *case) for case in cases])
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+    assert observed[0] == observed[1]
+    assert len(capsys.readouterr().err.splitlines()) == (0 if sink == 'ok' else 1)
+
+
+@pytest.mark.parametrize('shape', ['verbatim', 'header', 'window', 'fallback', 'budget', 'top_k', 'schema'])
+def test_v2_delivery(v2module, shape):
+    m = v2module
+    text = 'def f():\n    return 1\n'
+    hit = dict(content=text, role='assistant', event_time='2021-01-01Z', trajectory=2, summary=False)
+    if shape in ('window', 'fallback'):
+        hit['content'] = 'padding\n' * 3000 + '    DeepTracebackError: plugins\n' + 'tail\n' * 3000
+        at = hit['content'].index('DeepTracebackError')
+        hit['span'] = (at, at + 18) if shape == 'window' else None
+    hits = [dict(hit, content=hit['content'] + str(i)) for i in range(12)]
+    rows = m.v2_search_response(hits, 'u', 2 if shape == 'top_k' else 100,
+                                'DeepTracebackError plugins')['data']
+    if shape == 'verbatim':
+        assert text in rows[0]['content']
+    elif shape == 'header':
+        assert rows[0]['content'].startswith('[2021-01-01Z] assistant (trajectory 2)\n')
+        assert m.v2_search_response([dict(hit, event_time=None)], 'u', 1)['data'][0]['content'].startswith('assistant')
+    elif shape in ('window', 'fallback'):
+        assert '    DeepTracebackError: plugins' in rows[0]['content']
+    elif shape == 'budget':
+        rows = m.v2_search_response([dict(hit, stored_id=i, content='x' * 30000) for i in range(10)], 'u', 100)['data']
+        assert len(rows) == 10 and sum(len(r['content']) for r in rows) <= 40000
+        single = m.v2_search_response([dict(hit, content='x' * 30000)], 'u', 100)['data'][0]
+        assert 4000 < len(single['content']) <= 10240
+    elif shape == 'top_k':
+        assert len(rows) == 2
+    else:
+        assert all(set(r) == {'id', 'content', 'score'} for r in rows)
+
+
+
+def test_v2_roots_receipts_and_head(tmp_path, v2module):
+    one = Service(tmp_path / 'v1', 'synthetic-token', runner=stub_runner)
+    two = Service(tmp_path / 'v2', 'synthetic-token', runner=stub_runner)
+    server = v2module.Server(one, port=0, v2=two)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    try:
+        assert wire(base, '/aml/v2/health', method='HEAD') == (200, b'')
+        assert wire(base, '/aml/v1/health', method='HEAD')[0] == 501
+        assert wire(base, '/aml/v2/add', addition(content='PRIVATE-CONTENT\n    code'))[0] == 200
+        assert wire(base, '/aml/search', dict(user_id='user/a', query='PRIVATE-QUERY')) == (200, b'{"data":[]}')
+        assert wire(base, '/aml/v2/search', dict(user_id='user/a', query='PRIVATE-QUERY'))[0] == 200
+        assert not (one.root / digest('user/a')).exists()
+        lines = server.receipts.read_text()
+        assert all(x not in lines for x in ('PRIVATE', 'synthetic-token', 'user/a'))
+        records = [json.loads(line) for line in lines.splitlines()]
+        assert len(records) == 5 and records[-1]['hits'] == 2
+        assert records[-1]['route'] == '/aml/v2/search'
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_v2_adapter_order_rows(tmp_path, monkeypatch, v2module):
+    # Integration with the real pinned adapter (README: AML_OMNIMEMEVAL_REPO) over an LCM-X
+    # product tree (AML_TEST_LCMX_REPO, default this checkout).
+    omni = Path(os.environ.get('AML_OMNIMEMEVAL_REPO') or '/nonexistent')
+    if not (omni / 'scripts/client_factory/lcmx_client.py').is_file():
+        pytest.skip('set AML_OMNIMEMEVAL_REPO to the pinned OmniMemEval checkout')
+    monkeypatch.syspath_prepend(str(omni / 'scripts'))
+    monkeypatch.setenv('LCMX_REPO', os.environ.get('AML_TEST_LCMX_REPO') or str(REPO_ROOT))
+    monkeypatch.setenv('LCMX_DB_ROOT', str(tmp_path))
+    monkeypatch.setenv('LCMX_CONFIG', 'off')
+    monkeypatch.setenv('LCMX_DELIVERY', 'full')
+    from client_factory.lcmx_client import LcmxClient
+    client = LcmxClient()
+    client.add([dict(role='user', content='first\n    source'),
+                dict(role='assistant', content='second\n    source')], 'u')
+    import hermes_lcm.tools as tools
+    calls = []
+    def recall(args, engine):
+        calls.append(args)
+        return json.dumps(dict(hits=[dict(kind='message', store_id=i, session_id='u-s1',
+                                         chunk_span=dict(char_start=0, char_end=3)) for i in (2, 1, 2)]))
+    monkeypatch.setattr(tools, 'lcm_recall', recall)
+    expected = client.search('source', 'u', 10)
+    hits = v2module.coding_hits(client, 'source', 'u', 10)
+    assert [' '.join(h['content'].split()) for h in hits] == expected.splitlines()
+    assert [h['role'] for h in hits] == ['assistant', 'user', 'assistant']
+    assert all(h['trajectory'] == 1 and h['span'] == (0, 3) for h in hits)
+    assert calls[0] == calls[1]
+    assert [h['stored_id'] for h in hits] == [2, 1, 2]
+    assert len(v2module.v2_search_response(hits, 'u', 10)['data']) == 2
+    monkeypatch.setattr(tools, 'lcm_recall', lambda *a, **k: json.dumps(dict(hits=[
+        dict(kind='summary', node_id=1, snippet='summary', session_id='u-s1')])))
+    summary = v2module.coding_hits(client, 'source', 'u', 10)
+    assert v2module.v2_search_response(summary, 'u', 10)['data'][0]['id'] == digest('u\0summary:1')
+
+
+def test_v2_fallback_snippets_keep_literal_markers(monkeypatch, v2module):
+    import types
+    summary_text = '>>> run(x)\nshift = a >>> 2\ncat <<< "$s"'
+    hits = [dict(kind='summary', node_id=7, session_id='s', snippet=summary_text),
+            dict(kind='message', store_id=9, session_id='s',
+                 snippet='call >>>parse<<< then >>>emit_rows<<< >>> repl <<< x')]
+    tools = types.ModuleType('hermes_lcm.tools')
+    tools.lcm_recall = lambda *args, **kwargs: json.dumps(dict(hits=hits))
+    package = types.ModuleType('hermes_lcm')
+    package.tools = tools
+    monkeypatch.setitem(sys.modules, 'hermes_lcm', package)
+    monkeypatch.setitem(sys.modules, 'hermes_lcm.tools', tools)
+
+    class Store:
+        def get_batch(self, ids):
+            return {}  # no stored row: both hits fall back to their snippet
+
+    class Client:
+        def _open(self, *args):
+            return None, Store(), None, None
+
+        def search(self, query, user_id, top_k):
+            import hermes_lcm.tools as recall_tools
+            recall_tools.lcm_recall({}, None)
+            self._open()[1].get_batch([9])
+
+        def _load_sessions(self, user_id):
+            return {}
+
+    found = v2module.coding_hits(Client(), 'parse', 'u', 10)
+    # Summary text is never marked, so it is delivered verbatim; a message snippet loses only
+    # whole FTS marker pairs, and a bare >>> or <<< in code stays.
+    assert [h['content'] for h in found] == [summary_text, 'call parse then emit_rows >>> repl <<< x']
+    assert [h['marks'] for h in found] == [[], ['parse', 'emit_rows']]
+
+
+def test_v2_window_finds_short_unicode_and_marked_matches(v2module):
+    # No chunk span; the only match sits past the 4,000-char prefix of a long row.
+    content = 'x = 1\n' * 1500 + 'row.id = 検索\n' + 'y = 2\n' * 1000
+    hit = dict(content=content, stored_id=1, role='user', summary=False, span=None,
+               event_time=None, trajectory=None)
+    for query, marks in (('id', []), ('検索', []), ('unrelated paraphrase only', ['id'])):
+        text = v2module.coding_excerpt(dict(hit, marks=marks), query, 4000)
+        assert 'row.id = 検索' in text, query
+        assert len(text) <= 4000
+    # Strict identifiers still win when they match, and no evidence keeps the prefix.
+    assert v2module.coding_excerpt(dict(hit, marks=[]), 'nothing matches', 4000).startswith(
+        'user\nx = 1\n')
+    # Short words match whole tokens only: an earlier 'valid' must not take the window.
+    noisy = dict(hit, content='valid = 1\n' * 900 + 'row.id = 2\n' + 'y = 2\n' * 1000)
+    for query, marks in (('id', []), ('unrelated paraphrase only', ['id'])):
+        assert 'row.id = 2' in v2module.coding_excerpt(dict(noisy, marks=marks), query, 4000), query
+
+
+def test_v2_shares_worker_capacity_with_frozen_routes(tmp_path, v2module):
+    one = Service(tmp_path / 'v1', 'synthetic-token', workers=1, runner=stub_runner)
+    two = Service(tmp_path / 'v2', 'synthetic-token', workers=1, runner=stub_runner)
+    server = v2module.Server(one, port=0, v2=two)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    search = dict(user_id='user/a', query='q')
+    try:
+        assert one.slots.acquire(blocking=False)  # a frozen request holds the only slot
+        try:
+            assert wire(base, '/aml/v2/search', search)[0] == 429
+        finally:
+            one.slots.release()
+        assert wire(base, '/aml/v2/search', search)[0] == 200
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_v2_per_user_serialization(tmp_path, v2module):
+    active, overlap = [], []
+    def runner(root, op, body, deadline):
+        active.append(body['user_id'])
+        overlap.append(len(active))
+        time.sleep(.03)
+        active.remove(body['user_id'])
+        return {}
+    service = Service(tmp_path / 'v1', 'synthetic-token', runner=runner)
+    v2 = Service(tmp_path / 'v2', 'synthetic-token', runner=runner)
+    server = v2module.Server(service, port=0, v2=v2)
+    serving = threading.Thread(target=server.serve_forever, daemon=True)
+    serving.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    statuses = []
+    def post():
+        statuses.append(wire(base, '/aml/v2/add', addition())[0])
+    threads = [threading.Thread(target=post) for _ in range(3)]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert statuses == [200] * 3 and overlap == [1, 1, 1]
+    finally:
+        server.shutdown()
+        server.server_close()
+        serving.join()
+
+
+@pytest.mark.parametrize('fault', ['cache', 'lease', 'root'])
+def test_v2_startup_failure_contained(tmp_path, fault):
+    import fcntl
+    env, base = gateway_environment(tmp_path, 'coding')
+    root = tmp_path / 'v2'
+    root.mkdir()
+    with (root / '.server.lock').open('a') as lease:
+        if fault == 'lease':
+            fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif fault == 'root':
+            root = root / 'invalid-file'
+            root.touch()
+        env.update(AML_V2_DB_ROOT=str(root), AML_EMBED_CACHE_SOURCE=str(tmp_path / 'missing'))
+        with subprocess.Popen([sys.executable, '-B', aml_server.__file__], env=env,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True) as process:
+            try:
+                end = time.monotonic() + 5
+                while True:
+                    assert process.poll() is None, process.stderr.read()
+                    try:
+                        assert wire(base, '/aml/health') == (200, b'{"status":"ok"}')
+                        break
+                    except OSError:
+                        assert time.monotonic() < end
+                        time.sleep(.02)
+                assert wire(base, '/aml/v1/search', dict(user_id='u', query='q'))[0] == 200
+                for path in ('health', 'add', 'search', 'missing'):
+                    assert wire(base, '/aml/v2/' + path, {} if path != 'health' else None) == (
+                        503, b'{"detail":{"reason":"v2 unavailable"}}')
+                assert wire(base, '/aml/v2/health', method='HEAD') == (503, b'')
+            finally:
+                process.terminate()
+                process.wait(timeout=5)
+            assert process.stderr.read().splitlines() == ['AML v2 unavailable: preparation failed']
+
+
+def test_v2_stable_ids_and_deduplication():
+    hit = dict(content='same stored row', stored_id=7, role='user', summary=False)
+    other = dict(hit, content='another row', stored_id=8)
+    first = aml_server.v2_search_response([hit, hit, other], 'u', 10, 'first')['data']
+    second = aml_server.v2_search_response([other, hit], 'u', 10, 'different')['data']
+    assert len(first) == 2
+    assert first[0]['id'] == second[1]['id'] == digest('u\0' + '7')
+    assert first[0]['id'] != aml_server.v2_search_response([hit], 'other', 1)['data'][0]['id']
+    fallback = dict(hit, stored_id=None)
+    assert aml_server.v2_search_response([fallback, fallback], 'u', 10)['data'][0]['id'] == digest('u\0same stored row')
+
+
+def test_v2_surrogate_and_crash_are_request_local(tmp_path, monkeypatch):
+    from functools import partial
+    env, _ = gateway_environment(tmp_path, 'coding')
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    factory = Path(env['AML_OMNIMEMEVAL_REPO']) / 'scripts/client_factory/lcmx_client.py'
+    with factory.open('a') as stub:
+        stub.write('    def add(self, messages, *args, **kwargs):\n'
+                   '        import os\n'
+                   '        if messages[0]["content"] == "CRASH": os._exit(1)\n')
+    service = Service(tmp_path / 'v2', 'synthetic-token', workers=1,
+                      runner=partial(run_worker, search_mode='v2'))
+    with running_server(tmp_path / 'v1', v2=service) as base:
+        for i, content in enumerate(('\ud83d', 'CRASH')):
+            assert wire(base, '/aml/v2/add', addition(request=f'bad-{i}', content=content))[0] == 500
+            assert wire(base, '/aml/v2/add', addition(request=f'ok-{i}', content='recovered'))[0] == 200
+            assert wire(base, '/aml/v2/health') == (200, b'{"status":"ok"}')
+
+
+def test_v1_routes_switch_to_v2(tmp_path, v2module):
+    one = Service(tmp_path / 'v1', 'synthetic-token', runner=stub_runner)
+    two = Service(tmp_path / 'v2', 'synthetic-token', runner=stub_runner)
+    server = v2module.Server(one, port=0, v2=two)
+    server.v1_to_v2 = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    try:
+        assert wire(base, '/aml/v1/health', method='HEAD') == (200, b'')
+        assert json.loads(server.receipts.read_text().splitlines()[-1])['route'] == '/aml/v1/health'
+        assert wire(base, '/aml/v1/health')[0] == 200
+        assert wire(base, '/aml/v1/add', addition(content='PRIVATE-CONTENT\n    code'))[0] == 200
+        assert (two.root / digest('user/a')).exists() and not (one.root / digest('user/a')).exists()
+        assert wire(base, '/aml/v1/search', dict(user_id='user/a', query='PRIVATE-QUERY'))[0] == 200
+        records = [json.loads(line) for line in server.receipts.read_text().splitlines()]
+        assert records[-1]['hits'] == 2
+        # Unbound frozen paths keep the frozen service.
+        assert wire(base, '/aml/search', dict(user_id='user/a', query='PRIVATE-QUERY')) == (200, b'{"data":[]}')
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_v1_routes_switch_fails_closed_without_v2(tmp_path, v2module):
+    one = Service(tmp_path / 'v1', 'synthetic-token', runner=stub_runner)
+    server = v2module.Server(one, port=0, v2=None, v2_failed=True)
+    server.v1_to_v2 = True
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    base = 'http://127.0.0.1:' + str(server.server_port)
+    try:
+        assert wire(base, '/aml/v1/health')[0] == 503
+        assert wire(base, '/aml/v1/health', method='HEAD')[0] == 503
+        assert json.loads(server.receipts.read_text().splitlines()[-1])['route'] == '/aml/v1/health'
+        assert wire(base, '/aml/v1/search', dict(user_id='user/a', query='q'))[0] == 503
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
