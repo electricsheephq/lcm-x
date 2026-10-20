@@ -2463,7 +2463,7 @@ def _lcm_recall_fts_match_span(
         if offset < 0 or content.find(plain, offset + 1) >= 0:
             continue
         start = offset + len(fragment[:match.start()].replace(">>>", "").replace("<<<", ""))
-        return start, start + len(match[1])
+        return start + len(match[1]) - len(match[1].lstrip(">")), start + len(match[1])
     return None
 
 
@@ -2770,6 +2770,7 @@ class _LcmRecallStrictSelector:
                 "content_offset": candidate.get("content_offset"),
             }
             span = _lcm_recall_verified_span(probe, row)
+            used_fts_window = False
             if span is None:
                 match_span = _lcm_recall_fts_match_span(
                     candidate.get("_fts_snippet", candidate.get("snippet")),
@@ -2782,13 +2783,16 @@ class _LcmRecallStrictSelector:
                     )
                     probe.update(snippet=window["content"], content_offset=window["content_offset"])
                     span = _lcm_recall_verified_span(probe, row)
+                    used_fts_window = span is not None
             if span is None:
                 continue
-            if candidate is not hit or probe["snippet"] != hit.get("snippet"):
+            if used_fts_window or candidate is not hit or probe["snippet"] != hit.get("snippet"):
                 # Same row, quoted where it really says it.
                 hit["snippet"] = probe["snippet"]
                 hit["content_offset"] = probe["content_offset"]
-                if candidate.get("chunk_span"):
+                if used_fts_window:
+                    hit.pop("chunk_span", None)
+                elif candidate.get("chunk_span"):
                     hit["chunk_span"] = candidate["chunk_span"]
                 hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
             entry["_strict_span"] = span
@@ -3079,7 +3083,7 @@ def _lcm_recall_answer_ready_content(
             continue
         content = str(stored.get("content") or "")
         span = hit.get("chunk_span") or {}
-        if fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
+        if not span and fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
             # Fusion may retain a chunk preview; use the FTS representation of
             # this same row when it is available, before the literal fallback.
             for candidate in [hit, *entry.get("_alternates", [])]:

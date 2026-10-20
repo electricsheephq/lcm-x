@@ -2752,7 +2752,7 @@ def test_answer_ready_keeps_missing_session_refs_independently_eligible():
     assert dropped == 0
 
 
-def test_answer_ready_centers_message_content_on_fts_span_when_fused(
+def test_answer_ready_centers_message_content_on_exact_chunk_span(
     recall_engine, monkeypatch
 ):
     match = "kanban dashboard sprint"
@@ -2779,11 +2779,7 @@ def test_answer_ready_centers_message_content_on_fts_span_when_fused(
     )
 
     hit = payload["hits"][0]
-    # Only the middle word has token boundaries in FTS; B2 uses its actual
-    # match rather than reporting the wider semantic chunk as lexical evidence.
-    fts_start = content.index("dashboard")
-    fts_end = fts_start + len("dashboard")
-    expected_offset = (fts_start + fts_end) // 2 - 1_200
+    expected_offset = (match_start + match_end) // 2 - 1_200
     assert hit["store_id"] == store_id
     assert hit["content_offset"] == expected_offset
     assert len(hit["content"]) == 2_400
@@ -2794,9 +2790,82 @@ def test_answer_ready_centers_message_content_on_fts_span_when_fused(
     assert hit["role"] == "user"
     assert hit["source"] == "chat"
     assert hit["evidence_span"] == {
-        "char_start": fts_start,
-        "char_end": fts_end,
+        "char_start": match_start,
+        "char_end": match_end,
     }
+
+
+def test_answer_ready_far_apart_chunk_and_fts_keep_their_windows(
+    recall_engine, monkeypatch
+):
+    semantic = "visual workspace status panel"
+    content = ("a" * 497 + " dashboard " + "b" * 8002 + " "
+               + semantic + " " + "z" * 2000)
+    start = content.index(semantic)
+    end = start + len(semantic)
+    store_id = recall_engine._store.append(
+        "session-a", {"role": "user", "content": content}, source="chat",
+    )
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, start, end, [1.0, 0.0])])
+    args = dict(query="dashboard", include="verbatim", detail="answer_ready",
+                scope_bias=0.0, limit=1)
+    fused = _recall(recall_engine, monkeypatch, **args)["hits"][0]
+    assert set(fused["arms"]) == {"fts", "chunk"}
+
+    # Controls run before the regression assertion: chunk-only keeps its span,
+    # and embeddings-off still uses B2's FTS span when there is no chunk.
+    with monkeypatch.context() as patch:
+        patch.setattr(lcm_tools, "_lcm_recall_fts_arm", lambda *a, **k: ([], None))
+        chunk_only = _recall(recall_engine, monkeypatch, **args)["hits"][0]
+    assert chunk_only["arms"] == ["chunk"]
+    assert chunk_only["evidence_span"] == {"char_start": start, "char_end": end}
+    assert semantic in chunk_only["content"]
+    recall_engine._config.embeddings_enabled = False
+    fts_only = _recall(recall_engine, monkeypatch, **args)["hits"][0]
+    assert fts_only["arms"] == ["fts"]
+    assert "chunk_span" not in fts_only
+    assert fts_only["evidence_span"] == {"char_start": 498, "char_end": 507}
+    assert fts_only["content_offset"] == 0
+
+    assert fused["chunk_span"] == chunk_only["chunk_span"]
+    assert fused["evidence_span"] == chunk_only["evidence_span"]
+    assert fused["content_offset"] == chunk_only["content_offset"]
+    assert fused["content"] == chunk_only["content"]
+
+
+@pytest.mark.parametrize("content", ["a>>b c d", "x>b and stuff"])
+def test_fts_match_span_excludes_adjacent_marker_characters(content):
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE VIRTUAL TABLE docs USING fts5(content)")
+        connection.execute("INSERT INTO docs VALUES (?)", (content,))
+        snippet, = connection.execute(
+            "SELECT snippet(docs, 0, '>>>', '<<<', '...', 16) "
+            "FROM docs WHERE docs MATCH 'b'",
+        ).fetchone()
+    start = content.index("b")
+    assert lcm_tools._lcm_recall_fts_match_span(snippet, content) == (start, start + 1)
+
+
+def test_strict_fts_fallback_drops_stale_fused_chunk_span(recall_engine, monkeypatch):
+    content = "The dashboard is ready."
+    store_id = recall_engine._store.append("session-a", {"role": "user", "content": content})
+    chunk_hit = {
+        "kind": "message_excerpt", "store_id": store_id, "session_id": "session-a",
+        "snippet": "obsolete vector passage", "content_offset": 120,
+        "chunk_span": {"char_start": 120, "char_end": 143},
+        "_fts_snippet": "The >>>dashboard<<< is ready.",
+    }
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT", 0)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_chunk_arm",
+                        lambda *a, **k: ([dict(chunk_hit)], "full", 1, 1))
+    # Supply the corpus metadata needed to run the mock vector arm.
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, len(content), [1.0, 0.0])])
+    hit = _recall(recall_engine, monkeypatch, query="dashboard", include="verbatim",
+                  detail="answer_ready", limit=1)["hits"][0]
+    assert set(hit["arms"]) == {"chunk", "fts"}
+    assert hit["snippet"] == content
+    assert hit["content_offset"] == 0
+    assert "chunk_span" not in hit
 
 
 def test_answer_ready_expands_summary_ref_with_2400_char_bound(
