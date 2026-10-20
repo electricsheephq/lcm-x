@@ -67,7 +67,7 @@ def test_judge_checks_current_code(tmp_path, monkeypatch, factor):
     args = run.parser().parse_args(["judge", "--split-label", "smoke", "--store-root", str(tmp_path),
                                    "--output", str(tmp_path)])
     manifest = {"dataset_sha256": "d", "id_list_sha256": "i", "split_label": "smoke", "question_ids": ["0"],
-                "prompts_sha256": run.prompt_hashes(), "harness_commit": common.commit(Path(run.__file__).parents[2]),
+                "prompts_sha256": run.prompt_hashes(), **run.switches(args), "harness_commit": common.commit(Path(run.__file__).parents[2]),
                 "lcmx_commit": common.commit(args.lcmx_repo),
                 "harness_tree_sha256": common.sha(b"".join(p.read_bytes() for p in sorted(Path(run.__file__).parent.glob("*.py"))))}
     manifest[factor] = "different"
