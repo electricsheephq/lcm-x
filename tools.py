@@ -28,6 +28,10 @@ from .embedding_provider import (
     VoyageError,
     default_chunk_model,
     probe_provider_availability,
+    local_reranker,
+    rerank_readiness,
+    rerank_selection,
+    warn_rerank_once,
     resolve_provider,
 )
 from .diagnostics import (
@@ -3455,6 +3459,7 @@ def _lcm_recall_rerank(
     window: int,
     deadline: float,
     config: Any,
+    engine: Any = None,
 ) -> tuple[list[dict[str, Any]], str, list[list[Any]]]:
     """Optionally REORDER the top ``window`` fused candidates in ONE API call.
 
@@ -3472,15 +3477,42 @@ def _lcm_recall_rerank(
     """
     if not bool(getattr(config, "rerank_enabled", False)):
         return ordered, "disabled", []
+    provider_id, model = rerank_selection(config)
+    voyage_provider = getattr(provider, "provider_id", "") == "voyage" and hasattr(provider, "rerank")
     if (
-        provider is None
-        or getattr(provider, "provider_id", "") != "voyage"
-        or not hasattr(provider, "rerank")
+        provider_id == "voyage"
+        and not voyage_provider
+        and bool(getattr(config, "embeddings_enabled", False))
+        and str(getattr(config, "embedding_provider", "") or "").strip().lower() in {"voyage", "voyageai"}
     ):
+        # Voyage embeddings degraded for this recall (query-embedding failure,
+        # timeout, scope timeout, proactive override): keep the base skip.
         return ordered, "skipped: rerank requires the voyage provider", []
+    if provider_id == "unknown":
+        warn_rerank_once("unknown rerank model")
+        return ordered, "skipped: unknown rerank model", []
     head = ordered[:window]
     if not head:
         return ordered, "skipped: no candidates to rerank", []
+    def resolve_reranker():
+        if provider_id == "fastembed":
+            return local_reranker(model)
+        if voyage_provider:
+            return provider
+        cached = getattr(engine, "_lcm_rerank_provider_cache", None)
+        if cached is not None:
+            return cached
+        rerank_config = copy.copy(config)
+        rerank_config.embedding_provider, rerank_config.embedding_model = "voyage", "voyage-4-lite"
+        resolved = resolve_provider(rerank_config)
+        if engine is not None:
+            engine._lcm_rerank_provider_cache = resolved
+        return resolved
+
+    try:
+        provider = _run_within_deadline(resolve_reranker, remaining_s=deadline - time.monotonic(), name="lcm-recall-rerank")
+    except Exception as exc:
+        return ordered, f"skipped: {exc}", []
     outbound_query = str(query)
     documents = [str(entry["hit"].get("snippet") or "") for entry in head]
     privacy_revision: str | None = None
@@ -3509,10 +3541,7 @@ def _lcm_recall_rerank(
             documents,
             top_k=len(documents),
             timeout=max(0.001, deadline - time.monotonic()),
-            model=(
-                str(getattr(config, "rerank_model", "") or "").strip()
-                or "rerank-2.5-lite"
-            ),
+            model=model,
         )
 
     try:
@@ -4218,7 +4247,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
     # -- Optional rerank stage (default OFF): a pure rank-REORDER within the top
     #    window of the post-prior order (no score splicing onto the RRF scale). --
     ordered, rerank_status, rerank_scores = _lcm_recall_rerank(
-        provider, query, ordered, window=rerank_window, deadline=deadline, config=engine._config
+        provider, query, ordered, window=rerank_window, deadline=deadline, config=engine._config, engine=engine
     )
 
     # -- FTS anchor slot (#950), after rerank so rerank cannot undo it. Inert
@@ -4348,6 +4377,12 @@ def _lcm_store_has_live_chunk_vectors(conn: sqlite3.Connection) -> bool:
 
 
 def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
+    result = _embedding_provider_health_detail(engine)
+    result["rerank"] = rerank_readiness(engine._config)
+    return result
+
+
+def _embedding_provider_health_detail(engine: "LCMEngine") -> dict[str, Any]:
     """Return the ``embedding_provider_health`` lcm_doctor check (#672).
 
     Answers one operator question: *is the semantic retrieval I configured

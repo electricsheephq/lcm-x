@@ -104,7 +104,7 @@ RAW_READERS = {
         "_warn_env_range", "from_env", "containment_base_dir",
     },
     "db_bootstrap.py": {"_integrity_check_interval_hours"},
-    "embedding_provider.py": {"probe_provider_availability", "_request", "rerank", "__init__"},
+    "embedding_provider.py": {"probe_provider_availability", "_request", "rerank", "rerank_readiness", "__init__"},
     "engine.py": {"_set_context_length"},
 }
 

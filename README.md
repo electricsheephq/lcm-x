@@ -645,6 +645,11 @@ assistant even when doing so exceeds a configured bound.
 
 Advanced compaction, assembly, and extraction knobs are defined in `config.py`.
 
+Recall reranking stays off by default (`LCM_RERANK_ENABLED=false`). Select it
+independently of embeddings with `LCM_RERANK_MODEL`: `rerank-*` or `voyage:<model>`
+uses Voyage; `fastembed:Xenova/ms-marco-MiniLM-L-6-v2` uses a local cross-encoder.
+Prepare local models with `/lcm embed warmup`; recall never downloads them.
+
 ### Sensitive-pattern redaction
 
 LCM is lossless by default: durable messages, FTS rows, summaries, and payloads

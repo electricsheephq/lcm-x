@@ -107,6 +107,9 @@ from .embedding_provider import (
     _plan_contextualized_requests,
     default_chunk_model,
     fastembed_download_size_note,
+    local_reranker,
+    rerank_readiness,
+    rerank_selection,
     resolve_provider,
 )
 from .tokens import count_tokens
@@ -2427,9 +2430,18 @@ def _embedding_warmup_text(engine) -> str:
         result = _embedding_register_profiles(engine._config, engine._store.db_path, allow_download=True)
         if isinstance(result, dict):
             engine._lcm_embedding_provider_cache = result["provider_cache"]
-        return result["text"] if isinstance(result, dict) else result
+        text = result["text"] if isinstance(result, dict) else result
     except Exception as exc:
-        return "\n".join(["LCM embedding warmup", "status: error", f"error: {exc}"])
+        text = "\n".join(["LCM embedding warmup", "status: error", f"error: {exc}"])
+    rerank_provider, rerank_model = rerank_selection(engine._config)
+    if not (engine._config.rerank_enabled and rerank_provider == "fastembed"):
+        return text
+    # Local rerank prepares after, and independently of, the embedding warmup.
+    try:
+        local_reranker(rerank_model).warmup()
+        return text + f"\nrerank: {rerank_readiness(engine._config)}"
+    except Exception as exc:
+        return text + f"\nrerank: error: {exc}"
 
 
 def _embedding_read_connection(db_path: str | Path) -> sqlite3.Connection:

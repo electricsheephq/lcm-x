@@ -817,7 +817,8 @@ def test_recall_rerank_off_leaves_checkpoint_byte_identical(tmp_path, monkeypatc
     assert "recall_rerank_status" not in row["arms"]["lcm_recall"]
 
 
-def test_recall_rerank_on_records_status_and_mode_counts(tmp_path):
+def test_recall_rerank_on_records_status_and_mode_counts(tmp_path, monkeypatch):
+    monkeypatch.delenv("VOYAGE_API_KEY", raising=False)
     questions = _synthetic_dataset()
     checkpoint_path = tmp_path / "run" / "per_question_checkpoint.jsonl"
     dump_path = tmp_path / "run" / "candidates.jsonl"
@@ -833,7 +834,7 @@ def test_recall_rerank_on_records_status_and_mode_counts(tmp_path):
         dump_candidates_path=dump_path,
     )
 
-    expected_status = "skipped: rerank requires the voyage provider"
+    expected_status = "skipped: VOYAGE_API_KEY is not set"
     assert report["recall_rerank_modes"] == {expected_status: len(questions)}
     rows = checkpoint_path.read_text(encoding="utf-8").splitlines()
     header = json.loads(rows[0])
