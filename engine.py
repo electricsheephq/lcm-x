@@ -109,7 +109,9 @@ from .runtime_identity import (
     _git_runtime_identity,
     _plugin_metadata,
 )
-from .embedding_maintenance import _STOP_EMBEDDING_MAINTENANCE, run_incremental_embedding_pass
+from .embedding_maintenance import (
+    _STOP_EMBEDDING_MAINTENANCE, retire_local_model_prepare, run_incremental_embedding_pass,
+)
 from .rollup_builder import (
     initialize_rollup_invalidation_outbox,
     mark_stale_for_published_summary,
@@ -368,13 +370,14 @@ class _RollupMaintenanceScheduler:
                 self._condition.notify_all()
                 return True
             if len(self._jobs) >= self._max_pending_jobs:
-                if len(self._deferred_jobs) < self._max_pending_jobs:
+                if self._kind == "incremental embedding" and len(self._deferred_jobs) < self._max_pending_jobs:
                     self._deferred_jobs[key] = job
                     self._track_owner_locked(key, owner)
                     return True
                 logger.warning(
-                    "LCM %s maintenance queue is full; "
-                    "bounded deferred capacity exhausted; refusing database=%s scope=%s",
+                    "LCM %s maintenance queue is full; " + (
+                        "bounded deferred capacity exhausted; refusing database=%s scope=%s"
+                        if self._kind == "incremental embedding" else "deferring database=%s scope=%s until a later bind"),
                     self._kind,
                     key[0],
                     key[1],
@@ -550,6 +553,12 @@ class _RollupMaintenanceScheduler:
         while True:
             with self._condition:
                 while not self._jobs:
+                    # Retirement may empty the ready queue while retained work survives.
+                    if self._deferred_jobs:
+                        deferred_key = next(iter(self._deferred_jobs))
+                        self._jobs.append((deferred_key, self._deferred_jobs.pop(deferred_key)))
+                        self._queued_keys.add(deferred_key)
+                        break
                     if self._closed:
                         return
                     self._condition.wait()
@@ -3011,7 +3020,6 @@ class LCMEngine(
         with self._embedding_maintenance_lock:
             self._embedding_maintenance_retired = True
             owner = self._embedding_maintenance_owner
-        from .embedding_maintenance import retire_local_model_prepare
         retire_local_model_prepare(owner)
         try:
             _EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(

@@ -144,7 +144,7 @@ def test_duty_wait_is_retirement_interruptible(local_store, monkeypatch, interru
 def test_restart_resumes_persisted_coverage(local_store, monkeypatch):
     engine, _scheduler = local_store
     entered, release = threading.Event(), threading.Event()
-    for i in range(100):
+    for i in range(150):
         engine._store.append("seed", {"role": "user", "content": f"restart canary {i} " + "detail " * 60})
         engine._dag.add_node(SummaryNode(session_id="seed", depth=0, summary=f"restart leaf {i}",
                                         created_at=float(i), latest_at=float(i)))
@@ -166,7 +166,7 @@ def test_restart_resumes_persisted_coverage(local_store, monkeypatch):
         engine._retire_embedding_maintenance(wait=True)
         with sqlite3.connect(engine._store.db_path) as conn:
             before = {r[0] for r in conn.execute("SELECT embedded_id FROM lcm_embedding_meta")}
-            assert 0 < len(before) < 100
+            assert 0 < len(before) < 150
         monkeypatch.setattr(command, "resolve_provider", lambda c, **_k: FakeProvider(c.embedding_provider, c.embedding_model))
         successor = LCMEngine(config=engine._config, hermes_home=str(engine._hermes_home))
         successor.on_session_start("after-restart", context_length=200000)
@@ -202,11 +202,12 @@ def test_retired_prepare_never_registers_store(local_store, monkeypatch):
         writes.append(str(args[0].db_path))
         return register(*args, **kwargs)
 
-    monkeypatch.setattr(maintenance, "start_local_model_prepare", REAL_PREPARE)
     monkeypatch.setattr(command, "resolve_provider", lambda c, **_k: Model(c.embedding_provider, c.embedding_model))
     monkeypatch.setattr(VectorStore, "register_profile", recorded)
     try:
-        engine._schedule_embedding_maintenance()
+        with pytest.MonkeyPatch.context() as prepare_patch:
+            prepare_patch.setattr(maintenance, "start_local_model_prepare", REAL_PREPARE)
+            engine._schedule_embedding_maintenance()
         assert entered.wait(3)
         engine._retire_embedding_maintenance(wait=True)
         release.set()
@@ -297,7 +298,8 @@ def test_failing_row_is_not_rewritten_on_each_bind(local_store, monkeypatch):
     assert before == after
 
 
-def test_queue_re_admits_65th_database():
+@pytest.mark.parametrize("retire_ready", [False, True])
+def test_queue_re_admits_65th_database(retire_ready):
     scheduler = engines._RollupMaintenanceScheduler(kind="incremental embedding")
     ran = []
     try:
@@ -305,9 +307,12 @@ def test_queue_re_admits_65th_database():
             accepted = [scheduler.schedule((str(i), "embeddings"), lambda i=i: ran.append(i), owner=i + 1)
                         for i in range(65)]
             assert len(scheduler._jobs) <= 64
+            if retire_ready:
+                for i in range(64):
+                    assert scheduler.retire_owner(i + 1, timeout=0)
         assert all(accepted), "overflow database was dropped"
         assert scheduler.drain({(str(i), "embeddings") for i in range(65)}, 3)
-        assert set(ran) == set(range(65))
+        assert set(ran) == ({64} if retire_ready else set(range(65)))
     finally:
         scheduler.quiesce(3)
 

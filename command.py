@@ -4577,12 +4577,11 @@ def _chunk_authorized_uncertain_rows(
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
     """Select uncertain chunk rows without consuming their durable markers."""
     rows = conn.execute(
-        """
+        f"""
         SELECT f.embedded_id
         FROM lcm_embedding_backfill_inflight AS f
         WHERE f.identity_hash = ?
-          AND f.state = 'uncertain'
-          AND (? IS NULL OR COALESCE(f.updated_at, 0) <= ?)
+          AND f.state = 'uncertain'{" AND COALESCE(f.updated_at, 0) <= ?" if retry_before is not None else ""}
           AND NOT EXISTS (
               SELECT 1 FROM lcm_chunk_meta AS m
               WHERE m.chunk_id = f.embedded_id
@@ -4591,7 +4590,7 @@ def _chunk_authorized_uncertain_rows(
         ORDER BY f.updated_at, f.embedded_id
         LIMIT ?
         """,
-        (identity_hash, retry_before, retry_before, max(0, int(limit))),
+        (identity_hash, *((retry_before,) if retry_before is not None else ()), max(0, int(limit))),
     ).fetchall()
     documents: list[tuple[str, str, int]] = []
     meta: dict[str, tuple[int, int, int, int]] = {}

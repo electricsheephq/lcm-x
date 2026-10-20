@@ -87,6 +87,12 @@ endpoint locality must not be inferred solely from the provider name (#337).
 
 Do not silently treat those stores or scopes as interchangeable.
 
+## Explicit LOCAL catch-up
+
+Embeddings remain off by default. Explicit FastEmbed alternates summary/chunk maintenance slices, at most 32 items and a one-second soft budget, and re-enqueues at the queue tail after at least 1.5 times the slice's active time. An already dispatched batch may overrun; its progress reports that overrun. SQLite connections and leases close before the interruptible wait. Remote providers retain one pass per trigger.
+Model preparation warms only the shared model; owner-tracked jobs register stores. Preparation retries at ten-minute intervals, at most six attempts per process; uncertain rows retain timestamp-based retry backoff. No progress, refusal or error stops catch-up visibly. Lease contention and open circuits defer work; restart resumes from persisted vectors/scan state. The default bge-small model uses one intra-op thread per process, which is not a CPU quota.
+The ready queue admits 64 databases and retains up to 64 overflow databases for automatic re-admission. Exhausting both bounded banks explicitly refuses admission with a database-scoped reason.
+
 ## V4 derived state
 
 The V4 branch adds same-database, default-off assertion/query-view state and provider-neutral reasoning/evidence components. They remain subordinate to raw messages:
