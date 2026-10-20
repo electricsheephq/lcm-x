@@ -4236,20 +4236,26 @@ def _chunk_partial_ids(conn, identity_hash):
     ).fetchone()
     try:
         ids = json.loads(saved[0]) if saved else []
+        if isinstance(ids, dict):
+            if any(type(ids.get(k)) is not int or ids[k] < 0 for k in ("cursor", "turn")):
+                raise ValueError("invalid partial cursor")
+            ids = ids.get("ids")
         if not isinstance(ids, list) or any(type(i) is not int for i in ids):
             raise ValueError("invalid message ids")
         return set(ids)
     except (ValueError, TypeError):
         warning_key = (identity_hash, saved[0])
         if warning_key not in _CHUNK_PARTIAL_WARNED:
-            logging.getLogger("hermes_lcm").warning("Ignoring malformed partial-message record")
+            logging.getLogger("hermes_lcm").debug("Preserving malformed partial-message record; backlog unknown")
             _CHUNK_PARTIAL_WARNED.add(warning_key)
-        return set()
+        return None
 
 
 def _prune_chunk_partial_messages(conn, identity_hash, lease, chunk_cache, policy=""):
     """Drop discoverable unpublished intents and proven completions without re-chunking."""
     ids = _chunk_partial_ids(conn, identity_hash)
+    if ids is None:
+        return  # Unknown coverage must survive byte-for-byte.
     published = {}
     for sid, cid in conn.execute(
         "SELECT store_id, chunk_id FROM lcm_chunk_meta JOIN messages USING (store_id) WHERE identity_hash=? "
@@ -4258,31 +4264,41 @@ def _prune_chunk_partial_messages(conn, identity_hash, lease, chunk_cache, polic
         published.setdefault(sid, set()).add(cid)
     complete = {sid for sid, chunks in chunk_cache.items()
                 if all(c.chunk_id in published.get(sid, ()) for c in chunks if c.char_end > c.char_start)}
-    # Cloud withholding/token-cap skips can retain partials indefinitely; the
-    # half-pass selection quota prevents them starving new local-only work.
-    retained = ids if normalize_content_policy(policy) == "full" else ids & published.keys()
+    retained = {r[0] for r in conn.execute(
+        "SELECT store_id FROM messages WHERE store_id IN (SELECT value FROM json_each(?))",
+        (json.dumps(sorted(ids)),),
+    )} if normalize_content_policy(policy) == "full" else ids & published.keys()
     value = json.dumps(sorted(retained - complete))
     conn.execute(
-        "UPDATE metadata SET value=? WHERE key=? AND value!=? "
+        "UPDATE metadata SET value=CASE WHEN json_type(value)='object' "
+        "THEN json_set(value, '$.ids', json(?)) ELSE ? END WHERE key=? "
+        "AND CASE WHEN json_type(value)='object' THEN json_extract(value, '$.ids') ELSE value END !=? "
         "AND EXISTS (SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
         "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?)",
-        (value, f"chunk_partial_messages:{identity_hash}", value,
+        (value, value, f"chunk_partial_messages:{identity_hash}", value,
          _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
     )
 
 
-def _record_chunk_partial_messages(conn, identity_hash, lease, store_ids):
+def _record_chunk_partial_messages(conn, identity_hash, lease, store_ids, *, progress=None):
     """Persist before dispatch, so publication/exit/lease loss cannot strand a message."""
-    if not store_ids:
+    if not store_ids and progress is None:
         return
+    ids = _chunk_partial_ids(conn, identity_hash)
+    if ids is None:
+        raise ValueError("malformed partial-message record requires repair before dispatch")
+    saved = conn.execute("SELECT value FROM metadata WHERE key=?",
+                         (f"chunk_partial_messages:{identity_hash}",)).fetchone()
+    state = json.loads(saved[0]) if saved else []
+    value = sorted(ids | store_ids)
+    if isinstance(state, dict) or progress is not None:
+        value = dict(state if isinstance(state, dict) else {}, ids=value, **(progress or {}))
     cur = conn.execute(
         "INSERT INTO metadata(key, value) SELECT ?, ? WHERE EXISTS "
         "(SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
         "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?) "
-        "ON CONFLICT(key) DO UPDATE SET value=(SELECT json_group_array(value) FROM "
-        "(SELECT value FROM json_each(metadata.value) UNION SELECT value FROM json_each(excluded.value))) "
-        "WHERE EXISTS (SELECT value FROM json_each(excluded.value) EXCEPT SELECT value FROM json_each(metadata.value))",
-        (f"chunk_partial_messages:{identity_hash}", json.dumps(sorted(store_ids)),
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE metadata.value!=excluded.value",
+        (f"chunk_partial_messages:{identity_hash}", json.dumps(value),
          _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
     )
     if not cur.rowcount and not conn.execute(
@@ -4291,6 +4307,26 @@ def _record_chunk_partial_messages(conn, identity_hash, lease, store_ids):
         (_EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
     ).fetchone():
         raise _BackfillLeaseLost("embedding backfill lease lost before recording message intents")
+
+
+def _chunk_partial_window(conn, identity_hash, lease, limit, chunk_cache, policy, *, advance=True):
+    """Rotate bounded source reads; keep progress in the existing intent record."""
+    ids = _chunk_partial_ids(conn, identity_hash)
+    if not ids:
+        return set(), 0
+    state = json.loads(conn.execute("SELECT value FROM metadata WHERE key=?",
+                                   (f"chunk_partial_messages:{identity_hash}",)).fetchone()[0])
+    cursor, turn = (state["cursor"], state["turn"]) if isinstance(state, dict) else (0, 0)
+    ordered = sorted(ids)
+    ordered = [i for i in ordered if i > cursor] + [i for i in ordered if i <= cursor]
+    window = ordered[:4 * max(1, limit // 2) - 2]  # Reserve the two frontier boundary reads.
+    if advance:  # An uncertain retry between ordinary passes must not consume their parity.
+        _record_chunk_partial_messages(conn, identity_hash, lease, set(),
+                                       progress={"cursor": window[-1], "turn": turn + 1})
+    for row in conn.execute("SELECT store_id, role, content FROM messages WHERE store_id IN "
+                            "(SELECT value FROM json_each(?))", (json.dumps(window),)):
+        chunk_cache[row[0]] = chunk_message(*row, policy=policy)
+    return set(window), turn
 
 
 def _chunk_pending_rows(
@@ -4302,6 +4338,7 @@ def _chunk_pending_rows(
     incremental: bool = False,
     record_progress: bool = False,
     include_boundaries: bool = True, include_partials: bool = True, chunk_cache=None,
+    partial_window=None, partial_turn=0,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
     """Discover policy-chunked messages whose chunks are not yet embedded.
 
@@ -4319,8 +4356,8 @@ def _chunk_pending_rows(
     only what it saw.
     """
     chunk_cache = {} if chunk_cache is None else chunk_cache
-    partial_ids = _chunk_partial_ids(conn, identity_hash) if incremental else set()
-    partial_limit, partial_selected = max(1, limit // 2), 0
+    partial_ids = (_chunk_partial_ids(conn, identity_hash) or set()) if incremental else set()
+    partial_limit, partial_selected = (0 if limit == 1 and partial_turn % 2 else max(1, limit // 2)), 0
     if incremental:
         seen_rows = set()
         already = set()
@@ -4330,6 +4367,7 @@ def _chunk_pending_rows(
         rows = _chunk_frontier_rows(
             conn, identity_hash, policy=policy, record_progress=record_progress,
             include_boundaries=include_boundaries, partial_limit=partial_limit if include_partials else 0,
+            partial_window=partial_window,
         )
     else:
         already = _chunk_embedded_ids(conn, identity_hash)
@@ -4348,7 +4386,8 @@ def _chunk_pending_rows(
             if row[0] in seen_rows:
                 continue
             seen_rows.add(row[0])
-            if row[0] in partial_ids and (not include_partials or partial_selected >= partial_limit):
+            if row[0] in partial_ids and (not include_partials or partial_selected >= partial_limit
+                                         or (partial_window is not None and row[0] not in partial_window)):
                 continue
             already = set()
             if row[0] in revisit_ids:
@@ -4547,6 +4586,7 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
 def _chunk_frontier_rows(
     conn: sqlite3.Connection, identity_hash: str | None, history_limit: int | None = None, policy: str = "",
     *, record_progress: bool = False, include_boundaries: bool = False, partial_limit: int = 0,
+    partial_window=None,
 ):
     """Messages the automatic chunk pass has not reached. New messages come first, oldest first; then missing
     eligible rows inside unproven cursor bounds, newest first and bounded; then up to
@@ -4562,7 +4602,8 @@ def _chunk_frontier_rows(
         yield from conn.execute(
             "SELECT store_id, role, content FROM messages WHERE store_id IN "
             "(SELECT value FROM json_each(?)) ORDER BY store_id DESC",
-            (json.dumps(sorted(_chunk_partial_ids(conn, identity_hash))),),
+            (json.dumps(sorted(partial_window) if partial_window is not None else
+                        sorted(_chunk_partial_ids(conn, identity_hash) or ())[:4 * partial_limit]),),
         )
     revision = _chunk_policy_revision(conn, identity_hash)
     eligible = ""
@@ -4609,7 +4650,8 @@ _STATUS_CHUNK_SCAN_MESSAGES = 2_000  # /lcm status chunks at most this many mess
 
 def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None, policy: str) -> str:
     """The automatic pass's pending chunks, read along its frontier and bounded for the status page."""
-    total = len(_chunk_partial_ids(conn, identity_hash))
+    ids = _chunk_partial_ids(conn, identity_hash)
+    total = len(ids) if ids is not None else 1
     gap_bounds = _chunk_gapfill_bounds(
         conn, identity_hash, _chunk_cursor(conn, identity_hash), _chunk_policy_revision(conn, identity_hash),
     ) if normalize_content_policy(policy) != "full" else None
@@ -4619,7 +4661,7 @@ def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None,
         conn, identity_hash, history_limit=_STATUS_CHUNK_SCAN_MESSAGES + 1, policy=policy
     )
     seen = set()
-    partial_ids = _chunk_partial_ids(conn, identity_hash)
+    partial_ids = ids or set()
     for scanned, row in enumerate(rows):
         if scanned >= _STATUS_CHUNK_SCAN_MESSAGES:
             return f"{total}+{suffix}"
@@ -4638,7 +4680,7 @@ def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None,
         total += pending
         if pending and gap_bounds is not None and gap_bounds[0] <= row[0] <= gap_bounds[1]:
             suffix = " (gap-fill)"
-    return f"{total}{'+' if partial_ids else ''}{suffix}"
+    return f"{total}{'+' if partial_ids or ids is None else ''}{suffix}"
 
 
 def _rebuild_chunk_document(
@@ -4737,7 +4779,8 @@ def _chunk_backfill_remaining(
                 include_boundaries=include_boundaries, include_partials=False, chunk_cache=chunk_cache,
             )
             # Even held/uncertain chunks leave their recorded message incomplete.
-            remaining = max(remaining, len(_chunk_partial_ids(check_conn, identity_hash)))
+            ids = _chunk_partial_ids(check_conn, identity_hash)
+            remaining = max(remaining, len(ids) if ids is not None else 1)
             if identity_hash:
                 try:
                     in_flight = int(check_conn.execute(
@@ -5018,6 +5061,8 @@ def _chunk_backfill_run(
             ), reason="lease_held")
         _prepare_inflight_for_lease(conn, identity, lease)
         _prune_chunk_partial_messages(conn, identity, lease, chunk_cache, policy=policy)
+        partial_window, partial_turn = _chunk_partial_window(conn, identity, lease, limit, chunk_cache, policy,
+                                                            advance=not retry_uncertain)
         captured_identity = EmbeddingIdentity.canonical(
             provider_name,
             model,
@@ -5041,6 +5086,7 @@ def _chunk_backfill_run(
             pending, rows, chunk_meta = _chunk_pending_rows(
                 conn, identity, policy, limit, incremental=incremental,
                 record_progress=incremental, chunk_cache=chunk_cache,
+                partial_window=partial_window, partial_turn=partial_turn,
             )
             authorized_uncertain_ids = set()
         if maintenance_slice:
@@ -5375,7 +5421,7 @@ def _chunk_backfill_run(
             if lease is not None:
                 try:
                     _prune_chunk_partial_messages(conn, identity, lease, chunk_cache, policy=policy)
-                    partial_messages = bool(_chunk_partial_ids(conn, identity))
+                    partial_messages = _chunk_partial_ids(conn, identity) != set()
                 except Exception as exc:
                     logging.getLogger("hermes_lcm").warning("Partial-message prune failed: %s", exc)
                     partial_messages = True

@@ -1,6 +1,7 @@
 """Partial-message intents stay cheap and leave room for new turns (#1650)."""
 import dataclasses
 import json
+import logging
 import sqlite3
 import threading
 from collections import Counter
@@ -19,7 +20,8 @@ def _record(db):
         ).fetchone()[0]
         saved = conn.execute("SELECT value FROM metadata WHERE key=?",
                              (f"chunk_partial_messages:{identity}",)).fetchone()
-    return identity, json.loads(saved[0]) if saved else []
+    record = json.loads(saved[0]) if saved else []
+    return identity, record["ids"] if isinstance(record, dict) else record
 
 
 def _run(config, db, **kwargs):
@@ -112,17 +114,21 @@ def test_new_turn_progresses_with_400_recorded_messages(local_store, monkeypatch
 
 
 @pytest.mark.parametrize("value", ["not json", "null"])
-def test_malformed_partial_record_runs_and_reports(local_store, caplog, value):
+def test_malformed_partial_record_runs_and_reports(local_store, caplog, monkeypatch, value):
     engine, _ = local_store
     db = engine._store.db_path
+    caplog.set_level(logging.DEBUG, logger="hermes_lcm")
+    monkeypatch.setattr(command, "_CHUNK_PARTIAL_WARNED", set())
     _run(engine._config, db)
     identity, _ = _record(db)
     with sqlite3.connect(db) as conn:
         conn.execute("INSERT OR REPLACE INTO metadata(key,value) VALUES(?,?)",
                      (f"chunk_partial_messages:{identity}", value))
-        assert command._chunk_backlog_estimate(conn, identity, "conversational") == "0"
-        assert command._chunk_backlog_estimate(conn, identity, "conversational") == "0"
+        assert command._chunk_backlog_estimate(conn, identity, "conversational") == "1+"
+        assert command._chunk_backlog_estimate(conn, identity, "conversational") == "1+"
     result = _run(engine._config, db, incremental=True)
-    assert result["status"] == "complete" and not result["error"], result
-    assert _record(db)[1] == []
+    assert result["status"] == "partial" and result["remaining"] and not result["error"], result
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT value FROM metadata WHERE key=?",
+                            (f"chunk_partial_messages:{identity}",)).fetchone()[0] == value
     assert sum("partial-message record" in record.message for record in caplog.records) == 1

@@ -43,6 +43,7 @@ def test_lost_lease_prune_keeps_successor_record(local_store, monkeypatch, succe
 
     def successor_after_read(c, ih):
         ids = real_ids(c, ih)
+        monkeypatch.setattr(command, "_chunk_partial_ids", real_ids)  # Inject one lease takeover only.
         with sqlite3.connect(db) as other:
             other.execute("DELETE FROM metadata WHERE key=?", (command._EMBEDDING_BACKFILL_CLAIM_KEY,))
         successor = command._acquire_embedding_backfill_lease(conn, ttl_s=60, heartbeat_s=60)
@@ -131,7 +132,8 @@ def _identity(db):
 def _record(db):
     with sqlite3.connect(db) as conn:
         row = conn.execute("SELECT value FROM metadata WHERE key=?", (f"chunk_partial_messages:{_identity(db)}",)).fetchone()
-    return None if row is None else json.loads(row[0])
+    record = None if row is None else json.loads(row[0])
+    return record["ids"] if isinstance(record, dict) else record
 
 
 def _published(db):

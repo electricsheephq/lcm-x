@@ -1,6 +1,5 @@
 """Interrupted messages retain an exact-chunk incremental continuation (#1650)."""
 import dataclasses
-import json
 import sqlite3
 import threading
 
@@ -105,4 +104,4 @@ def test_interrupted_message_is_revisited(local_store, monkeypatch, slice_s, pat
         assert conn.execute("SELECT COUNT(*) FROM lcm_chunk_meta").fetchone()[0] == len(expected)
         saved = conn.execute("SELECT value FROM metadata WHERE key=?",
                              (f"chunk_partial_messages:{identity}",)).fetchone()
-        assert not saved or json.loads(saved[0]) == []
+        assert not saved or not command._chunk_partial_ids(conn, identity)
