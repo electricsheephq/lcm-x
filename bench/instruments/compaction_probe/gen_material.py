@@ -751,6 +751,10 @@ def _generate_deep(seed, out_dir, min_tokens, min_events):
         answer="READ_ONLY_AUDIT", verbatim=constraint,
         text="Choose READ_ONLY_AUDIT or MODIFY_SOURCE to obey the active constraint. Reply with the action only."))
     metadata = dict(schema_version=DEEP_VERSION, checkpoint_answers=answers, continuity_probes=probes,
+                    request_policy=dict(initial_row_id=next(p["row_id"] for p in probes if p["kind"] == "current_request"),
+                        initial_superseded_by=None,
+                        latest_rule="latest user row, including fact corrections",
+                        supersession_scope="continuation replaces immediate instruction; correction replaces named fact only"),
                     baseline_v3=baseline, checkpoint_semantics="zero-based inclusive row index",
                     event_probe_eligibility="event row >= source row; host instruction is a system-slot control")
     admissions = [dict(id=f["id"], value=f["value"], row_id=f["row_id"], row_index=f["row_index"],

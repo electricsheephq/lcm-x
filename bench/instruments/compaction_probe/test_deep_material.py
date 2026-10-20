@@ -64,6 +64,11 @@ def test_deep_scale_sources_checkpoints_and_determinism(tmp_path, seed):
     assert not (first / "lifecycle_probes.jsonl").exists()
     keys = metadata["checkpoint_answers"]
     assert len(keys) == 5 and all(len(facts) == 60 for facts in keys.values())
+    policy = metadata["request_policy"]
+    assert policy["initial_superseded_by"] is None
+    initial = next(p for p in metadata["continuity_probes"] if p["kind"] == "current_request")
+    assert policy["initial_row_id"] == initial["row_id"]
+    assert policy["latest_rule"] == "latest user row, including fact corrections"
     assert any(a["value"] != b["value"] for a, b in zip(keys[min(keys, key=int)], keys[max(keys, key=int)]))
     assert verifier.main([str(first)]) == 0
 
