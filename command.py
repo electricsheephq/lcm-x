@@ -2426,6 +2426,9 @@ def _embedding_warmup_text(engine) -> str:
     try:
         result = _embedding_register_profiles(engine._config, engine._store.db_path, allow_download=True)
         if isinstance(result, dict):
+            from .embedding_maintenance import note_local_model_present
+
+            note_local_model_present(engine._config)
             engine._lcm_embedding_provider_cache = result["provider_cache"]
         return result["text"] if isinstance(result, dict) else result
     except Exception as exc:

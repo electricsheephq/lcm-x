@@ -1802,6 +1802,11 @@ def _resolve_recall_provider(
     tool calls are byte-identical.
     """
     override = str(provider_override or "").strip()
+    from .embedding_maintenance import local_model_state
+
+    state = local_model_state(engine._config) if not override else None
+    if state is not None and state[0] == "preparing":
+        raise RuntimeError("local embedding model is preparing; recall uses full text")
     if not override:
         return _lcm_grep_resolve_provider(engine, deadline=deadline)
     config = engine._config
@@ -4347,6 +4352,42 @@ def _lcm_store_has_live_chunk_vectors(conn: sqlite3.Connection) -> bool:
         return False
 
 
+def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
+    """#1186 readiness: model present / preparing / unavailable(reason), and summary coverage."""
+    from . import command
+    from .embedding_maintenance import local_model_state
+
+    state = local_model_state(engine._config)
+    if not probe.get("available"):
+        model = f"unavailable({probe.get('detail')})"
+    elif state is not None:
+        model = state[0] if state[0] != "unavailable" else f"unavailable({state[1]})"
+    elif _active_embedding_profile_exists(engine):
+        model = "present"
+    else:
+        model = "not prepared (run /lcm embed warmup)"
+    try:
+        conn = command._embedding_read_connection(engine._store.db_path)
+        try:
+            command._register_summary_has_text(conn)
+            profile = command._embedding_current_profile(conn)
+            vectors = "SELECT 1 WHERE 0" if profile is None else (
+                "SELECT 1 FROM lcm_embedding_meta AS m WHERE m.embedded_id = CAST(n.node_id AS TEXT) "
+                "AND m.embedded_kind = 'summary' AND m.identity_hash = :identity"
+            )
+            eligible, embedded = conn.execute(
+                f"SELECT COUNT(*), COALESCE(SUM(EXISTS ({vectors})), 0) FROM summary_nodes AS n "
+                "WHERE n.depth = 0 AND lcm_summary_has_text(n.summary) = 1",
+                {"identity": str(profile["identity_hash"]) if profile is not None else ""},
+            ).fetchone()
+        finally:
+            conn.close()
+        coverage = f"{embedded}/{eligible} summaries"
+    except sqlite3.Error as exc:
+        coverage = f"unavailable ({exc})"
+    return f"model: {model}; coverage: {coverage}"
+
+
 def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
     """Return the ``embedding_provider_health`` lcm_doctor check (#672).
 
@@ -4396,8 +4437,10 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
         "reachability_probed": bool(probe.get("probed")),
         "reason": probe.get("detail"),
     }
+    if embedding_provider_id(str(probe.get("provider") or "")) == "fastembed":
+        detail["readiness"] = _embedding_readiness(engine, probe)
     # An unavailable provider is the prerequisite blocker: warmup cannot succeed until it is fixed.
-    if not probe.get("available"):
+    if not probe.get("available") or str(detail.get("readiness", "")).startswith("model: unavailable("):
         detail["impact"] = (
             "semantic retrieval is degraded: lcm_recall reports degraded=true and "
             "lcm_grep mode=semantic falls back to full-text"

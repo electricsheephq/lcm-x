@@ -1364,6 +1364,7 @@ class LCMEngine(
         # diagnostic drains do not retain every historical session key forever.
         self._rollup_maintenance_owner = object()
         self._embedding_maintenance_owner = object()
+        self._embedding_maintenance_lock = threading.Lock()
         self._embedding_maintenance_retired = False
         # Host-facing engine name: ENGINE_NAME, or the legacy alias when the
         # active Hermes config still selects ``context.engine: lcm`` (#471).
@@ -2914,7 +2915,7 @@ class LCMEngine(
             database_path = Path(raw_database_path).resolve()
             config = copy.deepcopy(self._config)
             from . import command
-            from .embedding_maintenance import _automatic_chunks_allowed
+            from .embedding_maintenance import _automatic_chunks_allowed, start_local_model_prepare
             from .vector_store import VectorStore
 
             chunks_allowed = _automatic_chunks_allowed(config, command)
@@ -2937,11 +2938,18 @@ class LCMEngine(
             def maintain() -> None:
                 run_incremental_embedding_pass(database_path, config, breaker=breaker)
 
-            _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(
-                self._rollup_maintenance_key("embeddings"),
-                profile_bound(maintain),
-                owner=self._embedding_maintenance_owner,
-            )
+            maintenance_key = self._rollup_maintenance_key("embeddings")
+            owner = self._embedding_maintenance_owner
+            bound_maintain = profile_bound(maintain)
+
+            def enqueue() -> None:
+                with self._embedding_maintenance_lock:
+                    if not self._embedding_maintenance_retired and owner is self._embedding_maintenance_owner:
+                        _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(maintenance_key, bound_maintain, owner=owner)
+
+            bound_enqueue = profile_bound(enqueue)
+            start_local_model_prepare(database_path, config, on_ready=bound_enqueue)
+            bound_enqueue()
         except Exception:
             logger.warning(
                 "LCM could not schedule background incremental embedding",
@@ -2949,10 +2957,14 @@ class LCMEngine(
             )
 
     def _rearm_embedding_maintenance(self) -> None:
-        self._embedding_maintenance_retired = False
+        with self._embedding_maintenance_lock:
+            if self._embedding_maintenance_retired:
+                self._embedding_maintenance_owner = object()
+            self._embedding_maintenance_retired = False
 
     def _retire_embedding_maintenance(self, wait: bool) -> None:
-        self._embedding_maintenance_retired = True
+        with self._embedding_maintenance_lock:
+            self._embedding_maintenance_retired = True
         try:
             _EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
                 self._embedding_maintenance_owner,
