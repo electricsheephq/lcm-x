@@ -1,0 +1,3 @@
+# Optional local reranker. Core and Jev adapter use the standard library.
+# Model weights are separately pinned in optional_scorer.py and cached by CI.
+sentence-transformers==5.1.1

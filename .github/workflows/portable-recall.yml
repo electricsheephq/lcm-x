@@ -1,0 +1,332 @@
+name: Portable recall v1
+on:
+  workflow_dispatch:
+    inputs:
+      frozen_run_id:
+        description: "Reuse registered public/synthetic pools from this repository's completed run; empty registers a new baseline"
+        type: string
+        required: false
+        default: ""
+      public_local_only:
+        description: "Complete the registered LOCAL500 baseline in validated shards; no scorer or synthetic reruns"
+        type: boolean
+        required: false
+        default: false
+  pull_request:
+    paths:
+      - "portable.py"
+      - "docs/portable-qualification.md"
+      - "optional_scorer.py"
+      - "store.py"
+      - "benchmarking/portable_recall_eval.py"
+      - "benchmarking/longmemeval.py"
+      - "scripts/*portable*"
+      - "tests/test_portable_recall.py"
+      - "tests/test_optional_scorer.py"
+      - "tests/test_public_shards.py"
+      - ".github/workflows/portable-recall.yml"
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: portable-recall-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  focused:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - run: pip install pytest==9.1.1 numpy==2.5.3 ruff==0.15.13
+      - run: python -B -m pytest tests/test_portable_recall.py tests/test_optional_scorer.py tests/test_public_shards.py -q -p no:cacheprovider
+      - run: ruff check portable.py optional_scorer.py scripts/lcm_portable.py scripts/package_portable.py scripts/eval_portable_recall.py benchmarking/portable_recall_eval.py benchmarking/longmemeval.py tests/test_portable_recall.py tests/test_optional_scorer.py tests/test_public_shards.py
+      - name: Build the actual local packages
+        run: python scripts/package_portable.py --output portable-artifacts
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: portable-packages
+          path: portable-artifacts
+  evaluation:
+    if: github.event_name == 'workflow_dispatch' && inputs.frozen_run_id == '' && !inputs.public_local_only
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        posture: [OFF, LOCAL]
+    env:
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - name: Set isolated embedding cache
+        run: echo "LCM_LONGMEMEVAL_FASTEMBED_CACHE=$RUNNER_TEMP/fastembed" >> "$GITHUB_ENV"
+      - name: Install and record evaluation environment
+        run: |
+          pip install numpy==2.5.3 fastembed==0.7.3 huggingface-hub==0.35.3 -r requirements-portable-eval.txt
+          mkdir evidence
+          pip freeze > evidence/environment.txt
+          git rev-parse HEAD > evidence/source-sha.txt
+      - name: Cache pinned reranker weights before timing
+        run: |
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          from optional_scorer import BGE_MODEL, BGE_REVISION
+          snapshot_download(BGE_MODEL, revision=BGE_REVISION, allow_patterns=['*.json', '*.safetensors', '*.model', 'tokenizer*', 'special_tokens_map.json'])
+          PY
+      - name: Freeze synthetic corpus using production retrieval
+        env:
+          POSTURE: ${{ matrix.posture }}
+        run: |
+          python scripts/eval_portable_recall.py freeze-synthetic --posture "$POSTURE" --local-model BAAI/bge-small-en-v1.5 --source-identity "$(git rev-parse HEAD):$POSTURE:BAAI/bge-small-en-v1.5" --output evidence/synthetic.jsonl
+      - name: Export frozen public/synthetic-only input for the separately authorized Jev campaign
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: portable-frozen-${{ matrix.posture }}
+          path: evidence/synthetic.jsonl
+      - name: Development pass with frozen policy
+        run: python scripts/eval_portable_recall.py run --input evidence/synthetic.jsonl --output evidence/dev-bge.json --split dev --scorer bge
+      - name: Single held-out pass with identical pools
+        run: python scripts/eval_portable_recall.py run --input evidence/synthetic.jsonl --output evidence/holdout-bge.json --split holdout --scorer bge
+      - name: Download pinned public corpus separately
+        run: python scripts/lcm_longmemeval.py fetch --output "$RUNNER_TEMP/public"
+      - name: Public baseline and frozen pools
+        env:
+          POSTURE: ${{ matrix.posture }}
+        run: |
+          python scripts/eval_portable_recall.py freeze-public --dataset "$RUNNER_TEMP/public/longmemeval_s" --posture "$POSTURE" --local-model BAAI/bge-small-en-v1.5 --source-identity "$(git rev-parse HEAD):$POSTURE:BAAI/bge-small-en-v1.5" --dataset-sha256 "$(sha256sum "$RUNNER_TEMP/public/longmemeval_s" | cut -d ' ' -f1)" --dev-corpus evidence/synthetic.jsonl --frozen-output evidence/public.jsonl --baseline-output evidence/public-baseline.json
+      - name: Public held-out scorer pass
+        run: python scripts/eval_portable_recall.py run --input evidence/public.jsonl --output evidence/public-bge.json --scorer bge
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: portable-eval-${{ matrix.posture }}
+          path: evidence
+
+  frozen-scoring:
+    if: github.event_name == 'workflow_dispatch' && inputs.frozen_run_id != '' && !inputs.public_local_only
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        posture: [OFF, LOCAL]
+    env:
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - name: Install and record the scoring environment
+        run: |
+          pip install numpy==2.5.3 huggingface-hub==0.35.3 -r requirements-portable-eval.txt
+          mkdir evidence
+          pip freeze > evidence/environment.txt
+          git rev-parse HEAD > evidence/source-sha.txt
+      - name: Download the registered pools without repeating production retrieval
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_RUN: ${{ inputs.frozen_run_id }}
+          POSTURE: ${{ matrix.posture }}
+        run: |
+          gh run download "$BASELINE_RUN" --repo "$GITHUB_REPOSITORY" --name "portable-frozen-$POSTURE" --dir frozen
+          echo "$BASELINE_RUN" > evidence/baseline-run.txt
+      - name: Cache the pinned reranker before timing
+        run: |
+          python - <<'PY'
+          from huggingface_hub import snapshot_download
+          from optional_scorer import BGE_MODEL, BGE_REVISION
+          snapshot_download(BGE_MODEL, revision=BGE_REVISION, allow_patterns=['*.json', '*.safetensors', '*.model', 'tokenizer*', 'special_tokens_map.json'])
+          PY
+      - name: Single development and held-out scoring passes over identical frozen pools
+        run: |
+          python scripts/eval_portable_recall.py run --input frozen/synthetic.jsonl --output evidence/dev-bge.json --split dev --scorer bge
+          python scripts/eval_portable_recall.py run --input frozen/synthetic.jsonl --output evidence/holdout-bge.json --split holdout --scorer bge
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: portable-frozen-scores-${{ matrix.posture }}
+          path: evidence
+
+  public-local-prepare:
+    if: github.event_name == 'workflow_dispatch' && inputs.public_local_only
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - name: Recover the registered LOCAL development corpus and environment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASELINE_RUN: ${{ inputs.frozen_run_id }}
+        run: |
+          test "$BASELINE_RUN" = 37894293829
+          mkdir registered
+          gh run download "$BASELINE_RUN" --repo "$GITHUB_REPOSITORY" --name portable-eval-LOCAL --dir registered
+          python - <<'PY'
+          import hashlib
+          from pathlib import Path
+          assert Path('registered/source-sha.txt').read_text().strip() == 'b0ca525b84216260637a784645a8613656c76071'
+          assert hashlib.sha256(Path('registered/synthetic.jsonl').read_bytes()).hexdigest() == '3f47011da537b35e01a0256252065325e84d7636b555b91b33edc9309a589f9b'
+          PY
+      - name: Install the original embedding dependencies under recorded constraints
+        run: |
+          pip install -c registered/environment.txt numpy==2.5.3 fastembed==0.7.3 huggingface-hub==0.35.3
+          pip freeze > registered/runner-environment.txt
+          git rev-parse HEAD > registered/runner-source-sha.txt
+          git rev-parse HEAD:benchmarking/longmemeval.py > registered/instrument-blob.txt
+          test "$(cat registered/instrument-blob.txt)" = f729c7db5d3e81670484dd4389f39d15612eff67
+      - name: Download the same pinned public corpus
+        run: python scripts/lcm_longmemeval.py fetch --output registered/public
+      - name: Prewarm one embedding cache for every shard
+        env:
+          LCM_LONGMEMEVAL_FASTEMBED_CACHE: ${{ runner.temp }}/fastembed
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from pathlib import Path
+          from benchmarking.longmemeval import resolve_harness_providers
+          providers = resolve_harness_providers('fastembed', 'BAAI/bge-small-en-v1.5')
+          root = Path(os.environ['LCM_LONGMEMEVAL_FASTEMBED_CACHE'])
+          files = {str(p.relative_to(root)): hashlib.sha256(p.read_bytes()).hexdigest()
+                   for p in sorted(root.rglob('*')) if p.is_file() and not p.name.endswith('.lock')}
+          Path('registered/embedding-cache.json').write_text(json.dumps({
+              'summary_binding': providers.summary_binding, 'chunk_binding': providers.chunk_binding,
+              'files': files}, indent=2) + '\n')
+          PY
+          tar -C "$RUNNER_TEMP" -czf registered/embedding-cache.tar.gz fastembed
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: portable-public-local-registration
+          path: registered
+
+  public-local-shard:
+    needs: public-local-prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      max-parallel: 10
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+    env:
+      OMP_NUM_THREADS: "4"
+      MKL_NUM_THREADS: "4"
+      TOKENIZERS_PARALLELISM: "false"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: portable-public-local-registration
+          path: registered
+      - name: Restore identical embedding inputs
+        run: |
+          pip install -c registered/environment.txt numpy==2.5.3 fastembed==0.7.3 huggingface-hub==0.35.3
+          mkdir evidence
+          pip freeze > evidence/environment.txt
+          cmp registered/runner-environment.txt evidence/environment.txt
+          tar -C "$RUNNER_TEMP" -xzf registered/embedding-cache.tar.gz
+          python - <<'PYCODE'
+          import hashlib, json, os
+          from pathlib import Path
+          cache = Path(os.environ['RUNNER_TEMP']) / 'fastembed'
+          manifest = json.loads(Path('registered/embedding-cache.json').read_text())
+          assert manifest['files']
+          for name, digest in manifest['files'].items():
+              assert hashlib.sha256((cache / name).read_bytes()).hexdigest() == digest
+          PYCODE
+          echo "LCM_LONGMEMEVAL_FASTEMBED_CACHE=$RUNNER_TEMP/fastembed" >> "$GITHUB_ENV"
+          cp registered/embedding-cache.json evidence/embedding-cache.json
+          cp registered/instrument-blob.txt evidence/instrument-blob.txt
+          git rev-parse HEAD > evidence/source-sha.txt
+      - name: Unchanged LOCAL retrieval for one deterministic public shard
+        env:
+          SHARD: ${{ matrix.shard }}
+        run: |
+          python scripts/eval_portable_recall.py freeze-public --dataset registered/public/longmemeval_s --dataset-sha256 08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894 --posture LOCAL --local-model BAAI/bge-small-en-v1.5 --source-identity "$(git rev-parse HEAD):LOCAL:BAAI/bge-small-en-v1.5" --dev-corpus registered/synthetic.jsonl --shard-index "$SHARD" --shard-count 10 --frozen-output evidence/public.jsonl --baseline-output evidence/public-baseline.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        if: always()
+        with:
+          name: portable-public-local-shard-${{ matrix.shard }}
+          path: evidence
+
+  public-local-aggregate:
+    needs: public-local-shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: portable-public-local-registration
+          path: registered
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: portable-public-local-shard-*
+          path: shards
+      - name: Require a complete identity-checked cohort
+        run: |
+          python - <<'PY'
+          import subprocess, sys
+          from pathlib import Path
+          roots = [Path('shards') / f'portable-public-local-shard-{i}' for i in range(10)]
+          assert len(list(Path('shards').iterdir())) == 10
+          for root in roots:
+              assert (root / 'environment.txt').read_bytes() == Path('registered/runner-environment.txt').read_bytes()
+              assert (root / 'embedding-cache.json').read_bytes() == Path('registered/embedding-cache.json').read_bytes()
+              assert (root / 'instrument-blob.txt').read_bytes() == Path('registered/instrument-blob.txt').read_bytes()
+              assert (root / 'source-sha.txt').read_bytes() == Path('registered/runner-source-sha.txt').read_bytes()
+          Path('evidence').mkdir()
+          command = [sys.executable, 'scripts/eval_portable_recall.py', 'merge-public',
+              '--dataset', 'registered/public/longmemeval_s', '--dataset-sha256',
+              '08d8dad4be43ee2049a22ff5674eb86725d0ce5ff434cde2627e5e8e7e117894',
+              '--baseline-output', 'evidence/public-baseline.json', '--frozen-output', 'evidence/public.jsonl']
+          for root in roots:
+              command += ['--baseline-input', str(root / 'public-baseline.json'),
+                          '--frozen-input', str(root / 'public.jsonl')]
+          subprocess.run(command, check=True)
+          PY
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: portable-public-local-complete
+          path: evidence
