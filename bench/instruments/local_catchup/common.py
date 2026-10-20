@@ -67,7 +67,7 @@ def safe_paths(*paths):
         raise ValueError("live .hermes paths forbidden")
 
 
-def foreign_files(pid, home, db, cache, user_home=None, out=None, scratch=None):
+def foreign_files(pid, home, db, cache, user_home=None, out=None, scratch=None, protected_roots=()):
     """Open files that reach another profile's data (the declaration's cross-profile stop).
 
     That is any path under a `.hermes` directory, or under the real user home (other profiles,
@@ -87,7 +87,8 @@ def foreign_files(pid, home, db, cache, user_home=None, out=None, scratch=None):
         path = Path(f.path).resolve()
         if ".hermes" not in path.parts and (path in store or any(path.is_relative_to(r) for r in roots)):
             continue
-        if ".hermes" in path.parts or path.is_relative_to(user_home):
+        if ".hermes" in path.parts or path.is_relative_to(user_home) or any(
+                path.is_relative_to(root.resolve()) for root in protected_roots):
             found.append(f.path)
     return found
 

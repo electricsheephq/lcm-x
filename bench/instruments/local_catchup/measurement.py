@@ -237,7 +237,8 @@ def safety(a):
         raise RuntimeError("offline subprocess launch")
     if any(e.get("violation") or e.get("foreground") for e in events):
         raise RuntimeError("foreground preparation/backfill/join or network")
-    foreign = foreign_files(os.getpid(), a.home, a.db, a.model_cache, user_home=Path(a.user_home), out=a.root, scratch=a.scratch)
+    foreign = foreign_files(os.getpid(), a.home, a.db, a.model_cache, user_home=Path(a.user_home),
+                            out=a.root, protected_roots=(a.scratch,))
     source_reads, unexpected = [], []
     for value in foreign:
         path = Path(value)
