@@ -1,6 +1,7 @@
 """Offline P plumbing probes; no model or corpus calls."""
 import json
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock
 
@@ -114,3 +115,43 @@ def test_agentic_reserve_and_raw_forwarding(monkeypatch, tmp_path):
     reader = mcp_reader.Reader(spec, engine, [], tmp_path / "log.jsonl")
     assert reader.call("lcm_recall", {}) == (raw, False)
     assert json.loads(reader.log.read_text())["output_bytes"] == len(raw.encode())
+
+
+@pytest.mark.parametrize("cross", [False, True])
+def test_score_separates_p_axis(tmp_path, cross):
+    # RED on initial P candidate and original base: P arms collide.
+    from bench.fmp import score
+    from bench.fmp.tests.test_score_commits import COMMITS, arm
+    runs = [arm(tmp_path, f"{i}-{unit}", commit, [True], **(
+        dict(delivery_unit=unit, delivery_budget=16000) if unit == "session" else {}))
+        for i, commit in enumerate(COMMITS if cross else COMMITS[:1]) for unit in ("hits", "session")]
+    result = score.score(runs, tmp_path / "score", pair_across_commits=cross)
+    assert len(result["arms"]) == (4 if cross else 2)
+    assert len(result["paired"]) == (2 if cross else 1)
+
+
+def test_score_does_not_pair_changed_p_across_commits(tmp_path):
+    # RED: initial candidate pairs hits against session as an equivalent arm.
+    from bench.fmp import score
+    from bench.fmp.tests.test_score_commits import COMMITS, arm
+    runs = [arm(tmp_path, "hits", COMMITS[0], [True]), arm(tmp_path, "session", COMMITS[1], [True],
+        delivery_unit="session", delivery_budget=16000)]
+    assert not score.score(runs, tmp_path / "score", pair_across_commits=True)["paired"]
+
+
+def test_judge_default_hits_rejects_session_identity(tmp_path, monkeypatch):
+    # RED: initial candidate reaches judging without checking the requested P.
+    from bench.fmp import common
+    args = run.parser().parse_args(["judge", "--split-label", "synthetic", "--store-root", str(tmp_path),
+        "--output", str(tmp_path), "--delivery", "single"])
+    monkeypatch.setattr(run, "commit", lambda _: "fixture")
+    manifest = dict(dataset_sha256="d", id_list_sha256="i", split_label="synthetic", question_ids=["0"],
+        prompts_sha256=run.prompt_hashes(), harness_commit="fixture", lcmx_commit="fixture",
+        harness_tree_sha256=common.sha(b"".join(p.read_bytes() for p in sorted(Path(run.__file__).parent.glob("*.py")))),
+        store_text="speaker-prefix", hit_label="speaker", delivery_unit="session", delivery_budget=16000)
+    (tmp_path / "run-manifest.json").write_text(json.dumps(manifest))
+    def admitted(_):
+        raise AssertionError("mismatched P identity admitted")
+    monkeypatch.setattr(run, "specs", admitted)
+    with pytest.raises(ValueError, match="identity mismatch"):
+        next(run.run(args, None, [SimpleNamespace(qid="0")], "d", "i", {}, None))

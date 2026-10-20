@@ -22,7 +22,7 @@ from .common import commit, digest_file, load_lcm, quiet, sha, utc, write_json
 from .models import (AGENTIC_TOOL_CAP, CLAUDE_AGREEMENT_JUDGE, CODEX_DEFAULT_JUDGE, CODEX_DEFAULT_READER,
                      CODEX_DISABLED, GLM_HOST, JUDGE_MAX_TOKENS, READER_MAX_TOKENS, READERS, REASONING, Backends, BudgetStopped,
                      OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec)
-from .score import score
+from .score import delivery_identity, score
 from .stores import Stores
 
 
@@ -308,6 +308,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
         write_json(manifest_path, manifest)
     else:
         manifest = json.loads(manifest_path.read_text())
+        if delivery_identity(manifest) != delivery_identity(switches(args)):
+            raise ValueError("judging run identity mismatch: delivery_unit/delivery_budget")
         for key, value in (*switches(args).items(), ("dataset_sha256", dataset_sha), ("id_list_sha256", ids_sha),
                            ("split_label", args.split_label), ("question_ids", [q.qid for q in questions]),
                            ("prompts_sha256", prompt_hashes()),
