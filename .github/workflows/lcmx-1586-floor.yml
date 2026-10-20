@@ -1,0 +1,73 @@
+name: LCM-X 1586 floor surrogate
+on:
+  workflow_dispatch:
+    inputs:
+      lcmx_ref:
+        description: Product ref to test (resolved SHA recorded)
+        required: true
+        type: string
+      cell:
+        description: Floor surrogate cell
+        required: true
+        type: choice
+        options: [coverage-rate, recall]
+      rows:
+        description: Eligible rows (qualification requires at least 250000)
+        type: number
+        default: 250000
+      max_minutes:
+        description: Maximum minutes (121 to 330)
+        type: number
+        default: 150
+permissions:
+  contents: read
+jobs:
+  floor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      PRODUCT_REF: ${{ inputs.lcmx_ref }}
+      CELL: ${{ inputs.cell }}
+      ROWS: ${{ inputs.rows }}
+      MINUTES: ${{ inputs.max_minutes }}
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.lcmx_ref }}
+          path: product
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: main
+          path: host
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Prepare dependencies and warm cache outside measured cell
+        run: |
+          pwd
+          python -m pip install fastembed psutil pyyaml rich python-dotenv requests platformdirs
+          python -c 'from fastembed import TextEmbedding; TextEmbedding("BAAI/bge-small-en-v1.5", cache_dir="model-cache", threads=2)'
+          chmod -R a-w model-cache
+          mkdir -p evidence
+          git -C . rev-parse HEAD > evidence/harness-sha.txt
+          git -C product rev-parse HEAD > evidence/product-sha.txt
+          git -C host rev-parse HEAD > evidence/host-sha.txt
+      - name: Enforce 4 GiB cgroup and run on CPUs 0 and 1
+        run: |
+          sudo mkdir /sys/fs/cgroup/lcmx-floor
+          echo 4294967296 | sudo tee /sys/fs/cgroup/lcmx-floor/memory.max
+          sudo chown "$(id -u):$(id -g)" /sys/fs/cgroup/lcmx-floor/cgroup.procs
+          nice -n 19 python -B -m bench.instruments.local_catchup.floor \
+            --lcmx-repo "$GITHUB_WORKSPACE/product" --hermes-source "$GITHUB_WORKSPACE/host" \
+            --model-cache "$GITHUB_WORKSPACE/model-cache" --scratch "$RUNNER_TEMP/floor-scratch" \
+            --out "$GITHUB_WORKSPACE/evidence/cell" --cgroup /sys/fs/cgroup/lcmx-floor \
+            --cell "$CELL" --rows "$ROWS" --max-minutes "$MINUTES"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lcmx-1586-floor-surrogate-${{ inputs.cell }}
+          path: evidence/
