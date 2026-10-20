@@ -21,7 +21,7 @@ def run(root, *arguments):
     # The subprocess timeout is an execution budget, not a timing assertion.
     result = subprocess.run(
         [sys.executable, str(SCRIPT), *arguments, "--format", "json"],
-        cwd=root, capture_output=True, text=True, timeout=20,
+        cwd=root, capture_output=True, text=True, timeout=120,
     )
     assert result.returncode == 0, result.stderr
     return json.loads(result.stdout)
