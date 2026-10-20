@@ -301,6 +301,7 @@ class _RollupMaintenanceScheduler:
         self._exclusive_keys: set[tuple[str, str]] = set()
         self._owned_keys: dict[object, set[tuple[str, str]]] = {}
         self._key_owners: dict[tuple[str, str], set[object]] = {}
+        self._handoff_jobs: dict[tuple[str, str], dict[object, Callable]] = {}
         self._retired_active_keys: dict[object, set[tuple[str, str]]] = {}
         self._worker: threading.Thread | None = None
         self._closed = False
@@ -310,11 +311,14 @@ class _RollupMaintenanceScheduler:
         self,
         key: tuple[str, str],
         owner: object | None,
+        job: Callable | None = None,
     ) -> None:
         if owner is None:
             return
         self._owned_keys.setdefault(owner, set()).add(key)
         self._key_owners.setdefault(key, set()).add(owner)
+        if job is not None:
+            self._handoff_jobs.setdefault(key, {})[owner] = job
 
     def _release_key_owners_if_idle_locked(self, key: tuple[str, str]) -> None:
         if (
@@ -325,6 +329,7 @@ class _RollupMaintenanceScheduler:
             or self._follow_up_key == key
         ):
             return
+        self._handoff_jobs.pop(key, None)
         for owner in self._key_owners.pop(key, set()):
             owned = self._owned_keys.get(owner)
             if owned is None:
@@ -340,6 +345,7 @@ class _RollupMaintenanceScheduler:
         *,
         owner: object | None = None,
         delay: float = 0.0,
+        handoff: bool = False,
     ) -> bool:
         global _EMBEDDING_EXIT_QUIESCE_REGISTERED
         with self._condition:
@@ -357,7 +363,7 @@ class _RollupMaintenanceScheduler:
                 )
                 return False
             if key in self._queued_keys or key in self._deferred_jobs:
-                self._track_owner_locked(key, owner)
+                self._track_owner_locked(key, owner, job if handoff else None)
                 return True
             if delay > 0:
                 self._not_before[key] = time.monotonic() + delay
@@ -366,13 +372,13 @@ class _RollupMaintenanceScheduler:
             if key in self._active_keys and not self._running_follow_up and delay <= 0:
                 self._follow_up_key = key
                 self._follow_up_job = job
-                self._track_owner_locked(key, owner)
+                self._track_owner_locked(key, owner, job if handoff else None)
                 self._condition.notify_all()
                 return True
             if len(self._jobs) >= self._max_pending_jobs:
                 if self._kind == "incremental embedding" and len(self._deferred_jobs) < self._max_pending_jobs:
                     self._deferred_jobs[key] = job
-                    self._track_owner_locked(key, owner)
+                    self._track_owner_locked(key, owner, job if handoff else None)
                     return True
                 logger.warning(
                     "LCM %s maintenance queue is full; " + (
@@ -400,9 +406,17 @@ class _RollupMaintenanceScheduler:
                 self._worker = worker
             self._jobs.append((key, job))
             self._queued_keys.add(key)
-            self._track_owner_locked(key, owner)
+            self._track_owner_locked(key, owner, job if handoff else None)
             self._condition.notify_all()
             return True
+
+    def handoff(self, key, retired_owner, *, delay=0.0) -> bool:
+        """Continue LOCAL work through a surviving owner, preserving its idle delay."""
+        with self._condition:
+            for owner, job in self._handoff_jobs.get(key, {}).items():
+                if owner is not retired_owner:
+                    return self.schedule(key, job, owner=owner, delay=delay, handoff=True)
+        return False
 
     def try_acquire_exclusive(self, key: tuple[str, str]) -> bool:
         """Reserve one idle key for a synchronous operator rebuild.
@@ -477,8 +491,19 @@ class _RollupMaintenanceScheduler:
                 for key in keys:
                     owners = self._key_owners.get(key, set())
                     owners.discard(owner)
+                    handoffs = self._handoff_jobs.get(key, {})
+                    handoffs.pop(owner, None)
                     if owners:
+                        if handoffs:
+                            # LOCAL dedup retains each live owner's profile-bound job.
+                            job = next(iter(handoffs.values()))
+                            self._jobs = deque((k, job if k == key else j) for k, j in self._jobs)
+                            if key in self._deferred_jobs:
+                                self._deferred_jobs[key] = job
+                            if self._follow_up_key == key:
+                                self._follow_up_job = job
                         continue
+                    self._handoff_jobs.pop(key, None)
                     self._key_owners.pop(key, None)
                     self._deferred_jobs.pop(key, None)
                     self._not_before.pop(key, None)
@@ -2985,7 +3010,11 @@ class LCMEngine(
 
             def maintain() -> None:
                 if slice_state is not None:
-                    start_local_model_prepare(database_path, config, on_ready=bound_enqueue, owner=owner)
+                    with self._embedding_maintenance_lock:
+                        if self._embedding_maintenance_retired or owner is not self._embedding_maintenance_owner:
+                            _EMBEDDING_MAINTENANCE_SCHEDULER.handoff(maintenance_key, owner)
+                            return
+                        start_local_model_prepare(database_path, config, on_ready=bound_enqueue, owner=owner)
                 run_incremental_embedding_pass(database_path, config, breaker=breaker,
                                                **({"slice_state": slice_state} if slice_state is not None else {}))
                 if slice_state is not None and slice_state.get("continue"):
@@ -2999,10 +3028,14 @@ class LCMEngine(
             def enqueue(delay=0.0) -> None:
                 with self._embedding_maintenance_lock:
                     if not self._embedding_maintenance_retired and owner is self._embedding_maintenance_owner:
-                        _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(maintenance_key, bound_maintain, owner=owner, delay=delay)
+                        _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(maintenance_key, bound_maintain, owner=owner, delay=delay, handoff=slice_state is not None)
+                    elif slice_state is not None:
+                        _EMBEDDING_MAINTENANCE_SCHEDULER.handoff(maintenance_key, owner, delay=delay)
 
             bound_enqueue = profile_bound(enqueue)
-            start_local_model_prepare(database_path, config, on_ready=bound_enqueue, owner=owner)
+            with self._embedding_maintenance_lock:
+                if not self._embedding_maintenance_retired and owner is self._embedding_maintenance_owner:
+                    start_local_model_prepare(database_path, config, on_ready=bound_enqueue, owner=owner)
             bound_enqueue()
         except Exception:
             logger.warning(

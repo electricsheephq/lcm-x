@@ -284,6 +284,7 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any, slice_state=None) 
         stage = slice_state.get("stage", 0)
         if stage == 0:
             slice_state["uncertain"] = False
+            slice_state["cycle_remaining"] = False
         corpora = [corpora[stage % len(corpora)]]
         before = _scan_frontier(db_path, command)
     outcomes: list[str] = []
@@ -320,6 +321,7 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any, slice_state=None) 
         if sliced:
             slice_state["vectors_written"] += embedded
             slice_state["remaining"] = bool(result.get("remaining"))
+            slice_state["cycle_remaining"] = slice_state.get("cycle_remaining", False) or slice_state["remaining"]
             slice_state["uncertain"] |= bool(result.get("uncertain"))
         if failure is None:
             outcomes.append(f"{name}={result['status']}:{embedded}")
@@ -341,7 +343,8 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any, slice_state=None) 
             slice_state.update(retry_wait=True, **{"continue": True})
             outcomes.append("row_backoff")
         if not slice_state["continue"] and not failures:
-            outcomes.append("no_progress" if not progress else "refused")
+            outcomes.append("refused" if progress or any("refused" in s for s in outcomes) else
+                            "no_progress" if slice_state["cycle_remaining"] else "complete")
     return " ".join(outcomes), "; ".join(failures) or None
 
 

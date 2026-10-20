@@ -59,7 +59,7 @@ def test_one_bind_autonomously_drains_all_expected_ids(local_store):
     assert actual_chunks == expected_chunks
 
 
-def test_no_progress_stops_with_visible_reason(local_store):
+def test_complete_stops_with_visible_reason(local_store):
     engine, scheduler = local_store
     admitted = []
     schedule = scheduler.schedule
@@ -73,11 +73,11 @@ def test_no_progress_stops_with_visible_reason(local_store):
     engine.on_session_start("empty", context_length=200000)
     assert engine.drain_embedding_maintenance(5)
     last, _ = maintenance.incremental_embedding_state(engine._store.db_path)
-    assert "no_progress" in last[1]
+    assert last[1].endswith(" complete")
     count = len(admitted)
     assert engine.drain_embedding_maintenance(0)
     assert len(admitted) == count
-    assert "no_progress" in command.handle_lcm_command("status", engine)
+    assert last[1] in command.handle_lcm_command("status", engine)
 
 
 class Clock:

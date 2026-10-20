@@ -4934,7 +4934,15 @@ def _chunk_backfill_run(
             )
             authorized_uncertain_ids = set()
         if maintenance_slice:
-            rows = rows[:min(limit, 32)]
+            # Gap discovery cannot revisit a message once any chunk is published.
+            cut = min(len(rows), limit, 32)
+            while 0 < cut < len(rows) and chunk_meta[rows[cut - 1][0]][0] == chunk_meta[rows[cut][0]][0]:
+                cut -= 1
+            if cut == 0 and rows:
+                cut = 1
+                while cut < len(rows) and chunk_meta[rows[cut][0]][0] == chunk_meta[rows[0][0]][0]:
+                    cut += 1
+            rows = rows[:cut]
         (
             documents,
             privacy_revision,
@@ -4979,7 +4987,19 @@ def _chunk_backfill_run(
             batch_size = _embedding_backfill_batch_size(
                 getattr(config, "embedding_max_batch_items", None)
             )
-            for offset in range(0, len(documents), batch_size):
+            batches = []
+            offset = 0
+            while offset < len(documents):
+                end = min(offset + batch_size, len(documents))
+                if maintenance_slice:
+                    while offset < end < len(documents) and chunk_meta[documents[end - 1][0]][0] == chunk_meta[documents[end][0]][0]:
+                        end -= 1
+                    if end == offset:  # A single message needs several bounded batches.
+                        end = min(offset + batch_size, len(documents))
+                batches.append(documents[offset:end])
+                offset = end
+            previous_message = None
+            for batch in batches:
                 if stop_event is not None and stop_event.is_set():
                     stop_reason = "process_exit"
                     break
@@ -4987,11 +5007,12 @@ def _chunk_backfill_run(
                     lease_lost = True
                     stop_reason = "lease_lost"
                     break
-                if budget_s > 0 and (time.monotonic() - started) > budget_s:
+                continuing_message = maintenance_slice and chunk_meta[batch[0][0]][0] == previous_message
+                if budget_s > 0 and (time.monotonic() - started) > budget_s and not continuing_message:
                     budget_exhausted = True
                     stop_reason = "op_budget_exhausted"
                     break
-                batch = documents[offset:offset + batch_size]
+                previous_message = chunk_meta[batch[-1][0]][0]
                 batch_authorized_ids = {
                     item[0] for item in batch if item[0] in authorized_uncertain_ids
                 }
