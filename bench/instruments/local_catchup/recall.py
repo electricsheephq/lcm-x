@@ -100,6 +100,7 @@ def worker(request):
     rows, publications, errors = [], [], []
     halt, started = threading.Event(), threading.Event()
     reader = None
+    closed = False
     try:
         if a.state == "ON-covered":
             wait_covered(a, mod, engine, manifest)
@@ -164,6 +165,8 @@ def worker(request):
         thread.join(engine._config.recall_query_timeout_s*len(pinned)+30)
         if thread.is_alive() or errors:
             raise RuntimeError(f"recall worker failure: {errors}")
+        engine.shutdown()
+        closed = True
         integrity(a, manifest)
         final = audit(a.db, manifest)
         dump(a.root/"final-audit.json", final)
@@ -179,7 +182,8 @@ def worker(request):
         dump(a.root/"raw-summary.json", result)
     finally:
         halt.set()
-        engine.shutdown()
+        if not closed:
+            engine.shutdown()
 
 
 def main(a):

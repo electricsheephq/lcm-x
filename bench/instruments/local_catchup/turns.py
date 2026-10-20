@@ -20,6 +20,7 @@ def worker(request):
     a, mod, engine, bind = runtime(request)
     manifest = a._manifest = load(a.out/"manifest.json")
     rows, coverage = [], []
+    closed = False
     try:
         def observe(row):
             rows.append(row)
@@ -38,6 +39,8 @@ def worker(request):
         activity = catchup_activity(a.root, start, end,
             {k: v["covered"] for k, v in initial["classes"].items()},
             {k: v["covered"] for k, v in final["classes"].items()}, require_prepared=True)
+        engine.shutdown()
+        closed = True
         integrity(a, manifest)
         evidence = safety(a)
         summary = dict(state="NOT_JUDGED", bind_ms=bind, samples=len(rows),
@@ -48,7 +51,8 @@ def worker(request):
             summary.update(state="INVALID", reason="on_no_catchup_activity")
         dump(a.root/"raw-summary.json", summary)
     finally:
-        engine.shutdown()
+        if not closed:
+            engine.shutdown()
 
 
 def main(a):

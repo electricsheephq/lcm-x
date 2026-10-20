@@ -219,14 +219,18 @@ def integrity(a, manifest):
         if now["provenance"] != manifest["preimage"]["provenance"]:
             raise RuntimeError("corpus provenance corruption")
         changed_metadata = [k for k, v in (manifest.get("observed_metadata", {}) | manifest["preimage"]["metadata"]).items() if now["metadata"].get(k) != v]
+        checked = audit(a.db, manifest)
         dump(a.root/"final-integrity.json", dict(corpus_raw_digest=digest(original),
             expected_raw_digest=manifest["preimage"]["raw_digest"],
+            unpaired_rows=checked["unpaired_rows"], residue=checked["residue"],
             changed_metadata=changed_metadata,
             vector_digest=hashlib.sha256(json.dumps(now["vectors"], sort_keys=True).encode()).hexdigest()))
         if any(now["vectors"].get(k) != v for k, v in (manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"]).items()):
             raise RuntimeError("pre-existing vector corruption")
         if changed_metadata:
             raise RuntimeError("pre-existing metadata corruption")
+        if checked["unpaired_rows"] or checked["residue"]:
+            raise RuntimeError("vector/metadata pairing or in-flight residue")
         if c.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RuntimeError("database corruption")
 
