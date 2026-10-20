@@ -38,7 +38,8 @@ Catchup binds once per interpreter lifetime, then only observes. Restart default
 to 40% coverage, with a declared 25%-of-max-wall fallback if that fraction is unreachable;
 the small control uses 30 seconds. Shutdown has a 10-second bound, then kill.
 Restart and interpreter startup count toward elapsed time. Every 30 seconds a
-read-only connection counts expected IDs; full raw-row/vector integrity audits
+read-only connection counts expected IDs and digests newly seen vectors only;
+previously seen vector replacements are detected at the next audit. Full raw-row/vector integrity audits
 run at baseline, restart and end. Zero progress includes
 persisted scan progress, and STALLED requires a successfully constructed provider.
 CPU samples are every second, CPU-time deltas in cores, weighted means and full
@@ -92,7 +93,9 @@ summary route. Real leaf inserts with fenced publication callbacks define the
 committed publication intervals; a call that misses every interval is excluded.
 Every block needs 200 overlapping calls and 10 publications. Nearest-rank p50/p90
 and their 10,000-resample upper95 bounds must meet 2 s/8 s. Errors, timeouts,
-missing FTS hits or undisclosed incomplete coverage fail health. ON-covered
+missing FTS hits or undisclosed incomplete coverage in overlapping calls fail health.
+Honestly empty semantic arms during catch-up neither fail health nor count toward
+the 200 semantic latency samples; covered cells still require both arms. ON-covered
 explicitly prepares vectors in a setup thread before measurement; this is not
 autonomous coverage evidence. Repeated canaries in small smoke stores do not
 qualify the 200-query full-size cell. Raw samples and per-block summaries persist.

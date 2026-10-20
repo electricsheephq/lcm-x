@@ -14,8 +14,8 @@ import time
 
 from .audit import audit, connect, preimage, progress
 from .catchup import stop
-from .common import append, config, dump, foreign_files, guards, immutable_cache, isolated, load, parser, product, safe_paths
-from .corpus import build
+from .common import append, config, dump, foreign_files, foreground_request, guards, immutable_cache, isolated, load, parser, product, safe_paths
+from .corpus import build, pilot_rows
 from .cpu import Supervisor
 
 SMOKE = "functional smoke, shared host, not a bar result"
@@ -49,7 +49,7 @@ def prepare(a):
     # Isolate corpus construction too, before any product import.
     isolated(a.scratch/"builder-home", a.model_cache)
     os.environ["HOME"] = str(a.scratch/"builder-home")
-    pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", min(1000, a.rows), a.shape, a.baseline)
+    pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", pilot_rows(1000, a.rows, a.shape), a.shape, a.baseline)
     estimate = 5*(pilot["database_bytes"]+len(pilot["expected"]["chunks"])*2048)*a.rows/pilot["rows"]
     if estimate > 6*2**30:
         raise RuntimeError("estimated live stores exceed 6 GB; declare a larger runner budget first")
@@ -91,6 +91,7 @@ def cell(a, state, block, kind):
         finally:
             stop(proc)
             meter.close()
+    reason = meter.breach or reason
     result = load(root/"raw-summary.json") if (root/"raw-summary.json").exists() else {}
     if reason or proc.returncode:
         result.update(state="ABORTED", reason=reason or f"worker_exit:{proc.returncode}")
@@ -102,6 +103,18 @@ def cell(a, state, block, kind):
     if result.get("state") == "ABORTED":
         raise RuntimeError(f"cell stopped: {root.name}: {result.get('reason')}")
     return result
+
+
+def guarded_worker(worker, request):
+    try:
+        worker(request)
+    except RuntimeError as exc:
+        reasons = {"foreground preparation/backfill/join or network": "foreground_preparation_backfill_join_or_network",
+                   "offline subprocess launch": "offline_subprocess_launch"}
+        if str(exc) not in reasons:
+            raise
+        dump(Path(load(request)["root"])/"raw-summary.json",
+             dict(state="INVALID", reason=reasons[str(exc)]))
 
 
 def runtime(request):
@@ -149,16 +162,18 @@ def trace(engine, mod, count, seed, observe, check):
         pair = batch[i % 64]
         view.append(pair[0])
         t0 = time.perf_counter()
-        engine.ingest(view)
-        due = engine.should_compress_preflight(view)
-        t1 = time.perf_counter()
-        if due:
-            view = engine.compress(view, current_tokens=mod("tokens").count_messages_tokens(view))
-        t2 = time.perf_counter()
+        with foreground_request():
+            engine.ingest(view)
+            due = engine.should_compress_preflight(view)
+            t1 = time.perf_counter()
+            if due:
+                view = engine.compress(view, current_tokens=mod("tokens").count_messages_tokens(view))
+            t2 = time.perf_counter()
         observe(dict(turn=i, start=t0, end=t2, ingest_preflight_ms=(t1-t0)*1000,
                      dispatch_ms=(t2-t0)*1000, compression_due=bool(due)))
         view.append(pair[1])
-        engine.ingest(view)
+        with foreground_request():
+            engine.ingest(view)
         engine.last_prompt_tokens = mod("tokens").count_messages_tokens(view)
         engine.note_turn_complete()
         engine._prepare_leaves_after_turn(view)
@@ -168,22 +183,31 @@ def trace(engine, mod, count, seed, observe, check):
 def integrity(a, manifest):
     # New trace rows are expected. Audit the immutable corpus subset and old vectors.
     with connect(a.db) as c:
+        c.execute("BEGIN")
         original = list(c.execute("SELECT * FROM messages WHERE store_id<=? ORDER BY store_id", (manifest["rows"],)))
         from .audit import digest
         if digest(original) != manifest["preimage"]["raw_digest"]:
             raise RuntimeError("corpus row corruption")
-        now = preimage(c)
+        now = preimage(c, len(manifest["expected"]["leaves"]))
+        if now["provenance"] != manifest["preimage"]["provenance"]:
+            raise RuntimeError("corpus provenance corruption")
+        changed_metadata = [k for k, v in manifest["preimage"]["metadata"].items() if now["metadata"].get(k) != v]
         dump(a.root/"final-integrity.json", dict(corpus_raw_digest=digest(original),
             expected_raw_digest=manifest["preimage"]["raw_digest"],
+            changed_metadata=changed_metadata,
             vector_digest=hashlib.sha256(json.dumps(now["vectors"], sort_keys=True).encode()).hexdigest()))
-        if any(now["vectors"].get(k) != v for k, v in manifest["preimage"]["vectors"].items()):
+        if any(now["vectors"].get(k) != v for k, v in (manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"]).items()):
             raise RuntimeError("pre-existing vector corruption")
+        if changed_metadata:
+            raise RuntimeError("pre-existing metadata corruption")
         if c.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RuntimeError("database corruption")
 
 
 def safety(a):
     events = [json.loads(s) for s in (a.root/"events.jsonl").read_text().splitlines()] if (a.root/"events.jsonl").exists() else []
+    if any(e.get("event") == "subprocess_launch" for e in events):
+        raise RuntimeError("offline subprocess launch")
     if any(e.get("violation") or e.get("foreground") or e.get("download") for e in events):
         raise RuntimeError("foreground preparation/backfill/join or network")
     foreign = foreign_files(os.getpid(), a.home, a.db, a.model_cache, user_home=Path(a.user_home), out=a.root, scratch=a.scratch)
@@ -202,8 +226,9 @@ def safety(a):
     now = time.monotonic()
     if now >= getattr(a, "_next_progress", 0):
         a._next_progress = now+30
-        manifest = load(a.out/"manifest.json")
-        value = progress(a.db, manifest)
+        if not hasattr(a, "_manifest"):
+            a._manifest = load(a.out/"manifest.json")
+        value = progress(a.db, a._manifest, False)
         fingerprint = str((value["classes"], value["scan"]))
         if fingerprint != getattr(a, "_fingerprint", None):
             a._fingerprint, a._changed = fingerprint, now
@@ -211,7 +236,10 @@ def safety(a):
         if not value["complete"] and now-a._changed >= 600 and a._ready():
             raise RuntimeError("zero progress for ten minutes while work remains")
     return {"events": "events.jsonl", "prepare_and_backfill_wrapped": True,
-            "embedding_thread_join_wrapped": True, "network_denied": True, "violations": 0}
+            "embedding_thread_join_wrapped": True, "python_socket_calls_denied":
+            "connect, connect_ex, sendto, sendmsg, getaddrinfo, gethostbyname, gethostbyname_ex, gethostbyaddr, getnameinfo",
+            "subprocess_launches_recorded": "subprocess.Popen", "subprocess_launches_denied": "subprocess.Popen",
+            "native_and_subprocess_network_guarded": False, "violations": 0}
 
 
 def catchup_activity(root, start, end, coverage_start, coverage_end, require_prepared=False):
@@ -223,7 +251,7 @@ def catchup_activity(root, start, end, coverage_start, coverage_end, require_pre
         and e.get("foreground") is False and e.get("embedded", 0) > 0
         and start <= e.get("at", -1) <= e.get("end", -1) <= end for e in events)
     delta = sum(coverage_end.values())-sum(coverage_start.values())
-    active = delta > 0 and (prior or during) if require_prepared else delta > 0 or runs > 0
+    active = delta > 0 and (not require_prepared or prior or during)
     return dict(coverage_start=coverage_start, coverage_end=coverage_end, coverage_delta=delta,
         model_prepared_at_start=prior, background_prepared=during, active_backfills=runs,
         catchup_activity=active, activity_window=dict(start=start, end=end))
@@ -241,7 +269,7 @@ def wait_covered(a, mod, engine, manifest):
                 if checked["complete"]:
                     return
                 safety(a)
-                fingerprint = str(progress(a.db, manifest))
+                fingerprint = str(progress(a.db, manifest, False))
                 if fingerprint != previous:
                     changed, previous = time.monotonic(), fingerprint
                 if time.monotonic()-changed >= 600 or time.monotonic()-start > a.max_seconds:
