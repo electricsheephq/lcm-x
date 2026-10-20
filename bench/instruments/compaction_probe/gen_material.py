@@ -403,7 +403,12 @@ SCENES = (
 
 def generate(seed: int, out_dir: Path, turns: int | None = None, tokens_per_turn: int | None = None,
              placements: bool = False, classes12: bool = False, min_tokens: int = 244800,
-             min_events: int = 2, smoke: bool = False, v4: bool = False) -> dict[str, Any]:
+             min_events: int = 2, smoke: bool = False, v4: bool = False,
+             deep: bool = False) -> dict[str, Any]:
+    if deep:
+        if v4 or smoke or turns is not None or tokens_per_turn is not None:
+            raise ValueError("deep is a fixed full horizon; omit v4, smoke and sizing overrides")
+        return _generate_deep(seed, out_dir, min_tokens, min_events)
     if v4:
         if turns not in (None, V4_STEPS) or tokens_per_turn is not None:
             raise ValueError(f"v4 has a fixed {V4_STEPS}-step horizon sized by --min-tokens/--min-events; "
@@ -598,6 +603,183 @@ def generate(seed: int, out_dir: Path, turns: int | None = None, tokens_per_turn
     _json_write(out_dir / "material.manifest.json", manifest)
     return manifest
 
+
+
+DEEP_VERSION = "track-s-deep-v1"
+
+
+def _generate_deep(seed, out_dir, min_tokens, min_events):
+    """Extend v3 independently; legacy generation and its serialized bytes stay frozen.
+
+    facts.json describes the final values. deep_metadata.json supplies the admissible
+    answer key at each row checkpoint, including earlier versions of updated facts.
+    Token/row floors plan opportunities only; DAG depth requires runtime evidence.
+    """
+    import copy
+
+    if min_tokens != 244800 or min_events != 2:
+        raise ValueError("deep-v1 fixes the comparison plan at min-tokens=244800, min-events=2")
+    if out_dir.exists() and any(out_dir.iterdir()):
+        raise ValueError("deep output directory must be empty")
+    manifest = generate(seed, out_dir, turns=130, placements=True, classes12=True,
+                        min_tokens=min_tokens, min_events=min_events)
+    rows = [json.loads(line) for line in (out_dir / "transcript.jsonl").read_text().splitlines()]
+    facts = json.loads((out_dir / "facts.json").read_text())
+    count = token_counter()
+    baseline = dict(rows=0, tokens=0)
+    # Reproduce the ordinary v3 stopping point from the shared, longer prefix.
+    baseline_target = 620000
+    for i, row in enumerate(rows):
+        baseline["tokens"] += count(row["content"])
+        if baseline["tokens"] >= baseline_target:
+            baseline["rows"] = i + 1
+            break
+    original_rows = len(rows)
+    initial_stale = {f["id"]: (f["stale"], f.get("stale_source")) for f in facts if f["stale"]}
+    updates = {}
+    selected = [f for f in facts if f["class"] in ("name", "decision", "superseded_value")]
+    for i, fact in enumerate(selected):
+        phase = i % (3 if fact["stale"] else 5)
+        boundary = int(original_rows * (.18, .38, .58, .76, .88)[phase])
+        # Never interleave an inserted user statement inside a call/result pair.
+        if rows[boundary]["role"] == "tool":
+            boundary -= 1
+        updates.setdefault(boundary, []).append(fact)
+    historical = {f["id"]: [dict(value=f["value"], **{k: f[k] for k in
+                  ("row_index", "row_id", "row_role", "turn", "char_offset", "placement")})] for f in facts}
+    request = f"Audit fixture replay seed {seed} and prepare the read-only rollback report."
+    constraint = "Keep source fixtures read-only; return the action READ_ONLY_AUDIT."
+    host = "Preserve chronology and abstain when a value is unknown."
+    continuity = []
+    # Plant before the first long tool-heavy turn; do not refresh these in the tail.
+    for item in manifest["continuity"]:
+        kind = item["id"].split("CONT-")[-1]
+        value = dict(current_request=request, active_constraint=constraint, host_instruction=host)[kind]
+        item["value"] = value
+        rows[item["row_index"]]["content"] = f"[{item['id']}] {value}"
+        continuity.append(item)
+    old_to_new, combined = {}, []
+    for old_index, row in enumerate(rows):
+        for fact in updates.get(old_index, []):
+            current = hashlib.sha256((f"deep:{seed}:" + fact["id"]).encode()).hexdigest()[:16]
+            if fact["class"] == "decision":
+                current = f"snapshot-{current} because read-only replay preserves ownership"
+            index = len(combined)
+            ident = f"S{seed}-D{index:05d}"
+            line = f"[{fact['id']}; fixture {fact['fixture']}] Correction: use {current}; prior value is obsolete."
+            combined.append(dict(id=ident, turn=row["turn"], role="user", content=line,
+                                 tool_call_id=None, ts=float(seed * 10000 + index)))
+            prior = copy.deepcopy(historical[fact["id"]][-1])
+            fact.update(value=current, answer=current, row_index=index, row_id=ident, row_role="user",
+                        turn=row["turn"], char_offset=line.index(current), placement="head")
+            if not fact["stale"]:
+                fact["correction_source"] = prior
+            historical[fact["id"]].append(dict(value=current, row_index=index, row_id=ident,
+                row_role="user", turn=row["turn"], char_offset=line.index(current), placement="head"))
+        old_to_new[old_index] = len(combined)
+        combined.append(row)
+    rows = combined
+    if len(rows) > 1024:
+        raise ValueError("deep-v1 fixed row horizon exceeded")
+    while len(rows) < 1024:
+        index = len(rows)
+        rows.append(dict(id=f"S{seed}-TAIL{index:05d}", turn=rows[-1]["turn"], role="assistant",
+                         content=f"Audit tail {index}: keep fixtures read-only and chronology intact.",
+                         tool_call_id=None, ts=float(seed * 10000 + index)))
+
+    def remap(item):
+        item["row_index"] = old_to_new[item["row_index"]]
+        return item
+
+    for fact in facts:
+        history = historical[fact["id"]]
+        remap(history[0])
+        if len(history) == 1:
+            remap(fact)
+        else:
+            # Inserted updates already use the final row coordinates.
+            if "correction_source" in fact:
+                fact["correction_source"] = copy.deepcopy(history[0])
+        if fact["stale"]:
+            remap(initial_stale[fact["id"]][1])
+            fact["stale"] = history[-2]["value"]
+            fact["stale_source"] = dict(id=fact["id"], **history[-2])
+        fact["versions"] = history
+    for item in continuity:
+        remap(item)
+    state = json.loads((out_dir / "continuation.json").read_text())
+    remap(state)
+    prefix, total = [], 0
+    for index, row in enumerate(rows):
+        row["ts"] = float(seed * 10000 + index)
+        total += count(row["content"])
+        prefix.append(total)
+    checkpoints = []
+    for requested in (176, 304, 600, 900, len(rows) - 1):
+        index = requested
+        if rows[index].get("tool_calls"):
+            index += 1
+        checkpoints.append(dict(id=index, requested_row_index=requested, row_index=index,
+                                row_id=rows[index]["id"], tokens=prefix[index]))
+    answers = {}
+    for cp in checkpoints:
+        snapshot = []
+        for fact in facts:
+            versions = [v for v in fact["versions"] if v["row_index"] <= cp["row_index"]]
+            if not versions:
+                continue
+            version = versions[-1]
+            item = dict(fact, **version, answer=version["value"])
+            # The checkpoint key must not carry an unobserved future answer.
+            item["versions"] = copy.deepcopy(versions)
+            item.pop("correction_source", None)
+            if fact["stale"] and len(versions) == 1:
+                item["stale"], item["stale_source"] = copy.deepcopy(initial_stale[fact["id"]])
+            if len(versions) > 1 and not fact["stale"]:
+                item["correction_source"] = copy.deepcopy(versions[-2])
+            snapshot.append(item)
+        answers[str(cp["row_index"])] = snapshot
+    probes = [dict(id=c["id"], kind=c["id"].split("CONT-")[-1], answer=c["value"],
+                   row_index=c["row_index"], row_id=c["row_id"],
+                   text={"current_request": "Restate the current user request exactly.",
+                         "active_constraint": "Quote the active constraint exactly and give the permitted audit action.",
+                         "host_instruction": "Quote the host instruction exactly."}[c["id"].split("CONT-")[-1]])
+              for c in continuity]
+    quote = next(p for p in probes if p["kind"] == "active_constraint")
+    quote.update(kind="constraint_quote", text="Quote the active constraint exactly.")
+    probes.append(dict(quote, id=quote["id"] + "-OBEY", kind="constraint_obey",
+        answer="READ_ONLY_AUDIT", verbatim=constraint,
+        text="Choose READ_ONLY_AUDIT or MODIFY_SOURCE to obey the active constraint. Reply with the action only."))
+    metadata = dict(schema_version=DEEP_VERSION, checkpoint_answers=answers, continuity_probes=probes,
+                    baseline_v3=baseline, checkpoint_semantics="zero-based inclusive row index",
+                    event_probe_eligibility="event row >= source row; host instruction is a system-slot control")
+    admissions = [dict(id=f["id"], value=f["value"], row_id=f["row_id"], row_index=f["row_index"],
+        role=f["row_role"], tool_call_id=rows[f["row_index"]]["tool_call_id"], status="scheduled",
+        runtime_row_id=None) for f in facts]
+    for target in manifest["receipt_targets"]:
+        fact = next(f for f in facts if f["id"] == target["id"])
+        target.update(row_index=fact["row_index"], row_id=fact["row_id"])
+        if target["kind"] == "ancestry":
+            target["stale_source"] = fact["stale_source"]
+    manifest.update(material_version=DEEP_VERSION, checkpoints=checkpoints, continuity=continuity,
+        params=dict(turns=130, tokens_per_turn=17000, min_tokens=min_tokens, min_events=min_events),
+        decision_checkpoint=checkpoints[-1], presented_tokens=prefix[max(f["row_index"] for f in facts)],
+        deep_metadata="deep_metadata.json", continuity_probes=probes,
+        proof_boundary="Engine-direct synthetic planning only; summary generations, DAG depth and continuity require runtime receipts.")
+    payloads = {name: json.loads((out_dir / name).read_text()) for name in ("traps.json",)}
+    payloads.update({"facts.json": facts, "canaries.json": facts, "continuation.json": state,
+        "admission.manifest.json": admissions, "deep_metadata.json": metadata, "transcript.jsonl": rows,
+        "turns.jsonl": [dict(turn=r["turn"], text=r["content"], role=r["role"], id=r["id"],
+            tool_call_id=r["tool_call_id"], tool_calls=r.get("tool_calls", [])) for r in rows]})
+    for name, payload in payloads.items():
+        if name.endswith(".jsonl"):
+            (out_dir / name).write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in payload), encoding="utf-8")
+        else:
+            _json_write(out_dir / name, payload)
+    manifest["shas"]["deep_metadata.json"] = ""
+    manifest["shas"] = {name: _sha256(out_dir / name) for name in sorted(manifest["shas"])}
+    _json_write(out_dir / "material.manifest.json", manifest)
+    return manifest
 
 
 V4_STEPS = 90
@@ -838,6 +1020,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--min-tokens", type=int, default=244800)
     parser.add_argument("--min-events", type=int, default=2)
     parser.add_argument("--v4", action="store_true")
+    parser.add_argument("--deep", action="store_true", help="fixed C1 deep-continuity horizon")
     parser.add_argument("--smoke", action="store_true", help="ten-turn prefix plus forced-event wiring suffix")
     return parser
 
@@ -845,7 +1028,7 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     generate(args.seed, args.out_dir, args.turns, args.tokens_per_turn,
-             args.placements, args.classes12, args.min_tokens, args.min_events, args.smoke, args.v4)
+             args.placements, args.classes12, args.min_tokens, args.min_events, args.smoke, args.v4, args.deep)
     return 0
 
 
