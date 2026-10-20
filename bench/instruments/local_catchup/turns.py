@@ -32,7 +32,7 @@ def worker(request):
         def check():
             safety(a)
             coverage.append(progress(a.db, manifest, False)["complete"])
-        trace(engine, mod, a.samples, a.seed+a.block, observe, check)
+        manifest["trace_rows"] = trace(engine, mod, a.samples, a.seed+a.block, observe, check)
         final = progress(a.db, manifest, False)
         coverage.append(final["complete"])
         end = time.perf_counter()

@@ -19,7 +19,7 @@ REQUEST = ContextVar("instrument_foreground_request", default=False)
 
 @contextmanager
 def foreground_request():
-    token = REQUEST.set(True)
+    token = REQUEST.set(threading.get_ident())
     try:
         yield
     finally:
@@ -115,7 +115,7 @@ def config(mod, db, enabled=True):
 def guards(mod, events, generation=0):
     """Observe real product calls, fail closed on network or foreground backfill/prepare."""
     def foreground_thread():
-        return REQUEST.get() or threading.current_thread() is threading.main_thread()
+        return bool(REQUEST.get()) or threading.current_thread() is threading.main_thread()
     def deny(*a, **kw):
         append(events, {"violation": "network_attempt", "thread": threading.current_thread().name})
         raise RuntimeError("offline instrument denies network")

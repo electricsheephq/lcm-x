@@ -156,7 +156,7 @@ def runtime(request):
     original_join = threading.Thread.join
     def join(thread, *args, **kw):
         name = thread.name.lower()
-        if REQUEST.get() and name != "lcm-query-embed" and any(
+        if REQUEST.get() == threading.get_ident() and name != "lcm-query-embed" and any(
                 part in name for part in ("embed", "backfill")):
             append(a.root/"events.jsonl", {"violation": "foreground_join", "thread": thread.name})
             raise RuntimeError("foreground embedding join forbidden")
@@ -183,11 +183,16 @@ def runtime(request):
 
 def trace(engine, mod, count, seed, observe, check):
     from bench.instruments.compaction_probe.bgprep.replay import workload
-    view, batch = [], []
+    view, batch, expected = [], [], []
     for i in range(count):
         if i % 64 == 0:
             batch = workload(seed+i//64)
         pair = batch[i % 64]
+        # Record generated input, not successful writes: ingest can fail silently.
+        for message in pair:
+            expected.append([engine.current_session_id, engine._conversation_id,
+                message["role"], message["timestamp"],
+                hashlib.sha256(message["content"].encode()).hexdigest()])
         view.append(pair[0])
         t0 = time.perf_counter()
         with foreground_request():
@@ -206,6 +211,7 @@ def trace(engine, mod, count, seed, observe, check):
         engine.note_turn_complete()
         engine._prepare_leaves_after_turn(view)
         check()
+    return expected
 
 
 def integrity(a, manifest):
@@ -216,6 +222,17 @@ def integrity(a, manifest):
         from .audit import digest
         if digest(original) != manifest["preimage"]["raw_digest"]:
             raise RuntimeError("corpus row corruption")
+        expected_trace = iter(manifest.get("trace_rows") or [])
+        pending = next(expected_trace, None)
+        for session, conversation, role, observed, content in c.execute(
+                "SELECT session_id,conversation_id,role,observed_at,content FROM messages WHERE store_id>? ORDER BY store_id",
+                (manifest["rows"],)):
+            actual = [session, conversation, role, observed,
+                      hashlib.sha256((content or "").encode()).hexdigest()]
+            if actual == pending:
+                pending = next(expected_trace, None)
+        if pending is not None:
+            raise RuntimeError("trace row corruption or missing/out-of-order ingest")
         now = preimage(c, len(manifest["expected"]["leaves"]))
         if now["provenance"] != manifest["preimage"]["provenance"]:
             raise RuntimeError("corpus provenance corruption")

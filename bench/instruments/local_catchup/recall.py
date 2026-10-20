@@ -164,7 +164,7 @@ def worker(request):
         thread.start()
         if not started.wait(30):
             raise RuntimeError("recall reader start timeout")
-        trace(engine, mod, 32 if a.smoke else max(600, a.queries*3), a.seed+a.block,
+        manifest["trace_rows"] = trace(engine, mod, 32 if a.smoke else max(600, a.queries*3), a.seed+a.block,
               lambda row: append(a.root/"turns.jsonl", row), lambda: safety(a))
         halt.set()
         thread.join(engine._config.recall_query_timeout_s*len(pinned)+30)

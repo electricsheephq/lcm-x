@@ -51,6 +51,8 @@ def audit(db, manifest):
         for k, v in now["vectors"].items():
             observed.setdefault(k, v)
         changed_meta = [k for k, v in (manifest.get("observed_metadata", {}) | before["metadata"]).items() if now["metadata"].get(k) != v]
+        for k in now["metadata"].keys() - before["metadata"].keys():
+            manifest.setdefault("observed_metadata", {}).setdefault(k, now["metadata"][k])
         expected_ids = {f"{kind}/{manifest['identities'][task]}/{ident}"
                         for kind, task in (("chunks", "chunk"), ("leaves", "summary"))
                         for ident in manifest["expected"][kind]}
@@ -110,6 +112,15 @@ def progress(db, manifest, verify=False):
             known = dict(manifest["preimage"]["vectors"], **observed)
             for ident, identity, vec in c.execute(f"SELECT {key},identity_hash,vec FROM {table} WHERE ?||'/'||identity_hash||'/'||{key} NOT IN (SELECT key FROM json_each(?))", (kind, json.dumps(known))):
                 observed[f"{kind}/{identity}/{ident}"] = hashlib.sha256(vec).hexdigest()
+                # Snapshot all reachability metadata with the first observed vector,
+                # including on the cheap I2 path (verify=False).
+                meta = "lcm_chunk_meta" if kind == "chunks" else "lcm_embedding_meta"
+                cur = c.execute(f"SELECT * FROM {meta} WHERE {key}=? AND identity_hash=?", (ident, identity))
+                columns = [d[0] for d in cur.description]
+                for row in cur:
+                    suffix = "/"+row[columns.index("embedded_kind")] if kind == "leaves" else ""
+                    manifest.setdefault("observed_metadata", {}).setdefault(
+                        f"{kind}/{identity}/{ident}{suffix}", digest([row]))
         for kind, table, meta, key, task in (("chunks", "lcm_chunk_vectors", "lcm_chunk_meta", "chunk_id", "chunk"),
                                            ("leaves", "lcm_embedding_vectors", "lcm_embedding_meta", "embedded_id", "summary")):
             expected = manifest["expected"][kind]
