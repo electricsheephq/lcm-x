@@ -555,6 +555,15 @@ The [generated scalar environment reference](skills/hermes-lcm/references/config
 
 Most installs only need `plugins.enabled` and `context.engine: lcm-x`.
 
+`LCM_USER_CARRY_TOKENS=512` (or `2048`) opts into a fixed token cap for a
+verbatim reference to earlier durable user messages. The default is `0` (off).
+The first user occurrence has priority, followed by the newest omitted history;
+entries appear oldest to newest. Later instructions and the latest live request
+take precedence over this history. A long entry can retain its head and tail,
+with a pointer such as `lcm_expand store_id=123 content_offset=456` to recover
+the omitted characters. Hard prompt limits may reduce or omit the packet.
+This experimental setting does not promise better recall or constraint retention.
+
 `LCM_SQLITE_MMAP_SIZE` sets the SQLite memory-map size in bytes (default
 `268435456`, unchanged). On SD-card or single-board hosts, set
 `LCM_SQLITE_MMAP_SIZE=0`: a storage read error on a mapped page kills the process

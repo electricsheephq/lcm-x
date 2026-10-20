@@ -198,6 +198,14 @@ class SurvivalFitMixin:
         before = self._survival_measure(result)
         if before <= budget:
             return result
+        if self._config.user_carry_tokens > 0:
+            without_carry = self._omit_pending_user_carry(result)
+            if without_carry != result:
+                if self._ingest_cursor == len(result) and not self._ingest_cursor_needs_reconcile:
+                    self._ingest_cursor = len(without_carry)
+                result, before = without_carry, self._survival_measure(without_carry)
+                if before <= budget:
+                    return result
         if exit_fit and window_budget is not None and before > window_budget:
             return self._survival_fit(messages, result, observed_tokens, reason[len("exit_fit:"):],
                                       after_exception=after_exception, summary_failure=summary_failure, fit_cause=fit_cause)

@@ -4911,6 +4911,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
         **({"background_leaf_prep": full_status["background_leaf_prep"]}  # #787; absent while off
            if "background_leaf_prep" in full_status else {}),
         "zero_leaf_streak": full_status.get("zero_leaf_streak"),  # #1162
+        **({"user_carry": full_status["user_carry"]} if "user_carry" in full_status else {}),
         "model": full_status.get("model", ""),
         "provider": full_status.get("provider", ""),
         "raw_context_length": full_status.get("raw_context_length", engine.context_length),

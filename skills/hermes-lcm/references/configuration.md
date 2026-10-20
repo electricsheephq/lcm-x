@@ -1,5 +1,15 @@
 # Configuration and activation
 
+`LCM_USER_CARRY_TOKENS` defaults to `0` (off); negative or invalid values warn
+and use `0`. Set `LCM_USER_CARRY_TOKENS=512` or `LCM_USER_CARRY_TOKENS=2048`
+to reserve that fixed cap for earlier durable user words, outside summaries.
+The origin is selected first, then the newest omitted occurrences, and entries
+are displayed chronologically. This is history: a later instruction and the
+latest live request take precedence. One crossing entry may be excerpted;
+its `lcm_expand store_id=... content_offset=...` pointer uses stored character
+offsets to recover omitted text. Prompt pressure can omit carry. `lcm_status`
+reports delivered tokens and entry count only while enabled; efficacy is unproven.
+
 LCM-X is a general Hermes plugin and a context engine. Both identifiers must be
 active:
 
@@ -144,6 +154,7 @@ warns without changing its behavior until removal.
 <!-- BEGIN GENERATED CONFIG REFERENCE -->
 | Environment key | Type | Default | Diagnostic range / choices | Deprecation |
 | --- | --- | --- | --- | --- |
+| `LCM_USER_CARRY_TOKENS` | `int` | `0` | — | — |
 | `LCM_FRESH_TAIL_COUNT` | `int` | `24` | — | — |
 | `LCM_FRESH_TAIL_MAX_TOKENS` | `int` | `24000` | — | — |
 | `LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED` | `bool` | `true` | — | — |

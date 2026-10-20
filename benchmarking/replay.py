@@ -102,6 +102,7 @@ def _config_from_policy(policy: LCMPolicy, database_path: Path):
     from hermes_lcm.config import LCMConfig
 
     return LCMConfig(
+        user_carry_tokens=policy.user_carry_tokens,
         fresh_tail_count=policy.fresh_tail_count,
         leaf_chunk_tokens=policy.leaf_chunk_tokens,
         context_threshold=policy.context_threshold,

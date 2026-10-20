@@ -125,6 +125,7 @@ class _CompressionState:
     leaf_compacted_this_turn: bool = False
     prep_freed: int = 0
     prep_low_water: float = 0.0
+    estimated_carry_tokens: int = 0
 
     sweep_step_seconds: Dict[str, float] = field(default_factory=dict)
     preexisting_dependent_reply_records: list[dict[str, str]] = field(default_factory=list)
@@ -178,11 +179,12 @@ class _LeafState:
 def select_oldest_leaf_chunk(
     candidate_raw: List[Dict[str, Any]],
     working_leaf_chunk_tokens: int,
+    counter=count_message_tokens,
 ) -> List[Dict[str, Any]]:
     selected: list[Dict[str, Any]] = []
     used = 0
     for msg in candidate_raw:
-        msg_tokens = count_message_tokens(msg)
+        msg_tokens = counter(msg)
         if used + msg_tokens > working_leaf_chunk_tokens and selected:
             break
         selected.append(msg)
@@ -191,6 +193,31 @@ def select_oldest_leaf_chunk(
 
 
 class CompactionMixin:
+    def _carry_emission_proof(self, view, candidates):
+        binding = self._emission_binding()
+        return {"version": 4, **binding, "output": [_emission_identity(m) for m in view],
+                "emissions": _finalize_emission_descriptors(view, candidates, binding)}
+
+    def _carry_packets(self, view, proof=None):
+        from .user_carry import HEADER, HEADER_RE
+        for row, (entry, identity) in zip(view, self._replay_occurrences(view, proof)[0]):
+            span = entry.generated_span or ""
+            start = span.find(HEADER)
+            if identity != entry.full_identity and start >= 0 and (end := self._verified_user_carry_end(span[start:])) is not None:
+                yield row, span[start:start + end], HEADER_RE.match(span[start:])
+
+    def _carry_tokens_in_view(self, view, proof=None):
+        return sum(count_message_tokens({"role": row["role"], "content": packet}) for row, packet, _ in self._carry_packets(view, proof))
+
+    def _update_carry_estimate(self, state):
+        if self._config.user_carry_tokens > 0:
+            candidates = []
+            trial = self._assemble_committed_compaction_context(
+                state.working_messages, state.anchor_source_messages, state.recovery_assembly_cap, persist=False, _emissions_out=candidates)
+            current = self._carry_tokens_in_view(trial, self._carry_emission_proof(trial, candidates))
+            state.estimated_active_tokens += current - state.estimated_carry_tokens
+            state.estimated_carry_tokens = current
+
     def _warn_unattributed_leaf(self, rows) -> None:
         # #1147 r1: share the warn-once refusal across admission, rescue and publication.
         frontier = self._store_complete_frontier()
@@ -620,7 +647,9 @@ class CompactionMixin:
         if force_overflow:
             return True, "forced overflow recovery", 0
 
-        raw_tokens_outside_tail = count_messages_tokens(candidate_raw)
+        occurrences = dict(zip(map(id, messages), self._replay_occurrences(messages)[0])) \
+            if any("[Earlier user messages, verbatim reference;" in str(m.get("content", "")) for m in messages) else {}
+        raw_tokens_outside_tail = sum(self._raw_message_tokens(m, occurrences.get(id(m))) for m in candidate_raw)
         if allow_partial_leaf:
             return True, "eligible partial threshold-sweep leaf", raw_tokens_outside_tail
         if self._config.dynamic_leaf_chunk_enabled:
@@ -676,7 +705,7 @@ class CompactionMixin:
         candidate_raw: List[Dict[str, Any]],
         working_leaf_chunk_tokens: int,
     ) -> List[Dict[str, Any]]:
-        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
+        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens, self._raw_message_tokens)
 
     def compress(self, messages: List[Dict[str, Any]],
                  current_tokens: int = None,
@@ -766,7 +795,27 @@ class CompactionMixin:
                     count_messages_tokens(result) >= count_messages_tokens(messages)):
                 # #651: no leaf, and neither rows nor tokens fell; #922 keeps the turn-paced hold.
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
+            prior_emissions = getattr(self, "_last_emission_descriptors", None)
             self._record_compress_commit_proof(messages, result)
+            if self._config.user_carry_tokens > 0:
+                # New generated carry is publishable only after exact scoped proof is durable.
+                from .user_carry import HEADER
+                if any(HEADER in candidate.get("span", "") for candidate in self._pending_emission_candidates):
+                    proof, durable = self._compress_commit_proof, self._durable_commit_proof_payload()
+                    projected = _project_emitted_occurrences(result, proof=proof) if proof else None
+                    covered = projected is not None and all(
+                        HEADER not in str(row.get("content", ""))
+                        or HEADER in (projected.entries[i].generated_span or "")
+                        for i, row in enumerate(result))
+                    if not covered or not durable or durable.get("emissions") != proof.get("emissions"):
+                        logger.warning("LCM omitted user carry: publication proof unavailable; returning raw view")
+                        result = messages
+                        self._ingest_cursor, self._ingest_cursor_needs_reconcile = len(messages), True
+                        self._pending_emission_candidates, self._compress_commit_proof = [], None
+                        self._last_emission_descriptors = prior_emissions
+                    else:
+                        self._remember_compacted_active_replay_snapshot(result)
+                self._record_user_carry_status(result)
             if self._compress_commit_proof is None:  # #1000: no proof recorded the fit's carrier
                 self._bind_survival_fit_emission(messages, result)
             self._host_uid_record_engine(result)
@@ -1267,6 +1316,10 @@ class CompactionMixin:
         anchor_claims: dict[int, list[int]] = {}  # #436 R4: id(input row) -> the store ids its text covers
         for message, claims in anchored_input or [(message, []) for message in selected_input]:
             remainder = self._generated_context_carrier_remainder(message)
+            if "[Earlier user messages, verbatim reference;" in str(message.get("content", "")):
+                occurrence = (getattr(self, "_compress_occurrences", None) or {}).get(id(message))
+                if occurrence is None or occurrence[0].generated_span is None:
+                    remainder = None  # an authored paste is source text, including its quoted packet
             if remainder is not None:
                 original = message
                 message = {**message, "content": remainder}
@@ -1458,6 +1511,7 @@ class CompactionMixin:
         anchor_source_messages: List[Dict[str, Any]],
         recovery_assembly_cap: int | None,
         persist: bool = True,
+        _emissions_out=None,
     ) -> List[Dict[str, Any]]:
         """Assemble and register replay proof for every committed leaf (``persist=False``: a no-write trial)."""
         leading_anchor_count = self._leading_anchor_count(working_messages)
@@ -1470,6 +1524,7 @@ class CompactionMixin:
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
                 **({} if persist else {"persist": False}),  # the leaf path's call is unchanged
+                **({} if _emissions_out is None else {"_emissions_out": _emissions_out}),
                 **(
                     {"retained_user_message": working_messages[1]}
                     if leading_anchor_count == 2
@@ -1887,6 +1942,8 @@ class CompactionMixin:
             and state.observed_prompt_tokens >= self.threshold_tokens
         )
         state.anchor_source_messages = list(state.working_messages)
+        if self._config.user_carry_tokens > 0:
+            state.estimated_carry_tokens = self._carry_tokens_in_view(messages)
         state.pressure_messages = messages if len(messages) == len(state.working_messages) else state.working_messages
         state.estimated_active_tokens = (
             state.observed_prompt_tokens
@@ -2121,6 +2178,7 @@ class CompactionMixin:
             )
             state.dropped_replayed_scaffold_messages = True
             state.working_messages = [message for index, message in enumerate(state.working_messages) if index not in drops]
+            self._update_carry_estimate(state)
             state.pressure_messages = [message for index, message in enumerate(state.pressure_messages) if index not in drops]
             leaf.candidate_start = leaf.leading_anchor_count
             leaf.fresh_tail_start = self._fresh_tail_start(state.working_messages)
@@ -2615,7 +2673,7 @@ class CompactionMixin:
         sources, anchor_claims = leaf.sources, leaf.anchor_claims
         if not leaf.summary_input_chunk:
             leaf.compacted_chunk = leaf.selected_raw_chunk
-            leaf.source_tokens = count_messages_tokens(leaf.selected_raw_chunk)
+            leaf.source_tokens = sum(self._raw_message_tokens(m) for m in leaf.selected_raw_chunk)
             leaf.summary_text = (
                 "Filtered replies derived from ignored messages.\n"
                 "[Expand for details: ignored-dependent reply]"
@@ -2719,7 +2777,7 @@ class CompactionMixin:
                                    dependent_reply_message_ids))
         leaf.selected_raw_len = len(leaf.source_lookup_chunk)
         leaf.remaining_messages = state.working_messages[leaf.leading_anchor_count + leaf.selected_raw_len:]
-        leaf.source_tokens = count_messages_tokens(leaf.source_lookup_chunk)
+        leaf.source_tokens = sum(self._raw_message_tokens(m) for m in leaf.source_lookup_chunk)
         if not leaf.consumed_store_ids:  # #1141: oldest-prefix rescue can discard the last durable source.
             self._warn_unattributed_leaf(leaf.compacted_chunk)  # #1147 r1: keep the publication backstop.
             state.noop_reason, state.unattributed_leaf_refused = "selected leaf chunk lacks raw store lineage", True
@@ -2835,9 +2893,10 @@ class CompactionMixin:
         if leaf.prepared is not None:  # #787: a promoted pass spends no summariser pass
             leaf_prep.promoted(str(self._store.db_path), self._conversation_id, leaf.prepared)
             state.promoted_leaves, state.max_leaf_passes = state.promoted_leaves + 1, state.max_leaf_passes + 1
-            state.prep_freed += count_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
+            state.prep_freed += sum(self._raw_message_tokens(m) for m in leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3
         state.estimated_active_tokens = max(0, state.estimated_active_tokens - leaf.source_tokens + leaf.summary_tokens)
+        self._update_carry_estimate(state)
         if (
             getattr(self._config, "large_output_transcript_gc_enabled", False)
             and leaf.source_store_ids
@@ -2907,7 +2966,7 @@ class CompactionMixin:
             pressure_remaining_raw = state.pressure_messages[
                 leaf.leading_anchor_count:remaining_fresh_tail_start
             ]
-            remaining_raw_tokens = count_messages_tokens(pressure_remaining_raw)
+            remaining_raw_tokens = sum(self._raw_message_tokens(m) for m in pressure_remaining_raw)
             remaining_threshold = self._working_leaf_chunk_tokens(remaining_raw_tokens)
             if remaining_raw_tokens < remaining_threshold:
                 if not (state.deferred_maintenance_active and state.critical_budget_pressure):
@@ -2970,7 +3029,7 @@ class CompactionMixin:
             return "break", None
 
         pressure_candidate_raw = state.pressure_messages[leaf.leading_anchor_count:leaf.fresh_tail_start]
-        raw_tokens_outside_tail = count_messages_tokens(pressure_candidate_raw)
+        raw_tokens_outside_tail = sum(self._raw_message_tokens(m) for m in pressure_candidate_raw)
         if leaf.hidden_backlog:
             leaf.to_compact = []
         elif state.threshold_full_sweep_active:

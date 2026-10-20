@@ -697,6 +697,7 @@ class _EnvFieldSpec:
 # preset-field lookups from the same list so the field/env/type mapping is not
 # duplicated. Order mirrors the historical ``from_env`` order for readability.
 ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
+    _EnvFieldSpec("user_carry_tokens", "LCM_USER_CARRY_TOKENS", int),
     _EnvFieldSpec("fresh_tail_count", "LCM_FRESH_TAIL_COUNT", int),
     _EnvFieldSpec("fresh_tail_max_tokens", "LCM_FRESH_TAIL_MAX_TOKENS", int),
     _EnvFieldSpec("fresh_tail_pressure_yield_enabled", "LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED", bool),
@@ -845,6 +846,7 @@ _PARSER_BY_TYPE = {
 # Fields whose env reading needs provenance tracking or a computed default;
 # ``from_env`` handles these explicitly, so the uniform loop skips them.
 _SOURCE_TRACKED_ENV_FIELDS = frozenset({
+    "user_carry_tokens",
     "fresh_tail_count",
     "fresh_tail_max_tokens",
     "leaf_chunk_tokens",
@@ -873,6 +875,8 @@ _PRESET_ENV_FIELDS = frozenset({
 @dataclass
 class LCMConfig:
     """All tunables for the LCM engine."""
+
+    user_carry_tokens: int = 0  # Fixed verbatim-history cap; zero preserves the existing path.
 
     # -- Fresh tail: recent messages never compacted ---
     fresh_tail_count: int = 24
@@ -1316,6 +1320,13 @@ class LCMConfig:
                 _warn_env_range(field, getattr(c, field), config_source_warnings)
 
         c.ignored_config_yaml_lcm_keys = _ignored_lcm_config_yaml_keys()
+
+        c.user_carry_tokens, source, warning = _parse_int_env_with_source("LCM_USER_CARRY_TOKENS", 0)
+        if c.user_carry_tokens < 0:
+            warning = "invalid env LCM_USER_CARRY_TOKENS ignored (must be >= 0)"
+            c.user_carry_tokens, source = 0, "default"
+        if c.user_carry_tokens or warning:
+            _record("user_carry_tokens", source, warning)
 
         # Source-tracked fields (provenance recording and/or a computed default)
         # stay explicit; the uniform loop below skips them.
