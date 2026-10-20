@@ -58,7 +58,7 @@ def test_rig_verifies_transient_vector_and_final_poll(corpus, fake_rig, monkeypa
         assert calls[-1] is True  # Last progress read before the final audit.
         n = result["verify_every_polls"]
         assert n > 0 and all(calls[i-1] for i in range(n, len(calls), n))
-        assert result["verified_read_cpu_s"] >= 0
+        assert result["verified_read_cpu_s_total"] >= result["verified_read_cpu_s_max_per_read"] >= 0
 
 
 GUARDS = [

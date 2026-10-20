@@ -35,7 +35,7 @@ def test_13_recall_thread_provider_build_is_foreground(tmp_path, monkeypatch):
     thread.start()
     thread.join()
     recorded = [json.loads(line) for line in events.read_text().splitlines()]
-    assert recorded == [dict(event="prepare", foreground=True, download=False, at=recorded[0]["at"])]
+    assert recorded == [dict(event="prepare", foreground=True, allow_download=False, at=recorded[0]["at"])]
     assert errors == ["foreground/download preparation forbidden"]
 
 

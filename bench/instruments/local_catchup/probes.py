@@ -56,7 +56,7 @@ def cold(a):
         threads[str(enabled)] = side["foreground_threads"]
     payload = recalls["True"]["payload"]
     passed = (bind["True"]-bind["False"] <= 500 and payload.get("degraded_to_fts") is True
-        and payload.get("total_results", 0) > 0 and not any(e.get("foreground") or e.get("download") or e.get("violation") for e in events))
+        and payload.get("total_results", 0) > 0 and not any(e.get("foreground") or e.get("violation") for e in events))
     dump(a.out/"summary.json", {"state": "PASS" if passed else "FAIL", "bind_ms": bind,
         "first_bind_added_ms": bind["True"]-bind["False"], "recalls": recalls, "events": events,
         "foreground_threads": threads})
@@ -74,6 +74,7 @@ if __name__ == "__main__":
         a = arguments()
         safe_paths(a.home, a.db)
         if mode == "drain96":
+            a.drain96 = True
             if a.db.exists():
                 raise ValueError("drain96 needs a new DB")
             a.db.parent.mkdir(parents=True, exist_ok=True)

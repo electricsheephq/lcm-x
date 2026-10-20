@@ -118,6 +118,8 @@ def guarded_worker(worker, request):
                    "foreground backfill forbidden": "foreground_backfill_forbidden",
                    "foreground embedding join forbidden": "foreground_embedding_join_forbidden",
                    "offline instrument denies network": "offline_network_forbidden"}
+        if str(exc) not in reasons:
+            raise
         events = []
         if events_path.exists():
             with events_path.open("rb") as stream:
@@ -127,7 +129,7 @@ def guarded_worker(worker, request):
                          "foreground_join": "foreground_embedding_join_forbidden"}
         for event in events:
             key = event.get("violation") or event.get("event")
-            if event.get("foreground") or event.get("download"):
+            if event.get("foreground"):
                 if key == "prepare":
                     event_reasons[key] = "foreground_preparation_forbidden"
                 elif key in ("_chunk_backfill_run", "_embedding_backfill_summary_run"):
@@ -233,7 +235,7 @@ def safety(a):
     events = [json.loads(s) for s in (a.root/"events.jsonl").read_text().splitlines()] if (a.root/"events.jsonl").exists() else []
     if any(e.get("event") == "subprocess_launch" for e in events):
         raise RuntimeError("offline subprocess launch")
-    if any(e.get("violation") or e.get("foreground") or e.get("download") for e in events):
+    if any(e.get("violation") or e.get("foreground") for e in events):
         raise RuntimeError("foreground preparation/backfill/join or network")
     foreign = foreign_files(os.getpid(), a.home, a.db, a.model_cache, user_home=Path(a.user_home), out=a.root, scratch=a.scratch)
     source_reads, unexpected = [], []

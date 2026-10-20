@@ -44,15 +44,17 @@ def main():
         raise RuntimeError("rig disk budget stop")
     jobs, manifests, processes = [], [], []
     # Bound verified reads to every five minutes; record their measured CPU cost.
-    verify_every_polls, polls, verified_read_cpu_s = 10, 0, 0.
+    verify_every_polls, polls, verified_read_cpu_s_total, verified_read_cpu_s_max_per_read = 10, 0, 0., 0.
     def poll_progress(verify):
-        nonlocal verified_read_cpu_s
+        nonlocal verified_read_cpu_s_total, verified_read_cpu_s_max_per_read
         rows = []
         for job, manifest in zip(jobs, manifests):
             started_cpu = time.process_time()
             rows.append(read_progress(job.db, manifest, verify=verify))
             if verify:
-                verified_read_cpu_s = max(verified_read_cpu_s, time.process_time()-started_cpu)
+                cost = time.process_time()-started_cpu
+                verified_read_cpu_s_total += cost
+                verified_read_cpu_s_max_per_read = max(verified_read_cpu_s_max_per_read, cost)
         return rows
     meter = supervisor(a, a.out/"cpu.jsonl")
     try:
@@ -97,7 +99,7 @@ def main():
             import json
             events = [[json.loads(s) for s in (j.out/"events.jsonl").read_text().splitlines()]
                       if (j.out/"events.jsonl").exists() else [] for j in jobs]
-            if any(e.get("violation") or e.get("foreground") or e.get("download") for es in events for e in es):
+            if any(e.get("violation") or e.get("foreground") for es in events for e in es):
                 reason = "foreground_or_network_stop"
                 break
             if time.monotonic() >= next_progress:
@@ -181,7 +183,8 @@ def main():
              if all(r[k] is not None for r in cpu["per_process"].values()) else None
              for k in ("mean_cores", "p95_rolling60_cores", "peak1s_cores", "peak_rss")}
     dump(a.out/"summary.json", {"state": state, "screen_only_never_gated": a.screen16, "reason": reason,
-         "verify_every_polls": verify_every_polls, "verified_read_cpu_s": verified_read_cpu_s,
+         "verify_every_polls": verify_every_polls, "verified_read_cpu_s_total": verified_read_cpu_s_total,
+         "verified_read_cpu_s_max_per_read": verified_read_cpu_s_max_per_read,
          "per_process_progress": progress, "per_process_bind": [load(j.out/f"worker-{g}.json") if (j.out/f"worker-{g}.json").exists() else None for j, g in zip(jobs, generations)],
          "worst_process_fraction": min(fractions), "worst_process_cpu_rss": worst, "cpu": cpu})
 
