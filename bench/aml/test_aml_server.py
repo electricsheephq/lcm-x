@@ -601,6 +601,67 @@ def test_private_capture_preserves_wire(tmp_path, monkeypatch, capsys, prefix, v
     assert capsys.readouterr().err.splitlines() == ['AML capture unavailable: PermissionError'] * 2
 
 
+@pytest.mark.parametrize('case', ['file-link', 'fifo', 'shared-dir', 'dir-link'])
+def test_capture_refuses_unsafe_targets(tmp_path, monkeypatch, case):
+    capture_dir, victim = tmp_path / 'private', tmp_path / 'victim.txt'
+    victim.write_bytes(b'victim')
+    victim.chmod(0o644)
+    if case == 'dir-link':
+        real = tmp_path / 'elsewhere'
+        real.mkdir(mode=0o700)
+        capture_dir.symlink_to(real, target_is_directory=True)
+    else:
+        capture_dir.mkdir(mode=0o700)
+        if case == 'file-link':
+            (capture_dir / 'capture.jsonl').symlink_to(victim)
+        elif case == 'fifo':
+            os.mkfifo(capture_dir / 'capture.jsonl', 0o600)
+        else:
+            capture_dir.chmod(0o777)
+    body, query = addition(), dict(user_id='user/a', query='moonflower', top_k=5)
+    monkeypatch.delenv('AML_CAPTURE_DIR', raising=False)
+    with running_server(tmp_path / 'off') as base:
+        expected = [wire(base, '/aml/add', body), wire(base, '/aml/search', query)]
+    monkeypatch.setenv('AML_CAPTURE_DIR', str(capture_dir))
+    started = time.monotonic()
+    with running_server(tmp_path / 'on') as base:
+        observed = [wire(base, '/aml/add', body), wire(base, '/aml/search', query)]
+    assert time.monotonic() - started < 5
+    assert observed == expected and all(status == 200 for status, _ in observed)
+    assert victim.read_bytes() == b'victim' and victim.stat().st_mode & 0o777 == 0o644
+    if case == 'dir-link':
+        assert list(real.iterdir()) == []
+    if case == 'shared-dir':
+        assert list(capture_dir.iterdir()) == []
+
+
+def test_capture_runs_after_the_reply(tmp_path, monkeypatch):
+    capture_file = tmp_path / 'private' / 'capture.jsonl'
+    monkeypatch.setenv('AML_CAPTURE_DIR', str(capture_file.parent))
+    release, original = threading.Event(), aml_server.Handler.capture
+
+    def slow_capture(self, body, response):
+        release.wait(10)
+        original(self, body, response)
+
+    monkeypatch.setattr(aml_server.Handler, 'capture', slow_capture)
+    data = json.dumps(addition()).encode()
+    request = ('POST /aml/add HTTP/1.0\r\nX-Api-Key: synthetic-token\r\n'
+               f'Content-Type: application/json\r\nContent-Length: {len(data)}\r\n\r\n').encode() + data
+    with running_server(tmp_path / 'db') as base:
+        with socket.create_connection(('127.0.0.1', int(base.rsplit(':', 1)[1])), timeout=3) as connection:
+            connection.sendall(request)
+            response = HTTPResponse(connection)
+            response.begin()  # the whole reply arrives while capture is still blocked
+            status, payload = response.status, response.read()
+            release.set()
+        deadline = time.monotonic() + 5
+        while not capture_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.05)
+    assert status == 200 and json.loads(payload)
+    assert [json.loads(line)['op'] for line in capture_file.read_text().splitlines()] == ['add']
+
+
 @pytest.mark.parametrize('mode', ['coding', 'textual'])
 @pytest.mark.parametrize('sink', ['ok', 'directory', 'permission', 'full'])
 def test_frozen_wire_golden(tmp_path, frozen, mode, sink, capsys):

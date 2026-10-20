@@ -22,6 +22,7 @@ import re
 import shutil
 import socket
 import sqlite3
+import stat
 import subprocess
 import sys
 import threading
@@ -617,8 +618,16 @@ class Handler(BaseHTTPRequestHandler):
             folder = Path(self.server.capture_dir)
             with self.server.receipt_lock:
                 folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+                # Only a private directory of ours: not a link, no group or other access.
+                info = os.lstat(folder)
+                if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+                    raise PermissionError('capture directory is not private')
+                # Never follow a link or wait on a FIFO; append only to a regular file.
                 with open(folder / 'capture.jsonl', 'ab',
-                          opener=lambda path, flags: os.open(path, flags, 0o600)) as capture:
+                          opener=lambda path, flags: os.open(path, flags | os.O_NOFOLLOW | os.O_NONBLOCK,
+                                                             0o600)) as capture:
+                    if not stat.S_ISREG(os.fstat(capture.fileno()).st_mode):
+                        raise PermissionError('capture target is not a regular file')
                     os.fchmod(capture.fileno(), 0o600)
                     capture.write(encoded(record) + b'\n')
         except Exception as error:
@@ -726,8 +735,8 @@ class Handler(BaseHTTPRequestHandler):
             reserved_slot, slot = slot, None
             response = service.execute(self.path.rsplit('/', 1)[1], body,
                                                    self.deadline, reserved_slot)
-            self.capture(body, response)
             self.respond(200, response)
+            self.capture(body, response)  # after the reply, so capture can never delay it
         except APIError as error:
             self.respond(error.status, {'detail': {'reason': error.reason}})
         except (TimeoutError, OSError):
