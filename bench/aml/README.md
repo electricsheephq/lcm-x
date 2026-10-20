@@ -102,3 +102,19 @@ bound `/aml/v1/add`, `/aml/v1/search` and `/aml/v1/health` with v2 delivery;
 the default `frozen` keeps them on the frozen routes. Other values, or `v2`
 without `AML_V2_DB_ROOT`, prevent startup. Receipts keep the incoming route.
 Register a new version before switching, because the delivery changes.
+
+## Private request capture (debugging only)
+
+Set `AML_CAPTURE_DIR=/path/to/private-dir` to append one JSON line per
+successful add or search to `capture.jsonl` in that directory, written after
+the reply is sent. Search lines hold the query, the requested `top_k` and the
+exact returned `data`; add lines hold only each item's size and SHA-256, never
+its content. The directory must be a private directory owned by the service
+user: it is created 0700 when missing, and a link or any group or other access
+disables capture. The file is created 0600 and must be a regular file (never a
+link or FIFO). A capture failure never changes a response and logs only the
+exception type. Unset, nothing is captured.
+
+Captured lines are evaluation data. Use them only to debug that evaluation,
+keep them off shared or synced storage, and delete them with the rest of the
+evaluation data, including any copies made for analysis.
