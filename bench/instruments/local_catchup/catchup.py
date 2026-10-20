@@ -5,9 +5,10 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 
-from .audit import audit
-from .common import append, config, dump, guards, immutable_cache, isolated, load, parser, product
+from .audit import audit, baseline, progress
+from .common import append, config, dump, foreign_files, guards, immutable_cache, isolated, load, parser, product, safe_paths
 from .cpu import flags, supervisor
 
 
@@ -26,9 +27,10 @@ def wall(value):
 
 
 def worker(a):
+    safe_paths(a.home, a.db)
     isolated(a.home, a.model_cache)
     mod = product(a.lcmx_repo, a.hermes_source)
-    guards(mod, a.out/"events.jsonl")
+    guards(mod, a.out/"events.jsonl", a.generation)
     cfg = config(mod, a.db)
     dump(a.home/"local-settings.json", {"provider": cfg.embedding_provider,
          "model": cfg.embedding_model, "enabled": cfg.embeddings_enabled, "offline": True})
@@ -37,7 +39,7 @@ def worker(a):
     engine.on_session_start("instrument-bind", platform="cli", context_length=200000)
     bind_ms = (time.monotonic()-started)*1000
     dump(a.out/f"worker-{a.generation}.json", {"pid": os.getpid(), "bind_ms": bind_ms,
-         "bind_started": started, "one_bind": True, "generation": a.generation})
+         "effective_config": __import__("dataclasses").asdict(cfg), "bind_started": started, "one_bind": True, "generation": a.generation})
     stop = False
     def interrupted(*_):
         nonlocal stop
@@ -56,9 +58,13 @@ def launch(a, generation):
     command = [sys.executable, "-B", "-m", "bench.instruments.local_catchup.catchup", "--worker",
         "--lcmx-repo", str(a.lcmx_repo), "--hermes-source", str(a.hermes_source), "--db", str(a.db),
         "--manifest", str(a.manifest), "--home", str(home), "--model-cache", str(a.model_cache),
-        "--out", str(a.out), "--generation", str(generation)]
-    with (a.out/f"worker-{generation}.log").open("w") as log:
-        return subprocess.Popen(command, stdout=log, stderr=subprocess.STDOUT)
+        "--out", str(a.out), "--scratch", str(a.scratch), "--generation", str(generation)]
+    p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    def capture():
+        with (a.out/f"worker-{generation}.log").open("wb") as log:
+            __import__("shutil").copyfileobj(p.stdout, log)
+    threading.Thread(target=capture, daemon=True).start()
+    return p
 
 
 def stop(p):
@@ -71,19 +77,29 @@ def stop(p):
             p.wait()
 
 
+def restart_trigger(a, fraction, elapsed):
+    if fraction >= 1:
+        return None
+    return "fraction" if fraction >= a.restart_fraction else "declared_time_fallback" if elapsed >= (a.restart_after if a.restart_after is not None else a.max_wall*.25) else None
+
+
 def run(a):
+    safe_paths(a.home, a.db)
+    initial_audit = baseline(a.db, load(a.manifest))
     immutable_cache(a.model_cache)
     a.out.mkdir(parents=True, exist_ok=False)
     manifest = load(a.manifest)
     meter = supervisor(a, a.out/"cpu.jsonl")
     started, last_change, next_progress, generation = time.monotonic(), time.monotonic(), 0., 0
     previous, history, restarted = None, [], False
+    meter.start()
     p = launch(a, generation)
+    meter.watch(p.pid)
     reason, final = "", "RUNNING"
     try:
         while final == "RUNNING":
             now = time.monotonic()
-            breach = meter.sample([p.pid]) if p.poll() is None else None
+            breach = meter.breach if p.poll() is None else None
             if breach or p.poll() is not None:
                 final, reason = "ABORTED", breach or f"worker_exit:{p.returncode}"
                 break
@@ -92,8 +108,11 @@ def run(a):
                 final, reason = "ABORTED", "foreground_prepare_backfill_or_network"
                 break
             if now >= next_progress:
-                result = audit(a.db, manifest)
-                if not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] != "ok":
+                result = progress(a.db, manifest)
+                if foreign_files(p.pid, a.home/str(generation), a.db, a.model_cache):
+                    final, reason = "ABORTED", "cross_profile_access"
+                    break
+                if not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] not in ("ok", "not_checked"):
                     final, reason = "ABORTED", "row_or_vector_corruption"
                     break
                 fingerprint = (sum(x["covered"] for x in result["classes"].values()), str(result["scan"]))
@@ -103,38 +122,52 @@ def run(a):
                 fraction = fingerprint[0]/max(1, total)
                 status_path = a.out/f"status-{generation}.json"
                 status = load(status_path) if status_path.exists() else {}
-                ready = status.get("ready", {}).get("available", False) and any(e.get("event") == "prepared" for e in events)
-                row = {"elapsed_s": now-started, "coverage_fraction": fraction, "audit": result, "status": status}
+                ready = status.get("ready", {}).get("available", False) and any(e.get("event") == "prepared" and e.get("generation") == generation for e in events)
+                row = {"elapsed_s": now-started, "coverage_fraction": fraction, "audit": result, "status": status, "ready": ready, "generation": generation}
                 append(a.out/"progress.jsonl", row)
                 history.append(row)
                 final = state(result, now-started, now-last_change, ready, a.max_wall)
                 reason = "full_expected_id_audit" if final == "COMPLETE" else "zero_progress_600s_provider_ready" if final == "STALLED" else "max_wall" if final == "INCOMPLETE" else ""
-                if not restarted and (fraction >= a.restart_fraction or now-started >= a.restart_after):
+                if result["complete"]:
+                    meter.windows[p.pid][1] = now
+                trigger = restart_trigger(a, fraction, now-started)
+                if final == "RUNNING" and not restarted and trigger:
+                    checked = audit(a.db, manifest)
+                    dump(a.out/"restart-audit.json", checked)
+                    if not checked["raw_unchanged"] or checked["changed_vectors"] or checked["integrity"] != "ok":
+                        final, reason = "ABORTED", "restart_corruption"
+                        break
                     append(a.out/"restarts.jsonl", {"elapsed_s": now-started, "fraction": fraction,
-                        "reason": "fraction" if fraction >= a.restart_fraction else "declared_time_fallback"})
+                        "reason": trigger})
                     stop(p)
                     generation, restarted = 1, True
                     p = launch(a, generation)
+                    meter.watch(p.pid)
+                    last_change, previous = time.monotonic(), None
                     final = "RUNNING"
                 next_progress = now+a.progress_interval
             time.sleep(1)
     finally:
         stop(p)
+        meter.close()
     result = audit(a.db, manifest)
+    if not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] != "ok" or result["residue"]:
+        final, reason = "ABORTED", "final_integrity_or_residue"
     elapsed = time.monotonic()-started
     covered = sum(x["covered"] for x in result["classes"].values())
     initial = sum(history[0]["audit"]["classes"][k]["covered"] for k in result["classes"]) if history else 0
-    first = history[0]["audit"] if history else result
-    summary = {"state": final, "reason": reason, "audit": result, "restarted": restarted,
+    first = initial_audit
+    summary = {"state": final, "reason": reason, "audit": result, "restarted": restarted, "restart": "once" if restarted else "none", "max_wall": a.max_wall,
         "end_to_end_s": elapsed, "coverage_fraction": covered/max(1, sum(x["expected"] for x in result["classes"].values())),
-        "new_ids_s": (covered-initial)/elapsed, "cpu": meter.summary(), "rows": manifest["rows"]}
+        "new_ids_s": (covered-initial)/elapsed, "cpu": meter.summary(final, 1), "effective_config": (load(a.out/f"worker-{generation}.json")["effective_config"] if (a.out/f"worker-{generation}.json").exists() else None), "rows": manifest["rows"]}
     summary.update(rows_s=(result["covered_rows"]-first["covered_rows"])/elapsed,
         chunks_s=(result["classes"]["chunks"]["covered"]-first["classes"]["chunks"]["covered"])/elapsed,
         tokens_s=sum(v["covered_tokens"]-first["classes"][k]["covered_tokens"] for k, v in result["classes"].items())/elapsed,
         model_preparation_s=sum(e.get("seconds", 0) for e in events if e.get("event") == "prepared"))
     from .audit import connect
-    with connect(a.db) as c, __import__("sqlite3").connect(a.out/"final.db") as dest:
+    with connect(a.db) as c, __import__("sqlite3").connect(a.scratch/(a.out.name+"-final.db")) as dest:
         c.backup(dest)
+    dump(a.out/"final-audit.json", result)
     dump(a.out/"manifest.json", manifest)
     dump(a.out/"summary.json", summary)
     return summary
@@ -142,11 +175,11 @@ def run(a):
 
 def arguments():
     p = parser(__doc__)
-    for name in ("db", "manifest", "home", "model-cache", "out"):
+    for name in ("db", "manifest", "home", "model-cache", "out", "scratch"):
         p.add_argument("--"+name, type=Path, required=True)
     p.add_argument("--max-wall", type=wall, default=wall("24h"))
     p.add_argument("--restart-fraction", type=float, default=.4)
-    p.add_argument("--restart-after", type=wall, default=wall("10m"))
+    p.add_argument("--restart-after", type=wall, default=None)
     p.add_argument("--progress-interval", type=float, default=30)
     p.add_argument("--worker", action="store_true")
     p.add_argument("--generation", type=int, default=0)

@@ -14,7 +14,9 @@ MODEL = "BAAI/bge-small-en-v1.5"
 
 
 def dump(path, value):
-    Path(path).write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+    temp = Path(str(path)+".tmp")
+    temp.write_text(json.dumps(value, sort_keys=True, indent=2) + "\n")
+    temp.replace(path)
 
 
 def load(path):
@@ -47,6 +49,19 @@ def product(repo, host):
     return lambda name: importlib.import_module("hermes_lcm." + name)
 
 
+def safe_paths(*paths):
+    if any(".hermes" in p.resolve().parts for p in paths):
+        raise ValueError("live .hermes paths forbidden")
+
+
+def foreign_files(pid, home, db, cache):
+    import psutil
+    roots = [p.resolve() for p in (home, cache, Path(sys.prefix), Path(sys.base_prefix))]
+    return [f.path for f in psutil.Process(pid).open_files()
+            if not any(Path(f.path).resolve().is_relative_to(r) for r in roots)
+            and Path(f.path).resolve() not in [db.resolve(), *[Path(str(db.resolve())+s) for s in ("-wal", "-shm", "-journal")]]]
+
+
 def isolated(home, cache):
     home = home.resolve()
     if home.exists() or ".hermes" in home.parts:
@@ -63,11 +78,10 @@ def isolated(home, cache):
 
 def config(mod, db, enabled=True):
     return mod("config").LCMConfig(database_path=str(db.resolve()),
-        embeddings_enabled=enabled, embedding_provider="fastembed", embedding_model=MODEL,
-        temporal_rollups_enabled=False, embedding_max_batch_items=32)
+        embeddings_enabled=enabled, embedding_provider="fastembed", embedding_model=MODEL)
 
 
-def guards(mod, events):
+def guards(mod, events, generation=0):
     """Observe real product calls, fail closed on network or foreground backfill/prepare."""
     def deny(*a, **kw):
         append(events, {"violation": "network_attempt", "thread": threading.current_thread().name})
@@ -85,7 +99,7 @@ def guards(mod, events):
             raise RuntimeError("foreground/download preparation forbidden")
         started = time.monotonic()
         model = original(self, allow_download=allow_download)
-        append(events, {"event": "prepared", "seconds": time.monotonic()-started})
+        append(events, {"event": "prepared", "generation": generation, "seconds": time.monotonic()-started})
         return model
     provider.FastembedProvider._construct = construct
     command = mod("command")

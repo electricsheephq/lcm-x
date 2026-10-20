@@ -9,7 +9,7 @@ def test_nearest_rank_and_rolling():
     assert rolling(samples) == [.5]*61
     assert statistics(samples)["p95_rolling60_cores"] == .5
     assert statistics(samples)["mean_cores"] == .5
-    assert rolling([(30, 30, 1), (60, 30, 0), (90, 30, 0)]) == [.5, 0]
+    assert rolling([(30, 30, 1), (60, 30, 0), (90, 30, 0)]) == [(30-i)/60 for i in range(31)]
 
 
 def test_abort_cpu_and_swap(monkeypatch, tmp_path):

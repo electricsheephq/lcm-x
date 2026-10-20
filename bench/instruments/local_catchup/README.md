@@ -2,7 +2,7 @@
 
 Binding authority: [#1586, Gate declaration (release manager), v1](https://github.com/electricsheephq/lcm-x/issues/1586#issuecomment-6283060211).
 Read the declaration before running; the instrument does not change its bars.
-Use Python 3.11+ with pytest, psutil (optional), FastEmbed and ruff 0.15.13.
+Use Python 3.11+ with pytest, psutil (mandatory), FastEmbed and ruff 0.15.13.
 The Hermes source supplies the host ContextEngine contract; its CLI is never run.
 Set shell variables to absolute paths: `PRODUCT` (any product checkout), `HOST`
 (Hermes source), `SCRATCH` (new regenerable bulk), `RUN` (new evidence directory),
@@ -13,10 +13,10 @@ No live profile is used. Never pass a live DB or home.
 python -m pytest bench/instruments/local_catchup/tests -q
 ruff check --no-cache bench/instruments/local_catchup
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.corpus --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --out "$SCRATCH/corpus" --rows 250000 --shape short --baseline empty --pilot 1000 --peak-disk-gb 8
-nice -n 19 "$PY" -B -m bench.instruments.local_catchup.catchup --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/corpus/store.db" --manifest "$SCRATCH/corpus/manifest.json" --home "$SCRATCH/homes" --model-cache "$CACHE" --out "$RUN/catchup" --max-wall 24h
-nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes drain96 --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/probe/store.db" --manifest "$RUN/probe-manifest.json" --home "$SCRATCH/probe/homes" --model-cache "$CACHE" --out "$RUN/probe" --max-wall 20m --restart-after 30s
-nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes cold --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/corpus/pilot.db" --manifest "$SCRATCH/corpus/pilot.json" --home "$SCRATCH/cold/home" --model-cache "$CACHE" --out "$RUN/cold"
-nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes screen16 --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/screen" --model-cache "$CACHE" --out "$RUN/screen" --rows 96
+nice -n 19 "$PY" -B -m bench.instruments.local_catchup.catchup --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/corpus/store.db" --manifest "$SCRATCH/corpus/manifest.json" --home "$SCRATCH/homes" --model-cache "$CACHE" --scratch "$SCRATCH" --out "$RUN/catchup" --max-wall 24h
+nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes drain96 --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/probe/store.db" --manifest "$RUN/probe-manifest.json" --home "$SCRATCH/probe/homes" --model-cache "$CACHE" --scratch "$SCRATCH" --out "$RUN/probe" --max-wall 20m --restart-after 30s
+nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes cold --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --db "$SCRATCH/corpus/pilot.db" --manifest "$SCRATCH/corpus/pilot.json" --home "$SCRATCH/cold/home" --model-cache "$CACHE" --scratch "$SCRATCH" --out "$RUN/cold"
+nice -n 19 "$PY" -B -m bench.instruments.local_catchup.probes screen16 --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/screen" --model-cache "$CACHE" --out "$RUN/screen" --rows 250000
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.rig --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/rig" --model-cache "$CACHE" --out "$RUN/rig" --processes 14 --rows 250000 --peak-disk-gb 80
 ```
 
@@ -34,21 +34,25 @@ Upgrade keeps short-turn gaps and one >32-chunk message with its first vector on
 Its pre-existing vectors are fixture vectors, never counted as measured throughput.
 
 Catchup binds once per interpreter lifetime, then only observes. Restart defaults
-to 40% coverage, with a declared 10-minute fallback if that fraction is unreachable;
+to 40% coverage, with a declared 25%-of-max-wall fallback if that fraction is unreachable;
 the small control uses 30 seconds. Shutdown has a 10-second bound, then kill.
 Restart and interpreter startup count toward elapsed time. Every 30 seconds a
-separate read-only connection audits all expected IDs, vector lengths, raw-row
-digests, pre-existing vectors and uncertain/inflight state. Zero progress includes
+read-only connection counts expected IDs; full raw-row/vector integrity audits
+run at baseline, restart and end. Zero progress includes
 persisted scan progress, and STALLED requires a successfully constructed provider.
 CPU samples are every second, CPU-time deltas in cores, weighted means and full
 60-second rolling means with nearest-rank p95. Missing 60-second windows are
 insufficient evidence. Default bars: .6/.75 per PID, 7/8.75 aggregate; abort at
 >12 cores for 10 seconds or increased host swap. Existing swap is recorded.
 `--cpu-cap`, `--cpu-sustained`, `--per-mean`, `--per-p95`, `--aggregate-mean`,
-`--aggregate-p95` expose the declared supervisor thresholds. psutil is preferred;
-the fallback reads cumulative `ps time`, RSS and platform-specific thread counts.
+`--aggregate-p95` expose the declared supervisor thresholds. psutil is mandatory. A dedicated sampler stays independent of audits; any sample
+gap over 2 s is insufficient. CPU bars are N/A for STALLED/ABORTED cells.
+Statistics clip to launch/first-complete; aggregate bars apply only to N=14.
+Host one-minute load above the core count flags a non-quiet window.
 
-Raw CPU/progress/events, worker status, final DB, manifest and summary are receipts.
+Raw CPU/progress/events, worker status, manifest and summary are receipts.
+Final DB copies stay in --scratch. Rescore with `python -m bench.instruments.local_catchup.rescore <cell>`.
+Screen statistics start after the last bind; any completed backlog makes it INVALID.
 The 16-process 60-second screen is reported and never gates the default flip.
 The cold probe pairs OFF/ON binds and requires FTS canary hits with honest semantic
 degradation. A control stall is an expected negative, not a product acceptance pass.

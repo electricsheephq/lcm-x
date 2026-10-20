@@ -1,11 +1,12 @@
 """One-second process CPU-time sampler; 1.0 CPU = one core, never ps %cpu."""
-from collections import defaultdict, deque
+from collections import defaultdict
 import math
 from pathlib import Path
 import re
 import subprocess
 import sys
 import time
+import threading
 
 from .common import append
 
@@ -15,22 +16,23 @@ def percentile(values, p=.95):
 
 
 def rolling(samples, window=60):
-    result, selected = [], deque()
-    duration, integral = 0., 0.
-    for t, dt, cpu in samples:
-        selected.append((t, dt, cpu))
-        duration, integral = duration+dt, integral+dt*cpu
-        while selected and selected[0][0] <= t-window:
-            _, old_dt, old_cpu = selected.popleft()
-            duration, integral = duration-old_dt, integral-old_dt*old_cpu
-        if selected and selected[0][0]-selected[0][1] < t-window:
-            end, old_dt, old_cpu = selected.popleft()
-            removed = old_dt-(end-(t-window))
-            duration, integral = duration-removed, integral-removed*old_cpu
-            selected.appendleft((end, old_dt-removed, old_cpu))
-        if duration >= window-1e-6:
-            result.append(integral/duration)
+    result, selected, pos = [], [], 0
+    if not samples:
+        return result
+    for end in range(math.ceil(samples[0][0]-samples[0][1]+window), math.floor(samples[-1][0])+1):
+        while pos < len(samples) and samples[pos][0]-samples[pos][1] < end:
+            selected.append(samples[pos])
+            pos += 1
+        selected = [s for s in selected if s[0] > end-window]
+        clipped = clip(selected, end-window, end)
+        if sum(dt for _, dt, _ in clipped) >= window-1e-6:
+            result.append(sum(dt*c for _, dt, c in clipped)/window)
     return result
+
+
+def clip(samples, lo, hi):
+    return [(min(t, hi), min(t, hi)-max(t-dt, lo), c) for t, dt, c in samples
+            if min(t, hi) > max(t-dt, lo)]
 
 
 def statistics(samples):
@@ -41,21 +43,13 @@ def statistics(samples):
 
 
 def process(pid):
+    import psutil
     try:
-        import psutil
-        try:
-            p = psutil.Process(pid)
-            t = p.cpu_times()
-            return t.user+t.system, p.memory_info().rss, p.num_threads()
-        except psutil.Error as exc:
-            raise ProcessLookupError(pid) from exc
-    except ImportError:
-        out = subprocess.check_output(["ps", "-p", str(pid), "-o", "time=,rss="], text=True).split()
-        threads = (len(subprocess.check_output(["ps", "-M", "-p", str(pid)], text=True).splitlines())-1
-            if sys.platform == "darwin" else int(subprocess.check_output(["ps", "-p", str(pid), "-o", "nlwp="], text=True)))
-        parts = out[0].replace("-", ":").split(":")
-        seconds = sum(float(v)*m for v, m in zip(reversed(parts), (1, 60, 3600, 86400)))
-        return seconds, int(out[1])*1024, threads
+        p = psutil.Process(pid)
+        t = p.cpu_times()
+        return t.user+t.system, p.memory_info().rss, p.num_threads()
+    except psutil.Error as exc:
+        raise ProcessLookupError(pid) from exc
 
 
 def swap():
@@ -74,7 +68,34 @@ class Supervisor:
         self.limits = (per_mean, per_p95, aggregate_mean, aggregate_p95)
         self.previous, self.samples, self.rss, self.threads = {}, defaultdict(list), defaultdict(int), defaultdict(int)
         self.excess, self.swap_start = 0., swap()
-        self.aggregate = []
+        self.aggregate, self.windows, self.loads = [], {}, []
+        self.breach, self.halt, self.lock = None, threading.Event(), threading.RLock()
+
+    def watch(self, pid):
+        with self.lock:
+            now = time.monotonic()
+            self.windows[pid], self.previous[pid] = [now, None], (now, 0.)
+
+    def start(self):
+        __import__("psutil")  # Mandatory before launching workers.
+        self.swap_start = swap()
+        def loop():
+            deadline = time.monotonic()
+            while not self.halt.is_set():
+                try:
+                    with self.lock:
+                        self.breach = self.sample(tuple(self.windows)) or self.breach
+                except Exception as exc:
+                    self.breach = f"sampler_error:{type(exc).__name__}"
+                deadline += 1
+                self.halt.wait(max(0, deadline-time.monotonic()))
+        self.thread = threading.Thread(target=loop, daemon=True)
+        self.thread.start()
+
+    def close(self):
+        self.halt.set()
+        self.thread.join()
+
 
     def sample(self, pids):
         now, total, intervals, raw = time.monotonic(), 0., [], {}
@@ -98,21 +119,34 @@ class Supervisor:
         self.aggregate.append((now, dt, total))
         self.excess = self.excess+dt if total > self.cap else 0.
         used = swap()
+        self.loads.append(__import__("os").getloadavg()[0])
         append(self.path, {"at": now, "processes": raw, "aggregate_cores": total,
                           "swap_bytes": used, "load": __import__("os").getloadavg()})
         return "swap_increased" if used > self.swap_start else "sustained_cpu_breach" if self.excess >= self.sustained else None
 
-    def summary(self):
-        per = {str(p): dict(statistics(s), peak_rss=self.rss[p], peak_threads=self.threads[p])
-               for p, s in self.samples.items()}
-        agg = statistics(self.aggregate)
+    def summary(self, state="INCOMPLETE", n=None, since=0):
+        end = time.monotonic()
+        windows = {p: (max(since, w[0]), w[1] or end) for p, w in self.windows.items()}
+        active = {p: clip(s, *windows.get(p, (since, end))) for p, s in self.samples.items()}
+        lo, hi = max((w[0] for w in windows.values()), default=since), min((w[1] for w in windows.values()), default=end)
+        max_dt = max((dt for s in self.samples.values() for _, dt, _ in s), default=0)
+        per = {str(p): dict(statistics(s), peak_rss=self.rss[p], peak_threads=self.threads[p], tail=statistics(clip(self.samples[p], windows.get(p, (since, end))[1], end)))
+               for p, s in active.items()}
+        agg = statistics(clip(self.aggregate, lo, hi))
         def bar(s, mean, p95):
+            if state not in ("COMPLETE", "INCOMPLETE"):
+                return "N/A"
+            if max_dt > 2:
+                return "INSUFFICIENT_CADENCE"
             if s["p95_rolling60_cores"] is None:
                 return "INSUFFICIENT_60S"
             return "PASS" if s["mean_cores"] <= mean and s["p95_rolling60_cores"] <= p95 else "FAIL"
         return {"per_process": per, "aggregate": agg,
                 "per_process_bars": {p: bar(s, *self.limits[:2]) for p, s in per.items()},
-                "aggregate_bar": bar(agg, *self.limits[2:]), "limits": self.limits}
+                "aggregate_bar": bar(agg, *self.limits[2:]) if (n or len(windows)) == 14 else "NOT_APPLICABLE", "limits": self.limits,
+                "tail": statistics(clip(self.aggregate, hi, end)), "max_sample_dt": max_dt,
+                "host_load_peak1m": max(self.loads, default=0),
+                "non_quiet_window": max(self.loads, default=0) > (__import__("os").cpu_count() or 1)}
 
 
 def flags(p):

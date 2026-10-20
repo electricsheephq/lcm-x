@@ -4,11 +4,15 @@ from pathlib import Path
 import shutil
 import time
 
-from .audit import audit, connect
+from .audit import audit, baseline, connect, progress as read_progress
 from .catchup import launch, stop, wall
-from .common import append, dump, immutable_cache, load, parser
-from .corpus import build
+from .common import append, dump, foreign_files, immutable_cache, load, parser, safe_paths
+from .corpus import build, pilot_rows
 from .cpu import flags, supervisor
+
+
+def screen_state(fractions):
+    return "INVALID" if any(f >= 1 for f in fractions) else "INCOMPLETE"
 
 
 def main():
@@ -25,11 +29,12 @@ def main():
     p.add_argument("--screen16", action="store_true")
     flags(p)
     a = p.parse_args()
+    safe_paths(a.scratch)
     immutable_cache(a.model_cache)
     a.out.mkdir(parents=True, exist_ok=False)
     a.scratch.mkdir(parents=True, exist_ok=False)
     n, duration = (16, 60) if a.screen16 else (a.processes, a.max_wall)
-    pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", min(a.rows, 1000), a.shape, a.baseline)
+    pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", pilot_rows(1000, a.rows, a.shape), a.shape, a.baseline)
     estimate = n*3*(pilot["database_bytes"]+len(pilot["expected"]["chunks"])*2048)*a.rows/pilot["rows"]
     dump(a.out/"allocation.json", {"estimate_bytes": estimate, "peak_disk_gb": a.peak_disk_gb})
     if estimate > a.peak_disk_gb*2**30 or shutil.disk_usage(a.scratch).free < max(150, a.peak_disk_gb+20)*2**30:
@@ -47,15 +52,22 @@ def main():
             dump(out/"manifest.json", manifest)
             jobs.append(Namespace(**{**vars(a), "db": db, "home": root/"homes", "out": out,
                                     "manifest": out/"manifest.json"}))
+            baseline(db, manifest)
             manifests.append(manifest)
+        meter.start()
         for job in jobs:
             processes.append(launch(job, 0))
-            meter.sample([q.pid for q in processes])
+            meter.watch(processes[-1].pid)
             time.sleep(a.stagger)
+        while not all((j.out/"worker-0.json").exists() for j in jobs):
+            if meter.breach or any(q.poll() is not None for q in processes):
+                raise RuntimeError(meter.breach or "worker exited before bind")
+            time.sleep(1)
         started, reason, progress = time.monotonic(), "max_wall", []
+        next_progress = 0.
         last_change, fingerprints = [started]*n, [None]*n
         while time.monotonic()-started < duration:
-            breach = meter.sample([q.pid for q in processes])
+            breach = meter.breach
             if breach or any(q.poll() is not None for q in processes):
                 reason = breach or "worker_exit"
                 break
@@ -65,36 +77,44 @@ def main():
             if any(e.get("violation") or e.get("foreground") or e.get("download") for es in events for e in es):
                 reason = "foreground_or_network_stop"
                 break
-            if not a.screen16 and int(time.monotonic()-started) % 30 == 0:
-                progress = [audit(j.db, m) for j, m in zip(jobs, manifests)]
+            if time.monotonic() >= next_progress:
+                next_progress = time.monotonic()+30
+                if any(foreign_files(q.pid, j.home/"0", j.db, a.model_cache) for j, q in zip(jobs, processes)):
+                    reason = "cross_profile_access"
+                    break
+                progress = [read_progress(j.db, m) for j, m in zip(jobs, manifests)]
                 append(a.out/"progress.jsonl", {"elapsed_s": time.monotonic()-started, "per_process": progress})
                 for i, r in enumerate(progress):
+                    if r["complete"] and meter.windows[processes[i].pid][1] is None:
+                        meter.windows[processes[i].pid][1] = time.monotonic()
                     fingerprint = str((r["classes"], r["scan"]))
                     if fingerprint != fingerprints[i]:
                         fingerprints[i], last_change[i] = fingerprint, time.monotonic()
-                if any(not r["raw_unchanged"] or r["changed_vectors"] or r["integrity"] != "ok" for r in progress):
+                if any(not r["raw_unchanged"] or r["changed_vectors"] or r["integrity"] not in ("ok", "not_checked") for r in progress):
                     reason = "corruption_stop"
                     break
                 if any(not r["complete"] and time.monotonic()-last_change[i] >= 600
                        and any(e.get("event") == "prepared" for e in events[i]) for i, r in enumerate(progress)):
                     reason = "stalled_provider_ready"
                     break
-                if all(r["complete"] for r in progress):
+                if not a.screen16 and all(r["complete"] for r in progress):
                     reason = "complete"
                     break
             time.sleep(1)
     finally:
         for q in processes:
             stop(q)
+        meter.close()
     progress = [audit(j.db, m) for j, m in zip(jobs, manifests)]
     for j in jobs:
-        with connect(j.db) as c, __import__("sqlite3").connect(j.out/"final.db") as dest:
+        with connect(j.db) as c, __import__("sqlite3").connect(j.db.parent/"final.db") as dest:
             c.backup(dest)
     fractions = [sum(v["covered"] for v in r["classes"].values())/sum(v["expected"] for v in r["classes"].values()) for r in progress]
-    cpu = meter.summary()
+    state = screen_state(fractions) if a.screen16 and reason == "max_wall" else "COMPLETE" if reason == "complete" else "INCOMPLETE" if reason == "max_wall" else "STALLED" if reason == "stalled_provider_ready" else "ABORTED"
+    cpu = meter.summary(state, n, started if a.screen16 else 0)
     worst = {k: max((r[k] or 0 for r in cpu["per_process"].values()), default=None)
              for k in ("mean_cores", "p95_rolling60_cores", "peak1s_cores", "peak_rss")}
-    dump(a.out/"summary.json", {"screen_only_never_gated": a.screen16, "reason": reason,
+    dump(a.out/"summary.json", {"state": state, "screen_only_never_gated": a.screen16, "reason": reason,
          "per_process_progress": progress, "per_process_bind": [load(j.out/"worker-0.json") for j in jobs],
          "worst_process_fraction": min(fractions), "worst_process_cpu_rss": worst, "cpu": cpu})
 

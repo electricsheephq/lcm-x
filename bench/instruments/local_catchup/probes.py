@@ -4,11 +4,12 @@ import threading
 import time
 
 from .catchup import arguments, run
-from .common import config, dump, guards, isolated, product
+from .common import config, dump, guards, isolated, product, safe_paths
 from .corpus import build
 
 
 def cold(a):
+    safe_paths(a.home, a.db)
     a.out.mkdir(parents=True, exist_ok=False)
     absent = a.home.parent/"absent-model-cache"
     absent.mkdir(parents=True)
@@ -46,6 +47,7 @@ if __name__ == "__main__":
         main()
     else:
         a = arguments()
+        safe_paths(a.home, a.db)
         if mode == "drain96":
             if a.db.exists():
                 raise ValueError("drain96 needs a new DB")

@@ -6,7 +6,7 @@ import sqlite3
 import time
 from unittest.mock import patch
 
-from .audit import connect, preimage
+from .audit import audit, connect, preimage
 from .common import MODEL, config, dump, parser, product
 
 
@@ -32,7 +32,7 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
         messages = [dict(m, timestamp=1700000000 + offset * 2 + i)
                     for i, m in enumerate(fixture.messages[1:])]
         if baseline == "upgrade" and shard == 0:
-            messages[0]["content"] += " A factual sentence with several details." * 7000
+            messages[0]["content"] += " A factual sentence with several details." * 2100
         sessions.append(name)
         canaries.extend(asdict(c) for c in fixture.canaries)
         for i, msg in enumerate(messages):
@@ -42,6 +42,8 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
         with patch.object(time, "time", return_value=1700000000 + offset):
             ids = store.append_batch(name, messages, token_estimates=counts)
         for ident, msg in zip(ids, messages):
+            with connect(db) as c:
+                msg["content"] = c.execute("SELECT content FROM messages WHERE store_id=?", (ident,)).fetchone()[0]
             parts = mod("chunking").chunk_message(ident, msg["role"], msg["content"], policy="conversational")
             expected["chunks"].update({c.chunk_id: c.token_estimate for c in parts})
             if baseline == "upgrade" and ((shard == 0 and ident == ids[0]) or ident % 4 == 0):
@@ -68,12 +70,18 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
         pre = preimage(c)
     with sqlite3.connect(db) as c:
         c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    return {"rows": rows, "pairs": rows//2, "system_rows": 0, "tool_rows": 0,
+    manifest = {"rows": rows, "pairs": rows//2, "system_rows": 0, "tool_rows": 0,
         "stripped_system_rows": len(sessions), "shape": shape, "baseline": baseline, "seed": seed,
         "sessions": sessions, "canaries": canaries, "token_distribution": dict(sorted(tokens.items())),
         "input_tokens": sum(k*v for k, v in tokens.items()), "expected": expected,
         "identities": identities, "dim": 384, "preimage": pre, "database_bytes": db.stat().st_size,
         "upgrade_long_chunks": long_count, "estimator": "product tokens.count_tokens"}
+    manifest["baseline_classes"] = audit(db, manifest)["classes"]
+    return manifest
+
+
+def pilot_rows(pilot, rows, shape):
+    return min(rows, max(pilot, 1002 if shape == "mixed" else 2))
 
 
 def main():
@@ -89,7 +97,7 @@ def main():
     a.out.mkdir(parents=True, exist_ok=False)
     if shutil.disk_usage(a.out).free < max(150, a.peak_disk_gb+20)*2**30:
         raise RuntimeError("disk headroom stop")
-    pilot = build(a.lcmx_repo, a.hermes_source, a.out/"pilot.db", min(a.pilot, a.rows), a.shape, a.baseline)
+    pilot = build(a.lcmx_repo, a.hermes_source, a.out/"pilot.db", pilot_rows(a.pilot, a.rows, a.shape), a.shape, a.baseline)
     # Include float32 vectors, SQLite overhead and a conservative WAL/copy margin.
     estimate = 3 * (pilot["database_bytes"] + len(pilot["expected"]["chunks"])*2048) * a.rows/pilot["rows"]
     dump(a.out/"pilot.json", dict(pilot, extrapolated_bytes=estimate))
