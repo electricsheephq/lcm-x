@@ -601,6 +601,30 @@ class Handler(BaseHTTPRequestHandler):
                                   status=status, ms=ms, request_id_hash=self.request_hash,
                                   slow=ms >= self.server.slow_seconds * 1000)), flush=True)
 
+    def capture(self, body, response):
+        if not self.server.capture_dir:
+            return
+        try:
+            operation = self.path.rsplit('/', 1)[-1]
+            record = dict(ts=datetime.now(timezone.utc).isoformat(), op=operation,
+                          route=self.original_path, user_digest=self.user_hash)
+            if operation == 'search':
+                record.update(query=body['query'], top_k_requested=self.metrics['top_k'],
+                              returned=response['data'])
+            else:
+                record['items'] = [dict(chars=len(row['content']), sha256=digest(row['content']))
+                                   for row in body['messages']]
+            folder = Path(self.server.capture_dir)
+            with self.server.receipt_lock:
+                folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+                with open(folder / 'capture.jsonl', 'ab',
+                          opener=lambda path, flags: os.open(path, flags, 0o600)) as capture:
+                    os.fchmod(capture.fileno(), 0o600)
+                    capture.write(encoded(record) + b'\n')
+        except Exception as error:
+            with contextlib.suppress(Exception):
+                print('AML capture unavailable: ' + type(error).__name__, file=sys.stderr, flush=True)
+
     def respond(self, status, body):
         data = encoded(body)
         rows = body.get('data', []) if isinstance(body, dict) else []
@@ -702,6 +726,7 @@ class Handler(BaseHTTPRequestHandler):
             reserved_slot, slot = slot, None
             response = service.execute(self.path.rsplit('/', 1)[1], body,
                                                    self.deadline, reserved_slot)
+            self.capture(body, response)
             self.respond(200, response)
         except APIError as error:
             self.respond(error.status, {'detail': {'reason': error.reason}})
@@ -725,6 +750,7 @@ class Server(ThreadingHTTPServer):
         self.v2_failed, self.receipt_failures = v2_failed, set()
         self.receipts = Path(os.environ.get('AML_RECEIPTS', str(service.root / 'receipts.jsonl')))
         self.receipt_lock = threading.Lock()
+        self.capture_dir = os.environ.get('AML_CAPTURE_DIR')
         super().__init__(('127.0.0.1', port), Handler)
 
     def handle_error(self, request, client_address):
