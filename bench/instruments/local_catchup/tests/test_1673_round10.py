@@ -10,8 +10,10 @@ from bench.instruments.local_catchup.tests.test_corpus_audit import fill
 pytest_plugins = ["bench.instruments.local_catchup.tests.test_corpus_audit"]
 
 
-@pytest.mark.parametrize("table,field", [("lcm_chunk_meta", "char_end"),
-                                         ("lcm_embedding_meta", "source_token_count")])
+# embedded_at is covered only by the metadata digest (the semantic expected-metadata check
+# reads other columns), so a missed snapshot would let its change pass unnoticed.
+@pytest.mark.parametrize("table,field", [("lcm_chunk_meta", "embedded_at"),
+                                         ("lcm_embedding_meta", "embedded_at")])
 def test_late_metadata_is_snapshotted_with_its_vector(corpus, table, field):
     db, manifest, mod = corpus
     fill(db, manifest, mod)
