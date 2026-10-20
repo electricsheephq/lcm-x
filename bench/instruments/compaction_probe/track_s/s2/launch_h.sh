@@ -18,7 +18,7 @@ roots = [scratch, output]
 if os.environ.get('C1_BUDGET_ROOT'):
     roots += [pathlib.Path(os.environ['C1_BUDGET_ROOT']), pathlib.Path(os.environ['CODEX_HOME'])]
 profile.write_text('(version 1)\n(allow default)\n' + ('(deny network*)\n' if os.environ.get('S2_OFFLINE') == '1' else '') +
-                   '(deny file-write*)\n(allow file-write* ' +
+                   '(deny file-write*)\n(allow file-write* (literal "/dev/null"))\n(allow file-write* ' +
                    ' '.join('(subpath ' + json.dumps(str(p.resolve())) + ')' for p in roots) + ')\n')
 PY
 cp "$profile" "$TRACK_S_OUT/h-isolation.sb"
