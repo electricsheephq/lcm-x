@@ -43,7 +43,7 @@ def test_hung_bind_aborts_with_named_worker(fake_rig, monkeypatch):
     a, checked, final, _, launched, clock = fake_rig
     a.max_wall, a.stagger = 5, 2
     final["complete"] = False
-    monkeypatch.setattr(rig, "read_progress", lambda *args: checked.copy())
+    monkeypatch.setattr(rig, "read_progress", lambda *args, **kw: checked.copy())
     launch = rig.launch
     def hung_launch(job, generation):
         p = launch(job, generation)
@@ -67,7 +67,7 @@ def test_hung_bind_aborts_with_named_worker(fake_rig, monkeypatch):
 def test_successful_launch_and_bind_consume_wall_budget(fake_rig, monkeypatch):
     a, checked, _, _, _, _ = fake_rig
     a.max_wall, a.stagger, a.restart_after, a.restart_fraction = 5, 2, 100, 1
-    monkeypatch.setattr(rig, "read_progress", lambda *args: checked.copy())
+    monkeypatch.setattr(rig, "read_progress", lambda *args, **kw: checked.copy())
     rig.main()
     summary = common.load(a.out/"summary.json")
     assert summary["cpu"]["end"] == 5

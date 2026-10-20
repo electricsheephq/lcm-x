@@ -110,11 +110,30 @@ def guarded_worker(worker, request):
         worker(request)
     except RuntimeError as exc:
         reasons = {"foreground preparation/backfill/join or network": "foreground_preparation_backfill_join_or_network",
-                   "offline subprocess launch": "offline_subprocess_launch"}
-        if str(exc) not in reasons:
+                   "offline subprocess launch": "offline_subprocess_launch",
+                   "foreground/download preparation forbidden": "foreground_preparation_forbidden",
+                   "foreground backfill forbidden": "foreground_backfill_forbidden",
+                   "foreground embedding join forbidden": "foreground_embedding_join_forbidden",
+                   "offline instrument denies network": "offline_network_forbidden"}
+        root = Path(load(request)["root"])
+        events = [json.loads(s) for s in (root/"events.jsonl").read_text().splitlines()] if (root/"events.jsonl").exists() else []
+        event_reasons = {"network_attempt": "offline_network_forbidden", "subprocess_launch": "offline_subprocess_launch",
+                         "foreground_join": "foreground_embedding_join_forbidden"}
+        for event in events:
+            key = event.get("violation") or event.get("event")
+            if event.get("foreground") or event.get("download"):
+                if key == "prepare":
+                    event_reasons[key] = "foreground_preparation_forbidden"
+                elif key in ("_chunk_backfill_run", "_embedding_backfill_summary_run"):
+                    event_reasons[key] = "foreground_backfill_forbidden"
+            if key in event_reasons:
+                reason = event_reasons[key]
+                break
+        else:
+            reason = reasons.get(str(exc))
+        if reason is None:
             raise
-        dump(Path(load(request)["root"])/"raw-summary.json",
-             dict(state="INVALID", reason=reasons[str(exc)]))
+        dump(root/"raw-summary.json", dict(state="INVALID", reason=reason))
 
 
 def runtime(request):

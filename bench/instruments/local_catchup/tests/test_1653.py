@@ -20,7 +20,7 @@ def test_01_screen_has_full_post_bind_window(fake_rig, monkeypatch):
     a.screen16, a.stagger = True, 2
     clock[0] = .25  # Full rolling windows must also work off the integer grid.
     final["complete"] = False
-    monkeypatch.setattr(rig, "read_progress", lambda *args: checked.copy())
+    monkeypatch.setattr(rig, "read_progress", lambda *args, **kw: checked.copy())
     meter = rig.supervisor()
     def summary(*args, **kw):
         lo, hi = kw["aggregate_window"]
@@ -40,7 +40,7 @@ def test_02_restart_does_not_reuse_old_prepared(fake_rig, monkeypatch):
     a, checked, final, _, launched, _ = fake_rig
     a.max_wall = 700
     final["complete"] = False
-    monkeypatch.setattr(rig, "read_progress", lambda *args: checked.copy())
+    monkeypatch.setattr(rig, "read_progress", lambda *args, **kw: checked.copy())
     launch = rig.launch
     def prepared(job, generation):
         p = launch(job, generation)

@@ -27,7 +27,7 @@ def test_restart_inflight_residue_launches_gen1(fake_rig, monkeypatch):
 @pytest.mark.parametrize("incomplete_process", [None, 0, 1])
 def test_rig_final_coverage_overrides_complete(fake_rig, monkeypatch, incomplete_process):
     a, checked, final, _, _, _ = fake_rig
-    monkeypatch.setattr(rig, "read_progress", lambda *args: {**checked, "complete": True})
+    monkeypatch.setattr(rig, "read_progress", lambda *args, **kw: {**checked, "complete": True})
     def final_audit(db, _):
         if incomplete_process is not None and db.parent.name == str(incomplete_process):
             return {**final, "complete": False,

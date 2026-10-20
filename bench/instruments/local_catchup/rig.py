@@ -43,6 +43,17 @@ def main():
     if estimate > a.peak_disk_gb*2**30 or shutil.disk_usage(a.scratch).free < max(150, a.peak_disk_gb+20)*2**30:
         raise RuntimeError("rig disk budget stop")
     jobs, manifests, processes = [], [], []
+    # Bound verified reads to every five minutes; record their measured CPU cost.
+    verify_every_polls, polls, verified_read_cpu_s = 10, 0, 0.
+    def poll_progress(verify):
+        nonlocal verified_read_cpu_s
+        rows = []
+        for job, manifest in zip(jobs, manifests):
+            started_cpu = time.process_time()
+            rows.append(read_progress(job.db, manifest, verify=verify))
+            if verify:
+                verified_read_cpu_s = max(verified_read_cpu_s, time.process_time()-started_cpu)
+        return rows
     meter = supervisor(a, a.out/"cpu.jsonl")
     try:
         for i in range(n):
@@ -95,7 +106,8 @@ def main():
                     dump(a.out/"cross-profile.json", {"paths": foreign})
                     reason = "cross_profile_access"
                     break
-                progress = [read_progress(j.db, m) for j, m in zip(jobs, manifests)]
+                polls += 1
+                progress = poll_progress(polls % verify_every_polls == 0)
                 if any(not r["raw_unchanged"] or r["changed_vectors"] for r in progress):
                     reason = "row_or_vector_corruption"
                     break
@@ -144,6 +156,9 @@ def main():
             for q in processes:
                 stop(q)
     reason = meter.breach or reason
+    progress = poll_progress(True)
+    if any(not r["raw_unchanged"] or r["changed_vectors"] for r in progress):
+        reason = "row_or_vector_corruption"
     progress = [audit(j.db, m) for j, m in zip(jobs, manifests)]
     for j, g, r in zip(jobs, generations, progress):
         dump(j.out/"final-audit.json", r)
@@ -154,7 +169,7 @@ def main():
     if a.screen16 and reason.startswith("bind_timeout:"):
         state = "INVALID"
     if any(audit_failed(r) for r in progress):
-        state, reason = "ABORTED", "final_integrity_or_residue"
+        state, reason = "ABORTED", reason if reason == "row_or_vector_corruption" else "final_integrity_or_residue"
     elif reason == "complete" and not all(r["complete"] for r in progress):
         state, reason = "ABORTED", "final_coverage_regressed"
     for r in progress:
@@ -166,6 +181,7 @@ def main():
              if all(r[k] is not None for r in cpu["per_process"].values()) else None
              for k in ("mean_cores", "p95_rolling60_cores", "peak1s_cores", "peak_rss")}
     dump(a.out/"summary.json", {"state": state, "screen_only_never_gated": a.screen16, "reason": reason,
+         "verify_every_polls": verify_every_polls, "verified_read_cpu_s": verified_read_cpu_s,
          "per_process_progress": progress, "per_process_bind": [load(j.out/f"worker-{g}.json") if (j.out/f"worker-{g}.json").exists() else None for j, g in zip(jobs, generations)],
          "worst_process_fraction": min(fractions), "worst_process_cpu_rss": worst, "cpu": cpu})
 
