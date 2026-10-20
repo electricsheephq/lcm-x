@@ -4247,8 +4247,8 @@ def _chunk_partial_ids(conn, identity_hash):
         return set()
 
 
-def _prune_chunk_partial_messages(conn, identity_hash, lease, chunk_cache):
-    """Drop unpublished intents and proven completions without re-chunking."""
+def _prune_chunk_partial_messages(conn, identity_hash, lease, chunk_cache, policy=""):
+    """Drop discoverable unpublished intents and proven completions without re-chunking."""
     ids = _chunk_partial_ids(conn, identity_hash)
     published = {}
     for sid, cid in conn.execute(
@@ -4260,12 +4260,14 @@ def _prune_chunk_partial_messages(conn, identity_hash, lease, chunk_cache):
                 if all(c.chunk_id in published.get(sid, ()) for c in chunks if c.char_end > c.char_start)}
     # Cloud withholding/token-cap skips can retain partials indefinitely; the
     # half-pass selection quota prevents them starving new local-only work.
+    retained = ids if normalize_content_policy(policy) == "full" else ids & published.keys()
+    value = json.dumps(sorted(retained - complete))
     conn.execute(
-        "UPDATE metadata SET value=? WHERE key=? AND (NOT EXISTS (SELECT 1 FROM metadata WHERE key=?) "
-        "OR EXISTS (SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
-        "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?))",
-        (json.dumps(sorted(ids & published.keys() - complete)), f"chunk_partial_messages:{identity_hash}",
-         _EMBEDDING_BACKFILL_CLAIM_KEY, _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
+        "UPDATE metadata SET value=? WHERE key=? AND value!=? "
+        "AND EXISTS (SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+        "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?)",
+        (value, f"chunk_partial_messages:{identity_hash}", value,
+         _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
     )
 
 
@@ -4278,11 +4280,16 @@ def _record_chunk_partial_messages(conn, identity_hash, lease, store_ids):
         "(SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
         "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?) "
         "ON CONFLICT(key) DO UPDATE SET value=(SELECT json_group_array(value) FROM "
-        "(SELECT value FROM json_each(metadata.value) UNION SELECT value FROM json_each(excluded.value)))",
+        "(SELECT value FROM json_each(metadata.value) UNION SELECT value FROM json_each(excluded.value))) "
+        "WHERE EXISTS (SELECT value FROM json_each(excluded.value) EXCEPT SELECT value FROM json_each(metadata.value))",
         (f"chunk_partial_messages:{identity_hash}", json.dumps(sorted(store_ids)),
          _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
     )
-    if not cur.rowcount:
+    if not cur.rowcount and not conn.execute(
+        "SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+        "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?",
+        (_EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
+    ).fetchone():
         raise _BackfillLeaseLost("embedding backfill lease lost before recording message intents")
 
 
@@ -4351,9 +4358,11 @@ def _chunk_pending_rows(
                     "SELECT chunk_id FROM lcm_chunk_meta WHERE store_id=? AND identity_hash=?",
                     (row[0], identity_hash),
                 )}
-        if row[0] not in chunk_cache:
-            chunk_cache[row[0]] = chunk_message(*row, policy=policy)
-        for chunk in chunk_cache[row[0]]:
+        chunks = chunk_cache.get(row[0])
+        if chunks is None:
+            chunks = chunk_message(*row, policy=policy)
+        selected_before = len(documents)
+        for chunk in chunks:
             chunk_id = chunk.chunk_id
             if chunk_id in already or chunk_id in inflight:
                 continue
@@ -4374,6 +4383,9 @@ def _chunk_pending_rows(
                     chunk.char_start,
                     chunk.char_end,
                 )
+        # Manual scans stream the rest; retain only rows needed by the record.
+        if row[0] in partial_ids or len(documents) > selected_before:
+            chunk_cache[row[0]] = chunks
     return total, documents, meta
 
 
@@ -4546,10 +4558,11 @@ def _chunk_frontier_rows(
     history_limit = _CHUNK_HISTORY_SCAN_MESSAGES if history_limit is None else history_limit
     policy = normalize_content_policy(policy)
     if partial_limit:
+        # Uncertain-only rows must not consume slots before selection's quota.
         yield from conn.execute(
             "SELECT store_id, role, content FROM messages WHERE store_id IN "
-            "(SELECT value FROM json_each(?)) ORDER BY store_id DESC LIMIT ?",
-            (json.dumps(sorted(_chunk_partial_ids(conn, identity_hash))), partial_limit),
+            "(SELECT value FROM json_each(?)) ORDER BY store_id DESC",
+            (json.dumps(sorted(_chunk_partial_ids(conn, identity_hash))),),
         )
     revision = _chunk_policy_revision(conn, identity_hash)
     eligible = ""
@@ -5004,7 +5017,7 @@ def _chunk_backfill_run(
                 "or after the lease TTL expires"
             ), reason="lease_held")
         _prepare_inflight_for_lease(conn, identity, lease)
-        _prune_chunk_partial_messages(conn, identity, lease, chunk_cache)
+        _prune_chunk_partial_messages(conn, identity, lease, chunk_cache, policy=policy)
         captured_identity = EmbeddingIdentity.canonical(
             provider_name,
             model,
@@ -5360,8 +5373,13 @@ def _chunk_backfill_run(
     finally:
         if store is not None:
             if lease is not None:
-                _prune_chunk_partial_messages(conn, identity, lease, chunk_cache)
-                partial_messages = bool(_chunk_partial_ids(conn, identity))
+                try:
+                    _prune_chunk_partial_messages(conn, identity, lease, chunk_cache, policy=policy)
+                    partial_messages = bool(_chunk_partial_ids(conn, identity))
+                except Exception as exc:
+                    logging.getLogger("hermes_lcm").warning("Partial-message prune failed: %s", exc)
+                    partial_messages = True
+                    error = f"{error}; partial-message prune failed: {exc}" if error else str(exc)
             if lease is not None and not lease_lost and not identity_superseded:
                 try:
                     lease.release()
