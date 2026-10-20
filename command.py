@@ -4226,6 +4226,65 @@ def _chunk_inflight_ids(conn: sqlite3.Connection, identity_hash: str | None) -> 
     }
 
 
+def _chunk_partial_ids(conn, identity_hash):
+    saved = conn.execute(
+        "SELECT value FROM metadata WHERE key=?", (f"chunk_partial_messages:{identity_hash}",),
+    ).fetchone()
+    return set(json.loads(saved[0])) if saved else set()
+
+
+def _chunk_partial_rows(conn, identity_hash, policy, *, record_progress=False):
+    """Re-chunk durable dispatch intents; only full publication retires an id."""
+    rows, complete = [], []
+    for store_id in sorted(_chunk_partial_ids(conn, identity_hash), reverse=True):
+        row = conn.execute(
+            "SELECT store_id, role, content FROM messages WHERE store_id=?", (store_id,),
+        ).fetchone()
+        published = conn.execute(
+            "SELECT chunk_id, chunk_index, char_start, char_end FROM lcm_chunk_meta "
+            "WHERE store_id=? AND identity_hash=?",
+            (store_id, identity_hash),
+        ).fetchall()
+        already = {str(item[0]) for item in published}
+        # A single full-source chunk proves completion without a second chunking
+        # call on the ordinary short-message path (#1014's discovery bound).
+        whole = row is not None and any(
+            item[1] == 0 and item[2] == 0 and item[3] == len(row[2]) for item in published
+        )
+        if row is not None and not whole and any(
+            c.char_end > c.char_start and c.chunk_id not in already
+            for c in chunk_message(*row, policy=policy)
+        ):
+            rows.append(row)
+        else:
+            complete.append(store_id)
+    if record_progress and complete:
+        # Remove only proven-complete ids, preserving any concurrently added intent.
+        conn.execute(
+            "UPDATE metadata SET value=(SELECT json_group_array(value) FROM json_each(metadata.value) "
+            "WHERE value NOT IN (SELECT value FROM json_each(?))) WHERE key=?",
+            (json.dumps(complete), f"chunk_partial_messages:{identity_hash}"),
+        )
+    return rows
+
+
+def _record_chunk_partial_messages(conn, identity_hash, lease, store_ids):
+    """Persist before dispatch, so publication/exit/lease loss cannot strand a message."""
+    if not store_ids:
+        return
+    cur = conn.execute(
+        "INSERT INTO metadata(key, value) SELECT ?, ? WHERE EXISTS "
+        "(SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+        "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?) "
+        "ON CONFLICT(key) DO UPDATE SET value=(SELECT json_group_array(value) FROM "
+        "(SELECT value FROM json_each(metadata.value) UNION SELECT value FROM json_each(excluded.value)))",
+        (f"chunk_partial_messages:{identity_hash}", json.dumps(sorted(store_ids)),
+         _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
+    )
+    if not cur.rowcount:
+        raise _BackfillLeaseLost("embedding backfill lease lost before recording message intents")
+
+
 def _chunk_pending_rows(
     conn: sqlite3.Connection,
     identity_hash: str | None,
@@ -4256,6 +4315,7 @@ def _chunk_pending_rows(
         already = set()
         inflight = _chunk_inflight_ids(conn, identity_hash)
         boundary_ids = set(_chunk_cursor(conn, identity_hash) or ()) if include_boundaries else set()
+        revisit_ids = boundary_ids | _chunk_partial_ids(conn, identity_hash)
         rows = _chunk_frontier_rows(
             conn, identity_hash, policy=policy, record_progress=record_progress,
             include_boundaries=include_boundaries,
@@ -4278,7 +4338,7 @@ def _chunk_pending_rows(
                 continue
             seen_rows.add(row[0])
             already = set()
-            if row[0] in boundary_ids:
+            if row[0] in revisit_ids:
                 # Exit may have published only the first batch of this message.
                 # Revisit its remaining chunks without re-embedding committed ones.
                 already = {str(item[0]) for item in conn.execute(
@@ -4473,6 +4533,7 @@ def _chunk_frontier_rows(
     run of tool rows cannot hold the walk in place."""
     history_limit = _CHUNK_HISTORY_SCAN_MESSAGES if history_limit is None else history_limit
     policy = normalize_content_policy(policy)
+    yield from _chunk_partial_rows(conn, identity_hash, policy, record_progress=record_progress)
     revision = _chunk_policy_revision(conn, identity_hash)
     eligible = ""
     if normalize_content_policy(policy) == "conversational":
@@ -4527,12 +4588,22 @@ def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None,
     rows = _chunk_frontier_rows(
         conn, identity_hash, history_limit=_STATUS_CHUNK_SCAN_MESSAGES + 1, policy=policy
     )
+    seen = set()
+    partial_ids = _chunk_partial_ids(conn, identity_hash)
     for scanned, row in enumerate(rows):
         if scanned >= _STATUS_CHUNK_SCAN_MESSAGES:
             return f"{total}+{suffix}"
+        if row[0] in seen:
+            continue
+        seen.add(row[0])
+        already = {str(item[0]) for item in conn.execute(
+            "SELECT chunk_id FROM lcm_chunk_meta WHERE store_id=? AND identity_hash=?",
+            (row[0], identity_hash),
+        )} if row[0] in partial_ids else set()
         pending = sum(
             1 for chunk in chunk_message(row[0], row[1], row[2], policy=policy)
             if chunk.char_end > chunk.char_start and chunk.chunk_id not in inflight
+            and chunk.chunk_id not in already
         )
         total += pending
         if pending and gap_bounds is not None and gap_bounds[0] <= row[0] <= gap_bounds[1]:
@@ -4632,6 +4703,8 @@ def _chunk_backfill_remaining(
                 # interrupt can leave part of this pass's message unfinished.
                 include_boundaries=include_boundaries,
             )
+            # Even held/uncertain chunks leave their recorded message incomplete.
+            remaining = max(remaining, len(_chunk_partial_rows(check_conn, identity_hash, policy)))
             if identity_hash:
                 try:
                     in_flight = int(check_conn.execute(
@@ -4880,6 +4953,7 @@ def _chunk_backfill_run(
     lease: _BackfillLease | None = None
     documents: list[tuple[str, str, int]] = []
     chunk_meta: dict[str, tuple[int, int, int, int]] = {}
+    partial_messages = False
     pending = 0
     embedded = 0
     skipped: list[tuple[str, str]] = []
@@ -4934,7 +5008,7 @@ def _chunk_backfill_run(
             )
             authorized_uncertain_ids = set()
         if maintenance_slice:
-            # Gap discovery cannot revisit a message once any chunk is published.
+            # Keep the existing whole-message slice selection.
             cut = min(len(rows), limit, 32)
             while 0 < cut < len(rows) and chunk_meta[rows[cut - 1][0]][0] == chunk_meta[rows[cut][0]][0]:
                 cut -= 1
@@ -4943,6 +5017,9 @@ def _chunk_backfill_run(
                 while cut < len(rows) and chunk_meta[rows[cut][0]][0] == chunk_meta[rows[0][0]][0]:
                     cut += 1
             rows = rows[:cut]
+        _record_chunk_partial_messages(
+            conn, identity, lease, {chunk_meta[row[0]][0] for row in rows},
+        )
         (
             documents,
             privacy_revision,
@@ -5245,6 +5322,8 @@ def _chunk_backfill_run(
                         error = str(exc)
                         stop_reason = "privacy_refused"
                         break
+        if not lease_lost and not identity_superseded:
+            partial_messages = bool(_chunk_partial_rows(conn, identity, policy, record_progress=True))
         if (
             not incremental and not retry_uncertain and pending == embedded
             and not error and not failed and not skipped and not stop_reason
@@ -5279,6 +5358,8 @@ def _chunk_backfill_run(
         failed=failed, uncertain=uncertain_count, skipped=len(skipped),
         privacy_withheld=privacy_withheld,
     )
+    if status == "complete" and partial_messages:
+        status = "partial"
     estimated_tokens, estimated_cost_tokens, estimated_batches = _chunk_backfill_estimates(
         documents=documents, provider_name=provider_name, model=model, config=config,
     )
