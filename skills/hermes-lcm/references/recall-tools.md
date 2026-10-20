@@ -69,6 +69,7 @@ Use for semantic discovery across all conversations stored in the local LCM data
 
 - `scope_bias` and recency are ranking boosts, never hard filters.
 - `include` selects all, summary, or verbatim hits.
+- A recorded embedding backlog adds `degraded: true` and a `summary semantic index catching up` or `chunk semantic index catching up` reason, with remaining rows when known. Non-FastEmbed uncertain rows instead report `<corpus> semantic index has N rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus <summary|chunks>`. Ingest marks an existing chunk backlog when automatic chunk passes cannot run; manual backfill clears it. Ordinary automatic ingest lag and no recorded pass add no reason. Coverage values describe the kNN scan and stay unchanged.
 - `detail='snippets'` is the default.
 - `detail='answer_ready'` adds bounded per-session diversity and exact-ref hydration.
 - Exact message copies (same session/conversation, role, tool-call id and full content) count once against delivery, per-session, expansion and response budgets. The best-ranked stamped member (or best-ranked member if none is stamped) represents the group at its best-ranked position with the maximum fused score and union of arms; `duplicate_store_ids` lists the sorted other ids only when non-empty. Summaries are never grouped. Raw reads and expansion of any id stay unchanged. Grouping is always on, with no config key; duplicate-free output is unchanged.
