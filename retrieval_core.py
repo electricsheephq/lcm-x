@@ -17,6 +17,7 @@ lexical to that module.
 from __future__ import annotations
 
 import copy
+import hashlib
 import sqlite3
 import threading
 import time
@@ -172,7 +173,7 @@ def _shape_message_hit(
 ) -> dict[str, Any]:
     """Shape a raw MessageStore hit into an lcm_grep result row."""
     timestamp_value = hit.get("timestamp", 0) or 0
-    return {
+    result = {
         "type": "message",
         "depth": "raw",
         "store_id": hit["store_id"],
@@ -188,6 +189,9 @@ def _shape_message_hit(
         "_sort_rank": hit.get("search_rank"),
         "_sort_directness": hit.get("_directness_score") or 0.0,
     }
+    if hit.get("duplicate_store_ids"):
+        result["duplicate_store_ids"] = hit["duplicate_store_ids"]
+    return result
 
 
 def _shape_summary_hit(node: Any) -> dict[str, Any]:
@@ -518,6 +522,103 @@ def _hit_identity(hit: dict[str, Any]) -> tuple[str, Any]:
     return ("message", hit.get("store_id"))
 
 
+def collapse_duplicate_candidates(
+    entries: list[dict[str, Any]], rows: dict[int, dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Group exact message copies before delivery quotas, without changing rows.
+
+    Keep the group's first ranked position, earliest stored representation,
+    maximum fused score and union of best arm ranks. Missing source identity
+    degrades to ungrouped delivery. Singleton entries remain untouched.
+    """
+    groups: dict[tuple, list[dict[str, Any]]] = {}
+    for index, entry in enumerate(entries):
+        hit = entry["hit"]
+        row = rows.get(hit.get("store_id"))
+        key: tuple = ("ungrouped", index)
+        if (
+            hit.get("kind", hit.get("type")) != "summary"
+            and hit.get("node_id") is None
+            and row is not None
+            and row.get("session_id")
+            and row.get("role")
+            and isinstance(row.get("content"), str)
+        ):
+            key = (
+                "message", row["session_id"], row.get("conversation_id") or "",
+                row["role"], row.get("tool_call_id") or "",
+                hashlib.sha256(row["content"].encode("utf-8")).digest(),
+            )
+        groups.setdefault(key, []).append(entry)
+    output = []
+    for members in groups.values():
+        if len(members) == 1:
+            output.append(members[0])
+            continue
+        representative = min(members, key=lambda e: int(e["hit"]["store_id"]))
+        entry = {**representative, "hit": dict(representative["hit"]), "ranks": {}}
+        # Full content is identical, so another copy's verified excerpt can
+        # cite the representative row too, including past the hydration cap.
+        entry["_alternates"] = [
+            hit for member in members
+            for hit in [member["hit"], *member.get("_alternates", [])]
+            if hit is not representative["hit"]
+        ]
+        ids = set()
+        for member in members:
+            ids.add(int(member["hit"]["store_id"]))
+            ids.update(member["hit"].get("duplicate_store_ids", []))
+            for arm, rank in member["ranks"].items():
+                entry["ranks"][arm] = min(rank, entry["ranks"].get(arm, rank))
+        ids.discard(int(entry["hit"]["store_id"]))
+        if ids:
+            entry["hit"]["duplicate_store_ids"] = sorted(ids)
+        entry["rrf_score"] = max(member["rrf_score"] for member in members)
+        output.append(entry)
+    return output
+
+
+def collapse_duplicate_hits(hits: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Use already-loaded full MessageStore search rows for grep grouping."""
+    rows = {hit["store_id"]: hit for hit in hits}
+    entries = [{"hit": hit, "rrf_score": 0.0, "ranks": {}} for hit in hits]
+    return [entry["hit"] for entry in collapse_duplicate_candidates(entries, rows)]
+
+
+def duplicate_identity_rows(
+    engine: "LCMEngine", entries: list[dict[str, Any]], *, deadline: float,
+) -> dict[int, dict[str, Any]]:
+    """One bounded read of full identity, never a SELECT per candidate."""
+    ids = list(dict.fromkeys(
+        entry["hit"]["store_id"] for entry in entries
+        if entry["hit"].get("kind") != "summary"
+        and entry["hit"].get("store_id") is not None
+    ))
+    if not ids or time.monotonic() >= deadline:
+        return {}
+    conn = None
+    try:
+        uri = f"{Path(engine._store.db_path).resolve().as_uri()}?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=max(0.001, deadline - time.monotonic()))
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+        placeholders = ",".join("?" for _ in ids)
+        rows = conn.execute(
+            "SELECT store_id, session_id, conversation_id, role, tool_call_id, content "
+            f"FROM messages WHERE store_id IN ({placeholders})", ids,
+        ).fetchall()
+        if time.monotonic() >= deadline:
+            return {}
+        return {int(row["store_id"]): dict(row) for row in rows}
+    except (sqlite3.Error, OSError):
+        # A failed identity read must never hide a potentially distinct row.
+        return {}
+    finally:
+        if conn is not None:
+            conn.close()
+
+
 def rrf_fuse(
     arms: list[list[dict[str, Any]]],
     k: int = 60,
@@ -763,7 +864,10 @@ def place_fts_anchor(
         return ordered, info
     anchor = _hit_identity(arm_hits["fts"][0])
     j = next(
-        (i for i, entry in enumerate(ordered) if _hit_identity(entry["hit"]) == anchor),
+        (i for i, entry in enumerate(ordered) if (
+            _hit_identity(entry["hit"]) == anchor
+            or (anchor[0] == "message" and anchor[1] in entry["hit"].get("duplicate_store_ids", []))
+        )),
         None,
     )
     if j is None or j < limit:

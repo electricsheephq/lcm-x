@@ -74,6 +74,9 @@ from .retrieval_core import (
     _lcm_recall_recency_boost as _lcm_recall_recency_boost,  # re-export for direct imports; the prior runs it in retrieval_core
     apply_prior,
     fuse_candidates,
+    collapse_duplicate_candidates,
+    collapse_duplicate_hits,
+    duplicate_identity_rows,
     place_fts_anchor,
     _lcm_grep_confidence,
     _lcm_grep_deadline_error,
@@ -1198,6 +1201,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 **({"stemmed": True} if args.get("_stemmed") else {}),
                 **({"agent_operators": True} if args.get("_agent_operators") else {}),
             )
+            if args.get("mode") != "recall":
+                msg_hits = collapse_duplicate_hits(msg_hits)
             for hit in msg_hits:
                 if hit.get("session_id") in excluded_session_ids:
                     continue
@@ -4209,6 +4214,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
     ordered, arm_order, arm_weights = fuse_candidates(
         arm_hits, getattr(engine._config, "recall_arm_weights", None)
+    )
+    ordered = collapse_duplicate_candidates(
+        ordered, duplicate_identity_rows(engine, ordered, deadline=deadline)
     )
     fts_arm_index = arm_order.index("fts") if "fts" in arm_order else None
     now = time.time()

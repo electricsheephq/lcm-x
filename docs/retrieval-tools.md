@@ -188,6 +188,26 @@ usable result before the deadline, the semantic arm is not started and an
 explicit timeout is returned. Fusion expiry also returns an explicit timeout.
 No external reranker is called.
 
+### Exact duplicate message delivery (`lcm_recall` / `lcm_grep`)
+
+Exact stored copies of a message count once against delivery limits, per-session
+quotas, expansion quotas and response budgets. The key is the session and
+conversation identity, role, tool-call id (empty when absent), and SHA-256 of the
+**full stored content**. Summaries are never grouped; chunks of the same message
+still fuse by `store_id` first.
+
+The representative has the smallest matching `store_id`. Recall keeps the
+maximum fused score and union of retrieval arms. Only grouped hits carry
+`duplicate_store_ids`: sorted other store ids, excluding the representative.
+For example, `{"store_id": 12, "duplicate_store_ids": [19, 27]}` identifies
+three stored copies through one delivered hit. This is on by default with no
+config key. Duplicate-free responses retain their existing bytes.
+
+Grouping affects delivery only: raw reads and `lcm_expand(store_id=...)` still
+return each row independently. It neither changes the store nor repairs the
+writers that produced duplicates. A failed or expired identity read leaves
+recall candidates ungrouped rather than hiding potentially distinct evidence.
+
 ### Weighted RRF fusion (lcm_recall)
 
 `lcm_recall` fuses three arms — full-text raw messages, summary-vector KNN, and
