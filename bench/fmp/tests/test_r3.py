@@ -92,7 +92,7 @@ def test_regression_claude_missing_usage(tmp_path):
 
 @pytest.mark.parametrize("reason,extra", [("tool_violation", {"status": "tool_violation"}),
     ("timeout", {"calls": [{"status": "error", "error": "timeout"}]}),
-    ("model_mismatch", {"judge_calls": [{"status": "error", "error": "model_mismatch"}]}),
+    ("model_mismatch", {"judge_calls": [{"requested_model": MODEL, "status": "error", "error": "model_mismatch"}]}),
     ("invalid_verdict", {"judges": {MODEL: {"status": "ok", "correct": None}}}),
     ("reader_error", {"status": "error"})])
 def test_regression_shared_validity_mask(tmp_path, reason, extra):

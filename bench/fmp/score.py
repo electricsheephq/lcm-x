@@ -8,7 +8,7 @@ from pathlib import Path
 
 from .common import write_json
 from .closeout import result_card, snapshot
-from .models import JUDGES
+from .models import JUDGES, parse_spec
 from .judges import parse
 
 
@@ -51,7 +51,10 @@ def correct(row, model):
 
 
 def invalid(row, models):
-    calls = row.get("calls", []) + row.get("judge_calls", [])
+    requested = set(models) | {parse_spec(m)[1] for m in models if parse_spec(m)[0] == "openrouter"}
+    # Judge-call failures count against their own judge; a call without attribution (older records) stays row-wide.
+    calls = row.get("calls", []) + [c for c in row.get("judge_calls", [])
+                                    if not c.get("requested_model") or c.get("requested_model") in requested]
     reasons = {c.get("error") for c in calls} & {"timeout", "model_mismatch"}
     if row["status"] == "tool_violation" or any(c.get("violations") or c.get("status") == "tool_violation" for c in calls):
         reasons.add("tool_violation")
@@ -69,7 +72,7 @@ def invalid(row, models):
 EXCLUDED = ("skipped", "not_run")  # skips: explicit denominators; not_run: spend stops (D7)
 IDENTITY = ("lcmx_commit", "harness_commit", "split_label", "dataset_sha256", "id_list_sha256", "judges",
             "agreement_judge", "summaries", "agreement_sample", "agreement_seed", "agreement_fraction",
-            "harness_tree_sha256")
+            "harness_tree_sha256", "toolset")
 TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "wrapper_overhead_tokens")
 
 
@@ -120,7 +123,7 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
     if not sets or any(ids != sets[0] for ids in sets):
         raise ValueError("paired runs require identical question ids")
     for key in IDENTITY:
-        if pair_across_commits and key == "lcmx_commit":
+        if pair_across_commits and key in ("lcmx_commit", "toolset"):
             continue
         if len({json.dumps(m.get(key)) for m in manifests.values()}) != 1:
             raise ValueError("paired runs require identical " + key)
@@ -162,8 +165,9 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
                         for t in sorted({r["qtype"] for r in rows})},
             "agreement": agreement(*[[r["judges"][m]["correct"] for r in valid] for m in pair]) if pair else None,
             "tool_calls_per_question": mean([r.get("tool_calls", 0) for r in eligible]),
-            "reader_tokens_per_question": usage(calls, len(eligible)),
-            "judge_tokens_per_question": usage(judge_calls, len(eligible)),
+            "tokens_per_question_population": "all attempted rows (excluding skipped and not_run), including failures",
+            "reader_tokens_per_question": usage([c for r in attempted for c in r.get("calls", [])], len(attempted)),
+            "judge_tokens_per_question": usage([c for r in attempted for c in r.get("judge_calls", [])], len(attempted)),
             "quota": quota(calls + judge_calls),
             "latency_p50_s": percentile([r.get("latency_s", 0) for r in eligible], .5),
             "latency_p90_s": percentile([r.get("latency_s", 0) for r in eligible], .9),
@@ -211,7 +215,8 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
     report = {"arms": summaries, "paired": comparisons, "bootstrap_resamples": 10_000,
               "claim": "attempted errors count incorrect; skips and not_run excluded; paired tests use valid rows only"}
     if pair_across_commits:
-        report.update(paired_across="lcmx_commit", lcmx_commits=commits)
+        report.update(paired_across="lcmx_commit", lcmx_commits=commits,
+                      toolsets={arm: m.get("toolset") for arm, m in manifests.items()})
     report["tokens_500_per_arm"] = {arm: {k: 500 * (s["reader_tokens_per_question"][k] + s["judge_tokens_per_question"][k])
                                           if all(s[t][k] is not None for t in ("reader_tokens_per_question", "judge_tokens_per_question")) else None
                                           for k in ("input_tokens", "output_tokens")} for arm, s in summaries.items()}
@@ -220,16 +225,15 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         estimates = {}
         for arm, summary in summaries.items():
             factor = 500 / max(1, summary["n"])
-            estimates[arm] = {"sol_500_one_config_usd": factor * summary["cost"],
-                "opus_500_one_config_usd": factor * (2 * summary["reader_cost"] + summary["judge_cost"]),
-                "wall_500_one_config_s_at_observed_workers": factor * summary["wall_s"]}
+            estimates[arm] = {"usd_500": factor * summary["cost"],
+                              "wall_500_s_at_observed_workers": factor * summary["wall_s"]}
         report["full_run_estimate"] = {"arms": estimates,
-            "matrix": "500 LME-S x off/local x agentic/single/full_context x sol/opus = 6000 answers, 12000 judgments",
-            "total_usd": sum(e["sol_500_one_config_usd"] + e["opus_500_one_config_usd"] for e in estimates.values()),
-            "wall_s_at_observed_workers": 4 * sum(e["wall_500_one_config_s_at_observed_workers"] for e in estimates.values()),
-            "assumptions": "Linear smoke extrapolation, identical token counts; Opus reader priced 2x Sol. "
-                           "Equal reader latency assumed (unmeasured); excludes local build and rerank. "
-                           "At workers=12 vs smoke=3, ideal wall time is 1/4; not a measured speedup."}
+            "matrix": f"500 questions x {len(estimates)} supplied arms = {500 * len(estimates)} answers, "
+                      f"{500 * len(estimates) * len(full)} judgments; arms: " + "; ".join(estimates),
+            "total_usd": sum(e["usd_500"] for e in estimates.values()),
+            "wall_s_at_observed_workers": sum(e["wall_500_s_at_observed_workers"] for e in estimates.values()),
+            "assumptions": "Linear smoke extrapolation for supplied arms only, identical token counts and latency; "
+                           "excludes local build and rerank. No unmeasured reader or worker scaling."}
     sample = random.Random(1189).sample(disagreements, min(50, len(disagreements)))
     report["adjudication"] = {"disagreements": len(disagreements), "sampled": len(sample), "seed": 1189}
     write_json(output / "report.json", report)
@@ -277,7 +281,7 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
                   "| Matrix | " + e["matrix"] + " |",
                   f"| Total USD | {e['total_usd']:.2f} |",
                   f"| Wall hours, observed workers | {e['wall_s_at_observed_workers'] / 3600:.2f} |",
-                  f"| Wall hours, ideal workers=12 | {e['wall_s_at_observed_workers'] / 14400:.2f} |"]
+                  "| Supplied arms | " + "; ".join(e["arms"]) + " |"]
     (output / "report.md").write_text("\n".join(lines) + "\n")
     result_card(output, report, allow_partial, pair_across_commits, snapshots)
     return report

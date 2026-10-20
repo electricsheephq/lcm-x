@@ -32,7 +32,7 @@ def test_attempted_failures_count_in_accuracy(tmp_path):
 def test_cost_projection_not_doubled(tmp_path):
     path = arm(tmp_path, "off", [row(0, calls=[{"cost": 2}], judge_calls=[{"cost": 1}])])
     result = score.score([path], tmp_path / "report")
-    assert result["full_run_estimate"]["total_usd"] == 500 * (3 + 5)
+    assert result["full_run_estimate"]["total_usd"] == 500 * 3
 
 
 

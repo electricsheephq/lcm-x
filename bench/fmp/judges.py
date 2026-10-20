@@ -50,19 +50,19 @@ def parse(text, dataset):
     return match.group(1).upper() == "CORRECT"
 
 
-def judge(q, hypothesis, client, records=None, models=JUDGES):
+def judge(q, hypothesis, client, records=None, models=JUDGES, agreement_model=None):
     # BudgetStopped propagates: a spend stop is a run state, not a verdict.
     results, records = {}, records if records is not None else []
-    for model in models:
+    for model in dict.fromkeys([*models, *([agreement_model] if agreement_model else [])]):
         verdict, raw, error = None, [], None
         for attempt in range(2):
             try:
                 message = client.call(model, messages(q, hypothesis), records,
                                       temperature=None if q.dataset.startswith("lme") else 0)
             except BudgetStopped:
-                if model == models[0]:
+                if model in models:
                     raise
-                error = "budget_stopped"  # a stopped secondary judge never voids the primary verdict
+                error = "budget_stopped"  # only the optional agreement judge can stop without voiding the row
                 break
             except Exception as exc:
                 error = type(exc).__name__
@@ -77,13 +77,13 @@ def judge(q, hypothesis, client, records=None, models=JUDGES):
     return results, records
 
 
-def judge_row(row, q, client, models=JUDGES):
+def judge_row(row, q, client, models=JUDGES, agreement_model=None):
     # Only answered rows are judged: errors score incorrect unjudged; skips and not_run are excluded.
     if row["status"] != "ok":
         return row
     records = []
     try:
-        result, _ = judge(q, row["hypothesis"], client, records, models)
+        result, _ = judge(q, row["hypothesis"], client, records, models, agreement_model)
     except BudgetStopped:
         return {**row, "status": "not_run", "reason": "budget_stopped_at_judge", "judge_calls": records}
     return {**row, "judges": result, "judge_calls": records}

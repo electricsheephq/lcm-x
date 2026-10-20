@@ -133,15 +133,21 @@ billable count. Reader errors (never judged) and judge errors count incorrect;
 full-context skips have explicit counts and denominators. A spend-guard stop is a
 run state (as is HTTP 402, an exhausted OpenRouter balance): those rows are `not_run`, excluded from scoring, the manifest says
 `incomplete`, and `score` refuses unequal run sets unless `--allow-partial`.
-`score` also requires equal commits, split label, dataset and id-list hashes. Agreement uses only
+Every `--judge` model is required: a stop from any required judge excludes the row.
+Only `--agreement-judge` stops and failures leave required verdicts intact and drop the sample from agreement.
+`score` also requires equal commits, offered toolsets, split label, dataset and id-list hashes.
+Explicit `--pair-across-commits` permits toolset changes and records each arm's toolset. Agreement uses only
 valid paired verdicts and reports its N. Paired comparisons exclude a question
 if either arm skipped it. Bootstrap uses 10,000 resamples with seed 1189.
 
 `report.md` contains tables only; `report.json` retains statistics, per-type
 accuracies and smoke-scaled estimates. `adjudicate.jsonl` has a seeded random
-sample of at most 50 blinded disagreements without arm labels. Full-run estimates assume the same token counts,
-Opus reader pricing twice Sol and equal latency; local build time, retrieval
-quality changes and actual Opus reader latency are unmeasured.
+sample of at most 50 blinded disagreements without arm labels. Token averages include all attempted
+rows and their calls, excluding `skipped` and `not_run` rows, including failures.
+Full-run estimates scale only supplied arms to 500 questions with the same token counts and latency;
+local build time, retrieval quality changes, unmeasured readers and worker scaling are excluded.
+Paired arms record their own active work time, excluding time spent in the other arm.
+Reader specs without a known context length are rejected at CLI parse time.
 
 Judges: LME parses a leading yes/no word (any case, trailing punctuation). LoCoMo
 sends OmniMemEval's system prompt and temperature 0 where the pinned endpoint lists
