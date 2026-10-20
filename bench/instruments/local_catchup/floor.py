@@ -98,6 +98,7 @@ def main():
             if not (a.out/"summary.json").exists():
                 dump(a.out/"summary.json", dict(state="ABORTED", reason="outer_deadline", label=LABEL))
             label_results(a.out)
+            raise SystemExit(3)
         if code:
             raise subprocess.CalledProcessError(code, proc.args)
         return
@@ -112,6 +113,7 @@ def main():
     except (TimeoutError, subprocess.TimeoutExpired):
         dump(a.out/"summary.json", dict(state="ABORTED", reason="floor_deadline", label=LABEL,
             shape=a.shape, baseline=a.baseline))
+        raise SystemExit(3)
     finally:
         signal.alarm(0)
         signal.signal(signal.SIGTERM, previous)
