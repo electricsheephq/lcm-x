@@ -108,7 +108,7 @@ def main():
                     break
                 polls += 1
                 progress = poll_progress(polls % verify_every_polls == 0)
-                if any(not r["raw_unchanged"] or r["changed_vectors"] for r in progress):
+                if any(not r["raw_unchanged"] or r["changed_vectors"] or r.get("changed_metadata") for r in progress):
                     reason = "row_or_vector_corruption"
                     break
                 append(a.out/"progress.jsonl", {"elapsed_s": time.monotonic()-started, "per_process": progress})
@@ -157,7 +157,7 @@ def main():
                 stop(q)
     reason = meter.breach or reason
     progress = poll_progress(True)
-    if any(not r["raw_unchanged"] or r["changed_vectors"] for r in progress):
+    if any(not r["raw_unchanged"] or r["changed_vectors"] or r.get("changed_metadata") for r in progress):
         reason = "row_or_vector_corruption"
     progress = [audit(j.db, m) for j, m in zip(jobs, manifests)]
     for j, g, r in zip(jobs, generations, progress):

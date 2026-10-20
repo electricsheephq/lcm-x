@@ -216,7 +216,7 @@ def integrity(a, manifest):
         now = preimage(c, len(manifest["expected"]["leaves"]))
         if now["provenance"] != manifest["preimage"]["provenance"]:
             raise RuntimeError("corpus provenance corruption")
-        changed_metadata = [k for k, v in manifest["preimage"]["metadata"].items() if now["metadata"].get(k) != v]
+        changed_metadata = [k for k, v in (manifest.get("observed_metadata", {}) | manifest["preimage"]["metadata"]).items() if now["metadata"].get(k) != v]
         dump(a.root/"final-integrity.json", dict(corpus_raw_digest=digest(original),
             expected_raw_digest=manifest["preimage"]["raw_digest"],
             changed_metadata=changed_metadata,
