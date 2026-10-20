@@ -2752,7 +2752,7 @@ def test_answer_ready_keeps_missing_session_refs_independently_eligible():
     assert dropped == 0
 
 
-def test_answer_ready_centers_message_content_on_exact_chunk_span(
+def test_answer_ready_centers_message_content_on_fts_span_when_fused(
     recall_engine, monkeypatch
 ):
     match = "kanban dashboard sprint"
@@ -2779,7 +2779,11 @@ def test_answer_ready_centers_message_content_on_exact_chunk_span(
     )
 
     hit = payload["hits"][0]
-    expected_offset = (match_start + match_end) // 2 - 1_200
+    # Only the middle word has token boundaries in FTS; B2 uses its actual
+    # match rather than reporting the wider semantic chunk as lexical evidence.
+    fts_start = content.index("dashboard")
+    fts_end = fts_start + len("dashboard")
+    expected_offset = (fts_start + fts_end) // 2 - 1_200
     assert hit["store_id"] == store_id
     assert hit["content_offset"] == expected_offset
     assert len(hit["content"]) == 2_400
@@ -2790,8 +2794,8 @@ def test_answer_ready_centers_message_content_on_exact_chunk_span(
     assert hit["role"] == "user"
     assert hit["source"] == "chat"
     assert hit["evidence_span"] == {
-        "char_start": match_start,
-        "char_end": match_end,
+        "char_start": fts_start,
+        "char_end": fts_end,
     }
 
 

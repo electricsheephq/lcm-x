@@ -2440,6 +2440,33 @@ def _lcm_recall_verified_span(
     return offset, len(text)
 
 
+def _lcm_recall_fts_match_span(
+    snippet: Any, content: str,
+) -> tuple[int, int] | None:
+    """Map a marked FTS snippet to an unambiguous span in the raw row.
+
+    SQLite's ellipses and highlight delimiters are presentation, not source
+    bytes. Use a contiguous snippet fragment as the anchor, and decline stale,
+    ambiguous or delimiter-colliding text rather than inventing an offset.
+    """
+    if ">>>" in content or "<<<" in content:
+        return None
+    for fragment in str(snippet or "").split("..."):
+        # Recall clips previews at 300 chars, possibly inside a highlight.
+        if fragment.count(">>>") > fragment.count("<<<"):
+            fragment = fragment[:fragment.rfind(">>>")]
+        match = re.search(r">>>(.+?)<<<", fragment, re.DOTALL)
+        if match is None:
+            continue
+        plain = fragment.replace(">>>", "").replace("<<<", "")
+        offset = content.find(plain)
+        if offset < 0 or content.find(plain, offset + 1) >= 0:
+            continue
+        start = offset + len(fragment[:match.start()].replace(">>>", "").replace("<<<", ""))
+        return start, start + len(match[1])
+    return None
+
+
 def _lcm_recall_citable_entries(
     ordered: list[dict[str, Any]],
     *,
@@ -2584,9 +2611,9 @@ class _LcmRecallStrictSelector:
     proof and the same snapshot is handed to hydration. Past that budget the hit
     ships its own excerpt, so the excerpt must be found at its offset. When a row
     surfaced through several arms, each arm's representation is tried in turn: an
-    FTS match window is not a verbatim prefix and will not verify, but the chunk
-    or summary-source representation of the same row does, and delivering that is
-    not a swap -- it is the same row, quoted somewhere it really says.
+    FTS match window is mapped back to the raw row before verification; a chunk
+    or summary-source representation can also supply a verified excerpt. Each
+    representation quotes the same row somewhere it really says the text.
     """
 
     def __init__(
@@ -2744,11 +2771,23 @@ class _LcmRecallStrictSelector:
             }
             span = _lcm_recall_verified_span(probe, row)
             if span is None:
+                match_span = _lcm_recall_fts_match_span(
+                    candidate.get("_fts_snippet", candidate.get("snippet")),
+                    str(row.get("content") or ""),
+                )
+                if match_span is not None:
+                    window = _lcm_recall_content_window(
+                        row["content"], match_start=match_span[0], match_end=match_span[1],
+                        char_cap=_LCM_RECALL_SNIPPET_CHARS,
+                    )
+                    probe.update(snippet=window["content"], content_offset=window["content_offset"])
+                    span = _lcm_recall_verified_span(probe, row)
+            if span is None:
                 continue
-            if candidate is not hit:
+            if candidate is not hit or probe["snippet"] != hit.get("snippet"):
                 # Same row, quoted where it really says it.
-                hit["snippet"] = candidate.get("snippet")
-                hit["content_offset"] = candidate.get("content_offset")
+                hit["snippet"] = probe["snippet"]
+                hit["content_offset"] = probe["content_offset"]
                 if candidate.get("chunk_span"):
                     hit["chunk_span"] = candidate["chunk_span"]
                 hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
@@ -3040,6 +3079,16 @@ def _lcm_recall_answer_ready_content(
             continue
         content = str(stored.get("content") or "")
         span = hit.get("chunk_span") or {}
+        if fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
+            # Fusion may retain a chunk preview; use the FTS representation of
+            # this same row when it is available, before the literal fallback.
+            for candidate in [hit, *entry.get("_alternates", [])]:
+                match_span = _lcm_recall_fts_match_span(
+                    candidate.get("_fts_snippet", candidate.get("snippet")), content,
+                )
+                if match_span is not None:
+                    span = {"char_start": match_span[0], "char_end": match_span[1]}
+                    break
         try:
             match_start = int(span["char_start"])
             match_end = int(span["char_end"])
@@ -3168,6 +3217,7 @@ def _lcm_recall_fts_arm(
             "timestamp": row.get("timestamp") or 0,
             "content_offset": 0,
             "snippet": (row.get("snippet") or "")[:_LCM_RECALL_SNIPPET_CHARS],
+            "_fts_snippet": row.get("snippet") or "",
             "from_current_session": bool(row.get("from_current_session")),
         }
         hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
