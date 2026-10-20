@@ -475,7 +475,7 @@ def test_c_a_call_that_outlives_its_configured_timeout_to_the_usable_deadline_is
     assert breaker._failures == {} and len(guard._calls) == 1
 
 
-def test_c_a_two_calls_cut_at_the_usable_deadline_leave_the_route_allowed(monkeypatch, clock):
+def test_c_a_full_window_deadline_hangs_open_each_route_before_the_next_compaction(monkeypatch, clock):
     provider = _provider_cut_at_stream_deadline(monkeypatch, clock)
     breaker = escalation.SummaryCircuitBreaker()
     for _ in range(2):
@@ -487,9 +487,10 @@ def test_c_a_two_calls_cut_at_the_usable_deadline_leave_the_route_allowed(monkey
                 "source text " * 400, source_tokens=4000, token_budget=50, model="m1", fallback_models=["m2"],
                 timeout=60.0, circuit_breaker=breaker, budget=budget)
         assert raised.value.reason == "time_budget_exhausted"
-    assert [model for model, _timeout, _started in provider.calls] == ["m1", "m1"]
-    assert breaker.allows("m1")
-    assert breaker._failures == {} and breaker._open_until == {}
+    assert [model for model, _timeout, _started in provider.calls] == ["m1", "m2"]
+    assert not breaker.allows("m1") and not breaker.allows("m2")
+    assert breaker._failures == {}
+    assert all(breaker.route_status([model])["last_error_class"] == "hung" for model in ("m1", "m2"))
 
 
 def test_c_a_call_past_its_timeout_on_a_host_without_the_deadline_seam_stays_a_route_failure(monkeypatch, clock):

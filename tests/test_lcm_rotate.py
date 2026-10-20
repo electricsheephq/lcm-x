@@ -5,7 +5,7 @@ import os
 import re
 from pathlib import Path
 
-from hermes_lcm.command import handle_lcm_command
+from hermes_lcm.command import _rotate_apply_unchecked, handle_lcm_command
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 
@@ -85,7 +85,7 @@ def test_rotate_apply_advances_frontier_and_writes_rolling_backup(tmp_path):
     engine = _build_engine(tmp_path, fresh_tail_count=3)
     _seed_messages(engine, count=10)
 
-    result = handle_lcm_command("rotate apply", engine)
+    result = _rotate_apply_unchecked(engine)
 
     assert "LCM rotate apply" in result
     assert "status: ok" in result
@@ -117,7 +117,7 @@ def test_rotate_apply_preserves_raw_messages_for_lossless_recovery(tmp_path):
     engine = _build_engine(tmp_path, fresh_tail_count=2)
     _seed_messages(engine, count=8)
 
-    handle_lcm_command("rotate apply", engine)
+    _rotate_apply_unchecked(engine)
 
     # All 8 raw messages remain in the store after rotate — frontier only
     # changes the bootstrap replay boundary, never deletes raw history.
@@ -130,14 +130,14 @@ def test_rotate_apply_rerun_is_idempotent_and_preserves_existing_backup(tmp_path
     engine = _build_engine(tmp_path, fresh_tail_count=3)
     _seed_messages(engine, count=10)
 
-    first = handle_lcm_command("rotate apply", engine)
+    first = _rotate_apply_unchecked(engine)
     assert "status: ok" in first
     first_backup = Path(_extract_field(first, "rotate_backup_path"))
     assert first_backup.exists()
     first_size = first_backup.stat().st_size
     first_mtime = first_backup.stat().st_mtime
 
-    second = handle_lcm_command("rotate apply", engine)
+    second = _rotate_apply_unchecked(engine)
     assert "status: noop" in second
     assert "reason: frontier_already_ahead" in second
     assert (
@@ -161,7 +161,7 @@ def test_rotate_apply_rolling_backup_overwrites_prior_slot_on_actual_rotate(tmp_
     engine = _build_engine(tmp_path, fresh_tail_count=3)
     _seed_messages(engine, count=10)
 
-    first = handle_lcm_command("rotate apply", engine)
+    first = _rotate_apply_unchecked(engine)
     assert "status: ok" in first
     first_backup = Path(_extract_field(first, "rotate_backup_path"))
     assert first_backup.exists()
@@ -176,7 +176,7 @@ def test_rotate_apply_rolling_backup_overwrites_prior_slot_on_actual_rotate(tmp_
     older = first_mtime - 5.0
     os.utime(first_backup, (older, older))
 
-    second = handle_lcm_command("rotate apply", engine)
+    second = _rotate_apply_unchecked(engine)
     assert "status: ok" in second
     second_backup = Path(_extract_field(second, "rotate_backup_path"))
     assert second_backup == first_backup, "rotate should reuse the rolling slot, not create a new file"
@@ -214,7 +214,7 @@ def test_rotate_apply_refuses_on_ignored_session_without_writing_backup(tmp_path
     _seed_messages(engine, count=8)
     engine._session_ignored = True
 
-    result = handle_lcm_command("rotate apply", engine)
+    result = _rotate_apply_unchecked(engine)
 
     assert "status: refused" in result
     assert "reason: session_ignored" in result
@@ -227,7 +227,7 @@ def test_rotate_apply_refuses_on_stateless_session_without_writing_backup(tmp_pa
     _seed_messages(engine, count=8)
     engine._session_stateless = True
 
-    result = handle_lcm_command("rotate apply", engine)
+    result = _rotate_apply_unchecked(engine)
 
     assert "status: refused" in result
     assert "reason: session_stateless" in result
@@ -263,7 +263,7 @@ def test_lcm_status_reports_last_rotate_at_after_apply(tmp_path):
     before = handle_lcm_command("status", engine)
     assert "last_rotate_at: (never)" in before
 
-    handle_lcm_command("rotate apply", engine)
+    _rotate_apply_unchecked(engine)
 
     after = handle_lcm_command("status", engine)
     # Pin the format: UTC ISO-8601 with seconds precision and +00:00 offset.
@@ -336,7 +336,7 @@ def test_rotate_apply_aborts_and_preserves_state_when_backup_write_fails(tmp_pat
     backup_dir.write_text("not a directory")
 
     try:
-        result = handle_lcm_command("rotate apply", engine)
+        result = _rotate_apply_unchecked(engine)
     finally:
         # Clean up the sentinel file so later tests in the same tmp_path do
         # not interfere — though pytest gives each test its own tmp_path.
@@ -368,7 +368,7 @@ def test_rotate_apply_reports_stale_lifecycle_state_when_session_drifts(tmp_path
     engine._lifecycle.bind_session("other-session", conversation_id=engine._conversation_id)
     # Engine's local _session_id stays on the original "live-session".
 
-    result = handle_lcm_command("rotate apply", engine)
+    result = _rotate_apply_unchecked(engine)
 
     assert "status: refused" in result
     assert "reason: stale_lifecycle_state" in result

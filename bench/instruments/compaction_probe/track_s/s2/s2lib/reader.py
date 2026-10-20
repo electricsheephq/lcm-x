@@ -32,12 +32,12 @@ class GLMReader:
         sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "harness"))
         from lanes import glm  # GLM_API_KEY from the environment only
         self._glm, self._k = glm, glm._key()
-        self.readback = {"model": None, "effort": "n/a (glm-5.3 lane sends no effort input)"}
+        self.readback = {"model": None, "effort": "thinking disabled (the reader sends thinking: disabled; with thinking on, reasoning can fill max_tokens and leave no answer)"}
 
     def _post(self, msgs):
         self.request_prompt = json.dumps(msgs, ensure_ascii=True)
         req = urllib.request.Request(self._glm.URL, method="POST", data=json.dumps(
-            {"model": self._glm.MODEL, "messages": msgs, "max_tokens": 8192}).encode(),
+            {"model": self._glm.MODEL, "messages": msgs, "max_tokens": 8192, "thinking": {"type": "disabled"}}).encode(),
             headers={"Content-Type": "application/json", "Authorization": "Bearer " + self._k})
         with urllib.request.urlopen(req, timeout=READER_TIMEOUT_S) as r:
             data = json.loads(r.read().decode())

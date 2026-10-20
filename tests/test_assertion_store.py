@@ -26,6 +26,7 @@ from hermes_lcm.db_bootstrap import (
     VERSION_MISMATCH_GENUINELY_NEWER,
     VERSION_MISMATCH_INTERIM_STAMP,
     classify_version_mismatch,
+    ensure_assertion_tables,
     remediate_interim_schema_stamp,
     verify_assertion_schema,
 )
@@ -154,6 +155,92 @@ def test_lazy_schema_marker_and_legacy_migration_stay_on_core_v5(tmp_path):
     finally:
         assertions.close()
         messages.close()
+
+
+def test_current_schema_reopen_does_not_change_schema_cookie(assertion_db):
+    db_path, _messages, assertions = assertion_db
+    before = assertions.connection.execute("PRAGMA schema_version").fetchone()[0]
+    second = AssertionStore(db_path)
+    try:
+        assert second.connection.execute("PRAGMA schema_version").fetchone()[0] == before
+        statements = []
+        second.connection.set_trace_callback(statements.append)
+        ensure_assertion_tables(second.connection)
+        assert not any(
+            sql.lstrip().upper().startswith(("CREATE", "DROP", "ALTER", "BEGIN"))
+            for sql in statements
+        )
+    finally:
+        second.close()
+
+
+def test_source_guard_upgrade_is_atomic(assertion_db):
+    db_path, _messages, assertions = assertion_db
+    conn = assertions.connection
+    conn.execute("DROP TRIGGER lcm_assertion_source_insert_guard")
+    conn.execute(
+        "CREATE TRIGGER lcm_assertion_source_insert_guard "
+        "BEFORE INSERT ON lcm_assertion_sources BEGIN SELECT 1; END"
+    )
+    before = conn.execute("PRAGMA schema_version").fetchone()[0]
+    seen = []
+    observer = sqlite3.connect(db_path, isolation_level=None)
+
+    def observe(sql):
+        if sql.lstrip().upper().startswith("CREATE TRIGGER IF NOT EXISTS LCM_ASSERTION_SOURCE_INSERT_GUARD"):
+            seen.append((
+                conn.in_transaction,
+                observer.execute("PRAGMA schema_version").fetchone()[0],
+                observer.execute(
+                    "SELECT sql FROM sqlite_master "
+                    "WHERE name='lcm_assertion_source_insert_guard'"
+                ).fetchone(),
+            ))
+
+    conn.set_trace_callback(observe)
+    try:
+        ensure_assertion_tables(conn)
+        assert len(seen) == 1
+        in_transaction, observed_version, trigger = seen[0]
+        assert in_transaction
+        assert observed_version == before
+        assert trigger is not None and "SELECT 1" in trigger[0]
+        assert verify_assertion_schema(conn) == []
+        assert not conn.in_transaction
+    finally:
+        conn.set_trace_callback(None)
+        observer.close()
+
+
+def test_source_guard_upgrade_failure_rolls_back(assertion_db):
+    db_path, _messages, assertions = assertion_db
+    guard = "lcm_assertion_source_insert_guard"
+
+    class FailingConnection(sqlite3.Connection):
+        def execute(self, sql, parameters=()):
+            if sql.lstrip().upper().startswith("CREATE TRIGGER") and guard in sql:
+                raise sqlite3.OperationalError("injected guard creation failure")
+            return super().execute(sql, parameters)
+
+    conn = sqlite3.connect(db_path, isolation_level=None, factory=FailingConnection)
+    try:
+        conn.execute(f"DROP TRIGGER {guard}")
+        # Bypass failure injection only to plant the legacy guard.
+        sqlite3.Connection.execute(
+            conn, f"CREATE TRIGGER {guard} BEFORE INSERT ON lcm_assertion_sources "
+            "BEGIN SELECT 1; END"
+        )
+        before = conn.execute("PRAGMA schema_version").fetchone()[0]
+        with pytest.raises(sqlite3.OperationalError, match="injected guard creation failure"):
+            ensure_assertion_tables(conn)
+        assert not conn.in_transaction
+        assert conn.execute("PRAGMA schema_version").fetchone()[0] == before
+        assert "SELECT 1" in conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name=?", (guard,)
+        ).fetchone()[0]
+        assert assertions.connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 0
+    finally:
+        conn.close()
 
 
 def test_schema_verifier_rejects_constraint_and_trigger_drift(tmp_path):

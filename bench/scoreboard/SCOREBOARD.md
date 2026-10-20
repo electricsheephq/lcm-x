@@ -2,19 +2,38 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `65db71e61e2f102030b84ddcb9109527a1273e33b5b87d753380b866c55172f8`, rows: 18)
+Generated from `results.jsonl` (sha256: `3fcd8effa816546b5884ffcd538a09f539e6c36fa6e77d2c58afc7d817cdc7ac`, rows: 53)
 
 ## Summary
 
 | Benchmark | Metric | Result | Tier | Date | Details |
 |---|---|---|---|---|---|
 | AMA-Bench (open-ended, 208 episodes) | strict judged accuracy, fail-closed denominator | 1180/2496 = 47.3% (scored-only 1180/2460 = 48.0%) | F | 2026-08-02 | [details](#ama208-full-2026-08-02) |
+| D5-A (engine-direct latency proxy) | max_lcm_owned_s | 49.1 s | P | 2026-10-16 | [details](#d5a-max-v0270-2026-10-16) |
+| D5-A (engine-direct latency proxy) | mean_wait_s_per_message | 7.9 s | P | 2026-10-16 | [details](#d5a-mean-wait-v0270-2026-10-16) |
+| D5-A (engine-direct latency proxy) | compaction_p90_s | 44.5 s | P | 2026-10-16 | [details](#d5a-p90-v0270-2026-10-16) |
+| D5-B (c1, live integration) | slowest_compaction_s | 48.7 s | P | 2026-10-16 | [details](#d5b-c1-slowest-v0270-2026-10-16) |
+| D5-B (c2, live integration) | slowest_compaction_s | 55.2 s | P | 2026-10-16 | [details](#d5b-c2-slowest-v0270-2026-10-16) |
+| D5-C (reference-agent real-use window) | max_lcm_owned_s | 116.3 | P | 2026-10-16 | [details](#d5c-max-v0270-2026-10-16) |
+| D5-C (reference-agent real-use window) | real_use_hours | 11.9 | P | 2026-10-16 | [details](#d5c-window-v0270-2026-10-16) |
 | Internal scale instrument (389×, 19,829 sessions / 199,641 messages) | p50_ms | 263.6 ms @ 19,829 sessions (24× vs pre-fix; 125 ms @ 8k) | P | 2026-07-30 | [details](#scale-curve-fastscan-2026-07-30) |
+| LoCoMo (1,986q, QA, OFF) | correct_count | 1,014/1,986 vs 987/1,986 | P | 2026-10-16 | [details](#locomo-qa-off-v0270-2026-10-16) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 54.9% (1,091/1,986); OFF on the same release 49.7% | P | 2026-10-08 | [details](#locomo10-1986-qa-local-v0261-2026-10-08) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 49.7% (987/1,986) | P | 2026-10-07 | [details](#locomo10-1986-qa-off-v0261-2026-10-07) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 67.4% (1,339/1,986 MemScore) | F | 2026-08-26 | [details](#locomo10-1986-b3a-2026-08-26) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 54.6% (1,085/1,986 MemScore) | F | 2026-08-02 | [details](#locomo10-1986-declared-2026-08-02) |
 | ~~LoCoMo (locomo10, 1,986q)~~ | ~~accuracy~~ | ~~47.0% (MemScore)~~ | ~~F~~ | ~~2026-07-30~~ | ~~[details](#locomo10-1986-arm-a-2026-07-30)~~ → [successor](#locomo10-1986-declared-2026-08-02) |
+| LongMemEval-M (R1-M, LOCAL, lcm_recall) | r10 | 0.9038 vs OFF 0.8733; +0.0305 (paired, p 0.0006) | P | 2026-10-16 | [details](#r1m-local-recall-r10-v0270-2026-10-16) |
+| LongMemEval-M (R1-M, OFF, fts) | per_question_flips | 0 | P | 2026-10-16 | [details](#r1m-off-fts-flips-v0270-2026-10-16) |
+| LongMemEval-M (R1-M, OFF, fts) | p50_ms | 11 | P | 2026-10-09 | [details](#r1m-off-fts-p50_ms-v0262-2026-10-09) |
+| LongMemEval-M (R1-M, OFF, fts) | p90_ms | 18 | P | 2026-10-09 | [details](#r1m-off-fts-p90_ms-v0262-2026-10-09) |
+| LongMemEval-M (R1-M, OFF, fts) | r10 | 0.8416 | P | 2026-10-09 | [details](#r1m-off-fts-r10-v0262-2026-10-09) |
+| LongMemEval-M (R1-M, OFF, lcm_recall) | per_question_flips | 260 (all #1035) | P | 2026-10-16 | [details](#r1m-off-recall-flips-v0270-2026-10-16) |
+| LongMemEval-M (R1-M, OFF, lcm_recall) | r10 | 0.8733 vs 0.8473; +0.0260 | P | 2026-10-16 | [details](#r1m-off-recall-r10-v0270-2026-10-16) |
+| LongMemEval-M (R1-M, OFF, lcm_recall) | p50_ms | 38 | P | 2026-10-09 | [details](#r1m-off-recall-p50_ms-v0262-2026-10-09) |
+| LongMemEval-M (R1-M, OFF, lcm_recall) | p90_ms | 95 | P | 2026-10-09 | [details](#r1m-off-recall-p90_ms-v0262-2026-10-09) |
+| LongMemEval-M (R1-M, OFF, lcm_recall) | r10 | 0.8473 | P | 2026-10-09 | [details](#r1m-off-recall-r10-v0262-2026-10-09) |
+| LongMemEval-S (500q, QA, OFF) | correct_count | 381/500 vs 363/500 | P | 2026-10-16 | [details](#longmemeval-s-qa-off-v0270-2026-10-16) |
 | LongMemEval-V1 (S, 500q) | accuracy | 455/500 (91.0%) | P | 2026-07-29 | [details](#longmemeval-v1-s500-accuracy-2026-07-29) |
 | LongMemEval-V1 (S, 500q) | latency_delta_s_per_q | −56.3 s/question vs vanilla (22% faster) | P | 2026-07-29 | [details](#longmemeval-v1-s500-latency-2026-07-29) |
 | LongMemEval-V1 MEDIUM (483q privacy-filtered set, retrieval row) | lcm_recall (primary arm): recall@10 / ndcg@10 / recall@1, fail-closed | recall@10 95.0% \| ndcg@10 0.860 \| recall@1 51.6% (456 scored + 27 abstention-excluded; 17 withheld by the production privacy filter; embeddings off on the same 456: 84.7%) | P | 2026-10-06 | [details](#longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06) |
@@ -26,6 +45,22 @@ Generated from `results.jsonl` (sha256: `65db71e61e2f102030b84ddcb9109527a1273e3
 | LongMemEval-V2 (451q, agentic) | accuracy | 298/451 (66.1%) | P | 2026-07-27 | [details](#longmemeval-v2-451-agentic-2026-07-27) |
 | LongMemEval-V2 (451q, static) | accuracy | 123/451 (27.3%) — official static protocol, fixed weak reader | P | 2026-07-31 | [details](#longmemeval-v2-451-static-2026-07-31) |
 | LongMemEval-V2 static (451q) | judged accuracy, full set | 143/451 = 31.7% (web 97/240 = 40.4%, enterprise 46/211 = 21.8%) | F | 2026-08-03 | [details](#v2-static-451-sota-luna-2026-08-03) |
+| Phase C (four live host cells) | slowest_compaction_s | 93.0 s; bar <=145 s | P | 2026-10-16 | [details](#phase-c-max-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | admission_proven_losses | 0; D3 PASS; 60/60 admitted at all 24 checkpoints | P | 2026-10-16 | [details](#track-s-admission-losses-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | compactions_per_100_messages | 12.3; bar <= 25 | P | 2026-10-16 | [details](#track-s-compactions-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | facts_kept_cp176 | 0.942 vs 0.933 (reported only) | P | 2026-10-16 | [details](#track-s-facts-cp176-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | facts_kept_cp304 | 0.778 vs 0.608; +16.9 pt; p 0.009 | P | 2026-10-16 | [details](#track-s-facts-cp304-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | mean_wait_s_per_message | 5.2 s; bar <= 15 s | P | 2026-10-16 | [details](#track-s-mean-wait-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | rows_dropped_by_survival_fits | 115 (FAIL, waived by release manager); bar 0 | P | 2026-10-16 | [details](#track-s-survival-drops-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | messages_waited_percent | 12%; bar <= 25% | P | 2026-10-16 | [details](#track-s-wait-share-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | compaction_wall_max_s | 115.1 s; bar <= 145 s | P | 2026-10-16 | [details](#track-s-wall-max-v0270-2026-10-16) |
+| Track S v3 (GLM summary route) | compaction_wall_p90_s | 64.5 s; bar <= 120 s | P | 2026-10-16 | [details](#track-s-wall-p90-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | compactions_per_100_messages | 20.0 | P | 2026-10-16 | [details](#slow-route-compactions-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | facts_kept | .872 | P | 2026-10-16 | [details](#slow-route-facts-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | mean_wait_s_per_message | 8.1 s | P | 2026-10-16 | [details](#slow-route-mean-wait-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | rows_dropped_by_survival_fits | 0 | P | 2026-10-16 | [details](#slow-route-survival-drops-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | messages_waited_percent | 20% | P | 2026-10-16 | [details](#slow-route-wait-share-v0270-2026-10-16) |
+| Track S v3 (slow summary route, #1128) | compaction_wall_p90_s | 45.8 s | P | 2026-10-16 | [details](#slow-route-wall-p90-v0270-2026-10-16) |
 
 ## Row disclosures
 
@@ -80,14 +115,483 @@ A/A' 30-episode fixed-seed subset (seed 20260802) EXECUTED: 27/30 pairs compared
 3/208 episodes failed (luna empty-content completions x3 retries; AttributeError in harness model_client.py:109) — 36 questions counted in denominator, never dropped
 
 **evidence:**
-- bench/specs/RUN-SHEET-AMA-208.md
-- bench/FINDING-F51-AMA-208-FIRST-FULL.md
-- session-notes 2026-08-02 hermes-ama-full208 (per-episode results, timing, telemetry)
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-AMA-208.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F51-AMA-208-FIRST-FULL.md
+
+**local_raw:**
+- local run 2026-08-02 hermes-ama-full208 (per-episode results, timing, telemetry)
 
 **caveats:**
 - First full-208 disclosed number; GOALS target >=72.26% NOT met (gap -24.9pt); funnel decomposition queued
 - Accuracy RISES with episode size (large>800k tier 55.6% vs small 47.2%) — no context-scale degradation
 - Reader effort = model default (AMA custom-provider path exposes no effort surface)
+
+### <a id="d5a-max-v0270-2026-10-16"></a>d5a-max-v0270-2026-10-16
+
+**id:**
+d5a-max-v0270-2026-10-16
+
+**benchmark:**
+D5-A (engine-direct latency proxy)
+
+**metric:**
+max_lcm_owned_s
+
+**value:**
+49.1
+
+**display:**
+49.1 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a; summary model gpt-6.1-sol through codex exec at reference-agent effort; host route differs
+
+**retrieval_config:**
+D5-A engine-direct proxy; 6 Track S runs appended as new sessions to a point-in-time reference-agent store copy (about 1.7 GB, 503,600 messages, 1,197 sessions); all agent LCM settings checked; context 272,000
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+60 progress compactions; p50 39.7 s; p90 44.5 s; max LCM-owned 49.1 s; compactions/100 messages 20.0; mean wait 7.9 s; waited 20%
+
+**variance:**
+6 runs; nearest-rank percentiles; pooled per-message rates; baseline field p90 86.9 s over 69 compactions, same served model/provider/effort, host default medium
+
+**failclose:**
+0 dropped rows, 0 summary-call failures, 0 circuit openings; 0 stop lines with host-compressor time
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D5-A PASS. Engine-direct proxy, not the reference agent own latency. Bars: progress compactions >=60, p90 <=86.9 s, max LCM-owned <=120 s, compactions/100 <=25, mean wait <=15 s, waited <=25%, drops/failures/circuit openings 0. LCM-owned = elapsed minus host.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5a-mean-wait-v0270-2026-10-16"></a>d5a-mean-wait-v0270-2026-10-16
+
+**id:**
+d5a-mean-wait-v0270-2026-10-16
+
+**benchmark:**
+D5-A (engine-direct latency proxy)
+
+**metric:**
+mean_wait_s_per_message
+
+**value:**
+7.9
+
+**display:**
+7.9 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a; summary model gpt-6.1-sol through codex exec at reference-agent effort; host route differs
+
+**retrieval_config:**
+D5-A engine-direct proxy; 6 Track S runs appended as new sessions to a point-in-time reference-agent store copy (about 1.7 GB, 503,600 messages, 1,197 sessions); all agent LCM settings checked; context 272,000
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+60 progress compactions; p50 39.7 s; p90 44.5 s; max LCM-owned 49.1 s; compactions/100 messages 20.0; mean wait 7.9 s; waited 20%
+
+**variance:**
+6 runs; nearest-rank percentiles; pooled per-message rates; baseline field p90 86.9 s over 69 compactions, same served model/provider/effort, host default medium
+
+**failclose:**
+0 dropped rows, 0 summary-call failures, 0 circuit openings; 0 stop lines with host-compressor time
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D5-A PASS. Engine-direct proxy, not the reference agent own latency. Bars: progress compactions >=60, p90 <=86.9 s, max LCM-owned <=120 s, compactions/100 <=25, mean wait <=15 s, waited <=25%, drops/failures/circuit openings 0. LCM-owned = elapsed minus host.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5a-p90-v0270-2026-10-16"></a>d5a-p90-v0270-2026-10-16
+
+**id:**
+d5a-p90-v0270-2026-10-16
+
+**benchmark:**
+D5-A (engine-direct latency proxy)
+
+**metric:**
+compaction_p90_s
+
+**value:**
+44.5
+
+**display:**
+44.5 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a; summary model gpt-6.1-sol through codex exec at reference-agent effort; host route differs
+
+**retrieval_config:**
+D5-A engine-direct proxy; 6 Track S runs appended as new sessions to a point-in-time reference-agent store copy (about 1.7 GB, 503,600 messages, 1,197 sessions); all agent LCM settings checked; context 272,000
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+60 progress compactions; p50 39.7 s; p90 44.5 s; max LCM-owned 49.1 s; compactions/100 messages 20.0; mean wait 7.9 s; waited 20%
+
+**variance:**
+6 runs; nearest-rank percentiles; pooled per-message rates; baseline field p90 86.9 s over 69 compactions, same served model/provider/effort, host default medium
+
+**failclose:**
+0 dropped rows, 0 summary-call failures, 0 circuit openings; 0 stop lines with host-compressor time
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D5-A PASS. Engine-direct proxy, not the reference agent own latency. Bars: progress compactions >=60, p90 <=86.9 s, max LCM-owned <=120 s, compactions/100 <=25, mean wait <=15 s, waited <=25%, drops/failures/circuit openings 0. LCM-owned = elapsed minus host.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5b-c1-slowest-v0270-2026-10-16"></a>d5b-c1-slowest-v0270-2026-10-16
+
+**id:**
+d5b-c1-slowest-v0270-2026-10-16
+
+**benchmark:**
+D5-B (c1, live integration)
+
+**metric:**
+slowest_compaction_s
+
+**value:**
+48.7
+
+**display:**
+48.7 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+literal canary checks; no full judge prompt in scorecard
+
+**reader:**
+not specified in the release scorecard
+
+**retrieval_config:**
+Hermes 0.21.7; fresh empty stores; GLM summary route; 40 material turns, restart and re-paste; context 128k, threshold .50, leaf chunk 8,000; no embedding provider key
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+D5-B c1: 5 compactions, 48.7 s slowest, probes 3/3 exact; c2: 6 compactions, 55.2 s slowest, probes 3/2 exact/1 recoverable; both: 0 loss, 0 duplicates, restart/re-paste PASS
+
+**variance:**
+2 live cells; no variance estimate; only sent canaries counted
+
+**failclose:**
+0 loss and 0 duplicates; doctor: no failing check in either cell; two warnings (embedding provider without key; lifecycle check), read as clean under the release-line rule
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D5-B PASS under release-line rule accepting recoverable stored probes and embedding/lifecycle doctor warnings. Strict doctor-clean wording would fail these and all Phase C cells; the release scorecard records the need for a spec clarification. Store scale covered separately by D5-A/C.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5b-c2-slowest-v0270-2026-10-16"></a>d5b-c2-slowest-v0270-2026-10-16
+
+**id:**
+d5b-c2-slowest-v0270-2026-10-16
+
+**benchmark:**
+D5-B (c2, live integration)
+
+**metric:**
+slowest_compaction_s
+
+**value:**
+55.2
+
+**display:**
+55.2 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+literal canary checks; no full judge prompt in scorecard
+
+**reader:**
+not specified in the release scorecard
+
+**retrieval_config:**
+Hermes 0.21.7; fresh empty stores; GLM summary route; 40 material turns, restart and re-paste; context 128k, threshold .50, leaf chunk 8,000; no embedding provider key
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+D5-B c1: 5 compactions, 48.7 s slowest, probes 3/3 exact; c2: 6 compactions, 55.2 s slowest, probes 3/2 exact/1 recoverable; both: 0 loss, 0 duplicates, restart/re-paste PASS
+
+**variance:**
+2 live cells; no variance estimate; only sent canaries counted
+
+**failclose:**
+0 loss and 0 duplicates; doctor: no failing check in either cell; two warnings (embedding provider without key; lifecycle check), read as clean under the release-line rule
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D5-B PASS under release-line rule accepting recoverable stored probes and embedding/lifecycle doctor warnings. Strict doctor-clean wording would fail these and all Phase C cells; the release scorecard records the need for a spec clarification. Store scale covered separately by D5-A/C.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5c-max-v0270-2026-10-16"></a>d5c-max-v0270-2026-10-16
+
+**id:**
+d5c-max-v0270-2026-10-16
+
+**benchmark:**
+D5-C (reference-agent real-use window)
+
+**metric:**
+max_lcm_owned_s
+
+**value:**
+116.3
+
+**display:**
+116.3
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+reference agent; exact answering model not specified in the release scorecard
+
+**retrieval_config:**
+reference agent real use on rc8; Hermes host moved to 0.22.2 at end of window
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+11.9 h; 4 answered organic turns plus 1 release-manager recall question under owner instruction; 2 progress compactions, 6 with LCM-owned time >=1 s; max 116.3 s; engine bound throughout
+
+**variance:**
+one real-use window; volume about two compactions/day, so volume latency bars judged by D5-A
+
+**failclose:**
+0 LCM-X tracebacks; 0 publication-invariant conflicts; no synthetic agent session
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SOAK-WINDOW-RECEIPT.md
+
+**caveats:**
+- D5-C PASS accepted at 11.9 h of declared 12 h when host changed; shortened-window decision disclosed. Bars: each LCM-owned stop <=120 s, 0 LCM-X tracebacks, 0 publication conflicts, engine bound, >=1 answered organic turn. The release asset records a 24 h post-GA re-read on Hermes 0.22.2 as continuing; it is outside this row.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="d5c-window-v0270-2026-10-16"></a>d5c-window-v0270-2026-10-16
+
+**id:**
+d5c-window-v0270-2026-10-16
+
+**benchmark:**
+D5-C (reference-agent real-use window)
+
+**metric:**
+real_use_hours
+
+**value:**
+11.9
+
+**display:**
+11.9
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+reference agent; exact answering model not specified in the release scorecard
+
+**retrieval_config:**
+reference agent real use on rc8; Hermes host moved to 0.22.2 at end of window
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+11.9 h; 4 answered organic turns plus 1 release-manager recall question under owner instruction; 2 progress compactions, 6 with LCM-owned time >=1 s; max 116.3 s; engine bound throughout
+
+**variance:**
+one real-use window; volume about two compactions/day, so volume latency bars judged by D5-A
+
+**failclose:**
+0 LCM-X tracebacks; 0 publication-invariant conflicts; no synthetic agent session
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SOAK-WINDOW-RECEIPT.md
+
+**caveats:**
+- D5-C PASS accepted at 11.9 h of declared 12 h when host changed; shortened-window decision disclosed. Bars: each LCM-owned stop <=120 s, 0 LCM-X tracebacks, 0 publication conflicts, engine bound, >=1 answered organic turn. The release asset records a 24 h post-GA re-read on Hermes 0.22.2 as continuing; it is outside this row.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="locomo-qa-off-v0270-2026-10-16"></a>locomo-qa-off-v0270-2026-10-16
+
+**id:**
+locomo-qa-off-v0270-2026-10-16
+
+**benchmark:**
+LoCoMo (1,986q, QA, OFF)
+
+**metric:**
+correct_count
+
+**value:**
+1014
+
+**display:**
+1,014/1,986 vs 987/1,986
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Codex CLI with configured model/effort; identity and full prompt not specified in the release scorecard
+
+**reader:**
+Codex CLI 0.162.1 (baseline 0.161.0); configured model and effort recorded per call but not specified in the release scorecard
+
+**retrieval_config:**
+embeddings OFF; same harness pin, dataset, question ids and scorer as rc1; exact pin and remaining knobs not specified in the release scorecard
+
+**dataset_exposure:**
+99 documented corrupted-gold rows all ran, scored as-is; known-corruption ceiling about 95% (unchanged from the earlier LoCoMo rows)
+
+**breakdown:**
+adversarial 188 vs 204; multi-hop 201 vs 190; single-hop 59 vs 49; temporal 30 vs 28; world-knowledge 536 vs 516
+
+**variance:**
+lost 82 / gained 109; exact McNemar p 0.060 (gain, not significant); A/A prime discordance 21/1,986 (baseline 28/1,986)
+
+**failclose:**
+0 failed reader calls; failed calls count as wrong
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/scoreboard/results.jsonl#L17
+
+**caveats:**
+- D4 PASS. Bar: paired exact McNemar p < 0.05 with a net loss blocks; placebo discordance > 5% is INCONCLUSIVE. Categories recorded, not gated. Baseline v0.26.1, not v0.26.2.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
 
 ### <a id="locomo10-1986-arm-a-2026-07-30"></a>locomo10-1986-arm-a-2026-07-30
 
@@ -140,8 +644,10 @@ arm A of a pre-registered A/A' pair; A' cancelled when harness bugs were found m
 pin discipline PASS; truncation bug meant 5.7% of delivered results were silently cut (fixed PR #3)
 
 **evidence:**
-- bench/FINDING-F46-LOCOMO-ARM-A-DECOMPOSITION (full §1-9 ledger)
-- session-notes 2026-07-30 hermes-locomo-deepdive artifacts
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F46-LOCOMO-ARM-A-DECOMPOSITION.md
+
+**local_raw:**
+- local run 2026-07-30 hermes-locomo-deepdive artifacts
 
 **caveats:**
 - published AS THE FAULT-FINDING RESULT IT IS: decomposition attributes the gap to instrument bugs (~+3pts ceiling), corrupted gold (~1.5-2pts), a config-class retrieval gap (fusion quota + chunk threshold, both since landed), and one genuine answer-layer weakness (adversarial speaker attribution — fact retrieved on 78.6% of wrong rows); declared-config re-run pending
@@ -201,10 +707,12 @@ pre-registered A/A′ pair on fresh stores: 82/1,986 discordant (4.13%), aggrega
 0/1,986 incomplete both arms; paired failclose union-drop 0; PINS-POSTRUN PASS both arms (A′ postrun executed manually after the resume script exited pre-postrun — env pins verify a reconstruction from the script's own exports; sha-class pins verified against disk)
 
 **evidence:**
-- bench/FINDING-F61-LOCOMO-C2-B3A-ATTRIBUTION.md
-- bench/specs/RUN-SHEET-LOCOMO-C2-B3A.md (#316)
-- session-notes 2026-08-21 hermes-locomo-c2 artifacts (paid-aa-20260820T211813Z)
-- session-notes 2026-08-26 interim-review artifacts F61-recompute.txt
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F61-LOCOMO-C2-B3A-ATTRIBUTION.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-LOCOMO-C2-B3A.md
+
+**local_raw:**
+- local run 2026-08-21 hermes-locomo-c2 artifacts (paid-aa-20260820T211813Z)
+- local run 2026-08-26 interim-review artifacts F61-recompute.txt
 
 **caveats:**
 - attribution is the lever, robustness is the prize: the adversarial (unanswerable) category nearly doubles (32.7 → 62.3) — the F59 §9 failure class (entity+recency-matched confusions from misattributed facts) attacked directly; every other category also rises, consistent with attribution improving retrieval binding generally
@@ -263,9 +771,11 @@ pre-registered A/A′ pair on fresh stores: 69/1,986 discordant (3.47%), aggrega
 0/1,986 both arms; union-drop 0; pins signed pre+post both arms
 
 **evidence:**
-- bench/FINDING-F48-LOCOMO-DECLARED-CONFIG.md
-- bench/specs/RUN-SHEET-LOCOMO-DECLARED-CONFIG.md
-- session-notes 2026-07-31 hermes-locomo-declared artifacts
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F48-LOCOMO-DECLARED-CONFIG.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-LOCOMO-DECLARED-CONFIG.md
+
+**local_raw:**
+- local run 2026-07-31 hermes-locomo-declared artifacts
 
 **caveats:**
 - +7.6 vs the superseded row is NOT pure retrieval: the judge rubric and adversarial gold changed between configs (both disclosed); corrupted gold unchanged (ceiling ≈95%)
@@ -391,6 +901,64 @@ pre-registered A/A′, full rerun on fresh stores: 28/1,986 discordant (1.4%; 16
 - category labels follow the harness and differ from the names some published tables use; compare by these labels or by LoCoMo category id
 - claim class: a QA baseline through the benchmark bridge on the GA tree; it does not measure host-visible behaviour, the fleet overlay, or the Voyage configuration
 
+### <a id="longmemeval-s-qa-off-v0270-2026-10-16"></a>longmemeval-s-qa-off-v0270-2026-10-16
+
+**id:**
+longmemeval-s-qa-off-v0270-2026-10-16
+
+**benchmark:**
+LongMemEval-S (500q, QA, OFF)
+
+**metric:**
+correct_count
+
+**value:**
+381
+
+**display:**
+381/500 vs 363/500
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Codex CLI with configured model/effort; identity and full prompt not specified in the release scorecard
+
+**reader:**
+Codex CLI 0.162.1 (baseline 0.161.0); configured model and effort recorded per call but not specified in the release scorecard
+
+**retrieval_config:**
+embeddings OFF; same harness pin, dataset, question ids and scorer as rc1; exact pin and remaining knobs not specified in the release scorecard
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+knowledge-update 69 vs 70; multi-session 67 vs 63; single-session-assistant 54 vs 53; single-session-preference 18 vs 13; single-session-user 70 vs 69; temporal-reasoning 103 vs 95
+
+**variance:**
+lost 9 / gained 27; exact McNemar p 0.004 (gain); A/A prime discordance 4/100 (baseline 1/100)
+
+**failclose:**
+0 failed reader calls; failed calls count as wrong
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D4 PASS. Bar: paired exact McNemar p < 0.05 with a net loss blocks; placebo discordance > 5% is INCONCLUSIVE. Categories recorded, not gated. Baseline v0.26.1, not v0.26.2.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
 ### <a id="longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06"></a>longmemeval-v1-m483-retrieval-voyage-tracker-v0260-2026-10-06
 
 **id:**
@@ -499,9 +1067,11 @@ A/A' 100q fixed-seed subset (seed 20260802): 95/95 scored questions per-question
 0/500 instrument failures; 30 abstention questions excluded by instrument design and counted
 
 **evidence:**
-- bench/FINDING-F53-V1M-FLAGSHIP-FIRST-ROW.md
-- bench/specs/RUN-SHEET-V1M-REGISTERED.md
-- session-notes 2026-08-19 v1m-launch2 artifacts + lme-runs/m-full2-shard-*
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F53-V1M-FLAGSHIP-FIRST-ROW.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-V1M-REGISTERED.md
+
+**local_raw:**
+- local run 2026-08-19 v1m-launch2 artifacts + lme-runs/m-full2-shard-*
 
 **caveats:**
 - The 25q smoke's r@1 0.96 was a first-N sampling artifact (full-500 r@1 = 0.50); first-N smokes retired, seeded-random only
@@ -617,7 +1187,7 @@ A/A' on the 100q F53 subset: 0/100 discordant rows and 0/100 discordant top-10 r
 470 scored + 30 abstention (_abs) excluded + 0 failed = 500; coverage.fts none (failed search) = 0; degraded:true on all 470 (expected label for embeddings off)
 
 **evidence:**
-- bench/specs/RUN-SHEET-ROW1-FULLTEXT.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-ROW1-FULLTEXT.md
 - https://github.com/electricsheephq/lcm-x/issues/898#issuecomment-6000141063 (the v0.26.0-rc1 recall gate measured against this row: 0 per-question flips)
 
 **caveats:**
@@ -657,10 +1227,10 @@ P
 fork train through 93a3ade; upstream PR #436 @ ccc76ee
 
 **judge:**
-LongMemEval official protocol judge; config in bench/release-kit (fork docs branch)
+gpt-5.6-sol @ low (F37 pins), not the official gpt-4o judge; official-judge (gpt-4o-2024-08-06) re-score 90.4% (#898 comment 6060571973)
 
 **reader:**
-per official V1 protocol (fixed reader); full config in F37/release kit
+gpt-5.6-sol @ medium via codex-cli 0.144.6 (F37 pins), not the official fixed reader
 
 **retrieval_config:**
 wave-1 delivery (answer_ready, evidence_cards_v1); pins per F32 (transport version pinned, 6e.13)
@@ -678,8 +1248,8 @@ bench/FINDING-F37 §per-type (fork docs branch)
 0 fail-closes (F32's 8 destroyed qids all scored; 7 correct)
 
 **evidence:**
-- bench/FINDING-F37
-- bench/release-kit/RELEASE-NOTES-R2
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F37-FULL500-CONFIRM.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/release-kit/RELEASE-NOTES-R2.md
 - upstream PR #436
 
 **caveats:**
@@ -736,8 +1306,9 @@ p < 1e-4 paired
 n/a
 
 **evidence:**
-- bench/FINDING-M12 lineage in PROGRAM-ARCHITECTURE
-- bench/release-kit/RELEASE-NOTES-R2
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-M12-AB-CLAIM-CORRECTION.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/PROGRAM-ARCHITECTURE.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/release-kit/RELEASE-NOTES-R2.md
 
 **caveats:**
 - accuracy A/B on the same instrument was NULL (M12) — the established claim is latency, not accuracy; we publish both facts together
@@ -912,7 +1483,7 @@ single scored run; instrument-clean recount 298/444 = 67.1% excluding #166's 7 t
 7/451 rows scored 0 on EMPTY reader responses (HTTP 524, no retry) — instrument defect #166, fixed upstream-report #7; both numbers shown
 
 **evidence:**
-- bench/FINDING-F30
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F30-V2-FAILURE-DECOMPOSITION.md
 - upstream harness reports #6/#7
 - tag bench-H6-P4-298
 
@@ -962,7 +1533,7 @@ answer_ready delivery, full pin set (pins-treatment.yaml in run artifacts)
 none documented
 
 **breakdown:**
-per-question rows in run artifacts (session-notes 2026-07-30/hermes-v2-paired)
+per-question rows in run artifacts (local run 2026-07-30/hermes-v2-paired)
 
 **variance:**
 paired vs control (prior main @ e5acbbf) in the same run: net +3 (b=29/c=26, n=434) under a pre-registered non-inferiority gate, verdict PASS via blind adjudication; control re-measured 120/451 vs the banked R1 125/451 — single-run cross-build variance context for V2-static numbers
@@ -971,13 +1542,656 @@ paired vs control (prior main @ e5acbbf) in the same run: net +3 (b=29/c=26, n=4
 17/451 union-dropped as instrument_failed (control 10, treatment 7), disclosed; adjusted 120/434
 
 **evidence:**
-- bench/FINDING-F47-V2-REBASELINE-GATE-PASS.md
-- bench/specs/GATE-V2-REBASELINE.yaml (frozen 41a749a7)
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F47-V2-REBASELINE-GATE-PASS.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/GATE-V2-REBASELINE.yaml
+
+**local_raw:**
 - run artifacts incl. ATTRIBUTION-DARCH2.json
 
 **caveats:**
 - static-protocol numbers on V2 are low-absolute by design (fixed weak reader); the agentic protocol row (298/451) is the capability surface
 - treatment arm completed via a documented append-only continuation after a transient EINTR fail-close (AMENDMENT-2; dataset freeze byte-identical across the gap, independently verified)
+
+### <a id="phase-c-max-v0270-2026-10-16"></a>phase-c-max-v0270-2026-10-16
+
+**id:**
+phase-c-max-v0270-2026-10-16
+
+**benchmark:**
+Phase C (four live host cells)
+
+**metric:**
+slowest_compaction_s
+
+**value:**
+93.0
+
+**display:**
+93.0 s; bar <=145 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+four Phase C cells; host/config details in release receipts
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+maximum across four Phase C cells
+
+**variance:**
+4 cells; no variance estimate
+
+**failclose:**
+not specified in Phase D scorecard latency cell; see Phase C receipt
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/PHASE-C-RECEIPT.md
+
+**caveats:**
+- D5 gauntlet cells PASS; max bar 145 s.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-local-recall-r10-v0270-2026-10-16"></a>r1m-local-recall-r10-v0270-2026-10-16
+
+**id:**
+r1m-local-recall-r10-v0270-2026-10-16
+
+**benchmark:**
+LongMemEval-M (R1-M, LOCAL, lcm_recall)
+
+**metric:**
+r10
+
+**value:**
+0.9038
+
+**display:**
+0.9038 vs OFF 0.8733; +0.0305 (paired, p 0.0006)
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+scripts/lcm_longmemeval.py at the same tree (4e603ed65f137a909606afccfc735c691e363d25), stub provider for OFF, fastembed provider for LOCAL
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; embeddings LOCAL: fastembed BAAI/bge-small-en-v1.5 on CPU (HF offline, pre-warmed cache, 0 misses), otherwise product defaults including the full-text anchor; no fleet overlay. OFF arm in the same run: product defaults, embeddings off
+
+**dataset_exposure:**
+none documented; no new dataset audit
+
+**breakdown:**
+LOCAL R@1 0.4512, R@5 0.8346, R@10 0.9038, NDCG@10 0.7955 (OFF 0.4523 / 0.8049 / 0.8733 / 0.7776); per category R@10 delta: multi-session +0.046, temporal-reasoning +0.041, single-session-preference +0.167, worst single-session-user -0.0156
+
+**variance:**
+paired LOCAL vs OFF over 470 questions: 49 wins / 20 losses / 401 ties, exact sign test p 0.0006; LOCAL A/A prime 0 of 100 discordant; OFF arm 0 per-question differences vs the 2026-10-10 OFF row; LOCAL 0 per-question differences vs the 2026-10-10 LOCAL row
+
+**failclose:**
+470 scored + 30 abstention-excluded + 0 failed = 500 in each arm
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0-rc8/LOCAL-RECALL-RECEIPT.md
+
+**caveats:**
+- Retrieval recall only; no QA answer accuracy.
+- One run on one machine under other load; lcm_recall latency p50/p90/max OFF 77/163/384 ms, LOCAL 125/238/950 ms, recorded and not judged.
+- Pre-warmed embedding cache; cold-cache embedding cost is not measured.
+- Advisory claim class: it gated the managed fleet's per-profile LOCAL turn-on, not the GA. Nothing about customer sessions is proven.
+
+### <a id="r1m-off-fts-flips-v0270-2026-10-16"></a>r1m-off-fts-flips-v0270-2026-10-16
+
+**id:**
+r1m-off-fts-flips-v0270-2026-10-16
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, fts)
+
+**metric:**
+per_question_flips
+
+**value:**
+0
+
+**display:**
+0
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4523, R@5 0.8049, R@10 0.8733, NDCG@10 0.7776; turn R@10 0.7005, turn NDCG@10 0.5861; previous GA R@10 0.8473; net +0.0260; no category down; 11 hit@10 changes
+
+**variance:**
+A/A prime: 0 discordant rows; 260 recall flips all attributed to stemmed recall #1035; 0 fts flips; rc8 equals rc5 over all 500 questions and all 8 metric fields
+
+**failclose:**
+470 scored + 30 abstention-excluded + 0 failed = 500
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D1 PASS (attributed). Bar: 0 flips or every flip attributed and intended, net R@10 >= previous GA - 0.005, no category down more than 0.02.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-fts-p50_ms-v0262-2026-10-09"></a>r1m-off-fts-p50_ms-v0262-2026-10-09
+
+**id:**
+r1m-off-fts-p50_ms-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, fts)
+
+**metric:**
+p50_ms
+
+**value:**
+11
+
+**display:**
+11
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-fts-p90_ms-v0262-2026-10-09"></a>r1m-off-fts-p90_ms-v0262-2026-10-09
+
+**id:**
+r1m-off-fts-p90_ms-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, fts)
+
+**metric:**
+p90_ms
+
+**value:**
+18
+
+**display:**
+18
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-fts-r10-v0262-2026-10-09"></a>r1m-off-fts-r10-v0262-2026-10-09
+
+**id:**
+r1m-off-fts-r10-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, fts)
+
+**metric:**
+r10
+
+**value:**
+0.8416
+
+**display:**
+0.8416
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-recall-flips-v0270-2026-10-16"></a>r1m-off-recall-flips-v0270-2026-10-16
+
+**id:**
+r1m-off-recall-flips-v0270-2026-10-16
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, lcm_recall)
+
+**metric:**
+per_question_flips
+
+**value:**
+260
+
+**display:**
+260 (all #1035)
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4523, R@5 0.8049, R@10 0.8733, NDCG@10 0.7776; turn R@10 0.7005, turn NDCG@10 0.5861; previous GA R@10 0.8473; net +0.0260; no category down; 11 hit@10 changes
+
+**variance:**
+A/A prime: 0 discordant rows; 260 recall flips all attributed to stemmed recall #1035; 0 fts flips; rc8 equals rc5 over all 500 questions and all 8 metric fields
+
+**failclose:**
+470 scored + 30 abstention-excluded + 0 failed = 500
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D1 PASS (attributed). Bar: 0 flips or every flip attributed and intended, net R@10 >= previous GA - 0.005, no category down more than 0.02.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-recall-p50_ms-v0262-2026-10-09"></a>r1m-off-recall-p50_ms-v0262-2026-10-09
+
+**id:**
+r1m-off-recall-p50_ms-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, lcm_recall)
+
+**metric:**
+p50_ms
+
+**value:**
+38
+
+**display:**
+38
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-recall-p90_ms-v0262-2026-10-09"></a>r1m-off-recall-p90_ms-v0262-2026-10-09
+
+**id:**
+r1m-off-recall-p90_ms-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, lcm_recall)
+
+**metric:**
+p90_ms
+
+**value:**
+95
+
+**display:**
+95
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-recall-r10-v0262-2026-10-09"></a>r1m-off-recall-r10-v0262-2026-10-09
+
+**id:**
+r1m-off-recall-r10-v0262-2026-10-09
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, lcm_recall)
+
+**metric:**
+r10
+
+**value:**
+0.8473
+
+**display:**
+0.8473
+
+**tier:**
+P
+
+**date:**
+2026-10-09
+
+**system_commit:**
+v0.26.2-rc2 (38be1f6c); measured candidate, published with v0.26.2
+
+**harness_commit:**
+benchmarking/longmemeval.py blob 5ddfece4; scripts/lcm_longmemeval.py blob 0a31802b at measured tag; equal to v0.26.1-rc1
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF, provider stub; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4578, R@5 0.7863, R@10 0.8473, NDCG@10 0.7637; turn R@10 0.6771, turn NDCG@10 0.5834; fts R@1 0.4514, R@5 0.7785, R@10 0.8416, NDCG@10 0.7559; turn R@10 0.6732, turn NDCG@10 0.5637
+
+**variance:**
+A/A' prepared-m-aprime100: 0 discordant rows and rankings; aggregate metrics equal; 0 per-question flips in either arm vs v0.26.1-rc1
+
+**failclose:**
+expected 500 = scored 470 + abstention-excluded 30 + failed 0; degraded_true 470; coverage.fts=ok 470
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.26.2/SCORECARD-FAST-TIER.md
+
+**caveats:**
+- PASS bar: 0 recall and fts flips vs v0.26.1-rc1 (previous GA tree plus notes). Latency recorded, not gated; shared-machine run under nice -n 19.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="r1m-off-recall-r10-v0270-2026-10-16"></a>r1m-off-recall-r10-v0270-2026-10-16
+
+**id:**
+r1m-off-recall-r10-v0270-2026-10-16
+
+**benchmark:**
+LongMemEval-M (R1-M, OFF, lcm_recall)
+
+**metric:**
+r10
+
+**value:**
+0.8733
+
+**display:**
+0.8733 vs 0.8473; +0.0260
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+R1-M, LongMemEval-M, 500 questions; product defaults, embeddings OFF; no fleet overlay
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+lcm_recall R@1 0.4523, R@5 0.8049, R@10 0.8733, NDCG@10 0.7776; turn R@10 0.7005, turn NDCG@10 0.5861; previous GA R@10 0.8473; net +0.0260; no category down; 11 hit@10 changes
+
+**variance:**
+A/A prime: 0 discordant rows; 260 recall flips all attributed to stemmed recall #1035; 0 fts flips; rc8 equals rc5 over all 500 questions and all 8 metric fields
+
+**failclose:**
+470 scored + 30 abstention-excluded + 0 failed = 500
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- D1 PASS (attributed). Bar: 0 flips or every flip attributed and intended, net R@10 >= previous GA - 0.005, no category down more than 0.02.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+- The instrument changed; the v0.26.2 row equals the pre-#1035 tree under the current instrument (0 flips), so the harness change moves nothing.
 
 ### <a id="scale-curve-fastscan-2026-07-30"></a>scale-curve-fastscan-2026-07-30
 
@@ -1030,11 +2244,899 @@ six gate executions, five root causes, mandatory confirmation-run protocol (F42 
 3 integrity fail-closes across the saga, all correct, all documented
 
 **evidence:**
-- bench/FINDING-F44
-- bench/specs/SPEC-171-FAST-SCAN-GATE v2
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/FINDING-F44-GATE171-CLOSED.md
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/SPEC-171-FAST-SCAN-GATE.md
 
 **caveats:**
 - uncontended latency is reported separately (P1/L4); this is the published cost-curve instrument
+
+### <a id="slow-route-compactions-v0270-2026-10-16"></a>slow-route-compactions-v0270-2026-10-16
+
+**id:**
+slow-route-compactions-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+compactions_per_100_messages
+
+**value:**
+20.0
+
+**display:**
+20.0
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="slow-route-facts-v0270-2026-10-16"></a>slow-route-facts-v0270-2026-10-16
+
+**id:**
+slow-route-facts-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+facts_kept
+
+**value:**
+0.872
+
+**display:**
+.872
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="slow-route-mean-wait-v0270-2026-10-16"></a>slow-route-mean-wait-v0270-2026-10-16
+
+**id:**
+slow-route-mean-wait-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+mean_wait_s_per_message
+
+**value:**
+8.1
+
+**display:**
+8.1 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="slow-route-survival-drops-v0270-2026-10-16"></a>slow-route-survival-drops-v0270-2026-10-16
+
+**id:**
+slow-route-survival-drops-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+rows_dropped_by_survival_fits
+
+**value:**
+0
+
+**display:**
+0
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="slow-route-wait-share-v0270-2026-10-16"></a>slow-route-wait-share-v0270-2026-10-16
+
+**id:**
+slow-route-wait-share-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+messages_waited_percent
+
+**value:**
+20
+
+**display:**
+20%
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="slow-route-wall-p90-v0270-2026-10-16"></a>slow-route-wall-p90-v0270-2026-10-16
+
+**id:**
+slow-route-wall-p90-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (slow summary route, #1128)
+
+**metric:**
+compaction_wall_p90_s
+
+**value:**
+45.8
+
+**display:**
+45.8 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds, 150 pooled post-crossing messages; live-host turn-end semantics; managed policy: leaf chunk 24,000, summary cap 2,000, timeout 120 s
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+rc8 vs rc5: compactions/100 20.0 vs 20.0; mean wait 8.1 vs 11.0 s; waited 20% vs 20%; late facts .872 vs .872; survival drops 0 vs 0; wall p90 45.8 vs 61.0 s
+
+**variance:**
+3 seeds; pooled rates; no variance estimate in scorecard; shorter waits are summary-route timing on the day, not a code-effect claim
+
+**failclose:**
+0 summary-call failures, 0 timeouts, 0 no-progress holds, 0 zero-leaf events
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Per-message wait replay PASS; slow gpt-6.1-sol summariser route. Bars: compactions/100 <=25, mean wait <=15 s, waited <=25%, facts >=.583, survival drops 0, wall p90 <=120 s. Before #1123: 87 compactions/100, 52 s mean wait.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-admission-losses-v0270-2026-10-16"></a>track-s-admission-losses-v0270-2026-10-16
+
+**id:**
+track-s-admission-losses-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+admission_proven_losses
+
+**value:**
+0
+
+**display:**
+0; D3 PASS; 60/60 admitted at all 24 checkpoints
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-compactions-v0270-2026-10-16"></a>track-s-compactions-v0270-2026-10-16
+
+**id:**
+track-s-compactions-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+compactions_per_100_messages
+
+**value:**
+12.3
+
+**display:**
+12.3; bar <= 25
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-facts-cp176-v0270-2026-10-16"></a>track-s-facts-cp176-v0270-2026-10-16
+
+**id:**
+track-s-facts-cp176-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+facts_kept_cp176
+
+**value:**
+0.942
+
+**display:**
+0.942 vs 0.933 (reported only)
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-facts-cp304-v0270-2026-10-16"></a>track-s-facts-cp304-v0270-2026-10-16
+
+**id:**
+track-s-facts-cp304-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+facts_kept_cp304
+
+**value:**
+0.778
+
+**display:**
+0.778 vs 0.608; +16.9 pt; p 0.009
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-mean-wait-v0270-2026-10-16"></a>track-s-mean-wait-v0270-2026-10-16
+
+**id:**
+track-s-mean-wait-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+mean_wait_s_per_message
+
+**value:**
+5.2
+
+**display:**
+5.2 s; bar <= 15 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-survival-drops-v0270-2026-10-16"></a>track-s-survival-drops-v0270-2026-10-16
+
+**id:**
+track-s-survival-drops-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+rows_dropped_by_survival_fits
+
+**value:**
+115
+
+**display:**
+115 (FAIL, waived by release manager); bar 0
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-wait-share-v0270-2026-10-16"></a>track-s-wait-share-v0270-2026-10-16
+
+**id:**
+track-s-wait-share-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+messages_waited_percent
+
+**value:**
+12
+
+**display:**
+12%; bar <= 25%
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-wall-max-v0270-2026-10-16"></a>track-s-wall-max-v0270-2026-10-16
+
+**id:**
+track-s-wall-max-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+compaction_wall_max_s
+
+**value:**
+115.1
+
+**display:**
+115.1 s; bar <= 145 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="track-s-wall-p90-v0270-2026-10-16"></a>track-s-wall-p90-v0270-2026-10-16
+
+**id:**
+track-s-wall-p90-v0270-2026-10-16
+
+**benchmark:**
+Track S v3 (GLM summary route)
+
+**metric:**
+compaction_wall_p90_s
+
+**value:**
+64.5
+
+**display:**
+64.5 s; bar <= 120 s
+
+**tier:**
+P
+
+**date:**
+2026-10-16
+
+**system_commit:**
+v0.27.0-rc8 (4e603ed65f137a909606afccfc735c691e363d25); GA tree adds release notes only
+
+**harness_commit:**
+not specified in the release scorecard
+
+**judge:**
+Track S fact scoring; full prompt not specified in the release scorecard
+
+**reader:**
+GLM reader; exact model and prompt not specified in the release scorecard
+
+**retrieval_config:**
+Track S v3, 3 seeds x 2 runs per build; interleaved fresh runs; both builds: leaf chunk 24,000, summary cap 2,000, timeout 120 s; checkpoints 176 and 304; timing: rc8 first six runs, 300 post-crossing messages
+
+**dataset_exposure:**
+none documented in this release scorecard; no new dataset audit
+
+**breakdown:**
+cp-176: v0.26.1 0.933 vs rc8 0.942, +0.8 pt, p 0.741; cp-304: 0.608 vs 0.778, +16.9 pt, p 0.009; 24 checkpoints admitted 60/60 facts
+
+**variance:**
+3 seeds x 2 runs per build; seed-2 repeat replaces first pair for facts only; largest repeat spread .067 baseline, .050 rc8; first seed-2 pair would give +11.7 pt, p .185
+
+**failclose:**
+0 admission-proven losses; first six candidate runs include 1 summary read timeout and 115 rows moved out of live context by survival fits; rows remain stored and searchable
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/releases/download/v0.27.0/SCORECARD-PHASE-D.md
+
+**caveats:**
+- Baseline is v0.26.1, not previous GA v0.26.2; no equivalence claim. GLM summariser route.
+- D2 facts PASS; decisive cp-304. Bar: exact stratified run-level permutation p < .05 and loss >= 5 points blocks; seed spread > 0.10 after repeat is INCONCLUSIVE.
+- D2 timing FAIL (115 rows vs bar 0); waived by release manager under owner delegation, pre-existing hold/fit cost tracked in #1096. First six timing runs stand; repeat decides facts only.
+- Backfill date is the release publication date; the scorecard does not state the run completion day.
+- Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
 
 ### <a id="v2-static-451-sota-luna-2026-08-03"></a>v2-static-451-sota-luna-2026-08-03
 
@@ -1087,8 +3189,10 @@ A/A' 100q fixed-seed subset (seed 20260802) EXECUTED: 11/100 discordant (11.0%),
 0/451 instrument failures both domains
 
 **evidence:**
-- bench/specs/RUN-SHEET-V2-SOTA-LUNA.md (incl. Amendment 1)
-- session-notes 2026-08-02 v2-sota-luna artifacts (full-web, full-enterprise, per-question)
+- https://github.com/electricsheephq/lcm-x/blob/764ed74c6142141a6d2102dd0c99eb84806f7f66/bench/specs/RUN-SHEET-V2-SOTA-LUNA.md
+
+**local_raw:**
+- local run 2026-08-02 v2-sota-luna artifacts (full-web, full-enterprise, per-question)
 
 **caveats:**
 - Cross-config context: official-config (qwen3.5-9b reader) row is 123/451=27.3%; the +4.4pt is READER-dominated by design — this row anchors the SOTA-reader funnel, it is NOT a memory-delta claim

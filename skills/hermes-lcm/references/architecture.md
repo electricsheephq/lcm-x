@@ -42,13 +42,30 @@ never a silent degrade to full-text. A stale vector identity is different: when 
 cloud profile matches, or the stored vectors carry an older privacy revision, `lcm_recall`
 answers from its full-text arm (for every `include`) with `degraded=true` and an
 `embedding_identity_stale:` reason, sends no query to the stale arm, and reads none of its
-vectors. The remedy is `/lcm embed warmup`, then `/lcm embed backfill --apply`.
+vectors. The remedy is `/lcm embed warmup`, then `/lcm embed backfill --apply`
+for summary-only staleness. The doctor's `stale_tasks` selects the corpus: add
+`--corpus chunks` for chunk-only staleness or `--corpus both` when both are stale.
+Chunk apply commands on cloud providers also require `--confirm-raw-text` on
+every invocation. This flag acknowledges sending raw message text to the named
+cloud provider, even with provider-input privacy enabled; inspect the doctor's
+emitted `remedy` and consent warning before applying it.
+Repeat the backfill apply only while `remaining` is above 0 and each run lowers it.
+Stop on `status: partial`, `status: error`, or `status: failed`, or if `remaining`
+stops falling, and inspect the warnings, errors, and detail output.
 
 With embeddings on and a registered profile, new leaf summaries are embedded by a bounded
 background pass after each published leaf summary and on session bind; new message chunks are
 embedded the same way only with fastembed or a loopback Ollama endpoint, because chunk consent
 (`--confirm-raw-text`) is per invocation. The pass shares the backfill lease and skips while a
 manual backfill holds it. `/lcm status` reports the backlog per corpus and the last pass.
+
+Background embedding maintenance follows the foreground session. A genuine session end (exit, `/new`, or an
+end after a cancelled compaction; never a compaction commit) stops scheduling new passes and drops this engine's
+queued passes without waiting; a pass already running is left to finish. Every live-session rebind re-arms
+maintenance and schedules a pass. Shutdown waits up to 2 s for an active pass. At process exit, maintenance
+stops at the next provider batch boundary and waits up to 10 s for that batch to publish; a pass or backfill cut
+short there reports `stop_reason: process_exit`, and the next pass picks up the unsent work. A backlog that holds
+steady between a session end and the next rebind is this designed pause, not a stalled pass.
 
 Vector identity binds provider, model, dimension, storage shape, and the active
 privacy revision. A policy change requires a new warmup/identity rather than

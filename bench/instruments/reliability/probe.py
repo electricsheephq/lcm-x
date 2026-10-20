@@ -40,7 +40,7 @@ ANCHORS = {  # shape -> (host file, text on the cited line)
     "user_merge": ("agent/agent_runtime_helpers.py", "def _merge_consecutive_users"),
     "orphan_drop": ("agent/agent_runtime_helpers.py", "def _drop_stray_tool_results"),
     "rotation_start": ("agent/conversation_compression.py", "def _notify_context_engine_compression_complete"),
-    "rotation_end": ("agent/conversation_compression.py", "agent.commit_memory_session(messages)"),
+    "rotation_end": ("agent/conversation_compression.py", "agent.commit_memory_session("),  # r34.10 passes original_messages
     "session_transition": ("run_agent.py", "def _transition_context_engine_session"),
     "summary_aborted": ("agent/context_compressor.py", '"summary_generation_aborted"'),
     "cron_agent": ("cron/scheduler.py", 'platform="cron"'),
@@ -80,10 +80,23 @@ UNSHORTENED = "LCM survival fit could not shorten the list"
 FILLER = "alpha beta gamma delta "
 
 
+def request_contains(messages: list[dict], text: str) -> bool:
+    """Full current-request bytes in one provider message; a tag alone is insufficient."""
+    return any(text in str(m.get("content") or "") for m in messages)
+
+
 def write_tool_files(files: Path, cell: dict) -> None:
     """Shared R1/R2 fixtures; distinct paths bypass the host's identical-read dedup."""
     files.mkdir(exist_ok=True)
     (files / "small.txt").write_text("small deterministic file\n")
+    if cell.get("id") == "default-window/objective-1221":
+        # Real reads use fixed ~/ paths; --out and --scratch-root never enter the tool arguments.
+        objective_files = Path.home() / "objective-1221"
+        objective_files.mkdir(exist_ok=True)
+        for n, size in enumerate([24000, 16000] + [7400] * 9, 1):
+            text = "".join(f"Record {i:04d}: datum for task step {n:02d}.\n"
+                           for i in range(size // 30 + 1))[:size]
+            (objective_files / f"big-{n:02d}.txt").write_text(text)
     lines = cell.get("big_lines", 400)
     (files / "big.txt").write_text("".join(f"line {i:05d}: " + FILLER * 8 + "\n" for i in range(lines)))
     for n in range(1, cell.get("big_files", 0) + 1):
@@ -150,7 +163,7 @@ def check_result(name, args, result):
     if isinstance(data, dict) and (data.get("error") or data.get("success") is False):
         return False, f"error: {str(data.get('error'))[:160]}", len(text)
     if name == "read_file":
-        path = Path(str((args or {}).get("path", "")))
+        path = Path(str((args or {}).get("path", ""))).expanduser()  # the host expands "~" itself
         want = len(path.read_text().splitlines()) if path.is_file() else None
         if not isinstance(data, dict) or data.get("truncated") or want is None or data.get("total_lines") != want:
             return False, f"read_file result incomplete (total_lines {(data or {}).get('total_lines')} of {want})", len(text)
@@ -184,6 +197,11 @@ def refusal(cell_dir):
 
 
 def user_text(cell, prefix, t):
+    if cell.get("id") == "default-window/objective-1221":
+        if t == 2:
+            # Fixed plain-row objective from #1221's engine regression, with the harness turn tag.
+            return "[T02] user turn 2: Keep the following objective verbatim.\n" + ("plan " * 9600) + " end."
+        return f"[{prefix}{t:02d}] user turn {t}: Earlier request. end."
     ut = cell["user_text"]
     if t in ut.get("continue_turns", []):
         return "continue"
@@ -568,6 +586,18 @@ def main():
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     orig_start, orig_end = etype.on_session_start, getattr(etype, "on_session_end", None)
 
+    if "F4" in cell.get("bars", []):
+        orig_gate = etype.should_compress
+
+        def traced_gate(self, prompt_tokens=None):
+            result = orig_gate(self, prompt_tokens)
+            event(turn=cur["turn"], event="compression_gate", session_prefix=cur.get("prefix", "T"),
+                  final=cur["final"], tool_round=cur["step"],
+                  tokens=prompt_tokens if prompt_tokens is not None else self.last_prompt_tokens,
+                  threshold_tokens=self.threshold_tokens, triggered=result)
+            return result
+        etype.should_compress = traced_gate
+
     recovery_turns = []
     fr = faults.get("forced_recovery")
     recovery_module = sys.modules[cell["plugin"]["module"] + ".engine"]
@@ -575,6 +605,7 @@ def main():
         ("placeholder", "_OVERFLOW_RECOVERY_PLACEHOLDER"), ("note", "_OVERFLOW_RECOVERY_OVERCAP_NOTE"))}
 
     def traced_compress(self, messages, *args, **kwargs):
+        message_count = len(messages)
         injecting = fr and cur["turn"] == fr["turn"] and cur["step"] > 0
         if injecting:
             if fr["kind"] not in fired:
@@ -586,7 +617,7 @@ def main():
                 result = orig_compress(self, messages, *args, **kwargs)
         else:
             result = orig_compress(self, messages, *args, **kwargs)
-        status = getattr(self, "_last_compression_status", None)
+        status = getattr(self, "last_compression_status", getattr(self, "_last_compression_status", None))
         recovery = {}
         if status == "overflow_recovery":
             paths = [k for k, text in recovery_texts.items() if text and any(
@@ -600,9 +631,14 @@ def main():
             counters["compacted_turns"].append(cur["turn"])
         event(turn=cur["turn"], event="compaction", session=getattr(self, "_session_id", None), final=cur["final"],
               session_prefix=cur.get("prefix", "T"),
-              compression_status=status, noop_reason=getattr(self, "_last_compression_noop_reason", None),
+              compression_status=status, noop_reason=getattr(self, "last_compression_noop_reason", getattr(self, "_last_compression_noop_reason", None)),
               depth0_nodes=depth0() if status == "compacted" else None,
-              rejection=rejection(self), native_attempts=cur["native"], **recovery)
+              rejection=rejection(self), native_attempts=cur["native"], **recovery,
+              **({"input_tokens": recovery_module.count_messages_tokens(messages),
+                  "message_count": message_count,
+                  "output_tokens": recovery_module.count_messages_tokens(result),
+                  "threshold_tokens": self.threshold_tokens, "config_threshold": self._config.context_threshold}
+                 if set(cell.get("bars", [])) & {"C1", "F4"} else {}))
         p8_pin(result)
         return result
     etype.compress = traced_compress
@@ -759,6 +795,13 @@ def main():
                     body = m.get("content") if isinstance(m.get("content"), str) else json.dumps(m.get("content"))
                     event(turn=t, event="tool_seen", id=cid, sha=hashlib.sha256(body.encode()).hexdigest(), chars=len(body),
                           **({"host_wire_notice": True} if body in wire_notices else {}))  # tool_calls.bind
+            if set(cell.get("bars", [])) & {"C1", "F4"}:
+                # Opt-in R1 continuity: only synthetic tags and a literal-presence boolean escape.
+                current = user_text(cell, prefix, t).strip()
+                messages = kw.get("messages") or []
+                event(turn=t, event="provider_request", session_prefix=prefix, final=cur["final"],
+                      continuity={"F4": any(f"[{prefix}{t:02d}]" in str(m.get("content") or "") for m in messages),
+                                  "current_request_present": request_contains(messages, current)})
             sent = sum(len(str(m.get("content") or "")) for m in kw.get("messages") or []) // 4 + 800
             usage = int((sent if asst.get("real_usage") else est) * float(asst.get("usage_scale", 1.0)))
             if cancel and step == 0:  # the ACP cancel lands while the provider call is in flight
@@ -1009,7 +1052,7 @@ def session_count():
 def rejection(engine):
     """LCM's native-recovery rejection reason for the call that just ended (it doubles as the noop reason)."""
     reason = getattr(engine, "_last_native_recovery_rejection", None)
-    return reason if reason and reason == getattr(engine, "_last_compression_noop_reason", None) else None
+    return reason if reason and reason == getattr(engine, "last_compression_noop_reason", getattr(engine, "_last_compression_noop_reason", None)) else None
 
 
 def final_check(agent, history, buf):
@@ -1052,7 +1095,7 @@ def final_check(agent, history, buf):
             agent._session_db = saved
         rec["engine_calls"] = getattr(engine, "_probe_calls", 0) - calls0  # a compress() inside THIS invocation
         rec["engine_status"] = getattr(engine, "_probe_status", None) if rec["engine_calls"] else None
-        rec["noop_reason"] = getattr(engine, "_last_compression_noop_reason", None)
+        rec["noop_reason"] = getattr(engine, "last_compression_noop_reason", getattr(engine, "_last_compression_noop_reason", None))
         rec["rejection"] = rejection(engine)
         rec["conflicts"] = buf.getvalue().count("publication_invariant_conflict") - before
         attempts.append(rec)

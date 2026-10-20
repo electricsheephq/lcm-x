@@ -22,6 +22,7 @@ import hermes_lcm.tokens as tokens
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
+from tests.harness import make_engine
 
 PAD = " alpha beta gamma delta" * 30
 LEAF = "Earlier turns.\nExpand for details about: turns"
@@ -291,12 +292,17 @@ def test_t6_partial_sweeps_do_not_grow_the_prefix(tmp_path, monkeypatch, caplog)
     60 s soft target, so the summariser takes 19 s per call on the clock (a call that takes no time would let
     every later leaf in under the target while the condensation passes are bounded by time)."""
     # #605 F2: the 150-token leaves are over a lowered level 3 bound, so each one calls (and takes its 19 s).
-    engine = _engine(tmp_path, condensation_fanin=2, leaf_chunk_tokens=150, l3_truncate_tokens=2,
-                     summary_prefix_target_tokens=150)  # Preserve this partial-sweep bound's original target.
+    # Rollups share the provider seam: their worker must not spend the foreground test's fake time.
+    engine = make_engine(
+        tmp_path, window=200_000, conversation_id="conv", platform="telegram",
+        fresh_tail_count=2, context_threshold=0.001, threshold_full_sweep_enabled=True,
+        max_assembly_tokens=100_000, condensation_fanin=2, leaf_chunk_tokens=150, l3_truncate_tokens=2,
+        summary_prefix_target_tokens=150, temporal_rollups_enabled=False,
+    )  # Preserve this partial-sweep bound's original target.
     long_leaf = "Earlier turns." + " summary words" * 20 + "\nExpand for details about: turns"
     offset = [0.0]
-    real_monotonic = time.monotonic
-    monkeypatch.setattr(time, "monotonic", lambda: real_monotonic() + offset[0])
+    # Only the scripted calls spend time; host load cannot change which passes are admitted.
+    monkeypatch.setattr(time, "monotonic", lambda: offset[0])
 
     def provider(prompt, max_tokens, model="", timeout=None, reasoning_effort=""):
         offset[0] += 19.0

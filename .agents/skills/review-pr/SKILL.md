@@ -34,7 +34,13 @@ Build JSON for `scripts/maintainer_gate.py` from live reads:
 Do not include merge authorization in readiness mode. Run the standard-library evaluator with
 JSON on stdin. Its output is advisory: it does not prove the provenance of caller-supplied facts
 and never grants write or merge authority. `review_lanes_hint` names the review lanes `land-pr`
-requires; it never fails readiness.
+requires; it never fails readiness. A `turn-path` named risk also supplies the advisory
+`turn_path_probe_packet`: consumer enumeration (`rg` call sites for every changed helper
+and effects on each consumer), the previous-GA differential row (`tests/differential`,
+opt-in), and sibling shapes (neighbouring windows, row roles, recovery paths). Read the
+packet in the PR body as review context. It adds no reviewers or PR-size cap and never
+blocks readiness or landing. Turn-path files retain `lcm-memory-preservation`; unknown
+changed files retain both lanes and have no packet key.
 
 ## 3. Review The Exact Head
 

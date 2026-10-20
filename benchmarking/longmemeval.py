@@ -37,6 +37,7 @@ import struct
 import sys
 import tempfile
 import time
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
@@ -722,7 +723,7 @@ class ContentHashEmbeddingCache:
 
     def _initialize(self) -> None:
         cache_existed = self.cache_path.exists()
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             mode = str(connection.execute("PRAGMA journal_mode=WAL").fetchone()[0])
             if mode.casefold() != "wal":
                 raise RuntimeError(
@@ -762,7 +763,7 @@ class ContentHashEmbeddingCache:
         if not digests:
             return {}
         found: dict[str, list[float]] = {}
-        with self._connect() as connection:
+        with closing(self._connect()) as connection, connection:
             for digest in dict.fromkeys(digests):
                 row = connection.execute(
                     """
@@ -854,7 +855,7 @@ class ContentHashEmbeddingCache:
                     f"{len(vectors)} vectors for {len(missing_texts)} texts"
                 )
             encoded = [self._encode_vector(vector) for vector in vectors]
-            with self._connect() as connection:
+            with closing(self._connect()) as connection, connection:
                 connection.executemany(
                     """
                     INSERT OR IGNORE INTO embedding_cache (

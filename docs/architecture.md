@@ -113,6 +113,7 @@ Plugin surface
   plugin.yaml            manifest
   __init__.py            plugin registration and optional slash-command registration
   schemas.py             tool schemas shown to the model
+  tool_registry.py       ordered tool schemas, handler names, emojis, and dormant flags
   tools.py               lcm_grep, lcm_load_session, lcm_describe, lcm_expand, lcm_expand_query
   command.py             /lcm command handlers
   config.py              env var defaults and overrides
@@ -127,6 +128,7 @@ Engine
   engine_registry.py     process-wide active-clone registry (resolve_active_lcm_engine)
   runtime_identity.py    plugin/git identity for status and doctor
   codex_routing.py       Codex OAuth route detection and effective context caps
+  compaction_policy.py   pure context-window, threshold and assembly-cap policy
   sqlite_util.py         SQLite lock-contention / busy-timeout helpers
   message_analysis.py    tool-call-id pairing and synthetic-noise detection
   sanitize.py            active-context sanitizers

@@ -1,6 +1,7 @@
 """v0.26.0 slice A: host ``message_uid`` SHADOW bindings (design REVISION 3). After #436 decides an ingest,
 each uid-bearing host dict gets one R3-3 class and the row #436 chose goes to the droppable ``host_uid_bindings``
-table. Nothing feeds back into ingest, replay, emission or commit; every exception is caught, counted and fails
+table. #1124 reads canonical bindings for store-complete copy exclusions; #1403 also reads them
+as occurrence proof for NULL-stamp audit copies. Every shadow exception is caught, counted and fails
 open. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
 host writes nothing. The shadow GATE is counted per binding in the table (``first_check`` / ``disagree_seen``),
 so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` does nothing; ``on`` runs as ``shadow``.
@@ -167,10 +168,13 @@ class HostUidShadowMixin:
                        if isinstance(uid, str)}
             records: dict = defaultdict(list)
             for uid in (present & pending.keys()) - done:
-                lineage, proof_kind = pending[uid]
+                entry = pending.get(uid)  # a bypassed pass on another thread may drop its own uid meanwhile
+                if entry is None:
+                    continue
+                lineage, proof_kind = entry
                 records[lineage].append((0, uid, "engine", proof_kind))
             for uid in (pending.keys() - present) | (pending.keys() & done):
-                pending.pop(uid)
+                pending.pop(uid, None)
             for lineage, rows in records.items():
                 try:
                     self._store.add_host_uid_bindings(lineage, rows)

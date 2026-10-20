@@ -50,10 +50,11 @@ Require success on the pinned head for:
 - `test (3.12)`
 - `test (3.13)`
 - `test (3.14)`
+- `differential` (from the `Differential` workflow, not `CI`; it passes in seconds when no turn-path file changed)
 
 Treat pending, skipped, missing, stale-head, or failing required checks as blocking. Require one
 result per required name; resolve each Actions run and bind its `head_sha` to `$head` and its
-`workflow_id` to protected `CI`. Reject name-only, duplicate, or mixed identities. Require strict
+`workflow_id` to protected `CI` (`Differential` for `differential`). Reject name-only, duplicate, or mixed identities. Require strict
 up-to-date status enforcement so a protected-base change blocks merging until CI passes again.
 
 ## 4. Verify Exact-Head Review Coverage
@@ -112,6 +113,13 @@ query($owner: String!, $name: String!, $number: Int!, $endCursor: String) {
   acceptance review and a distinct adversarial review whose reviewer model differs from the
   author model. A failed hint command, `HINT UNAVAILABLE`, or `"changed_files": "unknown"` also
   means both lanes.
+- When `named_risks` also includes `turn-path`, the PR body carries the fixed
+  `turn_path_probe_packet`: consumer enumeration (`rg` call sites for every changed helper
+  and effects on each consumer); the previous-GA differential row (`tests/differential`,
+  opt-in); and sibling shapes (neighbouring windows, row roles, recovery paths). This is
+  advisory: it adds no reviewers or PR-size cap and never blocks readiness or landing.
+  Turn-path files still name `lcm-memory-preservation`, so review lanes stay unchanged.
+  Unknown changed files have no packet key and still require both lanes.
 - Report each lane's pointer, or `REVIEW_SKIPPED: <lane> — <reason>` for the owner to decide.
   The merge receipt comment is a write: it is posted only in Section 7, after merge authority is
   established. A readiness-only invocation stays read-only.
@@ -190,9 +198,10 @@ Verify the result:
 merge_commit="$(gh pr view <PR> --repo electricsheephq/lcm-x \
   --json state,mergeCommit --jq 'select(.state == "MERGED") | .mergeCommit.oid')"; test -n "$merge_commit" && \
 test "$(gh api repos/electricsheephq/lcm-x/commits/main --jq .sha)" = "$merge_commit" && \
-required="$(gh api repos/electricsheephq/lcm-x/rulesets/20888757 --jq '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | {name: .context, app_id: .integration_id}]')" && gh api "repos/electricsheephq/lcm-x/commits/$merge_commit/check-runs?per_page=100" | jq -e --argjson required "$required" --argjson expected '["workflow-lint","lint","test (3.11)","test (3.12)","test (3.13)","test (3.14)"]' --argjson merge_expected '[{"name":"workflow-lint","app_id":15368},{"name":"lint","app_id":15368},{"name":"test (3.11)","app_id":15368},{"name":"test (3.12)","app_id":15368},{"name":"test (3.13)","app_id":15368},{"name":"test (3.14)","app_id":15368}]' '(($required | map(.name) | sort) == ($expected | sort)) and ([.check_runs[] | select(.status == "completed" and .conclusion == "success") | {name, app_id: .app.id}]) as $passed | ($merge_expected - $passed | length == 0)'
+required="$(gh api repos/electricsheephq/lcm-x/rulesets/20888757 --jq '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | {name: .context, app_id: .integration_id}]')" && gh api "repos/electricsheephq/lcm-x/commits/$merge_commit/check-runs?per_page=100" | jq -e --argjson required "$required" --argjson expected '["workflow-lint","lint","test (3.11)","test (3.12)","test (3.13)","test (3.14)","differential"]' --argjson merge_expected '[{"name":"workflow-lint","app_id":15368},{"name":"lint","app_id":15368},{"name":"test (3.11)","app_id":15368},{"name":"test (3.12)","app_id":15368},{"name":"test (3.13)","app_id":15368},{"name":"test (3.14)","app_id":15368}]' '(($required | map(.name) | sort) == ($expected | sort)) and ([.check_runs[] | select(.status == "completed" and .conclusion == "success") | {name, app_id: .app.id}]) as $passed | ($merge_expected - $passed | length == 0)'
 ```
-- Confirm the PR is merged and the six CI checks pass on the merge commit.
+- Confirm the PR is merged and the six CI checks pass on the merge commit. `differential` runs on PRs only, so it is
+  checked on the pinned head before merge, not on the merge commit.
 - Confirm verified closing issues are closed as completed.
 - Thank external contributors and link the landed PR.
 - Leave ambiguous issues open with a precise relationship note.
