@@ -81,6 +81,14 @@ def _load_standalone_config():
     return _STANDALONE_CONFIG
 
 
+def lcm_env_get(name: str, default=None):
+    if __package__ in sys.modules:
+        from .config import lcm_env_get as read_env
+    else:
+        read_env = _load_standalone_config().lcm_env_get
+    return read_env(name, default)
+
+
 def _env_flag_enabled(name: str, default: bool = False) -> bool:
     if __package__ in sys.modules:
         from .config import _parse_bool_env
@@ -141,28 +149,12 @@ def _engine_bound_session_id(engine) -> str:
     )
 
 
-def _ensure_engine_bound_to_session(
-    active_engine,
-    session_id: str,
-    *,
-    platform: str = "",
-    conversation_id: str = "",
-) -> None:
-    session_id = str(session_id or "")
-    if session_id and _engine_bound_session_id(active_engine) != session_id:
-        active_engine.on_session_start(
-            session_id,
-            platform=platform,
-            conversation_id=conversation_id or None,
-        )
-
-
 def _session_context_value(name: str) -> str:
     """Read task-local host session metadata with legacy env compatibility."""
     try:
         from gateway.session_context import get_session_env
     except ImportError:
-        return str(os.environ.get(name, "") or "")
+        return str(lcm_env_get(name, "") or "")
     try:
         return str(get_session_env(name, "") or "")
     except Exception:
@@ -284,12 +276,17 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
 
 
 def _effective_preanswer_mode(config) -> str:
+    if __package__ in sys.modules:
+        from .config import PREANSWER_EVIDENCE_MODES
+    else:
+        PREANSWER_EVIDENCE_MODES = _load_standalone_config().PREANSWER_EVIDENCE_MODES
+
     if not bool(getattr(config, "preanswer_evidence_enabled", False)):
         return "off"
     raw = str(getattr(config, "preanswer_evidence_mode", "") or "").strip().casefold()
     if not raw:
         return "legacy_selective"
-    return raw if raw in {"off", "legacy_selective", "requirements_v1"} else "off"
+    return raw if raw in PREANSWER_EVIDENCE_MODES else "off"
 
 
 def _pre_llm_context(active_engine, payload: dict) -> dict | None:
@@ -575,7 +572,7 @@ def register(ctx):
         hermes_home = str(get_hermes_home())
     except Exception as exc:
         logger.warning("hermes-lcm-x: could not import get_hermes_home (%s); falling back to env", exc)
-        hermes_home = os.environ.get("HERMES_HOME", os.path.expanduser("~/.hermes"))
+        hermes_home = lcm_env_get("HERMES_HOME", os.path.expanduser("~/.hermes"))
 
     engine = LCMEngine(config=config, hermes_home=hermes_home)
 

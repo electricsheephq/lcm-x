@@ -1,4 +1,4 @@
-"""Measure #1160's skipped tail without changing session-end recovery behavior."""
+"""#1160: bounded session-end retry and shutdown diagnostics."""
 
 from contextlib import contextmanager
 import logging
@@ -48,14 +48,27 @@ def _locked_flush(engine, caplog):
     finally:
         locker.execute("ROLLBACK")
         locker.close()
-    assert "raw-message ingest skipped due to SQLite lock" in caplog.text
+    assert "retry pending at the next session start or shutdown" in caplog.text
+    assert "may be absent" not in caplog.text
     assert _contents(engine) == [message["content"] for message in messages[:2]]
     return messages
 
 
-def test_locked_flush_reports_pending_count_without_content(engines, caplog):
-    """REGRESSION: a real writer lock names the one unflushed row, not its text."""
-    messages = _locked_flush(engines(), caplog)
+def test_locked_flush_reports_pending_count_without_content(engines, monkeypatch, caplog):
+    """Warn only after shutdown's bounded retry still cannot store the tail."""
+    engine = engines()
+    messages = _locked_flush(engine, caplog)
+    monkeypatch.setattr(engine_module, "_SESSION_END_SHUTDOWN_TIMEOUT_MS", 20)
+    caplog.clear()  # Assert the shutdown diagnostic, not the end notice.
+    locker = sqlite3.connect(str(engine._store.db_path), isolation_level=None)
+    locker.execute("BEGIN IMMEDIATE")
+    try:
+        with caplog.at_level(logging.WARNING):
+            engine.shutdown()
+    finally:
+        locker.rollback()
+        locker.close()
+    assert "raw-message ingest skipped due to SQLite lock" in caplog.text
     assert "unflushed=1" in caplog.text
     assert all(message["content"] not in caplog.text for message in messages)
 
@@ -72,15 +85,15 @@ def test_resume_recovers_skipped_tail_exactly_once(engines, caplog):
     assert _contents(resumed) == [message["content"] for message in messages]
 
 
-def test_never_resumed_session_keeps_known_loss_window(engines, caplog):
-    """CONTROL: the known window #1160 measures leaves a never-resumed tail absent."""
+def test_never_resumed_session_is_flushed_at_shutdown(engines, caplog):
+    """A graceful shutdown drains the tail even when the session never resumes."""
     original = engines()
     messages = _locked_flush(original, caplog)
     original.shutdown()
     next_engine = engines()
     next_engine.on_session_start("new-session", platform="cli")
     next_engine.ingest([{"role": "user", "content": "new session question"}])
-    assert _contents(next_engine) == [message["content"] for message in messages[:2]]
+    assert _contents(next_engine) == [message["content"] for message in messages]
     assert _contents(next_engine, "new-session") == ["new session question"]
 
 

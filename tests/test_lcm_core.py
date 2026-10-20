@@ -740,7 +740,7 @@ class TestProviderPrefixedAuxiliaryCalls:
         assert seen["model"] == "gpt-oss-120b"
 
     def test_expansion_call_passes_provider_and_stripped_model(self, monkeypatch):
-        from hermes_lcm.tools import _synthesize_expansion_answer
+        from hermes_lcm.expand_query_tools import _synthesize_expansion_answer
 
         seen = {}
 

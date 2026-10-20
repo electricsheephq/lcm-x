@@ -288,7 +288,7 @@ checkout root. Credential entries list only variable names, never values.
 | --- | --- | --- | --- |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `engine.py` | Absolute compaction threshold override | each call — `_set_context_length()` with a positive context length, through model updates, session-start metadata, or cloning |
 | `LCM_ENABLE_SLASH_COMMAND` | `__init__.py` | Optional slash-command registration | plugin registration |
-| `LCM_HERMES_BASE_DIR` | `engine.py`, `externalize.py`, `diagnostics.py` | Storage containment boundary | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |
+| `LCM_HERMES_BASE_DIR` | `config.py` (called by `engine.py`, `externalize.py`, `diagnostics.py`) | Storage containment boundary; process-wide, never read from a routed profile | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |
 | `LCM_IDENTITY_ANCHOR` | `identity_anchor.py` | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `db_bootstrap.py` | Startup integrity-check interval | database open — startup FTS validation, after structural checks pass |
 | `LCM_FTS_INTEGRITY_BACKGROUND` | `db_bootstrap.py` | Background integrity-check switch | database open — startup FTS validation, when a deep check is due |
@@ -304,6 +304,18 @@ the next named operation (FTS controls on the next database open, and
 registration-time check), provided the running process's environment has been
 updated; changing a parent shell's environment alone requires restarting the
 host to pass it the new values.
+
+On routed profiles, registration snapshots the absolute override for that home;
+model updates and clones keep that snapshot. Routed readers use the host-bound
+profile mapping or that home's registration pin. LCM-X background work runs with
+the profile that scheduled it.
+A multiplexed messaging gateway builds every profile's scope, including the launch
+profile, from its `.env` and configured secret sources; process-only settings and
+provider keys do not apply there. `hermes serve` instead supplies its captured launch
+environment overlaid by the launch profile's files; LCM-X preserves that composition.
+Put routed settings and provider keys in each profile's files or secret sources.
+`LCM_HERMES_BASE_DIR` is the exception: the containment root always comes from the
+process environment, so a profile can neither drop nor widen it.
 
 Three additional standalone helpers in `config.py` are also outside the scalar
 registry and `LCMConfig.from_env()`:

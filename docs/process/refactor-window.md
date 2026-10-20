@@ -4,7 +4,10 @@ Structural refactors land in a protected window between a GA tag and the next rc
 After the v0.27.0 GA the window is 5 working days, before v0.29 feature work.
 
 ## What may land in the window
-- PRs labelled `refactor-only`: one move or one extraction each, with no behaviour change.
+- PRs labelled `refactor-only`: one move or one extraction each, with no behaviour change. Adjacent phases of one function,
+  extracted in place within the same module and pinned by one golden trace that covers both, count as one extraction; a
+  move to a different module, or a second function or family, is its own PR. The 200 non-generated-line stop signal still
+  applies per PR.
 - Footgun fixes that already have a failing (strict xfail) probe test, as separate fix PRs.
 
 ## Rules for a refactor-only PR
@@ -23,6 +26,11 @@ After the v0.27.0 GA the window is 5 working days, before v0.29 feature work.
    body records the command. Existing modules are not held to this.
 9. **Name the invariants.** The PR body lists the IDs from [docs/invariants.md](../invariants.md) that the moved code serves,
    and the characterization tests that pin them.
+10. **Stack depth is behaviour where code walks the stack.** The auxiliary-agent checks in `aux_session.py` walk at most
+    32 frames from their caller. A move that puts a call to them (directly or through a wrapper) inside a new helper frame
+    adds a regression test that drives the deepest real auxiliary path through that helper and asserts it is still
+    classified as auxiliary. If any measured path comes within about 4 frames of the budget, the call stays in its
+    original frame. Changing the budget is a behaviour change and needs its own issue, never a refactor PR.
 
 ## Order for the first window (v0.27.0 GA → v0.28.0 rc1 / v0.29)
 1. Bypassed-child parent-state proof and rebind equivalence (tests) — they gate every per-compress state-lifetime change.

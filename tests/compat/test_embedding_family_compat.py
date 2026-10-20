@@ -16,11 +16,9 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.schema_families import COMPAT_REGISTRY, FINDING_KINDS, SchemaFinding
 from hermes_lcm.vector_store import EmbeddingIdentity, VectorStore
-from tests.compat.helpers import READERS, run_old
+from tests.compat.helpers import PREVIOUS_GA, READERS, run_old
 from tests.test_embedding_schema_golden import CASES, Case, schema_for
 
-# The previous-GA pin already fetched by the compatibility suite's CI job.
-PREVIOUS_GA = "v0.26.2"
 EMBEDDING_READERS = {
     **READERS,
     "v0.20.0": "49e99a272d2d461e5c90732e7ef2bc20e96f0826",

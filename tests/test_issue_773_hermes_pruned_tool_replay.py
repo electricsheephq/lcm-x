@@ -12,8 +12,7 @@ cleared (a string output over 200 characters, not a structured tool result), wit
 carry none). A reused id with two different such outputs, or an id whose first row is the placeholder
 text itself, has no source: the row stays new content, as before. A placeholder copy an older release
 stored is read as its source too, so a store that already holds copies maps the host list as it did.
-A row that took its source's identity is never a tool anchor of a replay proof, and proves a replayed
-tool segment only for an occurrence the list does not already hold.
+A row that took its source's identity is never a tool anchor or segment replay proof (#1385).
 
 Every engine here has both externalization flags off, so the store and the host hold real outputs
 (no LCM stubs, unlike #772).
@@ -283,6 +282,46 @@ def test_a_store_already_holding_placeholder_copies_maps_the_host_list_as_well(m
     assert len(stored(engine)) == len(rows)  # mapping never writes
 
 
+def test_legacy_placeholder_copies_do_not_duplicate_on_follow_up_ingest(make_engine, monkeypatch):  # noqa: F811
+    """A legacy writer persisted a complete salvaged view; the restart only adds the next turn."""
+    first = plain_engine(make_engine, fresh_tail_count=32)
+    view = real_view(pairs=4)
+    first._ingest_messages(view)
+    host = hermes_salvage(view)
+    with monkeypatch.context() as patch:
+        _older_release(patch, first)
+        legacy = _rebind(make_engine, first, fresh_tail_count=32)
+        legacy._ingest_messages(copy.deepcopy(host))
+    engine = _rebind(make_engine, legacy, fresh_tail_count=32)
+    before = stored(engine)
+    assert any(row.get("content") == CLEARED for row in before)
+
+    engine._ingest_messages(copy.deepcopy(host) + [{"role": "user", "content": "follow-up"}])
+
+    assert stored(engine)[:-1] == before
+    assert stored(engine)[-1]["content"] == "follow-up"
+    assert _grouped(stored(engine))
+
+
+def test_restart_replays_an_exact_tail_with_an_older_literal_placeholder(make_engine):  # noqa: F811
+    """An old full X output must not mask the literal X occurrence in the durable tail."""
+    first = plain_engine(make_engine, fresh_tail_count=32)
+    original = [{"role": "user", "content": "original turn"}, _call("X"), _result("X", "X" * 300)]
+    tail = [{"role": "user", "content": "later turn"}, _call("X"), _result("X", CLEARED),
+            _call("Y"), _result("Y", "result Y"), _call("Z"), _result("Z", "result Z")]
+    for row in original + tail:
+        first._store.append(first._session_id, row, conversation_id=first._conversation_id)
+    engine = _rebind(make_engine, first, fresh_tail_count=32)
+    before = stored(engine)
+
+    cursor = engine._reconcile_ingest_cursor_from_store(copy.deepcopy(tail))
+    engine._ingest_messages(copy.deepcopy(tail))
+
+    assert (cursor, stored(engine)) == (7, before)
+    assert engine._last_ingest_reconciliation["cursor"] == 7
+    assert _grouped(stored(engine))
+
+
 def test_a_stored_placeholder_is_a_copy_only_of_an_earlier_row_of_this_session(make_engine):  # noqa: F811
     """A placeholder row stored before any same-id output (a genuine output that is the placeholder
     text), or stored by another session, keeps its own identity."""
@@ -309,7 +348,7 @@ def test_other_rows_that_reuse_the_id_never_hide_the_original(make_engine):  # n
         call, result = tool_pair("call-1", f"other output {i}", tool_name="write_file")
         reuse += [{"role": "user", "content": f"pre {i}"}, call, {**result, "tool_name": "write_file"}]
     first = plain_engine(make_engine, fresh_tail_count=32)
-    view = reuse + real_view(pairs=2)
+    view = reuse + real_view(pairs=4)  # two newer outputs: call-1 really can be salvaged
     first._ingest_messages(view)
     engine = _rebind(make_engine, first, fresh_tail_count=32)
     before = len(stored(engine))
@@ -598,13 +637,9 @@ def test_a_placeholder_never_stands_for_an_output_the_salvage_could_not_clear(ma
     assert added[-1]["content"] == "u3"
 
 
-def test_a_placeholder_for_a_stored_pair_after_a_new_row_is_still_a_replay(make_engine):  # noqa: F811
-    """The other side of the whole-list rule: after a restart the host list proves a stored pair, adds a new
-    row, then replays later stored pairs, the first with the output the salvage cleared (two newer outputs
-    follow it, so the salvage could clear it). The list holds that pair's stored occurrence only once, as the
-    placeholder, so the placeholder is that row and the pair is a replayed durable tool segment: only the new
-    rows are stored. This input is also the accepted residual: a genuine call there that reuses the id and
-    returns the placeholder text reads the same way."""
+def test_an_ambiguous_salvage_pair_after_a_new_row_is_stored(make_engine):  # noqa: F811
+    """#1385: this shape is indistinguishable from a fresh same-id call returning the placeholder.
+    Store the ambiguous pair; later pairs with their own content evidence remain proven replays."""
     first = plain_engine(make_engine, fresh_tail_count=64)
     a, b, c, d = (payload_of(300, word) for word in ("aaa", "bbb", "ccc", "ddd"))
     first._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, _call("A"), _result("A", a),
@@ -617,8 +652,35 @@ def test_a_placeholder_for_a_stored_pair_after_a_new_row_is_still_a_replay(make_
                              _call("B"), _result("B", CLEARED), _call("C"), _result("C", c), _call("D"), _result("D", d),
                              {"role": "user", "content": "u2"}])
 
-    assert [row["content"] for row in stored(engine)[before:]] == ["new", "u2"]
-    assert engine._last_ingest_reconciliation.get("replayed_tool_segment_rows") == 6
+    assert [row["content"] for row in stored(engine)[before:]] == ["new", "", CLEARED, "u2"]
+    assert engine._last_ingest_reconciliation.get("replayed_tool_segment_rows") == 4
+
+
+def test_issue_1385_fresh_placeholder_pair_outside_prefix_is_stored(make_engine):  # noqa: F811
+    """All four conditions: proven prefix excludes X, exact reused call, literal placeholder,
+    and two later tool outputs. Borrowed identity must not discard either fresh X row (I1/I8)."""
+    first = plain_engine(make_engine, fresh_tail_count=64)
+    x, a = payload_of(300, "xxx"), payload_of(300, "aaa")
+    first._ingest_messages([SYSTEM, {"role": "user", "content": "u1"}, _call("X"), _result("X", x),
+                            _call("A"), _result("A", a), {"role": "assistant", "content": "a1"}])
+    engine = _rebind(make_engine, first, fresh_tail_count=64)
+    before = stored(engine)
+    prefix = [_call("A"), _result("A", a)]  # the older X occurrence is outside this proven prefix
+    fresh = [{"role": "user", "content": "fresh turn"}, _call("X"), _result("X", CLEARED),
+             _call("Y"), _result("Y", "new Y"), _call("Z"), _result("Z", "new Z")]
+    host = prefix + fresh
+    assert engine._reconcile_ingest_cursor_from_store(host) == len(prefix)
+    original_x = next(row for row in before if row.get("tool_call_id") == "X")
+    assert engine._message_replay_identity(fresh[2]) == engine._message_replay_identity(original_x, stored_row=True)
+
+    engine._ingest_messages(host)
+
+    rows = stored(engine)
+    assert rows[:len(before)] == before
+    assert [(row["role"], row["content"]) for row in rows[len(before):]] == [
+        (row["role"], row["content"]) for row in fresh]
+    assert rows[len(before) + 1]["tool_calls"] == fresh[1]["tool_calls"]
+    assert _grouped(rows)
 
 
 def test_a_placeholder_among_the_newest_two_outputs_is_a_genuine_call_after_a_restart(make_engine):  # noqa: F811

@@ -1,8 +1,13 @@
 """LCM configuration with defaults and env var overrides."""
+import contextvars
 import logging
 import os
+from collections import ChainMap
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 try:
@@ -12,6 +17,99 @@ except Exception:  # pragma: no cover - optional fallback for minimal installs
 
 
 logger = logging.getLogger(__name__)
+
+
+_profile_envs: dict[str, Mapping[str, str]] = {}
+
+
+def profile_bound(fn):
+    """Carry the scheduling profile into each invocation, including threads.
+
+    Only the host's profile binding should travel: LCM-X's own per-turn context
+    variables start from their defaults, as they would in a fresh thread.
+    """
+    captured = contextvars.copy_context()
+
+    def run(*args, **kwargs):
+        return captured.copy().run(_run_with_lcm_defaults, fn, args, kwargs)
+
+    return run
+
+
+def _run_with_lcm_defaults(fn, args, kwargs):
+    try:
+        from .externalize import _payload_lookup_memo, ingest_payload_writes
+    except ImportError:  # config.py loaded outside the package
+        pass
+    else:
+        _payload_lookup_memo.set(None)
+        ingest_payload_writes.set(True)
+    return fn(*args, **kwargs)
+
+
+@lru_cache(maxsize=128)
+def _resolved_profile_home(raw_home: str) -> str:
+    return str(Path(raw_home).resolve())
+
+
+def lcm_env():
+    """Resolve the home before consulting its registration pin.
+
+    Non-routing hosts keep live process-env semantics, including partial older
+    APIs. Only positively detected routing may fail closed; never call get_secret.
+    """
+    try:
+        from agent import secret_scope
+        routed = getattr(secret_scope, "serves_routed_profile", None)
+        multiplex = getattr(secret_scope, "is_multiplex_active", None)
+        routing = routed() if callable(routed) else callable(multiplex) and multiplex()
+    except Exception:
+        return os.environ
+    if not routing:
+        return os.environ
+    try:
+        scope_home = getattr(secret_scope, "current_secret_scope_home", lambda: None)
+        bound_home = scope_home()
+        try:
+            from hermes_cli.config import get_hermes_home
+            home = get_hermes_home()
+        except ImportError:
+            home = bound_home
+        home = _resolved_profile_home(str(home)) if home else None
+        current_scope = getattr(secret_scope, "current_secret_scope", lambda: None)
+        mapping = current_scope()
+        if mapping is not None and bound_home:
+            try:
+                from hermes_constants import get_hermes_home_override
+                # A stamped scope can route without overriding the launch home.
+                if get_hermes_home_override() is None:
+                    home = _resolved_profile_home(str(bound_home))
+            except Exception:
+                pass  # Older/partial hosts retain the existing home check.
+        if bound_home and home != _resolved_profile_home(str(bound_home)):
+            mapping = None
+        if mapping is None:
+            if home in _profile_envs:
+                return _profile_envs[home]
+            # Floor hosts cannot stamp scope provenance: an unbound read must
+            # use its own pin or defaults, never reconstruct/borrow a scope.
+            build = getattr(secret_scope, "build_profile_secret_scope", None)
+            mapping = build(Path(home)) if home and callable(routed) and callable(build) else {}
+        return MappingProxyType(ChainMap({"HERMES_HOME": home}, mapping)) if home else mapping
+    except Exception:
+        return {}
+
+
+def lcm_env_get(name: str, default=None):
+    return lcm_env().get(name, default)
+
+
+def containment_base_dir():
+    """The operator's storage containment root stays process-wide.
+
+    It is never routed through a profile, so a profile can neither drop nor widen it.
+    """
+    return os.environ.get("LCM_HERMES_BASE_DIR")
 
 
 def _parse_pattern_list(raw: str) -> list[str]:
@@ -93,7 +191,7 @@ def _warn_invalid_env(warnings: list[str] | None, key: str, raw: str, value: Any
 
 
 def _parse_int_env(key: str, default: int, *, warnings: list[str] | None = None) -> int:
-    raw = os.environ.get(key)
+    raw = lcm_env_get(key)
     if raw is None:
         return default
     try:
@@ -104,7 +202,7 @@ def _parse_int_env(key: str, default: int, *, warnings: list[str] | None = None)
 
 
 def _parse_float_env(key: str, default: float, *, warnings: list[str] | None = None) -> float:
-    raw = os.environ.get(key)
+    raw = lcm_env_get(key)
     if raw is None:
         return default
     try:
@@ -121,7 +219,7 @@ def _parse_bool_env(
     warnings: list[str] | None = None,
 ) -> bool:
     """Read on every call; unknown (including blank) keeps default unless specified."""
-    raw = os.environ.get(key)
+    raw = lcm_env_get(key)
     if raw is None:
         return default
     normalized = raw.strip().lower()
@@ -137,11 +235,11 @@ def _parse_bool_env(
 
 def _disabled_tool_names() -> set[str]:
     """Tools disabled via LCM_DISABLED_TOOLS (comma-separated lcm_* names)."""
-    return set(_parse_pattern_list(os.environ.get("LCM_DISABLED_TOOLS", "")))
+    return set(_parse_pattern_list(lcm_env_get("LCM_DISABLED_TOOLS", "")))
 
 
 def _parse_str_env(key: str, default):
-    return os.environ.get(key, default)
+    return lcm_env_get(key, default)
 
 
 _HOST_MESSAGE_UID_MODES = ("off", "shadow", "on")
@@ -152,7 +250,7 @@ def host_message_uid_mode() -> str:
     """``LCM_HOST_MESSAGE_UID`` (v0.26.0): ``off`` | ``shadow`` (default) | ``on`` (reserved for slice C; runs as
     ``shadow`` today). An unknown value means ``shadow``, with one WARNING per process."""
     global _host_message_uid_mode_warned
-    raw = (os.environ.get("LCM_HOST_MESSAGE_UID") or "").strip().lower()
+    raw = (lcm_env_get("LCM_HOST_MESSAGE_UID") or "").strip().lower()
     if raw and raw not in _HOST_MESSAGE_UID_MODES and not _host_message_uid_mode_warned:
         _host_message_uid_mode_warned = True
         logger.warning("invalid env LCM_HOST_MESSAGE_UID=%r ignored; using shadow", raw)
@@ -165,7 +263,7 @@ def _parse_int_env_with_source(
     *,
     default_source: str = "default",
 ) -> tuple[int, str, str | None]:
-    raw = os.environ.get(key)
+    raw = lcm_env_get(key)
     if raw is None:
         return default, default_source, None
     try:
@@ -196,7 +294,7 @@ def _parse_float_env_with_source(
     *,
     default_source: str = "default",
 ) -> tuple[float, str, str | None]:
-    raw = os.environ.get(key)
+    raw = lcm_env_get(key)
     if raw is None:
         return default, default_source, None
     try:
@@ -222,7 +320,11 @@ def _config_bool_disabled(value) -> bool:
 
 
 def _hermes_config_path() -> Path:
-    home = Path(os.environ.get("HERMES_HOME") or Path.home() / ".hermes")
+    try:
+        from hermes_cli.config import get_hermes_home
+        home = Path(get_hermes_home())
+    except Exception:
+        home = Path(lcm_env_get("HERMES_HOME") or Path.home() / ".hermes")
     return home / "config.yaml"
 
 
@@ -295,23 +397,6 @@ def _ignored_lcm_config_yaml_keys(cfg: dict[str, Any] | None = None) -> list[str
         for key in lcm_section
         if str(key) not in _SUPPORTED_LCM_CONFIG_YAML_KEYS
     )
-
-
-def _hermes_compression_threshold(default: float) -> float:
-    """Read lcm.context_threshold or Hermes compression.threshold from config.yaml.
-
-    Priority when no ``LCM_CONTEXT_THRESHOLD`` env var is set:
-      1. ``lcm.context_threshold`` (LCM-specific override in config.yaml)
-      2. ``compression.threshold`` (Hermes global setting, unless compression disabled),
-         raised to at least ``default`` (#1013)
-
-    Hermes gateways may load ``~/.hermes/config.yaml`` without exporting every
-    setting into the process environment. The ``lcm.context_threshold`` key lets
-    operators tune LCM compaction independently of the Hermes compression setting.
-    Disabled Hermes compression should not leak its threshold into LCM.
-    """
-    value, _source = _hermes_compression_threshold_with_source(default)
-    return value
 
 
 def _load_model_thresholds_from_yaml() -> dict[str, float]:
@@ -463,7 +548,7 @@ def hermes_auxiliary_compression_max_concurrency(hermes_home: str = "") -> int |
 
 
 def _lcm_config_string_with_source(env_name: str, yaml_key: str, default: str) -> tuple[str, str]:
-    env_value = os.environ.get(env_name)
+    env_value = lcm_env_get(env_name)
     if env_value is not None:
         return env_value, "env"
     cfg = _load_hermes_config_yaml()
@@ -539,7 +624,7 @@ def _warn_env_range(name: str, value: Any, warnings: list[str]) -> None:
     if (value >= minimum if inclusive else value > minimum) and (maximum is None or value <= maximum):
         return
     key = f"LCM_{name.upper()}"
-    raw = os.environ[key]
+    raw = lcm_env_get(key)
     bounds = f"{'>=' if inclusive else '>'} {minimum}"
     if maximum is not None:
         bounds += f" and <= {maximum}"
@@ -553,15 +638,32 @@ def _warn_env_range(name: str, value: Any, warnings: list[str]) -> None:
     warnings.append(f"out-of-range env {key}={repr(raw)[:40]} (must be {bounds}); {effect}")
 
 
+# Accepted spellings, in configuration-reference and diagnostic display order.
+EMBEDDING_PROVIDER_SPELLINGS: dict[str, tuple[str, ...]] = {
+    "voyage": ("voyage", "voyageai"),
+    "ollama": ("ollama",),
+    "fastembed": ("fastembed", "fast-embed"),
+    "openai-compatible": ("openai-compatible", "openai", "siliconflow"),
+}
+PREANSWER_EVIDENCE_MODES = ("off", "legacy_selective", "requirements_v1")
+EMBEDDING_STORAGE_DTYPES = ("float32", "int8")
+
+
+def embedding_provider_id(spelling: str) -> str:
+    """Map an already-normalized spelling to its id; preserve unknown values."""
+    return next((provider for provider, spellings in EMBEDDING_PROVIDER_SPELLINGS.items()
+                 if spelling in spellings), spelling)
+
+
 _ENV_CHOICES = {
     "embedding_provider": (
-        ("voyage", "voyageai", "ollama", "fastembed", "fast-embed", "openai-compatible", "openai", "siliconflow"),
+        tuple(spelling for spellings in EMBEDDING_PROVIDER_SPELLINGS.values() for spelling in spellings),
         str.lower, "provider resolution raises ProviderUnavailable when requested",
     ),
     "preanswer_evidence_mode": (
-        ("off", "legacy_selective", "requirements_v1"), str.casefold, "ignored; using 'off'",
+        PREANSWER_EVIDENCE_MODES, str.casefold, "ignored; using 'off'",
     ),
-    "embedding_storage_dtype": (("float32", "int8"), str.lower, "ignored; using 'float32'"),
+    "embedding_storage_dtype": (EMBEDDING_STORAGE_DTYPES, str.lower, "ignored; using 'float32'"),
 }
 
 # Deprecation/removal versions shared by the loader and generated reference.
@@ -1197,7 +1299,12 @@ class LCMConfig:
     @classmethod
     def from_env(cls) -> "LCMConfig":
         """Build config from environment variables (LCM_ prefix)."""
+        env = lcm_env()
+        pinned = env is not os.environ and bool(env.get("HERMES_HOME"))
+        if pinned:
+            _profile_envs[env["HERMES_HOME"]] = MappingProxyType(dict(env))
         c = cls()
+        c._absolute_threshold_tokens = env.get("LCM_ABSOLUTE_THRESHOLD_TOKENS", "0") if pinned else None
         config_sources: dict[str, str] = {}
         config_source_warnings: list[str] = []
 
@@ -1275,7 +1382,7 @@ class LCMConfig:
         # config.yaml, then LCM_MODEL_THRESHOLDS env var (comma-separated
         # key:value pairs). Env overrides config.yaml.
         c.model_thresholds = _load_model_thresholds_from_yaml()
-        _raw_env_thresholds = os.environ.get("LCM_MODEL_THRESHOLDS")
+        _raw_env_thresholds = lcm_env_get("LCM_MODEL_THRESHOLDS")
         if _raw_env_thresholds is not None:
             c.model_thresholds = _parse_model_thresholds_env(
                 _raw_env_thresholds, warnings=config_source_warnings
@@ -1342,11 +1449,11 @@ class LCMConfig:
             warning_count = len(config_source_warnings)
             if spec.py_type is str:
                 value = parser(spec.env_key, default)
-                if spec.env_key in os.environ:
+                if lcm_env_get(spec.env_key) is not None:
                     _warn_env_choice(spec.name, value, config_source_warnings)
             else:
                 value = parser(spec.env_key, default, warnings=config_source_warnings)
-                if os.environ.get(spec.env_key, "").strip() and len(config_source_warnings) == warning_count:
+                if lcm_env_get(spec.env_key, "").strip() and len(config_source_warnings) == warning_count:
                     _warn_env_range(spec.name, value, config_source_warnings)
             setattr(c, spec.name, value)
             if value is True and spec.name in ENV_FIELD_DEPRECATIONS:
@@ -1357,15 +1464,15 @@ class LCMConfig:
                 )
 
         # Pattern-list overrides carry a source sidecar and stay explicit.
-        raw_sensitive_patterns = os.environ.get("LCM_SENSITIVE_PATTERNS")
+        raw_sensitive_patterns = lcm_env_get("LCM_SENSITIVE_PATTERNS")
         if raw_sensitive_patterns is not None:
             c.sensitive_patterns = _parse_pattern_list(raw_sensitive_patterns)
             c.sensitive_patterns_source = "env"
-        raw_summary_fallback_models = os.environ.get("LCM_SUMMARY_FALLBACK_MODELS")
+        raw_summary_fallback_models = lcm_env_get("LCM_SUMMARY_FALLBACK_MODELS")
         if raw_summary_fallback_models is not None:
             c.summary_fallback_models = _parse_pattern_list(raw_summary_fallback_models)
 
-        raw_max_age = os.environ.get("LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS")
+        raw_max_age = lcm_env_get("LCM_EMPTY_LIFECYCLE_GC_MAX_AGE_HOURS")
         if raw_max_age is not None:
             try:
                 c.empty_lifecycle_gc_max_age_hours = float(raw_max_age)
@@ -1375,23 +1482,23 @@ class LCMConfig:
                     raw_max_age, c.empty_lifecycle_gc_max_age_hours,
                 )
 
-        raw_arm_weights = os.environ.get("LCM_RECALL_ARM_WEIGHTS")
+        raw_arm_weights = lcm_env_get("LCM_RECALL_ARM_WEIGHTS")
         if raw_arm_weights is not None:
             c.recall_arm_weights = _parse_arm_weights(
                 raw_arm_weights, _DEFAULT_RECALL_ARM_WEIGHTS, warnings=config_source_warnings
             )
 
-        raw_ignore = os.environ.get("LCM_IGNORE_SESSION_PATTERNS")
+        raw_ignore = lcm_env_get("LCM_IGNORE_SESSION_PATTERNS")
         if raw_ignore is not None:
             c.ignore_session_patterns = _parse_pattern_list(raw_ignore)
             c.ignore_session_patterns_source = "env"
 
-        raw_stateless = os.environ.get("LCM_STATELESS_SESSION_PATTERNS")
+        raw_stateless = lcm_env_get("LCM_STATELESS_SESSION_PATTERNS")
         if raw_stateless is not None:
             c.stateless_session_patterns = _parse_pattern_list(raw_stateless)
             c.stateless_session_patterns_source = "env"
 
-        raw_ignore_messages = os.environ.get("LCM_IGNORE_MESSAGE_PATTERNS")
+        raw_ignore_messages = lcm_env_get("LCM_IGNORE_MESSAGE_PATTERNS")
         if raw_ignore_messages is not None:
             c.ignore_message_patterns = _parse_pattern_list(raw_ignore_messages)
             c.ignore_message_patterns_source = "env"

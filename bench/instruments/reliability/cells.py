@@ -42,10 +42,14 @@ ISSUES = {
     # the same two shapes occur on ref, customer, r34.4 and upstream-uid (not seen on upstream-main)
     861: (("B1", "B2"), "acp-process: intermittent around the crash after rotation"),
     916: (("F4",), "acp-process continuity: survival projection removes the current user tag"),
+    1501: (("B1", "B2"), "rotation replay after a carried host stamp, including a previous-GA store"),
+    1505: (("B1", "B2"), "forced-recovery user turn stored twice after the crash and cold restart (since #1328)"),
+    1508: (("B1", "B2"), "T34 duplicate after the recovery crash on stamp-only rotation"),
+    1506: (("B1", "B2"), "previous-GA composite of T12+T13 kept next to the replayed parts after the restart"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
-ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "r34.10-", "upstream-uid"),
-               871: ("r34.4-", "r34.10-")}
+ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "r34.10-", "r34.15-", "upstream-uid"),
+               871: ("r34.4-", "r34.10-", "r34.15-"), 1506: ("ref-", "floor-", "upstream-main"), 1508: ("ref-", "floor-", "upstream-main")}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
 ISSUE_TRANSPORTS = {861: ("acp-process",)}
 
@@ -190,7 +194,7 @@ def registry() -> list[dict]:
     cells = []
     for m, ip in modes():
         cells += [
-            cell(f"overflow-recovery-restart/{m}", [534], in_place=ip, turns=36,
+            cell(f"overflow-recovery-restart/{m}", [534, 1505, 1508], in_place=ip, turns=36,
                  user={"repeat_from": {"31": 1, "32": 1600, "33": 800}}, bars=["B1", "B2"], min_compactions=1,
                  summary_repeat=200,
                  tool_plan=[{"turns": [32], "calls": [{"name": "write_file", "args": {
@@ -291,6 +295,12 @@ def registry() -> list[dict]:
         cell("crash-after-rotation/rotation", [519, 549, 821, 861], in_place=False, user={"trailing_ws": True},
              faults=[{"kind": "crash_after_rotation_before_child_row"}],
              doc="os._exit right after the engine's rotation on_session_start, before any child row (#519/#549)."),
+        cell("upgrade-crash-after-rotation/rotation", [1501, 1506], in_place=False, user={"trailing_ws": True},
+             from_ref="c67d7633d963a2ffd24cf90995189ee58e2f88c7",
+             faults=[{"kind": "crash_after_rotation_before_child_row"}, {"kind": "plugin_switch", "turn": 14}],
+             bars=["B1", "B2"],
+             doc="#1501: v0.27.0 writes through the rotation crash and the carried-stamp turn 13; before turn 14 "
+                 "the candidate takes over the same home/store and cold-replays the host's real stamps."),
         cell("crash-between-end-and-start/rotation", [489, 821, 871], in_place=False,
              faults=[{"kind": "crash_between_session_end_and_start"}],
              doc="os._exit between on_session_end and on_session_start of a rotation (#489). UNSUPPORTED where the "

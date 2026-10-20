@@ -10,7 +10,13 @@ from pathlib import Path
 
 from .cases import exact_cases, generated_cases, projection_cases
 from .run import run
-from .trees import DEFAULT_BASELINE, PrerequisiteUnavailable, skip_or_fail
+from .trees import BASELINE_CONFIG, BASELINES, DEFAULT_BASELINE, PrerequisiteUnavailable, skip_or_fail
+
+
+def test_default_baseline_is_v028_with_native_defaults():
+    assert DEFAULT_BASELINE == "v0.28.0"
+    assert BASELINES[DEFAULT_BASELINE] == "709099b3a397a7893a7abae8802ebe7bf605f79e"
+    assert BASELINE_CONFIG[DEFAULT_BASELINE] == "bare"
 
 
 @pytest.fixture(scope="module")
@@ -39,15 +45,10 @@ def test_exact_shape(case, outputs):
 def test_generated_sample(outputs):
     seed = int(os.environ.get("LCM_DIFFERENTIAL_SEED", "1227"))
     cases = generated_cases(int(os.environ.get("LCM_DIFFERENTIAL_CASES", "60")), seed)
-    evaluate([case for case in cases if seed != 1227 or case["id"] != "g0"], outputs / "generated")
+    evaluate(cases, outputs / "generated")
 
 
-class I1281Retention(Exception):
-    """The documented g0 user mark loses retention without reaching the budget."""
-
-
-@pytest.mark.xfail(strict=True, raises=I1281Retention, reason="#1281: g0 marks newest user without reaching survival budget")
-def test_i1281_g0_marks_newest_user_without_budget(outputs):
+def test_i1281_g0_keeps_newest_user_without_budget(outputs):
     case = generated_cases(1, 1227)[0]
     assert case["id"] == "g0"
     try:
@@ -56,9 +57,6 @@ def test_i1281_g0_marks_newest_user_without_budget(outputs):
                      os.environ.get("LCM_DIFFERENTIAL_CANDIDATE", "worktree"), 1227)
     except PrerequisiteUnavailable as exc:
         skip_or_fail(str(exc))
-    events = [(event["oracle"], event["detail"]) for event in result["unexplained"]]
-    if events == [("R2", dict(call=0, sentinel="⟦objective⟧")), ("R2", dict(call=0, sentinel="⟦newest⟧"))]:
-        raise I1281Retention("#1281: g0 loses objective and newest at call 0 without reaching the survival budget")
     assert not result["unexplained"], result["unexplained"]
 
 
@@ -172,6 +170,7 @@ def test_projection_user_marks_are_relative_after_v026(baseline, marks):
 @pytest.mark.parametrize("baseline,config,inherited", [
     ("v0.26.2", "managed", dict(cases=0, marks=0)),
     ("v0.27.0", "bare", dict(cases=1, marks=1)),
+    ("v0.28.0", "bare", dict(cases=1, marks=1)),
 ])
 def test_baseline_defaults_and_inherited_user_marks(baseline, config, inherited, tmp_path, monkeypatch):
     import json

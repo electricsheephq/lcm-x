@@ -7,6 +7,8 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests.test_survival_fit_apply_contract import fit_engine as fit_engine
+
 fit = import_module("hermes_lcm.survival_fit")
 tokens = import_module("hermes_lcm.tokens")
 fixtures = import_module("tests.test_survival_fit_apply_contract")
@@ -22,12 +24,12 @@ Row = dict[str, Any]
 @pytest.mark.parametrize("after_exception", [False, True], ids=["persisted", "exception"])
 @pytest.mark.parametrize("counter_failure", [False, True], ids=["counter-ok", "counter-failed"])
 def test_apply_logging_measurement_and_cursor_order(
-    path: str, reason: str, before: int, after: int, after_exception: bool,
+    fit_engine: Any, path: str, reason: str, before: int, after: int, after_exception: bool,
     counter_failure: bool, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture,
 ) -> None:
     emergency = path != "best-effort"
     engine, rows, fitted = fixtures.prepared_fit(
-        emergency=emergency, prefix="dropped" if emergency else "same")
+        fit_engine, emergency=emergency, prefix="dropped" if emergency else "same")
     rows[2]["content"] = "old " * 200
     if path == "best-effort":
         rows[-1]["content"] = "new " * 100
@@ -50,7 +52,7 @@ def test_apply_logging_measurement_and_cursor_order(
     engine._conversation_id = ""
     engine._survival_fit_warned = set()
     engine._store_complete_node_covered = lambda ids: set(ids)
-    engine._store = Mock()
+    monkeypatch.setattr(engine._store, "update_metadata_json", Mock())
     if counter_failure:
         # No-shrink has no "applied" log. This real recorder warning makes its
         # ordering observable even on that path, without mocking _survival_record.

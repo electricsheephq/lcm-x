@@ -4,8 +4,10 @@ import json
 
 import pytest
 
-import hermes_lcm.tools as lcm_tools
+from hermes_lcm import expand_query_tools
+
 from hermes_lcm import expansion_evidence
+from tests.harness import make_engine
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -19,6 +21,18 @@ def engine(tmp_path):
     instance._session_id = "test-session"
     instance.context_length = 200_000
     instance.threshold_tokens = int(instance.context_length * config.context_threshold)
+    try:
+        yield instance
+    finally:
+        instance.shutdown()
+
+
+@pytest.fixture
+def expansion_engine(tmp_path):
+    instance = make_engine(tmp_path)
+    instance._session_id = "test-session"
+    instance.context_length = 200_000
+    instance.threshold_tokens = int(instance.context_length * instance._config.context_threshold)
     try:
         yield instance
     finally:
@@ -46,10 +60,11 @@ def _add_message_summary(engine, content="The rollout target is Tuesday at 09:00
     return store_id, node_id
 
 
-def test_expand_query_returns_tool_extracted_evidence_without_claiming_entailment(engine, monkeypatch):
+def test_expand_query_returns_tool_extracted_evidence_without_claiming_entailment(expansion_engine, monkeypatch):
+    engine = expansion_engine
     store_id, node_id = _add_message_summary(engine)
     monkeypatch.setattr(
-        lcm_tools,
+        expand_query_tools,
         "_synthesize_expansion_answer",
         lambda **kwargs: "The rollout is Friday and the moon is cheese.",
     )
@@ -90,14 +105,15 @@ def test_expand_query_returns_tool_extracted_evidence_without_claiming_entailmen
     assert expanded["content"].startswith(message_item["quote"])
 
 
-def test_expand_query_session_snapshot_survives_rebind_during_synthesis(engine, monkeypatch):
+def test_expand_query_session_snapshot_survives_rebind_during_synthesis(expansion_engine, monkeypatch):
+    engine = expansion_engine
     _, node_id = _add_message_summary(engine)
 
     def synthesize(**kwargs):
         engine._session_id = "rebound-session"
         return "snapshot answer"
 
-    monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", synthesize)
+    monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", synthesize)
 
     result = json.loads(
         engine.handle_tool_call(
@@ -119,13 +135,14 @@ def test_expand_query_session_snapshot_survives_rebind_during_synthesis(engine, 
     assert all(item["session_id"] == "test-session" for item in evidence["items"])
 
 
-def test_expand_query_preserves_evidence_when_synthesis_fails(engine, monkeypatch):
+def test_expand_query_preserves_evidence_when_synthesis_fails(expansion_engine, monkeypatch):
+    engine = expansion_engine
     store_id, node_id = _add_message_summary(engine)
 
     def timeout(**kwargs):
         raise TimeoutError("provider timeout")
 
-    monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", timeout)
+    monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", timeout)
 
     result = json.loads(
         engine.handle_tool_call(
@@ -141,7 +158,8 @@ def test_expand_query_preserves_evidence_when_synthesis_fails(engine, monkeypatc
     assert any(item.get("store_id") == store_id for item in result["evidence_provenance"]["items"])
 
 
-def test_expand_query_represents_empty_evidence_without_running_synthesis(engine, monkeypatch):
+def test_expand_query_represents_empty_evidence_without_running_synthesis(expansion_engine, monkeypatch):
+    engine = expansion_engine
     called = False
 
     def synthesize(**kwargs):
@@ -149,7 +167,7 @@ def test_expand_query_represents_empty_evidence_without_running_synthesis(engine
         called = True
         return "should not run"
 
-    monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", synthesize)
+    monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", synthesize)
 
     result = json.loads(
         engine.handle_tool_call(
@@ -166,9 +184,10 @@ def test_expand_query_represents_empty_evidence_without_running_synthesis(engine
     assert result["evidence_provenance"]["semantic_entailment"] == "not_applicable"
 
 
-def test_expand_query_evidence_reports_partial_context_separately_from_entailment(engine, monkeypatch):
+def test_expand_query_evidence_reports_partial_context_separately_from_entailment(expansion_engine, monkeypatch):
+    engine = expansion_engine
     _, node_id = _add_message_summary(engine, content="abcdef")
-    monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "bounded answer")
+    monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", lambda **kwargs: "bounded answer")
 
     result = json.loads(
         engine.handle_tool_call(
@@ -228,7 +247,8 @@ def test_expand_query_evidence_represents_distinct_transcript_content():
     }
 
 
-def test_expand_query_provenance_covers_recursive_descendants(engine, monkeypatch):
+def test_expand_query_provenance_covers_recursive_descendants(expansion_engine, monkeypatch):
+    engine = expansion_engine
     store_id, leaf_id = _add_message_summary(engine, content="recursive leaf evidence")
     middle_id = engine._dag.add_node(
         SummaryNode(
@@ -254,7 +274,7 @@ def test_expand_query_provenance_covers_recursive_descendants(engine, monkeypatc
             created_at=3,
         )
     )
-    monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "recursive answer")
+    monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", lambda **kwargs: "recursive answer")
 
     result = json.loads(
         engine.handle_tool_call(
@@ -303,7 +323,8 @@ def test_expand_query_provenance_covers_recursive_descendants(engine, monkeypatc
     ]
 
 
-def test_expand_query_raw_window_provenance_expands_from_exact_offset(engine, monkeypatch):
+def test_expand_query_raw_window_provenance_expands_from_exact_offset(expansion_engine, monkeypatch):
+    engine = expansion_engine
     content = "prefix-noise " * 80 + "TAILMATCH exact evidence"
     store_id = engine._store.append("test-session", {"role": "user", "content": content}, source="cli")
     stored = engine._store.get(store_id)
@@ -311,7 +332,7 @@ def test_expand_query_raw_window_provenance_expands_from_exact_offset(engine, mo
     stored["snippet"] = "TAILMATCH exact evidence"
     monkeypatch.setattr(engine._store, "search", lambda *args, **kwargs: [stored])
     monkeypatch.setattr(engine._dag, "search", lambda *args, **kwargs: [])
-    monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "raw answer")
+    monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", lambda **kwargs: "raw answer")
 
     result = json.loads(
         engine.handle_tool_call(
@@ -334,17 +355,16 @@ def test_expand_query_raw_window_provenance_expands_from_exact_offset(engine, mo
 
 
 def test_expand_query_externalized_provenance_is_directly_expandable(tmp_path, monkeypatch):
-    config = LCMConfig(
-        database_path=str(tmp_path / "externalized-provenance.db"),
+    instance = make_engine(
+        tmp_path,
         large_output_externalization_enabled=True,
         large_output_externalization_threshold_chars=200,
     )
-    instance = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
     instance._session_id = "test-session"
     content = "EXTERNALIZED RAW DETAIL " + ("abcdef" * 100)
     try:
         instance._serialize_messages([{"role": "tool", "tool_call_id": "call_ext", "content": content}])
-        ref = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json")).name
+        ref = next((tmp_path / "home" / "lcm-large-outputs").glob("*.json")).name
         placeholder = f"[GC'd externalized tool output: tool_call_id=call_ext; chars={len(content)}; ref={ref}]"
         store_id = instance._store.append(
             "test-session",
@@ -362,7 +382,7 @@ def test_expand_query_externalized_provenance_is_directly_expandable(tmp_path, m
                 created_at=0,
             )
         )
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "externalized answer")
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", lambda **kwargs: "externalized answer")
 
         result = json.loads(
             instance.handle_tool_call(
@@ -425,9 +445,10 @@ def test_expand_query_evidence_bounds_dedupes_and_preserves_conflicts():
     assert evidence["items"][1]["quote"] == "B"
 
 
-def test_expand_query_blank_synthesis_retains_failed_provenance(engine, monkeypatch):
+def test_expand_query_blank_synthesis_retains_failed_provenance(expansion_engine, monkeypatch):
+    engine = expansion_engine
     _, node_id = _add_message_summary(engine)
-    monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "   ")
+    monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", lambda **kwargs: "   ")
 
     result = json.loads(
         engine.handle_tool_call(

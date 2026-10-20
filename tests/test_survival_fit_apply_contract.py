@@ -1,19 +1,28 @@
 """Characterize the survival fit's cursor, warning and emission side effects."""
 
+from collections.abc import Iterator
 from importlib import import_module
+from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
 import pytest
+
+from tests.harness import engine_context
 
 # The test bootstrap registers the plugin package at runtime.
 fit = import_module("hermes_lcm.survival_fit")
 Row = dict[str, Any]
 
 
-def prepared_fit(*, state: str = "persisted", after: int = 60, carrier: bool = False,
+@pytest.fixture
+def fit_engine(tmp_path: Path) -> Iterator[Any]:
+    with engine_context(tmp_path) as engine:
+        yield engine
+
+
+def prepared_fit(engine: Any, *, state: str = "persisted", after: int = 60, carrier: bool = False,
                  emergency: bool = False, prefix: str = "same") -> tuple[Any, list[Row], list[Row]]:
-    engine = fit.SurvivalFitMixin()
     rows: list[Row] = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "summary", "prefix": True},
@@ -48,9 +57,9 @@ def prepared_fit(*, state: str = "persisted", after: int = 60, carrier: bool = F
 @pytest.mark.parametrize("carrier", [False, True], ids=["plain", "carrier"])
 @pytest.mark.parametrize("after", [60, 80], ids=["within-budget", "best-effort"])
 def test_apply_preserves_cursor_record_and_emission(
-    state: str, exit_fit: bool, carrier: bool, after: int, caplog: pytest.LogCaptureFixture,
+    fit_engine: Any, state: str, exit_fit: bool, carrier: bool, after: int, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    engine, rows, fitted = prepared_fit(state=state, after=after, carrier=carrier)
+    engine, rows, fitted = prepared_fit(fit_engine, state=state, after=after, carrier=carrier)
     reason = "exit_fit:contract" if exit_fit else "contract"
     needs_reconcile = state != "persisted"
     snapshots: list[tuple[int, bool, dict[str, Any]]] = []
@@ -74,8 +83,8 @@ def test_apply_preserves_cursor_record_and_emission(
 
 
 @pytest.mark.parametrize("after", [100, 101], ids=["equal", "larger"])
-def test_no_shrink_records_failure_and_keeps_state(after: int, caplog: pytest.LogCaptureFixture) -> None:
-    engine, rows, _ = prepared_fit(after=after, carrier=True, emergency=True, prefix="dropped")
+def test_no_shrink_records_failure_and_keeps_state(fit_engine: Any, after: int, caplog: pytest.LogCaptureFixture) -> None:
+    engine, rows, _ = prepared_fit(fit_engine, after=after, carrier=True, emergency=True, prefix="dropped")
     result = engine._survival_fit(rows, rows, 0, "contract", after_exception=True, request_cap=70)
     assert result is rows
     assert (engine._ingest_cursor, engine._ingest_cursor_needs_reconcile) == (len(rows), False)
@@ -89,9 +98,9 @@ def test_no_shrink_records_failure_and_keeps_state(after: int, caplog: pytest.Lo
 @pytest.mark.parametrize("prefix", ["same", "equal-copy", "dropped"])
 @pytest.mark.parametrize("emergency", [False, True])
 def test_emergency_warning_checks_prefix_identity(
-    prefix: str, emergency: bool, caplog: pytest.LogCaptureFixture,
+    fit_engine: Any, prefix: str, emergency: bool, caplog: pytest.LogCaptureFixture,
 ) -> None:
-    engine, rows, fitted = prepared_fit(emergency=emergency, prefix=prefix)
+    engine, rows, fitted = prepared_fit(fit_engine, emergency=emergency, prefix=prefix)
     assert engine._survival_fit(rows, rows, 0, "contract", request_cap=70) is fitted
     expected = emergency and prefix != "same"
     assert ("dropped the summary prefix" in caplog.text) == expected
@@ -100,8 +109,8 @@ def test_emergency_warning_checks_prefix_identity(
             "LCM survival fit dropped the summary prefix (emergency: prefix=17 tokens, budget=70)")
 
 
-def test_missing_cut_leaves_apply_state_untouched() -> None:
-    engine, rows, _ = prepared_fit(carrier=True)
+def test_missing_cut_leaves_apply_state_untouched(fit_engine: Any) -> None:
+    engine, rows, _ = prepared_fit(fit_engine, carrier=True)
     engine._survival_cut = Mock(return_value=None)
     assert engine._survival_fit(rows, rows, 0, "contract", request_cap=70) is rows
     assert (engine._ingest_cursor, engine._ingest_cursor_needs_reconcile) == (len(rows), False)

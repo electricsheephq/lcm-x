@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-import os
+from contextlib import closing
+from sqlite3 import connect
 from pathlib import Path
 from typing import Any
+
+from .config import containment_base_dir
 
 
 DOCTOR_ACTION_SAFE_IGNORE = "safe/ignore"
@@ -12,9 +15,29 @@ DOCTOR_ACTION_INSPECT = "inspect"
 DOCTOR_ACTION_BACKUP_FIRST_CLEANUP = "backup-first cleanup"
 
 
+def fresh_sqlite_check(engine: Any, pragma: str) -> tuple[bool, str]:
+    """Avoid stale FTS state; label fallback results before giving restore advice."""
+    try:
+        timeout = engine._store.connection.execute("PRAGMA busy_timeout").fetchone()[0] / 1000
+        uri = Path(engine._store.db_path).resolve().as_uri() + "?mode=ro"
+        with closing(connect(uri, uri=True, timeout=timeout)) as conn:
+            row = conn.execute(f"PRAGMA {pragma}").fetchone()
+        return bool(row and row[0] == "ok"), str(row[0]) if row else "no response"
+    except Exception as exc:
+        name = getattr(exc, "sqlite_errorname", "")
+        if name.startswith("SQLITE_CORRUPT") or name == "SQLITE_NOTADB":
+            return False, f"error: {exc}"
+        try:
+            row = engine._store.connection.execute(f"PRAGMA {pragma}").fetchone()
+            detail = str(row[0]) if row else "no response"
+        except Exception as exc:
+            detail = f"error: {exc}"
+        return detail == "ok", detail + " (long-lived connection; unconfirmed)"
+
+
 def _enforce_state_db_containment(path: Path, *, description: str) -> Path:
     resolved = path.expanduser().resolve()
-    env_base = os.environ.get("LCM_HERMES_BASE_DIR")
+    env_base = containment_base_dir()
     if env_base:
         allowed_base = Path(env_base).expanduser().resolve()
         try:
@@ -113,7 +136,9 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         warning_only = True
         rationale = "an inactive process is a configuration/load warning; no stored data is at risk"
     elif name == "database_integrity":
-        command = "stop and inspect the SQLite database path; restore from backup if integrity_check is not ok"
+        command = ("rerun on a fresh connection or after a restart; restore only if that check also fails"
+                   if "long-lived connection; unconfirmed" in str(detail) else
+                   "stop and inspect the SQLite database path; restore from backup if integrity_check is not ok")
     elif name == "schema_core_tables":
         command = "verify HERMES_HOME/LCM_DATABASE_PATH points at the intended LCM database before repair or restore"
     elif name in {"messages_fts_integrity", "nodes_fts_integrity", "fts_index_sync"}:
@@ -127,7 +152,9 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             command = "run `/lcm doctor repair` first; if it still recommends repair, run `/lcm backup` before `/lcm doctor repair apply`"
             rationale = "FTS repair is rebuildable, but it still mutates SQLite indexes"
     elif name == "sqlite_storage":
-        command = "inspect journal/quick_check output and database/WAL size; restore from backup if SQLite reports corruption"
+        command = ("rerun on a fresh connection or after a restart; restore only if that check also fails"
+                   if "long-lived connection; unconfirmed" in str(detail) else
+                   "inspect journal/quick_check output and database/WAL size; restore from backup if SQLite reports corruption")
     elif name == "payload_storage":
         missing_refs = 0
         heartbeat_rows = 0

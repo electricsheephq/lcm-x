@@ -27,3 +27,18 @@ the probes. "Review this diff" is not a probe.
 ## Rules
 - No behaviour change mixed with code moves in one PR.
 - No hard PR-size cap.
+
+## Golden traces
+
+These deterministic traces pin ordered events and observed state before turn-path refactors:
+
+| Family | What it pins | Regenerate from the repository root |
+| --- | --- | --- |
+| Compress | Compaction branch decisions, store activity, logs and engine state | `python -m tests.behaviour.compress_trace_harness --regenerate` |
+| Reconcile | Ingest cursor decisions, store reads/writes, input preservation and engine state | `python -m tests.behaviour.reconcile_trace_harness --repo . --regenerate` |
+| Assembly | Prompt/tail assembly, SQL and helper order, lineage and emission state | `python -m tests.behaviour.assembly_trace_harness --repo . --out tests/fixtures/assembly_trace.json` |
+
+Use the test environment and dependencies for the repository. Review the first differing scenario and event before changing
+a fixture. Inventory failures name the observed-attribute or scenario set to update deliberately; preserve completeness.
+Regenerate once, attribute every changed event in the PR, never regenerate to hide a behaviour change. Name the commit or
+behaviour change that explains each changed event in the PR description.

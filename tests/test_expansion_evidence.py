@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import importlib
+
+from hermes_lcm import expand_query_tools
 import json
 from copy import deepcopy
 from types import SimpleNamespace
@@ -69,7 +71,7 @@ def test_expansion_continuation_shapes(monkeypatch: Any) -> None:
     node = SimpleNamespace(node_id=1, session_id="archive", depth=0, summary="summary", expand_hint="hint")
     engine = SimpleNamespace(current_session_id="active", _config=SimpleNamespace(),
                              _dag=SimpleNamespace(get_node=lambda _: node))
-    monkeypatch.setattr(lcm_tools, "_collect_context_blocks_for_node", lambda *a, **kw: deepcopy(blocks))
+    monkeypatch.setattr(expand_query_tools, "_collect_context_blocks_for_node", lambda *a, **kw: deepcopy(blocks))
     result = json.loads(lcm_tools.lcm_expand_query(
         {"prompt": "details?", "node_ids": [1], "session_ids": ["archive"],
          "output": "evidence", "context_max_tokens": 32000}, engine=engine,
@@ -87,8 +89,8 @@ def test_expansion_omitted_raw_cursor(monkeypatch: Any) -> None:
         _dag=SimpleNamespace(search=lambda *a, **kw: [node]),
         _store=SimpleNamespace(search=lambda *a, **kw: [{"store_id": 9}]),
     )
-    monkeypatch.setattr(lcm_tools, "_collect_context_blocks_for_node", lambda *a, **kw: [])
-    monkeypatch.setattr(lcm_tools, "_collect_raw_match_context_block", lambda *a, **kw: (
+    monkeypatch.setattr(expand_query_tools, "_collect_context_blocks_for_node", lambda *a, **kw: [])
+    monkeypatch.setattr(expand_query_tools, "_collect_raw_match_context_block", lambda *a, **kw: (
         {"type": "raw_messages", "messages": [],
          "pagination": {"has_more": True, "next_store_id": 9}}, [],
     ))
@@ -121,3 +123,149 @@ def test_expansion_empty_provenance_bytes() -> None:
         '"quote_max_chars": 500, "items": [], "locator_coverage": "none", '
         '"items_truncated": false, "quotes_truncated_by_provenance_cap": 0, "metadata_truncated": false}'
     )
+
+
+def test_expansion_budget_exact_serialized_edge(monkeypatch: Any) -> None:
+    """An exact fit stays intact; one character less drops the last item."""
+    blocks = [{"type": "summary", "node_id": i, "summary": f"quote {i}"} for i in (1, 2)]
+    kwargs = dict(session_id="active", context_truncated=False, synthesis_status="not_run")
+    original = expansion_evidence._build_expand_query_evidence(blocks, **kwargs)
+    # The limit has four digits here instead of the default's five digits.
+    limit = len(json.dumps(original)) - 1
+    assert 1000 <= limit < 10000
+    monkeypatch.setattr(expansion_evidence, "_EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS", limit)
+    exact = expansion_evidence._build_expand_query_evidence(blocks, **kwargs)
+    expected = deepcopy(original)
+    expected["serialized_char_limit"] = limit
+    assert json.dumps(exact) == json.dumps(expected)
+    assert len(json.dumps(exact)) == limit
+    monkeypatch.setattr(expansion_evidence, "_EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS", limit - 1)
+    trimmed = expansion_evidence._build_expand_query_evidence(blocks, **kwargs)
+    expected["serialized_char_limit"] = limit - 1
+    expected["items"] = expected["items"][:1]
+    expected["items_truncated"] = True
+    expected["locator_coverage"] = "partial"
+    assert json.dumps(trimmed) == json.dumps(expected)
+    assert trimmed["items"][0]["evidence_id"] == "node:1"
+
+
+def test_expansion_budget_item_edge(monkeypatch: Any) -> None:
+    """The item cap keeps the first 24 sources, including a zero-token quote."""
+    monkeypatch.setattr(expansion_evidence, "_EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS", 100000)
+    for count in (24, 25):
+        blocks = [{"type": "summary", "node_id": i, "summary": "", "token_count": 0}
+                  for i in range(count)]
+        evidence = expansion_evidence._build_expand_query_evidence(
+            blocks, session_id="active", context_truncated=False, synthesis_status="not_run",
+        )
+        assert [item["evidence_id"] for item in evidence["items"]] == [f"node:{i}" for i in range(24)]
+        assert all(item["quote"] == "" and item["quote_chars_before_provenance_cap"] == 0
+                   for item in evidence["items"])
+        assert evidence["context_unique_item_count"] == count
+        assert evidence["context_occurrence_count"] == count
+        assert evidence["items_truncated"] is (count == 25)
+        assert evidence["locator_coverage"] == ("complete" if count == 24 else "partial")
+
+
+def test_expansion_budget_repeated_source_deep_paths() -> None:
+    """Repeated deep-tree sources retain the first quote and bounded path order."""
+    paths = [[{"node_id": 100 * occurrence + depth, "source_index": depth}
+              for depth in range(12)] for occurrence in range(10)]
+    blocks = [{"type": "summary", "node_id": 1, "summary": "first" if i == 0 else "later",
+               "source_path": path, "source_path_depth": 12, "token_count": 0}
+              for i, path in enumerate(paths)]
+    before = deepcopy(blocks)
+    evidence = expansion_evidence._build_expand_query_evidence(
+        blocks, session_id="active", context_truncated=False, synthesis_status="not_run",
+    )
+    assert evidence["context_unique_item_count"] == 1
+    assert evidence["context_occurrence_count"] == 10
+    assert evidence["items_truncated"] is False
+    assert evidence["locator_coverage"] == "complete"
+    assert evidence["items"] == [{
+        "source_type": "summary", "node_id": 1, "locator_present": True,
+        "locator_replay_status": "unverified", "quote": "first",
+        "quote_chars_before_provenance_cap": 5, "quote_truncated_by_provenance_cap": False,
+        "session_id": "active", "expand_args": {"node_id": 1}, "evidence_id": "node:1",
+        "context_occurrence_count": 10,
+        "source_paths": [{"path": path[-8:], "depth": 12, "truncated": True} for path in paths[:8]],
+        "source_paths_truncated": True,
+    }]
+    assert blocks == before
+
+
+def test_expansion_budget_alias_and_read_order(monkeypatch: Any) -> None:
+    """Each measurement sees the same envelope/list and refreshed prefix metadata."""
+    blocks = [{"type": "summary", "node_id": i, "summary": "q" * 600} for i in (1, 2, 3)]
+    envelopes: list[dict[str, Any]] = []
+    lists: list[list[dict[str, Any]]] = []
+    snapshots: list[tuple[list[str], bool, int]] = []
+    first_items: list[dict[str, Any]] = []
+
+    def measured(evidence: dict[str, Any]) -> int:
+        envelopes.append(evidence)
+        lists.append(evidence["items"])
+        if not first_items:
+            first_items.extend(evidence["items"])
+        snapshots.append(([item["evidence_id"] for item in evidence["items"]],
+                          evidence["items_truncated"], evidence["quotes_truncated_by_provenance_cap"]))
+        return 10001 if len(evidence["items"]) > 1 else 10000
+
+    monkeypatch.setattr(expansion_evidence, "_expand_query_evidence_serialized_chars", measured)
+    result = expansion_evidence._build_expand_query_evidence(
+        blocks, session_id="active", context_truncated=False, synthesis_status="completed",
+    )
+    assert snapshots == [(["node:1", "node:2", "node:3"], False, 3),
+                         (["node:1", "node:2"], True, 2),
+                         (["node:1"], True, 1), (["node:1"], True, 1)]
+    assert all(envelope is result for envelope in envelopes)
+    assert all(items is result["items"] for items in lists)
+    assert result["items"][0] is first_items[0]
+    assert result["items"][0]["quote"] == "q" * 500
+    assert result["context_unique_item_count"] == 3
+    assert result["locator_coverage"] == "partial"
+
+
+def test_expansion_budget_omitted_cursor() -> None:
+    """An omitted raw cursor stays separate from the zero-token evidence item."""
+    blocks = [{"type": "summary", "node_id": 1, "summary": "", "token_count": 0}]
+    omitted = {"type": "raw_messages", "messages": [],
+               "pagination": {"has_more": True, "next_store_id": 9}}
+    before = deepcopy((blocks, omitted))
+    evidence = expansion_evidence._build_expand_query_evidence(
+        blocks, session_id="active", context_truncated=True, synthesis_status="not_run",
+    )
+    assert evidence["items"][0]["quote"] == ""
+    assert evidence["items"][0]["expand_args"] == {"node_id": 1}
+    assert evidence["context_unique_item_count"] == 1
+    assert evidence["context_truncated"] is True
+    assert expansion_evidence.continuations(blocks, omitted) == [{
+        "node_id": None, "type": "raw_messages", "pagination": omitted["pagination"],
+        "store_id": 9, "expand_args": {"store_id": 9},
+    }]
+    assert (blocks, omitted) == before
+
+
+def test_expansion_budget_fixed_envelope(monkeypatch: Any) -> None:
+    """An oversized fixed envelope compacts only after the last item is removed."""
+    import hashlib
+
+    monkeypatch.setattr(expansion_evidence, "_EXPAND_QUERY_EVIDENCE_MAX_SERIALIZED_CHARS", 900)
+    sessions = [f"session-{i:03}" for i in range(100)]
+    evidence = expansion_evidence._build_expand_query_evidence(
+        [{"type": "summary", "node_id": 1, "summary": ""}], session_id="active",
+        session_ids=sessions, scope_kind="explicit_sessions", context_truncated=True,
+        synthesis_status="completed",
+    )
+    assert evidence["retrieval_scope"] == {
+        "kind": "explicit_sessions", "session_ids": [],
+        "session_id_sha256": hashlib.sha256("\n".join(sessions).encode()).hexdigest(),
+        "session_id_omitted_due_to_size": True,
+    }
+    assert evidence["fixed_envelope_compacted"] is True
+    assert evidence["items"] == []
+    assert evidence["items_truncated"] is True
+    assert evidence["metadata_truncated"] is True
+    assert evidence["locator_coverage"] == "partial"
+    assert evidence["context_unique_item_count"] == evidence["context_occurrence_count"] == 1
+    assert evidence["semantic_entailment"] == "not_verified"

@@ -27,8 +27,7 @@ class RetryDiscoveryMachine(ExactlyOnceMachine):
 
     @rule(text=st.sampled_from(("alpha", "same text")), structured=st.booleans(), retry=st.booleans())
     def new_turn(self, text, structured, retry):
-        # The open issue's seed is a plain retry. Tool retries have a separate
-        # deterministic xfail below so a broader failure cannot hide in this one.
+        # Plain retries and tool retries both retain every occurrence.
         super().new_turn(text, structured, 0, retry, "lookup")
 
     @invariant()
@@ -44,12 +43,10 @@ class RetryDiscoveryMachine(ExactlyOnceMachine):
             raise
 
 
-@pytest.mark.xfail(strict=True, reason="#1179: retry loses a new equal-text user occurrence", raises=RetryCollapse)
 def test_machine_discovers_retry_1179():
     run_state_machine_as_test(RetryDiscoveryMachine, settings=PROFILE)
 
 
-@pytest.mark.xfail(strict=True, reason="#1179: retry loses a new equal-text user occurrence", raises=RetryCollapse)
 def test_retry_1179():
     machine = RetryDiscoveryMachine()
     try:
@@ -66,8 +63,6 @@ class RetryToolCollapse(AssertionError):
     """The #1179 retry shape also loses the assistant call before its result."""
 
 
-@pytest.mark.xfail(strict=True, reason="#1179-shaped retry also skips its first assistant tool call",
-                   raises=RetryToolCollapse)
 def test_retry_1179_with_tool_call():
     machine = RetryDiscoveryMachine()
     try:
@@ -77,12 +72,111 @@ def test_retry_1179_with_tool_call():
         ExactlyOnceMachine.new_turn(machine, "same text", False, 1, True, "lookup")
         expected, actual = list(map(identity, machine.occurrences)), list(map(identity, machine.rows()))
         try:
-            assert_occurrences(machine.occurrences, machine.rows())
+            assert_occurrences(machine.occurrences, machine.rows(), engine=machine.engine)
         except AssertionError as error:
             index = machine.retry_occurrence_index
             if actual == expected[:index] + expected[index + 2:]:
                 raise RetryToolCollapse(str(error)) from error
             raise
+    finally:
+        machine.teardown()
+
+
+@pytest.mark.parametrize("anchor", [False, True])
+@pytest.mark.parametrize("tool", [False, True])
+@pytest.mark.parametrize("entry", ["ingest", "compress"])
+@pytest.mark.parametrize("metadata,fresh", [
+    ("new-both", True), ("new-stamp", True), ("new-uid", True),
+    ("same", False), ("missing-old", False), ("missing-new", False),
+    ("unstamped", False),
+])
+def test_retry_prefix_occurrence_metadata_1179(anchor, tool, entry, metadata, fresh):
+    """The prefix proof respects known conflicts and keeps legacy unknowns."""
+    machine = ExactlyOnceMachine()
+    machine.patch.setenv("LCM_IDENTITY_ANCHOR", str(int(anchor)))
+    try:
+        original = [machine.stamp(dict(role=role, content=text)) for role, text in
+                    [("user", "alpha"), ("assistant", "first"),
+                     ("user", "same text"), ("assistant", "old answer")]]
+        retry = deepcopy(original[2])
+        if metadata in ("new-both", "new-stamp"):
+            retry["timestamp"] = 50.0
+        if metadata in ("new-both", "new-uid"):
+            retry["message_uid"] = "retry-occurrence"
+        for row in ([original[2]] if metadata == "missing-old" else
+                    [retry] if metadata == "missing-new" else
+                    [original[2], retry] if metadata == "unstamped" else []):
+            row.pop("timestamp", None)
+            row.pop("message_uid", None)
+        machine.engine.ingest(original)
+        host = deepcopy(original[:2]) + [retry]
+        if entry == "compress":
+            machine.engine.compress(host, current_tokens=1)
+        else:
+            machine.engine.ingest(host)
+        assert_occurrences(original + ([retry] if fresh else []), machine.rows(), engine=machine.engine)
+        if not fresh:
+            machine.engine.ingest(deepcopy(host))
+            assert_occurrences(original, machine.rows(), engine=machine.engine)
+            return
+        suffix = []
+        if tool:
+            suffix = [machine.stamp(dict(role="assistant", content="calling", tool_calls=[
+                dict(id="retry-call", type="function", function=dict(name="lookup", arguments="{}"))])),
+                machine.stamp(dict(role="tool", content="result", tool_call_id="retry-call"))]
+        suffix.append(machine.stamp(dict(role="assistant", content="new answer")))
+        host.extend(suffix)
+        expected = original + ([retry] if fresh else []) + suffix
+        machine.engine.ingest(host)
+        assert_occurrences(expected, machine.rows(), engine=machine.engine)
+        machine.engine.ingest(deepcopy(host))
+        assert_occurrences(expected, machine.rows(), engine=machine.engine)
+        # A fully stamped retry also replays after a cold start without repair.
+        if metadata == "new-both" and anchor:
+            machine.engine.shutdown()
+            machine.engine = machine.start_engine()
+            machine.engine.ingest(deepcopy(host))
+            assert_occurrences(expected, machine.rows(), engine=machine.engine)
+    finally:
+        machine.teardown()
+
+
+@pytest.mark.parametrize("anchor", [False, True])
+@pytest.mark.parametrize("metadata,fresh", [
+    ("new-both", True), ("new-stamp", True), ("new-uid", True),
+    ("same", False), ("missing-old", False), ("missing-new", False),
+])
+def test_compacted_prefix_occurrence_metadata_1179(anchor, metadata, fresh):
+    """A real compaction's output prefix must not hide replacement occurrences."""
+    machine = ExactlyOnceMachine()
+    machine.patch.setenv("LCM_IDENTITY_ANCHOR", str(int(anchor)))
+    try:
+        if metadata == "missing-old":
+            machine.patch.setattr(machine, "stamp", lambda row: dict(row))
+        for text in ("alpha", "same text"):
+            machine.new_turn(text, False, 0, False, "lookup")
+        machine.compress()
+        assert machine.engine._last_compression_status == "compacted"
+        assert machine.engine._compress_commit_proof
+        assert [identity(row) for row in machine.host[-2:]] == [
+            identity(row) for row in machine.occurrences[-2:]]
+        if metadata == "missing-old":
+            assert all(row.get("timestamp") is None and row.get("message_uid") is None
+                       for row in machine.host[-2:])
+        host = deepcopy(machine.host)
+        for index, row in enumerate(host[-2:]):
+            if metadata in ("new-both", "new-stamp", "missing-old"):
+                row["timestamp"] = 50.0 + index
+            if metadata in ("new-both", "new-uid", "missing-old"):
+                row["message_uid"] = f"compacted-retry-{index}"
+            if metadata == "missing-new":
+                row.pop("timestamp", None)
+                row.pop("message_uid", None)
+        expected = machine.occurrences + (host[-2:] if fresh else [])
+        machine.engine.ingest(host)
+        assert_occurrences(expected, machine.rows(), engine=machine.engine)
+        machine.engine.ingest(deepcopy(host))
+        assert_occurrences(expected, machine.rows(), engine=machine.engine)
     finally:
         machine.teardown()
 
@@ -428,8 +522,8 @@ def test_repeated_recovery_preserves_user_source(recoveries):
 
 @pytest.mark.parametrize("first_text", [
     pytest.param("alpha", id="distinct-source-control"),
-    pytest.param("βeta", id="equal-source-warm", marks=pytest.mark.xfail(
-        strict=True, reason=REPROJECTED_USER, raises=ReprojectedUserStored)),
+    # #1403: the accepted compaction prefix keeps the warm ingest from re-storing the projected user.
+    pytest.param("βeta", id="equal-source-warm"),
 ])
 def test_recovery_reprojection_warm_ingest(first_text):
     machine = RecoveryMachine()
@@ -476,7 +570,7 @@ def test_survival_carrier_1000_is_already_fixed(tmp_path, monkeypatch):
         reply = {"role": "assistant", "content": "reply CUR", "timestamp": 30_001.0}
         fitted[0]["timestamp"] = 40_000.0
         engine.ingest([*fitted, reply])
-        assert_occurrences([*expected, reply], engine._store.get_session_messages("S"))
+        assert_occurrences([*expected, reply], engine._store.get_session_messages("S"), engine=engine)
     finally:
         engine.shutdown()
         tokens._count_tokens_cached.cache_clear()
@@ -522,8 +616,11 @@ def test_historical_633_machine():
 def test_known_open_exclusions_track_their_strict_xfails():
     """The main machine may skip an open issue's input shape only while that issue's strict xfail is still here.
     When the fix lands and its xfail is removed, this fails until the KNOWN_OPEN entry goes too."""
+    from tests.invariants.test_retry_r5 import test_retry_host_merged_scaffold_after_compaction
+
+    seeds = [*globals().values(), test_retry_host_merged_scaffold_after_compaction]
     reasons = {str(mark.kwargs.get("reason", ""))
-               for value in list(globals().values()) if callable(value)
+               for value in seeds if callable(value)
                for mark in getattr(value, "pytestmark", [])
                if mark.name == "xfail" and mark.kwargs.get("strict")}
     reasons.update(str(mark.kwargs.get("reason", ""))
@@ -664,9 +761,7 @@ def test_cli_reset_classifier_rejects_other_mismatches(corruption, monkeypatch):
 
 
 @pytest.mark.parametrize("start", [
-    pytest.param(False, id="bare-new", marks=pytest.mark.xfail(
-        strict=True, reason="#1306: CLI /new keeps LCM bound to the ended session",
-        raises=CliResetReplayStored)),
+    pytest.param(False, id="bare-new"),
     pytest.param(True, id="explicit-start-control"),
 ])
 def test_cli_new_post_llm_compress_replay(start, caplog, monkeypatch):
@@ -727,33 +822,28 @@ def test_cli_new_post_llm_compress_replay(start, caplog, monkeypatch):
             connection.execute("INSERT INTO sessions VALUES (?, NULL, NULL)", (new,))
         machine.host = []
         machine.engine.on_session_reset()
+        # Hermes reset_session_state also offers the new id through this
+        # optional callback, even when its bare reset omits on_session_start.
+        bind = getattr(machine.engine, "bind_session_state", None)
+        if not start and callable(bind):
+            bind(None, new)
         if start:
             machine.engine.on_session_start(new, platform="cli", context_length=8192)
         caplog.clear()
         for text in ("alpha", "beta"):
             turn(new, text)
-        if not start:
-            assert "resident_engine_conflict" in caplog.text
-            assert machine.engine._store.connection.execute("SELECT COUNT(*) FROM messages").fetchone()[0] == 4
+        assert "resident_engine_conflict" not in caplog.text
         previous = deepcopy(machine.host)
         compressed = machine.engine.compress(machine.host, current_tokens=machine.engine.threshold_tokens + 1,
                                              force=True)
-        if start:
-            assert machine.engine._last_compression_status == "compacted"
-            assert compressed != previous
-            machine.engine.on_session_end(new, previous)
-            machine.engine.on_session_start(new, platform="cli", boundary_reason="compression", old_session_id=new)
-            machine.host = compressed
-        else:
-            assert machine.engine._last_compression_status == "error"
-            assert machine.engine._survival_fit_reason == "lifecycle_binding_changed"
-            assert compressed == previous
-            assert machine.host == previous
-            # Real CLI sees unchanged output and skips both boundary hooks.
+        assert machine.engine._last_compression_status == "compacted"
+        assert compressed != previous
+        machine.engine.on_session_end(new, previous)
+        machine.engine.on_session_start(new, platform="cli", boundary_reason="compression", old_session_id=new)
+        machine.host = compressed
         caplog.clear()
         turn(new, "gamma")
-        if not start:
-            assert "resident_engine_conflict" in caplog.text
+        assert "resident_engine_conflict" not in caplog.text
         stored = {}
         for conversation in ledgers:
             cursor = machine.engine._store.connection.execute(

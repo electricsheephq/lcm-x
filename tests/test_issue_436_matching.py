@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from hermes_lcm import identity_anchor
+from hermes_lcm import recognition_matching
 from hermes_lcm.identity_anchor import _match_occurrences, _reserve_shown
 
 KEYS = ("a", "b", "c")
@@ -106,8 +106,8 @@ def test_scale_hub_of_one_type(caplog, matching_bound):
 
 
 def test_a_spent_budget_leaves_a_valid_deterministic_direct_matching(caplog, monkeypatch):
-    monkeypatch.setattr(identity_anchor, "_MATCH_WORK_PER_ITEM", 0)
-    monkeypatch.setattr(identity_anchor, "_MATCH_WORK_FLOOR", 0)
+    monkeypatch.setattr(recognition_matching, "_MATCH_WORK_PER_ITEM", 0)
+    monkeypatch.setattr(recognition_matching, "_MATCH_WORK_FLOOR", 0)
     rng = random.Random(3)
     for _ in range(500):  # nothing is searched: each row takes a free key of its own in order, or nothing
         rows, occurrences = _instance(rng, 2)

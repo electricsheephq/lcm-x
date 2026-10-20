@@ -255,3 +255,166 @@ def test_anchor_window_gaps(corpus, monkeypatch, case):
     assert info["fired"] is (case != "short")
     assert info["position"] == {"short": None, "past-slots": 10, "fallback-cut": 4}[case]
     check_golden(f"anchor-{case}", raw)
+
+
+@pytest.mark.parametrize("count", [0, 1, 3])
+@pytest.mark.parametrize("deficit", [0, 1])
+def test_event_time_item_cap_exact_edge(corpus, monkeypatch, count, deficit):
+    engine, hits, _, _, _ = corpus
+    engine._store.connection.execute(
+        "UPDATE messages SET observed_at = ?, observed_at_source = ?",
+        (NOW - 86400, "host_message_timestamp"),
+    )
+    engine._store.connection.commit()
+    chosen = hits[:count]
+    # The first hit arrives through two arms but occupies one delivery slot.
+    set_arms(monkeypatch, fts=chosen[:1], chunk=chosen)
+    baseline = json.loads(recall(corpus, scope_bias=0))
+    assert len(baseline["hits"]) == count
+    assert all("event_time" in hit for hit in baseline["hits"])
+    if count:
+        assert baseline["hits"][0]["arms"] == ["chunk", "fts"]
+    cap = sum(len(json.dumps(hit, ensure_ascii=False)) for hit in baseline["hits"])
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", max(1, cap - deficit))
+    calls, fetched, snapshots = [], {}, {}
+    real_read = tools._lcm_recall_event_time_rows
+    real_fields = tools._lcm_recall_event_time
+
+    def read(engine, ids, *, deadline):
+        calls.append(("read", list(ids)))
+        rows, reason = real_read(engine, ids, deadline=deadline)
+        fetched.update(rows)
+        snapshots.update(deepcopy(rows))
+        return rows, reason
+
+    def fields(row):
+        store_id = next(key for key, value in fetched.items() if value is row)
+        calls.append(("fields", store_id))
+        return real_fields(row)
+
+    monkeypatch.setattr(tools, "_lcm_recall_event_time_rows", read)
+    monkeypatch.setattr(tools, "_lcm_recall_event_time", fields)
+    raw = recall(corpus, scope_bias=0)
+    expected = deepcopy(baseline)
+    if count and deficit:
+        expected["hits"][-1].pop("event_time")
+        expected["hits"][-1].pop("event_time_source")
+        expected["event_time_unavailable"] = True
+        expected["event_time_unavailable_reason"] = "response_cap"
+    assert raw == json.dumps(expected)
+    ids = [hit["store_id"] for hit in baseline["hits"]]
+    assert calls == ([("read", ids)] + [("fields", sid) for sid in ids] if ids else [])
+    # Delivery edits its own hit dicts, not the source rows supplied by the read.
+    assert fetched == snapshots
+
+
+def test_event_time_item_cap_bare_oversized_hit(corpus, monkeypatch):
+    engine, hits, _, _, _ = corpus
+    engine._store.connection.execute(
+        "UPDATE messages SET observed_at = NULL, observed_at_source = NULL"
+    )
+    engine._store.connection.commit()
+    set_arms(monkeypatch, chunk=hits[:1])
+    baseline = recall(corpus, scope_bias=0)
+    assert len(json.loads(baseline)["hits"]) == 1
+    assert "event_time" not in json.loads(baseline)["hits"][0]
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", 1)
+    # The first hit remains deliverable; stripping zero optional characters
+    # must not invent an unavailable marker or drop the hit.
+    assert recall(corpus, scope_bias=0) == baseline
+
+
+def test_event_time_item_cap_skips_bare_tail(corpus, monkeypatch):
+    engine, hits, _, _, _ = corpus
+    engine._store.connection.execute(
+        "UPDATE messages SET observed_at = ?, observed_at_source = ? WHERE store_id IN (?, ?)",
+        (NOW - 86400, "host_message_timestamp", hits[0]["store_id"], hits[1]["store_id"]),
+    )
+    engine._store.connection.commit()
+    set_arms(monkeypatch, chunk=hits[:3])
+    expected = json.loads(recall(corpus, scope_bias=0))
+    assert ["event_time" in hit for hit in expected["hits"]] == [True, True, False]
+    cap = sum(len(json.dumps(hit, ensure_ascii=False)) for hit in expected["hits"])
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap - 1)
+    expected["hits"][1].pop("event_time")
+    expected["hits"][1].pop("event_time_source")
+    expected["event_time_unavailable"] = True
+    expected["event_time_unavailable_reason"] = "response_cap"
+    assert recall(corpus, scope_bias=0) == json.dumps(expected)
+
+
+@pytest.mark.parametrize("count", [0, 1, 3])
+@pytest.mark.parametrize("deficit", [0, 1])
+def test_answer_ready_fit_exact_edge(corpus, monkeypatch, count, deficit):
+    set_arms(monkeypatch, chunk=corpus[1][:count])
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", 9000)
+    baseline = json.loads(recall(corpus, detail="answer_ready", scope_bias=0))
+    expansion = baseline["provenance"]["answer_ready"]
+    cap = len(json.dumps(baseline, ensure_ascii=False))
+    expansion["response_char_cap"] = cap
+    assert len(json.dumps(baseline, ensure_ascii=False)) == cap
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap - deficit)
+    raw = recall(corpus, detail="answer_ready", scope_bias=0)
+    if deficit:
+        expansion["response_char_cap"] = cap - 1
+        expansion["query_truncated"] = False
+        if count:
+            baseline["hits"].pop()
+            baseline["total_results"] -= 1
+            expansion["expanded_hit_count"] -= 1
+            expansion["response_truncated"] = True
+    assert raw == json.dumps(baseline, ensure_ascii=False)
+    assert json.loads(raw)["degraded"] is False
+
+
+@pytest.mark.parametrize("remaining", [0, 1])
+def test_answer_ready_fit_whole_hits_and_delta(corpus, monkeypatch, remaining):
+    set_arms(monkeypatch, chunk=corpus[1][:3])
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", 9000)
+    baseline = json.loads(recall(corpus, detail="answer_ready", seen_refs=[], scope_bias=0))
+    expected = deepcopy(baseline)
+    expected["hits"] = expected["hits"][:remaining]
+    expected["total_results"] = remaining
+    expansion = expected["provenance"]["answer_ready"]
+    expansion.update(expanded_hit_count=remaining, response_truncated=True, query_truncated=False)
+    cap = len(json.dumps(expected, ensure_ascii=False))
+    expansion["response_char_cap"] = cap
+    assert len(json.dumps(expected, ensure_ascii=False)) == cap
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap)
+    calls, hydrated, snapshots = [], {}, {}
+    real_hydrate = tools._lcm_recall_answer_ready_content
+
+    def hydrate(engine, entries, **kwargs):
+        calls.append([entry["hit"]["store_id"] for entry in entries])
+        rows = real_hydrate(engine, entries, **kwargs)
+        hydrated.update(rows)
+        snapshots.update(deepcopy(rows))
+        return rows
+
+    monkeypatch.setattr(tools, "_lcm_recall_answer_ready_content", hydrate)
+    raw = recall(corpus, detail="answer_ready", seen_refs=[], scope_bias=0)
+    refs = baseline["delta"]["novel_refs"][:remaining]
+    expected["delta"].update(novel_ref_count=remaining, novel_refs=refs, progress=bool(refs),
+                             termination_reason=None if refs else "no_novel_exact_ref")
+    assert raw == json.dumps(expected, ensure_ascii=False)
+    assert len(raw) <= cap
+    assert calls == [[hit["store_id"] for hit in baseline["hits"]]]
+    assert hydrated == snapshots
+
+
+def test_answer_ready_fit_long_query(corpus, monkeypatch):
+    set_arms(monkeypatch)
+    query = "kanban " * 750
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", 9000)
+    expected = json.loads(recall(corpus, query=query, detail="answer_ready", scope_bias=0))
+    assert len(expected["query"]) > 4096
+    expected["query"] = expected["query"][:4096]
+    expansion = expected["provenance"]["answer_ready"]
+    expansion["query_truncated"] = True
+    cap = len(json.dumps(expected, ensure_ascii=False))
+    expansion["response_char_cap"] = cap
+    monkeypatch.setattr(tools, "_LCM_RECALL_RESPONSE_CHAR_CAP", cap)
+    raw = recall(corpus, query=query, detail="answer_ready", scope_bias=0)
+    assert raw == json.dumps(expected, ensure_ascii=False)
+    assert len(raw) == cap
+    assert expansion["response_truncated"] is False

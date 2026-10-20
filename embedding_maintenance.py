@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .config import embedding_provider_id
 from .embedding_provider import _is_loopback_url
 
 logger = logging.getLogger(__name__)
@@ -74,8 +75,7 @@ def run_incremental_embedding_pass(db_path: str | Path, config: Any, *, breaker:
 
 def _automatic_chunks_allowed(config: Any, command: Any) -> bool:
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
-    # resolve_provider accepts `fast-embed` for the provider whose id is `fastembed`.
-    provider = {"fast-embed": "fastembed"}.get(provider, provider)
+    provider = embedding_provider_id(provider)
     if not command._is_local_embedding_provider(provider):
         return False
     if provider != "ollama":
@@ -107,7 +107,7 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
     if _STOP_EMBEDDING_MAINTENANCE.is_set():
         return "stopped", None
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
-    local = provider in {"fastembed", "fast-embed"}
+    local = embedding_provider_id(provider) == "fastembed"
     read_conn = command._embedding_read_connection(db_path)
     try:
         no_profile = command._embedding_current_profile(read_conn) is None

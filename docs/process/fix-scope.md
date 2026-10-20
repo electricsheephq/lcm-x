@@ -36,8 +36,8 @@ unchanged" must show the same reachability evidence as the fix itself, for every
 such an amendment.
 
 ## Default flips
-- v0.28.0: one planned flip, local embeddings on by default (#1186), under the same per-flip rules as below.
-- v0.29: no product-default flips.
+- v0.28.0: no product-default flips. The planned local-embeddings flip (#1186) moved to v0.29.0.
+- v0.29: one planned flip, local embeddings on by default (#1186), under the same per-flip rules as below.
 - From v0.30: at most 2 default flips per release. Each one carries a differential row and a pinned row in
   `tests/test_issue_1013_product_defaults.py`, and lands in its own PR.
 - A test that pins an old default needs a twin at the new default only when a PR touches that test file. There is no sweep of

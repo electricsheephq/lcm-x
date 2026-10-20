@@ -100,13 +100,12 @@ RAW_READERS = {
     "config.py": {
         "_parse_int_env", "_parse_float_env", "_parse_bool_env", "_parse_str_env",
         "_disabled_tool_names", "host_message_uid_mode", "_parse_int_env_with_source",
-        "_parse_float_env_with_source", "_hermes_config_path", "_lcm_config_string_with_source", "from_env",
+        "_parse_float_env_with_source", "_hermes_config_path", "_lcm_config_string_with_source",
+        "_warn_env_range", "from_env", "containment_base_dir",
     },
     "db_bootstrap.py": {"_integrity_check_interval_hours"},
-    "diagnostics.py": {"_enforce_state_db_containment"},
     "embedding_provider.py": {"probe_provider_availability", "_request", "rerank", "__init__"},
-    "engine.py": {"_set_context_length", "_get_allowed_hermes_base"},
-    "externalize.py": {"get_large_output_storage_dir"},
+    "engine.py": {"_set_context_length"},
 }
 
 
@@ -130,7 +129,7 @@ def test_boolean_policy_inventory():
             for alias in node.names if alias.name == "_parse_bool_env"
         }
         for function in (node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)):
-            if any(isinstance(node, ast.Call) and ast.unparse(node.func) in ("os.environ.get", "os.getenv")
+            if any(isinstance(node, ast.Call) and ast.unparse(node.func) in ("os.environ.get", "os.getenv", "lcm_env_get")
                    for node in ast.walk(function)):
                 raw_readers.setdefault(path.name, set()).add(function.name)
         for call in calls:

@@ -163,8 +163,12 @@ def test_b_hidden_only_leaf_consumes_no_host_row(tmp_path, summaries):
 def test_c_leaf_ends_before_a_retained_occurrence(tmp_path, summaries):
     """R (an unstamped user row) is stored early; the host re-orders it into the fresh tail. The leaf
     never covers R while the view retains it, and publication never conflicts."""
+    from tests.test_host_uid_shadow import _state_db
+
+    # #1403: canonical identity proves that the reordered NULL row is the retained occurrence.
+    _state_db(tmp_path, [("S", None, None)])
     engine = _engine(tmp_path, fresh_tail_count=1, leaf_chunk_tokens=1)
-    r = {"role": "user", "content": "[R] retained occurrence" + PAD}
+    r = {"role": "user", "content": "[R] retained occurrence" + PAD, "message_uid": "retained-r"}
     stored = [*_turn("T1", 100.0), r, *[row for i in range(2, 6) for row in _turn(f"T{i}", 100.0 * i)]]
     try:
         engine.ingest(stored)

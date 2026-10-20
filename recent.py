@@ -41,26 +41,6 @@ def _recent_rollup_bounds(window: RecentPeriodWindow) -> tuple[str, str]:
     return start, start
 
 
-def _recent_expected_period_starts(window: RecentPeriodWindow) -> list[str]:
-    """Every rollup ``period_start`` the window requires to be served in rollup
-    mode. For a day window this is every calendar day in ``[start, end)``; for a
-    week/month window it is the single containing aggregate's start.
-    """
-    if window.rollup_kind == "day":
-        first = window.start.date()
-        last = (window.end - timedelta(microseconds=1)).date()
-        day_count = (last - first).days + 1
-        if day_count > _tools._LCM_RECENT_FRONTIER_WORK_LIMIT:
-            return []
-        days: list[str] = []
-        current = first
-        while current <= last:
-            days.append(current.isoformat())
-            current += timedelta(days=1)
-        return days
-    return [window.start.date().isoformat()]
-
-
 def _recent_has_unready_rollups(
     store: RollupStore,
     window: RecentPeriodWindow,

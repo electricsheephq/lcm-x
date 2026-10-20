@@ -17,7 +17,6 @@ from hermes_lcm import tools as tools_module
 from hermes_lcm import recent as recent_module
 from hermes_lcm.tools import lcm_recent
 from hermes_lcm.recent import (
-    _recent_expected_period_starts,
     _recent_has_unready_rollups,
     _recent_ready_rollups,
 )
@@ -194,7 +193,6 @@ def test_recent_window_coverage_requires_every_day_ready(recent_parts):
     engine, store = recent_parts
     scope = engine.current_session_id
     window = parse_recent_period("2d", now=NOW)  # 2026-07-14 .. 2026-07-16
-    assert [d for d in _recent_expected_period_starts(window)] == ["2026-07-14", "2026-07-15"]
 
     _ready(store, "day", "2026-07-15", scope)  # 2026-07-14 missing entirely
     assert _recent_has_unready_rollups(store, window, scope) is True
@@ -216,7 +214,6 @@ def test_recent_window_period_enumeration_fails_closed_above_work_cap(recent_par
     statements: list[str] = []
     store.connection.set_trace_callback(statements.append)
     try:
-        assert _recent_expected_period_starts(window) == []
         assert _recent_has_unready_rollups(
             store, window, engine.current_session_id
         ) is True

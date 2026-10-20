@@ -1,5 +1,6 @@
 """One tree per process; synthetic providers and a scripted host clock only."""
 import argparse
+from contextlib import contextmanager
 from copy import deepcopy
 import importlib
 import importlib.util
@@ -113,30 +114,55 @@ def user_row_evidence(view, original, count_tokens, normalize, mark_re, store):
     return evidence
 
 
+@contextmanager
+def module_patches():
+    """Restore each patched binding by identity, including partial setup failures."""
+    originals = []
+
+    def patch(module, attr, value):
+        originals.append((module, attr, getattr(module, attr)))
+        setattr(module, attr, value)
+
+    try:
+        yield patch
+    finally:
+        for module, attr, original in reversed(originals):
+            setattr(module, attr, original)
+
+
 def load_tree(tree):
     spec = importlib.util.spec_from_file_location("hermes_lcm", tree / "__init__.py", submodule_search_locations=[str(tree)])
     sys.modules["hermes_lcm"] = importlib.util.module_from_spec(spec)
     tokens = importlib.import_module("hermes_lcm.tokens")
     missing = []
-    for name, value in (("_encoder_ready", True), ("_encoder", None)):
-        if hasattr(tokens, name):
-            setattr(tokens, name, value)
-        else:
+    for name in ("_encoder_ready", "_encoder"):
+        if not hasattr(tokens, name):
             missing.append(f"tokens.{name}")
     modules = {name: importlib.import_module(f"hermes_lcm.{name}") for name in
                ("engine", "config", "escalation", "survival_fit", "externalize", "message_content", "dag")}
     # Newer trees moved compress() out of engine.py; both bind this provider.
     if (tree / "compaction.py").exists():
         modules["compaction"] = importlib.import_module("hermes_lcm.compaction")
-    if hasattr(modules["survival_fit"], "_host_estimate"):
-        modules["survival_fit"]._host_estimate = lambda messages: None
-    else:
+    if not hasattr(modules["survival_fit"], "_host_estimate"):
         missing.append("survival_fit._host_estimate")
     modules["tokens"] = tokens
     return modules, missing
 
 
 def run_case(case, modules, directory, initial_missing, baseline_config="bare", side="candidate"):
+    with module_patches() as patch:
+        tokens = modules["tokens"]
+        if hasattr(tokens, "_encoder_generation"):
+            patch(tokens, "_encoder_generation", tokens._encoder_generation + 1)
+        for name, value in (("_encoder_ready", True), ("_encoder", None)):
+            if hasattr(modules["tokens"], name):
+                patch(modules["tokens"], name, value)
+        if hasattr(modules["survival_fit"], "_host_estimate"):
+            patch(modules["survival_fit"], "_host_estimate", lambda messages: None)
+        return _run_case(case, modules, directory, initial_missing, baseline_config, side, patch)
+
+
+def _run_case(case, modules, directory, initial_missing, baseline_config, side, patch):
     missing = list(initial_missing)
     now = [100000.0]
     # Replace module bindings, not the interpreter's time module or thread clocks.
@@ -145,7 +171,7 @@ def run_case(case, modules, directory, initial_missing, baseline_config="bare", 
     for module_name, module in list(sys.modules.items()):
         if module_name.startswith("hermes_lcm.") and hasattr(module, "time"):
             if hasattr(module.time, "monotonic"):
-                module.time = clock
+                patch(module, "time", clock)
     calls = [0]
 
     def provider(*args, **kwargs):
@@ -156,7 +182,7 @@ def run_case(case, modules, directory, initial_missing, baseline_config="bare", 
         return "Earlier work. " + "fact " * max(1, (case.get("summary_tokens", 80) * 4 - 80) // 5) + "\nExpand for details about: records"
 
     if hasattr(modules["escalation"], "_call_llm_for_summary"):
-        modules["escalation"]._call_llm_for_summary = provider
+        patch(modules["escalation"], "_call_llm_for_summary", provider)
     else:
         missing.append("escalation._call_llm_for_summary")
     config = modules["config"].LCMConfig(database_path=str(directory / "lcm.db"), temporal_rollups_enabled=False)
@@ -178,7 +204,6 @@ def run_case(case, modules, directory, initial_missing, baseline_config="bare", 
     if mark_re is None:
         missing.append("survival_fit._PROJECTED_RE")
     normalize = modules["message_content"].normalize_content_value
-    restored = []
 
     def require(names):
         absent = [name for name in names if not hasattr(engine, name)]
@@ -195,11 +220,10 @@ def run_case(case, modules, directory, initial_missing, baseline_config="bare", 
         def fake_leaf(chunk, focus_topic=None, deadline=None):
             return chunk, tokens.count_messages_tokens(chunk), provider(), 1, 0
 
-        engine._summarize_leaf_chunk_with_rescue = fake_leaf
+        patch(engine, "_summarize_leaf_chunk_with_rescue", fake_leaf)
         for module in modules.values():
             if hasattr(module, "summarize_with_escalation"):
-                restored.append((module, module.summarize_with_escalation))
-                module.summarize_with_escalation = fake_summary
+                patch(module, "summarize_with_escalation", fake_summary)
 
     def marks(view):
         return [i for i, row in enumerate(view) if row.get("role") == "user" and mark_re is not None
@@ -306,8 +330,6 @@ def run_case(case, modules, directory, initial_missing, baseline_config="bare", 
                     uncovered_rows=uncovered_rows(stored, view, engine._dag.get_session_nodes("S")),
                     retrieved_payloads=len(retrieved), unavailable_payloads=unavailable, missing_seams=sorted(set(missing)))
     finally:
-        for module, function in restored:
-            module.summarize_with_escalation = function
         engine.shutdown()
 
 
@@ -327,9 +349,9 @@ def main():
     def no_network(*args, **kwargs):
         raise RuntimeError("network forbidden in differential driver")
 
-    socket.socket.connect = no_network
-    modules, missing = load_tree(args.tree)
-    with args.cases.open() as source, args.out.open("w") as output:
+    with module_patches() as patch, args.cases.open() as source, args.out.open("w") as output:
+        patch(socket.socket, "connect", no_network)
+        modules, missing = load_tree(args.tree)
         for line in source:
             case = json.loads(line)
             assert case["layer"] == args.layer

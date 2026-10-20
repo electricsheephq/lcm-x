@@ -9,13 +9,17 @@ import sys
 from typing import Any
 
 from tests.compat import codec_adapter
+from tests.harness import make_engine
 
 # Same pins as test_host_uid_shadow.ROLLBACK_READERS (CI fetches these commits).
 READERS = {
     "v0.25.0-rc1": "c36b46e3a7b1bff23cfa45fa117565ab8624441d",
     "v0.25.1": "f47b55e031b507b424ff5f480d8f2a80d358f1f0",
     "v0.26.2": "6800cf45ad05280e6cf6fa9e1ad96c62b7132646",
+    "v0.27.0": "c67d7633d963a2ffd24cf90995189ee58e2f88c7",
+    "v0.28.0": "709099b3a397a7893a7abae8802ebe7bf605f79e",
 }
+PREVIOUS_GA = "v0.28.0"
 FORMS = ("mark_only", "head_mark", "head_mark_tail")
 VARIANTS = ("text", "structured", "tool_call", "tool_result", "named_tool_result")
 CASES = tuple(f"{form}-{variant}" for form in FORMS for variant in VARIANTS) + (
@@ -50,11 +54,9 @@ def config_for(directory: Path, **overrides: Any) -> Any:
 
 
 def open_engine(directory):
-    from hermes_lcm.engine import LCMEngine
-
-    engine = LCMEngine(config=config_for(directory), hermes_home=str(directory / "home"))
-    engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
-    return engine
+    return make_engine(directory, window=200_000, conversation_id="conv", embeddings_enabled=False,
+                       temporal_rollups_enabled=False,
+                       large_output_externalization_path=str(directory / "payloads"))
 
 
 def call(arguments):

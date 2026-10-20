@@ -18,7 +18,6 @@ from . import recall_delivery
 from .externalize import (
     _inspect_top_level_json_string_fields_before_content as _externalized_top_level_fields_before_content,
     extract_externalized_ref,
-    extract_externalized_refs,
     find_externalized_payload_for_message,
     get_large_output_storage_dir,
     load_externalized_payload,
@@ -32,6 +31,7 @@ from .embedding_provider import (
     resolve_provider,
 )
 from .diagnostics import (
+    fresh_sqlite_check,
     _has_lifecycle_fragmentation,
     _state_db_path_for_engine,
     doctor_guidance_for_checks,
@@ -60,9 +60,11 @@ from .ingest_protection import (
     sensitive_pattern_status,
     validate_embedding_privacy_dispatch,
 )
-from .model_routing import apply_lcm_model_route
 from . import evidence_tools as _evidence_tools
+from . import inspect_tools as _inspect_tools
 from . import expansion_evidence
+from . import expand_query_tools as _expand_query_tools
+from . import expand_tools as _expand_tools
 from .presets import preset_status_payload
 from . import recent as _recent
 from .retrieval_context import RetrievalContext
@@ -88,10 +90,9 @@ from .search_query import (
     AGE_DECAY_RATE, build_recall_or_query, contains_emoji, normalize_search_sort, recall_content_terms,
     requires_like_fallback, sanitize_fts5_query,
 )
-from .session_patterns import build_session_match_keys, compile_session_pattern
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore
-from .config import LCMConfig
+from .config import LCMConfig, embedding_provider_id, profile_bound
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -478,107 +479,6 @@ def lcm_query_state(args: Dict[str, Any], **kwargs) -> str:
     return _evidence_tools.lcm_query_state(args, **kwargs)
 
 
-def _bounded_operator_field(value: object) -> tuple[str, bool]:
-    text = str(value or "")
-    if len(text) <= _OPERATOR_TEXT_FIELD_MAX_CHARS:
-        return text, False
-    suffix = "..."
-    return text[: _OPERATOR_TEXT_FIELD_MAX_CHARS - len(suffix)] + suffix, True
-
-
-def _bound_operator_strings(value: Any) -> tuple[Any, int]:
-    """Return a JSON-compatible copy with every free-text field bounded."""
-    if isinstance(value, str):
-        bounded, truncated = _bounded_operator_field(value)
-        return bounded, int(truncated)
-    if isinstance(value, list):
-        result: list[Any] = []
-        truncated_fields = 0
-        for item in value:
-            bounded, count = _bound_operator_strings(item)
-            result.append(bounded)
-            truncated_fields += count
-        return result, truncated_fields
-    if isinstance(value, dict):
-        result: dict[Any, Any] = {}
-        truncated_fields = 0
-        for key, item in value.items():
-            bounded, count = _bound_operator_strings(item)
-            result[key] = bounded
-            truncated_fields += count
-        return result, truncated_fields
-    return value, 0
-
-
-def _bounded_inspect_json(response: dict[str, Any]) -> str:
-    """Serialize ``lcm_inspect`` under one final response-size invariant."""
-    payload, truncated_fields = _bound_operator_strings(response)
-    rollup_truncated_fields = (
-        (payload.get("temporal_rollups") or {}).get("truncated_fields") or []
-    )
-    total_truncated_fields = truncated_fields + len(rollup_truncated_fields)
-    payload["char_limit"] = _LCM_INSPECT_MAX_RESPONSE_CHARS
-    payload["truncated"] = bool(total_truncated_fields)
-    if total_truncated_fields:
-        payload["truncated_field_count"] = total_truncated_fields
-    encoded = json.dumps(payload, ensure_ascii=False)
-    if len(encoded) <= _LCM_INSPECT_MAX_RESPONSE_CHARS:
-        return encoded
-
-    # If cardinality rather than one text field exceeds the cap, keep whole
-    # top-level sections in a deterministic priority order.  Never cut encoded
-    # JSON mid-token; omitted sections are reported explicitly.
-    priority = [
-        "read_only",
-        "session_id",
-        "conversation_id",
-        "limit",
-        "temporal_rollups",
-        "runtime_identity",
-        "lineage",
-        "messages",
-        "compaction",
-        "dag",
-        "externalized_refs",
-        "ingest_protection",
-        "filters",
-        "limit_clamped_from",
-    ]
-    compact: dict[str, Any] = {
-        "char_limit": _LCM_INSPECT_MAX_RESPONSE_CHARS,
-        "truncated": True,
-        "truncation": {
-            "reason": "response_char_limit",
-            "omitted_top_level_sections": [],
-        },
-    }
-    if total_truncated_fields:
-        compact["truncated_field_count"] = total_truncated_fields
-    retained: list[str] = []
-    omitted: list[str] = []
-    ordered_keys = priority + [key for key in payload if key not in priority]
-    for key in dict.fromkeys(ordered_keys):
-        if key in {"char_limit", "truncated", "truncated_field_count"}:
-            continue
-        if key not in payload:
-            continue
-        compact[key] = payload[key]
-        if len(json.dumps(compact, ensure_ascii=False)) <= _LCM_INSPECT_MAX_RESPONSE_CHARS - 1_000:
-            retained.append(key)
-        else:
-            compact.pop(key)
-            omitted.append(key)
-    compact["truncation"]["omitted_top_level_sections"] = omitted
-    encoded = json.dumps(compact, ensure_ascii=False)
-    while len(encoded) > _LCM_INSPECT_MAX_RESPONSE_CHARS and retained:
-        key = retained.pop()
-        compact.pop(key, None)
-        omitted.append(key)
-        compact["truncation"]["omitted_top_level_sections"] = omitted
-        encoded = json.dumps(compact, ensure_ascii=False)
-    return encoded
-
-
 def lcm_compute(args: Dict[str, Any], **kwargs) -> str:
     """Run a pure operation over exact, selector-supplied evidence refs."""
     return _evidence_tools.lcm_compute(args, **kwargs)
@@ -614,10 +514,6 @@ _LCM_RETRIEVE_ARGUMENTS = frozenset({
 def lcm_retrieve(args: Dict[str, Any], **kwargs) -> str:
     """Drive one bounded retrieval episode inside the answerer's tool turn."""
     return _evidence_tools.lcm_retrieve(args, **kwargs)
-
-
-_TEMPORAL_ROLLUP_PERIOD_KINDS = ("day", "week", "month")
-_TEMPORAL_ROLLUP_STATUSES = ("ready", "stale", "building", "failed")
 
 
 def _slice_content_for_response(content: str, max_tokens: int, content_offset: int = 0) -> dict[str, Any]:
@@ -742,36 +638,6 @@ def _is_compact_externalized_marker(content: str, ref: str | None) -> bool:
         or content.startswith("[GC'd externalized payload:")
         or "[Externalized LCM ingest payload:" in content
     )
-
-
-def _pagination_payload(
-    *,
-    total_sources: int,
-    source_offset: int,
-    content_offset: int,
-    source_limit: int,
-    returned_sources: int,
-    next_source_offset: int | None,
-    next_content_offset: int,
-    has_more: bool,
-) -> dict[str, Any]:
-    if not has_more:
-        next_source_offset = None
-        next_content_offset = 0
-    remaining_sources = 0
-    if has_more and next_source_offset is not None:
-        remaining_sources = max(0, total_sources - next_source_offset)
-    return {
-        "source_offset": source_offset,
-        "content_offset": content_offset,
-        "source_limit": source_limit,
-        "returned_sources": returned_sources,
-        "total_sources": total_sources,
-        "next_source_offset": next_source_offset,
-        "next_content_offset": next_content_offset,
-        "has_more": has_more,
-        "remaining_sources": remaining_sources,
-    }
 
 
 def _expand_message_sources(
@@ -914,7 +780,7 @@ def _expand_message_sources(
         next_source_offset = source_offset + source_limit if has_more else None
         next_content_offset = 0
 
-    pagination = _pagination_payload(
+    pagination = expansion_evidence._pagination_payload(
         total_sources=total_sources,
         source_offset=source_offset,
         content_offset=content_offset,
@@ -993,7 +859,7 @@ def _expand_child_nodes(
     if has_more and next_source_offset is None:
         next_source_offset = source_offset + source_limit
 
-    return expanded, _pagination_payload(
+    return expanded, expansion_evidence._pagination_payload(
         total_sources=total_sources,
         source_offset=source_offset,
         content_offset=0,
@@ -1003,414 +869,6 @@ def _expand_child_nodes(
         next_content_offset=0,
         has_more=has_more,
     )
-
-
-def _bounded_source_path_payload(source_path: list[dict[str, int]]) -> dict[str, Any]:
-    path_tail = source_path[-8:]
-    payload: dict[str, Any] = {
-        "source_path": path_tail,
-        "source_path_depth": len(source_path),
-    }
-    if len(path_tail) < len(source_path):
-        payload["source_path_truncated"] = True
-    return payload
-
-
-def _collect_descendant_evidence_blocks(
-    engine: "LCMEngine",
-    node,
-    max_tokens: int,
-    *,
-    hydrate_externalized_content: bool = False,
-    visited_node_ids: set[int] | None = None,
-    source_path: list[dict[str, int]] | None = None,
-    remaining_node_visits: list[int] | None = None,
-    session_id: str | None = None,
-) -> list[dict[str, Any]]:
-    if max_tokens <= 0 or node.source_type != "nodes":
-        return []
-    if visited_node_ids is None:
-        visited_node_ids = set()
-    if source_path is None:
-        source_path = []
-    if remaining_node_visits is None:
-        # Budget and cycle detection are the primary limits. Keep a high,
-        # budget-scaled guard so corrupt zero-token DAGs cannot make expansion
-        # walk an unbounded number of nodes while normal deep summaries still
-        # reach their leaf evidence.
-        remaining_node_visits = [max(64, int(max_tokens) * 4)]
-    session_id = engine.current_session_id if session_id is None else session_id
-    if remaining_node_visits[0] <= 0:
-        return []
-
-    blocks: list[dict[str, Any]] = []
-    budget_used = 0
-    root_node_id = int(node.node_id)
-    stack: list[tuple[Any, list[dict[str, int]], set[int], int]] = [
-        (node, source_path, {*visited_node_ids, root_node_id}, 0)
-    ]
-
-    while stack and budget_used < max_tokens and remaining_node_visits[0] > 0:
-        current, current_path, current_visited, source_index = stack.pop()
-        if source_index >= len(current.source_ids):
-            continue
-
-        stack.append((current, current_path, current_visited, source_index + 1))
-        child_id = current.source_ids[source_index]
-        child = engine._dag.get_node(child_id)
-        if child is None or child.session_id != session_id:
-            continue
-        child_node_id = int(child.node_id)
-        if child_node_id in current_visited:
-            continue
-
-        remaining_node_visits[0] -= 1
-        child_path = [
-            *current_path,
-            {"node_id": int(current.node_id), "source_index": source_index},
-        ]
-        remaining_tokens = max(0, max_tokens - budget_used)
-        if child.source_type == "messages":
-            messages, pagination = _expand_message_sources(
-                engine,
-                child,
-                max_tokens=remaining_tokens,
-                hydrate_externalized_content=hydrate_externalized_content,
-                session_id=session_id,
-            )
-            if messages or pagination.get("has_more"):
-                block = {
-                    "type": "child_messages",
-                    "parent_node_id": current.node_id,
-                    "node_id": child.node_id,
-                    "depth": child.depth,
-                    "source_index": source_index,
-                    **_bounded_source_path_payload(child_path),
-                    "messages": messages,
-                    "pagination": pagination,
-                }
-                blocks.append(block)
-                budget_used += _context_content_token_count([block])
-            continue
-
-        if child.source_type == "nodes":
-            children, pagination = _expand_child_nodes(
-                engine,
-                child,
-                max_tokens=remaining_tokens,
-                session_id=session_id,
-            )
-            if children or pagination.get("has_more"):
-                block = {
-                    "type": "descendant_child_nodes",
-                    "parent_node_id": current.node_id,
-                    "node_id": child.node_id,
-                    "depth": child.depth,
-                    "source_index": source_index,
-                    **_bounded_source_path_payload(child_path),
-                    "children": children,
-                    "pagination": pagination,
-                }
-                blocks.append(block)
-                budget_used += _context_content_token_count([block])
-            if budget_used < max_tokens and remaining_node_visits[0] > 0:
-                stack.append((child, child_path, {*current_visited, child_node_id}, 0))
-    return blocks
-
-
-def _collect_context_blocks_for_node(
-    engine: "LCMEngine",
-    node,
-    max_tokens: int,
-    *,
-    hydrate_externalized_content: bool = False,
-    session_id: str | None = None,
-) -> list[dict[str, Any]]:
-    from .tokens import count_tokens
-
-    session_id = engine.current_session_id if session_id is None else session_id
-    summary, summary_truncated = _truncate_text_to_token_budget(node.summary, max_tokens)
-    blocks: list[dict[str, Any]] = [
-        {
-            "type": "summary",
-            "node_id": node.node_id,
-            "depth": node.depth,
-            "summary": summary,
-            "summary_truncated": summary_truncated,
-            "expand_hint": node.expand_hint,
-            "token_count": node.token_count,
-        }
-    ]
-    remaining_tokens = max(0, max_tokens - count_tokens(summary))
-
-    if node.source_type == "messages":
-        messages, pagination = _expand_message_sources(
-            engine,
-            node,
-            max_tokens=remaining_tokens,
-            hydrate_externalized_content=hydrate_externalized_content,
-            session_id=session_id,
-        )
-        if messages or pagination.get("has_more"):
-            block = {
-                "type": "messages",
-                "node_id": node.node_id,
-                "messages": messages,
-                "pagination": pagination,
-            }
-            blocks.append(block)
-    elif node.source_type == "nodes":
-        children, pagination = _expand_child_nodes(
-            engine,
-            node,
-            max_tokens=remaining_tokens,
-            session_id=session_id,
-        )
-        if children or pagination.get("has_more"):
-            blocks.append(
-                {
-                    "type": "child_nodes",
-                    "node_id": node.node_id,
-                    "children": children,
-                    "pagination": pagination,
-                }
-            )
-        used_tokens = _context_content_token_count(blocks)
-        descendant_tokens = max(0, max_tokens - used_tokens)
-        if descendant_tokens > 0:
-            blocks.extend(
-                _collect_descendant_evidence_blocks(
-                    engine,
-                    node,
-                    max_tokens=descendant_tokens,
-                    hydrate_externalized_content=hydrate_externalized_content,
-                    session_id=session_id,
-                )
-            )
-
-    return blocks
-
-
-def _collect_raw_match_context_block(
-    engine: "LCMEngine",
-    rows: list[dict[str, Any]],
-    max_tokens: int,
-    *,
-    query: str | None = None,
-    exclude_store_ids: set[int] | None = None,
-) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    from .tokens import count_tokens
-
-    exclude_store_ids = exclude_store_ids or set()
-    messages: list[dict[str, Any]] = []
-    matches: list[dict[str, Any]] = []
-    budget_used = 0
-    has_more = False
-    next_store_id: int | None = None
-    for row in rows:
-        store_id = row.get("store_id")
-        if store_id in exclude_store_ids:
-            continue
-        remaining_tokens = max(0, max_tokens - budget_used)
-        if remaining_tokens <= 0:
-            has_more = True
-            next_store_id = store_id if isinstance(store_id, int) else None
-            break
-        content = str(row.get("content") or "")
-        match_offset = _content_offset_for_query_match(content, query)
-        content_slice = _slice_content_for_response(content, remaining_tokens, content_offset=match_offset)
-        content = content_slice["content"]
-        item = {
-            "store_id": store_id,
-            "session_id": row.get("session_id") or "",
-            "source": row.get("source") or "",
-            "role": row.get("role"),
-            "timestamp": row.get("timestamp", 0),
-            **content_slice,
-            "content_source": "raw_search_hit",
-            "search_rank": row.get("search_rank"),
-        }
-        if row.get("tool_call_id"):
-            item["tool_call_id"] = row.get("tool_call_id")
-        if match_offset:
-            item["match_window_offset"] = match_offset
-        if row.get("tool_calls"):
-            item["tool_calls_omitted"] = True
-        if row.get("tool_name"):
-            item["tool_name"] = row.get("tool_name")
-        messages.append(item)
-        matches.append(
-            {
-                "store_id": store_id,
-                # Session ownership travels with the match, not just with the
-                # context-block message. `lcm_expand_query(output='answer')`
-                # returns no context blocks, so for a cross-session raw-only
-                # hit this is the caller's only provenance channel.
-                "session_id": row.get("session_id") or "",
-                "role": row.get("role"),
-                "snippet": row.get("snippet") or content[:300],
-                "search_rank": row.get("search_rank"),
-            }
-        )
-        budget_used += count_tokens(content)
-        if content_slice["has_more"]:
-            has_more = True
-            break
-
-    if not messages and not has_more:
-        return None, matches
-    block = {
-        "type": "raw_messages",
-        "messages": messages,
-        "pagination": {
-            "has_more": has_more,
-            "returned_sources": len(messages),
-            "total_sources": len(rows),
-            "next_store_id": next_store_id,
-        },
-    }
-    return block, matches
-
-
-def _raw_match_cursor_block(raw_block: dict[str, Any]) -> dict[str, Any] | None:
-    """Return a content-free ``raw_messages`` block preserving the raw cursor.
-
-    A raw block dropped for budget reasons leaves matched messages unreturned.
-    The caller still needs a handle to continue into them, so the first omitted
-    ``store_id`` survives without any of the content that blew the budget.
-    """
-    pagination = raw_block.get("pagination") or {}
-    next_store_id = next(
-        (
-            message.get("store_id")
-            for message in raw_block.get("messages") or []
-            if isinstance(message.get("store_id"), int)
-        ),
-        pagination.get("next_store_id"),
-    )
-    if not isinstance(next_store_id, int):
-        return None
-    return {
-        "type": "raw_messages",
-        "messages": [],
-        "pagination": {
-            "has_more": True,
-            "returned_sources": 0,
-            "total_sources": pagination.get("total_sources", 0),
-            "next_store_id": next_store_id,
-        },
-    }
-
-
-def _collect_store_ids_from_context_blocks(blocks: list[dict[str, Any]]) -> set[int]:
-    store_ids: set[int] = set()
-    for block in blocks:
-        if not isinstance(block, dict):
-            continue
-        for message in block.get("messages", []) or []:
-            store_id = message.get("store_id")
-            if isinstance(store_id, int):
-                store_ids.add(store_id)
-    return store_ids
-
-
-def _context_content_token_count(blocks: list[dict[str, Any]]) -> int:
-    from .tokens import count_tokens
-
-    total = 0
-    for block in blocks:
-        if block.get("type") == "summary":
-            total += count_tokens(str(block.get("summary") or ""))
-        if "source_path" in block:
-            total += count_tokens(
-                json.dumps(
-                    {
-                        "source_path": block.get("source_path") or [],
-                        "source_path_depth": block.get("source_path_depth"),
-                        "source_path_truncated": block.get("source_path_truncated", False),
-                    },
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                )
-            )
-        if block.get("type") in {"messages", "child_messages", "raw_messages"}:
-            for message in block.get("messages", []):
-                total += count_tokens(str(message.get("content") or ""))
-                total += count_tokens(str(message.get("transcript_content") or ""))
-        elif block.get("type") in {"child_nodes", "descendant_child_nodes"}:
-            total += sum(count_tokens(str(child.get("summary") or "")) for child in block.get("children", []))
-    return total
-
-
-class _ExpansionSynthesisError(RuntimeError):
-    """Raised when the expansion aux-LLM call returns an unusable response.
-
-    ``call_llm`` can hand back an error-shaped or partial object whose
-    ``choices`` is missing, ``None``, or otherwise non-subscriptable. Surfacing
-    that as a typed error lets ``lcm_expand_query`` degrade the same way it
-    already degrades on a synthesis timeout, instead of leaking an opaque
-    ``TypeError``/``AttributeError`` out of the tool call.
-    """
-
-
-def _synthesize_expansion_answer(
-    *,
-    prompt: str,
-    context_blocks: list[dict[str, Any]],
-    model: str,
-    reasoning_effort: str = "",
-    max_tokens: int,
-    timeout: float,
-) -> str:
-    from agent.auxiliary_client import call_llm
-    from .model_routing import apply_lcm_reasoning_effort
-
-    system_prompt = (
-        "You answer questions using expanded LCM retrieval context. "
-        "Be concise, factual, and grounded in the provided context. "
-        "If the context is insufficient, say so plainly."
-    )
-    user_prompt = (
-        f"QUESTION:\n{prompt}\n\n"
-        "EXPANDED CONTEXT:\n"
-        f"{json.dumps(context_blocks, ensure_ascii=False, indent=2)}"
-    )
-    call_kwargs = {
-        "task": "compression",
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        "max_tokens": max_tokens,
-        "timeout": timeout,
-    }
-    apply_lcm_model_route(call_kwargs, model)
-    apply_lcm_reasoning_effort(call_kwargs, reasoning_effort)
-    response = call_llm(**call_kwargs)
-    # ``call_llm`` can return an error-shaped or partial object (e.g. when the
-    # auxiliary lane collides with the foreground model's own in-flight calls),
-    # in which case ``choices`` may be absent, ``None``, empty, or a
-    # non-subscriptable sentinel. Guard the access so an unusable response
-    # degrades cleanly at the call site instead of raising an opaque
-    # ``TypeError``/``AttributeError`` that kills the whole expand call.
-    choices = getattr(response, "choices", None)
-    first = None
-    if choices is not None:
-        try:
-            first = choices[0]
-        except (TypeError, IndexError, KeyError):
-            first = None
-    if first is None:
-        raise _ExpansionSynthesisError(
-            "expansion synthesis returned no usable choices "
-            f"(response type={type(response).__name__})"
-        )
-    message = getattr(first, "message", None)
-    content = getattr(message, "content", None)
-    if not isinstance(content, str):
-        content = str(content) if content else ""
-    from .escalation import _strip_reasoning_blocks
-    return _strip_reasoning_blocks(content).strip()
 
 
 def _parse_load_session_roles(value: Any) -> tuple[list[str], str | None]:
@@ -2079,7 +1537,7 @@ def _run_within_deadline(
         finally:
             slots.release()
 
-    worker = threading.Thread(target=invoke, name=name, daemon=True)
+    worker = threading.Thread(target=profile_bound(invoke), name=name, daemon=True)
     try:
         worker.start()
     except BaseException:
@@ -4199,21 +3657,8 @@ def _lcm_recall_has_usable_vector_corpus(
     by the scope tables, so eligible == not excluded).
     """
     provider_name = str(provider_name or "").strip().lower()
-    # Profiles are registered under ``provider.provider_id`` (command.py warmup),
-    # never under the operator's config spelling, so EVERY alias
-    # ``resolve_provider`` accepts must collapse to the same canonical ID here.
-    # An alias left unmapped makes the preflight miss a real corpus, the cap
-    # never engages, and a slow FTS scan can still starve the valid vector arm --
-    # the exact starvation this preflight exists to prevent. The authority for
-    # these sets is embedding_provider.py:1965-1985 (voyage/voyageai,
-    # fastembed/fast-embed, openai-compatible/openai/siliconflow); ollama has no
-    # alias. Adding an alias there requires adding it here.
-    provider_name = {
-        "voyageai": "voyage",
-        "fast-embed": "fastembed",
-        "openai": "openai-compatible",
-        "siliconflow": "openai-compatible",
-    }.get(provider_name, provider_name)
+    # Profiles use the resolved provider id, not the configured spelling.
+    provider_name = embedding_provider_id(provider_name)
     model_name = str(model_name or "").strip()
     if not provider_name or not model_name or time.monotonic() >= deadline:
         return False
@@ -4835,110 +4280,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
 
 def lcm_describe(args: Dict[str, Any], **kwargs) -> str:
     """Inspect a summary node's subtree or get session DAG overview."""
-    engine = _require_engine(kwargs)
-    if engine is None:
-        return json.dumps({"error": "LCM engine not initialized"})
-
-    externalized_ref = str(args.get("externalized_ref") or "").strip()
-    if externalized_ref:
-        # Externalized payloads are current-session objects; an explicit
-        # session_id alongside the ref would be silently ignored below and the
-        # response could misattribute current-session content to the requested
-        # archive session. Reject the combination before dereferencing, the
-        # same way lcm_expand validates its mode arguments.
-        if "session_id" in args:
-            return json.dumps(
-                {
-                    "error": "externalized_ref cannot be combined with "
-                    "session_id; externalized payloads are current-session "
-                    "objects"
-                }
-            )
-        payload = _get_externalized_payload(engine, externalized_ref)
-        if payload is None:
-            return json.dumps(
-                {
-                    "error": f"Externalized payload {externalized_ref} not found in current session"
-                }
-            )
-        return json.dumps(
-            {
-                "externalized_ref": externalized_ref,
-                "kind": payload.get("kind", "tool_result"),
-                "tool_call_id": payload.get("tool_call_id", ""),
-                "role": payload.get("role", ""),
-                "session_id": payload.get("session_id", ""),
-                "field_path": payload.get("field_path", ""),
-                "content_chars": payload.get("content_chars", 0),
-                "content_bytes": payload.get("content_bytes", 0),
-                "created_at": payload.get("created_at"),
-                "content_preview": (payload.get("content") or "")[:500],
-            }
-        )
-
-    node_id = args.get("node_id")
-    session_id_explicit = "session_id" in args
-    session_id_arg = args.get("session_id")
-    if session_id_explicit:
-        if not isinstance(session_id_arg, str) or not session_id_arg.strip():
-            return json.dumps({"error": "session_id must be a non-empty string"})
-        session_id = session_id_arg.strip()
-    else:
-        session_id = engine.current_session_id
-
-    if node_id is not None:
-        node = _get_session_node(engine, node_id, session_id=session_id)
-        if node is None:
-            scope = (
-                f"session {session_id}" if session_id_explicit else "current session"
-            )
-            return json.dumps({"error": f"Node {node_id} not found in {scope}"})
-        info = engine._dag.describe_subtree(node_id)
-        provenance = engine._dag.get_node_provenance(node.node_id)  # #441
-        if provenance is not None:
-            info.update(provenance)
-        if session_id_explicit:
-            info["session_id"] = node.session_id
-            info["expand_hint"] = _session_expand_hint(node.node_id, node.session_id)
-            for child in info.get("children", []):
-                child["expand_hint"] = _session_expand_hint(
-                    child["node_id"], node.session_id
-                )
-        return json.dumps(info)
-
-    depth_stats = engine._dag.get_session_depth_stats(session_id)
-    depth_samples = engine._dag.get_session_depth_samples(
-        session_id,
-        per_depth_limit=20,
-        depths=list(depth_stats),
-    )
-    overview = {
-        "session_id": session_id,
-        "store_message_count": engine._store.get_session_count(session_id),
-        "depths": {},
-    }
-
-    for depth, stats in sorted(depth_stats.items()):
-        nodes = depth_samples.get(depth, [])
-        overview["depths"][f"d{depth}"] = {
-            "count": stats["count"],
-            "total_tokens": stats["tokens"],
-            "total_source_tokens": stats["source_tokens"],
-            "nodes": [
-                {
-                    "node_id": node.node_id,
-                    "token_count": node.token_count,
-                    "expand_hint": (
-                        _session_expand_hint(node.node_id, node.session_id)
-                        if session_id_explicit
-                        else node.expand_hint
-                    ),
-                }
-                for node in nodes
-            ],
-        }
-
-    return json.dumps(overview)
+    return _expand_tools.lcm_describe(args, **kwargs)
 
 
 def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
@@ -4952,585 +4294,12 @@ def lcm_expand(args: Dict[str, Any], **kwargs) -> str:
     Omitting ``session_id`` preserves current-session node lookup. Carried-over
     current-session nodes may reference raw source rows from the previous session.
     """
-    engine = _require_engine(kwargs)
-    if engine is None:
-        return json.dumps({"error": "LCM engine not initialized"})
-
-    externalized_ref = str(args.get("externalized_ref") or "").strip()
-    raw_store_id_arg = args.get("store_id")
-    raw_node_id_arg = args.get("node_id")
-
-    modes_provided: list[str] = []
-    if externalized_ref:
-        modes_provided.append("externalized_ref")
-    if raw_store_id_arg is not None:
-        modes_provided.append("store_id")
-    if raw_node_id_arg is not None:
-        modes_provided.append("node_id")
-
-    if len(modes_provided) > 1:
-        return json.dumps(
-            {
-                "error": (
-                    "Provide only one of node_id, externalized_ref, store_id "
-                    f"(got {', '.join(modes_provided)})"
-                ),
-            }
-        )
-    if not modes_provided:
-        return json.dumps(
-            {
-                "error": "node_id, externalized_ref, or store_id is required",
-            }
-        )
-
-    session_id_explicit = "session_id" in args
-    session_id_arg = args.get("session_id")
-    if session_id_explicit and "node_id" not in modes_provided:
-        return json.dumps({"error": "session_id is only valid with node_id"})
-    if session_id_explicit:
-        if not isinstance(session_id_arg, str) or not session_id_arg.strip():
-            return json.dumps({"error": "session_id must be a non-empty string"})
-        session_id = session_id_arg.strip()
-    else:
-        session_id = engine.current_session_id
-
-    max_tokens = _parse_positive_int(args.get("max_tokens", 4000), 4000)
-    source_offset = _parse_non_negative_int(args.get("source_offset", 0), 0)
-    source_limit_arg = args.get("source_limit")
-    source_limit = (
-        _parse_positive_int(source_limit_arg, 0)
-        if source_limit_arg is not None
-        else None
-    )
-    content_offset = _parse_non_negative_int(args.get("content_offset", 0), 0)
-    raw_include_exact_ref = args.get("include_exact_ref", False)
-    if not isinstance(raw_include_exact_ref, bool):
-        return json.dumps({"error": "include_exact_ref must be a boolean"})
-    include_exact_ref = raw_include_exact_ref
-    if include_exact_ref and raw_store_id_arg is None:
-        return json.dumps({"error": "include_exact_ref is supported only with store_id mode"})
-
-    if externalized_ref:
-        payload = _get_externalized_payload(engine, externalized_ref)
-        if payload is None:
-            return json.dumps(
-                {
-                    "error": f"Externalized payload {externalized_ref} not found in current session"
-                }
-            )
-        content = payload.get("content", "")
-        sliced = _slice_content_for_response(content, max_tokens, content_offset)
-        return json.dumps(
-            {
-                "externalized_ref": externalized_ref,
-                "source_type": "externalized_payload",
-                "kind": payload.get("kind", "tool_result"),
-                "tool_call_id": payload.get("tool_call_id", ""),
-                "role": payload.get("role", ""),
-                "session_id": payload.get("session_id", ""),
-                "field_path": payload.get("field_path", ""),
-                "content_chars": payload.get("content_chars", len(content)),
-                "content_bytes": payload.get("content_bytes", 0),
-                "content": sliced["content"],
-                "content_offset": sliced["content_offset"],
-                "content_returned_chars": sliced["content_returned_chars"],
-                "content_truncated": sliced["content_truncated"],
-                "next_content_offset": sliced["next_content_offset"],
-                "has_more": sliced["has_more"],
-            }
-        )
-
-    if raw_store_id_arg is not None:
-        try:
-            store_id = int(raw_store_id_arg)
-        except (TypeError, ValueError, OverflowError):
-            return json.dumps({"error": "store_id must be an integer"})
-        stored = engine._store.get(store_id)
-        if stored is None:
-            return json.dumps({"error": f"Message store_id {store_id} not found"})
-        transcript_content = stored.get("content", "") or ""
-        sliced = _slice_content_for_response(
-            transcript_content, max_tokens, content_offset
-        )
-        engine_session_id = engine.current_session_id
-        stored_session_id = stored.get("session_id", "")
-        result: Dict[str, Any] = {
-            "store_id": store_id,
-            "source_type": "raw_message",
-            "session_id": stored_session_id,
-            "source": stored.get("source") or "",
-            "conversation_id": stored.get("conversation_id") or "",
-            "role": stored.get("role"),
-            "timestamp": stored.get("timestamp", 0),
-            "tool_call_id": stored.get("tool_call_id") or "",
-            "from_current_session": bool(engine_session_id)
-            and stored_session_id == engine_session_id,
-            "content": sliced["content"],
-            "content_chars": sliced["content_chars"],
-            "content_offset": sliced["content_offset"],
-            "content_returned_chars": sliced["content_returned_chars"],
-            "content_truncated": sliced["content_truncated"],
-            "next_content_offset": sliced["next_content_offset"],
-            "has_more": sliced["has_more"],
-        }
-        if include_exact_ref and sliced["content_returned_chars"] > 0:
-            exact_start = sliced["content_offset"]
-            exact_end = exact_start + sliced["content_returned_chars"]
-            result["exact_ref"] = f"lcm:{store_id}:{exact_start}-{exact_end}"
-        # Surface externalized-payload metadata when the row references one. Content
-        # is not hydrated by default, mirroring the existing _expand_message_sources
-        # default. Externalized lookup remains session-scoped (per the existing
-        # _get_externalized_payload contract); cross-session rows surface only the
-        # ref string, with a hint pointing at the same-session expansion path.
-        ref_values = [transcript_content]
-        if stored.get("tool_calls"):
-            try:
-                ref_values.append(
-                    json.dumps(
-                        stored.get("tool_calls"), ensure_ascii=False, sort_keys=True
-                    )
-                )
-            except (TypeError, ValueError):
-                ref_values.append(str(stored.get("tool_calls")))
-        refs: list[str] = []
-        for value in ref_values:
-            if not isinstance(value, str):
-                continue
-            for found_ref in extract_ingest_externalized_refs(value):
-                if found_ref not in refs:
-                    refs.append(found_ref)
-            legacy_ref = extract_externalized_ref(value)
-            if legacy_ref and legacy_ref not in refs:
-                refs.append(legacy_ref)
-        if refs:
-            result["externalized_refs"] = refs
-            result["externalized_ref"] = refs[0]
-            if bool(engine_session_id) and stored_session_id == engine_session_id:
-                payload_summaries = []
-                for ref in refs:
-                    payload = _get_externalized_payload(engine, ref)
-                    if payload is None:
-                        continue
-                    payload_summary = dict(payload)
-                    payload_summary.pop("content", None)
-                    payload_summaries.append(payload_summary)
-                if payload_summaries:
-                    result["externalized_payloads"] = payload_summaries
-                    result["externalized"] = payload_summaries[0]
-            else:
-                result["externalized_note"] = (
-                    "Externalized payload metadata is session-scoped; "
-                    "cross-session ref is surfaced for traceability only and cannot be expanded in this version."
-                )
-        return json.dumps(result)
-
-    assert raw_node_id_arg is not None
-    node_id = raw_node_id_arg
-    node = _get_session_node(engine, node_id, session_id=session_id)
-    if node is None:
-        scope = f"session {session_id}" if session_id_explicit else "current session"
-        return json.dumps({"error": f"Node {node_id} not found in {scope}"})
-
-    if node.source_type == "messages":
-        messages, pagination = _expand_message_sources(
-            engine,
-            node,
-            max_tokens=max_tokens,
-            source_offset=source_offset,
-            source_limit=source_limit,
-            content_offset=content_offset,
-        )
-        result = {
-            "node_id": node_id,
-            "depth": node.depth,
-            "source_type": "messages",
-            "expanded": messages,
-            "pagination": pagination,
-        }
-        if session_id_explicit:
-            result["session_id"] = node.session_id
-        return json.dumps(result)
-
-    if node.source_type == "nodes":
-        children, pagination = _expand_child_nodes(
-            engine,
-            node,
-            max_tokens=max_tokens,
-            source_offset=source_offset,
-            source_limit=source_limit,
-            session_id=node.session_id,
-        )
-        result = {
-            "node_id": node_id,
-            "depth": node.depth,
-            "source_type": "nodes",
-            "expanded": children,
-            "pagination": pagination,
-        }
-        if session_id_explicit:
-            result["session_id"] = node.session_id
-            for child in result["expanded"]:
-                child["expand_hint"] = _session_expand_hint(
-                    child["node_id"], node.session_id
-                )
-        return json.dumps(result)
-
-    return json.dumps({"error": f"Unknown source_type: {node.source_type}"})
+    return _expand_tools.lcm_expand(args, **kwargs)
 
 
 def lcm_expand_query(args: Dict[str, Any], **kwargs) -> str:
     """Answer a question by expanding matching summaries or explicit node ids."""
-    engine = _require_engine(kwargs)
-    if engine is None:
-        return json.dumps({"error": "LCM engine not initialized"})
-    session_id = engine.current_session_id
-
-    prompt = str(args.get("prompt") or "").strip()
-    if not prompt:
-        return json.dumps({"error": "prompt is required"})
-
-    raw_output = args.get("output", "answer")
-    if not isinstance(raw_output, str):
-        return json.dumps({"error": "output must be one of: answer, evidence"})
-    output = raw_output.strip().lower()
-    if output not in {"answer", "evidence"}:
-        return json.dumps({"error": "output must be one of: answer, evidence"})
-
-    raw_session_ids = args.get("session_ids")
-    # An empty optional array means "not provided" (#1194).
-    session_ids_explicit = "session_ids" in args and raw_session_ids != []
-    if not session_ids_explicit:
-        session_ids = [engine.current_session_id]
-    elif not isinstance(raw_session_ids, list) or not raw_session_ids:
-        return json.dumps({"error": "session_ids must be a non-empty array of strings"})
-    elif len(raw_session_ids) > _LCM_EXPAND_QUERY_SESSION_ID_CAP:
-        return json.dumps({"error": "session_ids accepts at most 20 entries"})
-    else:
-        session_ids = []
-        for raw_session_id in raw_session_ids:
-            if not isinstance(raw_session_id, str) or not raw_session_id.strip():
-                return json.dumps(
-                    {"error": "session_ids must contain only non-empty strings"}
-                )
-            session_id = raw_session_id.strip()
-            if session_id not in session_ids:
-                session_ids.append(session_id)
-
-    # `session_id` is reused as a loop variable below, so provenance reads the
-    # active session from the engine: an explicit cross-session retrieval must
-    # not be described as the last session the search happened to visit.
-    active_session_id = engine.current_session_id
-    evidence_scope_kind = (
-        "explicit_sessions" if session_ids_explicit else "current_session"
-    )
-
-    def _parse_int_arg(name: str, default: int) -> tuple[int | None, str | None]:
-        raw_value = args.get(name, default)
-        try:
-            return int(raw_value), None
-        except (TypeError, ValueError):
-            return None, f"{name} must be an integer"
-
-    max_tokens, max_tokens_error = _parse_int_arg("max_tokens", 2000)
-    if max_tokens_error:
-        return json.dumps({"error": max_tokens_error})
-    max_tokens = max(1, max_tokens)
-    context_default = max(
-        max_tokens,
-        int(getattr(engine._config, "expansion_context_tokens", 32_000) or 32_000),
-    )
-    context_max_tokens, context_max_tokens_error = _parse_int_arg(
-        "context_max_tokens", context_default
-    )
-    if context_max_tokens_error:
-        return json.dumps({"error": context_max_tokens_error})
-    context_max_tokens = max(1, context_max_tokens)
-
-    max_results, max_results_error = _parse_int_arg("max_results", 5)
-    if max_results_error:
-        return json.dumps({"error": max_results_error})
-    max_results = max(1, int(max_results or 5))
-
-    query = _coerce_query_arg(args.get("query"))
-    raw_node_ids = args.get("node_ids") or []
-
-    nodes = []
-    raw_results: list[dict[str, Any]] = []
-    if raw_node_ids:
-        allowed_session_ids = set(session_ids)
-        for node_id in raw_node_ids:
-            try:
-                parsed_node_id = int(node_id)
-            except (TypeError, ValueError):
-                return json.dumps({"error": "node_ids must contain only integers"})
-            node = engine._dag.get_node(parsed_node_id)
-            if node is not None and node.session_id in allowed_session_ids:
-                nodes.append(node)
-    elif query:
-        for session_id in session_ids:
-            nodes.extend(
-                engine._dag.search(query, session_id=session_id, limit=max_results)
-            )
-            raw_results.extend(
-                engine._store.search(query, session_id=session_id, limit=max_results)
-            )
-        if len(session_ids) > 1:
-            nodes.sort(
-                key=lambda node: (
-                    float(node.search_rank)
-                    if node.search_rank is not None
-                    else float("inf"),
-                    -float(node.search_directness or 0),
-                    -float(node.latest_at or node.created_at or 0),
-                )
-            )
-            raw_results.sort(
-                key=lambda row: _combined_result_sort_key(
-                    {
-                        "type": "message",
-                        "role": row.get("role"),
-                        "_sort_rank": row.get("search_rank"),
-                        "_sort_directness": row.get("_directness_score"),
-                        "_sort_ts": row.get("timestamp"),
-                    },
-                    "relevance",
-                )
-            )
-        nodes = nodes[:max_results]
-        raw_results = raw_results[:max_results]
-    else:
-        return json.dumps({"error": "Provide either query or node_ids"})
-
-    if not nodes and not raw_results:
-        if output == "evidence":
-            payload = {
-                "prompt": prompt,
-                "query": query,
-                "output": "evidence",
-                "evidence": [],
-                "context_max_tokens": context_max_tokens,
-                "context_tokens": 0,
-                "context_truncated": False,
-                "context_pagination": [],
-                "node_ids": [],
-                "matches": [],
-                "raw_matches": [],
-            }
-            if session_ids_explicit:
-                payload["session_ids"] = session_ids
-            return json.dumps(payload)
-        return json.dumps(
-            {
-                "prompt": prompt,
-                "query": query,
-                "answer": (
-                    "No matching summaries or raw messages found in the requested sessions."
-                    if session_ids_explicit
-                    else "No matching summaries or raw messages found in the current session."
-                ),
-                "node_ids": [],
-                "matches": [],
-                "raw_matches": [],
-                "evidence_provenance": expansion_evidence._build_expand_query_evidence(
-                    [],
-                    session_id=active_session_id,
-                    session_ids=session_ids,
-                    scope_kind=evidence_scope_kind,
-                    context_truncated=False,
-                    synthesis_status="not_run",
-                ),
-            }
-        )
-
-    context_blocks = []
-    context_budget_used = 0
-    context_budget_truncated = False
-    for node in nodes[:max_results]:
-        remaining_context_tokens = max(0, context_max_tokens - context_budget_used)
-        if output == "evidence" and remaining_context_tokens <= 0:
-            context_budget_truncated = True
-            break
-        node_blocks = _collect_context_blocks_for_node(
-            engine,
-            node,
-            max_tokens=remaining_context_tokens,
-            hydrate_externalized_content=(
-                not session_ids_explicit or node.session_id == engine.current_session_id
-            ),
-            session_id=node.session_id,
-        )
-        if session_ids_explicit:
-            for block in node_blocks:
-                block["session_id"] = node.session_id
-        if output == "evidence":
-            for block in node_blocks:
-                candidate_blocks = [*context_blocks, block]
-                candidate_tokens = expansion_evidence._serialized_context_token_count(candidate_blocks)
-                if candidate_tokens > context_max_tokens:
-                    context_budget_truncated = True
-                    break
-                context_blocks.append(block)
-                context_budget_used = candidate_tokens
-            if context_budget_truncated:
-                break
-        else:
-            context_blocks.extend(node_blocks)
-            context_budget_used += _context_content_token_count(node_blocks)
-
-    raw_matches: list[dict[str, Any]] = []
-    # Summaries can consume the whole budget while distinct raw messages still
-    # matched. Those hits are then omitted from the context, but the caller
-    # still needs a cursor into them, so the raw block is always collected — at
-    # a zero budget it carries no content and only the ``next_store_id`` handle.
-    raw_cursor_block: dict[str, Any] | None = None
-    if raw_results:
-        seen_store_ids = _collect_store_ids_from_context_blocks(context_blocks)
-        remaining_context_tokens = max(0, context_max_tokens - context_budget_used)
-        raw_block, raw_matches = _collect_raw_match_context_block(
-            engine,
-            raw_results,
-            max_tokens=remaining_context_tokens,
-            query=query,
-            exclude_store_ids=seen_store_ids,
-        )
-        if raw_block is not None:
-            if output == "evidence":
-                candidate_blocks = [*context_blocks, raw_block]
-                candidate_tokens = expansion_evidence._serialized_context_token_count(candidate_blocks)
-                if candidate_tokens <= context_max_tokens:
-                    context_blocks.append(raw_block)
-                    context_budget_used = candidate_tokens
-                else:
-                    context_budget_truncated = True
-                    raw_cursor_block = _raw_match_cursor_block(raw_block)
-            else:
-                context_blocks.append(raw_block)
-                context_budget_used += _context_content_token_count([raw_block])
-
-    context_pagination = expansion_evidence.continuations(context_blocks, raw_cursor_block)
-
-    context_truncated = context_budget_truncated or any(
-        bool(item.get("summary_truncated"))
-        or bool(item.get("pagination", {}).get("has_more"))
-        for item in context_pagination
-    )
-
-    selected_nodes = nodes[:max_results]
-    matches = [
-        {
-            "node_id": node.node_id,
-            "depth": node.depth,
-            "summary": node.summary[:300],
-            "expand_hint": node.expand_hint,
-        }
-        for node in selected_nodes
-    ]
-    if session_ids_explicit:
-        for match, node in zip(matches, selected_nodes):
-            match["session_id"] = node.session_id
-            match["expand_hint"] = _session_expand_hint(node.node_id, node.session_id)
-    node_ids = [node.node_id for node in selected_nodes]
-
-    if output == "evidence":
-        payload = {
-            "prompt": prompt,
-            "query": query,
-            "output": "evidence",
-            "evidence": context_blocks,
-            "context_max_tokens": context_max_tokens,
-            "context_tokens": expansion_evidence._serialized_context_token_count(context_blocks),
-            "context_truncated": context_truncated,
-            "context_pagination": context_pagination,
-            "node_ids": node_ids,
-            "matches": matches,
-            "raw_matches": raw_matches,
-        }
-        if session_ids_explicit:
-            payload["session_ids"] = session_ids
-        return json.dumps(payload)
-
-    def _degraded_payload(reason: str, *, include_timeout: bool = False) -> str:
-        payload: Dict[str, Any] = {
-            "prompt": prompt,
-            "query": query,
-            "error": reason,
-            "degraded": True,
-            "model": model,
-            "max_tokens": max_tokens,
-            "context_max_tokens": context_max_tokens,
-            "context_truncated": context_truncated,
-            "context_pagination": context_pagination,
-            "node_ids": node_ids,
-            "matches": matches,
-            "raw_matches": raw_matches,
-            "evidence_provenance": expansion_evidence._build_expand_query_evidence(
-                context_blocks,
-                session_id=active_session_id,
-                session_ids=session_ids,
-                scope_kind=evidence_scope_kind,
-                context_truncated=context_truncated,
-                synthesis_status="failed",
-            ),
-        }
-        if include_timeout:
-            payload["timeout_seconds"] = timeout
-        return json.dumps(payload)
-
-    model = engine._config.expansion_model or engine._config.summary_model or ""
-    timeout = engine._config.expansion_timeout_ms / 1000
-    try:
-        synthesize_kwargs = {
-            "prompt": prompt,
-            "context_blocks": context_blocks,
-            "model": model,
-            "max_tokens": max_tokens,
-            "timeout": timeout,
-        }
-        if engine._config.expansion_reasoning_effort:
-            synthesize_kwargs["reasoning_effort"] = engine._config.expansion_reasoning_effort
-        answer = _synthesize_expansion_answer(**synthesize_kwargs)
-    except TimeoutError:
-        logger.warning("LCM expand_query synthesis timed out after %.3fs", timeout)
-        return _degraded_payload(
-            f"lcm_expand_query synthesis timed out after {timeout:.3g}s",
-            include_timeout=True,
-        )
-    except _ExpansionSynthesisError as exc:
-        # Unusable aux-LLM response. Degrade the same way a timeout does: the
-        # caller still receives the node/raw matches it asked for, only the
-        # synthesized prose answer is unavailable.
-        logger.warning("LCM expand_query synthesis failed: %s", exc)
-        return _degraded_payload(f"lcm_expand_query synthesis unavailable: {exc}")
-
-    answer = str(answer).strip() if answer is not None else ""
-    if not answer:
-        logger.warning("LCM expand_query synthesis returned an empty answer")
-        return _degraded_payload("lcm_expand_query synthesis returned an empty answer")
-
-    return json.dumps(
-        {
-            "prompt": prompt,
-            "query": query,
-            "answer": answer,
-            "model": model,
-            "max_tokens": max_tokens,
-            "context_max_tokens": context_max_tokens,
-            "context_truncated": context_truncated,
-            "context_pagination": context_pagination,
-            "node_ids": node_ids,
-            "matches": matches,
-            "raw_matches": raw_matches,
-            "evidence_provenance": expansion_evidence._build_expand_query_evidence(
-                context_blocks,
-                session_id=active_session_id,
-                session_ids=session_ids,
-                scope_kind=evidence_scope_kind,
-                context_truncated=context_truncated,
-                synthesis_status="completed",
-            ),
-        }
-    )
+    return _expand_query_tools.lcm_expand_query(args, **kwargs)
 
 
 def _active_embedding_profile_exists(engine: "LCMEngine") -> bool:
@@ -5640,11 +4409,7 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
         }
     provider_id = str(probe.get("provider") or "")
     if embedding_provider_requires_privacy(provider_id):
-        provider_id = {
-            "voyageai": "voyage",
-            "openai": "openai-compatible",
-            "siliconflow": "openai-compatible",
-        }.get(provider_id, provider_id)
+        provider_id = embedding_provider_id(provider_id)
         try:
             current_revision = embedding_privacy_revision(config)
         except EmbeddingPrivacyPolicyError as exc:
@@ -5795,115 +4560,6 @@ def _summary_quality_stats(engine: "LCMEngine", session_id: str) -> dict[str, An
     }
 
 
-def _matched_session_patterns(session_keys: list[str], patterns: list[str]) -> list[str]:
-    """Return configured session glob patterns that match the supplied keys."""
-    matched: list[str] = []
-    for pattern in patterns:
-        try:
-            compiled = compile_session_pattern(pattern)
-        except re.error:
-            continue
-        if any(compiled.match(key) for key in session_keys if key):
-            matched.append(pattern)
-    return matched
-
-
-def _inspect_externalized_refs_from_value(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if isinstance(value, str):
-        sources = [value]
-    else:
-        try:
-            sources = [json.dumps(value, ensure_ascii=False)]
-        except (TypeError, ValueError):
-            sources = [str(value)]
-
-    refs: list[str] = []
-    for source in sources:
-        for ref in extract_ingest_externalized_refs(source) + extract_externalized_refs(source):
-            if ref not in refs:
-                refs.append(ref)
-    return refs
-
-
-def _inspect_message_metadata(row: dict[str, Any]) -> dict[str, Any]:
-    """Return row metadata only; never include raw message content."""
-    content = row.get("content") or ""
-    item: dict[str, Any] = {
-        "store_id": row.get("store_id"),
-        "session_id": row.get("session_id") or "",
-        "source": row.get("source") or "",
-        "conversation_id": row.get("conversation_id") or "",
-        "role": row.get("role") or "unknown",
-        "timestamp": row.get("timestamp", 0),
-        "token_estimate": row.get("token_estimate", 0),
-        "content_chars": len(content),
-    }
-    if row.get("tool_call_id"):
-        item["tool_call_id"] = row.get("tool_call_id")
-    if row.get("tool_name"):
-        item["tool_name"] = row.get("tool_name")
-
-    refs: list[str] = []
-    for value in (row.get("content"), row.get("tool_calls")):
-        for ref in _inspect_externalized_refs_from_value(value):
-            if ref not in refs:
-                refs.append(ref)
-    if refs:
-        item["externalized_refs"] = refs
-    return item
-
-
-def _inspect_lifecycle_state(engine: "LCMEngine", session_id: str, conversation_id: str) -> dict[str, Any] | None:
-    state = None
-    if conversation_id:
-        state = engine._lifecycle.get_by_conversation(conversation_id)
-    if state is None and session_id:
-        state = engine._lifecycle.get_by_session(session_id)
-    if state is None:
-        return None
-    return {
-        "conversation_id": state.conversation_id,
-        "current_session_id": state.current_session_id,
-        "last_finalized_session_id": state.last_finalized_session_id,
-        "current_frontier_store_id": state.current_frontier_store_id,
-        "last_finalized_frontier_store_id": state.last_finalized_frontier_store_id,
-        "debt_kind": state.debt_kind,
-        "debt_size_estimate": state.debt_size_estimate,
-        "current_bound_at": state.current_bound_at,
-        "last_finalized_at": state.last_finalized_at,
-        "debt_updated_at": state.debt_updated_at,
-        "last_maintenance_attempt_at": state.last_maintenance_attempt_at,
-        "last_rollover_at": state.last_rollover_at,
-        "last_reset_at": state.last_reset_at,
-        "updated_at": state.updated_at,
-    }
-
-
-def _inspect_highest_compacted_source_store_id(engine: "LCMEngine", session_id: str) -> int:
-    highest = 0
-    rows = engine._dag.connection.execute(
-        """
-        SELECT source_ids
-        FROM summary_nodes
-        WHERE session_id = ? AND source_type = 'messages'
-        """,
-        (session_id,),
-    ).fetchall()
-    for (raw_source_ids,) in rows:
-        try:
-            source_ids = json.loads(raw_source_ids or "[]")
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
-        for source_id in source_ids:
-            try:
-                highest = max(highest, int(source_id))
-            except (TypeError, ValueError, OverflowError):
-                continue
-    return highest
-
-
 def _inspect_top_level_json_string_fields_before_content(text: str) -> tuple[dict[str, str], bool]:
     return _externalized_top_level_fields_before_content(text)
 
@@ -6028,322 +4684,8 @@ def _inspect_externalized_payload_metadata(
     return metadata
 
 
-def _inspect_externalized_refs(engine: "LCMEngine", session_id: str, limit: int) -> dict[str, Any]:
-    message_total = engine._store.get_session_count(session_id)
-    rows = engine._store.load_session_page(session_id, limit=_LCM_INSPECT_REF_SCAN_MESSAGE_LIMIT)
-    scan_truncated = message_total > len(rows)
-    items: list[dict[str, Any]] = []
-    total_known = 0
-    seen: set[tuple[int, str]] = set()
-    for row in rows:
-        refs: list[str] = []
-        for value in (row.get("content"), row.get("tool_calls")):
-            for ref in _inspect_externalized_refs_from_value(value):
-                if ref not in refs:
-                    refs.append(ref)
-        for ref in refs:
-            key = (int(row.get("store_id") or 0), ref)
-            if key in seen:
-                continue
-            seen.add(key)
-            total_known += 1
-            if len(items) >= limit:
-                continue
-            metadata = _inspect_externalized_payload_metadata(engine, ref, session_id)
-            item: dict[str, Any] = {
-                "externalized_ref": ref,
-                "store_id": row.get("store_id"),
-                "session_id": row.get("session_id") or "",
-                "source": row.get("source") or "",
-                "conversation_id": row.get("conversation_id") or "",
-                "role": row.get("role") or "unknown",
-                "timestamp": row.get("timestamp", 0),
-                "readable": metadata.get("readable") is True,
-            }
-            if row.get("tool_call_id"):
-                item["tool_call_id"] = row.get("tool_call_id")
-            item.update(metadata)
-            items.append(item)
-
-    return {
-        "total_known": total_known,
-        "total_known_exact": not scan_truncated,
-        "scanned_messages": len(rows),
-        "scan_truncated": scan_truncated,
-        "returned": len(items),
-        "has_more": total_known > len(items) or scan_truncated,
-        "items": items,
-    }
-
-
-def _temporal_rollups_status(engine: "LCMEngine") -> dict[str, Any]:
-    """Return the cheap, read-only temporal-rollup operator status payload."""
-    enabled = bool(engine._config.temporal_rollups_enabled)
-    scope = engine.current_session_id or ""
-    payload: dict[str, Any] = {
-        "enabled": enabled,
-        "scope": scope,
-        "counts": {
-            kind: {status: 0 for status in _TEMPORAL_ROLLUP_STATUSES}
-            for kind in _TEMPORAL_ROLLUP_PERIOD_KINDS
-        },
-        "oldest_stale_age_seconds": None,
-        "last_build_cursors": {kind: None for kind in _TEMPORAL_ROLLUP_PERIOD_KINDS},
-        "last_built_at": {kind: None for kind in _TEMPORAL_ROLLUP_PERIOD_KINDS},
-        "last_error": None,
-    }
-    # Disabled deployments deliberately avoid even the metadata reads. This
-    # keeps the optional feature inert while preserving a stable status shape.
-    if not enabled or not scope:
-        return payload
-
-    conn = engine._dag.connection
-    if conn is None:
-        return payload
-    try:
-        rows = conn.execute(
-            """
-            SELECT period_kind, status, COUNT(*)
-            FROM lcm_rollups INDEXED BY sqlite_autoindex_lcm_rollups_1
-            WHERE period_kind IN ('day', 'week', 'month') AND scope = ?
-            GROUP BY period_kind, status
-            """,
-            (scope,),
-        ).fetchall()
-        for period_kind, status, count in rows:
-            kind_key = str(period_kind)
-            status_key = str(status)
-            if kind_key in payload["counts"] and status_key in payload["counts"][kind_key]:
-                payload["counts"][kind_key][status_key] = int(count or 0)
-
-        oldest_stale = conn.execute(
-            """
-            SELECT period_start
-            FROM lcm_rollups INDEXED BY sqlite_autoindex_lcm_rollups_1
-            WHERE period_kind IN ('day', 'week', 'month')
-              AND scope = ? AND status = 'stale'
-            ORDER BY period_start
-            LIMIT 1
-            """,
-            (scope,),
-        ).fetchone()
-        if oldest_stale and oldest_stale[0]:
-            stale_start = datetime.combine(
-                datetime.fromisoformat(str(oldest_stale[0])).date(),
-                datetime.min.time(),
-                tzinfo=timezone.utc,
-            )
-            payload["oldest_stale_age_seconds"] = max(
-                0, int((datetime.now(timezone.utc) - stale_start).total_seconds())
-            )
-
-        cursor_rows = conn.execute(
-            """
-            SELECT period_kind, last_build_cursor, last_built_at
-            FROM lcm_rollup_state
-            WHERE period_kind IN ('day', 'week', 'month') AND scope = ?
-            """,
-            (scope,),
-        ).fetchall()
-        for period_kind, cursor, built_at in cursor_rows:
-            kind_key = str(period_kind)
-            if kind_key in payload["last_build_cursors"]:
-                payload["last_build_cursors"][kind_key] = cursor
-                payload["last_built_at"][kind_key] = built_at
-
-        error_row = conn.execute(
-            """
-            SELECT substr(error, 1, ?)
-            FROM lcm_rollups
-            WHERE scope = ? AND error IS NOT NULL AND error != ''
-            ORDER BY rollup_id DESC
-            LIMIT 1
-            """,
-            (_OPERATOR_TEXT_FIELD_MAX_CHARS + 1, scope),
-        ).fetchone()
-        if error_row:
-            last_error, was_truncated = _bounded_operator_field(error_row[0])
-            payload["last_error"] = last_error
-            if was_truncated:
-                payload.setdefault("truncated_fields", []).append("last_error")
-    except Exception as exc:  # pragma: no cover - defensive legacy-schema degradation
-        logger.debug("LCM temporal rollup status query failed", exc_info=True)
-        query_error, was_truncated = _bounded_operator_field(
-            f"{type(exc).__name__}: {exc}"
-        )
-        payload["query_error"] = query_error
-        if was_truncated:
-            payload.setdefault("truncated_fields", []).append("query_error")
-    return payload
-
-
-def lcm_inspect(args: Dict[str, Any], **kwargs) -> str:
-    """Return a read-only metadata inventory of the current LCM session."""
-    engine = _require_engine(kwargs)
-    if engine is None:
-        return json.dumps({"error": "LCM engine not initialized"})
-
-    raw_limit_arg = args.get("limit", _LCM_INSPECT_DEFAULT_LIMIT)
-    parsed_limit, limit_error = _parse_strict_int(raw_limit_arg, "limit")
-    if limit_error:
-        return json.dumps({"error": limit_error})
-    if parsed_limit is None or parsed_limit <= 0:
-        return json.dumps({"error": "limit must be a positive integer"})
-    requested_limit = parsed_limit
-    limit = min(requested_limit, _LCM_INSPECT_HARD_LIMIT_CAP)
-
-    session_id = engine.current_session_id
-    conversation_id = engine.current_conversation_id
-    if not session_id:
-        full_status = engine.get_status()
-        return _bounded_inspect_json({
-            "error": "No active session",
-            "read_only": True,
-            "runtime_identity": full_status.get("runtime_identity") or engine.get_runtime_identity(),
-            "ingest_protection": full_status.get("ingest_protection"),
-            "temporal_rollups": _temporal_rollups_status(engine),
-        })
-
-    full_status = engine.get_status()
-    runtime_identity = full_status.get("runtime_identity") or engine.get_runtime_identity()
-    lifecycle = _inspect_lifecycle_state(engine, session_id, conversation_id)
-
-    store_totals_row = engine._store.connection.execute(
-        """
-        SELECT COUNT(*), MIN(store_id), MAX(store_id), COALESCE(SUM(token_estimate), 0)
-        FROM messages
-        WHERE session_id = ?
-        """,
-        (session_id,),
-    ).fetchone()
-    message_total = int(store_totals_row[0] or 0) if store_totals_row else 0
-    min_store_id = store_totals_row[1] if store_totals_row else None
-    max_store_id = store_totals_row[2] if store_totals_row else None
-    estimated_tokens = int(store_totals_row[3] or 0) if store_totals_row else 0
-    fresh_tail_count = max(0, int(engine._config.fresh_tail_count or 0))
-    fresh_tail_rows, fresh_tail_boundary = engine._get_session_fresh_tail(session_id)
-    fresh_tail_display_rows = fresh_tail_rows[-limit:]
-    fresh_tail_items = [
-        _inspect_message_metadata(row)
-        for row in fresh_tail_display_rows
-    ]
-
-    depth_stats = engine._dag.get_session_depth_stats(session_id)
-    total_dag_nodes = sum(info["count"] for info in depth_stats.values())
-    total_dag_tokens = sum(info["tokens"] for info in depth_stats.values())
-    total_dag_source_tokens = sum(info["source_tokens"] for info in depth_stats.values())
-    latest_node_rows = engine._dag.connection.execute(
-        """
-        SELECT node_id, session_id, depth, token_count, source_token_count,
-               source_type, created_at, earliest_at, latest_at, expand_hint
-        FROM summary_nodes
-        WHERE session_id = ?
-        ORDER BY created_at DESC, node_id DESC
-        LIMIT ?
-        """,
-        (session_id, limit),
-    ).fetchall()
-    latest_nodes = [
-        {
-            "node_id": int(row[0]),
-            "session_id": row[1],
-            "depth": int(row[2]),
-            "token_count": int(row[3] or 0),
-            "source_token_count": int(row[4] or 0),
-            "source_type": row[5],
-            "created_at": row[6],
-            "earliest_at": row[7],
-            "latest_at": row[8],
-            "expand_hint_available": bool(row[9]),
-            "expand_hint_chars": len(row[9] or ""),
-        }
-        for row in latest_node_rows
-    ]
-
-    highest_compacted_source_store_id = _inspect_highest_compacted_source_store_id(engine, session_id)
-    lifecycle_current_frontier = int((lifecycle or {}).get("current_frontier_store_id") or 0)
-    lifecycle_finalized_frontier = int((lifecycle or {}).get("last_finalized_frontier_store_id") or 0)
-    runtime_last_compacted = int(getattr(engine, "_last_compacted_store_id", 0) or 0)
-
-    platform = engine.current_session_platform
-    session_keys = build_session_match_keys(session_id, platform=platform)
-    ignore_patterns = list(engine._config.ignore_session_patterns or [])
-    stateless_patterns = list(engine._config.stateless_session_patterns or [])
-
-    response: dict[str, Any] = {
-        "read_only": True,
-        "session_id": session_id,
-        "conversation_id": conversation_id,
-        "limit": limit,
-        "runtime_identity": runtime_identity,
-        "lineage": {
-            "session_id": session_id,
-            "conversation_id": conversation_id,
-            "session_platform": platform,
-            "side_channel_active": engine.side_channel_active,
-            "bound_session_id": getattr(engine, "_session_id", ""),
-            "bound_conversation_id": getattr(engine, "_conversation_id", ""),
-            "lifecycle": lifecycle,
-            "source_lineage": full_status.get("source_lineage"),
-        },
-        "messages": {
-            "total": message_total,
-            "estimated_tokens": estimated_tokens,
-            "min_store_id": min_store_id,
-            "max_store_id": max_store_id,
-            "fresh_tail_count": fresh_tail_count,
-            "fresh_tail_max_tokens": engine._config.fresh_tail_max_tokens,
-            "effective_fresh_tail_count": len(fresh_tail_rows),
-            "effective_fresh_tail_tokens": fresh_tail_boundary.tokens,
-            "pre_tail_message_count": max(0, message_total - len(fresh_tail_rows)),
-            "fresh_tail": {
-                "returned": len(fresh_tail_items),
-                "token_limited": fresh_tail_boundary.token_limited,
-                "tool_group_extended": fresh_tail_boundary.tool_group_extended,
-                "items": fresh_tail_items,
-            },
-        },
-        "compaction": {
-            "last": {
-                "status": full_status.get("last_compression_status", "idle"),
-                "noop_reason": full_status.get("last_compression_noop_reason", ""),
-                "condensation_suppressed_reason": full_status.get("condensation_suppressed_reason", ""),
-                "compression_count": engine.compression_count,
-                "last_prompt_tokens": engine.last_prompt_tokens,
-                "threshold_tokens": engine.threshold_tokens,
-            },
-            "frontier": {
-                "runtime_last_compacted_store_id": runtime_last_compacted,
-                "highest_compacted_source_store_id": highest_compacted_source_store_id,
-                "lifecycle_current_frontier_store_id": lifecycle_current_frontier,
-                "lifecycle_last_finalized_frontier_store_id": lifecycle_finalized_frontier,
-            },
-        },
-        "dag": {
-            "total_nodes": total_dag_nodes,
-            "total_tokens": total_dag_tokens,
-            "total_source_tokens": total_dag_source_tokens,
-            "depths": {f"d{depth}": info for depth, info in sorted(depth_stats.items())},
-            "latest_nodes": latest_nodes,
-        },
-        "temporal_rollups": _temporal_rollups_status(engine),
-        "externalized_refs": _inspect_externalized_refs(engine, session_id, limit),
-        "ingest_protection": full_status.get("ingest_protection"),
-        "filters": {
-            "session_keys": session_keys,
-            "ignored": engine.current_session_ignored,
-            "stateless": engine.current_session_stateless,
-            "ignore_session_patterns": ignore_patterns,
-            "stateless_session_patterns": stateless_patterns,
-            "matched_ignore_session_patterns": _matched_session_patterns(session_keys, ignore_patterns),
-            "matched_stateless_session_patterns": _matched_session_patterns(session_keys, stateless_patterns),
-            "ignore_message_patterns": list(engine._config.ignore_message_patterns or []),
-            "ignored_message_count": full_status.get("ignored_message_count", 0),
-        },
-    }
-    if requested_limit > _LCM_INSPECT_HARD_LIMIT_CAP:
-        response["limit_clamped_from"] = requested_limit
-    return _bounded_inspect_json(response)
+# Dispatch resolves this name at call time, so patching it changes behavior (rule 6).
+lcm_inspect = _inspect_tools.lcm_inspect
 
 
 def lcm_status(args: Dict[str, Any], **kwargs) -> str:
@@ -6576,12 +4918,11 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
 
     # 1. Database integrity
     try:
-        result = engine._store.connection.execute("PRAGMA integrity_check").fetchone()
-        ok = result and result[0] == "ok"
+        ok, detail = fresh_sqlite_check(engine, "integrity_check")
         checks.append({
             "check": "database_integrity",
             "status": "pass" if ok else "fail",
-            "detail": result[0] if result else "no response",
+            "detail": detail,
         })
     except Exception as e:
         checks.append({
@@ -6689,17 +5030,17 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     # 2. SQLite storage posture and payload diagnostics
     try:
         journal_mode_row = engine._store.connection.execute("PRAGMA journal_mode").fetchone()
-        quick_check_row = engine._store.connection.execute("PRAGMA quick_check").fetchone()
+        quick_ok, quick_detail = fresh_sqlite_check(engine, "quick_check")
         db_path = Path(engine._store.db_path)
         wal_path = Path(str(db_path) + "-wal")
         checks.append({
             "check": "sqlite_storage",
-            "status": "pass" if quick_check_row and quick_check_row[0] == "ok" else "fail",
+            "status": "pass" if quick_ok else "fail",
             "detail": {
                 "database_path": str(db_path),
                 "database_exists": db_path.exists(),
                 "journal_mode": journal_mode_row[0] if journal_mode_row else "unknown",
-                "quick_check": quick_check_row[0] if quick_check_row else "unknown",
+                "quick_check": quick_detail,
                 "database_size_bytes": db_path.stat().st_size if db_path.exists() else 0,
                 "wal_size_bytes": wal_path.stat().st_size if wal_path.exists() else 0,
             },
@@ -6827,9 +5168,17 @@ def lcm_doctor(args: Dict[str, Any], **kwargs) -> str:
     if c.fresh_tail_count < 2:
         config_warnings.append("fresh_tail_count < 2 may cause aggressive compaction")
     runtime_context_threshold = float(getattr(engine, "context_threshold", c.context_threshold))
-    if runtime_context_threshold > 0.95:
+    if runtime_context_threshold > 0.95 and not (
+        runtime_context_threshold == c.context_threshold
+        and any(warning.startswith("out-of-range env LCM_CONTEXT_THRESHOLD=")
+                for warning in getattr(c, "config_source_warnings", []) or [])
+    ):
         config_warnings.append("runtime context_threshold > 0.95 leaves very little headroom")
-    if runtime_context_threshold < 0.3:
+    if runtime_context_threshold < 0.3 and not (
+        runtime_context_threshold == c.context_threshold
+        and any(warning.startswith("out-of-range env LCM_CONTEXT_THRESHOLD=")
+                for warning in getattr(c, "config_source_warnings", []) or [])
+    ):
         config_warnings.append("runtime context_threshold < 0.3 triggers compaction very early")
     if c.condensation_fanin < 2:
         config_warnings.append("condensation_fanin < 2 creates excessive depth growth")

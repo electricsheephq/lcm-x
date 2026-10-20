@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from tests.compat.helpers import run_old
+from tests.compat.helpers import PREVIOUS_GA, run_old
+from tests.harness import make_engine
 from tests.compat.storage_fixtures import (
     VECTOR_TABLES, assert_calls_once, assert_complete_vectors, assert_preserved, bind,
     embed_all, install_fakes, plugin, seed_history, storage_config, table_hashes, vector_ids, warmup,
@@ -31,23 +32,49 @@ finally:
 '''
 
 
+@pytest.mark.parametrize("source_reader", ("v0.26.2", PREVIOUS_GA))
 @pytest.mark.parametrize("dtype", ["float32", "int8"])
 def test_previous_ga_vectors_survive_upgrade(
     tmp_path: Path, old_tree: Callable[[str], Path], host_root: Path,
-    monkeypatch: pytest.MonkeyPatch, dtype: str,
+    monkeypatch: pytest.MonkeyPatch, dtype: str, source_reader: str,
 ) -> None:
-    old = run_old(old_tree("v0.26.2"), tmp_path, host_root, OLD_EMBEDDED_STORE, data=dtype)
+    from collections import Counter
+    import sqlite3
+
+    old = run_old(old_tree(source_reader), tmp_path, host_root, OLD_EMBEDDED_STORE, data=dtype)
     before = table_hashes(tmp_path, VECTOR_TABLES)
     assert all(before[table] for table in VECTOR_TABLES if dtype == "int8" or not table.endswith("binary"))
+    with sqlite3.connect(tmp_path / "lcm.db") as conn:
+        (identity_hash,) = [row[0] for row in conn.execute(
+            "SELECT DISTINCT identity_hash FROM lcm_chunk_meta")]
+        revision_gaps = [row[0] for row in conn.execute(
+            "SELECT content FROM messages AS m WHERE lower(trim(role)) IN ('user', 'assistant') "
+            "AND NOT EXISTS (SELECT 1 FROM lcm_chunk_meta AS c "
+            "WHERE c.store_id = m.store_id AND c.identity_hash = ?)", (identity_hash,))
+            if row[0] and row[0].strip()]
     provider = install_fakes(monkeypatch)
     config = storage_config(tmp_path, embeddings=True, dtype=dtype, small=True)
-    engine = plugin("engine").LCMEngine(config=config, hermes_home=str(tmp_path / "home"))
+    engine = make_engine(tmp_path, embeddings_enabled=config.embeddings_enabled,
+                         embedding_provider=config.embedding_provider, embedding_model=config.embedding_model,
+                         embedding_storage_dtype=config.embedding_storage_dtype,
+                         fresh_tail_count=config.fresh_tail_count, leaf_chunk_tokens=config.leaf_chunk_tokens,
+                         large_output_externalization_path=config.large_output_externalization_path)
     try:
         bind(engine)
         assert engine.drain_embedding_maintenance(timeout=10)
-        assert provider.documents == [], "opening a fully embedded store must not re-embed old content"
-        assert table_hashes(tmp_path, VECTOR_TABLES) == before
+        assert Counter(provider.documents) == Counter(revision_gaps), (
+            "an upgrade embeds only revision gaps, never old content")
+        assert not set(provider.documents).intersection(old["documents"])
+        assert_preserved(tmp_path, {table: rows for table, rows in before.items()
+                                    if table != "lcm_embedding_profile"})
         assert_complete_vectors(engine)
+        revision = engine._store.connection.execute(
+            "SELECT value FROM metadata WHERE key = ?",
+            (f"chunk_policy_revision:{identity_hash}",),
+        ).fetchone()
+        assert revision is not None and int(revision[0]) == plugin("chunking").CHUNK_POLICY_REVISION
+        # assert_calls_once below measures only dispatch after this vector snapshot.
+        provider.documents.clear()
         previous = vector_ids(engine)
         seed_history(engine, "new-candidate", turns=8)
         assert engine.drain_embedding_maintenance(timeout=10)

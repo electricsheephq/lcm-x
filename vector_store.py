@@ -178,22 +178,6 @@ class EmbeddingIdentity:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _identity_hash(
-    provider: str,
-    model_name: str,
-    revision: str,
-    dim: int,
-    dtype: str,
-    byteorder: str,
-    task: str,
-) -> str:
-    """Return the stable canonical-identity hash for an embedding profile."""
-    identity = EmbeddingIdentity.canonical(
-        provider, model_name, revision, dim, dtype, byteorder, task
-    )
-    return identity.identity_hash
-
-
 def _load_numpy():
     """Import NumPy lazily. Kept isolated so fallback behavior is testable."""
     import numpy
@@ -1690,60 +1674,6 @@ class VectorStore:
                 "source lineage exceeded the bounded verification budget"
             )
         return {str(row[0]) for row in rows}
-
-    def _filtered_candidate_indexes(
-        self,
-        embedded_ids: Sequence[str],
-        *,
-        since: float | None,
-        until: float | None,
-        conversation_ids: Sequence[str] | None,
-        source: str | None,
-    ) -> list[int]:
-        if not embedded_ids:
-            return []
-        if conversation_ids is not None and not list(conversation_ids):
-            return []
-        unique_ids = list(dict.fromkeys(str(value) for value in embedded_ids))
-        columns = self._table_columns("summary_nodes")
-        if (since is not None or until is not None) and "latest_at" not in columns:
-            return []
-        recency_expr = "sn.latest_at"
-        with self._temp_id_table(unique_ids) as table:
-            where = ["1 = 1"]
-            args: list[object] = []
-            if "suppressed_at" in columns:
-                where.append("sn.suppressed_at IS NULL")
-            if since is not None:
-                where.append(f"{recency_expr} >= ?")
-                args.append(float(since))
-            if until is not None:
-                where.append(f"{recency_expr} <= ?")
-                args.append(float(until))
-            with self._optional_temp_id_table(conversation_ids) as conversation_table:
-                conversation_join = (
-                    f"JOIN {conversation_table} c ON c.id = sn.session_id"
-                    if conversation_table is not None
-                    else ""
-                )
-                rows = self._conn.execute(
-                    f"""
-                    SELECT t.id
-                    FROM {table} t
-                    JOIN summary_nodes sn ON sn.node_id = CAST(t.id AS INTEGER)
-                    {conversation_join}
-                    WHERE {' AND '.join(where)}
-                    """,
-                    args,
-                ).fetchall()
-            allowed = {str(row[0]) for row in rows}
-            if source:
-                allowed &= self._source_allowed_ids(table, source)
-        return [
-            index
-            for index, embedded_id in enumerate(embedded_ids)
-            if str(embedded_id) in allowed
-        ]
 
     # -- Two-stage KNN (binary Hamming prescreen -> int8/float rescore) -----
     #

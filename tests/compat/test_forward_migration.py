@@ -7,7 +7,7 @@ import sqlite3
 import pytest
 
 from tests.compat import codec_adapter
-from tests.compat.helpers import FLEET_POLICY, config_for, run_old
+from tests.compat.helpers import FLEET_POLICY, PREVIOUS_GA, config_for, run_old
 
 # One source for both sides: the old writer's reader and the current reader hash the same fields.
 DIGEST = r'''
@@ -87,7 +87,7 @@ finally:
 '''
 
 
-def snapshot(directory, before_columns=None):
+def snapshot(directory, before_columns=None, *, source_reader):
     with sqlite3.connect(directory / "lcm.db") as conn:
         # FTS shadow storage is derived; retain the virtual tables themselves.
         shadows = {row[1] for row in conn.execute("PRAGMA table_list") if row[2] == "shadow"}
@@ -99,11 +99,16 @@ def snapshot(directory, before_columns=None):
             assert set(columns) <= set(schema[table]), table
             names = ", ".join(f'"{column}"' for column in columns)
             rows = conn.execute(f'SELECT {names} FROM "{table}" ORDER BY rowid').fetchall()
-            if table == "metadata" and before_columns is not None:
-                # The upgrade adds this derived-index marker; every old key/value
-                # must still hash identically, and no other addition is allowed.
-                assert rows.count(("fts_stem_state", "backfilling")) == 1
-                rows.remove(("fts_stem_state", "backfilling"))
+            if table == "metadata":
+                markers = [row for row in rows if row[0] == "fts_stem_state"]
+                if source_reader == PREVIOUS_GA:
+                    assert markers == [("fts_stem_state", "ready")]
+                elif before_columns is not None:
+                    # Only the pre-stem source gains a marker; all old rows still hash identically.
+                    assert markers == [("fts_stem_state", "backfilling")]
+                    rows.remove(("fts_stem_state", "backfilling"))
+                else:
+                    assert markers == []
             # SQLite BLOBs need an explicit lossless JSON representation.
             encoded = json.dumps(rows, default=lambda value: {"blob_hex": value.hex()}).encode()
             hashes[table] = (len(rows), hashlib.sha256(encoded).hexdigest())
@@ -120,14 +125,15 @@ def snapshot(directory, before_columns=None):
         return schema, hashes, payloads
 
 
+@pytest.mark.parametrize("source_reader", ("v0.26.2", PREVIOUS_GA))
 @pytest.mark.parametrize("overlay", ["default", "fleet"])
-def test_previous_ga_forward_migration(tmp_path, old_tree, host_root, monkeypatch, overlay):
+def test_previous_ga_forward_migration(tmp_path, old_tree, host_root, monkeypatch, overlay, source_reader):
     from hermes_lcm import db_bootstrap
     from hermes_lcm.engine import LCMEngine
 
-    old = old_tree("v0.26.2")
+    old = old_tree(source_reader)
     original = run_old(old, tmp_path, host_root, WRITE_AND_READ, mode="write", data=overlay)
-    before = snapshot(tmp_path)
+    before = snapshot(tmp_path, source_reader=source_reader)
     if overlay == "fleet":
         assert before[1].get("lcm_rollups", (0, ""))[0] > 0
         assert before[1].get("lcm_rollup_sources", (0, ""))[0] > 0
@@ -153,7 +159,7 @@ def test_previous_ga_forward_migration(tmp_path, old_tree, host_root, monkeypatc
                     f"{session}: the current reader returns different message content or provenance"
         finally:
             engine.shutdown()
-        after = snapshot(tmp_path, before[0])
+        after = snapshot(tmp_path, before[0], source_reader=source_reader)
         for table, digest in before[1].items():
             assert after[1][table] == digest, f"upgrade changed old columns/rows in {table}"
         assert after[2] == before[2], "upgrade changed externalized payloads"
@@ -164,4 +170,4 @@ def test_previous_ga_forward_migration(tmp_path, old_tree, host_root, monkeypatc
     # #919's floor concerns replay of NEW short projections, not opening a store:
     # this candidate has emitted none. test_rollback_v0262_store defines this path.
     assert run_old(old, tmp_path, host_root, WRITE_AND_READ) == original
-    assert snapshot(tmp_path, before[0])[1:] == before[1:]
+    assert snapshot(tmp_path, before[0], source_reader=source_reader)[1:] == before[1:]

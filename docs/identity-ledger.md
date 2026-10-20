@@ -247,6 +247,22 @@ repeats the grep at its own base. Rows not marked otherwise are **dead** or **un
 | Row-ownership predicate | R242 R423 R447 | 3 | |
 | Host stamp and `alt_stamp` identity | R090 R201 R236 | 3 | |
 
+## Store-time carried-stamp provenance (#1501 / #1504)
+
+Alongside the persisted `composite` (R235) and `alt_stamp` (R236) relations, R461 records
+`(R, carried_stamp, P, None, s)` in the existing `message_relations` table, without DDL.
+Only a newly stored non-UID user row R with its own non-NULL stamp s qualifies. The adjacent
+stored row P must be a user at s in the current session or verified compression chain, absent
+from the incoming list in the occurrence-matching identity form. Incoming index i - 1 must
+match P's stored predecessor Q by identity and Q's own stamp. No Q means no marker.
+The verified chain is necessary because the rotation path stores P in the parent and R in the child.
+
+The carried-stamp reader requires the exact R-to-P relation at s as well as every existing
+adjacency, distinct-content, forward-stamp, lineage and single-consumption guard. This relation
+neither absorbs P nor grants summary coverage. NULL predecessors cannot supply this signature;
+canonical UID binding still serves its existing identity/backfill purpose. Stores written before
+this marker existed retain the safe duplicate fallback; relations are never inferred at read time.
+
 ## Contradictions resolved
 
 1. **Native-recovery state.** Readers proposed DELETE, DEMOTE and KEEP for the same rules.

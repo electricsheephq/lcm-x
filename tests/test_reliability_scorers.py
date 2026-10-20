@@ -146,11 +146,14 @@ def test_forced_recovery_requires_marker_and_prior_compaction(tmp_path, marked, 
 
 def test_overflow_cell_restart_and_bars_contract():
     for c in cells.select("overflow-recovery-restart/*"):
-        assert c["bars"] == ["B1", "B2"] and c["targets"] == [534]
+        assert c["bars"] == ["B1", "B2"] and c["targets"] == [534, 1505, 1508]
         assert c["faults"][1] == {"kind": "crash_after_compaction_before_reply", "after_status": "overflow_recovery", "offset": 1}
         assert c["faults"][2] == {"kind": "clean_exit_before_turn", "after_restart": 1}
         assert set(c["lcm_env"]) == set(cells.tight(c["window"]))
     assert cells.ISSUES[534] == (("B1", "B2"), "")
+    assert cells.ISSUES[1505][0] == ("B1", "B2")
+    assert cells.ISSUES[1508][0] == ("B1", "B2")
+    assert cells.ISSUE_HOSTS[1508] == ("ref-", "floor-", "upstream-main")
 
 
 @pytest.mark.parametrize("stored_result,verdict", [("real host result", "PASS"), ("wrong result", "FAIL")])

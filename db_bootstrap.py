@@ -19,7 +19,7 @@ import time
 from contextlib import closing, contextmanager
 from typing import Iterable, Sequence
 
-from .config import _parse_bool_env, sqlite_mmap_size
+from .config import _parse_bool_env, lcm_env_get, sqlite_mmap_size
 from .schema_families import SchemaFinding
 
 logger = logging.getLogger(__name__)
@@ -2644,7 +2644,7 @@ def _integrity_check_interval_hours() -> float:
     ``0`` checks on every startup (previous behavior); a negative value never
     checks on startup (relies on structural checks + LIKE fallback + doctor).
     """
-    raw = os.environ.get(INTEGRITY_CHECK_INTERVAL_ENV)
+    raw = lcm_env_get(INTEGRITY_CHECK_INTERVAL_ENV)
     if raw is None:
         return DEFAULT_INTEGRITY_CHECK_INTERVAL_HOURS
     try:

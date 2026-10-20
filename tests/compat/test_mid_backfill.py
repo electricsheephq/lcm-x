@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.compat.helpers import config_for, run_old
+from tests.compat.helpers import PREVIOUS_GA, config_for, run_old
 from tests.compat.storage_fixtures import (
     SESSION, VECTOR_TABLES, assert_calls_once, assert_preserved, bind, embed_all,
     finish_embeddings, install_fakes, plugin, seed_history, storage_config,
@@ -13,6 +13,10 @@ from tests.compat.storage_fixtures import (
 )
 
 OLD_STEM_INTERLUDE = r'''
+from hermes_lcm import db_bootstrap as old_boot
+# A stem-aware old reader resumes the backfill on open; keep it pending for the new reader.
+if hasattr(old_boot, "dispatch_background_stem_backfill"):
+    old_boot.dispatch_background_stem_backfill = lambda *args: None
 engine = LCMEngine(config=LCMConfig(**options), hermes_home=home)
 try:
     engine.on_session_start("compat-storage", platform="cli", context_length=200_000,
@@ -45,8 +49,10 @@ finally:
 '''
 
 
+@pytest.mark.parametrize("source_reader", ("v0.26.2", PREVIOUS_GA))
 def test_stem_backfill_survives_old_writer(
     tmp_path: Path, old_tree: Callable[[str], Path], host_root: Path, monkeypatch: pytest.MonkeyPatch,
+    source_reader: str,
 ) -> None:
     boot = plugin("db_bootstrap")
     store_mod = plugin("store")
@@ -75,7 +81,7 @@ def test_stem_backfill_survives_old_writer(
         before = table_hashes(tmp_path, ("messages",))
     finally:
         engine.shutdown()
-    report = run_old(old_tree("v0.26.2"), tmp_path, host_root, OLD_STEM_INTERLUDE)
+    report = run_old(old_tree(source_reader), tmp_path, host_root, OLD_STEM_INTERLUDE)
     # Snapshot after the old writer, so its interleaved row is held to the same lossless bar.
     after_old = table_hashes(tmp_path, ("messages",))
     assert report["inserted"] in after_old["messages"]
@@ -122,6 +128,7 @@ def test_partial_embeddings_survive_old_writer(
             before = table_hashes(tmp_path, VECTOR_TABLES)
         finally:
             engine.shutdown()
+    # v0.26.2 leaves partial embeddings idle; newer writers dispatch incremental embedding.
     report = run_old(old_tree("v0.26.2"), tmp_path, host_root, OLD_EMBEDDING_INTERLUDE)
     assert table_hashes(tmp_path, VECTOR_TABLES) == before
     provider = install_fakes(monkeypatch)

@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Protocol, Sequence
 from urllib.parse import urlsplit
 
-from .config import LCMConfig
+from .config import LCMConfig, embedding_provider_id, lcm_env_get, profile_bound
 from .tokens import count_tokens
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ BeforeDispatch = Callable[[tuple[int, ...]], None]
 # Default model per provider for the raw-history CHUNK corpus. Voyage maps to
 # voyage-context-4 (its contextualized-chunks model); local providers reuse the
 # configured model unchanged (local-first posture, plain per-chunk embedding).
-_DEFAULT_CHUNK_MODELS = {"voyage": "voyage-context-4", "voyageai": "voyage-context-4"}
+_DEFAULT_CHUNK_MODELS = {"voyage": "voyage-context-4"}
 
 
 def default_chunk_model(provider: str, configured_model: str) -> str:
@@ -95,7 +95,7 @@ def default_chunk_model(provider: str, configured_model: str) -> str:
     """
     configured = str(configured_model or "").strip()
     key = str(provider or "").strip().lower()
-    mapped = _DEFAULT_CHUNK_MODELS.get(key)
+    mapped = _DEFAULT_CHUNK_MODELS.get(embedding_provider_id(key))
     if mapped:
         # An explicit context model is the operator's stated chunk-model intent
         # and wins over the mapping; the voyage-context-4 default applies ONLY
@@ -302,7 +302,7 @@ def _run_blocking_with_deadline(
             worker_slots.release()
 
     worker = threading.Thread(
-        target=run, name=f"lcm-{provider.lower()}-embedding", daemon=True
+        target=profile_bound(run), name=f"lcm-{provider.lower()}-embedding", daemon=True
     )
     try:
         worker.start()
@@ -632,7 +632,7 @@ class VoyageProvider(_ResilientProvider):
         the flat ``/v1/embeddings`` request unchanged and returns
         ``list[list[float]]`` ordered to ``texts``.
         """
-        api_key = os.environ.get("VOYAGE_API_KEY", "").strip()
+        api_key = lcm_env_get("VOYAGE_API_KEY", "").strip()
         if not api_key:
             raise VoyageError("auth", "VOYAGE_API_KEY is not set")
         if payload is None:
@@ -1296,7 +1296,7 @@ class VoyageProvider(_ResilientProvider):
             return []
         budget = max(0.001, float(timeout))
         deadline = time.monotonic() + budget
-        api_key = os.environ.get("VOYAGE_API_KEY", "").strip()
+        api_key = lcm_env_get("VOYAGE_API_KEY", "").strip()
         if not api_key:
             raise VoyageError("auth", "VOYAGE_API_KEY is not set")
         payload: dict[str, Any] = {
@@ -1500,6 +1500,7 @@ class OllamaProvider(_ResilientProvider):
         # sleeps beyond the configured budget.
         return self._embed(texts, deadline_budget_s=self.timeout)
 
+    # Shared: OpenAICompatibleProvider reuses this method object; keep it provider-neutral.
     def embed_document_batches(
         self,
         texts: Sequence[str],
@@ -1604,10 +1605,10 @@ class OpenAICompatibleProvider(_ResilientProvider):
         deadline_budget_s: float | None = None,
         before_transport: Callable[[], None] | None = None,
     ) -> list[list[float]]:
-        api_key = os.environ.get(self.api_key_env, "").strip()
+        api_key = lcm_env_get(self.api_key_env, "").strip()
         if not api_key:
             # Convenience fallback: SiliconFlow key name used by OpenViking.
-            api_key = os.environ.get("SILICONFLOW_API_KEY", "").strip()
+            api_key = lcm_env_get("SILICONFLOW_API_KEY", "").strip()
         if not api_key:
             raise EmbeddingProviderError(
                 f"{self.api_key_env} (or SILICONFLOW_API_KEY) is not set"
@@ -1741,30 +1742,8 @@ class OpenAICompatibleProvider(_ResilientProvider):
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
         return self._embed(texts, deadline_budget_s=self.timeout)
 
-    def embed_document_batches(
-        self,
-        texts: Sequence[str],
-        *,
-        before_dispatch: BeforeDispatch | None = None,
-    ) -> Iterator[EmbeddedDocumentBatch]:
-        normalized = tuple(str(text) for text in texts)
-        if not normalized:
-            return
-        indexes = tuple(range(len(normalized)))
-        vectors = self._embed(
-            normalized,
-            max_attempts=1 if before_dispatch is not None else _MAX_ATTEMPTS,
-            deadline_budget_s=self.timeout,
-            before_transport=(
-                (lambda: before_dispatch(indexes))
-                if before_dispatch is not None
-                else None
-            ),
-        )
-        yield EmbeddedDocumentBatch(
-            indexes,
-            tuple(tuple(vector) for vector in vectors),
-        )
+    # Both HTTP providers use the same lazy batch adapter around self._embed.
+    embed_document_batches = OllamaProvider.embed_document_batches
 
     def embed_query(self, text: str) -> list[float]:
         return self._embed((text,), deadline_budget_s=self.timeout)[0]
@@ -1989,7 +1968,7 @@ def resolve_provider(
     )
     timeout_default = 120.0 if for_backfill else 3.0
     timeout = float(getattr(config, timeout_field, timeout_default))
-    if provider in {"voyage", "voyageai"}:
+    if embedding_provider_id(provider) == "voyage":
         return VoyageProvider(
             model,
             timeout=timeout,
@@ -1998,18 +1977,18 @@ def resolve_provider(
                 getattr(config, "embedding_max_batch_items", _VOYAGE_MAX_BATCH_ITEMS)
             ),
         )
-    if provider == "ollama":
+    if embedding_provider_id(provider) == "ollama":
         return OllamaProvider(
             model,
             base_url=getattr(config, "ollama_base_url", "http://localhost:11434"),
             timeout=timeout,
             spend_guard=spend_guard,
         )
-    if provider in {"fastembed", "fast-embed"}:
+    if embedding_provider_id(provider) == "fastembed":
         return FastembedProvider(
             model, timeout=timeout, spend_guard=spend_guard
         )
-    if provider in {"openai-compatible", "openai", "siliconflow"}:
+    if embedding_provider_id(provider) == "openai-compatible":
         return OpenAICompatibleProvider(
             model,
             base_url=getattr(config, "embedding_base_url", ""),
@@ -2066,7 +2045,7 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
             f"embeddings are enabled but {missing} is unset; both must be set",
         )
 
-    if provider in {"fastembed", "fast-embed"}:
+    if embedding_provider_id(provider) == "fastembed":
         if importlib.util.find_spec("fastembed") is None:
             return result(
                 False,
@@ -2076,8 +2055,8 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
             )
         return result(True, "fastembed is importable")
 
-    if provider in {"voyage", "voyageai"}:
-        if not os.environ.get("VOYAGE_API_KEY", "").strip():
+    if embedding_provider_id(provider) == "voyage":
+        if not lcm_env_get("VOYAGE_API_KEY", "").strip():
             return result(False, "VOYAGE_API_KEY is not set")
         return result(
             True,
@@ -2085,14 +2064,14 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
             probed=False,
         )
 
-    if provider in {"openai-compatible", "openai", "siliconflow"}:
+    if embedding_provider_id(provider) == "openai-compatible":
         api_key_env = str(
             getattr(config, "embedding_api_key_env", "LCM_EMBEDDING_API_KEY")
             or "LCM_EMBEDDING_API_KEY"
         ).strip()
         has_key = bool(
-            os.environ.get(api_key_env, "").strip()
-            or os.environ.get("SILICONFLOW_API_KEY", "").strip()
+            lcm_env_get(api_key_env, "").strip()
+            or lcm_env_get("SILICONFLOW_API_KEY", "").strip()
         )
         if not has_key:
             return result(
@@ -2107,7 +2086,7 @@ def probe_provider_availability(config: LCMConfig) -> dict[str, Any]:
             probed=False,
         )
 
-    if provider == "ollama":
+    if embedding_provider_id(provider) == "ollama":
         return result(
             True,
             "ollama daemon reachability not probed (offline check); verify with "

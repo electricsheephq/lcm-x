@@ -201,7 +201,17 @@ gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>
 - The GA commit may differ from the passing rc tree by EXACTLY the release-notes addition
   (mechanically verified: `git diff rcN..GA --name-only` ⊆ `.github/release-notes/`); GA notes
   link the four phase receipts (A-D). A P0/P1 gauntlet finding means fix → new rc → re-run; the only
-  exception is a Phase B shape or a Phase C publication conflict that the previous GA also
-  shows, with the candidate no worse than the base (the spec's differential rule).
+  exceptions are a Phase B shape or a Phase C publication conflict that the previous GA also
+  shows, with the candidate no worse than the base; and a Phase B duplicate-only shape reachable
+  only under an injected crash or kill, meeting all five conditions in the spec's differential
+  rule: only in-flight-turn rows duplicated, each at most twice, with both counts recorded;
+  no amplification after a second crash during another in-flight turn and recovery in the same
+  session; unambiguous message
+  identity and complete tool-call/result groups, with no orphaned or doubled tool result in
+  assembled context; every base row present, in order, in its session; and verification of
+  these conditions by a reviewer from a different model than the classification's author,
+  named in the Phase B receipt. The shape is disclosed at P2 with a tracked fix planned for
+  the next patch release. If any condition fails, the normal P0/P1 rule applies and the rc
+  respins. A duplicate on any path without an injected fault still respins.
 - Agents preparing a release produce the rc tag and receipts; the GA cut itself follows the
   maintainers-own-releases rule above.

@@ -34,7 +34,7 @@ def test_workflow_turn_paths_match_maintainer_gate() -> None:
                 for target in node.targets)
     ]
     assert len(assignments) == 1
-    assert len(paths.splitlines()) == 26
+    assert len(paths.splitlines()) == len(set(paths.splitlines()))  # no duplicate entries
     assert set(paths.splitlines()) == ast.literal_eval(assignments[0].value)
 
 

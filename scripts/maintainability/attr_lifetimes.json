@@ -1,1 +1,6 @@
-{}
+{
+  "_frontier": {
+    "lifetime": "process",
+    "why": "Owned by one engine for its lifetime; session transitions update the held values without replacing the holder."
+  }
+}

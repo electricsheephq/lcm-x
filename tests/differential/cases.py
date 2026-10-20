@@ -1,4 +1,5 @@
 """Replayable synthetic cases. Randomness is confined to generation."""
+from contextlib import contextmanager
 from copy import deepcopy
 import importlib.util
 import json
@@ -6,6 +7,8 @@ import math
 from pathlib import Path
 import random
 import sys
+
+from .driver import module_patches
 
 PROSE = "The record shows a value that we compare with earlier evidence before the next step. "
 LENS = [0, 1, 50, 300, 900, 1100, 1199, 1200, 1201, 1500, 2000, 2399, 2400, 2401, 3000, 4500, 6000]
@@ -165,7 +168,8 @@ def generated_cases(n, seed):
         case = public_case(f"g{i}", rows, family=f"{topology}/{size}/{role}", window=window,
                            config=rng.choice(["defaults", "fleet"]), summarizer=rng.choice(["healthy", "outage"]))
         # Parallel batches amortize call overhead; fill any gap below the density floor.
-        measured = token_counter().count_messages_tokens(rows)
+        with token_counter() as tokens:
+            measured = tokens.count_messages_tokens(rows)
         if measured < window * 0.8:
             rows.append({"role": "assistant", "timestamp": float(len(rows) + 1),
                          "content": f"⟦rg{i}.{len(rows)}⟧" + body(math.ceil(window * 0.8 - measured) * 4)})
@@ -173,6 +177,7 @@ def generated_cases(n, seed):
     return result
 
 
+@contextmanager
 def token_counter():
     """Load only the checkout's deterministic counter, without plugin registration."""
     root = Path(__file__).resolve().parents[2]
@@ -181,13 +186,15 @@ def token_counter():
     if spec.name not in sys.modules:
         sys.modules[spec.name] = importlib.util.module_from_spec(spec)
     from differential_counter import tokens
-    tokens._encoder_ready, tokens._encoder = True, None
-    return tokens
+    with module_patches() as patch:
+        patch(tokens, "_encoder_generation", tokens._encoder_generation + 1)
+        patch(tokens, "_encoder_ready", True)
+        patch(tokens, "_encoder", None)
+        yield tokens
 
 
 def projection_cases(n, seed):
     """Port of p34: preserve its random draw order and uninstrumented limits."""
-    tokens = token_counter()
     rng = random.Random(seed)
 
     def text(n):
@@ -228,7 +235,8 @@ def projection_cases(n, seed):
                 stored["content"] = f"[Externalized payload: kind=raw_payload; synthetic placeholder {i}]"
                 row["content"] = text(rng.randint(1300, 6000))
             rows.append(dict(message=row, stored=stored, is_stored=rng.random() < 0.9, ext=ext))
-        total = tokens.count_messages_tokens([row["message"] for row in rows])
+        with token_counter() as tokens:
+            total = tokens.count_messages_tokens([row["message"] for row in rows])
         limit = rng.choice([0, rng.randint(0, max(total, 1)), rng.randint(0, max(total, 1)), int(total * rng.uniform(0.3, 1.1))])
         for i, entry in enumerate(rows):
             for key in ("message", "stored"):

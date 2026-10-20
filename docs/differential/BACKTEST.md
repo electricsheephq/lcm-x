@@ -10,6 +10,76 @@ The absolute zero-gap expectation is retained as a dedicated strict xfail. Two e
 separately: 40K compress runs and 64K provider calls. No production code changed.
 This is advisory synthetic evidence. It is not a release gate or proof of runtime readiness.
 
+## Repinned to v0.28.0 (2026-10-19)
+
+The default is `DEFAULT_BASELINE = "v0.28.0"`, pinned to
+`709099b3a397a7893a7abae8802ebe7bf605f79e`, with `bare` GA-native defaults.
+v0.27.0 remains selectable with `bare`; v0.26.2 remains selectable with `managed`.
+The workflow fetches all three pinned commits. Explicit baseline/config overrides retain
+precedence. All four accepted deltas remain scoped only to v0.26.2; the v0.26.2-only
+oracle and inherited-mark branches are unchanged. v0.28.0 follows the same branches as v0.27.0.
+Code receipt: [`a08759acfafc564bd85c19e1faa864e1cc4b9019`](https://github.com/electricsheephq/lcm-x/commit/a08759acfafc564bd85c19e1faa864e1cc4b9019),
+on product/harness base `39757f7e9fc5595287b84075cb3cdc6e3baa1d21`.
+No product code, input cases, oracle thresholds or delta predicates changed in this repin.
+
+Counts below are raw / unabsorbed oracle events at that code receipt, seed 1227.
+Each row includes 75 public cases (15 exact plus 60 generated), 1,000 projection cases,
+and the separate #1281 pin on v0.26.2. The public count includes the strict absolute
+objective-overflow shape, making the counting boundary explicit beside the earlier 74-case table.
+
+| Selected baseline | Public | Projection | #1281 pin (v0.26.2) | Pytest | Exit | Wall s |
+|---|---:|---:|---:|---|---:|---:|
+| v0.28.0 default | 0 / 0 | 0 / 0 | 0 / 0 | 97 passed, 2 xfailed | 0 | 187.295 |
+| v0.27.0 | 0 / 0 | 0 / 0 | 0 / 0 | 97 passed, 2 xfailed | 0 | 136.043 |
+| v0.26.2 | 2 / 0 | 238 / 0 | 0 / 0 | 97 passed, 2 xfailed | 0 | 120.326 |
+
+The v0.28.0 and v0.27.0 projection runs each record 238 inherited cases / 282 inherited
+marks; neither has accepted deltas. A measured one-case `projection_cases(1, 1227)` run
+on v0.28.0 records `baseline_config="bare"` and `inherited_user_marks={"cases": 1, "marks": 1}`;
+the new parameter row pins exactly that result. Reverting only `DEFAULT_BASELINE` to
+v0.27.0 makes the new default/SHA/config regression fail; restoring it passes.
+
+The older v0.26.2 public/projection event counts are unchanged. The #1281 pin changes
+from the historical 2 / 2 to 0 / 0 because the candidate now includes the
+[#1281 fix](https://github.com/electricsheephq/lcm-x/commit/3f59baa7984ad54d9a60fe15c0a15add14110d36) that keeps the newest
+request whole when marking cannot reach the budget and the list already fits. Its former
+xfail now passes; the remaining xfails are #1225 absolute overflow and #1247 coverage.
+Subsequent oracle, identity and restoration regressions also increase the pytest total
+relative to the prior repin. These are current-harness results, not a rerun of the old harness.
+
+The measured pytest command is below; the older-baseline rows additionally set
+`LCM_DIFFERENTIAL_BASELINE` to the selected version. Wall seconds measure the whole process.
+All runs use Python 3.14, the CI host stub, isolated temporary/cache directories,
+`HERMES_DISABLE_LAZY_INSTALLS=1`, and `PYTHONDONTWRITEBYTECODE=1`, without network or model calls.
+
+```bash
+LCM_DIFFERENTIAL=1 nice -n 19 python -m pytest tests/differential -q -rx -o addopts= -p no:cacheprovider
+```
+
+The CLI's default sample is 75 public plus 60 projection cases (135 total), so its
+projection event count is intentionally separate from the 1,000-case pytest sample.
+All three CLI runs identify the clean code receipt above.
+
+| CLI baseline | Public raw / unabsorbed | Projection raw / unabsorbed | Accepted events | Exit | Wall s |
+|---|---:|---:|---:|---:|---:|
+| v0.28.0 default | 0 / 0 | 0 / 0 | 0 | 0 | 88.577 |
+| v0.27.0 | 0 / 0 | 0 / 0 | 0 | 0 | 90.016 |
+| v0.26.2 | 2 / 0 | 14 / 0 | 16 | 0 | 82.015 |
+
+The legacy CLI's 14 projection P_USER events are absorbed by D1233; its two public
+R3 events are absorbed by the unchanged 40K and 64K D1123 cells. D916 absorbs none.
+The two newer baselines have zero accepted events and each records 14 inherited cases /
+15 marks in this smaller projection sample. CLI commands (baseline omitted for the default):
+
+```bash
+LCM_DIFFERENTIAL=1 nice -n 19 python -m tests.differential.run --out differential-results/v028
+LCM_DIFFERENTIAL=1 nice -n 19 python -m tests.differential.run --out differential-results/v027 --baseline v0.27.0
+LCM_DIFFERENTIAL=1 nice -n 19 python -m tests.differential.run --out differential-results/v026 --baseline v0.26.2
+```
+
+Compatibility-suite `PREVIOUS_GA` and rollback-reader pins remain a separate repin.
+This is local synthetic evidence only; it does not establish merge, release or runtime readiness.
+
 ## Repinned to v0.27.0 (2026-10-16)
 
 The default is `DEFAULT_BASELINE = "v0.27.0"`, pinned to

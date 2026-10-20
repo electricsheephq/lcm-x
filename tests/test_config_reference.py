@@ -126,3 +126,173 @@ def test_generator_replaces_only_marked_bytes_and_is_idempotent(reference, monke
 def test_generator_refuses_missing_duplicate_or_reversed_markers(reference, document):
     with pytest.raises(ValueError):
         reference.update_reference(document.format(start=reference.START, end=reference.END))
+
+
+@pytest.fixture
+def choice_plugin():
+    import importlib.util
+    from pathlib import Path
+
+    spec = importlib.util.spec_from_file_location(
+        "hermes_lcm", Path(__file__).resolve().parents[1] / "__init__.py",
+    )
+    module = importlib.util.module_from_spec(spec)
+    module.__package__ = "hermes_lcm"
+    spec.loader.exec_module(module)
+    return module
+
+
+def _provider_choice_row(monkeypatch, spelling):
+    """Exercise the decision sites with inert storage and no provider dispatch."""
+    from types import SimpleNamespace
+
+    from hermes_lcm import command, embedding_maintenance as maintenance
+    from hermes_lcm import embedding_provider as providers, tools
+
+    cfg = config.LCMConfig(
+        embeddings_enabled=True, embedding_provider=spelling,
+        embedding_model="choice-model", embedding_base_url="http://localhost:8080/v1",
+    )
+    for key in ("VOYAGE_API_KEY", "LCM_EMBEDDING_API_KEY", "SILICONFLOW_API_KEY"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(providers.importlib.util, "find_spec", lambda _: None)
+    try:
+        resolved = type(providers.resolve_provider(cfg)).__name__
+    except providers.ProviderUnavailable as exc:
+        resolved = type(exc).__name__
+    probe = providers.probe_provider_availability(cfg)
+    mapped = []
+
+    def capture_provider(provider):
+        mapped.append(provider)
+        raise LookupError("captured before storage access")
+
+    with monkeypatch.context() as capture:
+        capture.setattr(tools, "embedding_provider_requires_privacy", capture_provider)
+        try:
+            tools._lcm_recall_has_usable_vector_corpus(
+                None, run_summary=True, run_chunk=True, provider_name=spelling,
+                model_name="choice-model", excluded_session_ids=set(), deadline=float("inf"),
+            )
+        except LookupError:
+            pass
+    health_mapped = []
+    with monkeypatch.context() as health:
+        # Isolate spelling resolution from the separately owned privacy policy.
+        health.setattr(tools, "embedding_provider_requires_privacy",
+                       lambda value: config.embedding_provider_id(value) in ("voyage", "openai-compatible"))
+        health.setenv("VOYAGE_API_KEY", "synthetic-placeholder")
+        health.setenv("LCM_EMBEDDING_API_KEY", "synthetic-placeholder")
+        health.setattr(providers.importlib.util, "find_spec", lambda _: object())
+        health.setattr(tools, "_active_embedding_profile_exists", lambda _: False)
+        health.setattr(tools, "embedding_privacy_revision", lambda _: "choice-revision")
+        health.setattr(tools.sqlite3, "connect", lambda *a, **kw: SimpleNamespace(close=lambda: None))
+        health.setattr(tools, "_lcm_store_has_live_chunk_vectors", lambda _: False)
+
+        def capture_health(conn, *, provider, model, task):
+            health_mapped.append(provider)
+            return "choice-revision"
+
+        health.setattr(tools, "_lcm_embedding_profile_revision", capture_health)
+        health_result = tools._embedding_provider_health_check(SimpleNamespace(
+            _config=cfg, _store=SimpleNamespace(db_path="unused"),
+        ))
+    auto = maintenance._automatic_chunks_allowed(cfg, command)
+    monkeypatch.setattr(command, "_embedding_read_connection", lambda _: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(command, "_embedding_current_profile", lambda _: None)
+    monkeypatch.setattr(command, "_chunk_current_profile", lambda _: None)
+    monkeypatch.setattr(command, "_embedding_register_profiles", lambda *a, **kw: "local registration")
+    local = maintenance._run_pass("unused", cfg, None)
+    # Drive the nested contextualized estimate through the real dry-run path.
+    monkeypatch.setattr(command, "_chunk_pending_rows", lambda *a: (1, [], None))
+    monkeypatch.setattr(command, "embedding_provider_requires_privacy", lambda _: False)
+    monkeypatch.setattr(command, "_prepare_embedding_provider_documents",
+                        lambda *a, **kw: ([("row", "text", 5)], None, 0, 0, None))
+    monkeypatch.setattr(command, "_chunk_context_estimates", lambda *a: (11, 12, 13))
+    monkeypatch.setattr(command, "_embedding_batch_estimate", lambda *a: 17)
+    result = command._chunk_backfill_run(
+        cfg, "unused", apply=False, limit=1, retry_uncertain=False, policy="conversational",
+    )
+    assert isinstance(result, dict)
+    return {
+        "resolver": resolved, "offline": probe,
+        "mapped_id": mapped[0] if mapped else None, "automatic_chunks": auto,
+        "health_mapped_ids": health_mapped, "health_check": health_result,
+        "local_registration": local, "chunk_model": providers.default_chunk_model(spelling, "choice-model"),
+        "chunk_estimate": [result[key] for key in ("estimated_tokens", "estimated_cost_tokens", "estimated_batches")],
+    }
+
+
+def test_choice_constants_feed_reference():
+    assert config._ENV_CHOICES["embedding_provider"][0] == tuple(
+        spelling for spellings in config.EMBEDDING_PROVIDER_SPELLINGS.values() for spelling in spellings
+    )
+    assert config._ENV_CHOICES["preanswer_evidence_mode"][0] == config.PREANSWER_EVIDENCE_MODES
+    assert config._ENV_CHOICES["embedding_storage_dtype"][0] == config.EMBEDDING_STORAGE_DTYPES
+
+
+@pytest.mark.parametrize("provider", ("voyage", "ollama", "fastembed", "openai-compatible"))
+def test_provider_consumers_follow_choice_constant(monkeypatch, provider):
+    with monkeypatch.context() as patch:
+        expected = _provider_choice_row(patch, provider)
+    spelling = "new-choice"
+    monkeypatch.setitem(config.EMBEDDING_PROVIDER_SPELLINGS, provider,
+                        config.EMBEDDING_PROVIDER_SPELLINGS[provider] + (spelling,))
+    actual = _provider_choice_row(monkeypatch, spelling)
+    # The probe deliberately reports the configured spelling, not the provider id.
+    expected["offline"]["provider"] = spelling
+    expected["health_check"]["detail"]["provider"] = spelling
+    assert actual == expected
+
+
+def test_preanswer_consumer_follows_choice_constant(monkeypatch, choice_plugin):
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(config, "PREANSWER_EVIDENCE_MODES", config.PREANSWER_EVIDENCE_MODES + ("new-mode",))
+    assert choice_plugin._effective_preanswer_mode(SimpleNamespace(
+        preanswer_evidence_enabled=True, preanswer_evidence_mode=" NEW-MODE ",
+    )) == "new-mode"
+    assert choice_plugin._effective_preanswer_mode(SimpleNamespace(
+        preanswer_evidence_enabled=True, preanswer_evidence_mode="requirements_v1",
+    )) == "requirements_v1"
+
+
+def test_dtype_consumers_follow_choice_constant(monkeypatch):
+    from types import SimpleNamespace
+
+    from hermes_lcm import command
+
+    monkeypatch.setattr(config, "EMBEDDING_STORAGE_DTYPES", config.EMBEDDING_STORAGE_DTYPES + ("new-dtype",))
+    assert command._resolve_storage_dtype(SimpleNamespace(embedding_storage_dtype=" NEW-DTYPE ")) == "new-dtype"
+    assert command._resolve_storage_dtype(None, "NEW-DTYPE") == "new-dtype"
+    result = command._embedding_backfill_options(["--dtype", "NEW-DTYPE"])
+    assert isinstance(result, tuple) and result[-1] == "new-dtype"
+
+
+@pytest.mark.parametrize("threshold", (1.5, 0.97, 0, -1, 0.2))
+def test_doctor_context_threshold_reproduction(monkeypatch, tmp_path, threshold):
+    import json
+
+    from hermes_lcm import tools
+    from tests.harness import engine_context, pin_char_counter
+
+    pin_char_counter(monkeypatch)
+    monkeypatch.setattr(config, "_load_hermes_config_yaml", lambda: {})
+    monkeypatch.setenv("LCM_CONTEXT_THRESHOLD", str(threshold))
+    cfg = config.LCMConfig.from_env()
+    with engine_context(tmp_path, context_threshold=cfg.context_threshold,
+                        config_source_warnings=cfg.config_source_warnings) as engine:
+        payload = json.loads(tools.lcm_doctor({}, engine=engine))
+        assert engine._config.context_threshold == threshold
+        warnings = next(check["detail"] for check in payload["checks"]
+                        if check["check"] == "config_validation")
+        threshold_lines = [line for line in warnings if "context_threshold" in line.lower()]
+        assert threshold_lines == (cfg.config_source_warnings if threshold > 1 or threshold <= 0 else [
+            "runtime context_threshold > 0.95 leaves very little headroom" if threshold > 0.95
+            else "runtime context_threshold < 0.3 triggers compaction very early",
+        ])
+        print("THRESHOLD_CHECKS=" + json.dumps([
+            check for check in payload["checks"]
+            if isinstance(check["detail"], (str, list))
+            and "context_threshold" in json.dumps(check["detail"]).lower()
+        ], sort_keys=True))

@@ -709,6 +709,10 @@ class MessageStore:
         ).fetchone()
         return self._row_to_dict(row) if row else None
 
+    def max_store_id(self) -> int:
+        """The newest stored message id (0 for an empty store)."""
+        return int(self._conn.execute("SELECT COALESCE(MAX(store_id), 0) FROM messages").fetchone()[0])
+
     def get_batch(self, store_ids: List[int]) -> Dict[int, Dict[str, Any]]:
         """Retrieve multiple messages by store_id in a single query.
 
@@ -1026,7 +1030,7 @@ class MessageStore:
             """)
         self._identity_anchor_schema_ready = True
 
-    # -- Host uid shadow bindings: droppable; #1124 reads canonical evidence only for copy exclusion --
+    # -- Host uid shadow bindings: droppable; canonical evidence for #1124 exclusions / #1403 audits --
 
     def _host_uid_table_exists(self) -> bool:
         with self._write_lock:
@@ -1153,9 +1157,10 @@ class MessageStore:
                 f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE conversation_id IN (?, '') AND observed_at IN ({marks})",
                 [_normalize_conversation_id_value(conversation_id), *chunk],
             ).fetchall()
-            aliased = self._conn.execute(
-                f"SELECT store_id, observed_at FROM message_relations WHERE kind = 'alt_stamp' AND observed_at IN ({marks})",
-                chunk,
+            aliased = self._conn.execute(  # an alias names a row of exactly this conversation ('' is not a wildcard)
+                "SELECT r.store_id, r.observed_at FROM message_relations r JOIN messages m ON m.store_id = r.store_id "
+                f"WHERE r.kind = 'alt_stamp' AND r.observed_at IN ({marks}) AND m.conversation_id = ?",
+                [*chunk, _normalize_conversation_id_value(conversation_id)],
             ).fetchall()
             for r in rows:
                 row = self._row_to_dict(r)

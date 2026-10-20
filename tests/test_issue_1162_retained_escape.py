@@ -15,8 +15,8 @@ import pytest
 
 import hermes_lcm.engine as lcm_engine
 import hermes_lcm.tools as lcm_tools
-from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from tests.harness import make_engine, pin_char_counter
 
 PAD = " alpha beta gamma delta" * 30
 RETAINED = "leaf would end before an unresolved retained occurrence"
@@ -57,8 +57,11 @@ def lines():
 def _engine(tmp_path, sweep: bool, **config) -> LCMEngine:
     settings = {"fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "dynamic_leaf_chunk_max": 400, "threshold_full_sweep_enabled": sweep,
-                "temporal_rollups_enabled": False, "database_path": str(tmp_path / "lcm.db"), **config}
-    engine = LCMEngine(config=LCMConfig(**settings))
+                "temporal_rollups_enabled": False, **config}
+    engine = make_engine(tmp_path, **settings)
+    # The host-identity fixture keeps state.db beside lcm.db.
+    engine._hermes_home = str(tmp_path)
+    engine._store._hermes_home = str(tmp_path)
     engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
     return engine
 
@@ -106,10 +109,14 @@ def _show(trace) -> str:
                      f"| noop={t['reason']!r}" for t in trace)
 
 
-def _reorder(tmp_path, sweep):
-    """#581 test (c) shape: user row R is stored early; the host shows it at the END of its list."""
+def _reorder(tmp_path, sweep, *, bound=True):
+    """#581 test (c): R moves to the END; #1403 requires proof that it is the same occurrence."""
+    if bound:
+        from tests.test_host_uid_shadow import _state_db
+
+        _state_db(tmp_path, [("S", None, None)])
     engine = _engine(tmp_path, sweep, fresh_tail_count=1, leaf_chunk_tokens=1)
-    r = {"role": "user", "content": "[R] retained occurrence" + PAD}
+    r = {"role": "user", "content": "[R] retained occurrence" + PAD, "message_uid": "retained-r"}
     stored = [*_turn("T1", 100.0), r, *[row for i in range(2, 6) for row in _turn(f"T{i}", 100.0 * i)]]
     engine.ingest(stored)
     view = [m for m in stored if m is not r] + [dict(r)]
@@ -140,6 +147,20 @@ def _r_id(engine) -> int:
 
 SCENARIOS = pytest.mark.parametrize("name", ["reorder", "restore"])
 SWEEP = pytest.mark.parametrize("sweep", [True, False], ids=["sweep_on", "sweep_off"])
+
+
+def test_unbound_reorder_keeps_one_copy_across_compactions(tmp_path, summaries, lines):
+    """#1403: without occurrence proof, keep a copy once, not once per later compaction/audit."""
+    engine, view = _reorder(tmp_path, False, bound=False)
+    try:
+        before = len(_rows(engine))
+        engine.ingest(view)
+        assert len(_rows(engine)) == before + 1
+        _passes(engine, view, 3, lines)
+        assert len(_rows(engine)) == before + 1
+        assert sum(row["content"].startswith("[R] retained") for row in _rows(engine)) == 2
+    finally:
+        engine.shutdown()
 
 
 # -- observability ---------------------------------------------------------------------------------------------
@@ -357,5 +378,116 @@ def test_the_stop_line_parsers_read_the_blocked_line(tmp_path, summaries, lines)
         for parser in (foreground_budget, host_fallback, stub_first_exit):
             found = parser.search(line)
             assert found and found.group(1) == "noop" and found.group(2) == "0", (parser.pattern, line)
+    finally:
+        engine.shutdown()
+
+
+def _no_source(tmp_path, monkeypatch, sweep, empty):
+    """Inject the selected no-source boundary; attribution and all stop surfaces stay real."""
+    pin_char_counter(monkeypatch)
+    engine = _engine(tmp_path, sweep)
+    view = [row for i in range(1, 5) for row in _turn(f"T{i}", 100.0 * i)]
+    summary = {"role": "user", "content": "[CONTEXT COMPACTION] Earlier turns were compacted."}
+    select = engine._select_leaf_candidate
+
+    def select_without_source(state, leaf, *args):
+        action = select(state, leaf, *args)
+        assert action == ("next", None)
+        # A native summary has no raw source; the real mapper bounds the scan below
+        # the first retained mapped row. An empty hidden scan has the same outcome.
+        leaf.to_compact = [] if empty else [summary]
+        return action
+
+    monkeypatch.setattr(engine, "_select_leaf_candidate", select_without_source)
+    return engine, view
+
+
+@SWEEP
+@pytest.mark.parametrize("empty", [False, True], ids=["host_summary", "empty_scan"])
+def test_no_source_stop_reaches_log_status_and_doctor(tmp_path, summaries, lines, monkeypatch, sweep, empty):
+    engine, view = _no_source(tmp_path, monkeypatch, sweep, empty)
+    try:
+        engine.ingest(view)
+        before = _rows(engine)
+        for _ in range(3):
+            start = len(lines)
+            view, _ = _passes(engine, view, 1, lines)
+            reason = "leaf input has no stored source rows"
+            line = next(msg for _, msg in lines[start:] if msg.startswith("LCM compaction stop:"))
+            assert re.search(f"reason={reason} leaves=0 " if sweep else "reason=(noop|sanitized) leaves=0 ", line), line
+            assert f" empty_input=no_source,rows:{0 if empty else 1}" in line, line
+            assert "(input_rows_without_source=" not in line and "blocked=" not in line and RETAINED not in line, line
+            full_reason = f"{reason} (input_rows_without_source={0 if empty else 1})"
+            assert f"LCM compression no-op: {full_reason}" in [msg for _, msg in lines[start:]]
+        status = json.loads(lcm_tools.lcm_status({}, engine=engine))
+        assert status["last_compression_noop_reason"] == full_reason
+        assert status["zero_leaf_streak"]["last_reason"] == full_reason
+        progress = next(check for check in json.loads(lcm_tools.lcm_doctor({}, engine=engine))["checks"]
+                        if check["check"] == "compaction_progress")
+        assert progress["status"] == "warn"
+        assert progress["detail"] == status["zero_leaf_streak"]
+        assert progress["detail"]["passes"] == 3
+        assert _rows(engine) == before and not summaries
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["host_summary", "empty_scan"])
+def test_the_stop_line_parsers_read_the_no_source_line(tmp_path, summaries, lines, monkeypatch, empty):
+    from tests.test_host_fallback_stop_line import STOP as host_fallback
+    from tests.test_issue_605_foreground_budget import STOP_LINE as foreground_budget
+    from tests.test_issue_671_stub_first_exit import STOP as stub_first_exit
+
+    engine, view = _no_source(tmp_path, monkeypatch, False, empty)
+    try:
+        _view, trace = _passes(engine, view, 1, lines)
+        for parser in (foreground_budget, host_fallback, stub_first_exit):
+            found = parser.search(trace[0]["line"])
+            assert found and found.group(1) in {"noop", "sanitized"} and found.group(2) == "0", trace[0]["line"]
+    finally:
+        engine.shutdown()
+
+
+@SWEEP
+def test_contiguity_cut_does_not_claim_a_retained_blocker(tmp_path, monkeypatch, lines, sweep):
+    """A real contiguity cut supplies the reason; exercise its final logger at unit level."""
+    from hermes_lcm.escalation import ForegroundBudget, ForegroundEstimates
+
+    pin_char_counter(monkeypatch)
+    engine = _engine(tmp_path, sweep)
+    rows = [{"role": "user", "content": f"row {i}" + PAD} for i in range(3)]
+    try:
+        engine.ingest(rows)
+        stored = _rows(engine)
+        mapping = {id(row): saved["store_id"] for row, saved in zip(rows, stored)}
+        chunk = [rows[2], rows[0]]
+        result = engine._store_complete_input(chunk, {}, {id(row): mapping[id(row)] for row in chunk},
+                                              chunk, chunk, 0, {}, 1, scanned=(stored, False))
+        assert result == [] and engine._store_complete_blocked is None
+        reason = "leaf input cannot form a contiguous stored prefix"
+        assert engine._store_complete_empty_reason == reason
+        assert _rows(engine) == stored
+        budget = ForegroundBudget(soft=0, hard=120.0, configured_timeout=60.0, estimates=ForegroundEstimates())
+        budget.sweep_active, budget.selected = sweep, True
+        engine._last_compression_status, engine._last_compression_noop_reason = "noop", reason
+        engine._last_threshold_full_sweep = {"stop_reason": reason} if sweep else {}
+        engine._finish_foreground_budget(budget, [], 10_000)
+        line = next(msg for _, msg in lines if msg.startswith("LCM compaction stop:"))
+        assert f"reason={reason if sweep else 'noop'} leaves=0 " in line, line
+        assert line.endswith(" empty_input=contiguity") and "blocked=" not in line, line
+    finally:
+        engine.shutdown()
+
+
+def test_prepared_input_probe_preserves_the_active_stop_diagnostics(tmp_path, monkeypatch):
+    pin_char_counter(monkeypatch)
+    engine = _engine(tmp_path, False)
+    summary = {"role": "user", "content": "[CONTEXT COMPACTION] Earlier turns were compacted."}
+    try:
+        engine._store_complete_blocked = (7, "user", "shown", 0)
+        engine._store_complete_empty_reason = "previous diagnostic"
+        assert engine._prepared_chunk_consumption([summary], [summary], [], set()) is None
+        assert engine._store_complete_blocked == (7, "user", "shown", 0)
+        assert engine._store_complete_empty_reason == "previous diagnostic"
     finally:
         engine.shutdown()

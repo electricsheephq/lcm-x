@@ -221,12 +221,13 @@ class StoreCompleteMixin:
     def _store_complete_input(self, chunk, claims, full_map, view, raw_chunk, frontier, carry, budget,
                               accounted_ids=(), scale: int = 1, scanned=None, copy_lookup=None) -> Optional[list]:
         """``[(input_row, [store_id, ...]), ...]`` in store order; ``[]`` when the leaf cannot start
-        (the first owned row above the frontier is a retained occurrence); None: today's input."""
+        (a retained occurrence, no source rows, or a contiguity cut); None: today's input."""
         from .identity_anchor import _match_occurrences
 
         self._store_complete_excluded, self._store_complete_cut = [], False
         self._store_complete_copy_exclusion_proofs = {}
         self._store_complete_blocked = None  # #1162: (store_id, role, kind, chunk head position) of a [] return
+        self._store_complete_empty_reason = ""
         given_claims = claims
         in_chunk = {id(message) for message in chunk}
         claims = {key: list(ids) for key, ids in claims.items()}
@@ -385,11 +386,17 @@ class StoreCompleteMixin:
                 break
             out = out[:next(i for i, (m, ids) in enumerate(out) if any(s > hole for s in ids_of(m, ids)))]
             complete = False
+            if not out:
+                self._store_complete_empty_reason = "leaf input cannot form a contiguous stored prefix"
         if copy_proofs and not any(ids_of(m, ids) for m, ids in out):
             return self._store_complete_input(chunk, given_claims, full_map, view, raw_chunk, frontier, carry,
                                               budget, accounted_ids, scale=scale, scanned=(rows, truncated), copy_lookup=({}, set()))
         if not out or (not any(ids_of(m, ids) for m, ids in out)
                        and all(self._is_context_summary_content(m.get("content")) for m in chunk)):
+            if not self._store_complete_blocked and not self._store_complete_empty_reason:
+                # This branch already established that no output row carries a source.
+                self._store_complete_empty_reason = (
+                    f"leaf input has no stored source rows (input_rows_without_source={len(out)})")
             return []  # nothing to cover: at most a host summary of rows already at or below the frontier
         emitted = sum(1 for message, _ids in out if id(message) in in_chunk)
         if emitted == len(out) == len(chunk) and not excluded and not any(ids for _m, ids in out):

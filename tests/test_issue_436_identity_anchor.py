@@ -16,6 +16,7 @@ import hermes_lcm.engine as lcm_engine
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
+from tests.harness import engine_context
 
 SYSTEM = {"role": "system", "content": "stable system prompt"}
 PAD = " alpha beta gamma delta" * 40
@@ -95,27 +96,23 @@ def _assert_claims_are_in_the_input(engine: LCMEngine, captured: list[str]) -> l
 # -- (a)-(e) REVISION 1 acceptance -------------------------------------------------------------------
 
 def test_a_unrelated_same_timestamp_row_is_not_absorbed(tmp_path, summaries):
-    """Astra's counterexample: R and U share one host stamp and nothing else. U never absorbs R:
-    no relation joins them, and R is claimed only with its own bytes in the summarizer input."""
-    engine = _engine(tmp_path)
+    """Same-stamp replacement provenance is not absorption or summary coverage of the prior row."""
     r = _u("unrelated retained text" + PAD, 500.0)
     u = _u("new user text" + PAD, 500.0)
-    head = _turns(1, 3, 0.0)  # Hermes hands the engine no system row
-    try:
+    head = _turns(1, 3, 0.0)
+    with engine_context(tmp_path, window=200_000, session_id="S", conversation_id="conv",
+                        fresh_tail_count=2, leaf_chunk_tokens=1) as engine:
         engine.ingest([*head, r])
-    finally:
-        engine.shutdown()
-    engine = _engine(tmp_path)  # restart; the host no longer shows R, U carries the same (batch) stamp
-    try:
+    with engine_context(tmp_path, window=200_000, session_id="S", conversation_id="conv",
+                        fresh_tail_count=2, leaf_chunk_tokens=1) as engine:
         live = [*head, u, _a("reply to U", 502.0), *_turns(10, 4, 600.0)]
         engine.compress(live)
         by_text = {str(row["content"]): int(row["store_id"]) for row in _rows(engine)}
         r_id, u_id = by_text[r["content"]], by_text[u["content"]]
-        assert not [rel for rel in _relations(engine) if {r_id, u_id} <= {rel[0], rel[2]}]
+        assert not [rel for rel in _relations(engine)
+                    if rel[1] != "carried_stamp" and {r_id, u_id} <= {rel[0], rel[2]}]
         claimed = _assert_claims_are_in_the_input(engine, summaries)
         assert u_id in claimed
-    finally:
-        engine.shutdown()
 
 
 @pytest.mark.parametrize("restart", [False, True], ids=["steady", "restart"])

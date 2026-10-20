@@ -289,20 +289,14 @@ def deliver_recall(
         hits_out.append(item)
         if len(hits_out) >= limit:
             break
-    # Over the cap only with the fields: strip them, lowest rank first, and
-    # say so, instead of dropping any hit.
-    event_time_total = response_chars + sum(event_time_chars)
-    for index in reversed(range(len(hits_out))):
-        if event_time_total <= response_char_cap:
-            break
-        if event_time_chars[index]:
-            for key in _EVENT_TIME_KEYS:
-                hits_out[index].pop(key, None)
-            event_time_total -= event_time_chars[index]
-            # A ``deadline`` or ``read_error`` marker keeps its reason.
-            if not event_time_unavailable:
-                event_time_unavailable = True
-                event_time_unavailable_reason = "response_cap"
+    event_time_unavailable, event_time_unavailable_reason = _strip_hit_event_time(
+        response_chars=response_chars,
+        event_time_chars=event_time_chars,
+        hits_out=hits_out,
+        response_char_cap=response_char_cap,
+        event_time_unavailable=event_time_unavailable,
+        event_time_unavailable_reason=event_time_unavailable_reason,
+    )
 
     degraded = bool(degraded_reasons)
     response: dict[str, Any] = {
@@ -412,75 +406,117 @@ def deliver_recall(
                 "observation_is_not_occurrence": True,
             }
 
-        anchor_fired = bool(fts_anchor_info and fts_anchor_info.get("fired"))
-        if anchor_fired:
-            # Size the cap check with the widest value (``false``) so the final
-            # recompute below can never grow the encoded response past the cap.
-            fts_anchor_info["delivered"] = False
-        encoded = json.dumps(response, ensure_ascii=False)
-        event_time_marker_deferred: str | None = None
-        if len(encoded) > response_char_cap:
-            encoded, event_time_marker_deferred = _fit_event_time(
-                response, response_char_cap=response_char_cap
-            )
-        if len(encoded) > response_char_cap:
-            original_query = response["query"]
-            response["query"] = original_query[:4_096]
-            expansion["query_truncated"] = len(response["query"]) < len(original_query)
-            encoded = json.dumps(response, ensure_ascii=False)
-        while len(encoded) > response_char_cap and (
-            response["hits"] or expansion.get("summary_leads")
-        ):
-            if response["hits"]:
-                response["hits"].pop()
-            else:
-                expansion["summary_leads"].pop()
-            response["total_results"] = len(response["hits"])
-            expansion["response_truncated"] = True
-            expansion["expanded_hit_count"] = sum(
-                "content" in hit for hit in response["hits"]
-            )
-            encoded = json.dumps(response, ensure_ascii=False)
-        if event_time_marker_deferred is not None:
-            # Put the marker back with its original reason, only if it fits.
-            marked = {
-                **response,
-                "event_time_unavailable": True,
-                "event_time_unavailable_reason": event_time_marker_deferred,
-            }
-            marked_encoded = json.dumps(marked, ensure_ascii=False)
-            if len(marked_encoded) <= response_char_cap:
-                response.update(
-                    event_time_unavailable=True,
-                    event_time_unavailable_reason=event_time_marker_deferred,
-                )
-                encoded = marked_encoded
-        if delta_requested:
-            novel_refs = [
-                hit["exact_ref"]
-                for hit in response["hits"]
-                if hit.get("exact_ref")
-            ]
-            response["delta"].update(
-                {
-                    "novel_ref_count": len(novel_refs),
-                    "novel_refs": novel_refs,
-                    "progress": bool(novel_refs),
-                    "termination_reason": (
-                        None if novel_refs else "no_novel_exact_ref"
-                    ),
-                }
-            )
-            encoded = json.dumps(response, ensure_ascii=False)
-        if anchor_fired:
-            # The cap loop may have popped the anchored hit: report delivery
-            # from the hits actually returned.
-            fts_anchor_info["delivered"] = _fts_anchor_delivered(
-                response["hits"], arm_hits
-            )
-            encoded = json.dumps(response, ensure_ascii=False)
-        return encoded
+        return _fit_answer_ready_response(
+            fts_anchor_info=fts_anchor_info, response=response,
+            response_char_cap=response_char_cap, expansion=expansion,
+            delta_requested=delta_requested, arm_hits=arm_hits,
+        )
     return json.dumps(response)
+
+
+def _fit_answer_ready_response(
+    *,
+    fts_anchor_info: dict[str, Any] | None,
+    response: dict[str, Any],
+    response_char_cap: int,
+    expansion: dict[str, Any],
+    delta_requested: bool,
+    arm_hits: dict[str, list[dict[str, Any]]],
+) -> str:
+    anchor_fired = bool(fts_anchor_info and fts_anchor_info.get("fired"))
+    if anchor_fired:
+        # Size the cap check with the widest value (``false``) so the final
+        # recompute below can never grow the encoded response past the cap.
+        fts_anchor_info["delivered"] = False
+    encoded = json.dumps(response, ensure_ascii=False)
+    event_time_marker_deferred: str | None = None
+    if len(encoded) > response_char_cap:
+        encoded, event_time_marker_deferred = _fit_event_time(
+            response, response_char_cap=response_char_cap
+        )
+    if len(encoded) > response_char_cap:
+        original_query = response["query"]
+        response["query"] = original_query[:4_096]
+        expansion["query_truncated"] = len(response["query"]) < len(original_query)
+        encoded = json.dumps(response, ensure_ascii=False)
+    while len(encoded) > response_char_cap and (
+        response["hits"] or expansion.get("summary_leads")
+    ):
+        if response["hits"]:
+            response["hits"].pop()
+        else:
+            expansion["summary_leads"].pop()
+        response["total_results"] = len(response["hits"])
+        expansion["response_truncated"] = True
+        expansion["expanded_hit_count"] = sum(
+            "content" in hit for hit in response["hits"]
+        )
+        encoded = json.dumps(response, ensure_ascii=False)
+    if event_time_marker_deferred is not None:
+        # Put the marker back with its original reason, only if it fits.
+        marked = {
+            **response,
+            "event_time_unavailable": True,
+            "event_time_unavailable_reason": event_time_marker_deferred,
+        }
+        marked_encoded = json.dumps(marked, ensure_ascii=False)
+        if len(marked_encoded) <= response_char_cap:
+            response.update(
+                event_time_unavailable=True,
+                event_time_unavailable_reason=event_time_marker_deferred,
+            )
+            encoded = marked_encoded
+    if delta_requested:
+        novel_refs = [
+            hit["exact_ref"]
+            for hit in response["hits"]
+            if hit.get("exact_ref")
+        ]
+        response["delta"].update(
+            {
+                "novel_ref_count": len(novel_refs),
+                "novel_refs": novel_refs,
+                "progress": bool(novel_refs),
+                "termination_reason": (
+                    None if novel_refs else "no_novel_exact_ref"
+                ),
+            }
+        )
+        encoded = json.dumps(response, ensure_ascii=False)
+    if anchor_fired:
+        # The cap loop may have popped the anchored hit: report delivery
+        # from the hits actually returned.
+        fts_anchor_info["delivered"] = _fts_anchor_delivered(
+            response["hits"], arm_hits
+        )
+        encoded = json.dumps(response, ensure_ascii=False)
+    return encoded
+
+
+def _strip_hit_event_time(
+    *,
+    response_chars: int,
+    event_time_chars: list[int],
+    hits_out: list[dict[str, Any]],
+    response_char_cap: int,
+    event_time_unavailable: bool,
+    event_time_unavailable_reason: str | None,
+) -> tuple[bool, str | None]:
+    # Over the cap only with the fields: strip them, lowest rank first, and
+    # say so, instead of dropping any hit.
+    event_time_total = response_chars + sum(event_time_chars)
+    for index in reversed(range(len(hits_out))):
+        if event_time_total <= response_char_cap:
+            break
+        if event_time_chars[index]:
+            for key in _EVENT_TIME_KEYS:
+                hits_out[index].pop(key, None)
+            event_time_total -= event_time_chars[index]
+            # A ``deadline`` or ``read_error`` marker keeps its reason.
+            if not event_time_unavailable:
+                event_time_unavailable = True
+                event_time_unavailable_reason = "response_cap"
+    return event_time_unavailable, event_time_unavailable_reason
 
 
 def _diverse_entries(

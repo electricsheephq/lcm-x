@@ -1,7 +1,7 @@
 """v0.26.0 slice A: host ``message_uid`` SHADOW bindings (design REVISION 3). After #436 decides an ingest,
 each uid-bearing host dict gets one R3-3 class and the row #436 chose goes to the droppable ``host_uid_bindings``
-table. Nothing feeds back into ingest, replay or emission; #1124 reads canonical bindings solely to prove
-store-complete copy exclusions. Every shadow exception is caught, counted and fails
+table. #1124 reads canonical bindings for store-complete copy exclusions; #1403 also reads them
+as occurrence proof for NULL-stamp audit copies. Every shadow exception is caught, counted and fails
 open. Event counter keys are ``[replay.]class.outcome[.reason]``; ``skipped.no_uid`` stays in memory, so a no-uid
 host writes nothing. The shadow GATE is counted per binding in the table (``first_check`` / ``disagree_seen``),
 so a replayed prefix never inflates it. ``LCM_HOST_MESSAGE_UID=off`` does nothing; ``on`` runs as ``shadow``.

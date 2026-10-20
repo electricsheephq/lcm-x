@@ -13,6 +13,7 @@ from tests.compat.helpers import CASES, GOLDEN, READERS, emit_case, open_engine,
 # The pinned readers start at v0.25.0-rc1. The operator guide's v0.24.5
 # plugin-only rollback floor is not exercised here (follow-up on #1271).
 SHORT_READER_FLOOR = "v0.27.0"
+READER_ORDER = ("v0.25.0-rc1", "v0.25.1", "v0.26.2", "v0.27.0", "v0.28.0")
 EXPECTED = {
     "mark_only": "supported",
     "head_mark": "documented_short_boundary",
@@ -22,9 +23,13 @@ EXPECTED = {
     "followers": "supported",
     "keep_reply": "supported",
 }
-# Each pinned reader is older than SHORT_READER_FLOOR and has this same table.
-# S6-F1 overrides supported name-only tool-result cells; S6-F2 overrides the
-# non-empty bounded-call cells. Both remain strict failures, never new floors.
+# Readers below SHORT_READER_FLOOR use EXPECTED; newer readers support all forms.
+# S6-F1 remains a strict failure on every reader's supported name-only tool-result cells
+# S6-F2 applies only to non-empty bounded calls below the floor.
+
+
+def below_short_floor(reader):
+    return READER_ORDER.index(reader) < READER_ORDER.index(SHORT_READER_FLOOR)
 
 
 class ReplayMismatch(AssertionError):
@@ -98,8 +103,10 @@ def test_candidate_warm_and_cold_replay(tmp_path, case, frozen):
         engine.shutdown()
 
 
-@pytest.mark.parametrize("reader", READERS)
-@pytest.mark.parametrize("case", replay_cases(old_reader=True))
+@pytest.mark.parametrize(("reader", "case"), [
+    pytest.param(reader, case.values[0], marks=case.marks, id=f"{reader}-{case.id}")
+    for reader in READERS for case in replay_cases(old_reader=below_short_floor(reader))
+])
 def test_old_reader_projection_replay(tmp_path, old_tree, host_root, reader, case):
     from hermes_lcm.diagnostics import doctor_guidance_for_check, survival_fit_projection_floor_applies
     from tests.test_host_uid_shadow import ROLLBACK_READERS
@@ -115,7 +122,8 @@ def test_old_reader_projection_replay(tmp_path, old_tree, host_root, reader, cas
     host.write_text(json.dumps(emitted))
     result = run_old(old, tmp_path, host_root, REPLAY, data=host)
     assert result["replay_added"] == 0, result
-    if EXPECTED[case.split("-")[0]] == "documented_short_boundary":
+    expectation = EXPECTED[case.split("-")[0]] if below_short_floor(reader) else "supported"
+    if expectation == "documented_short_boundary":
         # Short text/structured rows duplicate once; tool forms duplicate the pair.
         expected_rows = emitted[-2:] if ("tool" in case or case.startswith("stored_calls-")) else emitted[-1:]
         assert result["first_added"] == len(expected_rows), result

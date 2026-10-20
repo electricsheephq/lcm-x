@@ -154,6 +154,8 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with: {python-version: "3.12"}
       - run: pip install pytest numpy hypothesis==6.141.1
+      - name: Use the runtime SQLite library
+        uses: ./.github/actions/sqlite-runtime
       # keep identical to ci.yml's stub step
       - name: Stub hermes-agent ABC
         run: |

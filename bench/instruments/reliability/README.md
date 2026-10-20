@@ -329,8 +329,8 @@ gateway cells are UNSUPPORTED with the reason; `--transport gateway-process` is 
 Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `pull_request` path-filtered to
 `bench/instruments/reliability/**` and the workflow file. Not a required check; default token only. The workflow
 names its hosts in its own matrix (adding a `hosts.ci.json` entry alone adds no nightly coverage); each named host is
-pinned in `hosts.ci.json`: ref-0.21.5, floor-0.21.3 and r34.4-0.21.5 on Python 3.11, upstream-main and upstream-uid
-on 3.14. floor-0.21.3 is upstream v2026.9.14 (345cd2b0), the oldest host the plugin declares (`requires_hermes: ">=0.21.3"`).
+pinned in `hosts.ci.json`: ref-0.21.5, floor-0.21.3, r34.4-0.21.5 and r34.10-0.21.5 on Python 3.11, r34.15-0.21.5
+(the fleet runtime candidate) on 3.12, upstream-main and upstream-uid on 3.14. floor-0.21.3 is upstream v2026.9.14 (345cd2b0), the oldest host the plugin declares (`requires_hermes: ">=0.21.3"`).
 It replaced customer-0.21.2 in the nightly matrix: that host is below the declared floor, so Hermes skips the plugin
 there and every cell errors by design. Its `hosts.ci.json` entry stays for local runs and history.
 floor-0.21.3 does not re-anchor the turn after a post-tool compaction, so on those turns its request copy replaces the

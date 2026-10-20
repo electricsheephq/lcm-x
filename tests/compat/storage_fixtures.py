@@ -2,6 +2,7 @@
 
 from collections import Counter
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import closing
 from datetime import datetime, timezone
 import hashlib
 import importlib
@@ -174,7 +175,10 @@ def assert_complete_vectors(engine: Any) -> None:
         ids = [row[0] for row in conn.execute(f"SELECT {key} FROM {meta}")]
         assert len(ids) == len(set(ids)), f"duplicate source ids in {meta}"
         assert set(ids) == {row[0] for row in conn.execute(f"SELECT {key} FROM {vectors}")}
-    assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+    # The store connection can report false FTS5 corruption after summary writes
+    # through the other connection merge segments (#1578), so check a fresh one.
+    with closing(sqlite3.connect(engine._store.db_path)) as fresh:
+        assert fresh.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
 
 
 def assert_calls_once(provider: OfflineProvider, previous: tuple[set[str], set[str]], engine: Any) -> None:
