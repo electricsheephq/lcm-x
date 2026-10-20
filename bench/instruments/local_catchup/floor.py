@@ -82,7 +82,10 @@ def main():
                 code = proc.wait(timeout=a.max_minutes*60+120)
             except subprocess.TimeoutExpired:
                 timed_out = True
-                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                except ProcessLookupError:
+                    pass
                 try:
                     code = proc.wait(timeout=30)
                 except subprocess.TimeoutExpired:
