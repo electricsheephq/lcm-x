@@ -69,6 +69,15 @@ class Run(S2.Run):
             summariser_calls=calls, empty_no_room=None, timing_label="WIRING-ONLY" if forced else "full-stream",
             user_section_bytes=section_bytes(CC._LEAN_USER_MESSAGES_HEADING), identifier_index_bytes=section_bytes(CC._LEAN_ANCHOR_HEADING),
             continuity=S2.continuity(self.man, self.system, new)))
+        event = self.events[-1]
+        if S2.deep.enabled(self.man):
+            cdir = self.dir / "continuity"
+            cdir.mkdir(exist_ok=True)
+            (cdir / f"event-{event['event']}.json").write_text(json.dumps(dict(
+                event=event["event"], row_index=i, text=self.system + "\n" + text)))
+        S2.deep.event_probes(self, event, new)
+        print(f"  H event {event['event']}: row {i} compacted={event['is_compaction']} "
+              f"wall={event['compress_wall_s']:.3f}s", flush=True)
         return new
 
     def snapshot(self, cp, view):
@@ -86,9 +95,9 @@ def main():
     ap.add_argument("--context-length", type=int, default=S2.DEFAULT_CTX)
     ap.add_argument("--threshold", type=float, default=.75)
     ap.add_argument("--lane", default="glm", choices=("glm", "codex-sol", "codex-astra", "fake"))
-    ap.add_argument("--reader", default="glm", choices=("glm", "astra-low", "fake"))
+    ap.add_argument("--reader", default="glm", choices=("glm", "astra-low", "sol-low", "fake"))
     a = ap.parse_args()
-    a.batches, a.slice, a.prefix60k = 0, None, False
+    a.batches, a.slice, a.prefix60k, a.turn_end_notify = 0, None, False, False
     sdir = S2.MATERIAL / f"seed-{a.seed}"
     cps = S2.CP.select(sdir, a.checkpoints)
     man = S2.jload(sdir / "material.manifest.json")
@@ -96,7 +105,10 @@ def main():
     out = S2.RUNS / "H" / f"seed-{a.seed}" / a.run
     out.mkdir(parents=True, exist_ok=False)
     isolation = dict(host_tree=HOST_PROOF, write_denied=True, sandbox_profile=str(S2.TS / "h-isolation.sb"))
-    for label, parent in (("outside_output", S2.S2), ("host_src", src), ("hermes_home", hosts.real_hermes_dir())):
+    # Never probe the operator's live Hermes home, even with a write expected to fail.
+    # launch_h.sh uses an isolated HOME and denies writes outside explicit roots.
+    isolation["live_hermes_probe"] = "not attempted; isolated HOME and sandbox policy"
+    for label, parent in (("outside_output", S2.S2), ("host_src", src)):
         try:
             with (parent / ".eval2-write-denied-check").open("x"):
                 pass
@@ -121,11 +133,13 @@ def main():
         from s2lib.fakes import Reader
         rd = Reader()
     else:
-        rd = reader.GLMReader() if a.reader == "glm" else reader.AstraLowReader(out / "reader-scratch")
+        rd = (reader.GLMReader() if a.reader == "glm" else
+              (reader.SolLowReader if a.reader == "sol-low" else reader.AstraLowReader)(out / "reader-scratch"))
     summary = dict(context_length=a.context_length, threshold_tokens=run.engine.threshold_tokens,
                    threshold_percent=run.engine.real.threshold_percent, tail_mode=run.engine.real.tail_mode,
                    timeout_s=S2.replay_timeout(man["decision_checkpoint"]["tokens"]), arm=arm, worktree_head=host["sha"], worktree=str(src), isolation=isolation, status="DONE", seed=f"seed-{a.seed}",
-                   reader_readback=rd.readback, material_sha256=S2.sha(sdir / "material.manifest.json"), late_corrected_value_checkpoint=S2.CP.late_checkpoint(sdir))
+                   stop_row_index=cps[-1]["row_index"], reader_readback=rd.readback,
+                   material_sha256=S2.sha(sdir / "material.manifest.json"), late_corrected_value_checkpoint=S2.CP.late_checkpoint(sdir))
     for cp in run.snaps:
         run.reader_calls = []
         res = S2.probe(run, cp["view"], rd, False, cp)
@@ -133,6 +147,11 @@ def main():
         if cp_status == "FAILED":
             summary["status"] = "FAILED"
         (cp["dir"] / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in res))
+        (cp["dir"] / "assembled_context.json").write_text(json.dumps(dict(system=run.system, view=cp["view"])))
+        import shutil
+        (cp["dir"] / "continuity").mkdir(exist_ok=True)
+        for event in run.events[:cp["n_events"]]:
+            shutil.copy2(out / "continuity" / f"event-{event['event']}.json", cp["dir"] / "continuity")
         (cp["dir"] / "summary.json").write_text(json.dumps(dict(summary, status=cp_status, checkpoint_id=cp["checkpoint"]["id"], checkpoint=cp["row"],
             stop_row_index=cp["row"], reader_calls=run.reader_calls, events=run.events[:cp["n_events"]],
             final_context=dict(tokens=run.ntok([run.sysmsg] + cp["view"])),
