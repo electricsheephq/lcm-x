@@ -2,6 +2,7 @@
 import io
 import json
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -58,7 +59,9 @@ def snapshot(store, q):
         with patch.object(delivery, "dispatch", return_value=raw):
             evidence, returned = delivery.single(q, engine, speakers)
         assert returned == raw
-    return {"db_sha256": common.digest_file(directory / "lcm.db"),
+    with closing(sqlite3.connect(f"{(directory / 'lcm.db').as_uri()}?mode=ro", uri=True)) as conn:
+        dump = "\n".join(conn.iterdump())
+    return {"db_dump_sha256": common.sha(dump.encode("utf-8")),
             "speakers": (directory / "speakers.json").read_text(), "delivery": evidence}
 
 
