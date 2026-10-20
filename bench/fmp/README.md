@@ -82,7 +82,19 @@ split and output arguments. `answer` verifies/builds missing stores before API
 calls. For `score`, additionally supply `--runs RUN_DIR ...`; shared CLI options
 are still required. LoCoMo uses `sample_id:zero_based_qa_index` question ids and
 one store per conversation. LME uses one store per question. Dates are UTC.
-LoCoMo speaker identity is retained in stored content and a speaker sidecar alongside the production roles.
+LoCoMo speaker identity is retained in a speaker sidecar alongside the production roles.
+`--store-text speaker-prefix|plain|name-date` controls ingestion (default `speaker-prefix`,
+byte-identical store data): `Name: text`, turn text only, or `Name (YYYY-MM-DD): text`
+using the session UTC date. It feeds search, embeddings and deterministic summaries;
+LME store data stays identical across variants. Store manifests bind this option.
+`--hit-label speaker|role` controls single-delivery labels (default `speaker`); role
+uses the stored role and ignores the sidecar. Stored prefixes are stripped once.
+Both options are recorded in run manifests and checked for judging; the label is
+`n/a` for agentic and full-context delivery. Score keys distinguish these arm axes.
+For [#995 step 1](https://github.com/electricsheephq/lcm-x/issues/995):
+A0 = `--store-text plain --hit-label role`; A1 = `--store-text plain --hit-label speaker`;
+A2 = `--store-text name-date --hit-label speaker`. The agentic check compares
+`plain` with `name-date` under `--delivery agentic` (hit label recorded as `n/a`).
 Image captions, when supplied by the dataset, remain in the evidence.
 
 Every session id (LME and LoCoMo) is replaced at normalisation by an opaque

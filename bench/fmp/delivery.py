@@ -104,7 +104,7 @@ def dispatch(name, arguments, engine, offered=None):
         return json.dumps({"error": f"Error executing {name}: {exc}"}, ensure_ascii=False)
 
 
-def single(q, engine, speakers=None):
+def single(q, engine, speakers=None, hit_label="speaker", store_text="speaker-prefix"):
     raw = dispatch("lcm_recall", {"query": q.question, "limit": 25}, engine)
     payload = json.loads(raw)
     if "error" in payload:
@@ -117,10 +117,15 @@ def single(q, engine, speakers=None):
         if row is not None:
             stamp = row.get("observed_at")
             date = datetime.fromtimestamp(stamp, timezone.utc).isoformat() if stamp else "unknown"
-            role = (speakers or {}).get(str(row["store_id"]), row["role"])
+            speaker = (speakers or {}).get(str(row["store_id"])) if hit_label == "speaker" else None
+            role = speaker or row["role"]
             content = row["content"]
-            if str(row["store_id"]) in (speakers or {}) and content.startswith(role + ": "):
-                content = content[len(role) + 2:]
+            prefix = (speaker + (f" ({date[:10]})" if store_text == "name-date" else "") + ": ") if speaker else ""
+            if store_text != "plain":
+                if prefix and content.startswith(prefix):
+                    content = content[len(prefix):]
+                elif hit_label == "role" and getattr(q, "dataset", "") == "locomo":
+                    content = content.partition(": ")[2]
             lines.append(f"[{date}] {role}: {content}")
         else:
             lines.append(f"[{hit.get('event_time', 'unknown')}] summary: {hit.get('snippet', '')}")
@@ -138,13 +143,13 @@ def context_length(client, reader):
 
 
 def answer(q, mode, client, reader, engine=None, speakers=None, tool_budget=12, input_budget=200_000, records=None,
-           server=None):
+           server=None, hit_label="speaker", store_text="speaker-prefix"):
     records = records if records is not None else []
     if mode == "agentic" and harness(reader):
         result = harness_agentic(q, client, reader, server, records)
     else:
         with question_clock(q.question_date):
-            result = _answer(q, mode, client, reader, engine, speakers, tool_budget, input_budget, records)
+            result = _answer(q, mode, client, reader, engine, speakers, tool_budget, input_budget, records, hit_label, store_text)
     return {**result, **date_exposure(q)}
 
 
@@ -172,14 +177,14 @@ def harness_agentic(q, client, reader, server, records):
     return result
 
 
-def _answer(q, mode, client, reader, engine, speakers, tool_budget, input_budget, records):
+def _answer(q, mode, client, reader, engine, speakers, tool_budget, input_budget, records, hit_label, store_text):
     trace = []
     result = {"qid": q.qid, "qtype": q.qtype, "status": "ok", "hypothesis": "", "calls": records,
               "trace": trace, "tool_calls": 0, "forced_final": None, "finish_reason": None}
     system = INSTRUCTIONS.format(date=q.question_date) + (AGENTIC if mode == "agentic" else EVIDENCE)
     user = "Question: " + q.question
     if mode == "single":
-        evidence, raw = single(q, engine, speakers)
+        evidence, raw = single(q, engine, speakers, hit_label, store_text)
         trace.append({"tool": "lcm_recall", "result": raw})
         user = "History evidence:\n" + evidence + "\n" + user
     elif mode == "full_context":

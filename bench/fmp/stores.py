@@ -6,7 +6,7 @@ import sqlite3
 import struct
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -49,10 +49,11 @@ class ReadCache:
 
 
 class Stores:
-    def __init__(self, root, config, repo, dataset_sha, lme, summaries="none", cache=None):
+    def __init__(self, root, config, repo, dataset_sha, lme, summaries="none", cache=None, store_text="speaker-prefix"):
         self.root, self.config, self.repo = Path(root), config, Path(repo)
         self.root.mkdir(parents=True, exist_ok=True)
         self.dataset_sha, self.lme, self.summaries = dataset_sha, lme, summaries
+        self.store_text = store_text
         self.base, sep, self.rerank = config.partition("+rerank:")
         if self.base not in MODELS or (sep and not self.rerank):
             raise ValueError("unsupported store configuration")
@@ -78,10 +79,18 @@ class Stores:
         self.identity = {"lcmx_commit": commit(repo), "config": self.base,
                          "dataset_sha256": dataset_sha, "summaries": summaries,
                          "provider": self.provider_name, "model": self.model,
-                         "embedding_privacy": "raw-public-benchmark", "format": 3}
+                         "embedding_privacy": "raw-public-benchmark", "format": 3, "store_text": store_text}
         # D8: the path names every build input, so no build is reused across inputs.
         self.generation = "-".join([self.base, summaries, self.identity["lcmx_commit"][:12],
                                     sha(json.dumps(self.identity, sort_keys=True).encode())[:12]])
+
+    def content(self, turn, date):
+        name = turn.get("speaker")
+        if not name or self.store_text == "plain":
+            return turn["content"]
+        if self.store_text == "name-date":
+            name += " (" + datetime.fromisoformat(date).astimezone(timezone.utc).date().isoformat() + ")"
+        return name + ": " + turn["content"]
 
     def directory(self, q):
         # Reranking is recall-time only; variants share the same ingestion.
@@ -138,7 +147,7 @@ class Stores:
                 identity = EmbeddingIdentity.canonical(self.provider_name, self.model, "", self.provider.dim,
                                                        "float32", "little", "chunk")
             for order, session in enumerate(q.sessions, 1):
-                rows = [{"role": t["role"], "content": (t["speaker"] + ": " if t.get("speaker") else "") + t["content"],
+                rows = [{"role": t["role"], "content": self.content(t, session["date"]),
                          "timestamp": session["date"]}
                         for t in session["turns"]]
                 # Production ingest stamps timestamp/ingested_at from the store clock: run it at the

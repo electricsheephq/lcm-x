@@ -152,7 +152,7 @@ def test_glm_estimate_and_manifest(client, tmp_path):
     output = args.output
     q = SimpleNamespace(qid="synthetic", dataset="locomo", question="Synthetic?", gold="yes")
     (output / "run-manifest.json").write_text(json.dumps({"dataset_sha256": "d", "id_list_sha256": "i",
-        "split_label": "synthetic", "question_ids": [q.qid], "prompts_sha256": run.prompt_hashes(),
+        "split_label": "synthetic", "question_ids": [q.qid], "prompts_sha256": run.prompt_hashes(), **run.switches(args),
         "harness_commit": common.commit(Path(run.__file__).resolve().parents[2]),
         "lcmx_commit": common.commit(args.lcmx_repo),
         "harness_tree_sha256": common.sha(b"".join(p.read_bytes() for p in sorted(Path(run.__file__).parent.glob("*.py"))))}))
