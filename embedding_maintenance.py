@@ -19,11 +19,12 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from .config import embedding_provider_id
-from .embedding_provider import _is_loopback_url
+from .config import embedding_provider_id, profile_bound
+from .embedding_provider import FastembedProvider, _is_loopback_url
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +33,14 @@ _LAST_PASS: dict[str, tuple[float, str]] = {}
 _FAILURES = 0
 _FAILURE_WARNED = False
 _STOP_EMBEDDING_MAINTENANCE = threading.Event()
+_PREPARE: dict[tuple[str, str, int], tuple[str, str]] = {}
+_PREPARE_THREAD: threading.Thread | None = None
+# model key -> (database, owner token) -> enqueue; one entry per live owner, so a retiring engine
+# never displaces another engine's callback for the same database.
+_PREPARE_READY: dict[tuple[str, str, int], dict[tuple[str, object], Callable[[], None]]] = {}
+_PREPARE_RETRY: dict[tuple[str, str, int], tuple[int, float]] = {}
+# #1586 v1 CPU bars: target at most 40% maintenance duty, without a new setting.
+_LOCAL_IDLE_MULTIPLIER = 1.5
 
 
 def database_identity(db_path: str | Path) -> str:
@@ -61,16 +70,141 @@ def _record(db_path: str | Path, outcome: str, failure: str | None) -> None:
     )
 
 
-def run_incremental_embedding_pass(db_path: str | Path, config: Any, *, breaker: Any = None) -> str:
-    """Run one bounded pass over both corpora and record its outcome. Never raises."""
+def _local_model_key(config: Any) -> tuple[str, str, int] | None:
+    provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
+    if provider not in {"fastembed", "fast-embed"}:
+        return None
+    model = str(getattr(config, "embedding_model", "") or "").strip()
+    return FastembedProvider(model)._cache_key() if model else None
+
+
+def local_model_state(config: Any) -> tuple[str, str] | None:
+    """This process's ``(state, reason)`` for the configured local model, or None."""
+    key = _local_model_key(config)
+    with _STATE_LOCK:
+        return _PREPARE.get(key) if key else None
+
+
+def note_local_model_present(config: Any) -> None:
+    """A successful explicit warmup makes the local model present for this process."""
+    key = _local_model_key(config)
+    if key:
+        with _STATE_LOCK:
+            _PREPARE[key] = ("present", "")
+
+
+def start_local_model_prepare(
+    db_path: str | Path, config: Any, *, on_ready: Callable[[], None] | None = None,
+    owner: object | None = None,
+) -> bool:
+    """Start this process's one background prepare of the local model (#1186).
+
+    The thread runs the warmup path, the only one allowed to download, and
+    leaves profile registration to owner-tracked jobs. Recall never waits on it:
+    until the model is ready it serves full text and reports degraded. Failures
+    retry at ten-minute intervals, up to six attempts per model per process. A model requested
+    while another is preparing is admitted by a later trigger.
+    ``on_ready`` only enqueues maintenance; it must never run a pass inline.
+    """
+    global _PREPARE_THREAD
+    key = _local_model_key(config)
+    if key is None or not getattr(config, "embeddings_enabled", False):
+        return False
+    with _STATE_LOCK:
+        state = _PREPARE.get(key)
+        attempts, retry_at = _PREPARE_RETRY.get(key, (0, 0.0))
+        exhausted = attempts >= 6 and (state is None or state[0] != "preparing")
+        if on_ready is not None and not exhausted and (state is None or state[0] != "present"):
+            if state is not None or _PREPARE_THREAD is None or not _PREPARE_THREAD.is_alive():
+                token = on_ready if owner is None else owner
+                _PREPARE_READY.setdefault(key, {})[(database_identity(db_path), token)] = on_ready
+        if (state is not None and state[0] != "unavailable") or attempts >= 6 or time.monotonic() < retry_at:
+            return False
+        if _PREPARE_THREAD is not None and _PREPARE_THREAD.is_alive():
+            return False
+        _PREPARE_RETRY[key] = (attempts + 1, time.monotonic() + 600.0)
+        _PREPARE[key] = ("preparing", "")
+        # Started under the lock, so a concurrent caller sees it alive.
+        _PREPARE_THREAD = threading.Thread(
+            target=profile_bound(_prepare_local_model), args=(key, db_path, config),
+            name="lcm-embedding-prepare", daemon=True,
+        )
+        _PREPARE_THREAD.start()
+    return True
+
+
+def _prepare_local_model(key: tuple[str, str, int], db_path: str | Path, config: Any) -> None:
+    global _FAILURE_WARNED
     try:
-        outcome, failure = _run_pass(db_path, config, breaker)
+        from . import command  # lazy: command imports most of the plugin
+
+        # Only warm the shared model here. Store registration belongs to the
+        # owner-tracked maintenance job; retirement fences its enqueue callback.
+        provider = command.resolve_provider(config)
+        provider.warmup()
+        result = {}
+    except Exception as exc:
+        result = f"error: {exc}"
+    if isinstance(result, dict):
+        with _STATE_LOCK:
+            _PREPARE[key] = ("present", "")
+            _PREPARE_RETRY.pop(key, None)
+            callbacks = _PREPARE_READY.pop(key, {})
+        for enqueue in list(callbacks.values()):
+            try:
+                enqueue()
+            except Exception:
+                logger.warning("LCM could not enqueue embedding catch-up after preparation", exc_info=True)
+        return
+    reason = str(result).rsplit("error: ", 1)[-1].strip()
+    with _STATE_LOCK:
+        _PREPARE[key] = ("unavailable", reason)
+        if _PREPARE_RETRY.get(key, (0, 0.0))[0] >= 6:
+            _PREPARE_READY.pop(key, None)
+        first = not _FAILURE_WARNED
+        _FAILURE_WARNED = True
+    (logger.warning if first else logger.debug)(
+        "LCM local embedding model %s is unavailable (%s); recall uses full text. "
+        "Check `/lcm doctor` (embedding_provider_health); retry is bounded to six attempts per model per process",
+        key,
+        reason,
+    )
+
+
+def retire_local_model_prepare(owner) -> None:
+    with _STATE_LOCK:
+        for callbacks in _PREPARE_READY.values():
+            for callback_key in list(callbacks):
+                if callback_key[1] is owner:
+                    callbacks.pop(callback_key, None)
+
+
+def run_incremental_embedding_pass(
+    db_path: str | Path, config: Any, *, breaker: Any = None, slice_state: dict | None = None,
+) -> str | dict[str, Any]:
+    """Run one bounded pass over both corpora and record its outcome. Never raises."""
+    started = time.monotonic()
+    if slice_state is not None:
+        slice_state.update(vectors_written=0, scan_frontier_advance=False, remaining=False, **{"continue": False})
+        slice_state["deadline"] = started + 1.0
+    try:
+        outcome, failure = _run_pass(db_path, config, breaker, slice_state)
     except Exception as exc:
         outcome, failure = "error", str(exc)
+    if slice_state is not None:
+        active = time.monotonic() - started
+        deferred = outcome in {"lease_held", "circuit_open", "model_preparing", "model_unavailable"}
+        slice_state.update(active_s=active, overrun_s=max(0.0, active - 1.0),
+                           delay=max(_LOCAL_IDLE_MULTIPLIER * active, (600.0 if outcome == "model_unavailable" else 1.0) if deferred else 0.0))
+        if slice_state.pop("retry_wait", False):
+            slice_state["delay"] = max(600.0, slice_state["delay"])
+        slice_state["continue"] = deferred or (not failure and slice_state.get("continue", False))
+        slice_state["stop_reason"] = outcome if not slice_state["continue"] else ""
+        slice_state["rows_written"] = slice_state["vectors_written"]
     if outcome == "stopped":
         logger.info("LCM embedding maintenance stopped for database=%s scope=embeddings", db_path)
     _record(db_path, outcome, failure)
-    return outcome
+    return dict(slice_state, outcome=outcome) if slice_state is not None else outcome
 
 
 def _automatic_chunks_allowed(config: Any, command: Any) -> bool:
@@ -100,7 +234,7 @@ def _corpus_failure(result: dict[str, Any]) -> str | None:
     return None
 
 
-def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str | None]:
+def _run_pass(db_path: str | Path, config: Any, breaker: Any, slice_state=None) -> tuple[str, str | None]:
     from . import command  # lazy: command imports most of the plugin
     from .embedding_provider import probe_provider_availability
 
@@ -108,6 +242,13 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
         return "stopped", None
     provider = str(getattr(config, "embedding_provider", "") or "").strip().lower()
     local = embedding_provider_id(provider) == "fastembed"
+    sliced = local and slice_state is not None
+    state = local_model_state(config) if local else None
+    if state is not None and state[0] == "preparing":
+        return "model_preparing", None
+    if state is not None and state[0] == "unavailable":
+        attempts = _PREPARE_RETRY.get(_local_model_key(config), (0, 0.0))[0]
+        return ("model_prepare_exhausted" if attempts >= 6 else "model_unavailable"), None
     read_conn = command._embedding_read_connection(db_path)
     try:
         no_profile = command._embedding_current_profile(read_conn) is None
@@ -121,7 +262,7 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
         result = command._embedding_register_profiles(config, db_path, allow_download=False)
         if isinstance(result, str):
             return "auto_register_unavailable", result
-        del result  # release the probe models before the backfill loads its own
+        del result  # providers are disposable; FastEmbed shares its model
     if breaker is not None and breaker.is_open():
         return "circuit_open", None  # the query path's breaker is cooling down
     probe = probe_provider_availability(config)
@@ -131,22 +272,45 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
     limit = command._embedding_backfill_batch_size(
         getattr(config, "embedding_max_batch_items", None)
     )
-    corpora = [("summaries", lambda: command._embedding_backfill_summary_run(
-        config, db_path, apply=True, limit=limit, retry_uncertain=False,
-        stop_event=_STOP_EMBEDDING_MAINTENANCE,
+    if sliced:
+        limit = min(32, limit)
+    corpora = [("summaries", lambda retry: command._embedding_backfill_summary_run(
+        config, db_path, apply=True, limit=limit, retry_uncertain=retry,
+        stop_event=_STOP_EMBEDDING_MAINTENANCE, **({"maintenance_slice": max(0.001, slice_state["deadline"] - time.monotonic())} if sliced else {}),
     ))]
     if _automatic_chunks_allowed(config, command):
-        corpora.append(("chunks", lambda: command._chunk_backfill_run(
-            config, db_path, apply=True, limit=limit, retry_uncertain=False, policy="",
+        corpora.append(("chunks", lambda retry: command._chunk_backfill_run(
+            config, db_path, apply=True, limit=limit, retry_uncertain=retry, policy="",
             incremental=True,
-            stop_event=_STOP_EMBEDDING_MAINTENANCE,
+            stop_event=_STOP_EMBEDDING_MAINTENANCE, **({"maintenance_slice": max(0.001, slice_state["deadline"] - time.monotonic())} if sliced else {}),
         )))
+    if sliced:
+        stage = slice_state.get("stage", 0)
+        if stage == 0:
+            slice_state["uncertain"] = False
+            slice_state["cycle_remaining"] = False
+        corpora = [corpora[stage % len(corpora)]]
+        before = _scan_frontier(db_path, command)
     outcomes: list[str] = []
     failures: list[str] = []
     for name, run in corpora:
         if _STOP_EMBEDDING_MAINTENANCE.is_set():
             return "stopped", None
-        result = run()
+        embedded = 0
+        if sliced and time.monotonic() >= slice_state["deadline"]:
+            slice_state["continue"] = True
+            return "slice_budget", None
+        retries = (stage >= 2,) if sliced else ((False, True) if local else (False,))
+        for retry in retries:
+            if _STOP_EMBEDDING_MAINTENANCE.is_set():
+                return "stopped", None
+            result = run(retry)
+            if isinstance(result, str) or _corpus_failure(result) is not None:
+                break
+            embedded += result["embedded"]
+            # Only in-process FastEmbed may retry uncertainty without operator consent.
+            if result["stop_reason"]:
+                break
         if isinstance(result, str):
             if getattr(result, "reason", "") == "lease_held":
                 if not outcomes:
@@ -158,8 +322,13 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
         if result["stop_reason"] == "process_exit":
             return "stopped", None
         failure = _corpus_failure(result)
+        if sliced:
+            slice_state["vectors_written"] += embedded
+            slice_state["remaining"] = bool(result.get("remaining"))
+            slice_state["cycle_remaining"] = slice_state.get("cycle_remaining", False) or slice_state["remaining"]
+            slice_state["uncertain"] |= bool(result.get("uncertain"))
         if failure is None:
-            outcomes.append(f"{name}={result['status']}:{result['embedded']}")
+            outcomes.append(f"{name}={result['status']}:{embedded}")
             continue
         outcomes.append(f"{name}={result['status']}")
         failures.append(f"{name}: {failure}")
@@ -168,4 +337,32 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any) -> tuple[str, str 
         # one corpus must not starve the other.
         if result["status"] == "error":
             break
+    if sliced:
+        advanced = before != _scan_frontier(db_path, command)
+        slice_state["scan_frontier_advance"] = advanced
+        progress = slice_state.get("cycle_progress", 0) + slice_state["vectors_written"] + int(advanced)
+        slice_state.update(stage=(stage + 1) % 4, cycle_progress=progress if stage < 3 else 0)
+        slice_state["continue"] = not failures and not any("refused" in s for s in outcomes) and (stage < 3 or progress > 0)
+        if not failures and stage == 3 and not progress and slice_state["uncertain"]:
+            slice_state.update(retry_wait=True, **{"continue": True})
+            outcomes.append("row_backoff")
+        if not slice_state["continue"] and not failures:
+            outcomes.append("refused" if progress or any("refused" in s for s in outcomes) else
+                            "no_progress" if slice_state["cycle_remaining"] else "complete")
     return " ".join(outcomes), "; ".join(failures) or None
+
+
+def _scan_frontier(db_path, command):
+    conn = command._embedding_read_connection(db_path)
+    try:
+        profile = command._chunk_current_profile(conn)
+        if profile is None:
+            return None
+        identity = str(profile["identity_hash"])
+        return (command._chunk_cursor(conn, identity), tuple(conn.execute(
+            "SELECT key, value FROM metadata WHERE key IN (?, ?, ?) ORDER BY key",
+            tuple(f"{prefix}:{identity}" for prefix in (
+                "chunk_gapfill_scan", "chunk_policy_revision", "chunk_policy_revision_through")),
+        ).fetchall()))
+    finally:
+        conn.close()
