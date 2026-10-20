@@ -16,8 +16,8 @@ Use for discovery across current-session raw messages and summary nodes.
 - `mode='semantic'` or `'hybrid'` is useful when embeddings are configured; degraded coverage is reported.
 - Broader `session_scope='all'|'session'` is explicit, bounded, raw-message-only archive recovery inside `lcm.db`.
 - Exact role/time/source/conversation filters apply before limiting where supported.
-- Stamped message copies in the same session/conversation, source, role and tool-call identity (including assistant tool calls), with one shared recorded occurrence time, count once before the delivery limit. Unstamped rows and groups with multiple recorded times remain separate. Only grouped hits add `duplicate_store_ids` (sorted other ids); `store_id` is the best-ranked copy; the group keeps its best-ranked position. Summaries remain separate. Each listed id still works with `lcm_expand`.
-- Rows repeating the same text at different recorded times are not collapsed; unstamped repeats in one session are.
+- Stamped message copies in the same session/conversation, source, role, tool name and tool-call identity (including assistant tool calls), with one shared recorded occurrence time, count once before the delivery limit. Unstamped rows and groups with multiple recorded times remain separate. Only grouped hits add `duplicate_store_ids` (sorted other ids); `store_id` is the best-ranked copy; the group keeps its best-ranked position. Summaries remain separate. Each listed id still works with `lcm_expand`.
+- Rows repeating the same text at different recorded times are not collapsed, and neither are unstamped repeats.
 - If the payload carries `message_search_error`, the raw-message stage crashed and its
   results are missing: treat any returned results as INCOMPLETE (they come from the other
   stages only), never as proof of absence. Retry once, or fall back to `lcm_recall` /

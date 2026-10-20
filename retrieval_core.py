@@ -550,7 +550,7 @@ def collapse_duplicate_candidates(
         ):
             key = (
                 "message", row["session_id"], row.get("conversation_id") or "",
-                row["role"], row.get("tool_call_id") or "",
+                row["role"], row.get("tool_call_id") or "", row.get("tool_name") or "",
                 row.get("source") or "",
                 json.dumps(row.get("tool_calls"), sort_keys=True),
                 hashlib.sha256(row["content"].encode("utf-8")).digest(),
@@ -626,7 +626,7 @@ def duplicate_identity_rows(
         conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
         placeholders = ",".join("?" for _ in ids)
         rows = conn.execute(
-            "SELECT store_id, session_id, conversation_id, role, tool_call_id, source, tool_calls, content, observed_at "
+            "SELECT store_id, session_id, conversation_id, role, tool_call_id, tool_name, source, tool_calls, content, observed_at "
             f"FROM messages WHERE store_id IN ({placeholders})", ids,
         ).fetchall()
         if time.monotonic() >= deadline:

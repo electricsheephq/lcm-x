@@ -138,7 +138,7 @@ def test_unstamped_real_user_turns_preserve_repetition_and_order(engine, deliver
 
 
 @pytest.mark.parametrize("delivery", ["snippets", "answer_ready", "grep"])
-@pytest.mark.parametrize("dimension", ["tool_calls", "source"])
+@pytest.mark.parametrize("dimension", ["tool_calls", "source", "tool_name"])
 def test_stamped_distinct_provenance_is_not_a_replay(engine, delivery, dimension):
     ids = []
     for index in range(2):
@@ -146,6 +146,8 @@ def test_stamped_distinct_provenance_is_not_a_replay(engine, delivery, dimension
         if dimension == "tool_calls":
             fields["tool_calls"] = [{"id": f"call-{index}", "type": "function",
                                      "function": {"name": "lookup", "arguments": "{}"}}]
+        if dimension == "tool_name":
+            fields.update(role="tool", tool_name=f"lookup-{index}")
         ids.append(engine._store.append(
             "s0", fields, source=f"source-{index}" if dimension == "source" else "",
         ))
