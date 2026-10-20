@@ -6,6 +6,9 @@ from .common import load
 
 
 def verdict(path, max_wall):
+    terminal = path.with_name("summary.json")
+    if terminal.exists() and (recorded := load(terminal)).get("state") == "ABORTED" and recorded.get("reason"):
+        return "ABORTED"
     if path.with_name("cross-profile.json").exists() and load(path.with_name("cross-profile.json")).get("paths"):
         return "ABORTED"
     previous, last_change, generation, final = None, 0., 0, "RUNNING"

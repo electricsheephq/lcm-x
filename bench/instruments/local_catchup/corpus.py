@@ -25,6 +25,7 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
                                                              "float32", "little", "chunk")
     expected, tokens, chunks = {"chunks": {}, "leaves": {}}, Counter(), []
     canaries, sessions, long_count = [], [], 0
+    reader = connect(db)
     for shard, offset in enumerate(range(0, rows // 2, 250)):
         name = f"s{seed}_shard{shard:06d}"
         fixture = make_synthetic_fixture(name=name, message_pairs=min(250, rows // 2-offset),
@@ -42,8 +43,7 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
         with patch.object(time, "time", return_value=1700000000 + offset):
             ids = store.append_batch(name, messages, token_estimates=counts)
         for ident, msg in zip(ids, messages):
-            with connect(db) as c:
-                msg["content"] = c.execute("SELECT content FROM messages WHERE store_id=?", (ident,)).fetchone()[0]
+            msg["content"] = reader.execute("SELECT content FROM messages WHERE store_id=?", (ident,)).fetchone()[0]
             parts = mod("chunking").chunk_message(ident, msg["role"], msg["content"], policy="conversational")
             expected["chunks"].update({c.chunk_id: c.token_estimate for c in parts})
             if baseline == "upgrade" and ((shard == 0 and ident == ids[0]) or ident % 4 == 0):
@@ -55,6 +55,7 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
             source_ids=ids, token_count=20, source_token_count=sum(counts), created_at=1700000000+offset,
             earliest_at=1700000000+offset*2, latest_at=messages[-1]["timestamp"])
         expected["leaves"][str(dag.add_node(leaf))] = leaf.token_count
+    reader.close()
     for c in chunks:
         values = asdict(c)
         values.pop("text")
