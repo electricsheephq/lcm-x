@@ -118,7 +118,29 @@ def _wait_scheduler_idle(scheduler, timeout: float) -> bool:
 
 
 @pytest.fixture(autouse=True)
-def _drain_background_maintenance(monkeypatch):
+def _isolate_embedding_process_state(request):
+    """Keep process caches and model preparation inside the test that owns them."""
+    with pytest.MonkeyPatch.context() as patch:
+        provider = sys.modules.get("hermes_lcm.embedding_provider")
+        maintenance = sys.modules.get("hermes_lcm.embedding_maintenance")
+        if provider is not None:
+            patch.setattr(provider, "_FASTEMBED_MODELS", {})
+            patch.setattr(provider, "_FASTEMBED_BUILD_LOCKS", {})
+        if maintenance is not None:
+            patch.setattr(maintenance, "_PREPARE", {})
+            patch.setattr(maintenance, "_PREPARE_READY", {})
+            patch.setattr(maintenance, "_PREPARE_THREAD", None)
+            if request.node.path.name != "test_issue_1586_local_precursor.py":
+                patch.setattr(maintenance, "start_local_model_prepare", lambda *_a, **_k: False)
+        yield
+        thread = getattr(maintenance, "_PREPARE_THREAD", None)
+        if thread is not None:
+            thread.join(5)
+            assert not thread.is_alive(), "model preparation outlived its test"
+
+
+@pytest.fixture(autouse=True)
+def _drain_background_maintenance(monkeypatch, _isolate_embedding_process_state):
     """#1013 part B: temporal rollups are on by default, and their worker is process-wide.
 
     A job a test schedules must finish inside that test, while its fakes are still installed;

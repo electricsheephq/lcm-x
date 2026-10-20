@@ -979,7 +979,7 @@ def test_1063_g_registration_provider_released_before_backfill(
             engine._config.database_path, engine._config,
         )
         print(f"G: registration provider alive at backfill={alive_at_backfill}")
-        assert refs and alive_at_backfill == [[False]]
+        assert refs and alive_at_backfill == [[False], [False]]  # normal pass + LOCAL retry
     finally:
         engine._close_storage()
 
@@ -1151,3 +1151,42 @@ def test_a_long_run_of_tool_rows_does_not_stall_the_history_walk(tmp_path, home,
         assert {row[0] for row in _rows(engine, "SELECT store_id FROM lcm_chunk_meta")} == users
     finally:
         engine.shutdown()
+
+
+def test_1110_retries_only_fastembed_uncertain_rows(tmp_path, home, providers, monkeypatch):
+    monkeypatch.setattr(provider_mod, "probe_provider_availability",
+                        lambda _config: {"available": True, "detail": "offline fake"})
+    results = {}
+    for provider in ("voyage", "ollama", "fastembed"):
+        path = tmp_path / provider
+        path.mkdir()
+        engine = _make_engine(path, home, provider=provider)
+        try:
+            engine._store.append(SESSION, {"role": "user", "content": FILLER})
+            leaf = str(engine._dag.add_node(SummaryNode(
+                session_id=SESSION, depth=0, summary="uncertain summary",
+                created_at=1.0, latest_at=1.0,
+            )))
+            store = VectorStore(engine._config.database_path, config=engine._config)
+            try:
+                store.ensure_chunk_schema()
+                conn = store.connection
+                command_mod._ensure_inflight_table(conn)
+                for task, identity in conn.execute(
+                    "SELECT task, identity_hash FROM lcm_embedding_profile WHERE active = 1"
+                ).fetchall():
+                    embedded_id = "1:0" if task == "chunk" else leaf
+                    conn.execute(
+                        "INSERT INTO lcm_embedding_backfill_inflight "
+                        "(embedded_id, identity_hash, state, updated_at) VALUES (?, ?, 'uncertain', 1)",
+                        (embedded_id, identity),
+                    )
+                conn.commit()
+            finally:
+                store.close()
+            maintenance_mod.run_incremental_embedding_pass(engine._config.database_path, engine._config)
+            results[provider] = (_chunk_vector_count(engine), _summary_vector_ids(engine), _inflight_count(engine))
+        finally:
+            engine.shutdown()
+    assert results["voyage"] == results["ollama"] == (0, [], 2)
+    assert results["fastembed"] == (1, [leaf], 0)
