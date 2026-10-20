@@ -30,7 +30,7 @@ def fake_rig(tmp_path, monkeypatch):
                                                   "expected": {"chunks": {"x": 1}}})
     monkeypatch.setattr(rig, "baseline", lambda db, m: calls.append(("start", db)) or checked.copy())
     monkeypatch.setattr(rig, "audit", lambda db, m: calls.append(("audit", db)) or final.copy())
-    monkeypatch.setattr(rig, "read_progress", lambda db, m: {**checked, "complete": len(launched) >= 4})
+    monkeypatch.setattr(rig, "read_progress", lambda db, m, **kw: {**checked, "complete": len(launched) >= 4})
     monkeypatch.setattr(rig, "supervisor", lambda *args: meter)
     monkeypatch.setattr(rig, "foreign_files", lambda *args, **kw: [])
     monkeypatch.setattr(rig, "connect", lambda _: nullcontext(Namespace(backup=lambda _: None)))
@@ -52,7 +52,7 @@ def fake_rig(tmp_path, monkeypatch):
                                   dict(integrity="broken"), dict(residue={"uncertain": 1})])
 def test_a_final_audit_overrides_complete(fake_rig, bad, monkeypatch):
     a, checked, final, _, _, _ = fake_rig
-    monkeypatch.setattr(rig, "read_progress", lambda *args: {**checked, "complete": True})
+    monkeypatch.setattr(rig, "read_progress", lambda *args, **kw: {**checked, "complete": True})
     final.update(bad)
     rig.main()
     s = common.load(a.out/"summary.json")
@@ -76,7 +76,7 @@ def test_a_full_audit_at_start_restart_end(fake_rig):
 
 def test_b_rig_records_loop_end_before_stops(fake_rig, monkeypatch):
     a, checked, _, _, _, clock = fake_rig
-    monkeypatch.setattr(rig, "read_progress", lambda *args: checked.copy())
+    monkeypatch.setattr(rig, "read_progress", lambda *args, **kw: checked.copy())
     rig.main()
     s = common.load(a.out/"summary.json")
     assert s["cpu"]["end"] <= a.max_wall

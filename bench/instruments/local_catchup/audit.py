@@ -20,8 +20,12 @@ def connect(db):
     return c
 
 
-def preimage(c):
+def preimage(c, node_bound=None):
     raw = digest(c.execute("SELECT * FROM messages ORDER BY store_id"))
+    provenance = {table: digest(c.execute(f"SELECT * FROM {table}" + (f" WHERE node_id<={int(node_bound)}" if node_bound is not None else "") + f" ORDER BY {order}")
+                               if c.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone() else [])
+                  for table, order in (("summary_nodes", "node_id"), ("summary_node_provenance", "node_id"),
+                                       ("lcm_rollup_sources", "rollup_id,node_id"))}
     vectors, metadata = {}, {}
     for kind, table, key in (("chunks", "lcm_chunk_vectors", "chunk_id"),
                              ("leaves", "lcm_embedding_vectors", "embedded_id")):
@@ -34,15 +38,21 @@ def preimage(c):
             fields = dict(zip(columns, row))
             suffix = "/"+fields["embedded_kind"] if kind == "leaves" else ""
             metadata[f"{kind}/{fields['identity_hash']}/{fields[key]}{suffix}"] = digest([row])
-    return {"raw_digest": raw, "vectors": vectors, "metadata": metadata}
+    return {"raw_digest": raw, "vectors": vectors, "metadata": metadata, "provenance": provenance}
 
 
 def audit(db, manifest):
     with connect(db) as c:
+        c.execute("BEGIN")
         before = manifest["preimage"]
         now = preimage(c)
-        changed = [k for k, v in before["vectors"].items() if now["vectors"].get(k) != v]
-        changed_meta = [k for k, v in before["metadata"].items() if now["metadata"].get(k) != v]
+        observed = manifest.setdefault("observed_vectors", {}) if now["vectors"] else manifest.get("observed_vectors", {})
+        changed = [k for k, v in (observed | before["vectors"]).items() if now["vectors"].get(k) != v]
+        for k, v in now["vectors"].items():
+            observed.setdefault(k, v)
+        changed_meta = [k for k, v in (manifest.get("observed_metadata", {}) | before["metadata"]).items() if now["metadata"].get(k) != v]
+        for k in now["metadata"].keys() - before["metadata"].keys():
+            manifest.setdefault("observed_metadata", {}).setdefault(k, now["metadata"][k])
         expected_ids = {f"{kind}/{manifest['identities'][task]}/{ident}"
                         for kind, task in (("chunks", "chunk"), ("leaves", "summary"))
                         for ident in manifest["expected"][kind]}
@@ -54,12 +64,17 @@ def audit(db, manifest):
         paired_meta = {k.removesuffix("/summary") if k.startswith("leaves/") else k for k in new_meta}
         unpaired = sorted(new_vectors ^ paired_meta)
         result = {"changed_metadata": changed_meta, "unexpected_rows": unexpected, "unpaired_rows": unpaired,
-                  "raw_unchanged": now["raw_digest"] == before["raw_digest"],
+                  "raw_unchanged": now["raw_digest"] == before["raw_digest"] and now["provenance"] == before["provenance"],
                   "changed_vectors": changed, "classes": {}}
         for kind, table, meta, key, task in (
             ("chunks", "lcm_chunk_vectors", "lcm_chunk_meta", "chunk_id", "chunk"),
             ("leaves", "lcm_embedding_vectors", "lcm_embedding_meta", "embedded_id", "summary")):
             identity = manifest["identities"][task]
+            fields = "store_id,chunk_index,char_start,char_end,token_estimate" if kind == "chunks" else "source_token_count"
+            for row in c.execute(f"SELECT {key},{fields} FROM {meta} WHERE identity_hash=?", (identity,)):
+                ident = str(row[0])
+                if ident in manifest["expected"][kind] and list(row[1:]) != manifest["expected_metadata"][kind][ident]:
+                    changed_meta.append(f"{kind}/{identity}/{ident}")
             actual = {str(r[0]) for r in c.execute(
                 f"SELECT v.{key} FROM {table} v JOIN {meta} m USING ({key},identity_hash) "
                 "WHERE v.identity_hash=? AND m.archived=0 AND length(v.vec)=?",
@@ -80,9 +95,37 @@ def audit(db, manifest):
     return result
 
 
-def progress(db, manifest):
-    result = {"classes": {}, "raw_unchanged": True, "changed_vectors": [], "integrity": "not_checked"}
+def progress(db, manifest, verify=False):
+    result = {"classes": {}, "raw_unchanged": True, "changed_vectors": [], "changed_metadata": [], "integrity": "not_checked"}
     with connect(db) as c:
+        c.execute("BEGIN")
+        if verify:
+            now, before = preimage(c), manifest["preimage"]
+            result.update(raw_unchanged=now["raw_digest"] == before["raw_digest"] and now["provenance"] == before["provenance"],
+                changed_vectors=[k for k, v in (manifest.get("observed_vectors", {}) | before["vectors"]).items() if now["vectors"].get(k) != v],
+                changed_metadata=[k for k, v in (manifest.get("observed_metadata", {}) | before["metadata"]).items() if now["metadata"].get(k) != v])
+            observed_meta = manifest.setdefault("observed_metadata", {})
+            for k in now["metadata"].keys() - before["metadata"].keys():
+                observed_meta.setdefault(k, now["metadata"][k])
+        observed = manifest.setdefault("observed_vectors", {})
+        for kind, table, key in (("chunks", "lcm_chunk_vectors", "chunk_id"), ("leaves", "lcm_embedding_vectors", "embedded_id")):
+            known = dict(manifest["preimage"]["vectors"], **observed)
+            for ident, identity, vec in c.execute(f"SELECT {key},identity_hash,vec FROM {table} WHERE ?||'/'||identity_hash||'/'||{key} NOT IN (SELECT key FROM json_each(?))", (kind, json.dumps(known))):
+                # Snapshot all reachability metadata with the first observed vector,
+                # including on the cheap I2 path (verify=False).
+                meta = "lcm_chunk_meta" if kind == "chunks" else "lcm_embedding_meta"
+                cur = c.execute(f"SELECT * FROM {meta} WHERE {key}=? AND identity_hash=?", (ident, identity))
+                columns = [d[0] for d in cur.description]
+                rows = cur.fetchall()
+                if not rows:
+                    # Metadata not written yet: observe the vector on a later poll, together with its
+                    # metadata in one snapshot, so metadata never first appears unchecked after its vector.
+                    continue
+                observed[f"{kind}/{identity}/{ident}"] = hashlib.sha256(vec).hexdigest()
+                for row in rows:
+                    suffix = "/"+row[columns.index("embedded_kind")] if kind == "leaves" else ""
+                    manifest.setdefault("observed_metadata", {}).setdefault(
+                        f"{kind}/{identity}/{ident}{suffix}", digest([row]))
         for kind, table, meta, key, task in (("chunks", "lcm_chunk_vectors", "lcm_chunk_meta", "chunk_id", "chunk"),
                                            ("leaves", "lcm_embedding_vectors", "lcm_embedding_meta", "embedded_id", "summary")):
             expected = manifest["expected"][kind]
@@ -93,6 +136,23 @@ def progress(db, manifest):
         result["scan"] = list(c.execute("SELECT key,value FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%' OR key LIKE 'chunk_policy_revision_through:%' ORDER BY key"))
     result["complete"] = all(v["missing_count"] == 0 for v in result["classes"].values())
     return result
+
+
+def vector_counts(db, manifest):
+    """Cheap identity counts within the generated corpus; exclude new trace rows/leaves.
+
+    The builder allocates contiguous store/node IDs from 1. Boundary expected-ID
+    audits remain authoritative; these counts only track incompleteness in flight.
+    """
+    counts = {}
+    with connect(db) as c:
+        for kind, table, meta, key, task, scope, bound in (
+            ("chunks", "lcm_chunk_vectors", "lcm_chunk_meta", "chunk_id", "chunk", "m.store_id", manifest["rows"]),
+            ("leaves", "lcm_embedding_vectors", "lcm_embedding_meta", "embedded_id", "summary", "CAST(m.embedded_id AS INTEGER)", len(manifest["expected"]["leaves"]))):
+            counts[kind] = c.execute(f"SELECT count(*) FROM {table} v JOIN {meta} m USING ({key},identity_hash) "
+                f"WHERE v.identity_hash=? AND m.archived=0 AND length(v.vec)=? AND {scope} BETWEEN 1 AND ?",
+                (manifest["identities"][task], manifest["dim"]*4, bound)).fetchone()[0]
+    return counts
 
 
 def baseline(db, manifest):

@@ -38,7 +38,8 @@ Catchup binds once per interpreter lifetime, then only observes. Restart default
 to 40% coverage, with a declared 25%-of-max-wall fallback if that fraction is unreachable;
 the small control uses 30 seconds. Shutdown has a 10-second bound, then kill.
 Restart and interpreter startup count toward elapsed time. Every 30 seconds a
-read-only connection counts expected IDs; full raw-row/vector integrity audits
+read-only connection counts expected IDs and digests newly seen vectors only;
+previously seen vector replacements are detected at the next audit. Full raw-row/vector integrity audits
 run at baseline, restart and end. Zero progress includes
 persisted scan progress, and STALLED requires a successfully constructed provider.
 CPU samples are every second, CPU-time deltas in cores, weighted means and full
@@ -61,3 +62,62 @@ Small controls prove instrument sensitivity only: no 250k, floor-host, turn,
 compaction/recall, release, customer, or default-flip claim follows.
 At closeout initialize/add/headline/finalize/check a result card with `bench-card.py`
 for the positive-control evidence directory. The release manager owns publication.
+
+## I2: turns, compaction recall, floor surrogate
+
+These extend I1 without changing its behavior. Use the same variables above;
+`SCRATCH` and `RUN` must name new directories for each invocation.
+
+```sh
+nice -n 19 "$PY" -B -m bench.instruments.local_catchup.turns --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/turns" --out "$RUN/turns" --model-cache "$CACHE" --rows 250000 --blocks 3 --samples 600 --seed 1586
+nice -n 19 "$PY" -B -m bench.instruments.local_catchup.recall --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/recall" --out "$RUN/recall" --model-cache "$CACHE" --rows 250000 --blocks 3 --queries 200 --seed 1586
+# Functional smoke only: add --smoke --rows 2000 --blocks 1 --samples 50 --queries 20
+```
+
+Turns use alternating OFF/ON pairs with a seeded starting state, equivalent
+baseline stores and a seeded host trace. Per-block nearest-rank p90s feed a
+paired block bootstrap (10,000 resamples); mean matched p90 differences have a
+one-sided 95% upper bound. The tolerance is max(50 ms, 10% of mean OFF p90).
+Both ingest+preflight and compression-inclusive dispatch wait must qualify;
+first-bind deltas must each be at most 500 ms. Wrappers observe preparation,
+backfill, embedding-thread joins and denied network attempts. ON completion
+before the trace ends invalidates catch-up evidence. At least two pairs are
+needed for judgment; short smoke blocks are INVALID.
+ON blocks also require a positive corpus covered-count delta and evidence of
+background model preparation unless already prepared at block start. Raw summaries
+record start/end counts; inactive blocks are INVALID (`on_no_catchup_activity`).
+
+Recall uses product recall defaults, a pinned query-ID manifest derived from
+corpus canaries, separate thread-owned connections, and the bgprep deterministic
+summary route. Real leaf inserts with fenced publication callbacks define the
+committed publication intervals; a call that misses every interval is excluded.
+Every block needs 200 overlapping calls and 10 publications. Nearest-rank p50/p90
+and their 10,000-resample upper95 bounds must meet 2 s/8 s. Errors, timeouts,
+missing FTS hits or undisclosed incomplete coverage in overlapping calls fail health.
+Honestly empty semantic arms during catch-up neither fail health nor count toward
+the 200 semantic latency samples; covered cells still require both arms. ON-covered
+explicitly prepares vectors in a setup thread before measurement; this is not
+autonomous coverage evidence. Repeated canaries in small smoke stores do not
+qualify the 200-query full-size cell. Raw samples and per-block summaries persist.
+ON-catching-up requires positive coverage progress or a background backfill that
+embedded rows within the overlapping recall window. Per-recall identity counts
+exclude new trace rows; full expected-ID audits run at block start and end.
+
+Dispatch manually with `gh workflow run lcmx-1586-floor.yml --ref <branch or tag whose commit is the product under test>`
+plus `-f cell=<cell> -f rows=<rows> -f shape=<shape> -f baseline=<baseline> -f max_minutes=<minutes>` for `cell`, `rows`,
+`shape` (`short`/`mixed`), `baseline` (`empty`/`upgrade`), and
+`max_minutes` (121–330). The product commit must contain this workflow and instrument
+(based on main after this stack lands). It prepares the cache before measurement, then enters
+a cgroup v2 with MemoryMax=4 GiB and runs under `taskset -c 0,1`. The measured
+process verifies its effective cgroup and CPU list before starting. All rows are
+labelled **floor surrogate**. Coverage-rate requires a backlog lasting at least
+two hours; early completion is INVALID for the sustained-rate estimate. Recall
+uses the same three states and bars. Workflow artifacts include limits, SHAs,
+summaries and raw samples; the release manager owns result-card publication.
+The host is pinned in the workflow to `71d34bad1045610252eda02ee79549436896e784` and changes only by PR;
+artifacts also record `pip freeze`. Each summary's PASS/FAIL covers only its named
+shape and baseline. The floor bar is met only when every declared shape and
+baseline has a PASS row. The workflow moves its shell into the cgroup as root,
+then executes the unprivileged Python process; Python only verifies the limits.
+Neither synthetic summaries nor functional smoke establish live summary-route,
+quiet-host timing, smallest-host, release, customer, or default-flip readiness.
