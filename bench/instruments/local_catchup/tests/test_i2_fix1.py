@@ -80,7 +80,6 @@ def test_floor_shape_baseline_and_summary(tmp_path, monkeypatch, shape, baseline
     monkeypatch.setattr(sys, "argv", ["floor", "--lcmx-repo", str(tmp_path), "--hermes-source", str(tmp_path),
         "--scratch", str(scratch), "--out", str(out), "--model-cache", str(tmp_path),
         "--cgroup", str(tmp_path), "--limited", "--cell", "coverage-rate", "--shape", shape, "--baseline", baseline])
-    monkeypatch.setattr(floor.atexit, "register", lambda *args: None)
     monkeypatch.setattr(floor, "measured_limits", lambda *args: {"verified": True})
     monkeypatch.setattr(floor, "isolated", lambda *args: None)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -89,7 +88,7 @@ def test_floor_shape_baseline_and_summary(tmp_path, monkeypatch, shape, baseline
         built.append(args)
         return {"shape": args[4], "baseline": args[5]}
     monkeypatch.setattr(floor, "build", build)
-    monkeypatch.setattr(floor, "run", lambda a: dict(state="INCOMPLETE", rows_s=10))
+    monkeypatch.setattr(floor, "run", lambda a: dict(state="INCOMPLETE", rows_s=10, audit=dict(complete=False)))
     clock = iter([0, 7200])
     monkeypatch.setattr(floor.time, "monotonic", lambda: next(clock))
     floor.main()

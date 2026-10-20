@@ -1,9 +1,9 @@
 """Linux floor surrogate: taskset + verified cgroup v2 4 GiB, never a hardware claim."""
 from argparse import Namespace
-import atexit
 import json
 import os
 from pathlib import Path
+import signal
 import subprocess
 import sys
 import time
@@ -72,11 +72,54 @@ def main():
     a = p.parse_args()
     if sys.platform != "linux" or not 121 <= a.max_minutes <= 330:
         raise ValueError("Linux and max minutes in [121,330] required")
+    if a.cell == "coverage-rate" and a.max_minutes < 150:
+        raise ValueError("coverage-rate requires at least 150 minutes: build + 2h window + final audit")
     if not a.limited:
-        subprocess.run(command(sys.argv[1:]), check=True, timeout=a.max_minutes*60)
+        proc = subprocess.Popen(command(sys.argv[1:]), start_new_session=True)
+        timed_out = False
+        try:
+            try:
+                code = proc.wait(timeout=a.max_minutes*60+120)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                os.killpg(proc.pid, signal.SIGTERM)
+                try:
+                    code = proc.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    code = None
+        finally:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)  # Reap surviving grandchildren too.
+            except ProcessLookupError:
+                pass
+            proc.wait()
+        if timed_out:
+            a.out.mkdir(parents=True, exist_ok=True)
+            if not (a.out/"summary.json").exists():
+                dump(a.out/"summary.json", dict(state="ABORTED", reason="outer_deadline", label=LABEL))
+            label_results(a.out)
+        if code:
+            raise subprocess.CalledProcessError(code, proc.args)
         return
     a.out.mkdir(parents=True, exist_ok=False)
-    atexit.register(label_results, a.out)
+    def deadline(*_):
+        raise TimeoutError("floor deadline")
+    previous = signal.signal(signal.SIGTERM, deadline)
+    alarm = signal.signal(signal.SIGALRM, deadline)
+    signal.alarm(a.max_minutes*60)
+    try:
+        limited(a)
+    except (TimeoutError, subprocess.TimeoutExpired):
+        dump(a.out/"summary.json", dict(state="ABORTED", reason="floor_deadline", label=LABEL,
+            shape=a.shape, baseline=a.baseline))
+    finally:
+        signal.alarm(0)
+        signal.signal(signal.SIGTERM, previous)
+        signal.signal(signal.SIGALRM, alarm)
+        label_results(a.out)
+
+
+def limited(a):
     dump(a.out/"limits.json", measured_limits(a.cgroup))
     if a.cell == "recall":
         subprocess.run([sys.executable, "-B", "-m", "bench.instruments.local_catchup.recall",
