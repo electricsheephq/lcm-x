@@ -362,7 +362,9 @@ class Codex(Harness):
                 continue  # counted from the rollout below
             if kind not in ("agent_message", "reasoning", "error", None):
                 violations.append(kind)
-        lines = rollout.read_text().splitlines() if rollout else []
+        lines = rollout.read_text().split("\n") if rollout else []
+        while lines and not lines[-1]:
+            lines.pop()
         for line in lines:
             entry = json.loads(line)
             payload = entry.get("payload") or {}
@@ -410,7 +412,7 @@ class Codex(Harness):
         except subprocess.TimeoutExpired:
             records.append({**record, "status": "error", "error": "timeout", "latency_s": time.monotonic() - started})
             raise RuntimeError("codex_call_failed") from None
-        events = [json.loads(line) for line in proc.stdout.splitlines() if line.startswith("{")]
+        events = [json.loads(line) for line in proc.stdout.split("\n") if line.startswith("{")]
         thread = next((e.get("thread_id") for e in events if e.get("type") == "thread.started"), None)
         rollout = self.rollout(thread)
         violations, mcp_calls, info = self.inspect(events, rollout)

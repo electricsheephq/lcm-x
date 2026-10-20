@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from bench.fmp import dev, dev_cache, dev_panel, delivery, judges
+from bench.fmp import dev, dev_cache, dev_panel, delivery, judges, models
 from bench.fmp.common import digest_file, sha
 from bench.fmp.datasets import Question
 from bench.fmp.dev_cache import Incomplete, Responses, request_identity
@@ -234,3 +234,31 @@ def test_synthetic_end_to_end_cache_and_deadline_receipt(tmp_path, monkeypatch, 
         assert backend.calls == 2
     for name in ("report.json", "report.md", "rows.json", "RESULT.md"):
         assert "synthetic question" not in (args.output / name).read_text()
+
+
+def test_codex_jsonl_lf_framing_preserves_unicode_and_rejects_invalid_json(tmp_path, monkeypatch):
+    # U+2028 is valid JSON string content, never a JSONL record delimiter.
+    text, model = "synthetic\u2028answer", "fixture\u2028model"
+    rollout = tmp_path / "synthetic-rollout.jsonl"
+    entries = [{"type": "turn_context", "payload": {"model": model}}]
+    rollout.write_text("\n".join(json.dumps(e, ensure_ascii=False) for e in entries) + "\n\n")
+    events = [{"type": "thread.started", "thread_id": "synthetic-thread"},
+              {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+              {"type": "turn.completed", "usage": {}}]
+    output = "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n\n"
+    backend = models.Codex(tmp_path / "transport", models.Quota(tmp_path / "quota.json"))
+    monkeypatch.setattr(backend, "run", lambda *a: SimpleNamespace(stdout=output, returncode=0))
+    monkeypatch.setattr(backend, "rollout", lambda thread: rollout)
+    records = []
+    try:
+        message = backend.call(f"codex:{model}@low", [{"role": "user", "content": "synthetic"}], records)
+        assert message["content"].encode() == text.encode()
+        assert records[0]["returned_model"].encode() == model.encode()
+        output = "{invalid}\n"
+        with pytest.raises(json.JSONDecodeError):
+            backend.call(f"codex:{model}@low", [], [])
+        rollout.write_text("{invalid}\n")
+        with pytest.raises(json.JSONDecodeError):
+            backend.inspect([], rollout)
+    finally:
+        backend.close()
