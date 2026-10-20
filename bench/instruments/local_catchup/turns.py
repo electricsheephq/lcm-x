@@ -39,10 +39,10 @@ def worker(request):
         activity = catchup_activity(a.root, start, end,
             {k: v["covered"] for k, v in initial["classes"].items()},
             {k: v["covered"] for k, v in final["classes"].items()}, require_prepared=True)
+        evidence = safety(a)
         engine.shutdown()
         closed = True
         integrity(a, manifest)
-        evidence = safety(a)
         summary = dict(state="NOT_JUDGED", bind_ms=bind, samples=len(rows),
             p90={k: percentile([r[k] for r in rows], .9) for k in ("ingest_preflight_ms", "dispatch_ms")},
             compression_turns=sum(r["compression_due"] for r in rows), join_evidence=evidence,

@@ -170,6 +170,7 @@ def worker(request):
         thread.join(engine._config.recall_query_timeout_s*len(pinned)+30)
         if thread.is_alive() or errors:
             raise RuntimeError(f"recall worker failure: {errors}")
+        evidence = safety(a)
         engine.shutdown()
         closed = True
         integrity(a, manifest)
@@ -183,7 +184,7 @@ def worker(request):
         if a.smoke or a.rows < 250000 or len(pinned) < 200 or (a.state == "ON-catching-up" and
                 (final.get("complete") or not all(r["incomplete"] for r in overlapping(rows, publications)))):
             result["state"] = "INVALID"
-        result.update(bind_ms=bind, safety=safety(a), queries=len(pinned), **activity)
+        result.update(bind_ms=bind, safety=evidence, queries=len(pinned), **activity)
         dump(a.root/"raw-summary.json", result)
     finally:
         halt.set()
