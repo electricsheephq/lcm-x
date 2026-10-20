@@ -177,7 +177,8 @@ def test_caps_count_groups_once(engine, strict):
     snippets = recall(engine, limit=25)
     assert len(snippets["hits"]) == 20
     answer = recall(engine, detail="answer_ready", limit=25)
-    assert len(answer["hits"]) == (8 if strict else 20)
+    # Since #1679, strict answer-ready delivers every ranked group; hydration stays capped at 8.
+    assert len(answer["hits"]) == 20
     assert len({engine._store.get(hit["store_id"])["content"] for hit in answer["hits"]}) == len(answer["hits"])
     assert sum("content" in hit for hit in answer["hits"]) == 8
     assert max(sum(hit["session_id"] == f"s{s}" for hit in answer["hits"]) for s in range(4)) == 5
