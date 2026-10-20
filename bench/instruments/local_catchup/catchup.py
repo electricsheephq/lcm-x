@@ -59,7 +59,7 @@ def launch(a, generation):
         "--lcmx-repo", str(a.lcmx_repo), "--hermes-source", str(a.hermes_source), "--db", str(a.db),
         "--manifest", str(a.manifest), "--home", str(home), "--model-cache", str(a.model_cache),
         "--out", str(a.out), "--scratch", str(a.scratch), "--generation", str(generation)]
-    p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    p = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env={**os.environ, "HOME": str(home), "CFFIXED_USER_HOME": str(home)})
     def capture():
         with (a.out/f"worker-{generation}.log").open("wb") as log:
             __import__("shutil").copyfileobj(p.stdout, log)
@@ -109,7 +109,8 @@ def run(a):
                 break
             if now >= next_progress:
                 result = progress(a.db, manifest)
-                if foreign_files(p.pid, a.home/str(generation), a.db, a.model_cache):
+                if foreign := foreign_files(p.pid, a.home/str(generation), a.db, a.model_cache):
+                    dump(a.out/"cross-profile.json", {"paths": foreign})
                     final, reason = "ABORTED", "cross_profile_access"
                     break
                 if not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] not in ("ok", "not_checked"):

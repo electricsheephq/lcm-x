@@ -130,3 +130,18 @@ def test_11_psutil_mandatory_and_rescore(tmp_path, monkeypatch):
         path = tmp_path/"progress.jsonl"
         path.write_text("".join(json.dumps(r)+"\n" for r in rows))
         assert verdict(path, 1200) == expected
+
+
+def test_6_worker_native_home_isolated(tmp_path, monkeypatch):
+    seen = {}
+    def popen(command, **kwargs):
+        seen.update(kwargs)
+        return Namespace(stdout=None)
+    monkeypatch.setattr(catchup.subprocess, "Popen", popen)
+    monkeypatch.setattr(catchup.threading.Thread, "start", lambda _: None)
+    a = Namespace(home=tmp_path/"home", out=tmp_path, lcmx_repo=REPO,
+                  hermes_source=REPO, db=tmp_path/"db", manifest=tmp_path/"manifest",
+                  model_cache=tmp_path/"cache", scratch=tmp_path)
+    catchup.launch(a, 0)
+    assert seen["env"]["HOME"] == str(a.home/"0")
+    assert seen["env"]["CFFIXED_USER_HOME"] == str(a.home/"0")

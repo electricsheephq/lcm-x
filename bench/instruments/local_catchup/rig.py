@@ -79,7 +79,8 @@ def main():
                 break
             if time.monotonic() >= next_progress:
                 next_progress = time.monotonic()+30
-                if any(foreign_files(q.pid, j.home/"0", j.db, a.model_cache) for j, q in zip(jobs, processes)):
+                if foreign := [paths for j, q in zip(jobs, processes) if (paths := foreign_files(q.pid, j.home/"0", j.db, a.model_cache))]:
+                    dump(a.out/"cross-profile.json", {"paths": foreign})
                     reason = "cross_profile_access"
                     break
                 progress = [read_progress(j.db, m) for j, m in zip(jobs, manifests)]
