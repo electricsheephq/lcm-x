@@ -122,6 +122,8 @@ def main():
         signal.signal(signal.SIGTERM, previous)
         signal.signal(signal.SIGALRM, alarm)
         label_results(a.out)
+    if json.loads((a.out/"summary.json").read_text()).get("state") != "PASS":
+        raise SystemExit(1)
 
 
 def limited(a):

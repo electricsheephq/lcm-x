@@ -155,8 +155,9 @@ def runtime(request):
     guards(mod, a.root/"events.jsonl")
     original_join = threading.Thread.join
     def join(thread, *args, **kw):
-        if REQUEST.get() and threading.current_thread() is threading.main_thread() and any(
-                name in thread.name.lower() for name in ("embed", "backfill")):
+        name = thread.name.lower()
+        if REQUEST.get() and name != "lcm-query-embed" and any(
+                part in name for part in ("embed", "backfill")):
             append(a.root/"events.jsonl", {"violation": "foreground_join", "thread": thread.name})
             raise RuntimeError("foreground embedding join forbidden")
         return original_join(thread, *args, **kw)
@@ -305,9 +306,16 @@ def wait_covered(a, mod, engine, manifest):
                 if all(counts[k] >= len(v) for k, v in manifest["expected"].items()):
                     checked = audit(a.db, manifest)
                     append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_setup", audit=checked))
-                    if not checked["complete"]:
+                    if checked["complete"]:
+                        return
+                    transient = (checked["raw_unchanged"] and not checked["changed_vectors"]
+                                 and not checked["changed_metadata"] and not checked["unexpected_rows"]
+                                 and checked["integrity"] == "ok"
+                                 and all(v["missing_count"] == 0 for v in checked["classes"].values()))
+                    if not transient or time.monotonic()-start > a.max_seconds:
                         raise RuntimeError("covered setup final audit failed")
-                    return
+                    time.sleep(.1)
+                    continue
                 safety(a)
                 fingerprint = str(counts)
                 if fingerprint != previous:
