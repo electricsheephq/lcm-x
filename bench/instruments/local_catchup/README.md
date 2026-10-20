@@ -103,16 +103,18 @@ ON-catching-up requires positive coverage progress or a background backfill that
 embedded rows within the overlapping recall window. Per-recall identity counts
 exclude new trace rows; full expected-ID audits run at block start and end.
 
-Dispatch `lcmx-1586-floor.yml` manually with `lcmx_ref`, `host_ref`, `cell`, `rows`,
+Dispatch manually with `gh workflow run lcmx-1586-floor.yml --ref <branch or tag whose commit is the product under test>`
+plus `-f cell=<cell> -f rows=<rows> -f shape=<shape> -f baseline=<baseline> -f max_minutes=<minutes>` for `cell`, `rows`,
 `shape` (`short`/`mixed`), `baseline` (`empty`/`upgrade`), and
-`max_minutes` (121–330). It prepares the cache before measurement, then enters
+`max_minutes` (121–330). The product commit must contain this workflow and instrument
+(based on main after this stack lands). It prepares the cache before measurement, then enters
 a cgroup v2 with MemoryMax=4 GiB and runs under `taskset -c 0,1`. The measured
 process verifies its effective cgroup and CPU list before starting. All rows are
 labelled **floor surrogate**. Coverage-rate requires a backlog lasting at least
 two hours; early completion is INVALID for the sustained-rate estimate. Recall
 uses the same three states and bars. Workflow artifacts include limits, SHAs,
 summaries and raw samples; the release manager owns result-card publication.
-The host defaults to the Mac bench pin `71d34bad1045610252eda02ee79549436896e784`;
+The host is pinned in the workflow to `71d34bad1045610252eda02ee79549436896e784` and changes only by PR;
 artifacts also record `pip freeze`. Each summary's PASS/FAIL covers only its named
 shape and baseline. The floor bar is met only when every declared shape and
 baseline has a PASS row. The workflow moves its shell into the cgroup as root,
