@@ -171,6 +171,9 @@ CODEX_MCP_PROTOCOL = {"list_mcp_resources", "list_mcp_resource_templates", "read
 SERVER = "lcmx"
 AGENTIC_TOOL_CAP = 30
 USAGE_LIMIT = ("usage limit", "rate limit", "quota", "limit reached", "out of credits")
+GLM_BASE_URL = "https://api.z.ai/api/anthropic"
+GLM_HOST = "api.z.ai"
+GLM_ENV = ("HOME", "USER", "PATH", "LANG", "TMPDIR")
 BASE_ENV = ("HOME", "USER", "LOGNAME", "PATH", "TMPDIR", "SHELL")  # harness children get only these
 
 
@@ -179,9 +182,9 @@ class ToolViolation(Exception):
 
 
 def parse_spec(spec):
-    """`codex:<model>@<effort>`, `claude:<model>`, or the opt-in `openrouter:<id>` (legacy: a bare id)."""
+    """`codex:<model>@<effort>`, `claude:<model>`, `glm:<model>`, or the opt-in `openrouter:<id>` (legacy: a bare id)."""
     kind, sep, rest = spec.partition(":")
-    if not sep or kind not in ("codex", "claude", "openrouter"):
+    if not sep or kind not in ("codex", "claude", "glm", "openrouter"):
         return "openrouter", spec, None
     model, _, effort = rest.partition("@")
     if not model or (kind == "codex") != bool(effort):
@@ -190,7 +193,7 @@ def parse_spec(spec):
 
 
 def harness(spec):
-    return parse_spec(spec)[0] in ("codex", "claude")
+    return parse_spec(spec)[0] in ("codex", "claude", "glm")
 
 
 def render(messages):
@@ -204,6 +207,7 @@ class Quota:
         self.state = json.loads(self.path.read_text()) if self.path.exists() else {
             "codex": {"weekly_used_percent_first": None, "weekly_used_percent_last": None, "stopped": False},
             "claude": {"usage_limit_errors": 0, "stopped": False}}
+        self.state.setdefault("glm", {"usage_limit_errors": 0, "stopped": False})
 
     def check(self, kind):
         with self.lock:
@@ -230,7 +234,7 @@ class Quota:
     def stop(self, kind):
         with self.lock:
             self.state[kind]["stopped"] = True
-            if kind == "claude":
+            if kind in ("claude", "glm"):
                 self.state[kind]["usage_limit_errors"] += 1
             write_json(self.path, self.state)
 
@@ -278,10 +282,15 @@ class Harness:
                                    timeout=self.timeouts[agentic])
         except subprocess.TimeoutExpired as exc:  # keep the partial transcript for the audit
             out = exc.stdout.decode(errors="replace") if isinstance(exc.stdout, bytes) else exc.stdout or ""
+            if env.get("ANTHROPIC_AUTH_TOKEN"):
+                out = out.replace(env["ANTHROPIC_AUTH_TOKEN"], "[REDACTED]")
             (call / "events.jsonl").write_text(out)
             raise
         finally:
             prompt_path.unlink(missing_ok=True)  # corpus stays out of the run tree; the trace keeps metadata
+        if env.get("ANTHROPIC_AUTH_TOKEN"):
+            proc.stdout = (proc.stdout or "").replace(env["ANTHROPIC_AUTH_TOKEN"], "[REDACTED]")
+            proc.stderr = (proc.stderr or "").replace(env["ANTHROPIC_AUTH_TOKEN"], "[REDACTED]")
         (call / "events.jsonl").write_text(proc.stdout or "")
         return proc
 
@@ -422,7 +431,9 @@ DENY_HOOK = Path(__file__).with_name("deny_hook.py")
 class Claude(Harness):
     kind = "claude"
 
-    def __init__(self, *args, token=None, **kwargs):
+    def __init__(self, *args, token=None, kind="claude", **kwargs):
+        self.kind = kind
+        kwargs.setdefault("binary", "claude")
         super().__init__(*args, **kwargs)
         # Isolated config: an empty settings.json, so no user routing, hooks or MCP servers apply.
         self.config = self.scratch / "config"
@@ -452,7 +463,8 @@ class Claude(Harness):
     def call(self, spec, messages, records, tools=None, server=None, **_):
         if tools:
             raise ValueError("harness readers get tools over MCP only")
-        self.quota.check("claude")
+        auth = glm_key() if self.kind == "glm" else None
+        self.quota.check(self.kind)
         _, model, _ = parse_spec(spec)
         call = self.directory()
         mcp = self.server(call, server) if server else None
@@ -460,19 +472,27 @@ class Claude(Harness):
         prompt = render([m for m in messages if m["role"] != "system"])
         # An allowlisted environment: host-session markers (CLAUDECODE, CLAUDE_CODE_*, SDK and OAuth
         # routing variables) would make the child wait for host auth or route elsewhere.
-        env = {k: os.environ[k] for k in BASE_ENV if k in os.environ}
-        env.update(LANG="en_US.UTF-8", CLAUDE_CONFIG_DIR=str(self.config), CLAUDE_CODE_OAUTH_TOKEN=self.token())
+        env = {k: os.environ[k] for k in (GLM_ENV if auth else BASE_ENV) if k in os.environ}
+        env.update(LANG=env.get("LANG", "en_US.UTF-8"), CLAUDE_CONFIG_DIR=str(self.config))
+        if auth:
+            env.update(ANTHROPIC_BASE_URL=GLM_BASE_URL, ANTHROPIC_AUTH_TOKEN=auth)
+        else:
+            env["CLAUDE_CODE_OAUTH_TOKEN"] = self.token()
         started = time.monotonic()
-        record = {"backend": "claude", "requested_model": spec, "mcp_log": str(call / "mcp-log.jsonl") if mcp else None, "returned_model": None, "input_tokens": None,
+        record = {"backend": self.kind, "requested_model": spec, "mcp_log": str(call / "mcp-log.jsonl") if mcp else None, "returned_model": None, "input_tokens": None,
                   "output_tokens": None, "reasoning_tokens": None, "cost": 0, "retries": 0, "at": utc(),
                   "call_dir": call.name, "prompt_tokens_estimate": -(-len(system + prompt) // 4)}
+        if auth:
+            record["endpoint_host"] = GLM_HOST
         try:
-            proc = self.run(self.command(model, system, call, mcp), call, prompt, env, bool(mcp))
+            cmd = self.command(model, system, call, mcp) + (["--effort", "low"] if auth else [])
+            proc = self.run(cmd, call, prompt, env, bool(mcp))
         except subprocess.TimeoutExpired:
             records.append({**record, "status": "error", "error": "timeout", "latency_s": time.monotonic() - started})
             raise RuntimeError("claude_call_failed") from None
         finally:
             env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+            env.pop("ANTHROPIC_AUTH_TOKEN", None)
         events = [json.loads(line) for line in proc.stdout.splitlines() if line.startswith("{")]
         result = next((e for e in reversed(events) if e.get("type") == "result"), None) or {}
         violations, mcp_calls, models = [], 0, set()
@@ -512,8 +532,10 @@ class Claude(Harness):
                       cached_input_tokens=usage.get("cache_read_input_tokens"), output_tokens=usage.get("output_tokens"),
                       reasoning_tokens=(usage.get("output_tokens_details") or {}).get("thinking_tokens"),
                       identity_source="response", wrapper_overhead_tokens=None, input_tokens_label="total incl. retrieved evidence")
-        if rejected or (result.get("is_error") and (result.get("api_error_status") == 429 or limited(result.get("result")))):
-            self.quota.stop("claude")
+        glm_limited = auth and (proc.returncode != 0 or result.get("is_error")) and any(
+            t in (proc.stdout + proc.stderr).lower() for t in (*USAGE_LIMIT, "429", "rate-limit", "rate_limit"))
+        if rejected or glm_limited or (result.get("is_error") and (result.get("api_error_status") == 429 or limited(result.get("result")))):
+            self.quota.stop(self.kind)
             records.append({**record, "status": "error", "error": "usage_limit"})
             raise BudgetStopped()
         if proc.returncode != 0 or result.get("subtype") != "success" or result.get("is_error") or not result.get("result"):
@@ -529,6 +551,13 @@ class Claude(Harness):
         return {"role": "assistant", "content": result["result"]}
 
 
+def glm_key():
+    key = os.environ.get("GLM_API_KEY")
+    if not key:
+        raise ValueError("GLM_API_KEY is not set")
+    return key
+
+
 def keychain_token():
     # Read per call into the child environment only; never printed or written.
     raw = subprocess.run(["security", "find-generic-password", "-s", "Claude Code-credentials",
@@ -540,16 +569,19 @@ class Backends:
     """Routes a model spec to its backend; OpenRouter exists only when a spec names it explicitly."""
     def __init__(self, root, quota, specs, openrouter=None, codex=None, claude=None):
         kinds = {parse_spec(s)[0] for s in specs}
+        if "glm" in kinds:
+            glm_key()  # fail before constructing any backend or running any subprocess
         self.quota = quota
         self.codex = codex or (Codex(root, quota) if "codex" in kinds else None)
         self.claude = claude or (Claude(root, quota) if "claude" in kinds else None)
+        self.glm = Claude(root, quota, kind="glm") if "glm" in kinds else None
         self.openrouter = openrouter if "openrouter" in kinds else None
         if "openrouter" in kinds and openrouter is None:
             raise ValueError("an OpenRouter spec needs an explicit spend ledger (opt-in only)")
 
     def backend(self, spec):
         kind, model, _ = parse_spec(spec)
-        return {"codex": self.codex, "claude": self.claude, "openrouter": self.openrouter}[kind], model
+        return {"codex": self.codex, "claude": self.claude, "glm": self.glm, "openrouter": self.openrouter}[kind], model
 
     def call(self, spec, messages, records, tools=None, **kwargs):
         backend, model = self.backend(spec)
@@ -561,10 +593,12 @@ class Backends:
 
     def context_length(self, spec):
         backend, model = self.backend(spec)
+        if parse_spec(spec)[0] == "glm":
+            return 128_000  # conservative harness admission cap, not a provider capacity claim
         return backend.metadata[model]["context_length"] if backend is self.openrouter else CONTEXT[model]
 
     def close(self):
-        for backend in (self.codex, self.claude):
+        for backend in (self.codex, self.claude, self.glm):
             if backend:
                 backend.close()
         if self.openrouter:

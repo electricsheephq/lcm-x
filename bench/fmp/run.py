@@ -20,8 +20,8 @@ if __package__ in (None, ""):
 from . import datasets, delivery, judges
 from .common import commit, digest_file, load_lcm, quiet, sha, utc, write_json
 from .models import (AGENTIC_TOOL_CAP, CLAUDE_AGREEMENT_JUDGE, CODEX_DEFAULT_JUDGE, CODEX_DEFAULT_READER,
-                     CODEX_DISABLED, JUDGE_MAX_TOKENS, READER_MAX_TOKENS, READERS, REASONING, Backends, BudgetStopped,
-                     OpenRouter, Quota, Spend, ToolViolation, harness, parse_spec)
+                     CODEX_DISABLED, GLM_HOST, JUDGE_MAX_TOKENS, READER_MAX_TOKENS, READERS, REASONING, Backends, BudgetStopped,
+                     OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec)
 from .score import score
 from .stores import Stores
 
@@ -44,7 +44,7 @@ def parser():
     p.add_argument("--delivery", choices=("agentic", "single", "full_context"), default="agentic")
     # Default matrix is all-Codex on the ChatGPT plan; OpenRouter is an explicit opt-in
     # (`openrouter:<id>`, with --max-spend and --spend-ledger).
-    p.add_argument("--reader", default=CODEX_DEFAULT_READER, help="codex:<model>@<effort> | claude:<model> | "
+    p.add_argument("--reader", default=CODEX_DEFAULT_READER, help="codex:<model>@<effort> | claude:<model> | glm:<model> | "
                    "openrouter:<id>; opt-in ids: " + ", ".join(READERS))
     p.add_argument("--judge", nargs="+", default=[CODEX_DEFAULT_JUDGE], help="judges applied to every answer")
     p.add_argument("--agreement-judge", default=CLAUDE_AGREEMENT_JUDGE, help="judge on a seeded sample; 'none' disables")
@@ -91,7 +91,7 @@ def estimate(args, n):
         if args.agreement_judge != "none":
             calls.append((args.agreement_judge, len(sample(range(n), args.agreement_fraction, 0)), TOKENS_PER_CALL["judge"]))
     for spec, count, per in calls:
-        plan = {"codex": "chatgpt_plan", "claude": "claude_plan", "openrouter": "openrouter_metered"}[parse_spec(spec)[0]]
+        plan = {"codex": "chatgpt_plan", "claude": "claude_plan", "glm": "glm_coding_plan", "openrouter": "openrouter_metered"}[parse_spec(spec)[0]]
         entry = plans.setdefault(plan, {"calls": 0, "tokens": 0, "specs": []})
         entry["calls"] += count
         entry["tokens"] += count * per
@@ -178,6 +178,8 @@ def execute(args):
         return
     if not 0 < args.agreement_fraction <= 1:
         raise ValueError("invalid agreement fraction")
+    if any(parse_spec(s)[0] == "glm" for s in specs(args)):
+        glm_key()
     if args.data is None:
         raise ValueError("--data FILE or FMP_LME_DATA is required")
     args.data = Path(args.data)
@@ -290,6 +292,7 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
                            ("prompts_sha256", prompt_hashes())):
             if manifest[key] != value:
                 raise ValueError("judging run identity mismatch")
+    manifest.setdefault("endpoint_hosts", {}).update({s: GLM_HOST for s in specs(args) if parse_spec(s)[0] == "glm"})
     started = time.monotonic()
     if args.command == "answer":
         def work(q):

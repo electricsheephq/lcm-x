@@ -7,6 +7,10 @@ if [[ "${FMP_NICED:-}" != 1 ]]; then
 fi
 umask 077
 PYTHON="${FMP_PYTHON:?set FMP_PYTHON to the Python that has LCM-X dependencies}"
+if ! "$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+  echo "FMP_PYTHON requires Python >= 3.11" >&2
+  exit 1
+fi
 export PYTHONDONTWRITEBYTECODE=1
 export OMP_NUM_THREADS=4 OPENBLAS_NUM_THREADS=4 MKL_NUM_THREADS=4 ORT_NUM_THREADS=4
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"

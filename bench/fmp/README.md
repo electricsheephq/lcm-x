@@ -28,6 +28,13 @@ explicit opt-in metered path and needs `--max-spend` and `--spend-ledger`. Defau
 `claude:claude-opus-5-5` on a seeded 10% sample of question ids (`--agreement-judge none` disables),
 4 workers. `run.sh` loads the OpenRouter key only for an OpenRouter spec.
 
+`glm:<model>` uses the z.ai Coding Plan subscription through the isolated Claude Code runner
+at `api.z.ai`, with low thinking and no metered API charge. The operator exports `GLM_API_KEY`
+from their own secret store; the harness reads only that environment variable and passes it only
+to the child. For run 1, judge every answer with two families:
+`--judge codex:gpt-6.1-sol@low glm:glm-5.3 --agreement-judge none`.
+GLM readers support `single`, `full_context` (a conservative 128k admission cap), and the unchanged Claude MCP agentic route.
+
 - Codex: isolated `CODEX_HOME` (auth is a symlink to the plan login, never copied) and `HOME`,
   `--ignore-user-config --ignore-rules -s read-only`, every built-in tool feature disabled, a fresh
   empty `--cd` per call under `<output>/harness/`, prompt from a file, stdin from that file. Code mode

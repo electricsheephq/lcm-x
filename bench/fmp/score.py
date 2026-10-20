@@ -84,6 +84,8 @@ def quota(calls):
     weekly = [c["weekly_used_percent"] for c in calls if c.get("weekly_used_percent") is not None]
     return {"codex_weekly_used_percent": [min(weekly), max(weekly)] if weekly else None,
             "weekly_unknown": sum(c.get("backend") == "codex" and c.get("weekly_used_percent") is None for c in calls),
+            "glm_usage_limit_errors": sum(c.get("backend") == "glm" and c.get("error") == "usage_limit"
+                                          for c in calls),
             "claude_usage_limit_errors": sum(c.get("backend") == "claude" and c.get("error") == "usage_limit"
                                              for c in calls)}
 
