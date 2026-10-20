@@ -144,8 +144,8 @@ def guards(mod, events, generation=0):
     def construct(self, *, allow_download):
         foreground = foreground_thread()
         append(events, {"event": "prepare", "foreground": foreground,
-                        "download": allow_download, "at": time.monotonic()})
-        if allow_download or foreground:
+                        "allow_download": allow_download, "at": time.monotonic()})
+        if foreground:
             raise RuntimeError("foreground/download preparation forbidden")
         started = time.monotonic()
         model = original(self, allow_download=allow_download)
