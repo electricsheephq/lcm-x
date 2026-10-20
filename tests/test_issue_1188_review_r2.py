@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from hermes_lcm import schemas, tools, evidence_pack, evidence_compiler, answer_contract
+from hermes_lcm import schemas, tools, evidence_pack, evidence_compiler, answer_contract, retrieval_core
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryDAG, SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -149,7 +149,7 @@ def anchor_pipeline(engine, monkeypatch):
     monkeypatch.setattr(tools, '_lcm_recall_summary_arm', lambda *a, **k: (
         [entry['hit'] for entry in original], 'full', len(original), len(original), []))
     monkeypatch.setattr(tools, '_lcm_recall_chunk_arm', lambda *a, **k: ([], 'full', 0, 0))
-    monkeypatch.setattr(tools, 'rrf_fuse', lambda *a, **k: [
+    monkeypatch.setattr(retrieval_core, 'rrf_fuse', lambda *a, **k: [
         {**entry, 'hit': dict(entry['hit'])} for entry in original])
     return anchor['store_id']
 
@@ -220,7 +220,7 @@ def test_REGRESSION_plugin_registry_selected_variant(engine, monkeypatch):
     assert selected['lcm_load_session'] == schemas.recall_guidance_schemas('v2')['lcm_load_session']
 
 
-@pytest.mark.parametrize('path', ['pack', 'compile-proposal', 'compile-auto', 'requirements'])
+@pytest.mark.parametrize('path', ['pack', 'compile-proposal', 'compile-auto', 'requirements', 'adaptive'])
 def test_REGRESSION_internal_retrieve_keys_inert(engine, monkeypatch, path):
     for sid in 'abcdef':
         append(engine, sid)
@@ -242,6 +242,10 @@ def test_REGRESSION_internal_retrieve_keys_inert(engine, monkeypatch, path):
     hook = hook_module()
 
     def run():
+        if path == 'adaptive':
+            engine._adaptive_retrieval = SimpleNamespace(search=lambda *, dispatch, **kwargs: {
+                'recall': dispatch('lcm_recall', args)})
+            return tools.lcm_retrieve({'action': 'search'}, engine=engine)
         if path == 'pack':
             return tools.lcm_evidence_pack({}, engine=engine)
         if path.startswith('compile'):
