@@ -169,8 +169,9 @@ EXTRA_CONFIG_ROWS = (
     ("ignore_message_patterns", "LCM_IGNORE_MESSAGE_PATTERNS", "list", []),
 )
 
-# from_env has validation after the primitive reader for these six fields.
+# from_env has validation after the primitive reader for these fields.
 SPECIAL = {
+    "recall_delivery_unit": ("hits",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),
     "leaf_target_min_tokens": (D, D, D, D, 1, D, D, D, D, D, D, D, D, D, D, D),
