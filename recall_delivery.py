@@ -57,8 +57,18 @@ def deliver_recall(
     event_time_fields: Callable[[dict[str, Any] | None], dict[str, str]],
     read_occurrence_source: Callable[[int], tuple[dict, dict | None]],
     rerank_enabled: Callable[[], bool],
+    session_delivery: Callable[..., str] | None = None,
 ) -> str:
     """Deliver ranked entries without changing retrieval or host-read policy."""
+    if session_delivery is not None:
+        # Reuse the existing empty envelope/metrics; only the opt-in branch pays
+        # for it. The hits branch below retains its exact read/serialization order.
+        options = dict(locals())
+        options.pop("ordered")
+        options.pop("session_delivery")
+        response = json.loads(_deliver_hits([], **options))
+        response["provenance"].pop("answer_ready", None)
+        return session_delivery(ordered, response)
     # -- Response shaping (char-capped). The default snippets path retains the
     # historical order and serialized response exactly. answer_ready applies
     # stable post-rank diversity before bounded exact-ref hydration.
@@ -616,3 +626,8 @@ def _fts_anchor_delivered(
     """Whether the FTS arm's anchored hit is among the returned ``hits`` (#950)."""
     anchor = _hit_identity(arm_hits["fts"][0])
     return any(_hit_identity(hit) == anchor for hit in hits)
+
+
+# The opt-in empty-envelope call must not re-enter observer wrappers installed
+# on deliver_recall (FMP observes the real tools.py caller's effective K caps).
+_deliver_hits = deliver_recall

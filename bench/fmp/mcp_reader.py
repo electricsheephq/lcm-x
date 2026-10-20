@@ -87,6 +87,8 @@ def serve(spec, stdin, stdout):
     stores = Stores(spec["store_root"], spec["config"], spec["repo"], spec["dataset_sha"], lme,
                     spec["summaries"], spec.get("embed_cache"), spec.get("store_text", "speaker-prefix"))
     with stores.engine(question) as (engine, _):
+        if spec.get("delivery_unit", "hits") == "session":
+            engine._config.recall_delivery_unit = "session"
         reader = Reader(spec, engine, delivery.schemas(engine), spec["log"])
         for line in stdin:
             if not line.strip():

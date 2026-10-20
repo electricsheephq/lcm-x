@@ -109,14 +109,18 @@ def single(q, engine, speakers=None, hit_label="speaker", store_text="speaker-pr
     payload = json.loads(raw)
     if "error" in payload:
         raise RuntimeError("recall_failed")
-    rows = engine._store.get_batch([h["store_id"] for h in payload.get("hits", [])
-                                    if isinstance(h.get("store_id"), int)])
+    session = payload.get("provenance", {}).get("delivery", {}).get("unit") == "session"
+    rows = ({h["store_id"]: {**h, "observed_at": None} for h in payload.get("hits", [])} if session else
+            engine._store.get_batch([h["store_id"] for h in payload.get("hits", [])
+                                    if isinstance(h.get("store_id"), int)]))
     lines = []
     for hit in payload.get("hits", []):
         row = rows.get(hit.get("store_id"))
         if row is not None:
             stamp = row.get("observed_at")
             date = datetime.fromtimestamp(stamp, timezone.utc).isoformat() if stamp else "unknown"
+            if session:
+                date = row.get("event_time", "unknown")
             speaker = (speakers or {}).get(str(row["store_id"])) if hit_label == "speaker" else None
             role = speaker or row["role"]
             content = row["content"]
@@ -194,6 +198,8 @@ def _answer(q, mode, client, reader, engine, speakers, tool_budget, input_budget
         return {**result, "status": "skipped", "reason": "does not fit"}
     offered = schemas(engine) if mode == "agentic" else None
     used, last, sent, reserve = 0, 0, 0, TOOL_RESULT_RESERVE
+    if getattr(getattr(engine, "_config", None), "recall_delivery_unit", "hits") == "session":
+        reserve = 16_000
 
     def pending():  # estimated prompt tokens of the next call
         return last + tokens(messages[sent:]) if sent else tokens([messages, offered])

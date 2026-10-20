@@ -44,6 +44,7 @@ def parser():
     p.add_argument("--store-root", type=Path, required=True)
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--delivery", choices=("agentic", "single", "full_context"), default="agentic")
+    p.add_argument("--delivery-unit", choices=("hits", "session"), default="hits")
     # Default matrix is all-Codex on the ChatGPT plan; OpenRouter is an explicit opt-in
     # (`openrouter:<id>`, with --max-spend and --spend-ledger).
     p.add_argument("--reader", type=str, default=CODEX_DEFAULT_READER, help="codex:<model>@<effort> | claude:<model> | glm:<model> | "
@@ -107,7 +108,9 @@ def estimate(args, n):
 
 
 def switches(args):
-    return {"store_text": getattr(args, "store_text", "speaker-prefix"),
+    return {**({"delivery_unit": "session", "delivery_budget": 16000}
+               if getattr(args, "delivery_unit", "hits") == "session" else {}),
+            "store_text": getattr(args, "store_text", "speaker-prefix"),
             "hit_label": getattr(args, "hit_label", "speaker") if getattr(args, "delivery", "agentic") == "single" else "n/a"}
 
 
@@ -274,6 +277,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
         if manifest_path.exists():
             raise ValueError("output already contains a run; use a new directory")
         with store.engine(questions[0]) as (engine, _):
+            if getattr(args, "delivery_unit", "hits") == "session":
+                engine._config.recall_delivery_unit = "session"
             toolset = [s["function"]["name"] for s in delivery.schemas(engine)]
         manifest = {"harness_commit": commit(Path(__file__).resolve().parents[2]),
             "harness_tree_sha256": sha(b"".join(p.read_bytes() for p in sorted(Path(__file__).parent.glob("*.py")))),
@@ -325,6 +330,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
                                                server=server_spec(args, dataset_sha, q)))
                 else:
                     with store.engine(q) as (engine, _):
+                        if getattr(args, "delivery_unit", "hits") == "session":
+                            engine._config.recall_delivery_unit = "session"
                         speakers = json.loads((store.directory(q) / "speakers.json").read_text()) if args.hit_label == "speaker" else None
                         row.update(delivery.answer(q, args.delivery, client, args.reader, engine, speakers,
                                                    records=calls, hit_label=args.hit_label, store_text=args.store_text))

@@ -693,6 +693,9 @@ def register(ctx):
     # shadow Path B and lose current-turn ingest, so the Path B fallback is the
     # expected healthy behavior there.
     _TOOLS = [(spec.name, spec.schema, spec.emoji) for spec in TOOL_REGISTRY]
+    if getattr(engine._config, "recall_delivery_unit", "hits") == "session":
+        from .recall_session import session_schema
+        _TOOLS = [(name, session_schema(schema), emoji) for name, schema, emoji in _TOOLS]
     # Share the loaded-config filter with the native context-engine path:
     # explicitly disabled and flag-dormant tools cost no schema tokens.
     _disabled = engine._omitted_tool_names()

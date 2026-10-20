@@ -4332,6 +4332,15 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             ordered, arm_hits, arm_order, limit, arm_weights=arm_weights
         )
 
+    session_delivery = None
+    if kwargs.get("delivery_unit", getattr(engine._config, "recall_delivery_unit", "hits")) == "session":
+        from .recall_session import deliver_session
+        session_delivery = partial(
+            deliver_session, engine=engine, deadline=deadline, excluded=excluded_session_ids,
+            allowed=candidate_session_ids, seen_refs=seen_refs, delta_requested=delta_requested,
+            event_time_fields=_lcm_recall_event_time, occurrence=include_occurrence_time,
+            summary_leads=summary_leads,
+        )
     return recall_delivery.deliver_recall(
         ordered,
         query=query,
@@ -4373,6 +4382,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             engine._store.get(store_id),
         ),
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
+        session_delivery=session_delivery,
     )
 
 
@@ -4948,6 +4958,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
             "fresh_tail_count": engine._config.fresh_tail_count,
             "fresh_tail_max_tokens": engine._config.fresh_tail_max_tokens,
             "leaf_chunk_tokens": engine._config.leaf_chunk_tokens,
+            "recall_delivery_unit": getattr(engine._config, "recall_delivery_unit", "hits"),
             "leaf_target_ratio": getattr(
                 engine._config, "leaf_target_ratio", LCMConfig.leaf_target_ratio
             ),
