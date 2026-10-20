@@ -83,10 +83,18 @@ def test_6_guards_before_any_write(tmp_path, which):
 
 def test_6_open_file_allowlist(tmp_path, monkeypatch):
     import psutil
-    monkeypatch.setattr(psutil, "Process", lambda _: Namespace(open_files=lambda: [Namespace(path=str(tmp_path/"other"))]))
-    assert common.foreign_files(1, tmp_path/"home", tmp_path/"store.db", tmp_path/"cache")
-    monkeypatch.setattr(psutil, "Process", lambda _: Namespace(open_files=lambda: [Namespace(path=str(tmp_path/"store.db-wal"))]))
-    assert not common.foreign_files(1, tmp_path/"home", tmp_path/"store.db", tmp_path/"cache")
+
+    def opened(*paths):
+        monkeypatch.setattr(psutil, "Process", lambda _: Namespace(open_files=lambda: [Namespace(path=str(p)) for p in paths]))
+
+    user, os_cache = tmp_path/"user", tmp_path/"var"/"folders"/"C"/"python"/"Cache.db"
+    args = (1, user/"cell"/"home", user/"cell"/"store.db", user/"cache")
+    opened(user/"other-cell"/"store.db")  # a sibling profile's store under the user home
+    assert common.foreign_files(*args, user_home=user)
+    opened(tmp_path/"elsewhere"/".hermes"/"profiles"/"x"/"lcm.db")  # any live profile path
+    assert common.foreign_files(*args, user_home=user)
+    opened(user/"cell"/"store.db-wal", user/"cell"/"home"/"x", user/"cache"/"model.onnx", os_cache)
+    assert not common.foreign_files(*args, user_home=user)  # own paths and the OS URL cache
 
 
 def test_7_progress_has_no_hash_or_integrity_scan(fixture_corpus, monkeypatch):
