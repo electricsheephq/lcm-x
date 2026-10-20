@@ -101,7 +101,7 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
     snapshots = snapshot(runs, output)
     for directory in snapshots:
         manifest = json.loads((directory / "run-manifest.json").read_text())
-        rows = [json.loads(line) for line in (directory / "judged.jsonl").read_text().splitlines()]
+        rows = [json.loads(line) for line in (directory / "judged.jsonl").read_text().split("\n") if line.strip()]
         if manifest.get("status") not in ("complete", "incomplete"):
             raise ValueError("run is not fully judged")
         if {r["qid"] for r in rows} != set(manifest.get("question_ids") or []):
