@@ -4602,7 +4602,7 @@ def _chunk_authorized_uncertain_rows(
     limit: int,
     retry_before: float | None = None,
 ) -> tuple[int, list[tuple[str, str, int]], dict[str, tuple[int, int, int, int]]]:
-    """Keep retry markers for rebuildable chunks; discard unrebuildable orphans."""
+    """Keep retry markers unless their source message is gone or empty."""
     rows = conn.execute(
         f"""
         SELECT f.embedded_id
@@ -4626,8 +4626,9 @@ def _chunk_authorized_uncertain_rows(
         rebuilt = _rebuild_chunk_document(conn, chunk_id, policy)
         if rebuilt is None or rebuilt[3] <= rebuilt[2]:
             conn.execute(
-                "DELETE FROM lcm_embedding_backfill_inflight WHERE identity_hash=? AND embedded_id=? AND state='uncertain'",
-                (identity_hash, chunk_id),
+                "DELETE FROM lcm_embedding_backfill_inflight WHERE identity_hash=? AND embedded_id=? AND state='uncertain' "
+                "AND NOT EXISTS (SELECT 1 FROM messages WHERE store_id=CAST(? AS INTEGER) AND COALESCE(content, '') != '')",
+                (identity_hash, chunk_id, chunk_id.split(":", 1)[0]),
             )
             conn.commit()
             continue
@@ -4653,7 +4654,7 @@ def _chunk_authorized_uncertain_rows(
 
 def _chunk_backfill_remaining(
     db_path, identity_hash: str | None, policy: str, pending: int, embedded: int,
-    incremental: bool = False, *, include_boundaries: bool = False,
+    incremental: bool = False, *, include_boundaries: bool = False, inflight_policy: str | None = None,
 ) -> tuple[int, int, int]:
     try:
         check_conn = _embedding_read_connection(db_path)
@@ -4666,12 +4667,23 @@ def _chunk_backfill_remaining(
             )
             if identity_hash:
                 try:
-                    actionable = [row for row in check_conn.execute(
+                    chunks_by_source = {}
+                    actionable = []
+                    for row in check_conn.execute(
                         "SELECT embedded_id, state FROM lcm_embedding_backfill_inflight "
                         "WHERE identity_hash = ?",
                         (identity_hash,),
-                    ) if (rebuilt := _rebuild_chunk_document(check_conn, row[0], policy)) is not None
-                        and rebuilt[3] > rebuilt[2]]
+                    ):
+                        try:
+                            store_id = int(row[0].split(":", 1)[0])
+                        except ValueError:
+                            continue
+                        if store_id not in chunks_by_source:
+                            source = check_conn.execute("SELECT role, content FROM messages WHERE store_id=?", (store_id,)).fetchone()
+                            chunks_by_source[store_id] = {c.chunk_id for c in chunk_message(store_id, *source, policy=inflight_policy or policy)
+                                                         if c.char_end > c.char_start} if source else set()
+                        if row[0] in chunks_by_source[store_id]:
+                            actionable.append(row)
                     in_flight = len(actionable)
                     uncertain = sum(row[1] in ('dispatched', 'uncertain') for row in actionable)
                 except sqlite3.OperationalError:
@@ -5302,6 +5314,7 @@ def _chunk_backfill_run(
     remaining, in_flight_count, uncertain_count = _chunk_backfill_remaining(
         db_path, identity, policy, pending, embedded, incremental,
         include_boundaries=stop_reason == "process_exit",
+        inflight_policy=normalize_content_policy(getattr(config, "embedding_content_policy", "conversational")),
     )
     operator_retry = uncertain_count if embedding_provider_id(provider_name) != "fastembed" else 0
     backlog = remaining + in_flight_count - operator_retry

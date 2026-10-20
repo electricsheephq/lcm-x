@@ -5,7 +5,7 @@ or `chunk semantic index catching up` reason while the last backfill pass record
 a backlog for that identity. A count is included when known; bounded chunk passes
 record only whether work remains. Successful catch-up clears the reason. Ordinary
 automatic ingest lag and identities with no recorded pass do not add this reason.
-Non-FastEmbed uncertain rows report `<corpus> semantic index has N rows awaiting /lcm embed backfill --retry-uncertain`.
+Non-FastEmbed uncertain rows report `<corpus> semantic index has N rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus <summary|chunks>`.
 Ingest marks an existing chunk backlog when automatic chunk passes cannot run; manual backfill clears it.
 
 Use read-only product tools before changing configuration or running an apply path.

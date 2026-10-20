@@ -172,7 +172,7 @@ def test_orphan_uncertain_chunk_does_not_hold_backlog(engine, source):
     assert recall(engine, "chunk")["degraded"] is False
     backfill(engine, "chunk", limit=100, retry=True)
     with sqlite3.connect(engine._store.db_path) as conn:
-        assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_backfill_inflight").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_backfill_inflight").fetchone()[0] == (source == "policy")
 
 
 @pytest.mark.parametrize("task", ["summary", "chunk"])
@@ -188,7 +188,8 @@ def test_uncertain_rows_name_operator_retry(engine, task):
     for _ in range(4):
         embedding_maintenance.run_incremental_embedding_pass(engine._store.db_path, engine._config)
     reason = recall(engine, task)["degraded_reason"]
-    assert f"{task} semantic index has 1 rows awaiting /lcm embed backfill --retry-uncertain" in reason
+    corpus = "chunks" if task == "chunk" else "summary"
+    assert f"{task} semantic index has 1 rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus {corpus}" in reason
     assert "catching up" not in reason
     backfill(engine, task, limit=100, retry=True)
     assert recall(engine, task)["degraded"] is False
@@ -263,3 +264,185 @@ def test_remote_chunk_metadata_failure_does_not_fail_ingest(engine):
     batch = engine._store.append_batch("seed", [message])
     for store_id in [single, *batch]:
         assert engine._store.get(store_id)["content"] == message["content"]
+
+
+@pytest.mark.parametrize("override", ["conversational", "heads"])
+def test_retry_policy_override_preserves_configured_backlog(engine, override):
+    # Supplied C-policy/verify-policy probes: tool chunks exist only under full.
+    engine._config.embedding_content_policy = "full"
+    backfill(engine, "chunk", limit=100)
+    sid = engine._store.append("seed", {"role": "tool", "content": "cobalt output. " * 600})
+    mark_uncertain(engine, "chunk", f"{sid}:1")
+    backfill(engine, "chunk", limit=100)
+    assert record(engine, "chunk")["operator_retry"] == 1
+    command._embedding_backfill_text(
+        ["--apply", "--retry-uncertain", "--corpus", "chunks", "--policy", override], engine)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert conn.execute("SELECT state FROM lcm_embedding_backfill_inflight WHERE embedded_id=?",
+                            (f"{sid}:1",)).fetchone() == ("uncertain",)
+    assert record(engine, "chunk")["operator_retry"] == 1
+    assert recall(engine, "chunk")["degraded"] is True
+    for _ in range(3):
+        embedding_maintenance.run_incremental_embedding_pass(engine._store.db_path, engine._config)
+    assert recall(engine, "chunk")["degraded"] is True
+    backfill(engine, "chunk", limit=100, retry=True)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert conn.execute("SELECT 1 FROM lcm_chunk_meta WHERE chunk_id=?", (f"{sid}:1",)).fetchone()
+    assert recall(engine, "chunk")["degraded"] is False
+
+
+@pytest.mark.parametrize("content", [None, ""])
+def test_retry_purges_only_source_gone_or_empty(engine, content):
+    backfill(engine, "chunk", limit=100)
+    sid = engine._store.append("seed", {"role": "user", "content": "cobalt source"})
+    mark_uncertain(engine, "chunk", f"{sid}:0")
+    with sqlite3.connect(engine._store.db_path) as conn:
+        if content is None:
+            conn.execute("DELETE FROM messages WHERE store_id=?", (sid,))
+        else:
+            conn.execute("UPDATE messages SET content='' WHERE store_id=?", (sid,))
+    backfill(engine, "chunk", limit=100, retry=True)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_backfill_inflight").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_backlog_mark_rollback_cannot_rollback_ingest(engine, batch, caplog):
+    # Supplied F1 probe: RAISE(ROLLBACK) models a transaction-aborting error.
+    engine._config.ollama_base_url = "http://192.0.2.1:11434"
+    backfill(engine, "chunk", limit=100)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("CREATE TRIGGER abort_txn BEFORE UPDATE ON metadata "
+                     "WHEN NEW.key LIKE 'embedding_catchup:%' "
+                     "BEGIN SELECT RAISE(ROLLBACK, 'simulated transaction-aborting error'); END")
+    message = {"role": "user", "content": "cobalt committed"}
+    with caplog.at_level("DEBUG", logger="hermes_lcm.store"):
+        ids = (engine._store.append_batch("seed", [message] * 3) if batch
+               else [engine._store.append("seed", message)])
+    with sqlite3.connect(engine._store.db_path) as conn:
+        for sid in ids:
+            assert conn.execute("SELECT content FROM messages WHERE store_id=?", (sid,)).fetchone() == (message["content"],)
+    assert "Could not mark manual chunk backlog" in caplog.text
+    assert engine._store.append("seed", message) > max(ids)
+
+
+@pytest.mark.parametrize("task,corpus", [("summary", "summary"), ("chunk", "chunks")])
+def test_operator_retry_reason_is_executable_for_its_corpus(engine, monkeypatch, task, corpus):
+    backfill(engine, task, limit=100)
+    if task == "summary":
+        row = engine._dag.add_node(SummaryNode(session_id="seed", depth=0, summary="cobalt retry", created_at=9., latest_at=9.))
+        embedded_id = getattr(row, "node_id", row)
+    else:
+        embedded_id = f"{engine._store.append('seed', {'role': 'user', 'content': 'cobalt retry'})}:0"
+    mark_uncertain(engine, task, embedded_id)
+    backfill(engine, task, limit=100)
+    reason = recall(engine, task)["degraded_reason"]
+    tokens = reason.split("awaiting /lcm embed backfill ", 1)[1].split()
+    options = command._embedding_backfill_options(tokens)
+    assert not isinstance(options, str), options
+    assert options[0] is True and options[2] is True and options[3] == corpus
+    seen = []
+    monkeypatch.setattr(command, "_chunk_backfill_text", lambda *a, **kw: seen.append("chunks") or "ok")
+    monkeypatch.setattr(command, "_embedding_backfill_summary_run", lambda *a, **kw: seen.append("summary") or "ok")
+    command._embedding_backfill_text(tokens, engine)
+    assert seen == [corpus]
+
+
+@pytest.mark.parametrize("initial", [0, False, 7])
+def test_backlog_mark_preserves_count_and_does_not_rewrite(engine, initial):
+    # Supplied F4 probe: preserve known counts and stop rewriting once marked.
+    engine._config.ollama_base_url = "http://192.0.2.1:11434"
+    backfill(engine, "chunk", limit=100)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("UPDATE metadata SET value=json_set(value, '$.remaining', json(?)) "
+                     "WHERE key LIKE 'embedding_catchup:chunk:%'", (json.dumps(initial),))
+        conn.execute("CREATE TABLE mark_updates(n INTEGER)")
+        conn.execute("INSERT INTO mark_updates VALUES(0)")
+        conn.execute("CREATE TRIGGER count_marks AFTER UPDATE ON metadata "
+                     "WHEN NEW.key LIKE 'embedding_catchup:chunk:%' "
+                     "BEGIN UPDATE mark_updates SET n=n+1; END")
+    for _ in range(3):
+        engine._store.append("seed", {"role": "user", "content": "cobalt later"})
+    assert record(engine, "chunk")["remaining"] == (7 if initial == 7 else True)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert conn.execute("SELECT n FROM mark_updates").fetchone()[0] == (0 if initial == 7 else 1)
+
+
+def test_import_marks_cloud_chunk_backlog_after_commit(engine, tmp_path, monkeypatch):
+    from tests.test_import_lossless_claw import load_importer_module, write_jsonl_session, jsonl_header, jsonl_message
+    from hermes_lcm.ingest_protection import embedding_privacy_revision
+    engine._config.embedding_provider = "voyage"
+    store = VectorStore(engine._store.db_path, config=engine._config)
+    store.register_profile("model-a", "voyage", 2, task="chunk", revision=embedding_privacy_revision(engine._config))
+    store.close()
+    monkeypatch.setattr(tools, "_resolve_recall_chunk_provider", lambda *a, **kw: FakeProvider("voyage", "model-a"))
+    def fill():
+        result = command._chunk_backfill_run(engine._config, engine._store.db_path, apply=True, limit=100,
+                                             retry_uncertain=False, policy="", confirm_raw_text=True)
+        assert result["error"] is None, result
+    fill()
+    assert recall(engine, "chunk")["degraded"] is False
+    for key, value in {"LCM_EMBEDDINGS_ENABLED": "true", "LCM_EMBEDDING_PROVIDER": "voyage",
+                       "LCM_EMBEDDING_MODEL": "model-a"}.items():
+        monkeypatch.setenv(key, value)
+    source = tmp_path / "import" / "new.jsonl"
+    write_jsonl_session(source, [jsonl_header("imported")] + [
+        jsonl_message(f"m{i}", "user", "cobalt imported " + "detail " * 60) for i in range(3)])
+    importer = load_importer_module()
+    result = importer.import_jsonl_sessions(files=[source], target_db=engine._store.db_path,
+                                           namespace="openclaw-jsonl", agent="fixture", import_id="fix2", apply=True)
+    assert result.imported == 3
+    assert record(engine, "chunk")["remaining"] is True
+    assert recall(engine, "chunk")["degraded"] is True
+    fill()
+    assert recall(engine, "chunk")["degraded"] is False
+
+
+def test_actionable_count_chunks_each_source_once(engine, monkeypatch):
+    # Supplied D cost probe, bounded to deterministic rebuild-call counts.
+    from hermes_lcm.chunking import chunk_message
+    backfill(engine, "chunk", limit=100)
+    sources = set()
+    total = 0
+    for _ in range(3):
+        sid = engine._store.append("bulk", {"role": "assistant", "content": "cobalt sentence. " * 3750})
+        sources.add(sid)
+        stored = engine._store.get(sid)
+        for chunk in chunk_message(sid, stored["role"], stored["content"], policy="conversational"):
+            mark_uncertain(engine, "chunk", chunk.chunk_id)
+            total += 1
+    calls = []
+    def counted(sid, *args, **kwargs):
+        calls.append(sid)
+        return chunk_message(sid, *args, **kwargs)
+    monkeypatch.setattr(command, "chunk_message", counted)
+    # Isolate actionable counting from the separately bounded discovery scan.
+    monkeypatch.setattr(command, "_chunk_pending_rows", lambda *a, **kw: (0, [], {}))
+    with sqlite3.connect(engine._store.db_path) as conn:
+        identity = conn.execute("SELECT identity_hash FROM lcm_embedding_profile WHERE active=1 AND task='chunk'").fetchone()[0]
+    assert command._chunk_backfill_remaining(engine._store.db_path, identity, "conversational", 0, 0, True) == (0, total, total)
+    assert len(calls) <= len(sources)
+
+
+@pytest.mark.parametrize("abort", [False, True])
+def test_atomic_ingest_defers_backlog_mark_until_outer_commit(engine, abort):
+    engine._config.ollama_base_url = "http://192.0.2.1:11434"
+    backfill(engine, "chunk", limit=100)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("CREATE TRIGGER abort_txn BEFORE UPDATE ON metadata "
+                     "WHEN NEW.key LIKE 'embedding_catchup:%' "
+                     "BEGIN SELECT RAISE(ROLLBACK, 'simulated transaction-aborting error'); END")
+    ids = []
+    try:
+        with engine._store.atomic():
+            with engine._store.atomic():
+                ids.append(engine._store.append("seed", {"role": "user", "content": "cobalt atomic"}))
+            with sqlite3.connect(engine._store.db_path) as conn:
+                assert conn.execute("SELECT 1 FROM messages WHERE store_id=?", (ids[0],)).fetchone() is None
+            if abort:
+                raise RuntimeError("abort ingest")
+    except RuntimeError:
+        assert abort
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert bool(conn.execute("SELECT 1 FROM messages WHERE store_id=?", (ids[0],)).fetchone()) is not abort
+    assert engine._store._manual_chunk_backlog_pending is False

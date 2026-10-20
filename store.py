@@ -15,7 +15,7 @@ import math
 import sqlite3
 import threading
 import time
-from contextlib import AbstractContextManager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Collection, Dict, Iterable, List, Optional
@@ -348,6 +348,7 @@ class MessageStore:
         # uncontended ``RLock.acquire``/``release`` pair per operation.
         self._write_lock = threading.RLock()
         self._transaction_owner = TransactionOwner(self._write_lock)
+        self._manual_chunk_backlog_pending = False
         self._init_db()
 
     def _init_db(self):
@@ -479,14 +480,21 @@ class MessageStore:
             from . import command, embedding_maintenance
             if embedding_maintenance._automatic_chunks_allowed(config, command):
                 return
+            if self._conn.in_transaction:
+                self._manual_chunk_backlog_pending = True
+                return  # An enclosing atomic owner has not committed ingest yet.
+            self._manual_chunk_backlog_pending = False
             self._conn.execute(
                 "UPDATE metadata SET value=json_set(value, '$.remaining', json('true'), '$.updated_at', ?) "
                 "WHERE key='embedding_catchup:chunk:' || (SELECT identity_hash FROM lcm_embedding_profile "
                 "WHERE active=1 AND archived_at IS NULL AND task='chunk' "
-                "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1)",
+                "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1) "
+                "AND json_extract(value, '$.remaining') = 0",
                 (time.time(),),
             )
+            self._conn.commit()
         except Exception:
+            self._conn.rollback()
             logging.getLogger(__name__).debug("Could not mark manual chunk backlog", exc_info=True)
 
     def append(self, session_id: str, msg: Dict[str, Any],
@@ -529,8 +537,8 @@ class MessageStore:
                     "host_message_timestamp" if observed_at is not None else None,
                 ),
             )
-            self._mark_manual_chunk_backlog()
             self._commit()
+            self._mark_manual_chunk_backlog()
             return cur.lastrowid
 
     def append_batch(self, session_id: str,
@@ -635,16 +643,17 @@ class MessageStore:
                             """,
                             (key, value),
                         )
-            if ids:
-                self._mark_manual_chunk_backlog()
             return ids
 
         with self._write_lock:
-            return _run_sqlite_write_with_snapshot_retry(
+            ids = _run_sqlite_write_with_snapshot_retry(
                 conn,
                 insert_messages,
                 operation_name="message_store.append_protected_batch",
             )
+            if ids:
+                self._mark_manual_chunk_backlog()
+            return ids
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""
@@ -1554,7 +1563,20 @@ class MessageStore:
         conn = self._conn
         if conn is None:
             raise RuntimeError("MessageStore connection is closed")
-        return self._transaction_owner.atomic(conn, immediate=immediate)
+        @contextmanager
+        def marked():
+            with self._write_lock:
+                try:
+                    with self._transaction_owner.atomic(conn, immediate=immediate):
+                        yield
+                except BaseException:
+                    if not conn.in_transaction:
+                        self._manual_chunk_backlog_pending = False
+                    raise
+                if self._manual_chunk_backlog_pending:
+                    self._mark_manual_chunk_backlog()
+        return marked()
+
 
     def update_metadata_json(self, key: str, update: Any) -> Any:
         """Atomic read-modify-write of one metadata JSON value: ``update(current)`` (None when absent) runs
