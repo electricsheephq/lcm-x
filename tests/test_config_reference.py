@@ -185,6 +185,7 @@ def _provider_choice_row(monkeypatch, spelling):
         health.setenv("LCM_EMBEDDING_API_KEY", "synthetic-placeholder")
         health.setattr(providers.importlib.util, "find_spec", lambda _: object())
         health.setattr(tools, "_active_embedding_profile_exists", lambda _: False)
+        health.setattr(tools, "_embedding_readiness", lambda *_: "fixture readiness")
         health.setattr(tools, "embedding_privacy_revision", lambda _: "choice-revision")
         health.setattr(tools.sqlite3, "connect", lambda *a, **kw: SimpleNamespace(close=lambda: None))
         health.setattr(tools, "_lcm_store_has_live_chunk_vectors", lambda _: False)

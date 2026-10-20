@@ -268,6 +268,16 @@ the caveat â€” the same disclosure mechanism as `lcm_grep`'s `degraded_reason` â
 so a caller never mistakes a truncated or approximate arm's contribution to the
 fused ranking for an exhaustive exact one.
 
+A backlog recorded by the last embedding backfill pass also sets `degraded: true`
+with a `summary semantic index catching up` or `chunk semantic index catching up`
+reason (and remaining rows when known). The record is per corpus and embedding
+identity; completing catch-up clears it. Non-FastEmbed uncertain rows instead report
+`<corpus> semantic index has N rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus <summary|chunks>`.
+Ingest marks an existing chunk record when automatic chunk passes cannot run;
+a manual backfill clears it. Ordinary automatic ingest lag and no recorded pass
+add no reason. Recall uses a keyed metadata
+lookup, without counting corpus rows; coverage enums still describe the kNN scan.
+
 ### Privacy-policy errors are not a degrade
 
 A missing active cloud profile or an older registered privacy revision degrades

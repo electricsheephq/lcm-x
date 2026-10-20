@@ -101,6 +101,8 @@ def audit_failed(result):
 def run(a):
     safe_paths(a.home, a.db)
     initial_audit = baseline(a.db, load(a.manifest))
+    initial_covered = sum(v["covered"] for v in initial_audit["classes"].values())
+    drain96 = getattr(a, "drain96", False)
     immutable_cache(a.model_cache)
     a.out.mkdir(parents=True, exist_ok=False)
     manifest = load(a.manifest)
@@ -119,7 +121,7 @@ def run(a):
                 final, reason = "ABORTED", breach or f"worker_exit:{p.returncode}"
                 break
             events = [__import__("json").loads(s) for s in (a.out/"events.jsonl").read_text().splitlines()] if (a.out/"events.jsonl").exists() else []
-            if any(e.get("violation") or e.get("foreground") or e.get("download") for e in events):
+            if any(e.get("violation") or e.get("foreground") for e in events):
                 final, reason = "ABORTED", "foreground_prepare_backfill_or_network"
                 break
             if now >= next_progress:
@@ -128,7 +130,7 @@ def run(a):
                     dump(a.out/"cross-profile.json", {"paths": foreign})
                     final, reason = "ABORTED", "cross_profile_access"
                     break
-                if not result["raw_unchanged"] or result["changed_vectors"] or result["integrity"] not in ("ok", "not_checked"):
+                if not result["raw_unchanged"] or result["changed_vectors"] or result.get("changed_metadata") or result["integrity"] not in ("ok", "not_checked"):
                     final, reason = "ABORTED", "row_or_vector_corruption"
                     break
                 fingerprint = (sum(x["covered"] for x in result["classes"].values()), str(result["scan"]))
@@ -142,12 +144,21 @@ def run(a):
                 row = {"elapsed_s": now-started, "coverage_fraction": fraction, "audit": result, "status": status, "ready": ready, "generation": generation}
                 append(a.out/"progress.jsonl", row)
                 history.append(row)
-                final = state(result, now-started, now-last_change, ready, a.max_wall)
+                if drain96 and generation == 1 and not restarted and ready and (a.out/"worker-1.json").exists():
+                    bound = load(a.out/"worker-1.json")
+                    if bound.get("generation") == 1 and bound.get("one_bind") and bound.get("pid") == p.pid and result["complete"]:
+                        checked = audit(a.db, manifest)
+                        dump(a.out/"generation-1-audit.json", checked)
+                        if audit_failed(checked):
+                            final, reason = "ABORTED", "generation_1_integrity_or_residue"
+                            break
+                        restarted = checked["complete"]
+                trigger = ("first_coverage_increase" if fingerprint[0] > initial_covered else None) if drain96 else restart_trigger(a, fraction, now-started)
+                final = state({**result, "complete": result["complete"] and (not drain96 or restarted)}, now-started, now-last_change, ready, a.max_wall)
                 reason = "full_expected_id_audit" if final == "COMPLETE" else "zero_progress_600s_provider_ready" if final == "STALLED" else "max_wall" if final == "INCOMPLETE" else ""
                 if result["complete"]:
                     meter.windows[p.pid][1] = now
-                trigger = restart_trigger(a, fraction, now-started)
-                if final == "RUNNING" and not restarted and trigger:
+                if final == "RUNNING" and generation == 0 and trigger:
                     checked = audit(a.db, manifest)
                     dump(a.out/"restart-audit.json", checked)
                     if restart_audit_failed(checked):
@@ -157,17 +168,21 @@ def run(a):
                         "reason": trigger})
                     meter.windows[p.pid][1] = time.monotonic()
                     stop(p)
-                    generation, restarted = 1, True
+                    generation, restarted = 1, not drain96
                     p = launch(a, generation)
                     meter.watch(p.pid)
                     last_change, previous = time.monotonic(), None
                     final = "RUNNING"
                 next_progress = now+a.progress_interval
             time.sleep(1)
+    except ProcessLookupError:
+        final, reason = "ABORTED", "worker_exit"
     finally:
         loop_end = time.monotonic()
         stop(p)
         meter.close()
+    if meter.breach:
+        final, reason = "ABORTED", meter.breach
     events = [__import__("json").loads(s) for s in (a.out/"events.jsonl").read_text().splitlines()] if (a.out/"events.jsonl").exists() else []
     result = audit(a.db, manifest)
     if audit_failed(result):

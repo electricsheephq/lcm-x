@@ -1,16 +1,29 @@
 """Isolation and product loading; never execute the plugin registration entrypoint."""
 import argparse
+from contextlib import contextmanager
+from contextvars import ContextVar
 import importlib
 import json
 import os
 from pathlib import Path
 import socket
 import sys
+import subprocess
 import threading
 import time
 import types
 
 MODEL = "BAAI/bge-small-en-v1.5"
+REQUEST = ContextVar("instrument_foreground_request", default=False)
+
+
+@contextmanager
+def foreground_request():
+    token = REQUEST.set(threading.get_ident())
+    try:
+        yield
+    finally:
+        REQUEST.reset(token)
 
 
 def dump(path, value):
@@ -54,7 +67,7 @@ def safe_paths(*paths):
         raise ValueError("live .hermes paths forbidden")
 
 
-def foreign_files(pid, home, db, cache, user_home=None, out=None, scratch=None):
+def foreign_files(pid, home, db, cache, user_home=None, out=None, scratch=None, protected_roots=()):
     """Open files that reach another profile's data (the declaration's cross-profile stop).
 
     That is any path under a `.hermes` directory, or under the real user home (other profiles,
@@ -66,11 +79,16 @@ def foreign_files(pid, home, db, cache, user_home=None, out=None, scratch=None):
     store = [db.resolve(), *[Path(str(db.resolve())+s) for s in ("-wal", "-shm", "-journal")]]
     user_home = (user_home or Path.home()).resolve()
     found = []
-    for f in psutil.Process(pid).open_files():
+    try:
+        opened = psutil.Process(pid).open_files()
+    except (psutil.NoSuchProcess, psutil.AccessDenied) as exc:
+        raise ProcessLookupError(pid) from exc
+    for f in opened:
         path = Path(f.path).resolve()
         if ".hermes" not in path.parts and (path in store or any(path.is_relative_to(r) for r in roots)):
             continue
-        if ".hermes" in path.parts or path.is_relative_to(user_home):
+        if ".hermes" in path.parts or path.is_relative_to(user_home) or any(
+                path.is_relative_to(root.resolve()) for root in protected_roots):
             found.append(f.path)
     return found
 
@@ -96,34 +114,59 @@ def config(mod, db, enabled=True):
 
 def guards(mod, events, generation=0):
     """Observe real product calls, fail closed on network or foreground backfill/prepare."""
+    def foreground_thread():
+        return bool(REQUEST.get()) or threading.current_thread() is threading.main_thread()
     def deny(*a, **kw):
         append(events, {"violation": "network_attempt", "thread": threading.current_thread().name})
         raise RuntimeError("offline instrument denies network")
     socket.socket.connect = socket.socket.connect_ex = deny
+    socket.socket.sendto = socket.socket.sendmsg = deny
+    socket.getaddrinfo = socket.gethostbyname = socket.gethostbyname_ex = deny
+    socket.gethostbyaddr = socket.getnameinfo = deny
+    def launched(self, *args, **kwargs):
+        append(events, {"event": "subprocess_launch", "violation": "subprocess_launch",
+                        "thread": threading.current_thread().name})
+        raise RuntimeError("offline subprocess launch")
+    subprocess.Popen.__init__ = launched
+    engine = getattr(mod("engine"), "LCMEngine", None)
+    if engine is not None:
+        original_schedule = engine._schedule_embedding_maintenance
+        def schedule(self, *a, **kw):
+            token = REQUEST.set(False)  # Clear before profile_bound captures scheduled jobs.
+            try:
+                return original_schedule(self, *a, **kw)
+            finally:
+                REQUEST.reset(token)
+        engine._schedule_embedding_maintenance = schedule
     provider = mod("embedding_provider")
     if provider._FASTEMBED_THREADS > 2:
         raise RuntimeError("product ORT thread count exceeds two")
     original = provider.FastembedProvider._construct
     def construct(self, *, allow_download):
-        foreground = threading.current_thread() is threading.main_thread()
+        foreground = foreground_thread()
         append(events, {"event": "prepare", "foreground": foreground,
-                        "download": allow_download, "at": time.monotonic()})
-        if allow_download or foreground:
+                        "allow_download": allow_download, "at": time.monotonic()})
+        if foreground:
             raise RuntimeError("foreground/download preparation forbidden")
         started = time.monotonic()
         model = original(self, allow_download=allow_download)
-        append(events, {"event": "prepared", "generation": generation, "seconds": time.monotonic()-started})
+        append(events, {"event": "prepared", "generation": generation, "seconds": time.monotonic()-started,
+                        "foreground": foreground, "at": time.perf_counter()})
         return model
     provider.FastembedProvider._construct = construct
     command = mod("command")
     for name in ("_embedding_backfill_summary_run", "_chunk_backfill_run"):
         original_run = getattr(command, name)
         def run(*a, _name=name, _run=original_run, **kw):
-            foreground = threading.current_thread() is threading.main_thread()
+            foreground = foreground_thread()
             append(events, {"event": _name, "foreground": foreground})
             if foreground:
                 raise RuntimeError("foreground backfill forbidden")
-            return _run(*a, **kw)
+            start = time.perf_counter()
+            result = _run(*a, **kw)
+            append(events, {"event": _name, "foreground": foreground, "at": start,
+                            "end": time.perf_counter(), "embedded": result.get("embedded", 0) if isinstance(result, dict) else 0})
+            return result
         setattr(command, name, run)
 
 
