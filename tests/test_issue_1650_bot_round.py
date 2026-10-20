@@ -1,5 +1,6 @@
 """Real backfill-path regressions for #1650's bounded bot fix round."""
 import dataclasses
+import hashlib
 import json
 import logging
 import sqlite3
@@ -153,7 +154,7 @@ def test_malformed_full_record_is_preserved_and_disclosed(local_store, caplog, m
             assert _saved(engine) == value, result
             assert result["remaining"] and result["status"] != "complete", result
         else:
-            assert _saved(engine) == "[]", result
+            assert _ids(engine) == [] and "repair_pending" not in _saved(engine), result
             assert not result["remaining"] and result["status"] == "complete", result
     assert any("partial-message record" in record.message and record.levelno == logging.WARNING
                for record in caplog.records)
@@ -177,7 +178,10 @@ def test_operator_repairs_malformed_record_before_new_intents(local_store, value
         before = _published(engine, first)
         assert _ids(engine) == [] and not result["remaining"] and result["status"] == "complete"
         with sqlite3.connect(engine._store.db_path) as conn:
-            assert conn.execute("SELECT value FROM metadata WHERE key=?", (backup_key,)).fetchone()[0] == value
+            for preserved in (value, original):
+                digest = hashlib.sha256(preserved.encode()).hexdigest()[:16]
+                assert conn.execute("SELECT value FROM metadata WHERE key=?",
+                                    (f"{backup_key}:{digest}",)).fetchone()[0] == preserved
             assert conn.execute("SELECT * FROM messages ORDER BY store_id").fetchall() == messages
 
 

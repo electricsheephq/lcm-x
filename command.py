@@ -8,6 +8,7 @@ from datetime import date, datetime, timezone
 from enum import Enum
 from pathlib import Path
 import dataclasses
+import hashlib
 import json
 import logging
 import math
@@ -4230,24 +4231,28 @@ def _chunk_inflight_ids(conn: sqlite3.Connection, identity_hash: str | None) -> 
 _CHUNK_PARTIAL_WARNED = set()
 
 
-def _chunk_partial_ids(conn, identity_hash):
+def _chunk_partial_ids(conn, identity_hash, *, backlog=False):
     saved = conn.execute(
         "SELECT value FROM metadata WHERE key=?", (f"chunk_partial_messages:{identity_hash}",),
     ).fetchone()
+    warning_value = saved[0] if saved else None
     try:
         ids = json.loads(saved[0]) if saved else []
         if isinstance(ids, dict):
             if any(type(ids.get(k)) is not int or ids[k] < 0 for k in ("cursor", "turn")):
                 raise ValueError("invalid partial cursor")
+            if backlog and ids.get("repair_pending"):
+                warning_value = ids["repair_pending"]
+                raise ValueError("pending partial repair")
             ids = ids.get("ids")
         if not isinstance(ids, list) or any(type(i) is not int for i in ids):
             raise ValueError("invalid message ids")
         return set(ids)
     except (ValueError, TypeError):
-        warning_key = (identity_hash, saved[0])
+        warning_key = (identity_hash, warning_value)
         if warning_key not in _CHUNK_PARTIAL_WARNED:
             logging.getLogger("hermes_lcm").warning(
-                "Preserving malformed partial-message record; backlog unknown; repair with "
+                "Preserving partial-message record with unknown backlog; repair with "
                 "`/lcm embed backfill --corpus chunks --apply` (cloud providers also require --confirm-raw-text)"
             )
             _CHUNK_PARTIAL_WARNED.add(warning_key)
@@ -4260,14 +4265,17 @@ def _repair_chunk_partial_messages(conn, identity_hash, lease):
         conn.execute("BEGIN IMMEDIATE")
         if _chunk_partial_ids(conn, identity_hash) is None:
             key = f"chunk_partial_messages:{identity_hash}"
+            value = conn.execute("SELECT value FROM metadata WHERE key=?", (key,)).fetchone()[0]
+            digest = hashlib.sha256(value.encode()).hexdigest()[:16]
             fence = ("EXISTS (SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
                      "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?)")
             owner = (_EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation)
             conn.execute(
                 "INSERT OR IGNORE INTO metadata(key, value) SELECT ?, value FROM metadata WHERE key=? AND " + fence,
-                (f"chunk_partial_messages_malformed:{identity_hash}", key, *owner),
+                (f"chunk_partial_messages_malformed:{identity_hash}:{digest}", key, *owner),
             )
-            conn.execute("UPDATE metadata SET value='[]' WHERE key=? AND " + fence, (key, *owner))
+            conn.execute("UPDATE metadata SET value=? WHERE key=? AND " + fence,
+                         (json.dumps(dict(ids=[], cursor=0, turn=0, repair_pending=digest)), key, *owner))
         conn.commit()
     except Exception:
         conn.rollback()
@@ -4673,7 +4681,7 @@ _STATUS_CHUNK_SCAN_MESSAGES = 2_000  # /lcm status chunks at most this many mess
 
 def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None, policy: str) -> str:
     """The automatic pass's pending chunks, read along its frontier and bounded for the status page."""
-    ids = _chunk_partial_ids(conn, identity_hash)
+    ids = _chunk_partial_ids(conn, identity_hash, backlog=True)
     total = len(ids) if ids is not None else 1
     gap_bounds = _chunk_gapfill_bounds(
         conn, identity_hash, _chunk_cursor(conn, identity_hash), _chunk_policy_revision(conn, identity_hash),
@@ -4802,7 +4810,7 @@ def _chunk_backfill_remaining(
                 include_boundaries=include_boundaries, include_partials=False, chunk_cache=chunk_cache,
             )
             # Even held/uncertain chunks leave their recorded message incomplete.
-            ids = _chunk_partial_ids(check_conn, identity_hash)
+            ids = _chunk_partial_ids(check_conn, identity_hash, backlog=True)
             remaining = max(remaining, len(ids) if ids is not None else 1)
             if identity_hash:
                 try:
@@ -5083,7 +5091,7 @@ def _chunk_backfill_run(
                 "or after the lease TTL expires"
             ), reason="lease_held")
         _prepare_inflight_for_lease(conn, identity, lease)
-        if not incremental:
+        if not incremental and not retry_uncertain:
             _repair_chunk_partial_messages(conn, identity, lease)
         _prune_chunk_partial_messages(conn, identity, lease, chunk_cache, policy=policy)
         partial_window, partial_turn = _chunk_partial_window(conn, identity, lease, limit, chunk_cache, policy,
@@ -5436,6 +5444,13 @@ def _chunk_backfill_run(
             and not _chunk_inflight_ids(conn, identity)
         ):
             _record_chunk_policy_revision(conn, identity, (_chunk_cursor(conn, identity) or (0, 0))[1])
+            conn.execute(
+                "UPDATE metadata SET value=json_remove(value, '$.repair_pending') WHERE key=? "
+                "AND json_type(value)='object' AND json_extract(value, '$.repair_pending') IS NOT NULL "
+                "AND EXISTS (SELECT 1 FROM metadata WHERE key=? AND json_extract(value, '$.owner')=? "
+                "AND CAST(json_extract(value, '$.generation') AS INTEGER)=?)",
+                (f"chunk_partial_messages:{identity}", _EMBEDDING_BACKFILL_CLAIM_KEY, lease.lease_id, lease.generation),
+            )
     except _BackfillLeaseLost:
         lease_lost = True
         stop_reason = "lease_lost"
@@ -5446,7 +5461,7 @@ def _chunk_backfill_run(
             if lease is not None:
                 try:
                     _prune_chunk_partial_messages(conn, identity, lease, chunk_cache, policy=policy)
-                    partial_messages = _chunk_partial_ids(conn, identity) != set()
+                    partial_messages = _chunk_partial_ids(conn, identity, backlog=True) != set()
                 except Exception as exc:
                     logging.getLogger("hermes_lcm").warning("Partial-message prune failed: %s", exc)
                     partial_messages = True
