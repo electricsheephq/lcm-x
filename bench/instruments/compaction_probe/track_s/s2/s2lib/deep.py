@@ -8,7 +8,7 @@ from . import reader as R
 
 
 def enabled(man):
-    return man.get("material_version") == "track-s-deep-v1"
+    return man.get("material_version") in ("track-s-deep-v1", "track-s-deep-v2")
 
 
 def facts_at(directory, checkpoint):

@@ -59,7 +59,7 @@ def test_deep_scale_sources_checkpoints_and_determinism(tmp_path, seed):
     assert 2.5 <= result["rows"] / base["rows"] <= 4
     assert 2.5 <= result["tokens"] / base["tokens"] <= 4
     assert result["status"] == "PASS" and result["rows"] == 1024
-    assert manifest["material_version"] == "track-s-deep-v1"
+    assert manifest["material_version"] == "track-s-deep-v2"
     assert [cp["requested_row_index"] for cp in manifest["checkpoints"]] == [176, 304, 600, 900, 1023]
     assert not (first / "lifecycle_probes.jsonl").exists()
     keys = metadata["checkpoint_answers"]

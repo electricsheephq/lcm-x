@@ -605,7 +605,7 @@ def generate(seed: int, out_dir: Path, turns: int | None = None, tokens_per_turn
 
 
 
-DEEP_VERSION = "track-s-deep-v1"
+DEEP_VERSION = "track-s-deep-v2"
 
 
 def _generate_deep(seed, out_dir, min_tokens, min_events):
@@ -702,8 +702,13 @@ def _generate_deep(seed, out_dir, min_tokens, min_events):
                 fact["correction_source"] = copy.deepcopy(history[0])
         if fact["stale"]:
             remap(initial_stale[fact["id"]][1])
-            fact["stale"] = history[-2]["value"]
-            fact["stale_source"] = dict(id=fact["id"], **history[-2])
+            original_value, original_source = initial_stale[fact["id"]]
+            fact["stale_history"] = [dict(original_source, value=original_value,
+                char_offset=rows[original_source["row_index"]]["content"].index(original_value))]
+            if len(history) > 1:
+                fact["stale_history"] += copy.deepcopy(history[:-1])
+                fact["stale"] = history[-2]["value"]
+                fact["stale_source"] = dict(id=fact["id"], **history[-2])
         fact["versions"] = history
     for item in continuity:
         remap(item)
@@ -733,6 +738,9 @@ def _generate_deep(seed, out_dir, min_tokens, min_events):
             # The checkpoint key must not carry an unobserved future answer.
             item["versions"] = copy.deepcopy(versions)
             item.pop("correction_source", None)
+            if "stale_history" in fact:
+                item["stale_history"] = [copy.deepcopy(v) for v in fact["stale_history"]
+                                         if v["row_index"] <= cp["row_index"] and v["value"] != version["value"]]
             if fact["stale"] and len(versions) == 1:
                 item["stale"], item["stale_source"] = copy.deepcopy(initial_stale[fact["id"]])
             if len(versions) > 1 and not fact["stale"]:

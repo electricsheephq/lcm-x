@@ -28,7 +28,7 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
     rows = [json.loads(line) for line in (directory / "transcript.jsonl").read_text().splitlines()]
     facts, manifest, state = load("facts.json"), load("material.manifest.json"), load("continuation.json")
     v4 = manifest.get("material_version") == "track-s-v4"
-    deep = manifest.get("material_version") == _gen.DEEP_VERSION
+    deep = manifest.get("material_version") in ("track-s-deep-v1", _gen.DEEP_VERSION)
     check(deep or v4 or manifest.get("material_version") == _gen.MATERIAL_VERSION, "material version mismatch")
     admissions = load("admission.manifest.json")
     count = _gen.token_counter()
@@ -180,7 +180,7 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
 
 def _verify_deep(rows, facts, manifest, metadata, prefix, check):
     """Check the deep answer key without treating planned spans as observed events."""
-    check(manifest["mode"] == "decision" and metadata["schema_version"] == _gen.DEEP_VERSION,
+    check(manifest["mode"] == "decision" and metadata["schema_version"] == manifest["material_version"],
           "deep schema/mode mismatch")
     baseline = metadata["baseline_v3"]
     check(2.5 <= len(rows) / baseline["rows"] <= 4 and
