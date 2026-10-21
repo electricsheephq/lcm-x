@@ -1164,6 +1164,12 @@ def compile_evidence(
                 for error in dict.fromkeys(errors)
             )
             continue
+        baseline = next(
+            (ref for ref in normalized_refs if ref["exact_ref"] == selection["exact_ref"]),
+            {},
+        )
+        if baseline.get("duplicate_store_ids"):
+            item["duplicate_store_ids"] = baseline["duplicate_store_ids"]
         validated.append(item)  # type: ignore[arg-type]
         candidates.append(_candidate(selection))
     result["rejections"] = rejections

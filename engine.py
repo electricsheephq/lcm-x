@@ -109,7 +109,9 @@ from .runtime_identity import (
     _git_runtime_identity,
     _plugin_metadata,
 )
-from .embedding_maintenance import _STOP_EMBEDDING_MAINTENANCE, run_incremental_embedding_pass
+from .embedding_maintenance import (
+    _STOP_EMBEDDING_MAINTENANCE, retire_local_model_prepare, run_incremental_embedding_pass,
+)
 from .rollup_builder import (
     initialize_rollup_invalidation_outbox,
     mark_stale_for_published_summary,
@@ -286,6 +288,9 @@ class _RollupMaintenanceScheduler:
             tuple[tuple[str, str], Callable[[], None]]
         ] = deque()
         self._queued_keys: set[tuple[str, str]] = set()
+        # Keep one equally bounded overflow bank; admission never grows the ready queue.
+        self._deferred_jobs: dict[tuple[str, str], Callable] = {}
+        self._not_before: dict[tuple[str, str], float] = {}
         self._active_keys: set[tuple[str, str]] = set()
         # One worker means at most one active key. Keep its requested rerun in
         # a literal single slot so queue saturation cannot discard the
@@ -296,6 +301,7 @@ class _RollupMaintenanceScheduler:
         self._exclusive_keys: set[tuple[str, str]] = set()
         self._owned_keys: dict[object, set[tuple[str, str]]] = {}
         self._key_owners: dict[tuple[str, str], set[object]] = {}
+        self._handoff_jobs: dict[tuple[str, str], dict[object, Callable]] = {}
         self._retired_active_keys: dict[object, set[tuple[str, str]]] = {}
         self._worker: threading.Thread | None = None
         self._closed = False
@@ -305,20 +311,25 @@ class _RollupMaintenanceScheduler:
         self,
         key: tuple[str, str],
         owner: object | None,
+        job: Callable | None = None,
     ) -> None:
         if owner is None:
             return
         self._owned_keys.setdefault(owner, set()).add(key)
         self._key_owners.setdefault(key, set()).add(owner)
+        if job is not None:
+            self._handoff_jobs.setdefault(key, {})[owner] = job
 
     def _release_key_owners_if_idle_locked(self, key: tuple[str, str]) -> None:
         if (
             key in self._queued_keys
+            or key in self._deferred_jobs
             or key in self._active_keys
             or key in self._exclusive_keys
             or self._follow_up_key == key
         ):
             return
+        self._handoff_jobs.pop(key, None)
         for owner in self._key_owners.pop(key, set()):
             owned = self._owned_keys.get(owner)
             if owned is None:
@@ -333,6 +344,8 @@ class _RollupMaintenanceScheduler:
         job: Callable[[], None],
         *,
         owner: object | None = None,
+        delay: float = 0.0,
+        handoff: bool = False,
     ) -> bool:
         global _EMBEDDING_EXIT_QUIESCE_REGISTERED
         with self._condition:
@@ -349,23 +362,40 @@ class _RollupMaintenanceScheduler:
                     key[1],
                 )
                 return False
-            if key in self._queued_keys:
-                self._track_owner_locked(key, owner)
+            if key in self._queued_keys or key in self._deferred_jobs:
+                if delay > 0:
+                    self._not_before[key] = max(
+                        self._not_before.get(key, 0), time.monotonic() + delay,
+                    )
+                self._track_owner_locked(key, owner, job if handoff else None)
                 return True
-            if key in self._active_keys and not self._running_follow_up:
+            if delay > 0:
+                self._not_before[key] = time.monotonic() + delay
+                if self._follow_up_key == key:
+                    self._follow_up_key = self._follow_up_job = None
+            if key in self._active_keys and not self._running_follow_up and delay <= 0:
                 self._follow_up_key = key
                 self._follow_up_job = job
-                self._track_owner_locked(key, owner)
+                self._track_owner_locked(key, owner, job if handoff else None)
                 self._condition.notify_all()
                 return True
             if len(self._jobs) >= self._max_pending_jobs:
+                if self._kind == "incremental embedding" and len(self._deferred_jobs) < self._max_pending_jobs:
+                    self._deferred_jobs[key] = job
+                    self._track_owner_locked(key, owner, job if handoff else None)
+                    return True
                 logger.warning(
-                    "LCM %s maintenance queue is full; "
-                    "deferring database=%s scope=%s until a later bind",
+                    "LCM %s maintenance queue is full; " + (
+                        "bounded deferred capacity exhausted; refusing database=%s scope=%s"
+                        if self._kind == "incremental embedding" else "deferring database=%s scope=%s until a later bind"),
                     self._kind,
                     key[0],
                     key[1],
                 )
+                if self._kind == "incremental embedding":
+                    from .embedding_maintenance import _record
+                    _record(key[0], "queue_capacity_exhausted", "ready and deferred capacities exhausted")
+                self._not_before.pop(key, None)
                 return False
             if self._worker is None or not self._worker.is_alive():
                 if self is _EMBEDDING_MAINTENANCE_SCHEDULER and not _EMBEDDING_EXIT_QUIESCE_REGISTERED:
@@ -380,9 +410,17 @@ class _RollupMaintenanceScheduler:
                 self._worker = worker
             self._jobs.append((key, job))
             self._queued_keys.add(key)
-            self._track_owner_locked(key, owner)
+            self._track_owner_locked(key, owner, job if handoff else None)
             self._condition.notify_all()
             return True
+
+    def handoff(self, key, retired_owner, *, delay=0.0) -> bool:
+        """Continue LOCAL work through a surviving owner, preserving its idle delay."""
+        with self._condition:
+            for owner, job in self._handoff_jobs.get(key, {}).items():
+                if owner is not retired_owner:
+                    return self.schedule(key, job, owner=owner, delay=delay, handoff=True)
+        return False
 
     def try_acquire_exclusive(self, key: tuple[str, str]) -> bool:
         """Reserve one idle key for a synchronous operator rebuild.
@@ -393,7 +431,7 @@ class _RollupMaintenanceScheduler:
         background pass completes.
         """
         with self._condition:
-            busy_keys = self._queued_keys | self._active_keys | self._exclusive_keys
+            busy_keys = self._queued_keys | self._active_keys | self._exclusive_keys | set(self._deferred_jobs)
             if key in busy_keys or self._follow_up_key == key:
                 return False
             if len(self._exclusive_keys) >= self._max_pending_jobs:
@@ -416,6 +454,7 @@ class _RollupMaintenanceScheduler:
         with self._condition:
             while keys & (
                 self._queued_keys
+                | set(self._deferred_jobs)
                 | self._active_keys
                 | self._exclusive_keys
                 | ({self._follow_up_key} if self._follow_up_key else set())
@@ -456,9 +495,22 @@ class _RollupMaintenanceScheduler:
                 for key in keys:
                     owners = self._key_owners.get(key, set())
                     owners.discard(owner)
+                    handoffs = self._handoff_jobs.get(key, {})
+                    handoffs.pop(owner, None)
                     if owners:
+                        if handoffs:
+                            # LOCAL dedup retains each live owner's profile-bound job.
+                            job = next(iter(handoffs.values()))
+                            self._jobs = deque((k, job if k == key else j) for k, j in self._jobs)
+                            if key in self._deferred_jobs:
+                                self._deferred_jobs[key] = job
+                            if self._follow_up_key == key:
+                                self._follow_up_job = job
                         continue
+                    self._handoff_jobs.pop(key, None)
                     self._key_owners.pop(key, None)
+                    self._deferred_jobs.pop(key, None)
+                    self._not_before.pop(key, None)
                     if key in self._queued_keys:
                         self._jobs = deque(
                             (queued_key, job) for queued_key, job in self._jobs
@@ -499,6 +551,9 @@ class _RollupMaintenanceScheduler:
             with self._condition:
                 self._closed = True
                 pending_keys = self._queued_keys.copy()
+                pending_keys.update(self._deferred_jobs)
+                self._deferred_jobs.clear()
+                self._not_before.clear()
                 if self._follow_up_key is not None:
                     pending_keys.add(self._follow_up_key)
                 self._jobs.clear()
@@ -527,8 +582,30 @@ class _RollupMaintenanceScheduler:
         while True:
             with self._condition:
                 while not self._jobs:
+                    # Retirement may empty the ready queue while retained work survives.
+                    if self._deferred_jobs:
+                        deferred_key = next(iter(self._deferred_jobs))
+                        self._jobs.append((deferred_key, self._deferred_jobs.pop(deferred_key)))
+                        self._queued_keys.add(deferred_key)
+                        break
+                    if self._closed:
+                        return
                     self._condition.wait()
+                while self._jobs and all(self._not_before.get(k, 0) > time.monotonic() for k, _ in self._jobs):
+                    if self is _EMBEDDING_MAINTENANCE_SCHEDULER and _STOP_EMBEDDING_MAINTENANCE.is_set():
+                        self.quiesce(0)
+                        return
+                    self._condition.wait(min(0.5, min(self._not_before[k] for k, _ in self._jobs) - time.monotonic()))
+                if not self._jobs:
+                    continue
+                while self._not_before.get(self._jobs[0][0], 0) > time.monotonic():
+                    self._jobs.rotate(-1)
                 key, job = self._jobs.popleft()
+                self._not_before.pop(key, None)
+                if self._deferred_jobs:
+                    deferred_key = next(iter(self._deferred_jobs))
+                    self._jobs.append((deferred_key, self._deferred_jobs.pop(deferred_key)))
+                    self._queued_keys.add(deferred_key)
                 self._queued_keys.discard(key)
                 self._active_keys.add(key)
                 self._running_follow_up = False
@@ -1364,6 +1441,7 @@ class LCMEngine(
         # diagnostic drains do not retain every historical session key forever.
         self._rollup_maintenance_owner = object()
         self._embedding_maintenance_owner = object()
+        self._embedding_maintenance_lock = threading.Lock()
         self._embedding_maintenance_retired = False
         # Host-facing engine name: ENGINE_NAME, or the legacy alias when the
         # active Hermes config still selects ``context.engine: lcm`` (#471).
@@ -2914,7 +2992,7 @@ class LCMEngine(
             database_path = Path(raw_database_path).resolve()
             config = copy.deepcopy(self._config)
             from . import command
-            from .embedding_maintenance import _automatic_chunks_allowed
+            from .embedding_maintenance import _automatic_chunks_allowed, start_local_model_prepare
             from .vector_store import VectorStore
 
             chunks_allowed = _automatic_chunks_allowed(config, command)
@@ -2935,13 +3013,34 @@ class LCMEngine(
             breaker = getattr(cached[1], "breaker", None) if cached else None
 
             def maintain() -> None:
-                run_incremental_embedding_pass(database_path, config, breaker=breaker)
+                if slice_state is not None:
+                    with self._embedding_maintenance_lock:
+                        if self._embedding_maintenance_retired or owner is not self._embedding_maintenance_owner:
+                            _EMBEDDING_MAINTENANCE_SCHEDULER.handoff(maintenance_key, owner)
+                            return
+                        start_local_model_prepare(database_path, config, on_ready=bound_enqueue, owner=owner)
+                run_incremental_embedding_pass(database_path, config, breaker=breaker,
+                                               **({"slice_state": slice_state} if slice_state is not None else {}))
+                if slice_state is not None and slice_state.get("continue"):
+                    enqueue(delay=max(1e-9, slice_state["delay"]))
 
-            _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(
-                self._rollup_maintenance_key("embeddings"),
-                profile_bound(maintain),
-                owner=self._embedding_maintenance_owner,
-            )
+            maintenance_key = self._rollup_maintenance_key("embeddings")
+            owner = self._embedding_maintenance_owner
+            slice_state = {} if config.embedding_provider.strip().lower() in {"fastembed", "fast-embed"} else None
+            bound_maintain = profile_bound(maintain)
+
+            def enqueue(delay=0.0) -> None:
+                with self._embedding_maintenance_lock:
+                    if not self._embedding_maintenance_retired and owner is self._embedding_maintenance_owner:
+                        _EMBEDDING_MAINTENANCE_SCHEDULER.schedule(maintenance_key, bound_maintain, owner=owner, delay=delay, handoff=slice_state is not None)
+                    elif slice_state is not None:
+                        _EMBEDDING_MAINTENANCE_SCHEDULER.handoff(maintenance_key, owner, delay=delay)
+
+            bound_enqueue = profile_bound(enqueue)
+            with self._embedding_maintenance_lock:
+                if not self._embedding_maintenance_retired and owner is self._embedding_maintenance_owner:
+                    start_local_model_prepare(database_path, config, on_ready=bound_enqueue, owner=owner)
+            bound_enqueue()
         except Exception:
             logger.warning(
                 "LCM could not schedule background incremental embedding",
@@ -2949,13 +3048,20 @@ class LCMEngine(
             )
 
     def _rearm_embedding_maintenance(self) -> None:
-        self._embedding_maintenance_retired = False
+        with self._embedding_maintenance_lock:
+            if self._embedding_maintenance_retired:
+                self._embedding_maintenance_owner = object()
+            self._embedding_maintenance_retired = False
 
     def _retire_embedding_maintenance(self, wait: bool) -> None:
-        self._embedding_maintenance_retired = True
+        with self._embedding_maintenance_lock:
+            self._embedding_maintenance_retired = True
+            # Snapshot under the lock: a concurrent rearm mints a new owner, which must stay live.
+            owner = self._embedding_maintenance_owner
+        retire_local_model_prepare(owner)
         try:
             _EMBEDDING_MAINTENANCE_SCHEDULER.retire_owner(
-                self._embedding_maintenance_owner,
+                owner,
                 timeout=_EMBEDDING_RETIRE_TIMEOUT_S if wait else 0,
             )
         except Exception:
@@ -6730,15 +6836,23 @@ class LCMEngine(
                 # After compaction the cursor indexes its output, not this cache
                 # of the last ingested list; the commit proof owns that boundary.
                 and self._ingest_cursor == len(cached_source_identities)):
+            recent_tools = _hermes_salvage_protected_positions(messages)
             for idx, previous in enumerate(cached_active_replay_messages[:cursor]):
                 if current_prefix_identities[idx] != cached_source_identities[idx]:
                     break  # content changes retain the existing anchor audit
                 if self._host_occurrence_changed(messages[idx], previous):
                     new_prefix_occurrences.add(idx)
-                elif (messages[idx].get("content") == previous.get("content")
-                      and self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)):
-                    # An alias can match changed literal bytes; metadata alone
-                    # must not skip that result when a retry rewinds the cursor.
+                elif (self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
+                      and (messages[idx].get("content") == previous.get("content")
+                           or (idx not in recent_tools
+                               and messages[idx].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                               and previous.get("content") != _HERMES_PRUNED_TOOL_PLACEHOLDER
+                               and self._pruned_tool_output_identity(
+                                   messages[idx], str(messages[idx].get("role") or ""),
+                                   messages[idx]["content"],
+                               ) == cached_source_identities[idx]))):
+                    # Only proven older salvage may change literal bytes here.
+                    # The complete-list newest two may be genuine retry results.
                     unchanged_prefix_occurrences.add(idx)
             if new_prefix_occurrences:
                 cursor = self._ingest_cursor = min(new_prefix_occurrences)
