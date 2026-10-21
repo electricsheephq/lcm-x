@@ -157,7 +157,9 @@ def test_paired_admission_loss_outranks_truncation(tmp_path):
 def test_loss_class_admission_loss_outranks_truncation(tmp_path):
     (tmp_path / "facts.json").write_text(json.dumps([
         {"id": f, "placement": "head", "class": "name", "value": f"value-{f}"} for f in ("a", "b")]))
-    ns = functions("decision/loss_class.py", "classify_loss", "load", "ro", json=json, normalize=str.casefold)
+    scorer = functions("scorer/score_s.py", "checkpoint_facts", "jload", json=json)
+    ns = functions("decision/loss_class.py", "classify_loss", "load", "ro", json=json, normalize=str.casefold,
+                   checkpoint_facts=scorer["checkpoint_facts"])
     out = ns["classify_loss"]({"run_dir": str(tmp_path / "run"), "material": str(tmp_path), "arm": "x", "seed": "seed-1",
         "run": "r1", "checkpoint_row": 304, "probes": {"a": {"class": "READER_TRUNCATED"}, "b": {"class": "CORRECT"}},
         "metrics": {"facts_kept": {"lost_before_compaction": {"ids": ["a"]}}}})
@@ -233,7 +235,9 @@ def test_skipped_scores_removed(tmp_path, monkeypatch, receipt):
         "--material", str(tmp_path), "--logs", str(logs), "--out", str(out),
         "--arms", "LCMX-fleet", "--seeds", "1", "--checkpoints", "304"])
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
-    runpy.run_path(str(TRACK / "decision/score_decision.py"), run_name="__main__")
+    with pytest.raises(SystemExit) as stopped:
+        runpy.run_path(str(TRACK / "decision/score_decision.py"), run_name="__main__")
+    assert stopped.value.code is None
     assert not list(out.glob("*/cp-304/*.json"))
 
 
