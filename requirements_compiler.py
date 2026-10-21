@@ -392,6 +392,17 @@ def _date_value(raw: str) -> date | None:
     return None
 
 
+def _carried_absolute_day(source):
+    """Share the compiler date parser; a year is required for independence."""
+    if not source.get("time_uncertain"):
+        return None
+    quote = re.sub(r"(\d{1,2})(?:st|nd|rd|th)\b", r"\1", str(source["quote"]), flags=re.IGNORECASE)
+    quote = re.sub(r"(\b[A-Za-z]{3,9}\s+\d{1,2})\s+(\d{4})\b", r"\1, \2", quote)
+    days = {day for match in _DATE_TEXT_RE.finditer(quote)
+            if (day := _date_value(match.group(0))) is not None}
+    return days.pop() if len(days) == 1 else None
+
+
 def _clause_bounds(text: str, start: int, end: int) -> tuple[int, int]:
     left = 0
     for match in re.finditer(r"(?:[.!?;,]|\band\b|\bplus\b)", text[:start], re.IGNORECASE):
@@ -704,6 +715,9 @@ def _ordered_event_candidate(
         if isinstance(occurrence, Mapping)
         else ""
     )
+    absolute_day = _carried_absolute_day(source)
+    if absolute_day is not None:
+        event_date = absolute_day.isoformat()
     if not event_date:
         mention = _DATE_TEXT_RE.search(quote)
         parsed = _date_value(mention.group(0)) if mention else None
@@ -909,7 +923,7 @@ def _select_text(
 
 
 def _select_temporal_event(
-    candidates: Sequence[Mapping[str, Any]], contract: AnswerContract
+    candidates: Sequence[Mapping[str, Any]], contract: AnswerContract, *, result=None
 ) -> tuple[dict[str, Any] | None, str]:
     eligible = [
         candidate
@@ -920,9 +934,6 @@ def _select_temporal_event(
             "adapter_session_date",
         }
     ]
-    if any(item.get("time_uncertain") and _candidate_time(item)[1] == "uncertain_source_observation_time"
-           for item in eligible):
-        return None, "uncertain_source_observation_time"
     if not eligible:
         return None, "event_in_window_not_found"
     # Input order preserves the product rank.  Anchor score may improve that
@@ -933,6 +944,9 @@ def _select_temporal_event(
         for item in eligible
         if int(item.get("anchor_score") or 0) == best_score
     )
+    if _carried_absolute_day(chosen) is None and _candidate_time(chosen)[1] == "uncertain_source_observation_time":
+        _record_exclusion(result, chosen, "uncertain_source_observation_time")
+        return None, "uncertain_source_observation_time"
     return dict(chosen), "best_supported_event_in_window"
 
 
@@ -967,6 +981,9 @@ def _candidate_time(candidate: Mapping[str, Any]) -> tuple[float | None, str]:
 
 
 def _candidate_event_day(candidate: Mapping[str, Any]) -> tuple[date | None, str]:
+    absolute_day = _carried_absolute_day(candidate)
+    if absolute_day is not None:
+        return absolute_day, "occurred_at"
     occurrence = candidate.get("occurrence_time")
     if isinstance(occurrence, Mapping):
         raw = str(occurrence.get("event_date") or "")
@@ -1033,7 +1050,7 @@ def _temporally_eligible_candidates(
                 <= event_day
                 < contract.temporal_window.end
             ):
-                if candidate.get("time_uncertain") and (candidate.get("occurrence_time") or {}).get("event_time_source") != "explicit":
+                if candidate.get("time_uncertain") and _carried_absolute_day(candidate) is None:
                     _record_exclusion(result, candidate, "event_outside_temporal_window")
                 continue
             candidate = {**candidate, "temporal_match_basis": basis}
@@ -1867,7 +1884,7 @@ def _finite_enumeration(
                 <= event_day
                 < contract.temporal_window.end
             ):
-                if hydrated.get("time_uncertain") and hydrated["occurrence_time"].get("event_time_source") != "explicit":
+                if hydrated.get("time_uncertain") and _carried_absolute_day(hydrated) is None:
                     uncertain_window_exclusion = True
                     if result is not None:
                         _record_exclusion(result, hydrated, "event_outside_temporal_window", count=True)
@@ -1920,6 +1937,7 @@ def _finite_enumeration(
             "span_end": item["span_end"],
             "quote": item["quote"],
             "key": item["grounding_key"],
+            **({"date": item["date"]} if item.get("time_uncertain") else {}),
             "unit": item["unit"],
             "occurrence_time": item["occurrence_time"],
         }
@@ -2175,7 +2193,7 @@ def compile_preanswer_evidence(
             )
             return _finish(result, started=started)
     elif contract.operation == "date_filter":
-        chosen, reason = _select_temporal_event(baseline_candidates, contract)
+        chosen, reason = _select_temporal_event(baseline_candidates, contract, result=result)
         if chosen is not None:
             _record_baseline_fact(
                 result,
@@ -2232,7 +2250,7 @@ def compile_preanswer_evidence(
             fact, why = _select_state(candidates, contract)
             return fact, None, [fact] if fact else [], why
         if contract.operation == "date_filter":
-            fact, why = _select_temporal_event(candidates, contract)
+            fact, why = _select_temporal_event(candidates, contract, result=result)
             return fact, None, [fact] if fact else [], why
         fact, why = _select_text(candidates, contract)
         return fact, None, [fact] if fact else [], why

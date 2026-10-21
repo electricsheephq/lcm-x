@@ -499,15 +499,22 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs: Any) -> str:
     if mode not in {"proposal", "auto"}:
         return json.dumps({"error": "mode must be one of: proposal, auto"})
     if mode == "auto":
-        result = compile_preanswer_evidence(  # type: ignore[no-untyped-call]
-            args.get("question"),
-            engine=engine,
-            baseline_refs=args.get("baseline_refs") or (),
-            question_as_of=args.get("question_date"),
-            retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits"),
-            enabled=True,
-            budgets=args.get("budgets"),
-        )
+        try:
+            result = compile_preanswer_evidence(  # type: ignore[no-untyped-call]
+                args.get("question"),
+                engine=engine,
+                baseline_refs=args.get("baseline_refs") or (),
+                question_as_of=args.get("question_date"),
+                retrieve=lambda recall_args: _tools.lcm_recall(recall_args, engine=engine, delivery_unit="hits"),
+                enabled=True,
+                budgets=args.get("budgets"),
+            )
+        except sqlite3.Error:
+            result = {"status": "fallback", "state": "unknown",
+                      "reason": "uncertain_source_observation_time",
+                      "reason_code": "uncertain_source_observation_time",
+                      "next_path": "evidence_only", "context": None,
+                      "computation": None, "evidence": []}
         return json.dumps(result, ensure_ascii=False)
 
     proposal = args.get("proposal")

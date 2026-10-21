@@ -93,7 +93,9 @@ def test_month_name_matches_iso_window(tmp_path, form, operation, window):
         with engine_context(tmp_path / str(arm), embeddings_enabled=False) as engine:
             refs = plant(engine, [f"I took a vacation to Bali on {spelling}.",
                 "I took a vacation to Kyoto on 2023-02-12."])
+            before = engine._store.connection.total_changes
             result = json.loads(tools.lcm_compile_evidence(args(refs, question, question_date), engine=engine))
+            assert engine._store.connection.total_changes == before
             results.append(result)
     iso, named = results
     assert iso["contract"]["operation"] == ("scalar" if operation == "finite" else operation)
@@ -147,3 +149,14 @@ def test_preanswer_hook_fails_open_for_fallback_and_sqlite(tmp_path, monkeypatch
 
         monkeypatch.setattr(engine._store, "get_carried_stamp_ids", fail)
         assert plugin._pre_llm_context(engine, payload) is None
+
+
+@pytest.mark.parametrize("day", ["February 10", "yesterday"])
+def test_yearless_and_relative_dates_remain_non_explicit(tmp_path, day):
+    with engine_context(tmp_path, embeddings_enabled=False) as engine:
+        refs = plant(engine, [f"I took a vacation to Kyoto {day}."])
+        result = json.loads(tools.lcm_compile_evidence(args(refs,
+            "Which vacation did I take in February?", "2023-03-22"), engine=engine))
+        assert result["direct_fact"] is None and result["computation"] is None
+        assert result["reason_code"] == REASON
+        assert result["exclusions"][0]["time_uncertain"] == "carried"
