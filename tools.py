@@ -1199,6 +1199,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 exclude_session_ids=excluded_session_ids,
                 allow_operators=bool(args.get("_allow_operators", False)),
                 **({"stemmed": True} if args.get("_stemmed") else {}),
+                **({"_include_like_excerpt": True} if args.get("mode") == "recall" else {}),
                 **({"agent_operators": True} if args.get("_agent_operators") else {}),
             )
             if args.get("mode") != "recall":
@@ -1213,6 +1214,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                         has_current_session=has_current_session,
                     )
                 )
+                if args.get("mode") == "recall" and "_like_excerpt" in hit:
+                    results[-1]["_like_excerpt"] = hit["_like_excerpt"]
         except Exception as exc:
             # Grep degrades to whatever the other stages produce, but the
             # failure must reach the PAYLOAD, not just the log: lcm_recall's
@@ -2781,6 +2784,14 @@ class _LcmRecallStrictSelector:
                 "content_offset": candidate.get("content_offset"),
             }
             span = _lcm_recall_verified_span(probe, row)
+            used_like_excerpt = False
+            if span is None and candidate.get("_like_excerpt"):
+                # LIKE's ellipses are presentation too. Keep its producer's
+                # exact span, then check the original excerpt against this row.
+                probe.update(candidate["_like_excerpt"])
+                probe["snippet"] = probe["snippet"][:_LCM_RECALL_SNIPPET_CHARS]
+                span = _lcm_recall_verified_span(probe, row)
+                used_like_excerpt = span is not None
             used_fts_window = False
             if span is None:
                 match_span = _lcm_recall_fts_match_span(
@@ -2797,11 +2808,11 @@ class _LcmRecallStrictSelector:
                     used_fts_window = span is not None
             if span is None:
                 continue
-            if used_fts_window or candidate is not hit or probe["snippet"] != hit.get("snippet"):
+            if used_fts_window or used_like_excerpt or candidate is not hit or probe["snippet"] != hit.get("snippet"):
                 # Same row, quoted where it really says it.
                 hit["snippet"] = probe["snippet"]
                 hit["content_offset"] = probe["content_offset"]
-                if used_fts_window:
+                if used_fts_window or used_like_excerpt:
                     hit.pop("chunk_span", None)
                 elif candidate.get("chunk_span"):
                     hit["chunk_span"] = candidate["chunk_span"]
@@ -3094,6 +3105,19 @@ def _lcm_recall_answer_ready_content(
             continue
         content = str(stored.get("content") or "")
         span = hit.get("chunk_span") or {}
+        if not span and len(content) > _LCM_RECALL_ANSWER_READY_CONTENT_CHARS:
+            # Short rows keep their legacy evidence_span and output bytes.
+            # Emoji has no lexical hydration terms; use LIKE's verified span.
+            for candidate in [hit, *entry.get("_alternates", [])]:
+                excerpt = candidate.get("_like_excerpt")
+                if not excerpt:
+                    continue
+                probe = {**candidate, **excerpt}
+                probe["snippet"] = probe["snippet"][:_LCM_RECALL_SNIPPET_CHARS]
+                like_span = _lcm_recall_verified_span(probe, stored)
+                if like_span is not None:
+                    span = {"char_start": like_span[0], "char_end": sum(like_span)}
+                    break
         if not span and fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
             # Fusion may retain a chunk preview; use the FTS representation of
             # this same row when it is available, before the literal fallback.
@@ -3235,6 +3259,8 @@ def _lcm_recall_fts_arm(
             "_fts_snippet": row.get("snippet") or "",
             "from_current_session": bool(row.get("from_current_session")),
         }
+        if "_like_excerpt" in row:
+            hit["_like_excerpt"] = row["_like_excerpt"]
         hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
         hits.append(hit)
     return hits, None

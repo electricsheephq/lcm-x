@@ -34,6 +34,17 @@ def _warning(engine):
     return engine.get_automatic_compaction_status_message(phase="after", default_message="")
 
 
+def _behavior_logs(caplog):
+    # Default-on background rollups compete for SQLite's writer lock. Whether this
+    # exact warning occurs depends on worker scheduling, not rebind behavior (#1692).
+    # Keep every other warning/error, including this text from another logger/level.
+    return tuple(record.getMessage() for record in caplog.records
+                 if record.levelno >= logging.WARNING
+                 and (record.name, record.levelno, record.getMessage()) != (
+                     "hermes_lcm.rollup_store", logging.WARNING,
+                     "Temporal rollup write blocked by SQLite lock contention"))
+
+
 def _warm_a(engine, summaries):
     view = _history("A")
     compacted = engine.compress(view, force=True)
@@ -66,7 +77,7 @@ def _b_turns(engine, caplog):
                                       request_cap=500, reason="b-turn")
         trace.append((preflight, decision, _bytes(view), _bytes(fitted),
                       engine._last_compression_status, _warning(engine), _warning(engine),
-                      tuple(r.getMessage() for r in caplog.records if r.levelno >= logging.WARNING)))
+                      _behavior_logs(caplog)))
         view = fitted
         engine.note_turn_complete()
     return trace
@@ -115,3 +126,41 @@ def test_rebound_b_matches_fresh_b(tmp_path, monkeypatch, caplog, boundary):
                                if left != right}
                 raise RebindDifference({"initial": (actual[0], expected[0]), "turns": differences,
                                         "first_decisions": (actual[1][:2], expected[1][:2])})
+
+
+@pytest.mark.parametrize("logger_name,level,message,expect_difference", [
+    ("hermes_lcm.rollup_store", logging.WARNING,
+     "Temporal rollup write blocked by SQLite lock contention", False),
+    ("hermes_lcm.rollup_store", logging.WARNING, "Unexpected rollup behavior", True),
+    ("hermes_lcm.engine", logging.WARNING,
+     "Temporal rollup write blocked by SQLite lock contention", True),
+    ("hermes_lcm.rollup_store", logging.ERROR,
+     "Temporal rollup write blocked by SQLite lock contention", True),
+])
+def test_rebind_log_comparison(tmp_path, monkeypatch, caplog, logger_name, level,
+                               message, expect_difference):
+    original_b_turns = _b_turns
+    inject = True
+
+    def b_turns_with_one_sided_log(engine, caplog):
+        nonlocal inject
+        if not inject:
+            return original_b_turns(engine, caplog)
+        inject = False
+        original_ingest = engine.ingest
+
+        def ingest_with_log(view):
+            result = original_ingest(view)
+            logging.getLogger(logger_name).log(level, message)
+            return result
+
+        with monkeypatch.context() as patch:
+            patch.setattr(engine, "ingest", ingest_with_log)
+            return original_b_turns(engine, caplog)
+
+    monkeypatch.setitem(globals(), "_b_turns", b_turns_with_one_sided_log)
+    if expect_difference:
+        with pytest.raises(RebindDifference, match="logs"):
+            test_rebound_b_matches_fresh_b(tmp_path, monkeypatch, caplog, "session")
+    else:
+        test_rebound_b_matches_fresh_b(tmp_path, monkeypatch, caplog, "session")

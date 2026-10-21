@@ -35,7 +35,7 @@ from .db_bootstrap import (
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
 from .search_query import (
-    build_snippet,
+    build_snippet_with_span,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
     compute_directness_score,
@@ -1800,7 +1800,8 @@ class MessageStore:
                     exclude_session_ids: Collection[str] | None = None,
                     allow_operators: bool = False,
                     agent_operators: bool = False,
-                    stemmed: bool = False) -> List[Dict[str, Any]]:
+                    stemmed: bool = False,
+                    _include_like_excerpt: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1839,6 +1840,7 @@ class MessageStore:
                 time_from=time_from,
                 time_to=time_to,
                 exclude_session_ids=exclude_session_ids,
+                _include_excerpt=_include_like_excerpt,
             )
 
         order_by = _build_search_order_by(
@@ -1921,6 +1923,7 @@ class MessageStore:
                     time_from=time_from,
                     time_to=time_to,
                     exclude_session_ids=exclude_session_ids,
+                    _include_excerpt=_include_like_excerpt,
                 )
 
             raw_primary_values: list[float] = []
@@ -1962,7 +1965,8 @@ class MessageStore:
                      role: str | None = None,
                      time_from: float | None = None,
                      time_to: float | None = None,
-                     exclude_session_ids: Collection[str] | None = None) -> List[Dict[str, Any]]:
+                     exclude_session_ids: Collection[str] | None = None, *,
+                     _include_excerpt: bool = False) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
@@ -2087,7 +2091,12 @@ class MessageStore:
                 if score <= 0:
                     continue
                 result["search_rank"] = -float(score)
-                result["snippet"] = build_snippet(content, terms)
+                snippet, start, end = build_snippet_with_span(content, terms)
+                result["snippet"] = snippet
+                if _include_excerpt:
+                    result["_like_excerpt"] = {
+                        "snippet": content[start:end], "content_offset": start,
+                    }
                 result["_fallback_score"] = float(score)
                 result["_directness_score"] = _message_directness_score(result.get("role"), content, terms, phrases)
                 results.append(result)
