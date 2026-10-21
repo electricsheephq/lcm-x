@@ -36,6 +36,7 @@ def arguments(description):
     p.add_argument("--worker", type=Path)
     p.add_argument("--block", type=int, choices=(0, 1, 2))
     p.add_argument("--covered-store", type=Path)
+    p.add_argument("--user-home")
     p.add_argument("--build-covered", action="store_true")
     p.add_argument("--standalone-calibration-s", type=float)
     p.add_argument("--resume-covered-store", type=Path)
@@ -53,7 +54,7 @@ def prepare(a):
     a.scratch.mkdir(parents=True, exist_ok=False)
     if shutil.disk_usage(a.scratch).free < (150 if sys.platform == "darwin" else 26)*2**30:
         raise RuntimeError("disk headroom stop")
-    a.user_home = str(Path.home())
+    a.user_home = str(getattr(a, "user_home", None) or Path.home())
     # Isolate corpus construction too, before any product import.
     isolated(a.scratch/"builder-home", a.model_cache)
     os.environ["HOME"] = str(a.scratch/"builder-home")
@@ -89,12 +90,23 @@ def cell(a, state, block, kind):
         try:
             if not getattr(a, "covered_store", None) or not source.is_file():
                 raise FileNotFoundError("covered store or store.db absent")
-            checked = audit(source, load(a.out/"manifest.json"))
+            fresh = load(a.out/"manifest.json")
+            try:
+                persisted = load(a.covered_store/"manifest.json")
+            except (OSError, ValueError):
+                raise ValueError("covered_store_manifest_missing") from None
+            if any(k not in persisted or persisted[k] != fresh[k] for k in (
+                    "preimage", "expected", "identities", "rows", "shape", "baseline", "seed")):
+                raise ValueError("covered_store_changed")
+            fresh.update({k: persisted.get(k, {}) for k in ("observed_vectors", "observed_metadata")})
+            checked = audit(source, fresh)
+            if checked["complete"]:
+                dump(root/"manifest.json", fresh)
             detail = dict(changed_vectors=len(checked["changed_vectors"]), changed_metadata=len(checked["changed_metadata"]),
                 missing_count=sum(v["missing_count"] for v in checked["classes"].values()),
                 reason="covered_store_changed" if not checked["raw_unchanged"] or checked["changed_vectors"] or checked["changed_metadata"]
                     else "covered_store_unfinished", audit=checked)
-        except (FileNotFoundError, sqlite3.DatabaseError) as exc:
+        except (FileNotFoundError, sqlite3.DatabaseError, ValueError) as exc:
             checked, detail = dict(complete=False), dict(reason=str(exc))
         if not checked["complete"]:
             result = dict(state="INVALID", reason="covered_store_incomplete", pre_audit=detail)

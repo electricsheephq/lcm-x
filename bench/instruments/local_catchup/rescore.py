@@ -22,7 +22,8 @@ def verdict(path, max_wall):
 
 def v2(root):
     from .floor import rate
-    from .recall import score, window_calibration
+    from .recall import score, window_calibration, overlapping
+    from .measurement import catchup_activity
     def lines(path):
         return [json.loads(s) for s in path.read_text().splitlines()]
     for name in ("raw-summary.json", "summary.json"):
@@ -40,7 +41,14 @@ def v2(root):
         return dict(state=recorded["state"], cells=cells)
     if (root/"summary.json").exists() and "blocks" in load(root/"summary.json"):
         recorded = load(root/"summary.json")
-        cells = [v2(root/f"{c['block']}-{c['state']}") for c in recorded["blocks"]]
+        base = root if (root/"0-OFF").exists() else root/"recall" if (root/"recall").is_dir() else root
+        present = {p.name for p in base.iterdir() if p.is_dir() and any(p.name.endswith("-"+s) for s in ("OFF", "ON-catching-up", "ON-covered"))}
+        cells = {name: v2(base/name) for name in sorted(present)}
+        names = [f"{c['block']}-{c['state']}" for c in recorded["blocks"]]
+        assert len(names) == len(set(names)) and set(names) == present
+        assert all({f"{b}-{s}" for s in ("OFF", "ON-catching-up", "ON-covered")} <= present
+                   for b in {name.split("-", 1)[0] for name in present})
+        cells = [cells[name] for name in names]
         assert all(c["result"]["state"] == v["state"] for c, v in zip(recorded["blocks"], cells))
         assert recorded["state"] == rollup(c["state"] for c in cells)
         return dict(state=recorded["state"], blocks=cells)
@@ -57,11 +65,27 @@ def v2(root):
         recorded = load(root/"raw-summary.json")
         request = load(root/"request.json")
         calibrated = window_calibration(lines(root.parent/f"{request['block']}-ON-catching-up/events.jsonl"))
-        computed = score(lines(root/"recalls.jsonl"), lines(root/"publications.jsonl"),
-            request["seed"], request["state"], recorded, calibrated, REFERENCE_CALIBRATION_S)
-        if recorded.get("measurement_valid") is False:
+        rows, pubs = lines(root/"recalls.jsonl"), lines(root/"publications.jsonl")
+        counted = overlapping(rows, pubs)
+        activity = catchup_activity(root, min(r["start"] for r in counted), max(r["end"] for r in counted),
+            min(counted, key=lambda r: r["start"])["coverage_start"],
+            max(counted, key=lambda r: r["end"])["coverage_end"]) if counted else dict(catchup_activity=False)
+        raw = score(rows, pubs, request["seed"], request["state"], activity)
+        final = load(root/"final-audit.json")
+        invalid = (request["smoke"] or request["rows"] < 250000 or len(load(root.parent/"queries.json")) < 200
+            or (request["state"] == "ON-catching-up" and (all(c["missing_count"] == 0 for c in final["classes"].values())
+                or not all(r["incomplete"] for r in counted))))
+        capped = any(e.get("event") == "volume_cap" for e in lines(root/"events.jsonl")) if (root/"events.jsonl").exists() else False
+        if invalid or capped:
+            raw["state"] = rollup([raw["state"], "INVALID"])
+        valid = raw["state"] != "INVALID"
+        computed = score(rows, pubs, request["seed"], request["state"], activity, calibrated, REFERENCE_CALIBRATION_S)
+        computed.update(measurement_valid=valid, catchup_activity=activity["catchup_activity"])
+        if capped:
+            computed["reason"] = "volume_cap"
+        if not valid:
             computed["state"] = rollup([computed["state"], "INVALID"])
-        if calibrated is None and recorded.get("measurement_valid") is not False:
+        if calibrated is None and valid:
             computed["reason"] = "calibration_window_short"
         assert all(recorded[k] == v for k, v in computed.items())
     return computed

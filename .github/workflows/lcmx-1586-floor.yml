@@ -27,15 +27,30 @@ on:
         type: number
         default: 250000
       max_minutes:
-        description: Maximum minutes (121 to 330)
+        description: Maximum minutes (coverage-rate 150+, coverage-pair 300+, recall 330)
         type: number
         default: 330
 permissions:
   contents: read
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate cell budget before covered-store setup
+        env:
+          CELL: ${{ inputs.cell }}
+          MINUTES: ${{ inputs.max_minutes }}
+        run: |
+          case "$CELL" in
+            coverage-rate) minimum=150 ;;
+            coverage-pair) minimum=300 ;;
+            recall) minimum=330 ;;
+            *) exit 1 ;;
+          esac
+          [[ "$MINUTES" =~ ^[0-9]+$ ]] && (( MINUTES >= minimum && MINUTES <= 330 ))
   floor:
-    needs: covered-store
-    if: always() && (inputs.cell != 'recall' || needs.covered-store.result == 'success')
+    needs: [validate, covered-store]
+    if: always() && needs.validate.result == 'success' && (inputs.cell != 'recall' || needs.covered-store.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:
@@ -124,6 +139,7 @@ jobs:
           name: lcmx-1586-floor-surrogate-${{ inputs.cell }}-${{ inputs.shape }}-${{ inputs.baseline }}
           path: evidence/
   covered-store-1:
+    needs: validate
     if: inputs.cell == 'recall'
     uses: ./.github/workflows/lcmx-1586-covered-store.yml
     with:
