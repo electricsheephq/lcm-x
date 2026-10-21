@@ -100,14 +100,15 @@ def test_probe3x_partial_baseline_rejudge(tmp_path, source, failure, success, ch
 
 
 @pytest.mark.parametrize("detail", [None, {"score": "malformed"}, {"score": 1, "status": "failed"}])
-def test_baseline_failure_without_usable_success_keeps_verdict(tmp_path, detail):
+def test_baseline_failure_without_usable_success_is_incomplete(tmp_path, detail):
     candidate = write_run(tmp_path / "c", [row("a_abs", score=0), row("b")])
     baseline = write_run(tmp_path / "b", [row("a_abs", status="failed"), row("b")])
     if detail:
         overlay(baseline, SOURCES[0], [{"question_id": "a_abs", **detail}])
     result = d8_guard.compare_runs(candidate, baseline, subset=True)
-    assert result["pass"]
-    assert not result["INCOMPLETE"]
+    assert not result["pass"]
+    assert result["INCOMPLETE"]
+    assert result["reason"] == "baseline: failed rows: 1 (rerun the baseline)"
 
 
 @pytest.mark.parametrize("source", SOURCES)

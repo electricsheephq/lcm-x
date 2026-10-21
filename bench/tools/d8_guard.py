@@ -247,6 +247,9 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
                "baseline": degraded_rate(list(baseline.values()), bc)}
     issues += [f"{side}: unscorable rows: {rate['unscorable']}"
                for side, rate in overall.items() if rate.get("unscorable")]
+    failed_baseline = sum(bool(_failed(row)) for row in baseline.values())
+    if failed_baseline:
+        issues.append(f"baseline: failed rows: {failed_baseline} (rerun the baseline)")
     incomplete = (bool(issues) or bool(extra) or any(row["INCOMPLETE"] for row in overall.values())
                   or (not subset and len(baseline) != {"longmemeval": 500, "locomo": 1986}[benchmark]))
     cr, br = overall["candidate"], overall["baseline"]
