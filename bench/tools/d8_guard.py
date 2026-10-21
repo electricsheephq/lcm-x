@@ -204,8 +204,8 @@ def _load_run(root, *, baseline=False):
     return report, rows, identities, issues
 
 
-def _compare_identities(candidate, baseline, *, placebo=False):
-    issues, missing_both = [], []
+def _compare_identities(candidate, baseline, *, placebo=False, subset=False, reader_treatment=False):
+    issues, missing_both, differences = [], [], {}
     for field in IDENTITY_FIELDS:
         if field in {"recallConfig", "answerPresentationMode"} and not placebo:
             continue
@@ -215,8 +215,14 @@ def _compare_identities(candidate, baseline, *, placebo=False):
         elif not left or not right:
             issues.append(f"identity missing: {field}")
         elif len(left) != 1 or len(right) != 1 or left != right:
-            issues.append(f"identity mismatch: {field}")
-    return issues, missing_both
+            if len(left) == len(right) == 1 and (
+                (field == "questionSetSha256" and subset)
+                or (field == "readerPromptVersion" and reader_treatment)
+            ):
+                differences[field] = {"candidate": left[0], "baseline": right[0]}
+            else:
+                issues.append(f"identity mismatch: {field}")
+    return issues, missing_both, differences
 
 
 def _category(row, name):
@@ -226,10 +232,13 @@ def _category(row, name):
     return kind == "knowledge-update" if name == "knowledge-update" else str(kind) in {"5", "adversarial"}
 
 
-def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
+def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False, reader_treatment=False):
+    if reader_treatment and placebo:
+        raise ValueError("reader-treatment and placebo are mutually exclusive")
     candidate_report, candidate, candidate_ids, candidate_issues = _load_run(candidate_run)
     baseline_report, baseline, baseline_ids, baseline_issues = _load_run(baseline_run, baseline=True)
-    issues, missing_both = _compare_identities(candidate_ids, baseline_ids, placebo=placebo)
+    issues, missing_both, differences = _compare_identities(
+        candidate_ids, baseline_ids, placebo=placebo, subset=subset, reader_treatment=reader_treatment)
     issues += [f"{side} {issue}" if issue.startswith("failure contradicted by detail:")
                else f"{side}: {issue}" for side, values in
                (("candidate", candidate_issues), ("baseline", baseline_issues)) for issue in values]
@@ -263,6 +272,8 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
               "INCOMPLETE": incomplete, "d8_row": not subset,
               "mode": "placebo" if placebo else "non-inferiority", "rate_pass": rate_pass}
     result["identities_missing_both"] = missing_both
+    if differences:
+        result["identity_differences"] = differences
     if issues:
         result["reason"] = "; ".join(issues)
     for name in names:
@@ -294,11 +305,15 @@ def main(argv=None):
     parser.add_argument("baseline_run", type=Path)
     parser.add_argument("--subset", action="store_true",
                         help="allow a held-out split; output is not a full D8 row")
-    parser.add_argument("--placebo", action="store_true",
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--placebo", action="store_true",
                         help="compare A-prime (candidate) with A (baseline); require intervals strictly inside +/-2 points")
+    modes.add_argument("--reader-treatment", action="store_true",
+                       help="disclose differing reader prompt versions instead of requiring equality")
     args = parser.parse_args(argv)
     try:
-        result = compare_runs(args.candidate_run, args.baseline_run, subset=args.subset, placebo=args.placebo)
+        result = compare_runs(args.candidate_run, args.baseline_run, subset=args.subset,
+                              placebo=args.placebo, reader_treatment=args.reader_treatment)
     except (ValueError, OSError, TypeError, KeyError) as error:
         print(json.dumps({"pass": False, "INCOMPLETE": True, "error": str(error),
                           "d8_row": not args.subset, "mode": "placebo" if args.placebo else "non-inferiority"}))
