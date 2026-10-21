@@ -701,6 +701,11 @@ def _media_payload_text_part(part: Dict[str, Any]) -> str | None:
     return None
 
 
+# A media repr above this is never parsed or previewed (it only bounds a pathological AST); a few MiB
+# of media bytes in a repr parse in milliseconds.
+_MEDIA_REPR_PARSE_LIMIT = 64 * 1_048_576
+
+
 def _media_payload_preview_content(content: str) -> str:
     """Extract text only; remove opaque media before the bounded preview slices it."""
     import ast
@@ -723,14 +728,15 @@ def _media_payload_preview_content(content: str) -> str:
         # {} or [] followed by prose cannot be a container repr.
         repr_like = re.match(r"\s*(?:\[\s*(?:[\{\('\"]|b['\"])|\{\s*(?:['\"]|b['\"]))", content)
         if repr_like or (stripped.startswith("{") and stripped.endswith("}")):
-            # Normalization may have used repr for non-JSON media parts. Never preview that repr.
-            # The bound only stops a pathological AST; a repr of a few MiB of media bytes parses quickly.
+            # Normalization may have used repr for non-JSON media parts. Never preview that repr, and
+            # never preview an oversized candidate unparsed: it may be a repr with a non-string first key.
+            if len(content) > _MEDIA_REPR_PARSE_LIMIT:
+                return ""
             parsed, ok = None, False
-            if len(content) <= 64 * 1_048_576:
-                try:
-                    parsed, ok = ast.literal_eval(content), True
-                except (ValueError, SyntaxError, RecursionError):
-                    pass
+            try:
+                parsed, ok = ast.literal_eval(content), True
+            except (ValueError, SyntaxError, RecursionError):
+                pass
             if repr_like and not ok:
                 return ""
             # A brace-spanned string is a repr only when it parses to a dict; otherwise it is prose.

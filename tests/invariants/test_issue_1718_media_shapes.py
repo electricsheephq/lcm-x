@@ -153,3 +153,17 @@ def test_data_envelope_is_walked():
         {"data": {"caption": CAPTION, "blob": "data:image/png;base64," + "QUJD" * 100}}
     )
     assert_caption_preview(content)
+
+
+@pytest.mark.parametrize("content", [
+    "{0: b'" + "\\x89PNG" * 64 + "', 'caption': 'x'}",  # non-string first key: not repr_like by prefix
+    "{" + CAPTION + " " + "\\x89PNG" * 64 + "}",
+])
+def test_oversized_brace_span_is_never_previewed_unparsed(monkeypatch, content):
+    import hermes_lcm.externalize as externalize
+
+    # raising=False keeps the RED-on-base check behavioural (the old code has a fixed 64 MiB bound).
+    monkeypatch.setattr(externalize, "_MEDIA_REPR_PARSE_LIMIT", 128, raising=False)
+    assert len(content) > 128
+    assert _media_payload_preview_content(content) == ""
+    assert _build_externalized_placeholder(SUMMARY, content=content) == _build_externalized_placeholder(SUMMARY)
