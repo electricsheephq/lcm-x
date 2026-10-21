@@ -263,6 +263,31 @@ neither absorbs P nor grants summary coverage. NULL predecessors cannot supply t
 canonical UID binding still serves its existing identity/backfill purpose. Stores written before
 this marker existed retain the safe duplicate fallback; relations are never inferred at read time.
 
+### Retained duplicate scope
+
+Two shapes remain accepted duplicates, with no automatic deduplication
+([#1501 ruling](https://github.com/electricsheephq/lcm-x/issues/1501#issuecomment-6322150066)):
+
+- **Legacy carried stamps.** Rows stored before the marker existed have no positive
+  evidence of the host's merge. A replay can store the turn again. The duplicate is retained
+  rather than risk losing a genuine resend
+  ([#1504](https://github.com/electricsheephq/lcm-x/pull/1504#issuecomment-6244989492)).
+- **Host-mirrored occurrences.** After ACP crash recovery, the host's own transcript can
+  contain both copies of a user message. LCM-X retains both rather than infer that one is
+  disposable and risk losing a real occurrence
+  ([#1501 evidence](https://github.com/electricsheephq/lcm-x/issues/1501#issuecomment-6267963824),
+  [ruling](https://github.com/electricsheephq/lcm-x/issues/1501#issuecomment-6322150066)).
+
+The genuine resend counterexample in #1504 explains this choice: two consecutive user turns
+can share a second-resolution stamp when the first is multimodal and the host does not merge
+them. An undo and resend then made the earlier adjacency rule lose the resent occurrence and
+its time, even though its bytes survived in an older row
+([#1504 counterexample](https://github.com/electricsheephq/lcm-x/pull/1504#issuecomment-6244237007)).
+
+Revisit only when an independently verified historical witness separates genuine resends from
+the legacy carried-stamp shape. Strict exactly-once remains unmet for these two shapes
+([#1501 ruling](https://github.com/electricsheephq/lcm-x/issues/1501#issuecomment-6322150066)).
+
 ## Contradictions resolved
 
 1. **Native-recovery state.** Readers proposed DELETE, DEMOTE and KEEP for the same rules.
