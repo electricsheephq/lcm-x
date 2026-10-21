@@ -128,6 +128,8 @@ def test_ordinary_shapes_match_main_output_and_vm_steps(tmp_path, monkeypatch, s
     baseline, candidate = pinned_main_gapfill(), command._chunk_gapfill_rows
     high = 250_000 if shape == "prefix250k" else 100_000
     with closing(store(tmp_path / "ordinary.db", high)) as conn, conn:
+        # #1758 starts with no chunks; the direct discovery seam supplies bounds.
+        conn.execute("DELETE FROM lcm_chunk_meta")
         filled = 0
         cells = [0, 50_000, 240_000] if shape == "prefix250k" else [60_000] * 21
         for index, target in enumerate(cells):
@@ -170,5 +172,5 @@ def test_ordinary_shapes_match_main_output_and_vm_steps(tmp_path, monkeypatch, s
             assert outputs["candidate"] == outputs["main"]
             assert arms["candidate"]["vm_steps"] <= arms["main"]["vm_steps"]
             # Keep a real persistent walk across the twenty arrival passes.
-            if shape == "live100k":
+            if shape == "live100k" and index:
                 publish(conn, discover(conn, "synthetic", high))

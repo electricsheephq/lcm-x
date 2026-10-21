@@ -50,6 +50,15 @@ try:
             result = command._chunk_backfill_run(config, db, apply=True, limit=100,
                 retry_uncertain=False, policy="conversational", incremental=incremental)
             assert not result["error"] and not result["failed"], result
+        # The older Store has no general content-update API. Exercise the
+        # message trigger through its connection while destination proofs stand.
+        c = engine._store.connection
+        proof_keys = (f"chunk_gapfill_scan:{identity}", f"chunk_policy_revision_through:{identity}")
+        c.executemany("INSERT OR REPLACE INTO metadata VALUES(?, 'rollback-proof')", [(k,) for k in proof_keys])
+        assert c.execute("UPDATE messages SET content='Edited rollback fact.' "
+                         "WHERE store_id=40 AND role='user'").rowcount == 1
+        assert not c.execute("SELECT key FROM metadata WHERE key IN (?,?)", proof_keys).fetchall(), "destination proof"
+        c.commit()
         publish(engine, identity, [40])  # replacement invalidates the newer trigger proof
         # Exercise session deletion after a fresh old-reader open, independently
         # of its long-lived FTS connection during backfill schema setup.
