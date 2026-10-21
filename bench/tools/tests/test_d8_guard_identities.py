@@ -293,7 +293,7 @@ def test_presentation_mode_is_placebo_only_but_consistent_within_run(tmp_path):
     ({"score": float("nan")}, False), ({"score": "x"}, False),
     ({"score": None, "label": "pass"}, False),
     ({"label": "correct"}, True), ({"label": "incorrect"}, True),
-    ({"label": "unknown"}, True), ({"label": True}, True), ({"label": False}, True),
+    ({"label": "unknown"}, False), ({"label": True}, True), ({"label": False}, True),
     ({"label": {}}, False), ({"label": []}, False), ({"label": 1}, False),
     ({"label": None}, False), ({"label": " \t"}, False), ({}, False),
 ])
