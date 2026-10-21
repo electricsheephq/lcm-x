@@ -28,11 +28,11 @@ def classify_recall_health(health, config):
     if config == "OFF":
         valid_reason = reason == "semantic retrieval is disabled" if health["degraded"] else not reason
         return "healthy" if coverage.get("fts") == "ok" and valid_reason else "unhealthy"
-    arms = [arm for arm in ("summary", "chunk") if arm in coverage]
+    arms = ("summary", "chunk")
     reasons = reason.split("; ") if reason else []
-    if not arms or any(coverage[arm] not in {"full", "full_approx"} for arm in arms):
+    if any(coverage.get(arm) not in {"full", "full_approx"} for arm in arms):
         return "unhealthy"
-    if "fts" in coverage and coverage["fts"] != "ok":
+    if coverage.get("fts") != "ok":
         return "unhealthy"
     if health["degraded"] != bool(reasons):
         return "unhealthy"
@@ -47,7 +47,8 @@ def classify_recall_health(health, config):
 
 
 def _failed(row):
-    return (row.get("_failed", False) or row.get("status") in {"failed", "missing"}
+    # memorybench phases use completed for success; evaluations omit status.
+    return (row.get("_failed", False) or ("status" in row and row["status"] != "completed")
             or bool(row.get("error")) or row.get("judge_fallback") is True
             or bool(fail_close_signature(row)))
 
@@ -70,21 +71,23 @@ def degraded_rate(rows, config):
             "missing": missing, "INCOMPLETE": bool(missing) or not rows}
 
 
-def lower_bound(clusters):
-    """10,000 cluster resamples, seed 1607; nearest-rank p2.5 (250th value).
+def bootstrap_bounds(clusters):
+    """10,000 seed-1607 resamples; nearest-rank p2.5/p97.5 (250th/9,750th).
 
     Each cluster contains paired 0/1 correctness differences. Pool sampled
     questions (ratio of sums), retaining the original per-question weighting.
     """
     if not clusters:
-        return None
+        return None, None
     rng = random.Random(1607)
     totals = [(sum(values), len(values)) for values in clusters]
     samples = []
     for _ in range(10_000):
         picked = rng.choices(totals, k=len(totals))
         samples.append(100 * sum(s for s, _ in picked) / sum(n for _, n in picked))
-    return sorted(samples)[math.ceil(0.025 * len(samples)) - 1]
+    samples.sort()
+    return (samples[math.ceil(0.025 * len(samples)) - 1],
+            samples[math.ceil(0.975 * len(samples)) - 1])
 
 
 def _load_run(root):
@@ -116,7 +119,7 @@ def _category(row, name):
     return kind == "knowledge-update" if name == "knowledge-update" else str(kind) in {"5", "adversarial"}
 
 
-def compare_runs(candidate_run, baseline_run):
+def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
     candidate_report, candidate = _load_run(candidate_run)
     baseline_report, baseline = _load_run(baseline_run)
     benchmark = baseline_report.get("benchmark", "")
@@ -131,7 +134,14 @@ def compare_runs(candidate_run, baseline_run):
     cc, bc = candidate_report.get("recallConfig"), baseline_report.get("recallConfig")
     overall = {"candidate": degraded_rate(list(candidate.values()), cc),
                "baseline": degraded_rate(list(baseline.values()), bc)}
-    result = {"categories": {}, "runs": overall, "excluded_absent_from_baseline": extra}
+    incomplete = (bool(extra) or any(row["INCOMPLETE"] for row in overall.values())
+                  or (not subset and len(baseline) != {"longmemeval": 500, "locomo": 1986}[benchmark]))
+    cr, br = overall["candidate"], overall["baseline"]
+    rate_pass = None if placebo else (not cr["INCOMPLETE"] and not br["INCOMPLETE"]
+                                     and cr["rate_points"] <= br["rate_points"] + 1)
+    result = {"categories": {}, "runs": overall, "excluded_absent_from_baseline": extra,
+              "INCOMPLETE": incomplete, "d8_row": not subset,
+              "mode": "placebo" if placebo else "non-inferiority", "rate_pass": rate_pass}
     for name in names:
         base = {qid: row for qid, row in baseline.items() if _category(row, name)}
         clusters = {}
@@ -142,19 +152,16 @@ def compare_runs(candidate_run, baseline_run):
                 raise ValueError(f"invalid LoCoMo question id: {qid}")
             cluster = match[1] if match else qid
             clusters.setdefault(cluster, []).append(int(_is_correct(candidate[qid])) - int(_is_correct(row)))
-        bound = lower_bound(list(clusters.values()))
+        lower, upper = bootstrap_bounds(list(clusters.values()))
         cr = degraded_rate([row for row in candidate.values() if _category(row, name)], cc)
         br = degraded_rate(list(base.values()), bc)
-        interval_pass = bound is not None and bound > -2.0
-        rate_pass = (not cr["INCOMPLETE"] and not br["INCOMPLETE"]
-                     and cr["rate_points"] <= br["rate_points"] + 1)
+        interval_pass = lower is not None and lower > -2.0 and (not placebo or upper < 2.0)
         result["categories"][name] = {"paired_n": len(base), "clusters": len(clusters),
             "difference_points": 100 * sum(sum(v) for v in clusters.values()) / len(base) if base else None,
-            "lower_bound_points": bound, "interval_pass": interval_pass,
-            "candidate": cr, "baseline": br, "rate_pass": rate_pass,
-            "pass": interval_pass and rate_pass}
+            "lower_bound_points": lower, "upper_bound_points": upper, "interval_pass": interval_pass,
+            "candidate": cr, "baseline": br, "pass": interval_pass}
     result["pass"] = (all(row["pass"] for row in result["categories"].values())
-                      and not any(row["INCOMPLETE"] for row in overall.values()))
+                      and (placebo or rate_pass) and not incomplete)
     return result
 
 
@@ -162,11 +169,16 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("candidate_run", type=Path)
     parser.add_argument("baseline_run", type=Path)
+    parser.add_argument("--subset", action="store_true",
+                        help="allow a held-out split; output is not a full D8 row")
+    parser.add_argument("--placebo", action="store_true",
+                        help="compare A-prime (candidate) with A (baseline); require intervals strictly inside +/-2 points")
     args = parser.parse_args(argv)
     try:
-        result = compare_runs(args.candidate_run, args.baseline_run)
+        result = compare_runs(args.candidate_run, args.baseline_run, subset=args.subset, placebo=args.placebo)
     except (ValueError, OSError, TypeError, KeyError) as error:
-        print(json.dumps({"pass": False, "INCOMPLETE": True, "error": str(error)}))
+        print(json.dumps({"pass": False, "INCOMPLETE": True, "error": str(error),
+                          "d8_row": not args.subset, "mode": "placebo" if args.placebo else "non-inferiority"}))
         return 1
     print(json.dumps(result, sort_keys=True))
     return 0 if result["pass"] else 1
