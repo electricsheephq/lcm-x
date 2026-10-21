@@ -15,6 +15,8 @@ class CountedCursor(sqlite3.Cursor):
     def fetchall(self):
         rows = super().fetchall()
         self.connection.fetched.append(len(rows))
+        if rows and len(rows[0]) == 17:
+            self.connection.windows.append([tuple(row) for row in rows])
         return rows
 
     def fetchone(self):
@@ -31,6 +33,9 @@ class CountedConnection(sqlite3.Connection):
         self.materialized = {"content": 0, "snippet": 0}
         self.count_materialization = False
         self.fail_code = None
+        self.aggregate_fail_code = None
+        self.aggregate_errors = []
+        self.windows = []
         self.handlers = []
         for name in self.materialized:
             def count(value, name=name):
@@ -49,7 +54,16 @@ class CountedConnection(sqlite3.Connection):
             sql = sql.replace("m.content,", "counted_content(m.content) AS content,")
             sql = sql.replace("snippet(", "counted_snippet(snippet(")
             sql = sql.replace("40) as snippet", "40)) as snippet")
-        return self.cursor(CountedCursor).execute(sql, parameters)
+        try:
+            if "json_group_array" in sql and self.aggregate_fail_code is not None:
+                error = sqlite3.OperationalError("synthetic aggregate failure")
+                error.sqlite_errorcode = self.aggregate_fail_code
+                raise error
+            return self.cursor(CountedCursor).execute(sql, parameters)
+        except sqlite3.Error as exc:
+            if "json_group_array" in sql:
+                self.aggregate_errors.append(exc.sqlite_errorcode)
+            raise
 
     def set_progress_handler(self, callback, n):
         self.handlers.append((callback, n))
@@ -165,3 +179,75 @@ def test_private_deadline_has_no_hot_progress_handler(store, monkeypatch):
         assert not any(t.name == "full-text-deadline" for t in threading.enumerate())
     finally:
         dag.close()
+
+
+def frozen_stock():
+    namespace = vars(sm).copy()
+    source = (Path(__file__).parent / "fixtures" / "issue_1586_stock_fts.txt").read_text()
+    exec(compile(source, "<stock-1586>", "exec"), namespace)
+    return namespace["_search_fts"]
+
+
+@pytest.mark.parametrize("tied", [False, True])
+@pytest.mark.parametrize("sort", ["relevance", "recency", "hybrid"])
+def test_reverse_scan_matches_stock_windows_and_directness_pages(store, monkeypatch, sort, tied):
+    conn = store.connection
+    if tied:
+        conn.execute("UPDATE messages SET timestamp = 1.0")
+        conn.commit()
+    else:
+        conn.execute("UPDATE messages SET timestamp = store_id")
+        conn.commit()
+    conn.execute("PRAGMA reverse_unordered_selects=ON")
+    monkeypatch.setattr(sm, "compute_search_fetch_limit", lambda *a: 3)
+    monkeypatch.setattr(sm, "compute_search_candidate_cap", lambda *a: 30)
+    stock = frozen_stock()
+    conn.windows.clear()
+    expected = stock(store, "needle", limit=2, sort=sort)
+    expected_windows = list(conn.windows)
+    actual_windows = []
+    original = sm._fetch_ranked_search_rows
+
+    def capture(*args):
+        rows = original(*args)
+        actual_windows.append([tuple(row) for row in rows])
+        return rows
+
+    monkeypatch.setattr(sm, "_fetch_ranked_search_rows", capture)
+    actual = store._search_fts("needle", limit=2, sort=sort)
+    assert actual_windows == expected_windows
+    assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
+    if sort == "relevance":
+        assert len(actual_windows) > 1
+
+
+@pytest.mark.parametrize("error_code", [sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM])
+@pytest.mark.parametrize("stemmed", [False, True])
+def test_aggregate_resource_error_keeps_stock_fulltext_window(store, monkeypatch, error_code, stemmed):
+    conn = store.connection
+    if stemmed:
+        conn.execute("INSERT INTO messages_fts_stem(messages_fts_stem) VALUES('rebuild')")
+        monkeypatch.setattr(store, "_stem_state", lambda: "ready")
+    # Every individual stock row fits; the combined JSON window does not.
+    old_limit = conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, 16384)
+    if error_code == sqlite3.SQLITE_NOMEM:
+        conn.aggregate_fail_code = error_code
+    like_calls = []
+    monkeypatch.setattr(store, "_search_like", lambda *a, **kw: like_calls.append(kw) or [])
+    try:
+        conn.windows.clear()
+        expected = frozen_stock()(store, "needle", limit=20, stemmed=stemmed)
+        window_sizes = [len(page) for page in conn.windows]
+        conn.statements.clear()
+        conn.fetched.clear()
+        actual = store._search_fts("needle", limit=20, stemmed=stemmed)
+        assert like_calls == []
+        assert conn.aggregate_errors == [error_code] * len(window_sizes)
+        assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
+        assert conn.fetched == window_sizes
+        assert len(conn.statements) == 2 * len(window_sizes)
+        table = "messages_fts_stem" if stemmed else "messages_fts"
+        assert all(f"{table} MATCH" in sql for sql, _ in conn.statements)
+        assert store._last_fts_index == ("stem" if stemmed else "plain")
+    finally:
+        conn.setlimit(sqlite3.SQLITE_LIMIT_LENGTH, old_limit)

@@ -84,10 +84,15 @@ def _fetch_ranked_search_rows(conn: sqlite3.Connection, sql: str, args: list[Any
         f"CASE WHEN typeof({name})='real' THEN json_object('_real',printf('%!.17g',{name})) ELSE {name} END"
         for name in names
     ])
-    aggregate = f"""WITH ranked AS NOT MATERIALIZED ({sql}),
-        numbered AS (SELECT row_number() OVER () AS ordinal, * FROM ranked)
-        SELECT json_group_array(json_array({packed})) FROM numbered"""
-    decoded = json.loads(conn.execute(aggregate, args).fetchone()[0])
+    aggregate = f"""WITH ranked AS NOT MATERIALIZED ({sql})
+        SELECT json_group_array(json_array({packed})) FROM ranked"""
+    try:
+        decoded = json.loads(conn.execute(aggregate, args).fetchone()[0])
+    except sqlite3.Error as exc:
+        if getattr(exc, "sqlite_errorcode", None) not in (sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM):
+            raise
+        # Only the packed value failed: retain the same ranked full-text window.
+        return [list(row)[1:] for row in conn.execute(sql, args).fetchall()]
     decoded.sort(key=lambda row: row[0])
     return [[float(value['_real']) if isinstance(value, dict) else value for value in row[1:]]
             for row in decoded]
@@ -1865,6 +1870,8 @@ class MessageStore:
             "m.timestamp",
             _MESSAGE_ROLE_BIAS_SQL,
         )
+        key_order = order_by.replace(_MESSAGE_ROLE_BIAS_SQL, "key_role").replace(
+            "m.timestamp", "key_timestamp").replace("rank", "search_rank")
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
         candidate_cap = compute_search_candidate_cap(limit)
         apply_directness_adjustment = should_apply_directness_rank_adjustment(terms, phrases)
@@ -1905,15 +1912,17 @@ class MessageStore:
                 rows = _fetch_ranked_search_rows(
                     self._conn,
                     f"""WITH ranked_keys AS MATERIALIZED (
-                           SELECT fts.rowid AS key_id, rank AS search_rank
+                           SELECT fts.rowid AS key_id, rank AS search_rank,
+                                  m.timestamp AS key_timestamp, {_MESSAGE_ROLE_BIAS_SQL} AS key_role
                            FROM {fts_table} fts
                            JOIN messages m ON m.store_id = fts.rowid
                            WHERE {' AND '.join(where)}
                            ORDER BY {order_by} LIMIT ? OFFSET ?
                        ), numbered_keys AS (
-                           SELECT row_number() OVER () AS ordinal, * FROM ranked_keys
+                           SELECT row_number() OVER (ORDER BY {key_order}, key_id) AS ordinal,
+                                  * FROM ranked_keys
                        )
-                       SELECT m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
+                       SELECT keys.ordinal, m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
                               m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
                               m.ingested_at, m.observed_at, m.observed_at_source,
                               keys.search_rank,
