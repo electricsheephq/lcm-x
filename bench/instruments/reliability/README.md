@@ -120,8 +120,9 @@ asks it to publish. R1 only.
 
 `publication-failure/rotation-child` (G-REL-1, #541's bar) injects ONE publication failure, on the first rotation-child
 publication; the next child compaction must commit. `publication-failure/rotation-child-persistent` fails every
-rotation-child publication: a data cell (no target, `ci.NON_GATE`) for the degraded mode where no child compaction can
-ever publish, a product question outside stabilization.
+rotation-child publication: a data cell for the degraded mode where no child compaction can ever publish. It targets
+#1797 (exact content preserved under permanent child-publication failure; publication success is never required) and
+stays in `ci.NON_GATE`, so it never gates.
 
 Native cells: native recovery was removed (#777), so the native-only cells (`native-short-prefix/*`,
 `native-long-prefix/*`) were retired with it. `native-on-off/*` remain: an older lcm-x runs with native recovery ON,
@@ -139,7 +140,7 @@ whose plugin module is not the exported tree, or whose interpreter is not the ho
 `sql_dup_counter.py`, `summary_nodes_report.py` and `compaction_ledger.py`
 are ported as `scorers/dupes.py` and `scorers/summary.py` (diagnostics and the B5 ledger).
 
-## First-request continuity (diagnostic, non-gating)
+## First-request continuity (diagnostic, except the promoted cells)
 
 R2 records the first `main` provider request after each committed compaction:
 F1 is the system LCM note, F2 the first user's tag in sole-user cells, F3 the
@@ -152,8 +153,9 @@ ceiling and follows large turns with ordinary turns.
 and short later turns to measure F3 while the newest turn fits. The optional
 `continuity/forced-compaction-then-turn/{in-place,rotation}` reuses `/compress`
 after turn 19 and sends turn 20. Existing `baseline/{mode}/acp` cells supply
-the F3 negative control. These checks are outside `BARS`; the new cells are in
-`ci.NON_GATE`. The two survival-fit shapes keep B1–B7 and B9, but omit B8
+the F3 negative control. These checks are outside `BARS`. The sole-user, survival-fit and
+survival-fit-older-turns cells are in `ci.NON_GATE`; the two forced-compaction-then-turn cells gate on exact bars
+(F4 among them) through `ci.CELL_GATE` (#1588, listed under the nightly CI gate below). The two survival-fit shapes keep B1–B7 and B9, but omit B8
 because survival fitting is their required scenario. Other cell definitions and
 the bar implementations are unchanged.
 
@@ -161,7 +163,7 @@ In continuity cells only, a missing current tag in the last user message is
 a diagnostic `FAIL` on F4, targeting #916 in `survival-fit`; a last user message
 starting with `[LCM survival fit:` records `current_user_projected=true`.
 Other cells still report this condition as `ERROR`. Infrastructure errors
-still gate; continuity findings do not.
+still gate; continuity findings gate only in the promoted forced-compaction-then-turn cells.
 
 `MATRIX.md` reports per-host/cell counts and each compaction's kind, turn,
 previous-reply tag and whether its input row was replaced. Unknown data and
