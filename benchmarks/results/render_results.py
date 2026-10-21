@@ -32,14 +32,30 @@ def strongest_entries(data):
     )[:2]
 
 
+SHARED_FIELDS = (
+    "run_date", "lcmx_version", "executable_identity", "config", "harness_commit",
+    "claim_class", "source_url", "evidence_url",
+)
+
+
+def shared_metadata(entries):
+    """Page-level metadata is rendered once, so every reported entry must agree on it."""
+    first = entries[0]
+    for entry in entries[1:]:
+        for field in SHARED_FIELDS:
+            if entry[field] != first[field]:
+                raise ValueError(f"{entry['benchmark']} differs from {first['benchmark']} on {field}")
+    return first
+
+
 def render_readme_results(data):
     """The short README subsection shares the page's data and ranking logic."""
     entries = strongest_entries(data)
     placements = "; ".join(
-        f'[{entry["benchmark"]} {entry["value"]:.2f}: {placement(data, entry["benchmark"])}]({entry["source_url"]}#result-summary)'
+        f'[{entry["benchmark"]} {entry["value"]:.2f}: {placement(data, entry["benchmark"])} scored backends]({entry["source_url"]}#result-summary)'
         for entry in entries
     )
-    first = entries[0]
+    first = shared_metadata(reported_entries(data))
     return (
         "### Results\n\n"
         f'[{data["board"]}]({first["source_url"]}): {first["claim_class"]}.\n'
@@ -50,7 +66,7 @@ def render_readme_results(data):
 
 def render_results(data):
     entries = reported_entries(data)
-    first = entries[0]
+    first = shared_metadata(entries)
     lines = [
         "# Public results",
         "",

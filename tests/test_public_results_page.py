@@ -104,7 +104,18 @@ def test_readme_results_only_quote_sourced_claims(data):
         rank = scores.index(entry["value"]) + 1
         suffix = {1: "st", 2: "nd"}[rank]
         claims.append(
-            f'[{entry["benchmark"]} {entry["value"]:.2f}: {rank}{suffix} of {len(scores)}]({entry["source_url"]}#result-summary)'
+            f'[{entry["benchmark"]} {entry["value"]:.2f}: {rank}{suffix} of {len(scores)} scored backends]({entry["source_url"]}#result-summary)'
         )
     assert lines[3] == "; ".join(claims) + "."
     assert lines[4] == "[Results, configuration, evidence and disclosures](benchmarks/RESULTS.md)."
+
+
+def test_divergent_entry_metadata_is_refused(data):
+    import copy
+    changed = copy.deepcopy(data)
+    reported = [entry for entry in changed["entries"] if entry["status"] == "reported"]
+    reported[1]["run_date"] = "2099-01-01"
+    with pytest.raises(ValueError, match="run_date"):
+        renderer.render_results(changed)
+    with pytest.raises(ValueError, match="run_date"):
+        renderer.render_readme_results(changed)
