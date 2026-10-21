@@ -1,0 +1,11 @@
+{
+  "base_red": "3 failed, 15 deselected in 1.01s",
+  "focused": "387 passed, 1 deselected in 12.79s",
+  "full": "1 failed, 15951 passed, 137 skipped, 64 xfailed, 23 warnings in 253.67s (0:04:13)",
+  "final_identity": "1 passed in 4.14s",
+  "privacy": "77 passed in 2.35s",
+  "ruff": "All checks passed!",
+  "diff_check": "exit 0; no output",
+  "full_rerun": false,
+  "not_proven": "exact-head remote CI; full suite after test-only fixture correction"
+}

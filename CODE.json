@@ -1,0 +1,43 @@
+{
+  "base": "e0db1b846fd813a9d280b34229b799bdf6ce46e0",
+  "product_commit": "c9c8869314e8209b712fc8b2576267e4362c402e",
+  "product_files_sha256": {
+    "tools.py": "38277603ebfb96367503f13e1a614be01d3416231285dbca067196a33448d54b",
+    "vector_store.py": "13f7f9b4271e17ba56ee8b1759c5a2f7f1d4ff117cae78dbbb90728b0d6be531"
+  },
+  "measurement": {
+    "base": {
+      "phase": "base",
+      "head": "e0db1b846fd813a9d280b34229b799bdf6ce46e0",
+      "python": "3.14.6 (main, Jun 23 2026, 15:46:31) [Clang 22.1.3 ]",
+      "sqlite": "3.53.1",
+      "switch_interval": 0.005,
+      "nice": 19,
+      "budget_s": 8,
+      "rows": 250000
+    },
+    "product": {
+      "phase": "product",
+      "head": "e0db1b846fd813a9d280b34229b799bdf6ce46e0",
+      "python": "3.14.6 (main, Jun 23 2026, 15:46:31) [Clang 22.1.3 ]",
+      "sqlite": "3.53.1",
+      "switch_interval": 0.005,
+      "nice": 19,
+      "budget_s": 8,
+      "rows": 250000
+    }
+  },
+  "corpus": {
+    "rows": 250000,
+    "sessions": 500,
+    "seed": 1586,
+    "generator": "bench.instruments.local_catchup.corpus.build; shape=short; baseline=empty",
+    "chunk_identity": "38905b4cbe4030a9b2431a6f5288b73ceb17edaa2aa64dad130f5087cef88bb0",
+    "summary_identity": "2f9d21f9470349182f4718a55724908466a45d9e6efec0a8e91b97339f7efb7c",
+    "vectors": {
+      "lcm_chunk_binary": 250000,
+      "lcm_embedding_binary": 500
+    }
+  },
+  "test_delta": "Test-only fixture/source/scope/timestamp expectations corrected after single full run; final identity passes."
+}

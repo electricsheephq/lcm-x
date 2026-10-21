@@ -1,0 +1,297 @@
+{
+  "base": {
+    "sessions": {
+      "busy": {
+        "callbacks": [
+          36,
+          36,
+          36,
+          36,
+          36
+        ],
+        "exceeded_deadline": 0,
+        "max": 6.942296833003638,
+        "median": 0.09958883398212492,
+        "min": 0.030787958996370435,
+        "n": 5,
+        "rows": [
+          1000,
+          1000,
+          1000,
+          1000,
+          1000
+        ],
+        "timeouts": 0
+      },
+      "busy_idle_ratio": 46.71235855669201,
+      "decision": "fix",
+      "idle": {
+        "callbacks": [
+          36,
+          36,
+          36,
+          36,
+          36
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.003998624975793064,
+        "median": 0.002131959015969187,
+        "min": 0.0017668330110609531,
+        "n": 5,
+        "rows": [
+          1000,
+          1000,
+          1000,
+          1000,
+          1000
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "f33b8a2cc4340d9a581ac77f5e8dfe8c735e64eb97cb854def8366ea2ba8df55"
+    },
+    "vector.chunk": {
+      "busy": {
+        "callbacks": [
+          20,
+          21,
+          22,
+          23,
+          68
+        ],
+        "exceeded_deadline": 5,
+        "max": 8.441185667004902,
+        "median": 8.162328792008338,
+        "min": 8.092741374974139,
+        "n": 5,
+        "rows": [
+          1174,
+          1233,
+          1292,
+          1351,
+          3998
+        ],
+        "timeouts": 5
+      },
+      "busy_idle_ratio": 25.992908259757122,
+      "decision": "fix",
+      "idle": {
+        "callbacks": [
+          4250,
+          4250,
+          4250,
+          4250,
+          4250
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.3536580829822924,
+        "median": 0.31402137500117533,
+        "min": 0.2869673329987563,
+        "n": 5,
+        "rows": [
+          250000,
+          250000,
+          250000,
+          250000,
+          250000
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "778d093347ec043044f097cd57c565effbb93abaa88a0f64b29181c709629e1a"
+    },
+    "vector.summary": {
+      "busy": {
+        "callbacks": [
+          9,
+          9,
+          9,
+          9,
+          9
+        ],
+        "exceeded_deadline": 0,
+        "max": 3.5496561670152005,
+        "median": 3.0099368749943096,
+        "min": 0.0013741669827140868,
+        "n": 5,
+        "rows": [
+          500,
+          500,
+          500,
+          500,
+          500
+        ],
+        "timeouts": 0
+      },
+      "busy_idle_ratio": 2052.230621681914,
+      "decision": "fix",
+      "idle": {
+        "callbacks": [
+          9,
+          9,
+          9,
+          9,
+          9
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.007885208004154265,
+        "median": 0.001466665999032557,
+        "min": 0.001308874983806163,
+        "n": 5,
+        "rows": [
+          500,
+          500,
+          500,
+          500,
+          500
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "8a86a51c02184c3285a24f5ce8f72011d7519e772cda45357f6a9c1cb5c6ae5a"
+    }
+  },
+  "product": {
+    "sessions": {
+      "busy": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.19362958299461752,
+        "median": 0.18221770899253897,
+        "min": 0.15095800001290627,
+        "n": 5,
+        "rows": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "timeouts": 0
+      },
+      "busy_idle_ratio": 98.80095212264817,
+      "idle": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.0027772920147981495,
+        "median": 0.0018442910222802311,
+        "min": 0.0016841249889694154,
+        "n": 5,
+        "rows": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "f33b8a2cc4340d9a581ac77f5e8dfe8c735e64eb97cb854def8366ea2ba8df55"
+    },
+    "vector.chunk": {
+      "busy": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.5946742499945685,
+        "median": 0.5731908329762518,
+        "min": 0.5412044580152724,
+        "n": 5,
+        "rows": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "timeouts": 0
+      },
+      "busy_idle_ratio": 1.4166115290388959,
+      "idle": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.4129380419908557,
+        "median": 0.4046210419910494,
+        "min": 0.37692620800225995,
+        "n": 5,
+        "rows": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "778d093347ec043044f097cd57c565effbb93abaa88a0f64b29181c709629e1a"
+    },
+    "vector.summary": {
+      "busy": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.1777068329975009,
+        "median": 0.1621504159993492,
+        "min": 0.1455014169914648,
+        "n": 5,
+        "rows": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "timeouts": 0
+      },
+      "busy_idle_ratio": 82.42143876492119,
+      "idle": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.006443291989853606,
+        "median": 0.0019673329952638596,
+        "min": 0.0016582920216023922,
+        "n": 5,
+        "rows": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "8a86a51c02184c3285a24f5ce8f72011d7519e772cda45357f6a9c1cb5c6ae5a"
+    }
+  }
+}

@@ -1,0 +1,85 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1749-gil-v1-public",
+  "project": "lcm-x",
+  "kind": "eval",
+  "status": "settled",
+  "owner_lane": "lcmx-1749-gil",
+  "claim_class": "advisory",
+  "created": "2026-10-21T13:20:30Z",
+  "settled": "2026-10-21T13:20:31Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "c9c8869314e8209b712fc8b2576267e4362c402e",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python rescore.py",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "row-handoff-v1",
+      "metric": "chunk_busy_median_s",
+      "value": 0.5731908329762518,
+      "n": 5,
+      "source": "SUMMARY.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "SAMPLES.json",
+      "role": "per-item",
+      "sha256": "8ebba4430f06a9fc953b1e51140ce66a49874dd6297b708511ac5ea479e51b06",
+      "bytes": 20613
+    },
+    {
+      "path": "SUMMARY.json",
+      "role": "per-item",
+      "sha256": "7a6453831ca90362a6dabaee7c888820599257ad55f0f213330d97c958db547a",
+      "bytes": 5980
+    },
+    {
+      "path": "CODE.json",
+      "role": "per-item",
+      "sha256": "00597af8380ab4ccdd275088f4bcc983014bebbc338574d42b171f211ffd92eb",
+      "bytes": 1515
+    },
+    {
+      "path": "rescore.py",
+      "role": "per-item",
+      "sha256": "87866037af5d13250d6a7088d0151441806579e78a53a2cc4177862437097893",
+      "bytes": 1700
+    },
+    {
+      "path": "product-file-hashes.json",
+      "role": "per-item",
+      "sha256": "ebae4097f9bf25a5888df9b0abc0da83c37501bb4209adebe54718f383ac7c51",
+      "bytes": 174
+    }
+  ],
+  "rescore": {
+    "command": "python rescore.py",
+    "inputs": [
+      "SAMPLES.json",
+      "SUMMARY.json",
+      "rescore.py"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "CODE.json",
+    "RESULT.md",
+    "SAMPLES.json",
+    "SUMMARY.json",
+    "product-file-hashes.json",
+    "rescore.py"
+  ],
+  "local_raw": "/Users/m1/Codex/session-notes/2026-10-21/lcmx-1749-gil/artifacts/public"
+}
