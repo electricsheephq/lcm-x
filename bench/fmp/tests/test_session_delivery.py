@@ -202,3 +202,39 @@ def test_fix1_mcp_mismatch_invalidates_row(tmp_path):
     q = SimpleNamespace(qid="q", qtype="x", question="needle", question_date="")
     with pytest.raises(RuntimeError, match="delivery"):
         delivery.harness_agentic(q, Client(), "fixture", {}, [])
+
+
+@pytest.mark.parametrize("args", [
+    {"query": ""}, {"limit": 0}, {"limit": -1}, {"include": "bad"}, {"detail": "bad"},
+    {"scope_bias": "bad"}, {"seen_refs": ["ref"]},
+    {"detail": "answer_ready", "seen_refs": "bad"},
+    {"detail": "answer_ready", "seen_refs": ["ref"] * 101},
+    {"include_occurrence_time": True}, {"exclude_session_ids": "bad"},
+])
+def test_fix2_product_errors_forwarded_in_process_and_mcp(recall_engine, tmp_path, monkeypatch, args):
+    from io import StringIO
+    from bench.fmp import stores
+    e = recall_engine
+    e._config.embeddings_enabled = False
+    arguments = {"query": "needle", **args}
+    raw = delivery.dispatch("lcm_recall", arguments, e)
+    assert "error" in json.loads(raw)
+    delivery.session_mode(e)
+    assert delivery.dispatch("lcm_recall", arguments, e) == raw
+    @contextmanager
+    def opened(self, q):
+        yield e, None
+    monkeypatch.setattr(stores.Stores, "__init__", lambda *a, **kw: None)
+    monkeypatch.setattr(stores.Stores, "engine", opened)
+    monkeypatch.setattr(mcp_reader, "load_lcm", lambda *a: None)
+    spec = dict(config="fixture", repo="fixture", store_root=str(tmp_path), dataset_sha="fixture",
+        summaries=False, delivery_unit="session", max_calls=2, log=str(tmp_path / "mcp.jsonl"),
+        question=dict(qid="q", dataset="lme-s", question_date="", store_id="s", session_map={}))
+    requests = [dict(id=1, method="tools/call", params=dict(name="lcm_recall", arguments=arguments)),
+                dict(id=2, method="tools/call", params=dict(name="lcm_recall", arguments={"query": "needle"}))]
+    stdout = StringIO()
+    mcp_reader.serve(spec, StringIO("\n".join(json.dumps(r) for r in requests)), stdout)
+    error, ok = [json.loads(line)["result"] for line in stdout.getvalue().splitlines()]
+    assert error["isError"] and error["content"][0]["text"] == raw
+    assert not ok["isError"]
+    assert json.loads(ok["content"][0]["text"])["provenance"]["delivery"]["unit"] == "session"

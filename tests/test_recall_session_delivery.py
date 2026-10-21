@@ -354,3 +354,79 @@ def test_fix1_fallback_final_bytes(session_engine, monkeypatch, nonascii, anchor
         assert d.get("stop_reason") != "read_error"
         assert tokens._fallback_token_estimate(raw) == d["response_tokens"] <= 16000
         assert len(raw) == d["response_chars"] <= 64000
+
+
+@pytest.mark.parametrize("size", [56000, 59000])
+def test_fix2_deadline_keeps_evidence_before_hints(session_engine, monkeypatch, size):
+    e = session_engine
+    e._config.large_output_externalization_enabled = False
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    seed = add(e, "needle " + "a" * size, sid="big")
+    for i in range(20):
+        add(e, "needle", sid=f"s{i:02d}")
+    rank, read = tools._lcm_recall_rerank, e._store.load_session_window
+    def ranked(*a, **kw):
+        ordered, status, scores = rank(*a, **kw)
+        return sorted(ordered, key=lambda x: x["hit"]["session_id"] != "big"), status, scores
+    def window(sid, **kw):
+        if sid != "big":
+            raise TimeoutError
+        return read(sid, **kw)
+    monkeypatch.setattr(tools, "_lcm_recall_rerank", ranked)
+    monkeypatch.setattr(e._store, "load_session_window", window)
+    result = recall(e, limit=21)
+    d = result["provenance"]["delivery"]
+    assert [h["store_id"] for h in result["hits"]] == [seed]
+    known = {i for s in d["sessions"] for i in s["seed_ids"]} | {seed}
+    leads = [i for lead in d.get("seed_leads", []) for i in lead["seed_ids"]]
+    assert not known.intersection(leads) and len(leads) == len(set(leads))
+    assert result["timeout"] and d["response_tokens"] <= 16000 and d["response_chars"] <= 64000
+
+
+@pytest.mark.parametrize("entry", [False, True])
+def test_fix2_deadline_summary_lead(session_engine, monkeypatch, entry):
+    from hermes_lcm import recall_session
+    from hermes_lcm.dag import SummaryNode
+    e = session_engine
+    source = add(e, "needle source")
+    node = e._dag.add_node(SummaryNode(session_id="one", depth=0, summary="needle", source_ids=[source]))
+    seed = dict(hit=dict(kind="summary", session_id="one", node_id=node, snippet="needle"),
+                ranks={0: 1}, _final_score=1)
+    monkeypatch.setattr(tools, "_lcm_recall_rerank", lambda *a, **kw: ([seed, seed], "off", []))
+    original, clock, expired = recall_session.deliver_session, tools.time.monotonic, [False]
+    def deliver(*a, **kw):
+        expired[0] = entry
+        return original(*a, **kw)
+    def sources(*a, **kw):
+        raise TimeoutError
+    monkeypatch.setattr(recall_session, "deliver_session", deliver)
+    monkeypatch.setattr(e._dag, "source_message_ids", sources)
+    monkeypatch.setattr(tools.time, "monotonic", lambda: clock() + (100 if expired[0] else 0))
+    result = recall(e, limit=2)
+    leads = result["provenance"]["delivery"]["summary_leads"]
+    assert result["timeout"] and result["hits"] == []
+    assert leads == [dict(node_id=node, session_id="one",
+                         expand_hint=f'lcm_expand(node_id={node}, session_id="one")')]
+
+
+def test_fix2_nonconvergence_omission(session_engine, monkeypatch):
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    monkeypatch.setattr(tools.time, "time", lambda: 1700000000)
+    e = session_engine
+    e._config.large_output_externalization_enabled = False
+    sid = add(e, "needle " + "a" * 400 + "界" * 5000)
+    raw = tools.lcm_recall({"query": "needle", "limit": 1}, engine=e)
+    pad, observed = 400 + 25000 - len(raw), []
+    for delta in range(-20, 21):
+        with e._store._write_lock:
+            e._store._conn.execute("UPDATE messages SET content=? WHERE store_id=?",
+                ("needle " + "a" * (pad + delta) + "界" * 5000, sid))
+            e._store._conn.commit()
+        raw = tools.lcm_recall({"query": "needle", "limit": 1}, engine=e)
+        d = json.loads(raw)["provenance"]["delivery"]
+        assert tokens._fallback_token_estimate(raw) == d["response_tokens"] <= 16000
+        assert len(raw) == d["response_chars"] <= 64000
+        if d.get("stop_reason") == "size_nonconvergence":
+            observed.append(delta)
+            assert {s["omission_reason"] for s in d["sessions"]} == {"size_nonconvergence"}
+    assert observed, "fixture must exercise the fallback estimator discontinuity"

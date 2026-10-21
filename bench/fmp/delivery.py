@@ -116,7 +116,8 @@ def dispatch(name, arguments, engine, offered=None):
     except Exception as exc:
         return json.dumps({"error": f"Error executing {name}: {exc}"}, ensure_ascii=False)
     if name == "lcm_recall" and getattr(getattr(engine, "_config", None), "recall_delivery_unit", "hits") == "session":
-        if json.loads(raw).get("provenance", {}).get("delivery", {}).get("unit") != "session":
+        payload = json.loads(raw)
+        if "error" not in payload and payload.get("provenance", {}).get("delivery", {}).get("unit") != "session":
             raise DeliveryMismatch("product response lacks session delivery provenance")
     return raw
 

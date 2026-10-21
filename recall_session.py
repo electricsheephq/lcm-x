@@ -47,6 +47,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
     response["provenance"]["delivery"] = delivery
     response["query"] = response["query"][:4096]
     admitted, matched, rows, adjacency = [], {}, {}, {}
+    resolved_summaries, fit_failure = set(), "budget"
     conn = None
 
     def check():
@@ -91,7 +92,9 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         return None
 
     def fits():
+        nonlocal fit_failure
         raw = encode()
+        fit_failure = "size_nonconvergence" if raw is None else "budget"
         return raw is not None and len(raw) <= CHAR_BUDGET and count(raw) <= TOKEN_BUDGET
 
     def window(sid, anchor):
@@ -205,6 +208,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 ids = io.dag.source_message_ids(node.node_id, limit=25) if node and node.session_id == sid else []
                 sources = store.get_batch(ids) if ids else {}
                 row = next((sources[i] for i in ids if i in sources and sources[i]["session_id"] == sid), None)
+                if row is not None:
+                    resolved_summaries.add((sid, hit["node_id"]))
                 if row is None and len(delivery["summary_leads"]) < response["limit"]:
                     delivery["summary_leads"].append(dict(node_id=hit["node_id"], session_id=sid,
                         expand_hint=f"lcm_expand(node_id={hit['node_id']}, session_id={json.dumps(sid)})"))
@@ -245,7 +250,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                         emitted.update(h["store_id"] for h in pending)
                     else:
                         admitted.pop()
-                        meta["omission_reason"] = "oversized_group" if not emitted else "budget"
+                        meta["omission_reason"] = (fit_failure if fit_failure == "size_nonconvergence"
+                                                   else "oversized_group" if not emitted else "budget")
                         meta["expand_hint"] = f"lcm_expand(store_id={anchor})"
                         # Try other ranked anchors/sessions, never repeatedly
                         # walk an over-budget neighborhood.
@@ -259,11 +265,23 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
             reason = "deadline"
         if reason == "deadline":
             response["timeout"] = True
-            delivery["seed_leads"] = [dict(session_id=e["hit"]["session_id"],
-                seed_ids=[e["hit"]["store_id"]], expand_hint=f"lcm_expand(store_id={e['hit']['store_id']})")
-                for e in ordered[:response["limit"]] if e["hit"].get("store_id") is not None
-                and e["hit"].get("session_id") not in excluded
-                and (allowed is None or e["hit"].get("session_id") in allowed)]
+            known = {i for s in delivery["sessions"] for i in s["seed_ids"]}
+            known.update(h["store_id"] for g in admitted for h in g)
+            summaries = resolved_summaries | {(s["session_id"], s["node_id"]) for s in delivery["summary_leads"]}
+            delivery["seed_leads"] = []
+            for entry in ordered[:response["limit"]]:
+                hit = entry["hit"]
+                sid, seed = hit.get("session_id"), hit.get("store_id")
+                if sid in excluded or (allowed is not None and sid not in allowed):
+                    continue
+                if seed is not None and seed not in known:
+                    delivery["seed_leads"].append(dict(session_id=sid, seed_ids=[seed],
+                        expand_hint=f"lcm_expand(store_id={seed})"))
+                    known.add(seed)
+                elif seed is None and hit.get("kind") == "summary" and (sid, hit["node_id"]) not in summaries:
+                    delivery["summary_leads"].append(dict(session_id=sid, node_id=hit["node_id"],
+                        expand_hint=f"lcm_expand(node_id={hit['node_id']}, session_id={json.dumps(sid)})"))
+                    summaries.add((sid, hit["node_id"]))
         for meta in delivery["sessions"]:
             if not meta["complete"] and meta["omission_reason"] is None:
                 meta["omission_reason"] = reason
@@ -275,11 +293,21 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
     delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
         not s["complete"] for s in delivery["sessions"])
     # Final metadata and escaped JSON count too: refit whole groups and delta.
-    while not fits() and admitted:
+    while not fits():
+        # Deadline pointers must never displace already admitted evidence.
+        if delivery.get("seed_leads"):
+            delivery["seed_leads"].pop()
+            continue
+        hints = [s for s in delivery["sessions"] if "expand_hint" in s] if response.get("timeout") else []
+        if hints:
+            hints[-1].pop("expand_hint")
+            continue
+        if not admitted:
+            break
         removed = admitted.pop()
         for meta in delivery["sessions"]:
             if meta["session_id"] == removed[0]["session_id"]:
-                meta.update(complete=False, omission_reason="budget")
+                meta.update(complete=False, omission_reason=fit_failure)
         delivery["truncated"] = True
     while not fits():
         # Metadata is budgeted too, even for K=100 bench seeds and no citable
