@@ -115,10 +115,21 @@ def to_msg(row: dict) -> dict:
         msg["tool_calls"] = row["tool_calls"]
     return msg
 
-def continuity(man: dict, system: str, view: list[dict]) -> list[dict]:
+def continuity(man: dict, system: str, view: list[dict], source_rows=()) -> list[dict]:
     text = R.flatten("", view)
-    return [{"id": c["id"], "present": c["value"] in system or c["value"] in text, "in_view": c["value"] in text,
-             "in_system_slot": c["value"] in system} for c in man["continuity"]]
+    receipts = []
+    for c in man["continuity"]:
+        receipt = {"id": c["id"], "present": c["value"] in system or c["value"] in text,
+                   "in_view": c["value"] in text, "in_system_slot": c["value"] in system}
+        if c["id"].endswith("current_request"):
+            index = c.get("row_index")
+            source = source_rows[index].get("content") if type(index) is int and 0 <= index < len(source_rows) else None
+            receipt["whole_source_request_in_view"] = (any(
+                source.encode("utf-8") in m["content"].encode("utf-8")
+                for m in view if m.get("role") == "user" and isinstance(m.get("content"), str)
+            ) if isinstance(source, str) and source else None)
+        receipts.append(receipt)
+    return receipts
 
 def actual_horizon(events, source, checkpoint):
     return sum(e.get("is_compaction", False) and source <= e["row_index"] <= checkpoint
@@ -228,7 +239,7 @@ class Run:
               "spend_guard_skips": SKIPS.n,
               "compress_wall_s": wall, "compress_wall_label": "SUMMARISER WALL (compress() duration; NOT host-visible wait)",
               "t_start": t_start, "t_end": t_start + wall, "summariser_calls": calls,
-              "continuity": continuity(self.man, self.system, new)}
+              "continuity": continuity(self.man, self.system, new, self.rows)}
         self.events.append(ev)
         carry = getattr(self.engine, "_last_user_carry", None)
         ev["empty_no_room"] = carry_room(carry) if isinstance(carry, dict) else None
