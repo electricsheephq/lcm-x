@@ -1268,6 +1268,26 @@ class MessageStore:
             self._commit()
         return added
 
+    def get_carried_stamp_ids(self, store_ids: List[int], *, connection=None) -> set[int]:
+        """Read carried-time provenance without creating schema or changing rows.
+
+        A caller's read-only connection keeps recall's existing deadline policy.
+        Stores predating the optional relation table have no carried markers.
+        """
+        ids = sorted({int(i) for i in store_ids})
+        conn = connection if connection is not None else self._conn
+        if not ids or not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+        ).fetchone():
+            return set()
+        found: set[int] = set()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            found.update(int(row[0]) for row in conn.execute(
+                "SELECT store_id FROM message_relations WHERE kind = 'carried_stamp' "
+                f"AND store_id IN ({','.join('?' * len(chunk))})", chunk))
+        return found
+
     def get_message_relations(self, store_ids: List[int], kind: str, *, related: bool = False) -> List[Dict[str, Any]]:
         """Relation rows of ``kind`` whose ``store_id`` (or ``related_store_id``) is in ``store_ids``."""
         ids = sorted({int(i) for i in store_ids})

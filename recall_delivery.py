@@ -262,6 +262,10 @@ def deliver_recall(
                         else "ingest_fallback"
                     ),
                 }
+                if source_row.get("time_uncertain") == "carried":
+                    item["time_uncertain"] = "carried"
+                    occurrence["time_uncertain"] = "carried"
+                    item["observation_time"]["time_uncertain"] = "carried"
         if reference_strict:
             # Selection already proved this candidate against its row, so there
             # is nothing left to re-check here -- only the proven span to

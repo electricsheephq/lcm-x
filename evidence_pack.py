@@ -20,6 +20,7 @@ from typing import Any, Callable, Mapping, Sequence
 from .occurrence_time import resolve_occurrence_time
 from .reasoning import (
     EvidencePlan,
+    GroundingDecision,
     compile_evidence_plan,
     execute_plan,
     ground_evidence,
@@ -306,12 +307,15 @@ def _observation_time(
             datetime.fromtimestamp(ingested_at, tz=timezone.utc).date().isoformat()
         )
         source = "ingest_fallback"
-    return {
+    result = {
         "observed_at": observed_at,
         "ingested_at": ingested_at,
         "date": observed_day,
         "source": source,
     }
+    if row.get("time_uncertain") == "carried":
+        result["time_uncertain"] = "carried"
+    return result
 
 
 def _resolve_candidate(
@@ -330,6 +334,8 @@ def _resolve_candidate(
     row = engine._store.get(store_id)
     if row is None:
         return None, "missing_source_row"
+    if engine._store.get_carried_stamp_ids([store_id]):
+        row = {**row, "time_uncertain": "carried"}
     content = str(row.get("content") or "")
     if (
         declared_start < 0
@@ -456,7 +462,32 @@ def _resolve_candidate(
     }
     if raw.get("duplicate_store_ids"):
         public["duplicate_store_ids"] = raw["duplicate_store_ids"]
+    if row.get("time_uncertain") == "carried":
+        public["occurrence_time"]["time_uncertain"] = "carried"
     return ResolvedCandidate(operand=operand, public=public), None
+
+
+def _ground_pack_evidence(resolved, *, engine, as_of):
+    """Retain carried rows as disclosed evidence, without certifying an as-of time.
+
+    Each uncertain row skips the time boundary, including grounding's second
+    observation check. Ordinary rows retain all existing as-of checks. No stored
+    time or identity evidence is rewritten, even transiently for grounding.
+    """
+    options = dict(messages=engine._store, assertions=getattr(engine, "_assertions", None),
+                   session_dates=getattr(engine, "_session_occurrence_dates", None))
+    if as_of is None or not any(
+        item.public["observation_time"].get("time_uncertain") for item in resolved
+    ):
+        return ground_evidence([item.operand for item in resolved], as_of=as_of, **options)
+    operands = []
+    for item in resolved:
+        uncertain = item.public["observation_time"].get("time_uncertain") == "carried"
+        decision = ground_evidence([item.operand], as_of=None if uncertain else as_of, **options)
+        if decision.status != "grounded":
+            return decision
+        operands.extend(decision.operands)
+    return GroundingDecision("grounded", operands=tuple(operands))
 
 
 def _completeness(
@@ -752,7 +783,8 @@ def build_evidence_pack(
                 if isinstance(observation, Mapping)
                 else None
             )
-            if observed_at is not None and observed_at > as_of:
+            if (observed_at is not None and observed_at > as_of
+                    and observation.get("time_uncertain") != "carried"):
                 exclusions.append(
                     {
                         "exact_ref": item.public["exact_ref"],
@@ -763,13 +795,7 @@ def build_evidence_pack(
             as_of_eligible.append(item)
         resolved = as_of_eligible
     grounding = (
-        ground_evidence(
-            [item.operand for item in resolved],
-            messages=engine._store,
-            assertions=getattr(engine, "_assertions", None),
-            as_of=as_of,
-            session_dates=getattr(engine, "_session_occurrence_dates", None),
-        )
+        _ground_pack_evidence(resolved, engine=engine, as_of=as_of)
         if resolved
         else None
     )
@@ -815,7 +841,11 @@ def build_evidence_pack(
     )
     computation: dict[str, Any] | None = None
     computation_reason: str | None = None
-    if plan is not None and completeness["state"] == "closed":
+    if as_of is not None and any(
+        item.public["observation_time"].get("time_uncertain") for item in resolved
+    ):
+        computation_reason = "uncertain_source_observation_time"
+    elif plan is not None and completeness["state"] == "closed":
         alignment_error = validate_selector_alignment(question, plan, grounded_operands)
         if alignment_error:
             computation_reason = alignment_error
