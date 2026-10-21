@@ -115,6 +115,64 @@ def canonical_store_digest(c):
         c.execute(f'SELECT * FROM "{t}"'), key=repr))) for t in tables])
 
 
+def canonical_store_snapshot(c):
+    """Keep structure and per-column hashes for readable, content-free failures."""
+    objects = {name: {"type": kind, "table": table, "digest": audit.digest([(sql,)])}
+               for kind, name, table, sql in c.execute(
+                   "SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY name")}
+    tables = {}
+    for name, obj in objects.items():
+        if obj["type"] != "table":
+            continue
+        quoted = '"' + name.replace('"', '""') + '"'
+        rows = sorted(c.execute(f"SELECT * FROM {quoted}"), key=repr)
+        columns = [r[1] for r in c.execute(f"PRAGMA table_info({quoted})")]
+        tables[name] = {"rows": len(rows), "digest": audit.digest(rows),
+                        "columns": {col: audit.digest([(r[i],) for r in rows])
+                                    for i, col in enumerate(columns)}}
+    return {"digest": canonical_store_digest(c), "objects": objects, "tables": tables}
+
+
+def store_changes(expected, actual):
+    changes = []
+    for section in ("objects", "tables"):
+        before, after = expected[section], actual[section]
+        for name in sorted(before.keys() | after.keys()):
+            if before.get(name) == after.get(name):
+                continue
+            if name not in before or name not in after:
+                change = "added" if name in after else "removed"
+                changes.append(f"{section}: {name} {change}")
+            elif section == "objects":
+                obj = after[name]
+                changes.append(f"schema: {obj['type']} {name} on table {obj['table']} changed")
+            else:
+                old, new = before[name], after[name]
+                columns = sorted(col for col in old["columns"].keys() | new["columns"].keys()
+                                 if old["columns"].get(col) != new["columns"].get(col))
+                changes.append(f"table {name}: rows {old['rows']} -> {new['rows']}; "
+                               f"changed columns: {', '.join(columns) or '(row association changed)'}")
+    return "\n".join(changes)
+
+
+@pytest.mark.parametrize("mutation,diagnostic", [
+    ("ALTER TABLE messages ADD COLUMN origin TEXT", "changed columns: origin"),
+    ("UPDATE messages SET content='private replacement'", "changed columns: content"),
+    ("CREATE TRIGGER changed AFTER UPDATE ON messages BEGIN SELECT 1; END", "objects: changed added"),
+])
+def test_store_changes_names_structure_without_message_content(mutation, diagnostic):
+    with sqlite3.connect(":memory:") as c:
+        c.execute("CREATE TABLE messages(content TEXT)")
+        c.execute("INSERT INTO messages VALUES ('private original')")
+        before = canonical_store_snapshot(c)
+        c.execute(mutation)
+        after = canonical_store_snapshot(c)
+    assert before["digest"] != after["digest"]
+    changes = store_changes(before, after)
+    assert diagnostic in changes
+    assert "private" not in changes
+
+
 def test_corpus_reuses_reader_and_preserves_bytes(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path/"home"))
     reads, original = [], corpus.connect
@@ -125,7 +183,7 @@ def test_corpus_reuses_reader_and_preserves_bytes(tmp_path, monkeypatch):
     db = tmp_path/"small.db"
     manifest = corpus.build(REPO, REPO, db, 8)
     # The separate provenance-audit extension adds metadata to the manifest.
-    # Everything emitted by the old builder and the entire store stays identical.
+    # Everything emitted by the old builder stays identical.
     manifest["preimage"].pop("metadata", None)
     manifest["preimage"].pop("provenance", None)
     manifest.pop("expected_metadata", None)
@@ -137,8 +195,11 @@ def test_corpus_reuses_reader_and_preserves_bytes(tmp_path, monkeypatch):
         c.execute("UPDATE lcm_migration_state SET completed_at=0")
         c.execute("UPDATE metadata SET value='fixture-clock' WHERE key LIKE 'fts_integrity_checked_at:%'")
         c.commit()
-        store_digest = canonical_store_digest(c)
-    assert store_digest == "f9d6ac8474c8021571ac599913d5e699dd59ec7280d3152aec65d6c84f12dad0"
+        snapshot = canonical_store_snapshot(c)
+    # #1748 added gap-fill invalidation triggers, first in 34cc7a53f58f,
+    # extended in 04b38508e2bb, f84f849e63cb and 1eb0620a917d. Row bytes did not change.
+    golden = json.loads(Path(__file__).with_name("local_catchup_store_golden.json").read_text())
+    assert snapshot == golden, "Canonical store changed:\n" + store_changes(golden, snapshot)
     assert len(reads) <= 2, "one read connection for the build plus the preimage read"
 
 
