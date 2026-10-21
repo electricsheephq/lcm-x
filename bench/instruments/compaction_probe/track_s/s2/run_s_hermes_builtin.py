@@ -149,9 +149,10 @@ def main():
         (cp["dir"] / "results.jsonl").write_text("".join(json.dumps(r) + "\n" for r in res))
         (cp["dir"] / "assembled_context.json").write_text(json.dumps(dict(system=run.system, view=cp["view"])))
         import shutil
-        (cp["dir"] / "continuity").mkdir(exist_ok=True)
-        for event in run.events[:cp["n_events"]]:
-            shutil.copy2(out / "continuity" / f"event-{event['event']}.json", cp["dir"] / "continuity")
+        if S2.deep.enabled(man):
+            (cp["dir"] / "continuity").mkdir(exist_ok=True)
+            for event in run.events[:cp["n_events"]]:
+                shutil.copy2(out / "continuity" / f"event-{event['event']}.json", cp["dir"] / "continuity")
         (cp["dir"] / "summary.json").write_text(json.dumps(dict(summary, status=cp_status, checkpoint_id=cp["checkpoint"]["id"], checkpoint=cp["row"],
             stop_row_index=cp["row"], reader_calls=run.reader_calls, events=run.events[:cp["n_events"]],
             final_context=dict(tokens=run.ntok([run.sysmsg] + cp["view"])),
