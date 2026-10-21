@@ -1,6 +1,6 @@
 # Public results
 
-OmniMemEval: An open evaluation harness comparing memory backends within each benchmark using the same data, prompts, answer model, judge model and metric logic.
+OmniMemEval: An open evaluation harness that requests the same data, prompts, answer model, judge model and metric logic for every backend within each benchmark (the disclosure below states how the LCM-X rows requested the models).
 The LCM-X maintainers ran these rows on the unchanged upstream pipeline and prompts.
 Claim class: **contributor-run, accepted upstream**.
 Placements count only listed backends with a score in the pinned upstream summary; higher scores rank first.

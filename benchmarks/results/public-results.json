@@ -1,6 +1,6 @@
 {
   "board": "OmniMemEval",
-  "description": "An open evaluation harness comparing memory backends within each benchmark using the same data, prompts, answer model, judge model and metric logic.",
+  "description": "An open evaluation harness that requests the same data, prompts, answer model, judge model and metric logic for every backend within each benchmark (the disclosure below states how the LCM-X rows requested the models).",
   "snapshot": {
     "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
     "benchmarks": [
