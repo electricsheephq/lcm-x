@@ -1,5 +1,6 @@
 """Opt-in post-ranking session packs. No retrieval, writes or sidecar restores."""
 from collections import deque
+from contextlib import ExitStack
 import copy
 from functools import partial
 import json
@@ -49,6 +50,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
     admitted, matched, rows, adjacency = [], {}, {}, {}
     resolved_summaries, fit_failure = set(), "budget"
     conn = None
+    live_reads = ExitStack()
 
     def check():
         if time.monotonic() >= deadline:
@@ -96,6 +98,19 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         raw = encode()
         fit_failure = "size_nonconvergence" if raw is None else "budget"
         return raw is not None and len(raw) <= CHAR_BUDGET and count(raw) <= TOKEN_BUDGET
+
+    def evidence_fits():
+        # Pointers never outrank source evidence, during admission or refit.
+        while not fits():
+            if delivery.get("seed_leads"):
+                delivery["seed_leads"].pop()
+            elif delivery["summary_leads"]:
+                delivery["summary_leads"].pop()
+            elif hints := [s for s in delivery["sessions"] if "expand_hint" in s]:
+                hints[-1].pop("expand_hint")
+            else:
+                return False
+        return True
 
     def window(sid, anchor):
         check()
@@ -187,13 +202,19 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
 
     try:
         check()
-        path = Path(engine._store.db_path).resolve()
-        conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=max(.001, deadline - time.monotonic()))
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only=ON")
-        conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
-        conn.execute("BEGIN")
-        io = RetrievalContext(engine._store, engine._dag).bind(conn, conn)
+        if str(engine._store.db_path) == ":memory:":
+            # Borrow under the owners' locks; no transaction or PRAGMA changes.
+            live_reads.enter_context(engine._store._write_lock)
+            live_reads.enter_context(engine._dag._db_lock)
+            io = RetrievalContext(engine._store, engine._dag)
+        else:
+            path = Path(engine._store.db_path).resolve()
+            conn = sqlite3.connect(f"{path.as_uri()}?mode=ro", uri=True, timeout=max(.001, deadline - time.monotonic()))
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only=ON")
+            conn.set_progress_handler(lambda: int(time.monotonic() >= deadline), 1000)
+            conn.execute("BEGIN")
+            io = RetrievalContext(engine._store, engine._dag).bind(conn, conn)
         store = io.store
         sessions = {}
         eligible = 0
@@ -246,7 +267,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                     meta["omission_reason"] = "no_novel_exact_ref"
                 elif pending:
                     admitted.append(pending)
-                    if fits():
+                    if evidence_fits():
                         emitted.update(h["store_id"] for h in pending)
                     else:
                         admitted.pop()
@@ -290,18 +311,11 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
     finally:
         if conn is not None:
             conn.close()
+        live_reads.close()
     delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
         not s["complete"] for s in delivery["sessions"])
     # Final metadata and escaped JSON count too: refit whole groups and delta.
-    while not fits():
-        # Deadline pointers must never displace already admitted evidence.
-        if delivery.get("seed_leads"):
-            delivery["seed_leads"].pop()
-            continue
-        hints = [s for s in delivery["sessions"] if "expand_hint" in s] if response.get("timeout") else []
-        if hints:
-            hints[-1].pop("expand_hint")
-            continue
+    while not evidence_fits():
         if not admitted:
             break
         removed = admitted.pop()
@@ -323,5 +337,12 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         elif response["query"]:
             response["query"] = response["query"][:len(response["query"]) // 2]
         else:
+            # An inherited envelope can exceed the cap without any evidence.
+            # Return an explicit bounded failure, never silently overrun it.
+            delivery.update(sessions=[], summary_leads=[], truncated=True, stop_reason="budget")
+            delivery.pop("seed_leads", None)
+            response.clear()
+            response.update(error="session_base_envelope_over_budget", query="",
+                            provenance={"delivery": delivery})
             break
     return encode()

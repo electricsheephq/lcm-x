@@ -84,7 +84,6 @@ def test_mcp_spec_and_reopen(monkeypatch, tmp_path, recall_engine):
     monkeypatch.setattr(stores.Stores, "__init__", lambda *a, **kw: None)
     monkeypatch.setattr(stores.Stores, "engine", opened)
     monkeypatch.setattr(mcp_reader, "load_lcm", lambda *a: None)
-    monkeypatch.setattr(delivery, "schemas", lambda e: [])
     def dispatch(name, arguments, engine, offered=None):
         assert engine._config.recall_delivery_unit == "session"
         return '{"provenance":{"delivery":{"unit":"session"}},"hits":[]}'
@@ -174,6 +173,15 @@ def test_fix1_effective_delivery(recall_engine, monkeypatch):
     monkeypatch.setattr(tools, "lcm_recall", lambda *a, **kw: '{"hits":[]}')
     with pytest.raises(RuntimeError, match="delivery"):
         delivery.dispatch("lcm_recall", {"query": "needle"}, recall_engine)
+
+
+def test_fix3_admission_without_retrieval(recall_engine, monkeypatch):
+    from hermes_lcm import tools
+    probe = Mock(side_effect=AssertionError("unreported recall"))
+    monkeypatch.setattr(tools, "lcm_recall", probe)
+    delivery.session_mode(recall_engine)
+    probe.assert_not_called()
+    assert recall_engine._config.recall_delivery_unit == "session"
 
 
 def test_fix1_old_checkout_manifest(recall_engine, tmp_path, monkeypatch):

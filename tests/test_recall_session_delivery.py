@@ -430,3 +430,70 @@ def test_fix2_nonconvergence_omission(session_engine, monkeypatch):
             observed.append(delta)
             assert {s["omission_reason"] for s in d["sessions"]} == {"size_nonconvergence"}
     assert observed, "fixture must exercise the fallback estimator discontinuity"
+
+
+def test_fix3_memory_store(session_engine, monkeypatch):
+    from hermes_lcm.store import MessageStore
+    from hermes_lcm.dag import SummaryDAG
+    from hermes_lcm import recall_session
+    store, dag = MessageStore(":memory:"), SummaryDAG(":memory:")
+    monkeypatch.setattr(session_engine, "_store", store)
+    monkeypatch.setattr(session_engine, "_dag", dag)
+    try:
+        seed = add(session_engine, "needle")
+        neighbor = add(session_engine, "local neighbor")
+        ranked = dict(hit=dict(kind="message_excerpt", session_id="one", store_id=seed),
+                      ranks={}, _final_score=1)
+        monkeypatch.setattr(tools, "_lcm_recall_rerank", lambda *a, **kw: ([ranked], "off", []))
+        connections = (store._conn, dag._conn)
+        before = [(c.total_changes, c.in_transaction, c.execute("PRAGMA query_only").fetchone()[0])
+                  for c in connections]
+        monkeypatch.setattr(recall_session.sqlite3, "connect", Mock(side_effect=AssertionError("wrong file")))
+        result = recall(session_engine)
+        assert [h["store_id"] for h in result["hits"]] == [seed, neighbor]
+        assert before == [(c.total_changes, c.in_transaction, c.execute("PRAGMA query_only").fetchone()[0])
+                          for c in connections]
+    finally:
+        dag.close()
+        store.close()
+
+
+@pytest.mark.parametrize("phase", ["admission", "refit"])
+def test_fix3_evidence_before_pointers(session_engine, monkeypatch, phase):
+    from hermes_lcm import recall_session
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    session_engine._config.large_output_externalization_enabled = False
+    seed = add(session_engine, "needle " + "a" * 2000)
+    original = recall_session.deliver_session
+    def deliver(ordered, response, **kw):
+        kw["summary_leads"] = [dict(session_id="one", node_id=99, expand_hint="x" * 64000)]
+        if phase == "refit":
+            # Simulate the final deadline metadata arriving after admission.
+            def count(raw, **unused):
+                payload = json.loads(raw)
+                final = payload["provenance"]["delivery"]["sessions"][0]["complete"]
+                return 16001 if final and payload["provenance"]["delivery"]["summary_leads"] else 100
+            monkeypatch.setattr(tokens, "count_tokens_with_encoder", count)
+            kw["summary_leads"][0]["expand_hint"] = "hint"
+        return original(ordered, response, **kw)
+    monkeypatch.setattr(recall_session, "deliver_session", deliver)
+    result = recall(session_engine)
+    assert [h["store_id"] for h in result["hits"]] == [seed]
+    assert result["provenance"]["delivery"]["summary_leads"] == []
+
+
+def test_fix3_oversized_base_envelope(session_engine, monkeypatch):
+    from hermes_lcm import recall_session
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    add(session_engine, "needle")
+    original = recall_session.deliver_session
+    def deliver(ordered, response, **kw):
+        response["degraded_reason"] = "x" * 100000
+        return original(ordered, response, **kw)
+    monkeypatch.setattr(recall_session, "deliver_session", deliver)
+    result = recall(session_engine)
+    raw = json.dumps(result, ensure_ascii=False)
+    d = result["provenance"]["delivery"]
+    assert len(raw) == d["response_chars"] <= 64000
+    assert tokens._fallback_token_estimate(raw) == d["response_tokens"] <= 16000
+    assert result["error"] == "session_base_envelope_over_budget"

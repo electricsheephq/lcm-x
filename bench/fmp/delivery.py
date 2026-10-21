@@ -95,9 +95,10 @@ def session_mode(engine):
     if not hasattr(engine._config, "recall_delivery_unit"):
         raise DeliveryMismatch("session delivery unavailable in selected checkout")
     engine._config.recall_delivery_unit = "session"
-    raw = dispatch("lcm_recall", {"query": "FMP delivery verification", "limit": 1}, engine)
-    if json.loads(raw).get("provenance", {}).get("delivery", {}).get("unit") != "session":
-        raise DeliveryMismatch("session delivery verification failed")
+    recall = next((s["function"] for s in schemas(engine)
+                   if s["function"]["name"] == "lcm_recall"), {})
+    if "Session delivery" not in recall.get("description", ""):
+        raise DeliveryMismatch("session delivery schema unavailable in selected checkout")
 
 
 def dispatch(name, arguments, engine, offered=None):
