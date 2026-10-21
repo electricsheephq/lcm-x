@@ -46,7 +46,7 @@ def test_item6_final_integrity_runs_after_shutdown(tmp_path, monkeypatch, kind):
     monkeypatch.setattr(module, "runtime", lambda _: (a, mod, engine, 0))
     monkeypatch.setattr(module, "safety", lambda *a: {})
     monkeypatch.setattr(module, "catchup_activity", lambda *a, **kw: dict(catchup_activity=False))
-    def trace(engine, mod, count, seed, observe, check):
+    def trace(engine, mod, count, seed, observe, check, done=None):
         observe(dict(ingest_preflight_ms=1, dispatch_ms=1, compression_due=True))
         check()
     monkeypatch.setattr(module, "trace", trace)

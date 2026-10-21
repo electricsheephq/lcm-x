@@ -95,7 +95,7 @@ def test_floor_shape_baseline_and_summary(tmp_path, monkeypatch, shape, baseline
         a.out.mkdir()
         events = [dict(event="_embedding_backfill_summary_run", embedded=32, at=i, end=i+.572) for i in range(5)]
         (a.out/"events.jsonl").write_text("".join(json.dumps(e)+"\n" for e in events))
-        return dict(state="INCOMPLETE", rows_s=10, audit=dict(complete=False))
+        return dict(state="INCOMPLETE", rows_s=10, audit=dict(complete=False), end_to_end_s=7200)
     monkeypatch.setattr(floor, "run", run)
     clock = iter([0, 1, 1, 7201])
     monkeypatch.setattr(floor.time, "monotonic", lambda: next(clock))

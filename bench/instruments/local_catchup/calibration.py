@@ -37,7 +37,7 @@ def standalone(a):
         if not isinstance(result, dict) or result.get("embedded") != 32:
             raise RuntimeError("standalone calibration did not write 32 vectors")
         target.unlink()
-    value = dict(core_seconds=times, standalone_calibration_s=median(times), reference_standalone_s=None, model_preparation_s=preparation_s)
+    value = dict(core_seconds=times, standalone_calibration_s=median(times), model_preparation_s=preparation_s)
     dump(a.out/"calibration.json", value)
     return value
 
@@ -55,6 +55,7 @@ def covered(a):
     fill_covered(a, mod, __import__("argparse").Namespace(_config=config(mod, db)), manifest)
     audit_start = time.monotonic()
     checked = audit(db, manifest)
+    dump(a.out/"manifest.json", manifest)  # Carry first-seen digests into the next setup stage.
     dump(a.out/"audit.json", dict(checked, build_seconds=time.monotonic()-start,
         corpus_seconds=corpus_s, audit_seconds=time.monotonic()-audit_start))
     if not checked["complete"] and not getattr(a, "allow_partial", False):

@@ -106,4 +106,9 @@ jobs:
         if: always()
         with:
           name: lcmx-1586-setup-evidence-${{ inputs.stage }}
-          path: evidence/
+          path: |
+            evidence/*.txt
+            evidence/calibration/
+            evidence/covered/audit.json
+            evidence/covered/manifest.json
+            evidence/covered/coverage.jsonl

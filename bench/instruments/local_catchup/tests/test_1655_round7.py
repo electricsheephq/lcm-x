@@ -237,7 +237,7 @@ def test_f4_floor_nonpass_exits_after_summary_and_labels(tmp_path, monkeypatch, 
     def run(a):
         a.out.mkdir()
         (a.out/"events.jsonl").write_text("")
-        return {}
+        return dict(end_to_end_s=7200)
     monkeypatch.setattr(floor, "run", run)
     monkeypatch.setattr(floor, "rate", lambda *a: dict(state=state))
     def recall_run(*a, **kw):

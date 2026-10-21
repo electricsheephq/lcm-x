@@ -14,6 +14,7 @@ import time
 import types
 
 MODEL = "BAAI/bge-small-en-v1.5"
+REFERENCE_CALIBRATION_S = .572
 REQUEST = ContextVar("instrument_foreground_request", default=False)
 
 
@@ -24,6 +25,12 @@ def foreground_request():
         yield
     finally:
         REQUEST.reset(token)
+
+
+def rollup(states):
+    states = set(states)
+    return next((s for s, members in (("FAIL", {"FAIL"}), ("INVALID", {"INVALID", "ABORTED"}),
+        ("UNCALIBRATED", {"UNCALIBRATED"})) if states & members), "PASS")
 
 
 def dump(path, value):

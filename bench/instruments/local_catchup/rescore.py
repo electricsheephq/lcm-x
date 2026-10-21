@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 from .catchup import state
-from .common import load
+from .common import load, rollup
 
 
 def verdict(path, max_wall):
@@ -25,22 +25,37 @@ def v2(root):
     from .recall import score
     def lines(path):
         return [json.loads(s) for s in path.read_text().splitlines()]
+    for name in ("raw-summary.json", "summary.json"):
+        if (root/name).exists():
+            early = load(root/name)
+            if early.get("state") == "INVALID" and early.get("reason") == "covered_store_incomplete":
+                return early
     if (root/"summary.json").exists() and "cells" in load(root/"summary.json"):
         recorded = load(root/"summary.json")
         cells = [v2(root/c["baseline"]) for c in recorded["cells"]]
-        assert recorded["state"] == ("PASS" if all(c["state"] == "PASS" for c in cells) else "FAIL")
+        assert recorded["state"] == rollup(c["state"] for c in cells)
         return dict(state=recorded["state"], cells=cells)
+    if (root/"summary.json").exists() and "blocks" in load(root/"summary.json"):
+        recorded = load(root/"summary.json")
+        cells = [v2(root/f"{c['block']}-{c['state']}") for c in recorded["blocks"]]
+        assert all(c["result"]["state"] == v["state"] for c, v in zip(recorded["blocks"], cells))
+        assert recorded["state"] == rollup(c["state"] for c in cells)
+        return dict(state=recorded["state"], blocks=cells)
     if (root/"catchup").is_dir():
         recorded = load(root/"summary.json")
-        computed = rate(load(root/"catchup/summary.json"), recorded["measured_seconds"],
+        raw = load(root/"catchup/summary.json")
+        seconds = raw.get("end_to_end_s")
+        if seconds is None:
+            seconds = max(r["elapsed_s"] for r in lines(root/"catchup/progress.jsonl"))
+        computed = rate(raw, seconds,
             load(root/"manifest.json")["rows"], lines(root/"catchup/events.jsonl"))
         assert all(recorded[k] == v for k, v in computed.items())
     else:
         recorded = load(root/"raw-summary.json")
         request = load(root/"request.json")
         computed = score(lines(root/"recalls.jsonl"), lines(root/"publications.jsonl"),
-            request["seed"], request["state"], recorded, request.get("standalone_calibration_s"),
-            recorded["reference_standalone_s"])
+            request["seed"], request["state"], recorded, recorded.get("calibration_s", recorded.get("standalone_calibration_s")),
+            recorded["reference_calibration_s"])
         if recorded.get("measurement_valid") is False:
             computed["state"] = "INVALID"
         assert all(recorded[k] == v for k, v in computed.items())
@@ -51,7 +66,8 @@ if __name__ == "__main__":
     import sys
     for name in sys.argv[1:]:
         root = Path(name)
-        if (root/"catchup").is_dir() or (root/"recalls.jsonl").exists() or "cells" in load(root/"summary.json"):
+        if (root/"catchup").is_dir() or (root/"raw-summary.json").exists() or any(
+                k in load(root/"summary.json") for k in ("cells", "blocks")) or load(root/"summary.json").get("reason") == "covered_store_incomplete":
             print(json.dumps(v2(root)))
             continue
         summary, audit = load(root/"summary.json"), load(root/"final-audit.json")

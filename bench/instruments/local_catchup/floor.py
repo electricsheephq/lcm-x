@@ -10,7 +10,7 @@ import sys
 import time
 
 from .catchup import run, wall
-from .common import dump, isolated, parser
+from .common import REFERENCE_CALIBRATION_S, dump, isolated, parser, rollup
 from .corpus import build
 from .calibration import standalone
 
@@ -50,13 +50,13 @@ def rate(summary, seconds, rows, events=()):
     speed = summary.get("rows_s", 0)
     hours = rows/speed/3600 if speed > 0 else None
     calibrated = calibration(events)
-    normalized = hours*.572/calibrated if hours is not None and calibrated else None
+    normalized = hours*REFERENCE_CALIBRATION_S/calibrated if hours is not None and calibrated else None
     gated = max(hours, normalized) if normalized is not None else None
     valid = (seconds >= 7200 and summary.get("state") == "INCOMPLETE" and rows >= 250000
              and summary.get("audit", {}).get("complete") is False)
     return dict(label=LABEL, state="INVALID" if not valid or calibrated is None else "PASS" if gated is not None and gated <= 72 else "FAIL",
                 sustained_rows_s=speed, implied_hours=hours, measured_seconds=seconds, bar_hours=72,
-                calibration_s=calibrated, reference_calibration_s=.572, implied_hours_normalized=normalized,
+                calibration_s=calibrated, reference_calibration_s=REFERENCE_CALIBRATION_S, implied_hours_normalized=normalized,
                 implied_hours_gated=gated, reason="no_calibration" if calibrated is None else None,
                 validity="at least two hours, backlog present throughout, declared corpus size")
 
@@ -166,7 +166,7 @@ def limited(a):
             out.mkdir()
             coverage(Namespace(**{**vars(a), "out": out, "scratch": a.scratch/baseline, "baseline": baseline}))
             cells.append(json.loads((out/"summary.json").read_text()))
-        summary = dict(state="PASS" if all(c["state"] == "PASS" for c in cells) else "FAIL", cells=cells)
+        summary = dict(state=rollup(c["state"] for c in cells), cells=cells)
     else:
         return coverage(Namespace(**{**vars(a), "scratch": a.scratch/a.baseline}))
     dump(a.out/"summary.json", dict(summary, label=LABEL, shape=a.shape, baseline=a.baseline))
@@ -184,14 +184,13 @@ def coverage(a):
     if a.cell == "coverage-pair" and 2*(build_s+7200+build_s) > a.max_minutes*60:
         raise RuntimeError("coverage pair cannot fit build, two full windows and audit reserve")
     dump(a.out/"manifest.json", manifest)
-    start = time.monotonic()
     measured = run(Namespace(**{**vars(a), "db": db, "manifest": a.out/"manifest.json",
         "home": a.scratch/"homes", "out": a.out/"catchup", "max_wall": wall("2h"),
         "restart_fraction": 2., "restart_after": float("inf"), "progress_interval": 30,
         "cpu_cap": 1.5, "cpu_sustained": 10, "per_mean": .6, "per_p95": .75,
         "aggregate_mean": 7., "aggregate_p95": 8.75}))
     events = [json.loads(s) for s in (a.out/"catchup/events.jsonl").read_text().splitlines()]
-    summary = rate(measured, time.monotonic()-start, a.rows, events)
+    summary = rate(measured, measured["end_to_end_s"], a.rows, events)
     dump(a.out/"summary.json", dict(summary, label=LABEL, shape=a.shape, baseline=a.baseline))
 
 

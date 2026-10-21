@@ -6,7 +6,8 @@ import threading
 import time
 
 from .audit import audit, vector_counts
-from .common import append, dump, foreground_request, load
+from .common import REFERENCE_CALIBRATION_S, append, dump, foreground_request, load, rollup
+from .floor import calibration
 from .cpu import percentile
 from .measurement import SMOKE, arguments, bootstrap, catchup_activity, cell, guarded_worker, integrity, prepare, runtime, safety, trace, wait_covered
 
@@ -75,10 +76,10 @@ def overlapping_publications(counted, publications):
     return len({p.get("node_id", i) for i, p in enumerate(publications) if overlapping([p], counted)})
 
 
-def score(rows, publications, seed=1586, state="OFF", activity=None, calibration_s=None, reference_standalone_s=None):
+def score(rows, publications, seed=1586, state="OFF", activity=None, calibration_s=None, reference_calibration_s=REFERENCE_CALIBRATION_S):
     if not any("query_class" in r for r in rows):
         return score_class(rows, publications, seed, state, activity)
-    ratio = reference_standalone_s/calibration_s if reference_standalone_s and calibration_s else None
+    ratio = reference_calibration_s/calibration_s if reference_calibration_s and calibration_s else None
     classes = {c: score_class([r for r in rows if r.get("query_class") == c], publications, seed, state, activity)
                for c in ("canary", "broad_nl")}
     if ratio and ratio > 1.25:
@@ -89,8 +90,8 @@ def score(rows, publications, seed=1586, state="OFF", activity=None, calibration
                 result["state"] = "FAIL"
     states = [r["state"] for r in classes.values()]
     host = "UNCALIBRATED" if ratio is None else "FAIL" if ratio > 1.25 and "FAIL" in states else "PASS"
-    return dict(state="FAIL" if "FAIL" in states else "INVALID" if "INVALID" in states else host,
-        classes=classes, standalone_calibration_s=calibration_s, reference_standalone_s=reference_standalone_s,
+    return dict(state=rollup([*states, host]),
+        classes=classes, calibration_s=calibration_s, reference_calibration_s=reference_calibration_s,
         host_check=host, latency_scale=ratio if ratio and ratio > 1.25 else 1.)
 
 
@@ -132,6 +133,25 @@ def recall_reader(engine, mod, db, home):
         _store=mod("store").MessageStore(db), _dag=mod("dag").SummaryDAG(db), current_session_id="i2-recall")
 
 
+# A 330-minute block reserves 30 minutes for corpus/setup and 100 per state.
+# Of each state, 95 minutes collect volume and 5 allow audits and shutdown.
+STATE_SECONDS = 100*60
+VOLUME_SECONDS = 95*60
+
+
+def publication_trace(a, engine, mod, enough, halt):
+    deadline = getattr(a, "_volume_deadline", None) or time.monotonic()+getattr(a, "volume_seconds", VOLUME_SECONDS)
+    turns = 0
+    def observe(row):
+        nonlocal turns
+        turns += 1
+        append(a.root/"turns.jsonl", row)
+    expected = trace(engine, mod, 32 if a.smoke else None, a.seed+a.block,
+        observe, lambda: safety(a),
+        lambda: enough.is_set() or halt.is_set() or time.monotonic() >= deadline)
+    return expected, turns, not enough.is_set() and time.monotonic() >= deadline
+
+
 def worker(request):
     a, mod, engine, bind = runtime(request)
     manifest = a._manifest = load(a.out/"manifest.json")
@@ -139,6 +159,7 @@ def worker(request):
     queries = {q["id"]: q["text"] if q.get("query_class") == "broad_nl" else manifest["canaries"][q["canary"]]["value"] for q in pinned}
     rows, publications, errors = [], [], []
     halt, started = threading.Event(), threading.Event()
+    enough = threading.Event()
     reader, original_fts = None, None
     closed = False
     try:
@@ -170,7 +191,9 @@ def worker(request):
                 fts, original_fts = diagnostics(mod("tools"), reader)
                 started.set()
                 i = 0
-                while not halt.is_set() or i < len(pinned):
+                deadline = time.monotonic()+getattr(a, "volume_seconds", VOLUME_SECONDS)
+                a._volume_deadline = deadline
+                while time.monotonic() < deadline and (not halt.is_set() or i < len(pinned)):
                     q = pinned[i % len(pinned)]
                     before = vector_counts(a.db, manifest) if a.state != "OFF" else {}
                     incomplete_arms = [arm for kind, arm in (("chunks", "chunk"), ("leaves", "summary"))
@@ -200,9 +223,11 @@ def worker(request):
                     counted = [r for r in overlapping(rows, publications) if not (a.state == "ON-catching-up" and r["semantic_healthy"] and r["semantic_empty"])]
                     if i >= len(pinned) and all(len(part := [r for r in counted if r["query_class"] == c]) >= 200
                             and overlapping_publications(part, publications) >= 10 for c in ("canary", "broad_nl")):
+                        enough.set()
                         break
             except Exception as exc:
                 errors.append(type(exc).__name__)
+                halt.set()
                 started.set()
             finally:
                 if reader:
@@ -214,8 +239,7 @@ def worker(request):
         thread.start()
         if not started.wait(30):
             raise RuntimeError("recall reader start timeout")
-        manifest["trace_rows"] = trace(engine, mod, 32 if a.smoke else max(600, a.queries*3), a.seed+a.block,
-              lambda row: append(a.root/"turns.jsonl", row), lambda: safety(a))
+        manifest["trace_rows"], turns_used, capped = publication_trace(a, engine, mod, enough, halt)
         halt.set()
         thread.join(engine._config.recall_query_timeout_s*len(pinned)+30)
         if thread.is_alive() or errors:
@@ -230,17 +254,41 @@ def worker(request):
         activity = catchup_activity(a.root, min(r["start"] for r in counted), max(r["end"] for r in counted),
             min(counted, key=lambda r: r["start"])["coverage_start"],
             max(counted, key=lambda r: r["end"])["coverage_end"]) if counted else dict(catchup_activity=False)
-        result = score(rows, publications, a.seed, a.state, activity, getattr(a, "standalone_calibration_s", None))
+        result = score(rows, publications, a.seed, a.state, activity)
         if a.smoke or a.rows < 250000 or len(pinned) < 200 or (a.state == "ON-catching-up" and
                 (all(final["classes"][kind]["missing_count"] == 0 for kind in manifest["expected"])
                  or not all(r["incomplete"] for r in overlapping(rows, publications)))):
             result["state"] = "INVALID"
-        result.update(measurement_valid=result["state"] != "INVALID", bind_ms=bind, safety=evidence, queries=len(pinned), **activity)
+        if capped:
+            result.update(state="INVALID", reason="volume_cap")
+        result.update(turns_used=turns_used, measurement_valid=result["state"] != "INVALID", bind_ms=bind, safety=evidence, queries=len(pinned), **activity)
         dump(a.root/"raw-summary.json", result)
     finally:
         halt.set()
         if not closed:
             engine.shutdown()
+
+
+def finalize_block(a, block, results):
+    root = a.out/f"{block}-ON-catching-up"
+    def lines(path):
+        return [json.loads(s) for s in path.read_text().splitlines()] if path.exists() else []
+    calibrated = calibration(lines(root/"events.jsonl"))
+    for entry in results:
+        result = entry["result"]
+        if "classes" not in result:  # Early INVALID has no recall receipts to score.
+            continue
+        root = a.out/f"{block}-{entry['state']}"
+        scored = score(lines(root/"recalls.jsonl"), lines(root/"publications.jsonl"),
+            a.seed, entry["state"], result, calibrated)
+        if result.get("measurement_valid") is False:
+            scored["state"] = "INVALID"
+        if calibrated is None and result.get("measurement_valid") is not False:
+            scored["reason"] = "insufficient_calibration_batches"
+        result.update(scored, calibration_s=calibrated,
+            standalone_calibration_s=a.standalone_calibration_s)
+        for name in ("raw-summary.json", "summary.json"):
+            dump(root/name, dict(load(root/name), **result))
 
 
 def main(a):
@@ -251,7 +299,9 @@ def main(a):
     from .calibration import standalone
     if getattr(a, "standalone_calibration_s", None) is None:
         a.standalone_calibration_s = standalone(a)["standalone_calibration_s"]
-    dump(a.out/"calibration.json", dict(standalone_calibration_s=a.standalone_calibration_s, reference_standalone_s=None))
+    dump(a.out/"calibration.json", dict(standalone_calibration_s=a.standalone_calibration_s, reference_calibration_s=REFERENCE_CALIBRATION_S))
+    a.max_seconds = min(getattr(a, "max_seconds", STATE_SECONDS), STATE_SECONDS)
+    a.volume_seconds = min(VOLUME_SECONDS, max(0, a.max_seconds-300))
     order = list(range(len(manifest["canaries"])))
     random.Random(a.seed).shuffle(order)
     pinned = [q for i in range(a.queries) for q in (
@@ -259,10 +309,14 @@ def main(a):
         {"id": f"b{i:04d}", "text": BROAD_NL[i % 3], "query_class": "broad_nl"})]
     # IDs only: query text derives from the pinned corpus manifest, never raw transcripts.
     dump(a.out/"queries.json", pinned)
-    results = [dict(block=b, state=s, result=cell(a, s, b, "recall"))
-               for b in ([a.block] if getattr(a, "block", None) is not None else range(a.blocks)) for s in ("OFF", "ON-catching-up", "ON-covered")]
+    results = []
+    for b in ([a.block] if getattr(a, "block", None) is not None else range(a.blocks)):
+        block = [dict(block=b, state=s, result=cell(a, s, b, "recall"))
+                 for s in ("OFF", "ON-catching-up", "ON-covered")]
+        finalize_block(a, b, block)
+        results.extend(block)
     states = [r["result"]["state"] for r in results]
-    dump(a.out/"summary.json", dict(state="FAIL" if "FAIL" in states else "INVALID" if "INVALID" in states else "UNCALIBRATED" if "UNCALIBRATED" in states else "PASS",
+    dump(a.out/"summary.json", dict(state=rollup(states),
         label=SMOKE if a.smoke else a.label, blocks=results, seed=a.seed, shape=a.shape, baseline=a.baseline))
 
 

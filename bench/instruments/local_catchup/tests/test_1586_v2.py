@@ -73,15 +73,15 @@ def test_fts_none_fails_catching_up_even_with_hits(publications):
     assert result["classes"]["broad_nl"]["failures"] == 1
 
 
-def test_reference_null_is_uncalibrated(publications):
+def test_healthy_reference_basis_passes(publications):
     result = recall.score(rows()+rows(query_class="broad_nl"), publications, calibration_s=.1)
-    assert result["reference_standalone_s"] is None
-    assert result["host_check"] == result["state"] == "UNCALIBRATED"
+    assert result["reference_calibration_s"] == .572
+    assert result["host_check"] == result["state"] == "PASS"
 
 
 def test_host_scaling_preserves_raw_statistics(publications):
     result = recall.score(rows(seconds=1.5)+rows(seconds=1.5, query_class="broad_nl"), publications,
-                          calibration_s=.25, reference_standalone_s=.5)
+                          calibration_s=.25, reference_calibration_s=.5)
     assert result["state"] == "FAIL"
     for part in result["classes"].values():
         assert part["statistics"]["p50"]["seconds"] == 1.5
@@ -150,7 +150,7 @@ def test_pair_order_and_separate_evidence(tmp_path, monkeypatch, shape, order):
 
 def test_rescore_recomputes_and_checks_coverage(tmp_path):
     (tmp_path/"catchup").mkdir()
-    summary = dict(state="INCOMPLETE", rows_s=2, audit=dict(complete=False))
+    summary = dict(state="INCOMPLETE", rows_s=2, audit=dict(complete=False), end_to_end_s=7200)
     floor.dump(tmp_path/"catchup/summary.json", summary)
     floor.dump(tmp_path/"manifest.json", dict(rows=250000))
     (tmp_path/"catchup/events.jsonl").write_text("".join(json.dumps(e)+"\n" for e in events()))
@@ -182,7 +182,7 @@ def test_standalone_five_fresh_32_leaf_batches(corpus, tmp_path, monkeypatch):
     value = calibration.standalone(a)
     assert len(set(n for n, _ in calls)) == len(value["core_seconds"]) == 5
     assert all(k == dict(apply=True, limit=32, retry_uncertain=False, include_next_hint=False) for _, k in calls)
-    assert value["reference_standalone_s"] is None
+    assert value["standalone_calibration_s"] >= 0
 
 
 @pytest.mark.parametrize("initialize", [True, False])
@@ -288,6 +288,8 @@ def test_covered_runtime_retires_all_measured_maintenance(corpus, tmp_path, monk
     monkeypatch.setattr(measurement, "guards", lambda *a: None)
     monkeypatch.setattr(measurement.threading.Thread, "join", measurement.threading.Thread.join)
     monkeypatch.setattr(mod("embedding_provider"), "resolve_provider", lambda *a, **kw: NS(_ensure_local=lambda **kw: warmed.append(kw)))
+    scheduled = []
+    monkeypatch.setattr(mod("engine").LCMEngine, "_schedule_embedding_maintenance", lambda self: scheduled.append(1))
     def forbidden(*a, **kw): pytest.fail("ON-covered scheduled a backfill")
     for name in ("_chunk_backfill_run", "_embedding_backfill_summary_run"):
         monkeypatch.setattr(mod("command"), name, forbidden)
@@ -296,7 +298,9 @@ def test_covered_runtime_retires_all_measured_maintenance(corpus, tmp_path, monk
     _, _, engine, _ = measurement.runtime(tmp_path/"request.json")
     try:
         assert engine._embedding_maintenance_retired is True
+        engine._embedding_maintenance_retired = False
         engine._schedule_embedding_maintenance()
+        assert scheduled == []
         assert warmed == [dict(allow_download=False)]
     finally:
         engine.shutdown()

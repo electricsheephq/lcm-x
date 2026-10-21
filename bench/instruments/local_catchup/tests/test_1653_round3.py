@@ -125,7 +125,9 @@ def test_worker_semantic_arms_cannot_pass_fts_only(tmp_path, monkeypatch, state,
     monkeypatch.setattr(threading, "Thread", Thread)
     recall.worker(None)
     result = common.load(tmp_path/"raw-summary.json")
-    assert result["state"] == ("UNCALIBRATED" if state == "OFF" or failure == "healthy" else "FAIL")
+    # Workers retain raw class statistics; main applies the shared block calibration.
+    assert all(c["state"] == ("PASS" if state == "OFF" or failure == "healthy" else "FAIL")
+               for c in result["classes"].values())
     assert all(c["failures"] == (0 if state == "OFF" or failure == "healthy" else 200) for c in result["classes"].values())
 
 

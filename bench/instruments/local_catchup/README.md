@@ -70,7 +70,8 @@ These extend I1 without changing its behavior. Use the same variables above;
 
 ```sh
 nice -n 19 "$PY" -B -m bench.instruments.local_catchup.turns --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/turns" --out "$RUN/turns" --model-cache "$CACHE" --rows 250000 --blocks 3 --samples 600 --seed 1586
-nice -n 19 "$PY" -B -m bench.instruments.local_catchup.recall --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/recall" --out "$RUN/recall" --model-cache "$CACHE" --rows 250000 --blocks 3 --queries 200 --seed 1586
+nice -n 19 "$PY" -B -m bench.instruments.local_catchup.recall --build-covered --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/covered" --out "$RUN/covered" --model-cache "$CACHE" --rows 250000 --seed 1586
+nice -n 19 "$PY" -B -m bench.instruments.local_catchup.recall --covered-store "$RUN/covered" --lcmx-repo "$PRODUCT" --hermes-source "$HOST" --scratch "$SCRATCH/recall" --out "$RUN/recall" --model-cache "$CACHE" --rows 250000 --blocks 3 --queries 200 --seed 1586
 # Functional smoke only: add --smoke --rows 2000 --blocks 1 --samples 50 --queries 20
 ```
 
@@ -132,7 +133,17 @@ and raw × 0.572 / calibration. Recall takes `block=0|1|2`, downloads an audited
 pre-covered store, and alternates unchanged canaries with three fixed broad
 questions. Each class requires 200 overlaps across ten publications and gates
 separately. Rows include FTS duration, budget, hit count, coverage and cap reason.
-The standalone reference is null: host checking reports `UNCALIBRATED` until set.
+Recall uses the same `calibration(events)` as coverage: at least five in-worker
+32-vector summary batches from ON-catching-up, with reference 0.572 s. A ratio
+(reference / calibration) above 1.25 additionally gates p50, p90 and upper95 after
+scaling every state in the block; raw statistics stay unchanged. Fewer qualifying
+batches make the block `UNCALIBRATED`. The standalone five-run median is informational.
+Publication continues with the same seeded trace until both classes meet volume.
+Each state reserves 95 minutes for volume and five for audit/shutdown, leaving
+30 minutes of the 330-minute block for setup. Exhaustion is `INVALID` (`volume_cap`),
+an inconclusive result. Summaries record turns used and per-class overlaps.
+Local ON-covered setup is two-step: `--build-covered`, then `--covered-store <dir>`
+as above. Without `--covered-store`, ON-covered is `INVALID` by design.
 Covered-store setup chains four artifact jobs with 240-minute fill budgets; each
 resumes the prior store and manifest, and only the final job requires completeness.
 All setup jobs calibrate under confinement first, then fill outside it with no

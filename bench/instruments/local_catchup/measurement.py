@@ -2,6 +2,7 @@
 from dataclasses import asdict, replace
 import hashlib
 import json
+import itertools
 import os
 from pathlib import Path
 import random
@@ -208,10 +209,12 @@ def runtime(request):
     return a, mod, engine, bind
 
 
-def trace(engine, mod, count, seed, observe, check):
+def trace(engine, mod, count, seed, observe, check, done=None):
     from bench.instruments.compaction_probe.bgprep.replay import workload
     view, batch, expected = [], [], []
-    for i in range(count):
+    for i in itertools.count():
+        if (count is not None and i >= count) or (done is not None and done()):
+            break
         if i % 64 == 0:
             batch = workload(seed+i//64)
         pair = batch[i % 64]
