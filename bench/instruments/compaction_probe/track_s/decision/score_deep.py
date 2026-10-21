@@ -115,10 +115,12 @@ def aggregate(args):
                 result["result"] = "INCOMPLETE"
             if any(v is None for k, v in result["summary_tokens"].items() if k != "estimated_calls"):
                 result["result"] = "INCOMPLETE"
+            # Publish only when every checkpoint and run input scored. A FAIL verdict on complete
+            # evidence is a measured result and keeps its files; any INCOMPLETE cause publishes nothing.
+            accepted = result["result"] == "COMPLETE"
             if result["continuity"]["result"] == "FAIL" or result["dag"]["generation_gate"] == "FAIL":
                 result["result"] = "FAIL"
-            # Publish only after every checkpoint and final run gate accepts the run.
-            if result["result"] == "COMPLETE":
+            if accepted:
                 for target, payload in pending:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     target.write_text(json.dumps(payload, indent=1) + "\n")

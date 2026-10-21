@@ -114,7 +114,7 @@ def test_aggregate_fails_entire_arm_on_one_compaction_miss(cell, tmp_path, passe
     result = aggregate(args)
     assert result["per_arm"]["H"]["result"] == expected
     for population in ("scores", "loss"):
-        assert bool(list((args.out / population).glob("cp-*/*.json"))) == (expected == "COMPLETE")
+        assert bool(list((args.out / population).glob("cp-*/*.json"))) == (expected != "INCOMPLETE")
     from score_deep import exit_status
     assert exit_status(result) == {"FAIL": 1, "INCOMPLETE": 2, "COMPLETE": 0}[expected]
     assert result["per_arm"]["H"]["summary_tokens"] == dict(input=100, output=20, estimated_calls=0)
@@ -342,3 +342,37 @@ def test_later_checkpoint_rejection_publishes_no_run_files(cell, tmp_path, arm, 
     assert json.loads((args.out / "score-deep.json").read_text()) == result
     for population in ("scores", "loss"):
         assert not list((args.out / population).glob(f"cp-*/{name}"))
+
+
+@pytest.mark.parametrize("depth,expected", [(1, "FAIL"), (2, "COMPLETE")])
+def test_complete_evidence_publishes_scores_even_when_a_gate_fails(cell, tmp_path, depth, expected):
+    # A FAIL verdict on complete evidence is a measured result, not a rejected run: its files stay.
+    import hashlib
+    from score_deep import write_deep
+
+    mat, directory = cell
+    arm = "LCMX-fleet-rc3"
+    run = tmp_path / "runs" / arm / "seed-1/d1-r1"
+    summary = json.loads((directory / "summary.json").read_text())
+    shallow = event()
+    shallow["nodes"] = [dict(depth=depth)]
+    summary.update(material_sha256=hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest(),
+                   events=[shallow], worktree_head="pinned")
+    write(run / "summary.json", summary)
+    write(run / "cp-1/summary.json", summary)
+    rows = [dict(json.loads(line), arm=arm) for line in (directory / "results.jsonl").read_text().splitlines()]
+    (run / "cp-1/results.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    wall = tmp_path / "logs" / f"s2-{arm}-d1-r1.log.wall"
+    wall.parent.mkdir()
+    wall.write_text("exit 0 end now\n")
+    args = SimpleNamespace(material=mat.parent, run_root=tmp_path / "runs", logs=wall.parent,
+                           out=tmp_path / "out", arms=[arm], seeds=[1], checkpoints=["1"],
+                           expected_host_sha=None, expected_product_sha="pinned")
+
+    result = write_deep(args)
+    run_result = result["per_run"][f"{arm}|d1-r1"]
+    assert run_result["dag"]["generation_gate"] == ("FAIL" if depth < 2 else "PASS")
+    assert run_result["result"] == expected
+    name = f"{arm}.seed-1.d1-r1.json"
+    for population in ("scores", "loss"):
+        assert [p.parent.name for p in (args.out / population).glob(f"cp-*/{name}")] == ["cp-1"]
