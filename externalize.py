@@ -707,7 +707,9 @@ def _media_payload_preview_content(content: str) -> str:
 
     from .ingest_content import _MEDIA_VALUE_KEYS, _replace_wrapped_base64_blocks
 
-    non_text_keys = set(_MEDIA_VALUE_KEYS) | {
+    media_keys = set(_MEDIA_VALUE_KEYS)
+    # Descriptor fields hold one opaque leaf; a dict or list under them is an envelope and is walked.
+    descriptor_keys = {
         "data", "mime_type", "mimetype", "mime", "content_type", "content-type", "contenttype",
         "media_type", "media-type", "mediatype", "format", "encoding", "detail",
     }
@@ -719,16 +721,21 @@ def _media_payload_preview_content(content: str) -> str:
         stripped = content.strip()
         # A dict repr may start with any key type (0, None, a tuple), but always spans {...}; an empty
         # {} or [] followed by prose cannot be a container repr.
-        if re.match(r"\s*(?:\[\s*(?:[\{\('\"]|b['\"])|\{\s*(?:['\"]|b['\"]))", content) or (
-                stripped.startswith("{") and stripped.endswith("}")):
+        repr_like = re.match(r"\s*(?:\[\s*(?:[\{\('\"]|b['\"])|\{\s*(?:['\"]|b['\"]))", content)
+        if repr_like or (stripped.startswith("{") and stripped.endswith("}")):
             # Normalization may have used repr for non-JSON media parts. Never preview that repr.
-            # Bound both repr shapes before allocating an AST; the full source stays expandable.
-            if len(content) > 1_048_576:
+            # The bound only stops a pathological AST; a repr of a few MiB of media bytes parses quickly.
+            parsed, ok = None, False
+            if len(content) <= 64 * 1_048_576:
+                try:
+                    parsed, ok = ast.literal_eval(content), True
+                except (ValueError, SyntaxError, RecursionError):
+                    pass
+            if repr_like and not ok:
                 return ""
-            try:
-                value = ast.literal_eval(content)
-            except (ValueError, SyntaxError, RecursionError):
-                return ""
+            # A brace-spanned string is a repr only when it parses to a dict; otherwise it is prose.
+            if repr_like or isinstance(parsed, dict):
+                value = parsed
     if isinstance(value, dict):
         value = [value]
     if isinstance(value, list):
@@ -752,7 +759,8 @@ def _media_payload_preview_content(content: str) -> str:
                             parts.append(leaf)
                         elif isinstance(leaf, dict):
                             stack.extend((v, depth + 1) for k, v in reversed(list(leaf.items()))
-                                         if str(k).lower() not in non_text_keys)
+                                         if (key := str(k).lower()) not in media_keys
+                                         and (key not in descriptor_keys or isinstance(v, (dict, list))))
                         elif isinstance(leaf, list):
                             stack.extend((v, depth + 1) for v in reversed(leaf))
         text = "\n".join(parts)

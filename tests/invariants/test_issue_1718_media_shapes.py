@@ -123,3 +123,33 @@ def test_nonmedia_placeholders_byte_identical_to_base(kind, shape):
     summary = dict(SUMMARY, kind=kind, content_chars=len(content), content_bytes=len(content.encode()))
     actual = _build_externalized_placeholder(summary, content=content)
     assert actual.encode() == expected[kind][shape].encode()
+
+
+def test_brace_wrapped_prose_keeps_its_caption():
+    # Only a dict proves a brace-spanned string was a repr; prose in braces stays text, as on main.
+    content = "{" + CAPTION + " data:image/png;base64," + "QUJD" * 100 + "}"
+    preview = _media_payload_preview_content(content)
+    assert CAPTION in preview and "QUJD" not in preview
+    stub = _build_externalized_placeholder(SUMMARY, content=content)
+    assert CAPTION in stub and "data:" not in stub and "QUJD" not in stub
+
+
+@pytest.mark.parametrize("container", ["list", "dict"])
+def test_repr_over_one_mib_keeps_its_caption(container):
+    blob = bytes(range(256)) * 4_096  # 1 MiB of bytes; its repr is several MiB
+    if container == "list":
+        value = [{"type": "text", "text": CAPTION}, {"type": "image", "image": blob}]
+    else:
+        value = {"image": blob, "caption": CAPTION}
+    content = normalize_content_value(value)
+    assert content == str(value) and len(content) > 1_048_576
+    start = time.monotonic()
+    assert_caption_preview(content)
+    assert time.monotonic() - start < 5
+
+
+def test_data_envelope_is_walked():
+    content = normalize_content_value(
+        {"data": {"caption": CAPTION, "blob": "data:image/png;base64," + "QUJD" * 100}}
+    )
+    assert_caption_preview(content)
