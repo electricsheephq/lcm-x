@@ -66,6 +66,9 @@ def main():
                         summary.get("worktree_head") == head if arm.startswith("LCMX") else
                         summary.get("host_sha") == host_sha and summary.get("worktree_head") == host_sha) and all(
                         (run / f"cp-{cp}" / "summary.json").exists() for cp in cps):
+                    depth = max((n["depth"] for e in summary.get("events", []) for n in e.get("nodes", [])), default=-1)
+                    if arm.startswith("LCMX") and depth < 2:
+                        raise SystemExit(f"C1 STOP: incomplete/mismatched existing run {arm} seed-{seed}; DAG below three generations")
                     print(f"SKIP completed {arm} seed-{seed}", flush=True)
                     continue
                 raise SystemExit(f"C1 STOP: incomplete/mismatched existing run {arm} seed-{seed}; preserve for diagnosis")

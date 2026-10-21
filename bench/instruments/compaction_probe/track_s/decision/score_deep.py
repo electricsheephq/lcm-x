@@ -68,6 +68,12 @@ def aggregate(args):
             summary = jload(directory / "summary.json")
             if summary.get("material_sha256") != material_digest:
                 raise ValueError(f"run material digest mismatch: {key}")
+            field = "host_sha" if arm == "H" else "worktree_head"
+            expected = getattr(args, "expected_host_sha" if arm == "H" else "expected_product_sha", None)
+            if not expected or summary.get(field) != expected:
+                per_run[key] = {"arm": arm, "result": "INCOMPLETE",
+                                "reason": f"missing or mismatched code pin: {field}; expected pin required"}
+                continue
             result = {"arm": arm, "result": "COMPLETE" if summary.get("status") == "DONE" else "INCOMPLETE", "checkpoints": {}}
             for checkpoint, sub in checkpoints.items():
                 if not (directory / sub / "summary.json").exists():
@@ -76,6 +82,10 @@ def aggregate(args):
                 cp_summary = jload(directory / sub / "summary.json")
                 if cp_summary.get("material_sha256") != material_digest:
                     raise ValueError(f"checkpoint material digest mismatch: {key}/cp-{checkpoint}")
+                if cp_summary.get(field) != expected:
+                    result["result"] = "INCOMPLETE"
+                    result.setdefault("reasons", []).append(f"cp-{checkpoint}: missing or mismatched code pin: {field}")
+                    continue
                 scored = score(material, directory / sub, arm)
                 loss = classify_loss(scored)
                 fk, corrected = scored["metrics"]["facts_kept"], scored["metrics"]["deep_corrected"]
@@ -166,6 +176,8 @@ def main(argv=None):
     parser.add_argument("--arms", nargs="+", default=["LCMX-fleet-rc3", "H"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[1, 2, 3])
     parser.add_argument("--checkpoints", nargs="+", help="exact numeric rows or last; default: all deep answer keys")
+    parser.add_argument("--expected-product-sha", help="required product pin for LCM-X runs")
+    parser.add_argument("--expected-host-sha", help="required host pin for Hermes runs")
     result = write_deep(parser.parse_args(argv))
     return exit_status(result)
 
