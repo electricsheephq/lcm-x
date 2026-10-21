@@ -236,4 +236,3 @@ def test_trigger_installation_distrusts_legacy_skip_proof():
     ensure_chunk_tables(conn)
     assert conn.execute("SELECT value FROM metadata WHERE key='chunk_gapfill_scan:synthetic'").fetchone()[0] == "current"
     conn.close()
-
