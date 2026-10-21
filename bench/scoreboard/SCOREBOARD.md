@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `3fcd8effa816546b5884ffcd538a09f539e6c36fa6e77d2c58afc7d817cdc7ac`, rows: 53)
+Generated from `results.jsonl` (sha256: `87c35bd1e3253f6903e40de811e2006eb65563244168d720bdc34d06c8a9d325`, rows: 57)
 
 ## Summary
 
@@ -17,6 +17,7 @@ Generated from `results.jsonl` (sha256: `3fcd8effa816546b5884ffcd538a09f539e6c36
 | D5-C (reference-agent real-use window) | max_lcm_owned_s | 116.3 | P | 2026-10-16 | [details](#d5c-max-v0270-2026-10-16) |
 | D5-C (reference-agent real-use window) | real_use_hours | 11.9 | P | 2026-10-16 | [details](#d5c-window-v0270-2026-10-16) |
 | Internal scale instrument (389×, 19,829 sessions / 199,641 messages) | p50_ms | 263.6 ms @ 19,829 sessions (24× vs pre-fix; 125 ms @ 8k) | P | 2026-07-30 | [details](#scale-curve-fastscan-2026-07-30) |
+| LOCAL catch-up gap discovery (#1748; synthetic 250k store) | sqlite_vm_work_amplification_240k_vs_empty | 1.744911x VM work; 2x eligible-row visits; live max 1.000263x steady | P | 2026-10-21 | [details](#issue1748-gapwalk-2026-10-21) |
 | LoCoMo (1,986q, QA, OFF) | correct_count | 1,014/1,986 vs 987/1,986 | P | 2026-10-16 | [details](#locomo-qa-off-v0270-2026-10-16) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 54.9% (1,091/1,986); OFF on the same release 49.7% | P | 2026-10-08 | [details](#locomo10-1986-qa-local-v0261-2026-10-08) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 49.7% (987/1,986) | P | 2026-10-07 | [details](#locomo10-1986-qa-off-v0261-2026-10-07) |
@@ -46,6 +47,9 @@ Generated from `results.jsonl` (sha256: `3fcd8effa816546b5884ffcd538a09f539e6c36
 | LongMemEval-V2 (451q, static) | accuracy | 123/451 (27.3%) — official static protocol, fixed weak reader | P | 2026-07-31 | [details](#longmemeval-v2-451-static-2026-07-31) |
 | LongMemEval-V2 static (451q) | judged accuracy, full set | 143/451 = 31.7% (web 97/240 = 40.4%, enterprise 46/211 = 21.8%) | F | 2026-08-03 | [details](#v2-static-451-sota-luna-2026-08-03) |
 | Phase C (four live host cells) | slowest_compaction_s | 93.0 s; bar <=145 s | P | 2026-10-16 | [details](#phase-c-max-v0270-2026-10-16) |
+| Recall row handoff (sessions) | busy_median_s | 3.297513 -> 0.112816 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-sessions) |
+| Recall row handoff (vector.chunk) | busy_median_s | 8.160382 -> 0.335681 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-vector.chunk) |
+| Recall row handoff (vector.summary) | busy_median_s | 1.656694 -> 0.117894 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-vector.summary) |
 | Track S v3 (GLM summary route) | admission_proven_losses | 0; D3 PASS; 60/60 admitted at all 24 checkpoints | P | 2026-10-16 | [details](#track-s-admission-losses-v0270-2026-10-16) |
 | Track S v3 (GLM summary route) | compactions_per_100_messages | 12.3; bar <= 25 | P | 2026-10-16 | [details](#track-s-compactions-v0270-2026-10-16) |
 | Track S v3 (GLM summary route) | facts_kept_cp176 | 0.942 vs 0.933 (reported only) | P | 2026-10-16 | [details](#track-s-facts-cp176-v0270-2026-10-16) |
@@ -533,6 +537,66 @@ one real-use window; volume about two compactions/day, so volume latency bars ju
 - D5-C PASS accepted at 11.9 h of declared 12 h when host changed; shortened-window decision disclosed. Bars: each LCM-owned stop <=120 s, 0 LCM-X tracebacks, 0 publication conflicts, engine bound, >=1 answered organic turn. The release asset records a 24 h post-GA re-read on Hermes 0.22.2 as continuing; it is outside this row.
 - Backfill date is the release publication date; the scorecard does not state the run completion day.
 - Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="issue1748-gapwalk-2026-10-21"></a>issue1748-gapwalk-2026-10-21
+
+**id:**
+issue1748-gapwalk-2026-10-21
+
+**benchmark:**
+LOCAL catch-up gap discovery (#1748; synthetic 250k store)
+
+**metric:**
+sqlite_vm_work_amplification_240k_vs_empty
+
+**value:**
+1.744911369193154
+
+**display:**
+1.744911x VM work; 2x eligible-row visits; live max 1.000263x steady
+
+**tier:**
+P
+
+**date:**
+2026-10-21
+
+**system_commit:**
+candidate 04b38508e2bb62e54fee4e1af5dcb7464537cc59; baseline f3cc8de918ba14c21ae246099652762a26255554
+
+**harness_commit:**
+04b38508e2bb62e54fee4e1af5dcb7464537cc59 tests/test_issue_1748_gapwalk.py and tests/_issue_1748_base_gapfill.py
+
+**judge:**
+n/a (deterministic SQLite instrumentation)
+
+**reader:**
+n/a (no model/provider)
+
+**retrieval_config:**
+250,000 synthetic user rows; limit 2000, SQL page 32; matching real priming/publication batches <=2000. Live: 100,000 rows, 60,000 filled, one newly published message between 20 passes, same limit/page and instrumentation in both arms.
+
+**dataset_exposure:**
+Synthetic generated store; no corpus, customer data or transcript.
+
+**breakdown:**
+Candidate 0/50k/240k filled: VM steps 65440/114187/114187; eligible-row visits 2000/4000/4000; statements 70/130/130. Base: VM steps 377804/17427766/82217766; visits 2000/52000/242000; statements 64/64/64. Live candidate steady 114225 VM steps; 20 arrival passes 47002-114255; base steady 20837804, arrivals 20838107-33802586. Selected rows 2000 in every measured cell.
+
+**variance:**
+One deterministic count comparison per fill level; no variance estimate. Wall time supplementary only.
+
+**failclose:**
+Matching cost base <=2x RED, candidate GREEN. Pre-fix live-arrival bound RED; candidate all 20 passes <=2x steady GREEN. Exact coverage passes 200 mixed seeds; first/existing walk DELETE and identity UPDATE races, eligibility edits and exhaustion CAS are RED pre-fix/GREEN candidate.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/04b38508e2bb62e54fee4e1af5dcb7464537cc59/tests/test_issue_1748_gapwalk.py
+- https://github.com/electricsheephq/lcm-x/blob/04b38508e2bb62e54fee4e1af5dcb7464537cc59/tests/compat/test_gapwalk_migration.py
+
+**caveats:**
+- Local synthetic product-performance and compatibility proof only; not the #1586 host floor, provider throughput, remote CI, release, runtime or customer readiness.
+- VM counts include traversal before instrumented eligible-row predicates. One deterministic observation per fill level and pass; no variance estimate; wall time supplementary.
+- The plain-text prior T2 tag covers the earlier run only. Fix-round remeasurement remains local; no new T2 publication was authorized.
+- Pre-token intermediate remeasurement is excluded; candidate values cover the final first-selection CAS token.
 
 ### <a id="locomo-qa-off-v0270-2026-10-16"></a>locomo-qa-off-v0270-2026-10-16
 
@@ -2192,6 +2256,204 @@ A/A prime: 0 discordant rows; 260 recall flips all attributed to stemmed recall 
 - Backfill date is the release publication date; the scorecard does not state the run completion day.
 - Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
 - The instrument changed; the v0.26.2 row equals the pre-#1035 tree under the current instrument (0 flips), so the harness change moves nothing.
+
+### <a id="row-handoff-v1-1749-sessions"></a>row-handoff-v1-1749-sessions
+
+**id:**
+row-handoff-v1-1749-sessions
+
+**benchmark:**
+Recall row handoff (sessions)
+
+**metric:**
+busy_median_s
+
+**value:**
+0.11281608301214874
+
+**display:**
+3.297513 -> 0.112816 s
+
+**tier:**
+P
+
+**date:**
+2026-10-21
+
+**system_commit:**
+8d18e7943152d132f0af292911c88098b66685aa + fix.patch (sha256 fa8411c21ba78856c8f7afc5ce58cfb7eb443e173d859bd68f086437ab170748; exact measured file hashes in CODE.json)
+
+**harness_commit:**
+1b2aa454bad593116279ffc99854c80d79c0c06d
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+Generated 250k-message short corpus; 500 sessions; 250k chunk and 500 summary binary rows; 384-d int8; cold direct load; 8s deadline; Python 3.14.6 / SQLite 3.53.1; inherited nice 20; one busy in-process Python thread
+
+**dataset_exposure:**
+Generated only; no corpus text retained in evidence
+
+**breakdown:**
+base: busy median 3.297513 s (min 3.170188, max 4.272009, n=5, timeouts 0, past deadline 0); idle median 0.002511 s (n=5, timeouts 0); busy/idle 1313.16. candidate: busy median 0.112816 s (min 0.106986, max 0.142380, n=5, timeouts 0, past deadline 0); idle median 0.002110 s (n=5, timeouts 0); busy/idle 53.47. Fix-round limits (candidate vs base): 1m-128 deadline 4 vs 4, passed; 1m-128 memory 1127 vs 583, 1.933x, failed; 1m-128 speed 0.9685 vs 1.0825, 0.895x, passed; 1m-384 memory 2947 vs 1107, 2.662x, failed; 250k-48 speed 0.212 vs 0.2355, 0.900x, passed. Full per-run samples: https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+
+**variance:**
+5 idle/busy pairs per phase/site, interleaved base/candidate; fresh process per idle/busy pair; min/max in linked card
+
+**failclose:**
+Base chunk 5/5 busy deadline misses; candidate 0/5 at every site. RSS acceptance FAIL at both required widths.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/LIMITS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CHECKS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CODE.json
+
+**caveats:**
+- Advisory on this Mac; no floor, smallest-host, release or runtime claim.
+- PARTIAL: prescribed memory changes miss the <=1.25x RSS target: 1.933x at 1M x 128 B and 2.662x at 1M x 384 B. Whole-stream hex aggregation remains the limiting mechanism.
+- Session busy median improves in this remeasurement; earlier regression is not reproduced. Timing noise is large; no universal session speedup claim.
+- Idle speed ratios 0.900x at 250k x 48 B and 0.895x at 1M x 128 B; full matrix returned at 1.6s in 4/4 base and candidate runs.
+- Full suite 15963 passed, 140 skipped, 64 xfailed; privacy 77 passed. Independent review and exact-head remote CI not established.
+- No T2 publication in this round. Prior run used nice 19; absolute timings are not pooled with this nice-20 run.
+
+### <a id="row-handoff-v1-1749-vector.chunk"></a>row-handoff-v1-1749-vector.chunk
+
+**id:**
+row-handoff-v1-1749-vector.chunk
+
+**benchmark:**
+Recall row handoff (vector.chunk)
+
+**metric:**
+busy_median_s
+
+**value:**
+0.33568108300096355
+
+**display:**
+8.160382 -> 0.335681 s
+
+**tier:**
+P
+
+**date:**
+2026-10-21
+
+**system_commit:**
+8d18e7943152d132f0af292911c88098b66685aa + fix.patch (sha256 fa8411c21ba78856c8f7afc5ce58cfb7eb443e173d859bd68f086437ab170748; exact measured file hashes in CODE.json)
+
+**harness_commit:**
+1b2aa454bad593116279ffc99854c80d79c0c06d
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+Generated 250k-message short corpus; 500 sessions; 250k chunk and 500 summary binary rows; 384-d int8; cold direct load; 8s deadline; Python 3.14.6 / SQLite 3.53.1; inherited nice 20; one busy in-process Python thread
+
+**dataset_exposure:**
+Generated only; no corpus text retained in evidence
+
+**breakdown:**
+base: busy median 8.160382 s (min 8.026514, max 8.281800, n=5, timeouts 5, past deadline 5); idle median 0.259293 s (n=5, timeouts 0); busy/idle 31.47. candidate: busy median 0.335681 s (min 0.316753, max 0.342580, n=5, timeouts 0, past deadline 0); idle median 0.198665 s (n=5, timeouts 0); busy/idle 1.69. Fix-round limits (candidate vs base): 1m-128 deadline 4 vs 4, passed; 1m-128 memory 1127 vs 583, 1.933x, failed; 1m-128 speed 0.9685 vs 1.0825, 0.895x, passed; 1m-384 memory 2947 vs 1107, 2.662x, failed; 250k-48 speed 0.212 vs 0.2355, 0.900x, passed. Full per-run samples: https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+
+**variance:**
+5 idle/busy pairs per phase/site, interleaved base/candidate; fresh process per idle/busy pair; min/max in linked card
+
+**failclose:**
+Base chunk 5/5 busy deadline misses; candidate 0/5 at every site. RSS acceptance FAIL at both required widths.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/LIMITS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CHECKS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CODE.json
+
+**caveats:**
+- Advisory on this Mac; no floor, smallest-host, release or runtime claim.
+- PARTIAL: prescribed memory changes miss the <=1.25x RSS target: 1.933x at 1M x 128 B and 2.662x at 1M x 384 B. Whole-stream hex aggregation remains the limiting mechanism.
+- Session busy median improves in this remeasurement; earlier regression is not reproduced. Timing noise is large; no universal session speedup claim.
+- Idle speed ratios 0.900x at 250k x 48 B and 0.895x at 1M x 128 B; full matrix returned at 1.6s in 4/4 base and candidate runs.
+- Full suite 15963 passed, 140 skipped, 64 xfailed; privacy 77 passed. Independent review and exact-head remote CI not established.
+- No T2 publication in this round. Prior run used nice 19; absolute timings are not pooled with this nice-20 run.
+
+### <a id="row-handoff-v1-1749-vector.summary"></a>row-handoff-v1-1749-vector.summary
+
+**id:**
+row-handoff-v1-1749-vector.summary
+
+**benchmark:**
+Recall row handoff (vector.summary)
+
+**metric:**
+busy_median_s
+
+**value:**
+0.11789395799860358
+
+**display:**
+1.656694 -> 0.117894 s
+
+**tier:**
+P
+
+**date:**
+2026-10-21
+
+**system_commit:**
+8d18e7943152d132f0af292911c88098b66685aa + fix.patch (sha256 fa8411c21ba78856c8f7afc5ce58cfb7eb443e173d859bd68f086437ab170748; exact measured file hashes in CODE.json)
+
+**harness_commit:**
+1b2aa454bad593116279ffc99854c80d79c0c06d
+
+**judge:**
+n/a (instrument)
+
+**reader:**
+n/a (instrument)
+
+**retrieval_config:**
+Generated 250k-message short corpus; 500 sessions; 250k chunk and 500 summary binary rows; 384-d int8; cold direct load; 8s deadline; Python 3.14.6 / SQLite 3.53.1; inherited nice 20; one busy in-process Python thread
+
+**dataset_exposure:**
+Generated only; no corpus text retained in evidence
+
+**breakdown:**
+base: busy median 1.656694 s (min 1.390754, max 1.773543, n=5, timeouts 0, past deadline 0); idle median 0.001621 s (n=5, timeouts 0); busy/idle 1021.86. candidate: busy median 0.117894 s (min 0.088226, max 0.142537, n=5, timeouts 0, past deadline 0); idle median 0.001793 s (n=5, timeouts 0); busy/idle 65.75. Fix-round limits (candidate vs base): 1m-128 deadline 4 vs 4, passed; 1m-128 memory 1127 vs 583, 1.933x, failed; 1m-128 speed 0.9685 vs 1.0825, 0.895x, passed; 1m-384 memory 2947 vs 1107, 2.662x, failed; 250k-48 speed 0.212 vs 0.2355, 0.900x, passed. Full per-run samples: https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+
+**variance:**
+5 idle/busy pairs per phase/site, interleaved base/candidate; fresh process per idle/busy pair; min/max in linked card
+
+**failclose:**
+Base chunk 5/5 busy deadline misses; candidate 0/5 at every site. RSS acceptance FAIL at both required widths.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/SAMPLES.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/LIMITS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CHECKS.json
+- https://github.com/electricsheephq/lcm-x/blob/1b2aa454bad593116279ffc99854c80d79c0c06d/fix-r1/CODE.json
+
+**caveats:**
+- Advisory on this Mac; no floor, smallest-host, release or runtime claim.
+- PARTIAL: prescribed memory changes miss the <=1.25x RSS target: 1.933x at 1M x 128 B and 2.662x at 1M x 384 B. Whole-stream hex aggregation remains the limiting mechanism.
+- Session busy median improves in this remeasurement; earlier regression is not reproduced. Timing noise is large; no universal session speedup claim.
+- Idle speed ratios 0.900x at 250k x 48 B and 0.895x at 1M x 128 B; full matrix returned at 1.6s in 4/4 base and candidate runs.
+- Full suite 15963 passed, 140 skipped, 64 xfailed; privacy 77 passed. Independent review and exact-head remote CI not established.
+- No T2 publication in this round. Prior run used nice 19; absolute timings are not pooled with this nice-20 run.
 
 ### <a id="scale-curve-fastscan-2026-07-30"></a>scale-curve-fastscan-2026-07-30
 
