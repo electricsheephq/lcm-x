@@ -1,0 +1,26 @@
+Commands use isolated checkout, host-stub, temporary and evidence roots. Environment-specific paths are represented by variables.
+
+RED at pinned main source, then GREEN with fix:
+python -m pytest tests/test_issue_1765_gapwalk.py tests/compat/test_gapwalk_migration.py -q -s --basetemp="$TEST_TMP/pt-red" -o tmp_path_retention_policy=failed
+12 failed, 5 passed in 11.48s
+python -m pytest tests/test_issue_1765_gapwalk.py tests/compat/test_gapwalk_migration.py -q -s --basetemp="$TEST_TMP/pt-green" -o tmp_path_retention_policy=failed
+19 passed in 14.99s
+
+Full CI-style main suite, once (soft fd limit 1024, four workers):
+python -m pytest tests/ -q -m "not latency" -n 4 --ignore=tests/test_embedding_privacy.py --basetemp="$TEST_TMP/pt-full" -o tmp_path_retention_policy=failed -o junit_family=xunit1 --junitxml="$EVIDENCE/full.xml"
+16579 passed, 141 skipped, 64 xfailed, 23 warnings in 397.72s (0:06:37)
+
+CI's isolated privacy leg:
+python -m pytest tests/test_embedding_privacy.py -q -m "not latency" --basetemp="$TEST_TMP/pt-privacy" -o tmp_path_retention_policy=failed -o cache_dir="$TEST_TMP/pytest-cache" --junitxml="$EVIDENCE/privacy.xml"
+77 passed in 2.45s
+
+Final exact-shape measurement fixture:
+python -m pytest tests/test_issue_1765_gapwalk.py::test_ordinary_shapes_match_main_output_and_vm_steps -q -s --basetemp="$TEST_TMP/pt-ordinary-final" -o tmp_path_retention_policy=failed -o cache_dir="$TEST_TMP/pytest-cache"
+2 passed in 4.44s
+
+uv tool run --from ruff==0.15.13 ruff check .
+All checks passed!
+git diff --check
+exit 0 (no output)
+
+The full main and privacy runs covered the final production bytes. Only the ordinary-store test fixture was corrected afterward, to remove seeded endpoint chunks and leave the steady measurement unpublished, matching #1758 exactly. Its two parameter cases passed after that correction; the full suite was not repeated.

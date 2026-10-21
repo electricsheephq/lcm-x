@@ -1,0 +1,109 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1765-whitespace-20261022",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "lcmx-1765-fix",
+  "claim_class": "advisory",
+  "created": "2026-10-21T23:20:50Z",
+  "settled": "2026-10-21T23:28:57Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "61148a0209136f65e135508950e0d9e2e851332c",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python -m pytest tests/test_issue_1765_gapwalk.py tests/compat/test_gapwalk_migration.py -q -s",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "issue1765-ordinary-shapes",
+      "metric": "output_identical_and_vm_nonincreasing",
+      "value": 24.0,
+      "n": 24,
+      "baseline_run": "main-5dd67c0dab62f409beec5f86951181f3d2affb1c",
+      "source": "ordinary-final.json"
+    },
+    {
+      "benchmark": "issue1765-whitespace-drain",
+      "metric": "max_passes_to_zero",
+      "value": 11.0,
+      "n": 3,
+      "baseline_run": "main-5dd67c0dab62f409beec5f86951181f3d2affb1c",
+      "source": "validation.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "ordinary.json",
+      "role": "per-item",
+      "sha256": "ea8d7096faacc9e83cc713975987187678476d4d9558c9cd64ede3ad3def1e12",
+      "bytes": 10183
+    },
+    {
+      "path": "validation.json",
+      "role": "per-item",
+      "sha256": "f967e59b04f84cdcbd66ce123d9a52855f452d36aeb1f48fd48eeb52c696e5d5",
+      "bytes": 2381
+    },
+    {
+      "path": "rescore.txt",
+      "role": "config",
+      "sha256": "2119eadec33423273389732d4121cb33c76d2d0d63a78112423aac060d2b31f5",
+      "bytes": 700
+    },
+    {
+      "path": "ordinary-final.json",
+      "role": "per-item",
+      "sha256": "cc0c331331b4d2b0ee6971ad88237eb2ffbbb1d8ce453d509993fd243f978de4",
+      "bytes": 10191
+    },
+    {
+      "path": "rescore-final.txt",
+      "role": "config",
+      "sha256": "5518d9d04877336c06e79723d73941a308cd73d34b4dfe2a91d1acee16f97a7c",
+      "bytes": 706
+    },
+    {
+      "path": "validation.txt",
+      "role": "receipt",
+      "sha256": "cceee185a9fe6e74156e891e88102b783f122ed500f04b23f7b6822bc339fe8f",
+      "bytes": 1868
+    }
+  ],
+  "rescore": {
+    "command": "python3 rescore-final.txt",
+    "inputs": [
+      "ordinary-final.json",
+      "validation.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [
+    "https://github.com/electricsheephq/lcm-x/tree/61148a0209136f65e135508950e0d9e2e851332c"
+  ],
+  "keep": [
+    "RESULT.md",
+    "ordinary-final.json",
+    "ordinary.json",
+    "rescore-final.txt",
+    "rescore.txt",
+    "validation.json",
+    "validation.txt"
+  ],
+  "measured_dirty_source": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "56098d7aa4cbaba6ed38cdad473003fa0aed3e87",
+    "dirty": true,
+    "diff_sha256": "5152d40ac51de498442ef4232212d8b26b2f4341af994593115c017ebfd4b267"
+  },
+  "validation_note": "Full main and privacy suites covered the final production fix. The exact #1758 measurement-fixture correction followed the full run; its two affected parameter cases passed afterward. No production change after the full run.",
+  "measurement_note": "ordinary.json is the retained preliminary endpoint-seeded fixture; ordinary-final.json is the exact #1758 shape and the headline source."
+}

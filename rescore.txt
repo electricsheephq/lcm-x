@@ -1,0 +1,14 @@
+import json
+from pathlib import Path
+rows = json.loads(Path("ordinary.json").read_text())
+assert len(rows) == 24
+for row in rows:
+    a, b = row["arms"]["main"], row["arms"]["candidate"]
+    assert a["sha256"] == b["sha256"] and a["chunks"] == b["chunks"]
+    assert b["vm_steps"] <= a["vm_steps"]
+checks = json.loads(Path("validation.json").read_text())
+for row in checks["whitespace"]:
+    if row["arm"] == "green":
+        assert row["remaining"][-1] == 0 and len(row["remaining"]) <= checks["pass_bound"]
+assert checks["arrival_budget"]["candidate_fetched"] == 2000
+print("24/24 ordinary cells preserve chunk ids/bytes and do not increase VM steps; all whitespace cases drain within 12 passes.")
