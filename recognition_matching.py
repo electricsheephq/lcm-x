@@ -67,7 +67,7 @@ def _decompositions(content: str, texts: set[str], *, partial: bool) -> list[tup
     return out
 
 
-def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequence[tuple[Any, Any]]) -> dict[int, Any]:
+def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequence[tuple[Any, Any]], *, forbidden=frozenset()) -> dict[int, Any]:
     """``{store_id: occurrence}``: a maximum matching of stored ``rows`` (store order; a row listed twice, e.g.
     under an alternate stamp, is one row) to view ``occurrences`` ``[(occurrence, key)]`` (view order) by any key
     of ``keys_of(row)``, each side once. A row takes its first key with a free occurrence, else an augmenting
@@ -156,6 +156,37 @@ def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequen
             given[kind][k] += 1
             result[sid] = slots[k][taken[k]]
             taken[k] += 1
+    if any((sid, occurrence) in forbidden for sid, occurrence in result.items()):
+        result = {sid: occurrence for sid, occurrence in result.items() if (sid, occurrence) not in forbidden}
+        owners = {occurrence: sid for sid, occurrence in result.items()}
+        for sid in kinds:  # retain base assignments; augment only after removing a forbidden edge
+            if sid in result:
+                continue
+            parents, queue, seen = {sid: (None, None)}, [sid], set()
+            endpoint = None
+            for current in queue:
+                for occurrence in (o for key in kinds[current] for o in slots[key]):
+                    work += 1
+                    if work > budget:
+                        spent = True
+                        break
+                    if occurrence in seen or (current, occurrence) in forbidden:
+                        continue
+                    seen.add(occurrence)
+                    holder = owners.get(occurrence)
+                    if holder is None:
+                        endpoint = (current, occurrence)
+                        break
+                    if holder not in parents:
+                        parents[holder] = (current, occurrence)
+                        queue.append(holder)
+                if endpoint or spent:
+                    break
+            while endpoint and endpoint[0] is not None:
+                current, occurrence = endpoint
+                result[current] = occurrence
+                owners[occurrence] = current
+                endpoint = parents[current]
     if spent:
         logger.warning("LCM identity-anchor matching spent its work budget %d: rows=%d occurrences=%d keys=%d matched=%d",
                        budget, len(kinds), len(occurrences), len(slots), len(result))

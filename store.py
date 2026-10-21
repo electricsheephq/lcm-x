@@ -83,6 +83,17 @@ class _ObservedAtRows(list):
         super().__init__(rows)
         self.canonical_stamps = canonical_stamps
 
+    def __reduce__(self):
+        return list, (list(self),)
+
+    def __copy__(self):
+        return list(self)
+
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
+
+        return deepcopy(list(self), memo)
+
 
 def _fetch_ranked_search_rows(conn: sqlite3.Connection, sql: str, args: list[Any]) -> list[list[Any]]:
     # A single SQLite result avoids reacquiring Python's GIL for every candidate.

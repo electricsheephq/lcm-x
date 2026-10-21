@@ -185,54 +185,36 @@ class IdentityAnchorMixin:
         return memo[store_id]
 
     def _identity_anchor_alias_uid_keys(self, rows, canonical_stamps, keys_of, occurrences, messages):
-        """Split only conflicted keys so UID filtering precedes multiset assignment (#1519)."""
+        """Forbid only alias/occurrence pairs with positive conflicting host UIDs (#1519)."""
         from .host_uid import _valid_uid
 
         incoming = {idx: messages[idx].get("message_uid") for idx, _key in occurrences
                     if _valid_uid(messages[idx].get("message_uid"))}
         incoming_keys = {key for idx, key in occurrences if idx in incoming}
+        if canonical_stamps is None:  # a transport discarded ephemeral provenance: re-read
+            canonical_stamps = {sid: r.get("observed_at") for sid, r in
+                                self._store.get_batch(sorted({int(r["store_id"]) for r in rows})).items()}
         aliases = [r for r in rows
                    if int(r["store_id"]) in canonical_stamps
                    and _normalize_observed_at(canonical_stamps[int(r["store_id"])]) != float(r["observed_at"])
                    and incoming_keys.intersection(keys_of(r))]
         if not aliases:
-            return keys_of, occurrences
+            return set()
         lineage, _problem = self._host_uid_lineage_key()
         if lineage is None:
-            return keys_of, occurrences
+            return set()
         canonical = self._store.host_uid_uids_of_stores(lineage, [r["store_id"] for r in aliases], ("canonical",))
         if not canonical:
-            return keys_of, occurrences
+            return set()
         uids = set(incoming.values()) | {uid for values in canonical.values() for uid in values if _valid_uid(uid)}
         engine = self._store.host_uid_bindings_for(lineage, uids, ("engine",))
         incoming = {idx: uid for idx, uid in incoming.items() if uid not in engine}
         canonical = {sid: {uid for uid in values if _valid_uid(uid) and uid not in engine}
                      for sid, values in canonical.items()}
-        variants: dict = defaultdict(set)
-        for idx, key in occurrences:
-            variants[key].add(incoming.get(idx))
-        denied: dict = {}
-        for row in aliases:
-            sid = int(row["store_id"])
-            known = canonical.get(sid, set())
-            if len(known) != 1:
-                continue
-            denied[id(row)] = {key: {uid for uid in variants.get(key, ()) if uid is not None and uid not in known}
-                               for key in keys_of(row)}
-        split = {key for by_key in denied.values() for key, values in by_key.items() if values}
-        if not split:
-            return keys_of, occurrences
-
-        def filtered(row):
-            for key in keys_of(row):
-                if key not in split:
-                    yield key
-                else:
-                    for uid in variants[key] - denied.get(id(row), {}).get(key, set()):
-                        yield (key, uid)
-
-        # A rejected edge leaves the incoming occurrence unmatched: ingest stores a fresh row, without loss.
-        return filtered, [(idx, (key, incoming.get(idx)) if key in split else key) for idx, key in occurrences]
+        return {(int(row["store_id"]), idx) for row in aliases
+                if len(canonical.get(int(row["store_id"]), ())) == 1
+                for idx, key in occurrences if key in keys_of(row) and idx in incoming
+                and incoming[idx] not in canonical[int(row["store_id"])]}
 
     def _identity_anchor_prematch(self, messages, identity_messages, cursor: int, audit_from: Optional[int] = None,
                                   *, accepted_prefix: int = 0) -> Dict[str, Any]:
@@ -323,11 +305,11 @@ class IdentityAnchorMixin:
         forms_of = {id(r): forms for pairs in by_stamp.values() for r, forms in pairs}
         occurrences = [(idx, (stamps[idx], identity_at(idx))) for idx in sorted(stamps)
                        if stamps[idx] in wanted and identity_at(idx) is not None]
-        keys_of, occurrences = self._identity_anchor_alias_uid_keys(
-            rows, getattr(rows, "canonical_stamps", {}),
-            lambda r: {(float(r["observed_at"]), form) for form in forms_of[id(r)]},
-            occurrences, identity_messages)
-        for store_id, idx in _match_occurrences(rows, keys_of, occurrences).items():
+        def keys_of(r):
+            return {(float(r["observed_at"]), form) for form in forms_of[id(r)]}
+        forbidden = self._identity_anchor_alias_uid_keys(
+            rows, getattr(rows, "canonical_stamps", None), keys_of, occurrences, identity_messages)
+        for store_id, idx in _match_occurrences(rows, keys_of, occurrences, forbidden=forbidden).items():
             consumed.add(store_id)
             matched[idx] = [next(r for r, _forms in by_stamp[stamps[idx]] if int(r["store_id"]) == store_id)]
             if idx >= start:
@@ -387,6 +369,10 @@ class IdentityAnchorMixin:
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
                 del plan["remainders"][idx]
+        rejected = {idx for _sid, idx in forbidden if idx not in matched and idx < plan["cursor"]}
+        if rejected:  # a rejected edge is not positional proof that the occurrence was stored
+            plan["cursor"] = min(rejected)
+            plan["replayed"].update(matched)
         plan["explained"] = plan["replayed"] - plan.get("positional", set())
         plan["replayed"] = {idx for idx in plan["replayed"] if idx >= plan["cursor"]}
         plan["carry"] = [row for idx in plan["replayed"] | set(plan["remainders"]) for row in matched.get(idx, ())]
