@@ -113,6 +113,8 @@ def test_aggregate_fails_entire_arm_on_one_compaction_miss(cell, tmp_path, passe
                            arms=["H"], seeds=[1], checkpoints=["1"], expected_host_sha="host")
     result = aggregate(args)
     assert result["per_arm"]["H"]["result"] == expected
+    for population in ("scores", "loss"):
+        assert bool(list((args.out / population).glob("cp-*/*.json"))) == (expected != "INCOMPLETE")
     from score_deep import exit_status
     assert exit_status(result) == {"FAIL": 1, "INCOMPLETE": 2, "COMPLETE": 0}[expected]
     assert result["per_arm"]["H"]["summary_tokens"] == dict(input=100, output=20, estimated_calls=0)
@@ -231,3 +233,146 @@ def test_round2_stale_rate_counts_stale_history(cell):
     metrics = score(mat, directory, "H")["metrics"]
     assert metrics["stale_rate"]["stale_ids"] == ["F1"]
     assert metrics["deep_corrected"]["stale_ids"] == ["F1"]
+
+
+@pytest.mark.parametrize("arm,field", [("H", "host_sha"), ("LCMX-fleet-rc3", "worktree_head")])
+@pytest.mark.parametrize("rejection", ["run-pin", "missing-run-pin", "expected-pin", "checkpoint-pin",
+                                      "missing-checkpoint-pin", "wall", "missing-wall", "summary", "checkpoint"])
+def test_rejected_rerun_removes_only_its_prior_scores(cell, tmp_path, arm, field, rejection):
+    import hashlib
+    from score_deep import exit_status, write_deep
+
+    mat, directory = cell
+    run = tmp_path / "runs" / arm / "seed-1/d1-r1"
+    summary = json.loads((directory / "summary.json").read_text())
+    summary.update(material_sha256=hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest(),
+                   events=[event()], **{field: "pinned"})
+    write(run / "summary.json", summary)
+    write(run / "cp-1/summary.json", summary)
+    rows = [dict(json.loads(line), arm=arm) for line in (directory / "results.jsonl").read_text().splitlines()]
+    (run / "cp-1/results.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    wall = tmp_path / "logs" / f"s2-{arm}-d1-r1.log.wall"
+    wall.parent.mkdir()
+    wall.write_text("exit 0 end now\n")
+    args = SimpleNamespace(material=mat.parent, run_root=tmp_path / "runs", logs=wall.parent,
+                           out=tmp_path / "out", arms=[arm], seeds=[1], checkpoints=["1"],
+                           expected_host_sha="pinned", expected_product_sha="pinned")
+    first = write_deep(args)
+    assert exit_status(first) == 0
+    assert first["per_run"][f"{arm}|d1-r1"]["continuity"]["result"] == "PASS"
+    name = f"{arm}.seed-1.d1-r1.json"
+    for population in ("scores", "loss"):
+        assert (args.out / population / "cp-1" / name).is_file()
+        # A previously selected checkpoint must also be invalidated on this rerun.
+        write(args.out / population / "cp-999" / name, {"old": True})
+    preserved = [args.out / "keep.json", args.out / "other" / "cp-1" / name]
+    for population in ("scores", "loss"):
+        preserved.extend(args.out / population / "cp-1" / filename for filename in
+                         (f"{arm}.seed-2.d2-r1.json", f"{arm}.seed-1.d1-r2.json", "other.seed-1.d1-r1.json"))
+        preserved.append(args.out / population / "not-a-checkpoint" / name)
+    for path in preserved:
+        write(path, {"keep": True})
+    before = {path: path.read_bytes() for path in preserved}
+
+    if rejection in ("run-pin", "missing-run-pin", "summary"):
+        if rejection == "summary":
+            (run / "summary.json").unlink()
+        else:
+            write(run / "summary.json", dict(summary, **{field: "other" if rejection == "run-pin" else None}))
+    elif rejection == "expected-pin":
+        setattr(args, "expected_host_sha" if arm == "H" else "expected_product_sha", None)
+    elif rejection in ("checkpoint-pin", "missing-checkpoint-pin", "checkpoint"):
+        if rejection == "checkpoint":
+            (run / "cp-1/summary.json").unlink()
+        else:
+            write(run / "cp-1/summary.json", dict(summary, **{field: "other" if rejection == "checkpoint-pin" else None}))
+    elif rejection == "wall":
+        wall.write_text("exit 1 end now\n")
+    else:
+        wall.unlink()
+
+    result = write_deep(args)
+    assert exit_status(result) == 2
+    assert result["per_run"][f"{arm}|d1-r1"]["result"] == "INCOMPLETE"
+    assert json.loads((args.out / "score-deep.json").read_text()) == result
+    for population in ("scores", "loss"):
+        assert not list((args.out / population).glob(f"cp-*/{name}"))
+    assert {path: path.read_bytes() for path in preserved} == before
+
+
+@pytest.mark.parametrize("arm,field", [("H", "host_sha"), ("LCMX-fleet-rc3", "worktree_head")])
+@pytest.mark.parametrize("rejection", ["missing", "pin", "facts"])
+def test_later_checkpoint_rejection_publishes_no_run_files(cell, tmp_path, arm, field, rejection):
+    import hashlib
+    from score_deep import exit_status, write_deep
+
+    mat, directory = cell
+    run = tmp_path / "runs" / arm / "seed-1/d1-r1"
+    summary = json.loads((directory / "summary.json").read_text())
+    summary.update(material_sha256=hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest(),
+                   events=[event()], **{field: "pinned"})
+    write(run / "summary.json", summary)
+    write(run / "cp-1/summary.json", summary)
+    rows = [dict(json.loads(line), arm=arm) for line in (directory / "results.jsonl").read_text().splitlines()]
+    (run / "cp-1/results.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    if rejection != "missing":
+        later = dict(summary, checkpoint=3, stop_row_index=3)
+        if rejection == "pin":
+            later[field] = "other"
+        write(run / "cp-3/summary.json", later)
+        # F2 is absent, so the later checkpoint has incomplete facts.
+        (run / "cp-3/results.jsonl").write_text(json.dumps(dict(rows[0], answer="new-value")) + "\n")
+    wall = tmp_path / "logs" / f"s2-{arm}-d1-r1.log.wall"
+    wall.parent.mkdir()
+    wall.write_text("exit 0 end now\n")
+    args = SimpleNamespace(material=mat.parent, run_root=tmp_path / "runs", logs=wall.parent,
+                           out=tmp_path / "out", arms=[arm], seeds=[1], checkpoints=["1", "3"],
+                           expected_host_sha="pinned", expected_product_sha="pinned")
+    name = f"{arm}.seed-1.d1-r1.json"
+    for population in ("scores", "loss"):
+        for cp in (1, 3, 999):
+            write(args.out / population / f"cp-{cp}" / name, {"old": True})
+
+    result = write_deep(args)
+    run_result = result["per_run"][f"{arm}|d1-r1"]
+    assert run_result["checkpoints"]["1"]["facts"]["complete"]
+    if rejection == "facts":
+        assert not run_result["checkpoints"]["3"]["facts"]["complete"]
+    assert run_result["result"] == "INCOMPLETE" and exit_status(result) == 2
+    assert json.loads((args.out / "score-deep.json").read_text()) == result
+    for population in ("scores", "loss"):
+        assert not list((args.out / population).glob(f"cp-*/{name}"))
+
+
+@pytest.mark.parametrize("depth,expected", [(1, "FAIL"), (2, "COMPLETE")])
+def test_complete_evidence_publishes_scores_even_when_a_gate_fails(cell, tmp_path, depth, expected):
+    # A FAIL verdict on complete evidence is a measured result, not a rejected run: its files stay.
+    import hashlib
+    from score_deep import write_deep
+
+    mat, directory = cell
+    arm = "LCMX-fleet-rc3"
+    run = tmp_path / "runs" / arm / "seed-1/d1-r1"
+    summary = json.loads((directory / "summary.json").read_text())
+    shallow = event()
+    shallow["nodes"] = [dict(depth=depth)]
+    summary.update(material_sha256=hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest(),
+                   events=[shallow], worktree_head="pinned")
+    write(run / "summary.json", summary)
+    write(run / "cp-1/summary.json", summary)
+    rows = [dict(json.loads(line), arm=arm) for line in (directory / "results.jsonl").read_text().splitlines()]
+    (run / "cp-1/results.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    wall = tmp_path / "logs" / f"s2-{arm}-d1-r1.log.wall"
+    wall.parent.mkdir()
+    wall.write_text("exit 0 end now\n")
+    args = SimpleNamespace(material=mat.parent, run_root=tmp_path / "runs", logs=wall.parent,
+                           out=tmp_path / "out", arms=[arm], seeds=[1], checkpoints=["1"],
+                           expected_host_sha=None, expected_product_sha="pinned")
+
+    result = write_deep(args)
+    run_result = result["per_run"][f"{arm}|d1-r1"]
+    assert run_result["dag"]["generation_gate"] == ("FAIL" if depth < 2 else "PASS")
+    assert run_result["result"] == expected
+    name = f"{arm}.seed-1.d1-r1.json"
+    for population in ("scores", "loss"):
+        assert [p.parent.name for p in (args.out / population).glob(f"cp-*/{name}")] == ["cp-1"]
