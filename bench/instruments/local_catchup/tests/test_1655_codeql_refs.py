@@ -3,6 +3,7 @@
 from pathlib import Path
 import re
 
+import pytest
 import yaml
 
 
@@ -16,11 +17,12 @@ def test_checkout_inputs_are_removed():
     assert "inputs.host_ref" not in text
     # BaseLoader preserves the YAML `on` key as text.
     inputs = yaml.load(text, Loader=yaml.BaseLoader)["on"]["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {"cell", "shape", "baseline", "rows", "max_minutes"}
+    assert set(inputs) == {"cell", "shape", "baseline", "rows", "max_minutes", "block"}
 
 
-def test_checkout_refs_are_absent_or_literal_commit_shas():
-    job = yaml.safe_load(WORKFLOW.read_text())["jobs"]["floor"]
+@pytest.mark.parametrize("workflow,job_name", [(WORKFLOW, "floor"), (WORKFLOW.with_name("lcmx-1586-covered-store.yml"), "build")])
+def test_checkout_refs_are_absent_or_literal_commit_shas(workflow, job_name):
+    job = yaml.safe_load(workflow.read_text())["jobs"][job_name]
     checkouts = [s["with"] for s in job["steps"]
                  if s.get("uses", "").startswith("actions/checkout@")]
     assert len(checkouts) == 3
@@ -33,8 +35,9 @@ def test_checkout_refs_are_absent_or_literal_commit_shas():
     assert job["env"]["PRODUCT_REF"] == "${{ github.sha }}"
 
 
-def test_checked_out_heads_are_verified_before_execution():
-    steps = yaml.safe_load(WORKFLOW.read_text())["jobs"]["floor"]["steps"]
+@pytest.mark.parametrize("workflow,job_name", [(WORKFLOW, "floor"), (WORKFLOW.with_name("lcmx-1586-covered-store.yml"), "build")])
+def test_checked_out_heads_are_verified_before_execution(workflow, job_name):
+    steps = yaml.safe_load(workflow.read_text())["jobs"][job_name]["steps"]
     verification = next(i for i, s in enumerate(steps)
                         if s.get("name") == "Verify checked-out commit SHAs")
     assert verification > max(i for i, s in enumerate(steps)

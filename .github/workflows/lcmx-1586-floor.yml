@@ -6,7 +6,12 @@ on:
         description: Floor surrogate cell
         required: true
         type: choice
-        options: [coverage-rate, recall]
+        options: [coverage-rate, coverage-pair, recall]
+      block:
+        description: Recall block
+        type: choice
+        options: ['0', '1', '2']
+        default: '0'
       shape:
         description: Declared corpus shape
         type: choice
@@ -22,13 +27,30 @@ on:
         type: number
         default: 250000
       max_minutes:
-        description: Maximum minutes (121 to 330)
+        description: Maximum minutes (coverage-rate 150+, coverage-pair 300+, recall 330)
         type: number
-        default: 150
+        default: 330
 permissions:
   contents: read
 jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate cell budget before covered-store setup
+        env:
+          CELL: ${{ inputs.cell }}
+          MINUTES: ${{ inputs.max_minutes }}
+        run: |
+          case "$CELL" in
+            coverage-rate) minimum=150 ;;
+            coverage-pair) minimum=300 ;;
+            recall) minimum=330 ;;
+            *) exit 1 ;;
+          esac
+          [[ "$MINUTES" =~ ^[0-9]+$ ]] && (( MINUTES >= minimum && MINUTES <= 330 ))
   floor:
+    needs: [validate, covered-store]
+    if: always() && needs.validate.result == 'success' && (inputs.cell != 'recall' || needs.covered-store.result == 'success')
     runs-on: ubuntu-latest
     timeout-minutes: 350
     env:
@@ -78,6 +100,7 @@ jobs:
           git -C . rev-parse HEAD > evidence/harness-sha.txt
           git -C product rev-parse HEAD > evidence/product-sha.txt
           git -C host rev-parse HEAD > evidence/host-sha.txt
+          lscpu > evidence/lscpu.txt
       - name: Record and ensure runner temp disk headroom
         run: |
           # Each measured cell refuses to start under 26 GiB free, and the corpus build before the
@@ -91,7 +114,14 @@ jobs:
           df -B1 "$RUNNER_TEMP" | tee evidence/disk-after.txt
           free=$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n 1)
           (( free >= required )) || { echo "::error::floor requires 34 GiB free in RUNNER_TEMP (26 GiB per-cell headroom + corpus build)"; exit 1; }
+      - uses: actions/download-artifact@v4
+        if: inputs.cell == 'recall'
+        with:
+          name: lcmx-1586-covered-store
+          path: covered-store
       - name: Enforce 4 GiB cgroup and run on CPUs 0 and 1
+        env:
+          BLOCK: ${{ inputs.block }}
         run: |
           sudo mkdir /sys/fs/cgroup/lcmx-floor
           echo 4294967296 | sudo tee /sys/fs/cgroup/lcmx-floor/memory.max
@@ -101,9 +131,46 @@ jobs:
             --lcmx-repo "$GITHUB_WORKSPACE/product" --hermes-source "$GITHUB_WORKSPACE/host" \
             --model-cache "$GITHUB_WORKSPACE/model-cache" --scratch "$RUNNER_TEMP/floor-scratch" \
             --out "$GITHUB_WORKSPACE/evidence/cell" --cgroup /sys/fs/cgroup/lcmx-floor \
-            --cell "$CELL" --rows "$ROWS" --shape "$SHAPE" --baseline "$BASELINE" --max-minutes "$MINUTES"
+            --cell "$CELL" --rows "$ROWS" --shape "$SHAPE" --baseline "$BASELINE" --max-minutes "$MINUTES" \
+            --block "$BLOCK" --covered-store "$GITHUB_WORKSPACE/covered-store"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: lcmx-1586-floor-surrogate-${{ inputs.cell }}-${{ inputs.shape }}-${{ inputs.baseline }}
           path: evidence/
+  covered-store-1:
+    needs: validate
+    if: inputs.cell == 'recall'
+    uses: ./.github/workflows/lcmx-1586-covered-store.yml
+    with:
+      stage: '1'
+      shape: ${{ inputs.shape }}
+      baseline: ${{ inputs.baseline }}
+      rows: ${{ inputs.rows }}
+  covered-store-2:
+    needs: covered-store-1
+    uses: ./.github/workflows/lcmx-1586-covered-store.yml
+    with:
+      stage: '2'
+      previous_stage: '1'
+      shape: ${{ inputs.shape }}
+      baseline: ${{ inputs.baseline }}
+      rows: ${{ inputs.rows }}
+  covered-store-3:
+    needs: covered-store-2
+    uses: ./.github/workflows/lcmx-1586-covered-store.yml
+    with:
+      stage: '3'
+      previous_stage: '2'
+      shape: ${{ inputs.shape }}
+      baseline: ${{ inputs.baseline }}
+      rows: ${{ inputs.rows }}
+  covered-store:
+    needs: covered-store-3
+    uses: ./.github/workflows/lcmx-1586-covered-store.yml
+    with:
+      stage: 'store'
+      previous_stage: '3'
+      shape: ${{ inputs.shape }}
+      baseline: ${{ inputs.baseline }}
+      rows: ${{ inputs.rows }}

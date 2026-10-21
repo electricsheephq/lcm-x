@@ -20,7 +20,7 @@ def test_transient_covered_retries_each_check_safety(tmp_path, monkeypatch):
     monkeypatch.setattr(measurement, "safety", lambda a: calls.append("safety"))
     monkeypatch.setattr(measurement.time, "sleep", lambda _: calls.append("sleep"))
     a = NS(db=tmp_path/"unused.db", root=tmp_path, max_seconds=2)
-    measurement.wait_covered(a, None, None, dict(expected=dict(chunks=["1:0"])))
+    measurement.fill_covered(a, None, None, dict(expected=dict(chunks=["1:0"])))
     assert calls == ["safety", "sleep", "safety", "sleep"]
 
 
