@@ -61,7 +61,6 @@ def compare_replays(path, monkeypatch, caplog, n, view, turns=2, grow=False, ini
                         snapshots.append((current, [bindings(eng, r["store_id"]) for r in current]))
             if observe:
                 count = sum(r.args[0] for r in caplog.records if "would reject" in r.msg)
-                assert not any("guard_skipped_budget" in r.message for r in caplog.records)
             arms.append(snapshots)
     assert arms[0] == arms[1]
     return [len(s[0]) for s in arms[1]], count

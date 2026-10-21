@@ -83,8 +83,9 @@ def test_alias_keys_are_computed_once_per_row(monkeypatch, record_property, capl
         db.execute("CREATE INDEX idx_host_uid_store ON host_uid_bindings(store_id)")
         db.executemany("INSERT INTO host_uid_bindings VALUES (?, ?, 'synthetic-lineage', 'canonical')",
                        [(i, f"old-{i}") for i in range(n)])
-        eng = SimpleNamespace(_host_uid_lineage_key=lambda: ("synthetic-lineage", None),
-                              _store=SimpleNamespace(_conn=db, _host_uid_table_exists=lambda: True))
+        eng = IdentityAnchorMixin()
+        eng._host_uid_lineage_key = lambda: ("synthetic-lineage", None)
+        eng._store = SimpleNamespace(_conn=db, _host_uid_table_exists=lambda: True)
         sql = []
         db.set_trace_callback(sql.append)
         calls = 0

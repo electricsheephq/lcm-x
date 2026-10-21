@@ -186,6 +186,12 @@ class IdentityAnchorMixin:
 
     def _observe_alias_uid_conflicts(self, rows, canonical_stamps, keys_of, occurrences, messages):
         """Count conflicting alias edges; never change matching or persisted state (#1519)."""
+        try:
+            self._count_alias_uid_conflicts(rows, canonical_stamps, keys_of, occurrences, messages)
+        except Exception as exc:
+            logger.debug("LCM identity-anchor host UID observation unavailable (%s)", type(exc).__name__)
+
+    def _count_alias_uid_conflicts(self, rows, canonical_stamps, keys_of, occurrences, messages):
         from .config import host_message_uid_mode
         from .host_uid import _valid_uid
 
