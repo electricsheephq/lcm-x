@@ -13,12 +13,12 @@ from pathlib import Path
 S2 = Path(__file__).resolve().parent
 TS = Path(os.environ["TRACK_S_OUT"]).resolve()
 MATERIAL = Path(os.environ["TRACK_S_MATERIAL"]).resolve()
-RUNS = TS / "lcmx-runs"
+RUNS = Path(os.environ.get("S2_RUN_ROOT", str(TS / "lcmx-runs"))).resolve()
 DEFAULT_CTX = 272_000  # the engine is told this window; threshold = the arm's LCM_CONTEXT_THRESHOLD x window
 HOST_MODEL = "eval-s2-host"
 sys.path.insert(0, str(S2))
 sys.path.insert(0, str(S2.parent))
-from s2lib import arms as A, reader as R, seam  # noqa: E402
+from s2lib import arms as A, reader as R, seam, deep  # noqa: E402
 import checkpoints as CP  # noqa: E402
 
 SUMMARY_RE = re.compile(r"\[[^\[\]\n]*Summary \(d\d+, node \d+\)\]")  # engine.py:5189/7394 summary part header (S7 D7)
@@ -237,6 +237,7 @@ class Run:
         (cdir / f"event-{n}.json").write_text(json.dumps({"event": n, "row_index": i, "source": "system slot + view "
             "returned by compress()", "text": self.system + "\n" + "\n".join(
                 c if isinstance(c := m.get("content"), str) else json.dumps(c) for m in new)}))
+        deep.event_probes(self, ev, new)
         print(f"  event {n}: row {i} turn {row['turn']} tokens {cur} -> {ev['tokens_after']} leaves {ev['leaves']} "
               f"cond {ev['condensations']} wall {wall}s status {ev['status']}", flush=True)
         return new
@@ -281,7 +282,10 @@ class Run:
                            reason=None if len(after) >= need else f"{len(after)} event(s) after supersession < {need}")
             self.receipts_out.append(rec)
         blob = "\n".join(x[2] or "" for x in msgs) + "\n".join(p.get("content") or "" for _n, p in payloads)
-        planted = [f for f in jload(self.sdir / "facts.json") if f["row_id"] in fed]
+        checkpoint = len(rows) - 1
+        facts = deep.facts_at(self.sdir, checkpoint) if checkpoint >= 0 else None
+        planted = [f for f in (facts if facts is not None else jload(self.sdir / "facts.json"))
+                   if f["row_id"] in fed]
         fed_rows = [r for r in rows if r["role"] != "system"]
         by_role = lambda seq: {k: sum(1 for x in seq if x == k) for k in ("user", "assistant", "tool")}  # noqa: E731
         return {"rows_fed_by_role": by_role([r["role"] for r in fed_rows]),
@@ -300,6 +304,14 @@ def clone_store(src_db: Path, src_home: Path, dst: Path):
 
 def batches_for(sdir: Path, checkpoint=None):
     out, cont = jlines(sdir / "probe_batches.jsonl"), jload(sdir / "continuation.json")
+    if checkpoint and (facts := deep.facts_at(sdir, checkpoint["row_index"])) is not None:
+        by_id = {f["id"]: f for f in facts}
+        final_ids = {f["id"] for f in jload(sdir / "facts.json")}
+        out = [dict(b, probes=[dict(p, gold=by_id[p["id"]]["answer"]) if p["id"] in by_id else p
+                              for p in b["probes"] if p["id"] not in final_ids or p["id"] in by_id]) for b in out]
+        out = [b for b in out if b["probes"]]
+        if cont["row_index"] > checkpoint["row_index"]:
+            return out
     out.append({"id": out[0]["id"].rsplit("-", 1)[0] + "-BCONT", "text": out[0]["text"],
                 "added_by": "S2 (continuation.json, scored field by field)", "probes": [
                     {"id": f"{cont['id']}.{k}", "kind": "continuation_field", "expect": "value", "gold": cont[k],
@@ -311,7 +323,8 @@ def probe(run: Run, view: list[dict], reader, is_store: bool, src=None) -> list[
     src_db, src_home, out = (src["db"], src["home"], src["dir"]) if src else (run.db, run.home, run.dir)
     blocks = sum(len(SUMMARY_RE.findall(m["content"] if isinstance(m.get("content"), str) else json.dumps(m.get("content"))))
                  for m in view)  # S7 D7: summary blocks in the reader request (the view it is sent)
-    facts = {f["id"]: f for f in jload(run.sdir / "facts.json")}
+    fact_rows = deep.facts_at(run.sdir, src["row"]) if src and "checkpoint" in src else None
+    facts = {f["id"]: f for f in (fact_rows if fact_rows is not None else jload(run.sdir / "facts.json"))}
     traps = {t["id"]: t for t in jload(run.sdir / "traps.json")}
     receipts = {r["id"]: r for r in run.receipts_out}
     is_open = run.arm["open"]
@@ -410,7 +423,7 @@ def main():
     ap.add_argument("--seed", required=True, help="1|2|3|smoke-1")
     ap.add_argument("--run", default="1", help="run id (1|2, or a labelled id such as smoke-m-1)")
     ap.add_argument("--lane", choices=("glm", "codex-sol", "codex-astra", "fake"), default="glm")
-    ap.add_argument("--reader", choices=("astra-low", "glm", "fake"), default="glm")
+    ap.add_argument("--reader", choices=("astra-low", "sol-low", "glm", "fake"), default="glm")
     ap.add_argument("--slice", type=int, default=None, help="stop after this turn (smoke: 10)")
     ap.add_argument("--checkpoint", default="auto", help="auto (r4 F1 decision checkpoint) | <tokens>")
     ap.add_argument("--turn-end-notify", action="store_true",
@@ -506,7 +519,8 @@ def main():
         summary.update(status="DONE", finished=time.time(), prefix60k=getattr(run, "p60", None))
         (run_dir / "summary.json").write_text(json.dumps(summary, indent=1, default=str))
         return print(f"wrote {run_dir}/summary.json ({len(run.events)} event(s), no probes)")
-    reader = None if args.reader == "fake" else R.GLMReader() if args.reader == "glm" else R.AstraLowReader(run_dir / "reader-scratch")
+    reader = (None if args.reader == "fake" else R.GLMReader() if args.reader == "glm" else
+              (R.SolLowReader if args.reader == "sol-low" else R.AstraLowReader)(run_dir / "reader-scratch"))
     if args.reader == "fake":
         from s2lib.fakes import Reader
         reader = Reader()

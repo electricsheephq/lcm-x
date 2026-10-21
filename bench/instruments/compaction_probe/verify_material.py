@@ -28,7 +28,8 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
     rows = [json.loads(line) for line in (directory / "transcript.jsonl").read_text().splitlines()]
     facts, manifest, state = load("facts.json"), load("material.manifest.json"), load("continuation.json")
     v4 = manifest.get("material_version") == "track-s-v4"
-    check(v4 or manifest.get("material_version") == _gen.MATERIAL_VERSION, "material version mismatch")
+    deep = manifest.get("material_version") in ("track-s-deep-v1", _gen.DEEP_VERSION)
+    check(deep or v4 or manifest.get("material_version") == _gen.MATERIAL_VERSION, "material version mismatch")
     admissions = load("admission.manifest.json")
     count = _gen.token_counter()
     counts = [count(r["content"]) for r in rows]
@@ -43,6 +44,8 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
     check(len({r["id"] for r in rows}) == len(rows), "duplicate row ids")
     check(rows[0]["role"] == "system", "missing head system row")
     check([r["turn"] for r in rows] == sorted(r["turn"] for r in rows), "turn chronology")
+    if deep:
+        check([r["ts"] for r in rows] == sorted({r["ts"] for r in rows}), "deep timestamp chronology")
     for i, r in enumerate(rows):
         check(r["role"] in ("system", "user", "assistant", "tool"), "invalid role")
         if r["role"] == "tool":
@@ -54,7 +57,7 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
                   calls[0].get("type") == "function" and
                   calls[0].get("function", {}).get("name") == "read_material", "tool call metadata mismatch")
     check(Counter(f["class"] for f in facts) == Counter({c: 5 for c in _gen.CLASSES}), "12 classes x 5 required")
-    for cls in (() if v4 else _gen.CLASSES):
+    for cls in (() if v4 or deep else _gen.CLASSES):
         check(Counter(f["placement"] for f in facts if f["class"] == cls) ==
               Counter(head=2, middle=1, tail=2), f"placement coverage mismatch: {cls}")
     check(len({f["id"] for f in facts}) == 60, "60 unique fact ids required")
@@ -102,7 +105,10 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
     check(prefix[last_item] == manifest["presented_tokens"], "presentation checkpoint mismatch")
     supersession = max(prefix[f["row_index"]] for f in facts if f["stale"])
     spans = (total - supersession - 20000) // trigger
-    if v4:
+    if deep:
+        _verify_deep(rows, facts, manifest, load("deep_metadata.json"), prefix, check)
+        check(spans >= events, "deep token/event floor")
+    elif v4:
         check(total >= trigger and spans >= events, "v4 token/event floor")
         check(total - prefix[last_item] >= 20000, "tail missing")
         check(max(r["turn"] for r in rows) == manifest["params"]["turns"], "v4 turn horizon")
@@ -166,10 +172,73 @@ def verify(directory: Path, min_tokens: int | None = None, min_events: int | Non
                 tool_result_token_share=round(sum(n for n, r in zip(counts, rows) if r["role"] == "tool") / total, 6),
                 results_over_12000_chars=sum(r["role"] == "tool" and len(r["content"]) > 12000 for r in rows),
                 class_placement_role=dict(sorted(Counter(f"{f['class']}|{f['placement']}|{f['row_role']}" for f in facts).items())),
-                planned_post_supersession_trigger_spans=spans if v4 or not smoke else None,
+                planned_post_supersession_trigger_spans=spans if deep or v4 or not smoke else None,
                 tokenizer=manifest["tokenizer"], runtime_receipts="UNTESTED: events, ancestry, externalization, admission",
                 smoke_exemptions="full horizon, tail and natural event spans" if smoke and not v4 else None)
 
+
+
+def _verify_deep(rows, facts, manifest, metadata, prefix, check):
+    """Check the deep answer key without treating planned spans as observed events."""
+    check(manifest["mode"] == "decision" and metadata["schema_version"] == manifest["material_version"],
+          "deep schema/mode mismatch")
+    baseline = metadata["baseline_v3"]
+    check(2.5 <= len(rows) / baseline["rows"] <= 4 and
+          2.5 <= prefix[-1] / baseline["tokens"] <= 4, "deep scale outside 2.5x-4x")
+    check(manifest["params"] == dict(turns=130, tokens_per_turn=17000, min_tokens=244800, min_events=2),
+          "deep plan mismatch")
+    checkpoints = manifest["checkpoints"]
+    check([cp["requested_row_index"] for cp in checkpoints] == [176, 304, 600, 900, len(rows) - 1],
+          "deep checkpoint schedule")
+    check(set(metadata["checkpoint_answers"]) == {str(cp["row_index"]) for cp in checkpoints},
+          "deep checkpoint answer coverage")
+    for fact in facts:
+        versions = fact["versions"]
+        check(versions and [v["row_index"] for v in versions] == sorted({v["row_index"] for v in versions}),
+              "deep version chronology")
+        for version in versions:
+            index, offset, value = version["row_index"], version["char_offset"], version["value"]
+            check(0 <= index < len(rows) and version["row_id"] == rows[index]["id"] and
+                  fact["id"] in rows[index]["content"] and rows[index]["role"] == version["row_role"] and
+                  rows[index]["content"][offset:offset + len(value)] == value, "deep version source")
+        check(all(fact[k] == versions[-1][k] for k in versions[-1]), "deep latest version mismatch")
+        if "correction_source" in fact:
+            check(fact["correction_source"] == versions[-2], "deep correction source mismatch")
+    for cp in checkpoints:
+        index = cp["row_index"]
+        check(cp["id"] == index and cp["row_id"] == rows[index]["id"] and
+              cp["tokens"] == prefix[index] and not rows[index].get("tool_calls") and
+              abs(index - cp["requested_row_index"]) <= 1, "deep checkpoint admissibility")
+        expected = {}
+        for fact in facts:
+            eligible = [v for v in fact["versions"] if v["row_index"] <= index]
+            if eligible:
+                expected[fact["id"]] = eligible[-1]
+        answers = metadata["checkpoint_answers"][str(index)]
+        check(len(answers) == len(expected) and {f["id"] for f in answers} == set(expected),
+              "deep checkpoint fact coverage")
+        for fact in answers:
+            check(all(fact[k] == v for k, v in expected[fact["id"]].items()) and
+                  fact["answer"] == fact["value"] and
+                  all(v["row_index"] <= index for v in fact["versions"]), "deep checkpoint latest value")
+    check(manifest["decision_checkpoint"] == checkpoints[-1], "deep decision checkpoint")
+    check(sum("correction_source" in f for f in facts) >= 10 and
+          len({v["row_index"] * 3 // len(rows) for f in facts for v in f["versions"][1:]}) == 3,
+          "deep distributed correction coverage")
+    probes = metadata["continuity_probes"]
+    check(manifest["continuity_probes"] == probes and
+          {p["kind"] for p in probes} == {"current_request", "constraint_quote", "constraint_obey", "host_instruction"},
+          "deep continuity probe coverage")
+    for probe in probes:
+        item = next(c for c in manifest["continuity"] if probe["id"].removesuffix("-OBEY") == c["id"])
+        check((probe.get("verbatim") if probe["kind"] == "constraint_obey" else probe["answer"]) == item["value"] and probe["row_index"] == item["row_index"] and
+              probe["row_id"] == item["row_id"], "deep continuity probe source")
+    constraint = next(p for p in probes if p["kind"] == "constraint_obey")
+    check(constraint["answer"] == "READ_ONLY_AUDIT" and
+          constraint["answer"] in constraint["verbatim"] and
+          any(r["role"] == "tool" and len(r["content"]) >= 100004
+              for r in rows[constraint["row_index"] + 1:checkpoints[0]["row_index"]]),
+          "deep constraint/tool-heavy separation")
 
 
 def _verify_v4(rows, facts, traps, manifest, probes, prefix, count, check):
