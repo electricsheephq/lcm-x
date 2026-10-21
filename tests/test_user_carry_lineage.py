@@ -158,3 +158,39 @@ def test_off_rotation_bytes(tmp_path, scenario):
     data = json.loads(run.stdout.replace(str(tmp_path), '<WORK>'))
     actual = json.dumps(data, sort_keys=True, separators=(',', ':'))
     assert hashlib.sha256(actual.encode()).hexdigest() == expected['sha256'][scenario]
+
+
+def test_disabled_restart_before_superseding(factory, monkeypatch):
+    """test_more.py's restart precedes the compression whose output the host rejects."""
+    engine = factory(budget=384)
+    rows = _compress_setup(engine, monkeypatch)
+    host = _more(_real_hermes_merge(deepcopy(engine.compress(rows, force=True))))
+    engine.ingest(host)
+    before = _stored(engine)
+    engine = _restart(engine, 0)
+    try:
+        _compress_setup(engine, monkeypatch, seed=False)
+        engine.compress(host, force=True)
+        engine.ingest(deepcopy(host) + GENUINE)
+        assert _stored(engine) == before + [(len(before) + i + 1, m['role'], m['content']) for i, m in enumerate(GENUINE)]
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize('budget', [512, 2048])
+def test_objective_first_appears_mid_turn(factory, monkeypatch, budget):
+    """test_rr_e3.py: the objective moves from raw tail to anchor on the second compression."""
+    engine = factory(budget=budget)
+    _compress_setup(engine, monkeypatch, seed=False)
+    rows = _seed(engine, ('ORIGIN: build.' + ' pad' * 120, 'CONSTRAINT: no unsafe.' + ' pad' * 120,
+                         'CORRECTION: allow ffi.' + ' pad' * 120))
+    host = rows + [{'role': 'user', 'content': 'OBJECTIVE: refactor X.'}] + _tool_pair(0)
+    engine.ingest(host)
+    for lo, hi in [(1, 6), (6, 10), (10, 10)]:
+        out = engine.compress(host, force=True)
+        text = _text(out)
+        assert HEADER in text and text.count('ORIGIN') == 1 and text.count('OBJECTIVE') == 1
+        host = _real_hermes_merge(deepcopy(out))
+        for i in range(lo, hi):
+            host += _tool_pair(i)
+        engine.ingest(host)
