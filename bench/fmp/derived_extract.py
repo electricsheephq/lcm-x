@@ -5,7 +5,7 @@ from collections import Counter
 from .common import sha
 from .datasets import iso
 from .delivery import tokens
-from .derived_cache import Excluded, Paused, snapshot
+from .derived_cache import Deadline, Excluded, Paused, snapshot
 from .dev_cache import Incomplete
 from .dev_panel import encoded
 SCHEMA = 'dm0-v1'
@@ -15,7 +15,8 @@ kind (fact,event,preference,commitment,status,request,intention,quotation,questi
 subject_resolution (explicit/contextual), predicate_key, object_value, value_text, polarity,
 scope_key, event_at/valid_from/valid_to (null unless quoted), explicitness=explicit,
 sources[{row_id,quote}]. Quote exact source text; do not supply offsets. Preserve speaker/role.
-Questions, temporary requests, quotations, plans and fulfilled tasks are not durable preferences.
+All item fields are strings except sources and nullable string dates. Quotes must fit each
+window's max_quote_chars. Questions, temporary requests, quotations, plans and fulfilled tasks are not durable preferences.
 Relations: from_local_id,to_local_id (or prior_item_id),type (supersedes,cancels,fulfills),
 sources[{row_id,quote}],evidence=explicit. Only explicit update evidence creates a relation;
 recency alone never does. Unknown dates stay null. Empty extraction is a valid items=[] response.'''
@@ -34,9 +35,10 @@ def windows(view, source_tokens=16000, context_tokens=2000):
     limit = source_tokens * 4 - 1024
     if limit < 1024:
         raise ValueError('window budget too small')
+    quote_limit = min(2400, limit//2)
     chunks = [dict(r, start=start, end=min(len(r['content']), start+limit),
                    row_sha256=sha(r['content'].encode()), content=r['content'][start:start+limit])
-              for r in view['rows'] for start in range(0, max(1, len(r['content'])), limit)]
+              for r in view['rows'] for start in range(0, max(1, len(r['content'])-quote_limit), limit-quote_limit)]
     groups, current = [], []
     for chunk in chunks:
         if current and tokens(current + [chunk]) > source_tokens:
@@ -53,10 +55,48 @@ def windows(view, source_tokens=16000, context_tokens=2000):
             if tokens([row, *context]) <= context_tokens:
                 context.insert(0, row)
         result.append(dict(schema_version=SCHEMA, haystack_hash=view['haystack_hash'], cutoff=view['cutoff'],
-                           window_id=str(index), rows=group, context=context))
+                           window_id=str(index), rows=group, context=context,
+                           chunking='overlap-v2', max_quote_chars=quote_limit))
     return result
 def request(batch, prior=()):
     return [dict(role='system', content=PROMPT), dict(role='user', content=json.dumps(dict(windows=batch, prior_index=[i for i in prior if i['haystack_hash'] in {w['haystack_hash'] for w in batch}]), ensure_ascii=False))]
+def repair_targets(batch, output, admitted):
+    targets = []
+    for w, raw, got in zip(batch, output, admitted, strict=True):
+        items, relations = [], []
+        counts = Counter(i.get('local_id') for i in raw['items'] if isinstance(i, dict) and isinstance(i.get('local_id'), str))
+        for rejection in got['rejected']:
+            if 'item' in rejection:
+                n = rejection['item']
+                value = raw['items'][n]
+                local = value.get('local_id') if isinstance(value, dict) else None
+                if not isinstance(local, str) or counts[local] != 1:
+                    local = 'repair-' + sha(encoded([raw, n]))
+                items.append(dict(item=n, local_id=local, rejected=value, reason=rejection['reason']))
+            else:
+                n = rejection['relation']
+                relations.append(dict(relation=n, rejected=raw['relations'][n], reason=rejection['reason']))
+        targets.append(dict(window_id=w['window_id'], haystack_hash=w['haystack_hash'], items=items, relations=relations))
+    return targets
+def replacements(raw, original, target):
+    """Rebuild the original window, replacing only explicitly rejected slots."""
+    if not isinstance(raw, dict) or not isinstance(raw.get('items'), list) or not isinstance(raw.get('relations'), list):
+        raise Incomplete('invalid repair arrays')
+    items = dict(enumerate(original['items']))
+    relations = dict(enumerate(original['relations']))
+    for entry in target['items']:
+        matches = [i for i in raw['items'] if isinstance(i, dict) and i.get('local_id') == entry['local_id']]
+        if len(matches) == 1:
+            items[entry['item']] = matches[0]
+        elif not matches:
+            items.pop(entry['item'])
+    for entry in target['relations']:
+        matches = [r for r in raw['relations'] if isinstance(r, dict) and r.get('repair_relation') == entry['relation']]
+        if len(matches) == 1:
+            relations[entry['relation']] = matches[0]
+        elif not matches:
+            relations.pop(entry['relation'])
+    return raw | dict(items=list(items.values()), relations=list(relations.values()))
 def validate(wire, window, prior=()):
     if not isinstance(wire,dict):
         return dict(items=[],relations=[],rejected=[dict(item=0,reason='non-object window')],state='partial')
@@ -70,15 +110,17 @@ def validate(wire, window, prior=()):
             raise ValueError('missing sources')
         out = []
         for ref in refs:
-            matches = []
+            matches = {}
+            if not isinstance(ref['quote'],str) or not 0 < len(ref['quote']) <= window['max_quote_chars']:
+                raise ValueError('invalid quote')
             for row in rows:
                 quote = ref['quote']
                 if row['row_id'] == ref['row_id'] and quote:
                     positions = [m.start() for m in re.finditer('(?=' + re.escape(quote) + ')', row['content'])]
-                    matches.extend((row, n) for n in positions)
+                    matches.update({(row['row_id'],row['start']+n):(row,n) for n in positions})
             if len(matches) != 1:
                 raise ValueError('ambiguous/missing quote')
-            row, offset = matches[0]
+            row, offset = next(iter(matches.values()))
             if ref.get('role', row['role']) != row['role']:
                 raise ValueError('role substitution')
             out.append(dict(row_id=row['row_id'], quote=quote, start=row['start']+offset,
@@ -90,7 +132,9 @@ def validate(wire, window, prior=()):
         try:
             i = {k: raw[k] for k in ('kind','subject_key','subject_resolution','predicate_key','object_value',
                  'value_text','polarity','scope_key','event_at','valid_from','valid_to','explicitness')}
-            if any(not isinstance(i[k],str) for k in ('value_text','subject_key')):
+            dates = ('event_at','valid_from','valid_to')
+            if any(not isinstance(v,str) for k,v in i.items() if k not in dates) or any(
+                    i[k] is not None and not isinstance(i[k],str) for k in dates):
                 raise ValueError('invalid field type')
             if not isinstance(raw['local_id'],str) or counts[raw['local_id']] != 1 or i['explicitness'] != 'explicit' or i['kind'] not in (
                     'fact','event','preference','commitment','status','request','intention','quotation','question'):
@@ -133,6 +177,10 @@ def validate(wire, window, prior=()):
                 state='partial' if rejected else 'succeeded' if accepted else 'empty')
 def execute(views, cache, spec, root):
     all_items, all_relations, ledger = {}, {}, []
+    def preserve(groups):
+        for got in groups or []:
+            all_items.update({i['id']:i for i in got['items']})
+            all_relations.update({sha(encoded(r)):r for r in got['relations']})
     for view in views:
         ws = windows(view)
         for start in range(0, len(ws), 3):
@@ -140,6 +188,9 @@ def execute(views, cache, spec, root):
             calls = []
             key = sha(encoded(batch))
             terminal_reason=None
+            retained=None
+            extracted_counts=None
+            original=targets=None
             try:
                 msgs = request(batch, list(all_items.values()))
                 for attempt in range(2):
@@ -150,27 +201,56 @@ def execute(views, cache, spec, root):
                         if not isinstance(output, list) or len(output) != len(batch):
                             raise ValueError('batch shape')
                         admitted, batch_items = [], {}
-                        for w, raw in zip(batch, output, strict=True):
+                        for index, (w, raw) in enumerate(zip(batch, output, strict=True)):
+                            if targets is not None:
+                                raw = replacements(raw, original[index], targets[index])
                             got = validate(raw, w, [*all_items.values(), *batch_items.values()])
                             admitted.append(got)
                             batch_items.update({i['id']:i for i in got['items']})
-                        break
+                        if extracted_counts is None:
+                            extracted_counts=[len(raw['items']) if isinstance(raw,dict) else 1 for raw in output]
+                        if attempt or not any(g['rejected'] for g in admitted):
+                            break
+                        retained = admitted
+                        original = output
+                        targets = repair_targets(batch, output, admitted)
+                        msgs = request(batch, list(all_items.values()))
+                        payload = json.loads(msgs[1]['content'])
+                        payload['repairs'] = targets
+                        msgs[1]['content'] = json.dumps(payload, ensure_ascii=False)
+                        msgs[0]['content'] += ('\nRepair only the identified rejected items/relations in repairs; '
+                            'return replacements only, preserving each requested local_id. '
+                            'For a relation replacement include repair_relation equal to its relation index. '
+                            'Never regenerate accepted items. Same schema and sources. Return the array only.')
                     except (Incomplete, ValueError, TypeError):
                         if attempt:
+                            if retained is not None:
+                                admitted=retained
+                                break
                             terminal_reason='extraction invalid after retry'
                             raise Incomplete('invalid extraction JSON') from None
                         msgs = request(batch, list(all_items.values())) + [dict(role='user', content='Repair invalid JSON; same schema and sources. Return the array only.')]
-                for w, raw, got in zip(batch, output, admitted, strict=True):
+                for index, (w, got) in enumerate(zip(batch, admitted, strict=True)):
+                    if retained is not None:
+                        got['items'] = list({i['id']:i for i in [*retained[index]['items'], *got['items']]}.values())
+                        got['relations'] = list({sha(encoded(r)):r for r in [*retained[index]['relations'], *got['relations']]}.values())
+                        got['state']='partial' if got['rejected'] else 'succeeded' if got['items'] else 'empty'
                     all_items.update({i['id']:i for i in got['items']})
                     all_relations.update({sha(encoded(r)):r for r in got['relations']})
                     ledger.append(dict(window=w['window_id'], source=view['haystack_hash'], state=got['state'],
-                                       rejected=got['rejected'], extracted_count=len(raw['items']) if isinstance(raw,dict) else 1,
+                                       rejected=got['rejected'], extracted_count=extracted_counts[index],
                                        rejected_count=sum('item' in r for r in got['rejected']),calls=calls))
             except Paused:
+                # The immutable first-pass cache response reconstructs these on resume.
+                preserve(retained)
                 raise
             except Excluded:
+                preserve(retained)
                 ledger.extend(dict(window=w['window_id'],source=view['haystack_hash'],state='excluded',reason='transient retries exhausted',calls=calls) for w in batch)
-            except (Incomplete, ValueError, TypeError, KeyError):
+            except (Incomplete, ValueError, TypeError, KeyError) as exc:
+                preserve(retained)
+                if isinstance(exc,Deadline):
+                    terminal_reason='deadline expired'
                 ledger.extend(dict(window=w['window_id'], source=view['haystack_hash'], state='failed', calls=calls) for w in batch)
                 result=dict(items=list(all_items.values()),relations=list(all_relations.values()),ledger=ledger)
                 if terminal_reason:

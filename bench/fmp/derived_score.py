@@ -80,6 +80,9 @@ def evaluate(entries, rows, *, complete=True, semantic_valid=True, drift_valid=T
         tables['dataset_balanced_delta'] = sum(t['delta'] for t in tables['datasets'].values())/max(1,len(tables['datasets']))
         result['judges'][judge] = tables
     if not complete:
+        if admission.get('incomplete_reason'):
+            result['reasons'] = [admission['incomplete_reason']]
+            return result
         futile = all(max(t['target']['ci95'][1],t['target']['paired95'][1])<.05 for t in result['judges'].values())
         result['verdict'] = 'PARK-FUTILITY' if futile else 'PARK-INCOMPLETE'
         result['reasons'] = ['fixed target interim; never promotes']
