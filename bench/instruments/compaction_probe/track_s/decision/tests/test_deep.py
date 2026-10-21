@@ -195,3 +195,24 @@ def test_round2_run_pins_required(cell, tmp_path, arm, field, recorded, expected
 def test_round2_wait_stop_must_be_in_range_integer(stop):
     result = engine_turn_wait(dict(stop_row_index=stop, events=[event()]), [dict(turn=t) for t in (0, 1, 1, 2)])
     assert not result["complete"] and "stop_row_index" in result["reason"]
+
+
+def test_round2_checkpoint_pin_must_match_run_pin(cell, tmp_path):
+    import hashlib
+    mat, directory = cell
+    run = tmp_path / "runs" / "H" / "seed-1/d1-r1"
+    summary = json.loads((directory / "summary.json").read_text())
+    summary.update(material_sha256=hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest(),
+                   events=[event()], host_sha="pinned")
+    write(run / "summary.json", summary)
+    write(run / "cp-1/summary.json", dict(summary, host_sha="other"))
+    (run / "cp-1/results.jsonl").write_text((directory / "results.jsonl").read_text())
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "s2-H-d1-r1.log.wall").write_text("exit 0 end now\n")
+    args = SimpleNamespace(material=mat.parent, run_root=tmp_path / "runs", logs=logs, out=tmp_path / "out",
+                           arms=["H"], seeds=[1], checkpoints=["1"], expected_host_sha="pinned")
+    result = aggregate(args)
+    run_result = result["per_run"]["H|d1-r1"]
+    assert run_result["result"] == "INCOMPLETE" and "1" not in run_result["checkpoints"]
+    assert any("cp-1" in r and "pin" in r for r in run_result["reasons"])

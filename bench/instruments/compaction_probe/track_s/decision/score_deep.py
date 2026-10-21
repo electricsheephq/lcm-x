@@ -82,6 +82,10 @@ def aggregate(args):
                 cp_summary = jload(directory / sub / "summary.json")
                 if cp_summary.get("material_sha256") != material_digest:
                     raise ValueError(f"checkpoint material digest mismatch: {key}/cp-{checkpoint}")
+                if cp_summary.get(field) != expected:
+                    result["result"] = "INCOMPLETE"
+                    result.setdefault("reasons", []).append(f"cp-{checkpoint}: missing or mismatched code pin: {field}")
+                    continue
                 scored = score(material, directory / sub, arm)
                 loss = classify_loss(scored)
                 fk, corrected = scored["metrics"]["facts_kept"], scored["metrics"]["deep_corrected"]
