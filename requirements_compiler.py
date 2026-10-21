@@ -1798,6 +1798,7 @@ def _finite_enumeration(
         return None, [], certificate, "finite_scan_truncated"
 
     candidates: list[dict[str, Any]] = []
+    uncertain_window_exclusion = False
     time_bases: set[str] = set()
     carried = engine._store.get_carried_stamp_ids([int(r["store_id"]) for r in scan.get("rows") or []])
     for row in scan.get("rows") or []:
@@ -1841,6 +1842,11 @@ def _finite_enumeration(
                 <= event_day
                 < contract.temporal_window.end
             ):
+                if hydrated.get("time_uncertain") and hydrated["occurrence_time"].get("event_time_source") != "explicit":
+                    uncertain_window_exclusion = True
+                    if result is not None:
+                        result.setdefault("exclusions", []).append(dict(exact_ref=hydrated["exact_ref"],
+                            reason_code="event_outside_temporal_window", time_uncertain="carried"))
                 continue
             grounding_key = _finite_event_key(clause, contract.requested_unit)
             key = _finite_event_key(
@@ -1865,6 +1871,8 @@ def _finite_enumeration(
 
     certificate["time_bases"] = sorted(time_bases)
     certificate["adapter_time_used"] = "adapter_session_date" in time_bases
+    if uncertain_window_exclusion:
+        return None, [], certificate, "uncertain_source_observation_time"
     if certificate["material_clauses"] == 0:
         return None, [], certificate, "finite_no_material_events"
     if certificate["unknown_time_clauses"]:

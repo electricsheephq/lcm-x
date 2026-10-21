@@ -352,6 +352,7 @@ class MessageStore:
         self._hermes_home = hermes_home or str(self.db_path.parent)
         self._context_window_tokens: dict[str, int] = {}  # transient, session-keyed; never LCMConfig/SQLite
         self._conn: Optional[sqlite3.Connection] = None
+        self._carried_relation_connections: set[sqlite3.Connection] = set()
         # ``self._conn`` is shared across threads (the connection is opened with
         # ``check_same_thread=False``). SQLite's own C-level mutex serializes
         # statements at the engine layer, but the Python ``sqlite3`` module
@@ -1092,6 +1093,7 @@ class MessageStore:
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at);
             """)
         self._identity_anchor_schema_ready = True
+        self._carried_relation_connections.add(self._conn)
 
     # -- Host uid shadow bindings: droppable; canonical evidence for #1124 exclusions / #1403 audits --
 
@@ -1276,10 +1278,15 @@ class MessageStore:
         """
         ids = sorted({int(i) for i in store_ids})
         conn = connection if connection is not None else self._conn
-        if not (ids or session_ids) or not conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
-        ).fetchone():
+        if not (ids or session_ids):
             return set()
+        if conn not in self._carried_relation_connections:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+            ).fetchone():
+                return set()
+            if not conn.in_transaction:
+                self._carried_relation_connections.add(conn)
         if session_ids:
             # Collect the entire candidate ID set in SQL before session formatting,
             # including neighbors later rejected by the payload budget.
