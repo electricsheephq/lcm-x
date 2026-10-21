@@ -98,6 +98,9 @@ def render(result, output):
 
 
 def rescore(inputs, output, rule=RULE_VERSION):
+    for name in ("facts-split.jsonl", "events-split.jsonl", "request-ground-truth.json", "rescore-summary.json", "RESCORE.md"):
+        if (output / name).exists():
+            raise ValueError("existing result; choose a new output directory: " + name)
     for entry in load(inputs / "INPUT-MANIFEST.json")["entries"]:
         if digest(inputs / entry["path"]) != entry["sha256"]:
             raise ValueError("snapshot digest mismatch: " + entry["path"])
@@ -117,9 +120,15 @@ def rescore(inputs, output, rule=RULE_VERSION):
         truth["provenance"] = "derived from pinned deep-v1 generator policy; no objective cancellation in material"
         ground_truth[str(seed)] = truth
         run = source / f"runs/LCMX-fleet-rc3/seed-{seed}/d{seed}-r1"
+        summary = load(run / ("summary.json" if seed == 1 else "partial-summary.json"))
+        material_sha = digest(source / f"material/seed-{seed}/material.manifest.json")
+        if summary.get("material_sha256") != material_sha:
+            raise ValueError(f"run material digest mismatch: seed-{seed}")
         if seed == 1:
             for cp, facts in sorted(metadata["checkpoint_answers"].items(), key=lambda item: int(item[0])):
                 directory = run / f"cp-{cp}"
+                if load(directory / "summary.json").get("material_sha256") != material_sha:
+                    raise ValueError(f"checkpoint material digest mismatch: seed-{seed}/cp-{cp}")
                 answers = {r["probe_id"]: r for r in lines(directory / "results.jsonl")}
                 assembled = load(directory / "assembled_context.json")
                 context = assembled["system"] + "\n" + "\n".join(str(r.get("content") or "") for r in assembled["view"])
@@ -138,7 +147,6 @@ def rescore(inputs, output, rule=RULE_VERSION):
                     raise ValueError("historical aggregate mismatch")
                 facts_out.extend(records)
                 checkpoints[cp] = {k: count(records, k) for k in verdicts}
-        summary = load(run / ("summary.json" if seed == 1 else "partial-summary.json"))
         records = []
         for event in summary["events"]:
             if not event.get("is_compaction"):
