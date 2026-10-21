@@ -47,6 +47,8 @@ def test_request_build_on_real_product_child_is_foreground(corpus, tmp_path, mon
             reader._store.close()
             reader._dag.close()
     else:
+        # v2 item 3: force a cold foreground probe despite independent background warm-up.
+        monkeypatch.setattr(mod("engine").LCMEngine, "_schedule_embedding_maintenance", lambda self: None)
         common.dump(tmp_path/"manifest.json", manifest)
         monkeypatch.setattr(probes, "guards", lambda *args: None)
         monkeypatch.setattr(probes, "isolated", lambda home, cache: home.mkdir(parents=True))
@@ -75,11 +77,11 @@ def test_disclosure_is_bound_to_every_incomplete_arm(coverage, reason, arms, exp
 def test_worker_semantic_arms_cannot_pass_fts_only(tmp_path, monkeypatch, state, failure):
     common.dump(tmp_path/"manifest.json", dict(expected=dict(chunks={"1": 1, "2": 1}, leaves={"1": 1}),
                                                canaries=[dict(value="query")]))
-    common.dump(tmp_path/"queries.json", [dict(id=str(i), canary=0) for i in range(200)])
+    common.dump(tmp_path/"queries.json", [dict(id=str(i), canary=0, query_class="canary" if i % 2 == 0 else "broad_nl", text="What turn was acknowledged") for i in range(400)])
     a = NS(out=tmp_path, root=tmp_path, db=tmp_path/"db", home=tmp_path,
            state=state, smoke=False, rows=250000, queries=200, seed=1, block=0)
     store = NS(close=lambda: None)
-    ids = iter(range(200))
+    ids = iter(range(400))
     engine = NS(_config=NS(recall_query_timeout_s=1), _dag=NS(add_node=lambda *a, **kw: next(ids)), shutdown=lambda: None)
     cov = {"chunk": "full", "summary": "full"} if failure == "healthy" else {"chunk": "none", "summary": "none"}
     reason = {"absent": "chunk semantic index catching up; summary semantic index catching up; embedding provider unavailable: boom", "failed": "chunk semantic index catching up; summary semantic index catching up; chunk arm failed: boom; summary arm failed: boom",
@@ -93,8 +95,11 @@ def test_worker_semantic_arms_cannot_pass_fts_only(tmp_path, monkeypatch, state,
     def mod(name):
         return {"store": NS(MessageStore=lambda *args: store), "dag": NS(SummaryDAG=lambda *args: store),
                 "tools": NS(lcm_recall=call)}[name]
+    # Declaration item 6: isolate the existing health probe from the new FTS observer.
+    monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
+    monkeypatch.setattr(recall, "calibration_window", lambda *a: None)  # Separate raw-window regressions in fix2.
     monkeypatch.setattr(recall, "runtime", lambda _: (a, mod, engine, 1))
-    reads = iter([dict(chunks=0, leaves=0) if i % 2 == 0 else dict(chunks=1, leaves=0) for i in range(400)])
+    reads = iter([dict(chunks=0, leaves=0) if i % 2 == 0 else dict(chunks=1, leaves=0) for i in range(800)])
     monkeypatch.setattr(recall, "vector_counts", lambda *args: dict(chunks=2, leaves=1) if state == "ON-covered" else next(reads))
     monkeypatch.setattr(recall, "audit", lambda *args: dict(classes=dict(
         chunks=dict(covered=1, expected=2, missing_count=1),
@@ -121,7 +126,10 @@ def test_worker_semantic_arms_cannot_pass_fts_only(tmp_path, monkeypatch, state,
     monkeypatch.setattr(threading, "Thread", Thread)
     recall.worker(None)
     result = common.load(tmp_path/"raw-summary.json")
-    assert result["state"] == ("PASS" if state == "OFF" or failure == "healthy" else "FAIL")
+    # Workers retain raw class statistics; main applies the shared block calibration.
+    assert all(c["state"] == ("PASS" if state == "OFF" or failure == "healthy" else "FAIL")
+               for c in result["classes"].values())
+    assert all(c["failures"] == (0 if state == "OFF" or failure == "healthy" else 200) for c in result["classes"].values())
 
 
 @pytest.mark.parametrize("table,change", [("summary_nodes", "source_ids='[2]'"),
