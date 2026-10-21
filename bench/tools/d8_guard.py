@@ -6,6 +6,7 @@ import json
 import math
 import random
 import re
+from numbers import Real
 from pathlib import Path
 
 from bench.tools.failclose import _correct, _qid, fail_close_signature, load_rows
@@ -74,8 +75,17 @@ def _is_correct(row):
 
 
 def _unscorable(row):
-    return (not _failed(row) and row.get("correct") is None and row.get("score") is None
-            and not str(row.get("label") or "").strip())
+    if _failed(row):
+        return False
+    # Follow _correct's key-presence precedence, but require typed outcomes
+    # rather than accepting its permissive bool()/str() coercions.
+    if "correct" in row:
+        return not isinstance(row["correct"], bool)
+    if "score" in row:
+        score = row["score"]
+        return not (isinstance(score, Real) and not isinstance(score, bool) and score == score)
+    label = row.get("label")
+    return not (isinstance(label, bool) or isinstance(label, str) and bool(label.strip()))
 
 
 def degraded_rate(rows, config):
@@ -127,6 +137,8 @@ def _record_identities(document, identities, issues):
         value = document
         for key in field.split("."):
             value = value.get(key) if isinstance(value, dict) else None
+        if isinstance(value, str) and not value.strip():
+            value = None
         if value is not None and value not in identities[field]:
             identities[field].append(value)
 
@@ -169,7 +181,10 @@ def _load_run(root):
         checkpoint = json.loads(checkpoint_path.read_text())
         _record_identities(checkpoint, identities, issues)
         questions = checkpoint.get("questions", {})
-        for qid in checkpoint.get("targetQuestionIds") or questions:
+        targets = [_qid({"questionId": qid}) for qid in checkpoint.get("targetQuestionIds") or questions]
+        _check_rows([{"questionId": qid} for qid in targets],
+                    "checkpoint.json targetQuestionIds", identities, issues)
+        for qid in targets:
             question = questions.get(qid, {})
             phases = question.get("phases", {})
             row = rows.setdefault(qid, {"questionId": qid,
@@ -186,7 +201,7 @@ def _load_run(root):
 def _compare_identities(candidate, baseline, *, placebo=False):
     issues, missing_both = [], []
     for field in IDENTITY_FIELDS:
-        if field == "recallConfig" and not placebo:
+        if field in {"recallConfig", "answerPresentationMode"} and not placebo:
             continue
         left, right = candidate[field], baseline[field]
         if not left and not right:
@@ -232,6 +247,9 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
                                      and cr["rate_points"] <= br["rate_points"] + 1)
     result = {"categories": {}, "runs": overall, "excluded_absent_from_baseline": extra,
               "recall_configs": {"candidate": cc, "baseline": bc},
+              "answer_presentation_modes": {
+                  "candidate": candidate_report.get("answerPresentationMode"),
+                  "baseline": baseline_report.get("answerPresentationMode")},
               "INCOMPLETE": incomplete, "d8_row": not subset,
               "mode": "placebo" if placebo else "non-inferiority", "rate_pass": rate_pass}
     result["identities_missing_both"] = missing_both

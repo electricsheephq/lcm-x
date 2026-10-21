@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from bench.tools.d8_guard import compare_runs, main
+from bench.tools.d8_guard import _unscorable, compare_runs, main
 
 
 def write_run(root, **metadata):
@@ -236,3 +236,79 @@ def test_null_verdict_without_label_is_unscorable(tmp_path, field, label):
     assert not result["pass"]
     assert result["runs"]["candidate"]["unscorable"] == 1
     assert "candidate: unscorable rows: 1" in result["reason"]
+
+
+@pytest.mark.parametrize("field", ["answeringModel", "answererProvenance.reasoningEffort"])
+@pytest.mark.parametrize("left,right", [("", " \t"), (" \n", ""), ("", "reader"), ("reader", " ")])
+def test_blank_identity_values_are_missing(tmp_path, field, left, right):
+    def metadata(value):
+        parts = field.split(".")
+        return {parts[0]: value if len(parts) == 1 else {parts[1]: value}}
+
+    baseline = write_run(tmp_path / "b", **metadata(left))
+    candidate = write_run(tmp_path / "c", **metadata(right))
+    result = compare_runs(candidate, baseline, subset=True)
+    if not left.strip() and not right.strip():
+        assert result["pass"]
+        assert field in result["identities_missing_both"]
+    else:
+        assert result["INCOMPLETE"]
+        assert f"identity missing: {field}" in result["reason"]
+
+
+@pytest.mark.parametrize("targets", [["c", "c"], [1, "1"]])
+def test_checkpoint_target_ids_reject_normalized_duplicates(tmp_path, targets):
+    baseline = write_run(tmp_path / "b")
+    candidate = write_run(tmp_path / "c")
+    (candidate / "checkpoint.json").write_text(json.dumps({"targetQuestionIds": targets}))
+    result = compare_runs(candidate, baseline, subset=True)
+    assert result["INCOMPLETE"]
+    assert (f"candidate: duplicate question ids: 1; first id: {targets[0]} "
+            "(checkpoint.json targetQuestionIds)") in result["reason"]
+
+
+def test_presentation_mode_is_placebo_only_but_consistent_within_run(tmp_path):
+    baseline = write_run(tmp_path / "b", answerPresentationMode="raw")
+    candidate = write_run(tmp_path / "c", answerPresentationMode="default")
+    result = compare_runs(candidate, baseline, subset=True)
+    assert result["pass"]
+    assert result["answer_presentation_modes"] == {"candidate": "default", "baseline": "raw"}
+    placebo = compare_runs(candidate, baseline, subset=True, placebo=True)
+    assert placebo["INCOMPLETE"]
+    assert "identity mismatch: answerPresentationMode" in placebo["reason"]
+
+    (candidate / "checkpoint.json").write_text(json.dumps({"answerPresentationMode": "raw"}))
+    for placebo_mode in (False, True):
+        mixed = compare_runs(candidate, baseline, subset=True, placebo=placebo_mode)
+        assert mixed["INCOMPLETE"]
+        assert "candidate: identity mixed within run: answerPresentationMode" in mixed["reason"]
+
+
+@pytest.mark.parametrize("evaluation,scorable", [
+    ({"correct": True}, True), ({"correct": False}, True),
+    ({"correct": "yes"}, False), ({"correct": 1}, False), ({"correct": None}, False),
+    ({"correct": {}, "score": 1}, False), ({"correct": False, "score": "x"}, True),
+    ({"score": 0}, True), ({"score": 0.5}, True), ({"score": float("inf")}, True),
+    ({"score": 10**400}, True), ({"score": True}, False),
+    ({"score": float("nan")}, False), ({"score": "x"}, False),
+    ({"score": None, "label": "pass"}, False),
+    ({"label": "correct"}, True), ({"label": "incorrect"}, True),
+    ({"label": "unknown"}, True), ({"label": True}, True), ({"label": False}, True),
+    ({"label": {}}, False), ({"label": []}, False), ({"label": 1}, False),
+    ({"label": None}, False), ({"label": " \t"}, False), ({}, False),
+])
+def test_outcome_types_use_scorer_precedence(tmp_path, evaluation, scorable):
+    baseline = write_run(tmp_path / "b")
+    candidate = write_run(tmp_path / "c")
+
+    def replace_score(report):
+        row = report["evaluations"][2]
+        del row["score"]
+        row.update(evaluation)
+
+    update_report(candidate, replace_score)
+    result = compare_runs(candidate, baseline, subset=True)
+    assert result["INCOMPLETE"] is (not scorable)
+    assert result["runs"]["candidate"].get("unscorable", 0) == int(not scorable)
+    assert _unscorable(evaluation) is (not scorable)
+    assert not _unscorable({**evaluation, "status": "failed"})
