@@ -153,6 +153,8 @@ def test_setup_diagnostic_allowlist():
 
 
 def test_guarded_worker_receipt_rescores(tmp_path):
+    tmp_path = tmp_path/"0-ON-covered"
+    tmp_path.mkdir()
     request = tmp_path/"request.json"
     common.dump(request, dict(root=str(tmp_path)))
     def denied(*a):

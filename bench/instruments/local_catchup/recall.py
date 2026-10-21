@@ -315,7 +315,7 @@ def worker(request):
                 (all(final["classes"][kind]["missing_count"] == 0 for kind in manifest["expected"])
                  or not all(r["incomplete"] for r in overlapping(rows, publications)))):
             result["state"] = rollup([result["state"], "INVALID"])
-        capped = capped and any(c["overlapping"] < 200 or c["overlapping_publications"] < 10 for c in result["classes"].values())
+        capped = capped and (not rows or any(c["overlapping"] < 200 or c["overlapping_publications"] < 10 for c in result["classes"].values()))
         if capped:
             append(a.root/"events.jsonl", dict(event="volume_cap"))
             result.update(state=rollup([result["state"], "INVALID"]), reason="volume_cap")

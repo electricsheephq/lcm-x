@@ -187,6 +187,8 @@ def test_pair_rollup_and_rescore(tmp_path, monkeypatch, states, expected):
 
 @pytest.mark.parametrize("worker", [False, True])
 def test_early_invalid_rescores_without_raw_files(tmp_path, worker):
+    tmp_path = tmp_path/"0-ON-covered"
+    tmp_path.mkdir()
     value = dict(state="INVALID", reason="covered_store_incomplete")
     common.dump(tmp_path/("raw-summary.json" if worker else "summary.json"), value)
     assert rescore.v2(tmp_path) == value
