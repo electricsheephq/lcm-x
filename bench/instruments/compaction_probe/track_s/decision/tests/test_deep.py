@@ -95,13 +95,14 @@ def test_wait_groups_events_per_turn_and_includes_zero_turns():
     assert not engine_turn_wait(dict(stop_row_index=3, events=[event(wall=None)]), rows)["complete"]
 
 
-def test_aggregate_fails_entire_arm_on_one_compaction_miss(cell, tmp_path):
+@pytest.mark.parametrize("passed,expected", [(False, "FAIL"), (None, "INCOMPLETE"), (True, "COMPLETE")])
+def test_aggregate_fails_entire_arm_on_one_compaction_miss(cell, tmp_path, passed, expected):
     import hashlib
     mat, directory = cell
     run = tmp_path / "runs" / "H" / "seed-1" / "d1-r1"
     digest = hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest()
     summary = json.loads((directory / "summary.json").read_text())
-    summary.update(material_sha256=digest, events=[event(False)])
+    summary.update(material_sha256=digest, host_sha="host", events=[event(passed)])
     write(run / "summary.json", summary)
     write(run / "cp-1" / "summary.json", summary)
     (run / "cp-1" / "results.jsonl").write_text((directory / "results.jsonl").read_text())
@@ -109,12 +110,79 @@ def test_aggregate_fails_entire_arm_on_one_compaction_miss(cell, tmp_path):
     logs.mkdir()
     (logs / "s2-H-d1-r1.log.wall").write_text("exit 0 end now\n")
     args = SimpleNamespace(material=mat.parent, run_root=tmp_path / "runs", logs=logs, out=tmp_path / "scores",
-                           arms=["H"], seeds=[1], checkpoints=["1"])
+                           arms=["H"], seeds=[1], checkpoints=["1"], expected_host_sha="host")
     result = aggregate(args)
-    assert result["per_arm"]["H"]["result"] == "FAIL"
+    assert result["per_arm"]["H"]["result"] == expected
+    from score_deep import exit_status
+    assert exit_status(result) == {"FAIL": 1, "INCOMPLETE": 2, "COMPLETE": 0}[expected]
     assert result["per_arm"]["H"]["summary_tokens"] == dict(input=100, output=20, estimated_calls=0)
     assert result["per_run"]["H|d1-r1"]["dag"]["status"] == "N/A"
     assert result["per_arm"]["H"]["checkpoints"]["1"]["facts_kept"] == 1
     assert list(runs(1, args))[0][0] == "H"
     args.checkpoints = ["last"]
     assert list(runs(1, args))[0][3] == {3: "cp-3"}
+
+
+def test_round2_rejects_every_stale_history_value(cell):
+    mat, directory = cell
+    metadata = json.loads((mat / "deep_metadata.json").read_text())
+    fact = metadata["checkpoint_answers"]["1"][0]
+    fact["stale_history"] = [dict(value="obsolete-origin")]
+    fact["stale"] = "intermediate-value"
+    write(mat / "deep_metadata.json", metadata)
+    rows = [json.loads(r) for r in (directory / "results.jsonl").read_text().splitlines()]
+    rows[0]["answer"] = "old-value and obsolete-origin"
+    (directory / "results.jsonl").write_text(json.dumps(rows[0]) + "\n")
+    corrected = score(mat, directory, "H")["metrics"]["deep_corrected"]
+    assert corrected["correct"] == 0 and corrected["stale_ids"] == ["F1"]
+
+
+@pytest.mark.parametrize("answer", [None, {}, {"R": None}, {"R": []}, {"R": ""}])
+def test_round2_missing_event_answer_is_incomplete(tmp_path, monkeypatch, answer):
+    sys.path.insert(0, str(HERE.parent / "s2"))
+    from s2lib import deep
+    from score_deep import exit_status
+    specs = [dict(id="R", kind="current_request", text="request?", answer="keep request")]
+    run = SimpleNamespace(dir=tmp_path, man=dict(material_version="track-s-deep-v2", continuity_probes=specs),
+                          system="", m=SimpleNamespace(tokens=SimpleNamespace(count_tokens=len)))
+    monkeypatch.setattr(deep.R, "SolLowReader", lambda _: SimpleNamespace(readback={}))
+    monkeypatch.setattr(deep.R, "answer", lambda *a, **k: (answer, {}))
+    ev = event()
+    deep.event_probes(run, ev, [])
+    assert ev["deep_probes"][0]["reader_pass"] is None
+    # Even absent context or another known miss cannot turn missing evidence into FAIL.
+    result = continuity_events(dict(events=[ev, event(False)]))
+    assert result["result"] == "INCOMPLETE"
+    assert exit_status(dict(per_arm={"H": result, "L": dict(result="FAIL")})) == 2
+
+
+@pytest.mark.parametrize("arm,field", [("H", "host_sha"), ("LCMX-fleet-rc3", "worktree_head")])
+@pytest.mark.parametrize("recorded,expected", [(None, "pinned"), ("other", "pinned"), ("pinned", None)])
+def test_round2_run_pins_required(cell, tmp_path, arm, field, recorded, expected):
+    import hashlib
+    mat, directory = cell
+    run = tmp_path / "runs" / arm / "seed-1/d1-r1"
+    summary = json.loads((directory / "summary.json").read_text())
+    summary.update(material_sha256=hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest(),
+                   events=[event()], **{field: recorded})
+    write(run / "summary.json", summary)
+    write(run / "cp-1/summary.json", summary)
+    (run / "cp-1/results.jsonl").write_text((directory / "results.jsonl").read_text())
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / f"s2-{arm}-d1-r1.log.wall").write_text("exit 0 end now\n")
+    args = SimpleNamespace(material=mat.parent, run_root=tmp_path / "runs", logs=logs, out=tmp_path / "out",
+                           arms=[arm], seeds=[1], checkpoints=["1"],
+                           expected_host_sha=expected, expected_product_sha=expected)
+    from score_deep import exit_status
+    result = aggregate(args)
+    assert result["per_run"][f"{arm}|d1-r1"]["result"] == "INCOMPLETE"
+    assert "pin" in result["per_run"][f"{arm}|d1-r1"]["reason"]
+    assert exit_status(result) == 2
+    assert not args.out.exists()
+
+
+@pytest.mark.parametrize("stop", [-1, 4, 100, True, "3", 1.5])
+def test_round2_wait_stop_must_be_in_range_integer(stop):
+    result = engine_turn_wait(dict(stop_row_index=stop, events=[event()]), [dict(turn=t) for t in (0, 1, 1, 2)])
+    assert not result["complete"] and "stop_row_index" in result["reason"]

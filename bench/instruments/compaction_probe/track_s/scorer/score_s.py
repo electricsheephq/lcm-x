@@ -459,6 +459,7 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
             answer = normalize((by_id.get(f["id"]) or {}).get("answer"))
             old = [v["value"] for v in f.get("versions", []) if v["value"] != f["value"]]
             old += [f["stale"]] if f.get("stale") else []
+            old += [v["value"] for v in f.get("stale_history", [])]
             stale = any(normalize(v) and normalize(v) in answer for v in old)
             if stale:
                 old_hits.append(f["id"])

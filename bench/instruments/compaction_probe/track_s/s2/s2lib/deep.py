@@ -32,10 +32,10 @@ def event_probes(run, event, view):
     checks = []
     for p in specs:
         answer = (answers or {}).get(p["id"])
-        exact = answer == p["answer"]
+        exact = answer == p["answer"] if isinstance(answer, str) and answer.strip() else None
         value = p.get("verbatim", p["answer"])
         present = value in text
-        checks.append(dict(kind=p["kind"], passed=exact and present,
+        checks.append(dict(kind=p["kind"], passed=None if exact is None else exact and present,
                            reader_pass=exact, present_verbatim=present))
     event.update(deep_probes=checks, deep_reader_readback=dict(rd.readback),
                  deep_reader_usage=meta.get("usage"))
