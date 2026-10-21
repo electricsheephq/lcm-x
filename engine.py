@@ -5664,7 +5664,8 @@ class LCMEngine(
         }
         handler = handlers.get(name)
         if handler:
-            return handler(args, engine=self)
+            return handler(args, engine=self,
+                           **{k: v for k, v in kwargs.items() if k == "delivery_unit"})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:

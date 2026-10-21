@@ -4,7 +4,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from hermes_lcm import recall_delivery, tokens, tools
+from hermes_lcm import recall_delivery, recall_session, tokens, tools
 from hermes_lcm.config import LCMConfig
 from tests import test_lcm_recall
 
@@ -48,10 +48,105 @@ def test_hits_green_control(recall_engine, monkeypatch, detail):
     monkeypatch.setattr(tools.time, "time", lambda: 1700000000)
     monkeypatch.setattr(engine._store, "load_session_window", Mock(side_effect=AssertionError("session read")))
     monkeypatch.setattr(tokens, "count_tokens", Mock(side_effect=AssertionError("token count")))
+    monkeypatch.setattr(tokens, "count_tokens_with_encoder", Mock(side_effect=AssertionError("session token count")))
+    monkeypatch.setattr(recall_session, "deliver_session", Mock(side_effect=AssertionError("session delivery")))
     args = {"query": "needle", "detail": detail, **({"seen_refs": []} if detail == "answer_ready" else {})}
     before = tools.lcm_recall(args, engine=engine)
     engine._config.recall_delivery_unit = "hits"
     assert tools.lcm_recall(args, engine=engine) == before
+
+
+@pytest.fixture
+def internal_recall(recall_engine, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    from hermes_lcm.engine import LCMEngine
+    e = recall_engine
+    e._config.embeddings_enabled = False
+    add(e, "needle")
+    add(e, "unrelated neighbor must not enter internal evidence")
+    monkeypatch.setattr(tools.time, "time", lambda: 1700000000)
+    monkeypatch.setattr(e, "_disabled_tool_names", lambda: set(), raising=False)
+    monkeypatch.setattr(e, "handle_tool_call", lambda *a, **kw:
+        LCMEngine.handle_tool_call(e, *a, **kw), raising=False)
+    spec = importlib.util.spec_from_file_location(
+        "hermes_lcm.fix4_plugin", Path(__file__).parents[1] / "__init__.py")
+    plugin = importlib.util.module_from_spec(spec)
+    plugin.__package__ = "hermes_lcm"
+    spec.loader.exec_module(plugin)
+    return e, plugin
+
+
+def test_fix4_answer_ready_baseline_hits_identity(internal_recall):
+    e, plugin = internal_recall
+    e._config.recall_delivery_unit = "hits"
+    expected = plugin._answer_ready_baseline(e, "needle", {})
+    assert len(expected) == 1 and expected[0].get("quote", expected[0].get("content")) == "needle"
+    e._config.recall_delivery_unit = "session"
+    assert plugin._answer_ready_baseline(e, "needle", {}) == expected
+    # External dispatch still uses the configured unit.
+    assert len(json.loads(e.handle_tool_call("lcm_recall", {"query": "needle"}))["hits"]) == 2
+
+
+def test_fix4_real_preanswer_evidence_hits_identity(internal_recall, monkeypatch):
+    e, plugin = internal_recall
+    add(e, "You need 15 points to redeem the reward.")
+    e._config.preanswer_evidence_enabled = True
+    e._config.preanswer_evidence_mode = "requirements_v1"
+    monkeypatch.setattr(tools.time, "perf_counter", lambda: 100.0)
+    payload = {"user_message": "How many points do I need to redeem the reward?"}
+    e._config.recall_delivery_unit = "hits"
+    expected = plugin._pre_llm_context(e, payload)
+    assert expected and "15 point" in expected["context"]
+    e._config.recall_delivery_unit = "session"
+    assert plugin._pre_llm_context(e, payload) == expected
+
+
+@pytest.mark.parametrize("consumer", ["pack", "proposal", "auto", "requirements"])
+def test_fix4_internal_evidence_hits_identity(internal_recall, monkeypatch, consumer):
+    from types import SimpleNamespace
+    from hermes_lcm import answer_contract, evidence_compiler, evidence_pack
+    e, plugin = internal_recall
+    args = {"query": "needle", "detail": "answer_ready"}
+    # Exercise every product-owned retrieval callback with real ranked recall.
+    def consume(*a, retrieve, **kw):
+        return {"context": retrieve(args)}
+    monkeypatch.setattr(evidence_pack, "build_evidence_pack", consume)
+    monkeypatch.setattr(evidence_compiler, "compile_evidence", consume)
+    monkeypatch.setattr(evidence_compiler, "compile_preanswer_evidence", consume)
+    monkeypatch.setattr(answer_contract, "compile_answer_contract",
+                        lambda *a: SimpleNamespace(status="planned"))
+    e._config.preanswer_evidence_enabled = True
+    e._config.preanswer_evidence_mode = "requirements_v1"
+    def invoke():
+        if consumer == "requirements":
+            return plugin._pre_llm_context(e, {"user_message": "needle", "baseline_refs": []})
+        if consumer == "pack":
+            return tools.lcm_evidence_pack({}, engine=e)
+        return json.loads(tools.lcm_compile_evidence(
+            {"question": "needle", "mode": consumer}, engine=e))
+    e._config.recall_delivery_unit = "hits"
+    expected = invoke()
+    assert len(json.loads(expected["context"])["hits"]) == 1
+    e._config.recall_delivery_unit = "session"
+    assert invoke() == expected
+
+
+def test_fix4_size_nonconvergence_is_bounded_json(session_engine, monkeypatch):
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    original = tokens.count_tokens_with_encoder
+    def oscillating_fallback(raw, *, encoder):
+        assert encoder is None
+        size = original(raw, encoder=encoder)
+        delivery = json.loads(raw)["provenance"]["delivery"]
+        return size + (delivery.get("response_tokens") == size)
+    monkeypatch.setattr(tokens, "count_tokens_with_encoder", oscillating_fallback)
+    raw = tools.lcm_recall({"query": "needle"}, engine=session_engine)
+    assert isinstance(raw, str)
+    assert len(raw) <= 64000 and original(raw, encoder=None) <= 16000
+    delivery = json.loads(raw)["provenance"]["delivery"]
+    assert delivery["estimator"] == "fallback"
+    assert delivery["stop_reason"] == "size_nonconvergence"
 
 
 @pytest.mark.parametrize("detail", ["snippets", "answer_ready"])

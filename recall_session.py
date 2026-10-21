@@ -51,12 +51,14 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
     resolved_summaries, fit_failure = set(), "budget"
     conn = None
     live_reads = ExitStack()
+    last_encoded = ""
 
     def check():
         if time.monotonic() >= deadline:
             raise TimeoutError
 
     def encode():
+        nonlocal last_encoded
         hits = [item for group in admitted for item in group]
         priority = {s["session_id"]: i for i, s in enumerate(delivery["sessions"])}
         hits.sort(key=lambda h: (priority[h["session_id"]], h["store_id"]))
@@ -91,6 +93,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         # The fallback estimator has discontinuities. Reject this payload;
         # fitting only removes whole groups, never retries an oscillating one.
         delivery.update(stop_reason="size_nonconvergence", truncated=True)
+        last_encoded = json.dumps(response, ensure_ascii=False)
         return None
 
     def fits():
@@ -345,4 +348,13 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
             response.update(error="session_base_envelope_over_budget", query="",
                             provenance={"delivery": delivery})
             break
-    return encode()
+    raw = encode()
+    if raw is not None:
+        return raw
+    # Fixed-point failure must never escape as None or an oversized payload.
+    # The last attempt retains size_nonconvergence from the failed refits.
+    if len(last_encoded) <= CHAR_BUDGET and count(last_encoded) <= TOKEN_BUDGET:
+        return last_encoded
+    return json.dumps(dict(error="session_size_nonconvergence", hits=[], total_results=0,
+        provenance={"delivery": dict(unit="session", estimator=delivery["estimator"],
+                                    stop_reason="size_nonconvergence", truncated=True)}))
