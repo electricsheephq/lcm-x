@@ -39,7 +39,7 @@ def test_workflow_turn_paths_match_maintainer_gate() -> None:
 
 
 def test_required_check_always_reports_and_propagates_failures() -> None:
-    assert "  pull_request:\npermissions:" in WORKFLOW
+    assert "  pull_request:\n  merge_group:\npermissions:" in WORKFLOW
     assert "continue-on-error:" not in WORKFLOW
     assert "  differential:\n" in WORKFLOW
     assert "    timeout-minutes: 30\n" in WORKFLOW
@@ -57,6 +57,8 @@ def test_required_check_always_reports_and_propagates_failures() -> None:
     ("", "pull_request", "false"),
     ("tests/differential/x", "pull_request", "true"),
     (".github/workflows/differential.yml", "pull_request", "true"),
+    ("engine.py", "merge_group", "true"),
+    ("docs/guide.md", "merge_group", "false"),
     ("docs/guide.md", "schedule", "true"),
     ("docs/guide.md", "workflow_dispatch", "true"),
 ])
@@ -89,3 +91,11 @@ def test_relevance_shell(tmp_path: Path, path: str, event: str, expected: str) -
     assert result.stdout == (
         "No differential-relevant changes; skipping.\n" if expected == "false" else ""
     )
+
+
+def test_required_checks_run_for_the_merge_queue() -> None:
+    # Required checks on main must also report on merge-queue groups, or the queue stalls.
+    ci = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    assert "  merge_group:\n" in ci
+    assert "  merge_group:\n" in WORKFLOW
+    assert "github.event.merge_group.base_sha" in WORKFLOW
