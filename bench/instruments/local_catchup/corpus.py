@@ -1,5 +1,6 @@
 """Deterministic bounded-session corpus and zero-vector / legacy-gap baselines."""
 from collections import Counter
+from contextlib import ExitStack, closing
 from dataclasses import asdict
 import shutil
 import sqlite3
@@ -11,13 +12,18 @@ from .common import MODEL, config, dump, parser, product
 
 
 def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=1586):
+    with ExitStack() as resources:
+        return _build(resources, repo, host, db, rows, shape, baseline, seed)
+
+
+def _build(resources, repo, host, db, rows, shape, baseline, seed):
     if rows < 2 or rows % 2 or db.exists():
         raise ValueError("positive even row count and a new DB required")
     mod = product(repo, host)
     from benchmarking.fixtures import make_synthetic_fixture
-    store = mod("store").MessageStore(db, hermes_home=str(db.parent))
-    dag = mod("dag").SummaryDAG(db)
-    vs = mod("vector_store").VectorStore(db, config=config(mod, db, False))
+    store = resources.enter_context(closing(mod("store").MessageStore(db, hermes_home=str(db.parent))))
+    dag = resources.enter_context(closing(mod("dag").SummaryDAG(db)))
+    vs = resources.enter_context(closing(mod("vector_store").VectorStore(db, config=config(mod, db, False))))
     vs.ensure_chunk_schema()
     identities = {task: vs.register_profile(MODEL, "fastembed", 384, task=task)
                   for task in ("summary", "chunk")}
@@ -26,7 +32,7 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
     expected, tokens, chunks = {"chunks": {}, "leaves": {}}, Counter(), []
     chunk_metadata, leaf_metadata = {}, {}
     canaries, sessions, long_count = [], [], 0
-    reader = connect(db)
+    reader = resources.enter_context(closing(connect(db)))
     for shard, offset in enumerate(range(0, rows // 2, 250)):
         name = f"s{seed}_shard{shard:06d}"
         fixture = make_synthetic_fixture(name=name, message_pairs=min(250, rows // 2-offset),
@@ -72,9 +78,9 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
     store.close()
     dag.close()
     vs.close()
-    with connect(db) as c:
+    with closing(connect(db)) as c:
         pre = preimage(c)
-    with sqlite3.connect(db) as c:
+    with closing(sqlite3.connect(db)) as c:
         c.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     manifest = {"rows": rows, "pairs": rows//2, "system_rows": 0, "tool_rows": 0,
         "stripped_system_rows": len(sessions), "shape": shape, "baseline": baseline, "seed": seed,

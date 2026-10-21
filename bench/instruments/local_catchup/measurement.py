@@ -71,6 +71,13 @@ def prepare(a):
         return manifest
     pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", pilot_rows(1000, a.rows, a.shape), a.shape, a.baseline)
     estimate = 5*(pilot["database_bytes"]+len(pilot["expected"]["chunks"])*2048)*a.rows/pilot["rows"]
+    import psutil
+    pilot_files = {a.scratch/"pilot.db", *[a.scratch/("pilot.db"+s) for s in ("-wal", "-shm", "-journal")]}
+    if any(Path(f.path).resolve() in {p.resolve() for p in pilot_files}
+           for f in psutil.Process().open_files()):
+        raise RuntimeError("pilot store handles remain open")
+    for path in pilot_files:
+        path.unlink(missing_ok=True)
     if estimate > 6*2**30:
         raise RuntimeError("estimated live stores exceed 6 GB; declare a larger runner budget first")
     manifest = build(a.lcmx_repo, a.hermes_source, a.scratch/"baseline.db", a.rows, a.shape, a.baseline)
