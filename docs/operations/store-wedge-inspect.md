@@ -91,11 +91,11 @@ exit 2 using argparse's usage message. Inspection failures emit no traceback.
 | `snapshot_invalid` | View is absent, malformed, mismatched to the copy/scope/capture/config, or cannot be processed. |
 | `unsupported_view_evidence` | Special host identity, external payload or carrier evidence is required. |
 | `source_time_unavailable` | Supported schema-v5 copy lacks optional source-time columns; database findings remain available, but view attribution is unassessed. |
-| `identity_anchor_unsupported` | A timestamped user message has an owned composite witness or is an exact join of stored replay-identity forms, even without a witness. Engine claim resolution can write relations, so all view findings remain unassessed. |
-| `leaf_admission_unassessed` | Raw backlog is below the configured leaf threshold, or dynamic sizing is enabled. V1 lacks the force, fit, sweep and deferred-maintenance state needed to assess admission safely. |
+| `identity_anchor_unsupported` | A timestamped user message has an owned composite witness, or an unmapped user message is an exact join of stored replay-identity forms with a same-stamp user donor in the conversation and supported session scope (including alternate stamps). Mapped replays skip the candidate-composite guard. Engine claim resolution can write relations, so all view findings remain unassessed. |
+| `leaf_admission_unassessed` | Raw backlog is below the context-capped working leaf threshold without a captured pressure-yield waiver, or dynamic sizing is enabled. V1 lacks the force, fit, sweep and deferred-maintenance state needed to assess admission safely. |
 | `copy_exclusions_unassessed` | Nonempty persisted host UID bindings require active host lineage and UID mode unavailable in V1, so view copy exclusions are unassessed. With bindings absent or empty, the production helper reproduces E1 byte-identical assistant tool-call/tool-result exclusions using selected-session ownership and node/leaf coverage. Database copy findings remain available. |
 | `ignore_patterns_unavailable` | Configured ignore patterns cannot all be compiled with the production engine in this process (including missing optional `regex`). View filtering and attribution remain unassessed. |
-| `unverified_ancestry` | Captured compaction carry ancestry cannot be established. |
+| `unverified_ancestry` | Captured compaction carry ancestry, or the host ancestry of a same-stamp user donor outside the selected session, cannot be established. |
 | `blocker_evidence_missing` | The retained blocker cannot be located in the captured view. |
 
 For view-dependent checks add `--view-snapshot SNAPSHOT.json` and
@@ -126,7 +126,7 @@ are valid (filtered dependent replies) and contribute no coverage. Parent messag
 persisted carry range are accepted after validating the range and conversation;
 view ancestry remains unassessed without host evidence. Rotation-predecessor
 chains allow empty hops (which contribute no rows), and every hop with rows
-must have consistent conversation ownership;
+must have consistent conversation ownership, including all-blank or NULL predecessors;
 missing or contradictory evidence and cycles refuse with `unverified_ancestry`.
 Validated predecessor message sources contribute to coverage even though raw
 rows remain in their original session.
@@ -137,8 +137,11 @@ and special identity metadata leave view findings unassessed before attribution.
 The no-op check keeps shown-but-unmapped retained occurrences in the backlog,
 so they can produce a named stop. It uses production's bounded, extendable scan
 and subtracts node-covered copies only when that scan is not truncated.
-Attribution uses the larger of the leaf budget and the selected input's token
-cost, matching production's budget floor.
+Admission uses production's working-leaf helper with the captured context window
+and honours an already-engaged pressure-yield waiver. The raw configured leaf
+budget still governs attribution and prefix-budget reporting. Attribution uses
+the larger of that budget and the selected input's token cost, matching
+production's budget floor.
 
 **Does NOT repair:** no reconstruction, frontier rewind, replay manifest,
 ingest, compression, schema migration or live host adoption is performed.

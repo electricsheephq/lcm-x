@@ -21,6 +21,7 @@ if "hermes_lcm" not in sys.modules:
 
 from hermes_lcm import tokens  # noqa: E402
 from hermes_lcm.compaction import select_oldest_leaf_chunk  # noqa: E402
+from hermes_lcm.compaction import CompactionMixin  # noqa: E402
 from hermes_lcm.config import LCMConfig  # noqa: E402
 from hermes_lcm.db_bootstrap import SCHEMA_VERSION, _V5_CORE_OPTIONAL_COLUMNS, _V5_CORE_TABLE_COLUMNS  # noqa: E402
 from hermes_lcm.externalize import extract_externalized_ref  # noqa: E402
@@ -122,8 +123,7 @@ def _coverage(connection, rows, session_id, session_rows, conversation_id):
                  "unverified_ancestry")
         parent = connection.execute("SELECT store_id,conversation_id FROM messages WHERE session_id=?",
                                     (predecessor,)).fetchall()
-        _require(not parent or (all(str(r[1] or "").strip() in owners for r in parent)
-                 and any(str(r[1] or "").strip() == str(conversation_id or "").strip() for r in parent)),
+        _require(all(str(r[1] or "").strip() in owners for r in parent),
                  "unverified_ancestry")
         parent_ids = {r[0] for r in parent}
         session_owned.update(parent_ids)
@@ -202,6 +202,9 @@ class _ReadStore:
 
 class _Probe(StoreCompleteMixin, ReconcileMixin):
     """Read-only facade for ordinary raw views; unavailable host proof stays unknown."""
+
+    _context_aware_leaf_cap = CompactionMixin._context_aware_leaf_cap
+    _working_leaf_chunk_tokens = CompactionMixin._working_leaf_chunk_tokens
 
     def __init__(self, connection, rows, session_id, frontier, config, covered, conversation_id):
         self._store = _ReadStore(connection, rows)
@@ -383,12 +386,41 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     # Check every row before entering helpers that could otherwise resolve an external payload.
     for message in [*session_rows, *view]:
         probe._message_replay_identity(message, stored_row=True)
+    mapping = probe._get_store_id_map_for_messages(view)
     # IdentityAnchorMixin._identity_anchor_summary_input: the no-witness branch
     # may compose timestamped user rows and write a relation. Do not guess claims.
     texts = {text for row in rows for text in
              {probe._message_replay_identity(row, stored_row=True)[1],
               *(form[1] for form in probe._stored_row_forms(row))}}
-    _require(not any(m.get("role") == "user" and _normalize_observed_at(m.get("timestamp")) is not None
+    # find_rows_by_observed_at uses conversation AND session-chain scope. V1
+    # has no verified host ancestors (carry is refused above), so scope is this
+    # session only; rotation metadata is not host identity-anchor ancestry.
+    donor_stamps = {r[0] for r in connection.execute(
+        "SELECT observed_at FROM messages WHERE session_id=? AND conversation_id IN (?, '') "
+        "AND role='user' AND observed_at IS NOT NULL", (session_id, probe._conversation_id))}
+    relations = connection.execute(
+        "SELECT 1 FROM sqlite_schema WHERE type='table' AND name='message_relations'").fetchone()
+    if relations:
+        donor_stamps.update(r[0] for r in connection.execute(
+            "SELECT r.observed_at FROM message_relations r JOIN messages m ON m.store_id=r.store_id "
+            "WHERE r.kind='alt_stamp' AND m.session_id=? AND m.conversation_id=? "
+            "AND m.role='user' AND r.observed_at IS NOT NULL", (session_id, probe._conversation_id)))
+    # A same-conversation donor outside this session could be a host ancestor;
+    # V1 cannot prove that chain. Refuse rather than silently omit its claims.
+    outside_stamps = {r[0] for r in connection.execute(
+        "SELECT observed_at FROM messages WHERE session_id!=? AND conversation_id IN (?, '') "
+        "AND role='user' AND observed_at IS NOT NULL", (session_id, probe._conversation_id))}
+    if relations:
+        outside_stamps.update(r[0] for r in connection.execute(
+            "SELECT r.observed_at FROM message_relations r JOIN messages m ON m.store_id=r.store_id "
+            "WHERE r.kind='alt_stamp' AND m.session_id!=? AND m.conversation_id=? "
+            "AND m.role='user' AND r.observed_at IS NOT NULL", (session_id, probe._conversation_id)))
+    _require(not any(id(m) not in mapping and m.get("role") == "user"
+                     and _normalize_observed_at(m.get("timestamp")) in outside_stamps for m in view),
+             "unverified_ancestry")
+    _require(not any(id(m) not in mapping and m.get("role") == "user"
+                     and (stamp := _normalize_observed_at(m.get("timestamp"))) is not None
+                     and stamp in donor_stamps
                      and _candidate_composite(probe._message_replay_identity(m)[1], texts) for m in view),
              "identity_anchor_unsupported")
     if connection.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='message_relations'").fetchone():
@@ -402,7 +434,6 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
                         for r in connection.execute("SELECT store_id,observed_at FROM message_relations "
                                                     "WHERE kind='composite' AND observed_at IS NOT NULL"))
         _require(not witnessed, "identity_anchor_unsupported")
-    mapping = probe._get_store_id_map_for_messages(view)
     # The session-wide replay mapper can select a foreign conversation occurrence.
     _require(set(mapping.values()) <= {r["store_id"] for r in rows}, "unsupported_view_evidence")
     shown = _match_occurrences([r for r in rows if r["store_id"] not in mapping.values()], probe._stored_row_forms,
@@ -443,8 +474,11 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     raw = view[leading:max(leading, tail.start)]
     # CompactionMixin._select_leaf_candidate returns before selection below the
     # working threshold. Force/fit/sweep/deferred state is absent from V1 captures.
+    probe.context_length = config["context_window"]
+    raw_tokens = tokens.count_messages_tokens(raw)
     _require(not raw or (not probe._config.dynamic_leaf_chunk_enabled
-                        and tokens.count_messages_tokens(raw) >= config["leaf_chunk_tokens"]),
+                        and (config["pressure_yield_limit"] > 0
+                             or raw_tokens >= probe._working_leaf_chunk_tokens(raw_tokens))),
              "leaf_admission_unassessed")
     chunk = select_oldest_leaf_chunk(raw, config["selection_budget"])
     top = max((mapping[id(m)] for m in chunk if id(m) in mapping), default=0)
