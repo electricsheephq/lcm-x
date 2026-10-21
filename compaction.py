@@ -195,7 +195,8 @@ def select_oldest_leaf_chunk(
 
 class CompactionMixin:
     def _raw_messages_counter(self, messages, occurrences=None):
-        if not any("[Earlier user messages, verbatim reference;" in str(m.get("content", "")) for m in messages):
+        if self._config.user_carry_tokens <= 0 or not any(
+                self._carry_occurrence_packet((occurrences or {}).get(id(m))) for m in messages):
             return count_messages_tokens
         return lambda rows: sum(self._raw_message_tokens(m, (occurrences or {}).get(id(m))) for m in rows)
 
@@ -203,6 +204,15 @@ class CompactionMixin:
         binding = self._emission_binding()
         return {"version": 4, **binding, "output": [_emission_identity(m) for m in view],
                 "emissions": _finalize_emission_descriptors(view, candidates, binding)}
+
+    def _carry_occurrence_packet(self, occurrence):
+        if not occurrence or occurrence[0] is None:
+            return None
+        span = occurrence[0].generated_span or ""
+        from .user_carry import HEADER
+        start = span.find(HEADER)
+        end = self._verified_user_carry_end(span[start:]) if start >= 0 else None
+        return span[start:start + end] if end is not None else None
 
     def _carry_packets(self, view, proof=None):
         from .user_carry import HEADER, HEADER_RE
@@ -217,10 +227,8 @@ class CompactionMixin:
 
     def _update_carry_estimate(self, state):
         if self._config.user_carry_tokens > 0:
-            candidates = []
-            trial = self._assemble_committed_compaction_context(
-                state.working_messages, state.anchor_source_messages, state.recovery_assembly_cap, persist=False, _emissions_out=candidates)
-            current = self._carry_tokens_in_view(trial, self._carry_emission_proof(trial, candidates))
+            # Reserve the cap once; the existing final trial measures the actual view.
+            current = self._config.user_carry_tokens
             state.estimated_active_tokens += current - state.estimated_carry_tokens
             state.estimated_carry_tokens = current
 
@@ -806,21 +814,18 @@ class CompactionMixin:
             prior_emissions = getattr(self, "_last_emission_descriptors", None)
             self._record_compress_commit_proof(messages, result)
             if self._config.user_carry_tokens > 0:
-                # New generated carry is publishable only after exact scoped proof is durable.
-                from .user_carry import HEADER
-                if any(HEADER in candidate.get("span", "") for candidate in self._pending_emission_candidates):
-                    proof, durable = self._compress_commit_proof, self._durable_commit_proof_payload()
-                    projected = _project_emitted_occurrences(result, proof=proof) if proof else None
-                    covered = projected is not None and all(
-                        HEADER not in str(row.get("content", ""))
-                        or HEADER in (projected.entries[i].generated_span or "")
-                        for i, row in enumerate(result))
-                    if not covered or not durable or durable.get("emissions") != proof.get("emissions"):
-                        logger.warning("LCM omitted user carry: publication proof unavailable; returning raw view")
-                        result = messages
-                        self._ingest_cursor, self._ingest_cursor_needs_reconcile = len(messages), True
-                        self._pending_emission_candidates, self._compress_commit_proof = [], None
+                # The durable proof must bind each packet at its actual occurrence.
+                packets = [(id(row), packet) for row, packet, _ in self._carry_packets(
+                    result, self._carry_emission_proof(result, self._pending_emission_candidates))]
+                if packets:
+                    durable = self._durable_commit_proof_payload()
+                    durable_packets = [(id(row), packet) for row, packet, _ in self._carry_packets(result, durable)] if durable else []
+                    if packets != durable_packets:
+                        logger.warning("LCM omitted user carry: publication proof unavailable; retaining fitted view")
+                        result = self._omit_pending_user_carry(result)
+                        self._ingest_cursor, self._ingest_cursor_needs_reconcile = len(result), False
                         self._last_emission_descriptors = prior_emissions
+                        self._record_compress_commit_proof(messages, result)
                     else:
                         self._remember_compacted_active_replay_snapshot(result)
                 self._record_user_carry_status(result)
@@ -834,6 +839,8 @@ class CompactionMixin:
             returned = result
             return result
         except BaseException as exc:
+            if self._config.user_carry_tokens > 0:
+                self._last_user_carry = None
             self._compress_occurrences = None
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""

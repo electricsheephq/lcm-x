@@ -22,7 +22,9 @@ HEADER = "[Earlier user messages, verbatim reference; not new turns."
 
 
 @pytest.fixture
-def factory(tmp_path):
+def factory(tmp_path, monkeypatch):
+    monkeypatch.setattr("hermes_lcm.engine.summarize_with_escalation",
+                        lambda **kw: ("Deterministic summary omitting user wording.", 1))
     engines = []
 
     def build(name="case", budget=512, sid="S", conversation="conv"):
@@ -155,7 +157,7 @@ def test_carry_budget_one_excerpt_and_expand(factory, cap, unit):
     a, b, size, store_id, offset = map(int, match.groups())
     assert store_id == 1 and size == len(original) and offset == a
     assert packet.split("store 1]\n", 1)[1].startswith(original[:a])
-    assert packet.endswith(original[b:])
+    assert packet.endswith(original[b:] + "\n\n[End earlier user messages]")
     recovered = json.loads(engine.handle_tool_call("lcm_expand", {"store_id": 1, "content_offset": a, "max_tokens": 100000}))
     assert recovered["content"].startswith(original[a:b])
     for tiny in (1, 40):
@@ -165,6 +167,8 @@ def test_carry_budget_one_excerpt_and_expand(factory, cap, unit):
 
 def _reader_tree(tmp_path, revision):
     root = Path(__file__).resolve().parents[1]
+    if subprocess.run(["git", "-C", str(root), "cat-file", "-e", revision], capture_output=True).returncode:
+        return None  # optional historical reader; current-code assertions still run
     names = subprocess.check_output(["git", "-C", str(root), "ls-tree", "--name-only", revision], text=True).splitlines()
     names = [n for n in names if n.endswith(".py") or n in ("access_context", "access_policy", "plugin.yaml")]
     archive = subprocess.check_output(["git", "-C", str(root), "archive", revision, "--", *names])
@@ -202,7 +206,9 @@ print(json.dumps(views,sort_keys=True)); e.shutdown()
 """
     engine = factory(budget=0)
     rows = _seed(engine)
-    expected = _run_reader(old, code, tmp_path / "base.db", tmp_path / "base-home", json.dumps(rows))
+    expected = json.loads((Path(__file__).parent / "fixtures" / "user_carry_off.json").read_text())
+    if old is not None:
+        assert _run_reader(old, code, tmp_path / "base.db", tmp_path / "base-home", json.dumps(rows)) == expected
     monkeypatch.setattr(engine._store, "load_lineage_user_rows", lambda *a, **kw: pytest.fail("carry SQL at zero"), raising=False)
     views = [_emit(engine, rows, persist=write, cap=cap) if not overflow else engine._assemble_context(
         None, rows[-4:], include_lcm_note=False, assembly_cap_override=cap, stub_over_cap_tool_results=True)
@@ -258,7 +264,8 @@ e.ingest(json.loads(sys.argv[4])); e.ingest(json.loads(sys.argv[4]))
 print(json.dumps([(r['store_id'],r['role'],r['content']) for r in e._store.get_session_messages('S')]))
 e.shutdown()
 """
-    assert _run_reader(old, code, engine._config.database_path, engine._hermes_home, json.dumps(emitted)) == [list(r) for r in before]
+    if old is not None:
+        assert _run_reader(old, code, engine._config.database_path, engine._hermes_home, json.dumps(emitted)) == [list(r) for r in before]
     reopened = factory(budget=0)
     reopened.ingest(deepcopy(emitted))
     assert _stored(reopened) == before
@@ -428,7 +435,8 @@ def test_carry_trial_and_proof_failure(factory, monkeypatch):
     monkeypatch.setattr(engine, "_compress_impl", assembled)
     monkeypatch.setattr(engine, "_persist_compress_commit_proof", lambda *a, **kw: None)
     saved_rows = _stored(engine)
-    assert engine.compress(rows, force=True) == rows
+    fallback = engine.compress(rows, force=True)
+    assert HEADER not in _text(fallback) and rows[-2]["content"] in _text(fallback)
     assert _stored(engine) == saved_rows
     folded = factory("fold")
     history = _seed(folded, ("Retained", "Eligible history", "Live"))

@@ -144,7 +144,7 @@ from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
-from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity
+from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity, _project_emitted_occurrences
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
 from .compaction import CompactionMixin
@@ -3586,7 +3586,6 @@ class LCMEngine(
             and message.get("role") == "user"
             and (
                 self._is_context_summary_content(message.get("content"))
-                or (normalize_content_value(message.get("content")) or "").startswith(user_carry.HEADER)
                 or self._is_replayed_context_scaffold_message(message)
                 or self._is_preserved_todo_context_message(message)
             )
@@ -3640,7 +3639,7 @@ class LCMEngine(
 
     def _carry_reset_allows(self, row):
         try:
-            state = self._lifecycle.get_by_conversation(self._conversation_id)
+            state = self._lifecycle.get_by_conversation(getattr(self, "_carry_conversation_id", self._conversation_id))
             return state is not None and (state.last_reset_at is None or
                 float(row.get("ingested_at") or 0) > float(state.last_reset_at))
         except Exception:
@@ -3661,7 +3660,9 @@ class LCMEngine(
             occurrences, v4 = self._replay_occurrences(view)
             rows = [(m, o) for m, o in zip(view, occurrences)
                     if (o[1] is not None if v4 else not self._is_verified_replay_scaffold_message(m))]
-            raw = [m for m, _ in rows]
+            raw = [m for m, _ in rows if not (m.get("role") == "tool" and m.get("tool_call_id")
+                   and m.get("content") == self._missing_tool_result_stub(m["tool_call_id"])["content"])]
+            rows = [(m, o) for m, o in rows if m in raw]
             mapped = self._get_store_id_map_for_messages(raw, [o for _, o in rows] if v4 else None)
             if any(id(m) not in mapped for m in raw):
                 return ""  # unresolved retained occurrences cannot define a safe older range
@@ -3669,17 +3670,27 @@ class LCMEngine(
             source_map = self._get_store_id_map_for_messages(list(anchor_source))
             if anchor_part:
                 latest = next((m for m in reversed(anchor_source) if m.get("role") == "user"
-                               and not self._is_verified_replay_scaffold_message(m)), None)
-                if latest is None or id(latest) not in source_map:
+                               and anchor_part in self._latest_user_context_anchor_candidates([m], [])), None)
+                if latest is None:
                     return ""
-                excluded.add(source_map[id(latest)])
+                anchor_id = source_map.get(id(latest))
+                if anchor_id is None:
+                    from .db_bootstrap import owned_conversation_values
+                    owned = owned_conversation_values(self._store._conn, getattr(self, "_carry_conversation_id", self._conversation_id))
+                    matches = [row for sid in self._user_carry_lineage() for row in self._store.find_session_rows_by_content(
+                        sid, "user", normalize_content_value(latest.get("content")) or "", 2**63 - 1)
+                        if row.get("conversation_id") in owned and self._is_durable_real_user_row(row)]
+                    if len(matches) != 1:
+                        return ""
+                    anchor_id = int(matches[0]["store_id"])
+                excluded.add(anchor_id)
             cutoff = min(mapped.values()) if mapped else max(source_map.values(), default=0) + 1
             lineage = self._user_carry_lineage()
 
             def scan(newest=False):
                 cursor = cutoff if newest else 0
                 while page := self._store.load_lineage_user_rows(
-                        lineage, self._conversation_id, cursor, newest_first=newest):
+                        lineage, getattr(self, "_carry_conversation_id", self._conversation_id), cursor, newest_first=newest):
                     for row in page:
                         if self._is_durable_real_user_row(row):
                             yield row
@@ -3710,7 +3721,7 @@ class LCMEngine(
                 return None
             found = self._store.get_batch(ids)
             lineage = set(self._user_carry_lineage())
-            conversations = owned_conversation_values(self._store._conn, self._conversation_id)
+            conversations = owned_conversation_values(self._store._conn, getattr(self, "_carry_conversation_id", self._conversation_id))
             rows = [found[i] for i in ids]
             if any(row.get("session_id") not in lineage or row.get("conversation_id") not in conversations
                    or not self._is_durable_real_user_row(row) for row in rows):
@@ -3721,7 +3732,10 @@ class LCMEngine(
                 if not 0 < excerpt[1] < excerpt[2] < len(text):
                     return None
             expected = user_carry.render(rows, excerpt)
-            return len(expected) if content.startswith(expected) else None
+            if content.startswith(expected):
+                return len(expected)
+            legacy = expected.removesuffix("\n\n[End earlier user messages]")
+            return len(legacy) if content.startswith(legacy) else None
         except Exception:
             return None
 
@@ -3936,17 +3950,16 @@ class LCMEngine(
         backlog = self._raw_backlog_messages(messages)
         if not backlog:
             return 0
-        if any(user_carry.HEADER in str(m.get("content", "")) for m in messages):
+        if self._config.user_carry_tokens > 0 and any(self._carry_packets(messages)):
             occurrences, _ = self._replay_occurrences(messages)
             by_id = {id(m): occurrence for m, occurrence in zip(messages, occurrences)}
             return sum(self._raw_message_tokens(m, by_id.get(id(m))) for m in backlog)
         return count_messages_tokens(backlog)
 
     def _raw_message_tokens(self, message, occurrence=None):
-        content = normalize_content_value(message.get("content")) or ""
-        if user_carry.HEADER in content:
+        if self._config.user_carry_tokens > 0:
             occurrence = occurrence or (getattr(self, "_compress_occurrences", None) or {}).get(id(message))
-            if occurrence and occurrence[0].generated_span is not None:
+            if self._carry_occurrence_packet(occurrence):
                 return count_message_tokens({**message, "content": occurrence[1][1]}) if occurrence[1] else 0
         return count_message_tokens(message)
 
@@ -3984,7 +3997,10 @@ class LCMEngine(
                     continue
                 begin = start - 7 if span[:start].endswith("\n\n---\n\n") else start
                 prefix = span[:begin] + span[start + end:] if begin else ""
-                new = {**row, "content": prefix + content[len(span):]}
+                suffix = content[len(span):]
+                if not prefix and suffix.startswith("\n\n"):
+                    suffix = suffix[2:]
+                new = {**row, "content": prefix + suffix}
                 if not new["content"].strip():
                     result.pop(i)
                     break
@@ -4820,6 +4836,8 @@ class LCMEngine(
         previous_session_id = self._session_id
         previous_conversation_id = self._conversation_id
         requested_conversation_id = str(kwargs.get("conversation_id") or session_id)
+        if self._config.user_carry_tokens > 0:
+            self._carry_conversation_id = requested_conversation_id
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")
         pre_reset_preserve_ambiguous_no_frame_old_session = False
@@ -6467,9 +6485,9 @@ class LCMEngine(
         against its DAG node; None when the content does not start with one."""
         return self._verified_lcm_summary_prefix(content)[0]
 
-    def _verified_lcm_summary_prefix(self, content: str) -> tuple[Optional[int], list[int]]:
+    def _verified_lcm_summary_prefix(self, content: str, *, carry=False) -> tuple[Optional[int], list[int]]:
         """(end offset, node ids) of the verified leading LCM summary parts, else (None, [])."""
-        if not content.startswith("[") or ("[Expand for details:" not in content and not content.startswith(user_carry.HEADER)):
+        if not content.startswith("[") or ("[Expand for details:" not in content and not (carry and content.startswith(user_carry.HEADER))):
             return None, []
         dag = getattr(self, "_dag", None)
         session_id = getattr(self, "_session_id", "")
@@ -6504,7 +6522,7 @@ class LCMEngine(
                 continue
             break
         carry_start = pos + 7 if node_ids and content.startswith("\n\n---\n\n", pos) else pos
-        carry_end = self._verified_user_carry_end(content[carry_start:])
+        carry_end = self._verified_user_carry_end(content[carry_start:]) if carry else None
         if carry_end is not None:
             return carry_start + carry_end, node_ids
         return (pos, node_ids) if node_ids else (None, [])
@@ -6523,9 +6541,12 @@ class LCMEngine(
         if not isinstance(content, str):
             return None
         occurrence = (getattr(self, "_compress_occurrences", None) or {}).get(id(msg))
-        if user_carry.HEADER in content and (not occurrence or occurrence[0].generated_span is None):
-            return None  # byte equality alone never authorizes stripping a user's quoted packet
-        pos = self._verified_lcm_summary_prefix_end(content)
+        packet = self._carry_occurrence_packet(occurrence)
+        if not packet and self._config.user_carry_tokens > 0:
+            entry = _project_emitted_occurrences([msg], proof=self._active_emission_proof()).entries[0]
+            if self._carry_occurrence_packet((entry, entry.effective_identity)):
+                return None  # an emitted span at an unproven occurrence can be a user's paste
+        pos = self._verified_lcm_summary_prefix(content, carry=bool(packet))[0]
         if pos is None:
             return None
         for separator in ("\n\n---\n\n", "\n\n"):
@@ -6556,8 +6577,8 @@ class LCMEngine(
     def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any]) -> bool:
         """Return true for active-context scaffolding that should not be re-ingested."""
         occurrence = (getattr(self, "_compress_occurrences", None) or {}).get(id(msg))
-        if user_carry.HEADER in str(msg.get("content", "")):
-            return bool(occurrence and occurrence[0].generated_span is not None and occurrence[1] is None)
+        if self._carry_occurrence_packet(occurrence):
+            return occurrence[1] is None
         if self._is_registered_folded_tail_message(msg):
             return False
         if self._generated_context_carrier_remainder(msg) is not None:
@@ -6887,6 +6908,7 @@ class LCMEngine(
 
     def _ingest_messages(self, messages, **kwargs):
         # Replay authority is the engine's scoped descriptor, never packet-shaped text.
+        had_registry = "_compress_occurrences" in self.__dict__
         saved = getattr(self, "_compress_occurrences", None)
         proof = self._active_emission_proof()
         parent = None
@@ -6918,7 +6940,10 @@ class LCMEngine(
                     break
             return self._ingest_messages_impl(messages, **kwargs)
         finally:
-            self._compress_occurrences = saved
+            if had_registry:
+                self._compress_occurrences = saved
+            else:
+                self.__dict__.pop("_compress_occurrences", None)
             self.__dict__.pop("_ingest_carry_proof", None)
 
     def _ingest_messages_impl(
@@ -8810,16 +8835,25 @@ class LCMEngine(
         gets smaller fallback candidates after the unchanged whole-row choice.
         """
         selected_tail_messages = [msg for msg in selected_tail if isinstance(msg, dict)]
+        carry_occurrences = {}
+        if self._config.user_carry_tokens > 0:
+            pending = self._carry_emission_proof(messages, getattr(self, "_pending_emission_candidates", ()))
+            projection = _project_emitted_occurrences(messages, proof=(
+                pending if pending["emissions"] else self._active_emission_proof()))
+            carry_occurrences = {id(m): (entry, entry.effective_identity)
+                                 for i, (m, entry) in enumerate(zip(messages, projection.entries))
+                                 if entry.output_index == i}
         for message in reversed(messages):
             if not isinstance(message, dict):
                 continue
-            if (user_carry.HEADER in (normalize_content_value(message.get("content")) or "")
-                    and (remainder := self._generated_context_carrier_remainder(message)) is not None):
-                # Historical carry is generated context, never the latest request.
-                message = {**message, "content": remainder}
-                if any(self._message_replay_identity(message) == self._message_replay_identity(selected)
-                       for selected in selected_tail_messages):
-                    return []
+            if self._config.user_carry_tokens > 0:
+                occurrence = (getattr(self, "_compress_occurrences", None) or {}).get(id(message))
+                packet = self._carry_occurrence_packet(occurrence or carry_occurrences.get(id(message)))
+                if packet:
+                    content = message["content"]
+                    start = content.index(packet)
+                    begin = start - 7 if content[:start].endswith("\n\n---\n\n") else start
+                    message = {**message, "content": content[:begin] + content[start + len(packet):]}
             content_text = text_content_for_pattern_matching(message.get("content")) or ""
             if (
                 self._matches_ignore_message_patterns(message)
@@ -8853,7 +8887,6 @@ class LCMEngine(
                     # the row whole (duplicate over loss).
                     if boundary.start() < verified_until or not (
                         self._LCM_SUMMARY_PART_HEADER_RE.match(preserved_objective, boundary.end())
-                        or user_carry.HEADER_RE.match(preserved_objective, boundary.end())
                     ):
                         continue
                     # Cut only at summary parts verified against this session's DAG; a quoted header is request text.
@@ -9530,8 +9563,9 @@ class LCMEngine(
                 "role": "user",
                 "content": f"{summary_message['content']}\n\n{tail_selected[0]['content']}",
             }
-            if user_carry.HEADER in summary_message["content"]:
-                end = self._verified_lcm_summary_prefix_end(carrier["content"])
+            if (self._config.user_carry_tokens > 0 and summary_candidate
+                    and any(self._carry_packets([summary_message], self._carry_emission_proof([summary_message], [summary_candidate])))):
+                end = self._verified_lcm_summary_prefix(carrier["content"], carry=True)[0]
                 remainder = carrier["content"][end + 2:] if end is not None and carrier["content"][end:].startswith("\n\n") else None
             else:
                 remainder = self._generated_context_carrier_remainder(carrier)
