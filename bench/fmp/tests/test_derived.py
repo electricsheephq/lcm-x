@@ -393,3 +393,78 @@ def test_12_cli_score_activation_missing_baseline_and_deadline(tmp_path,monkeypa
     run.freeze(tmp_path/'expired',expired)
     backend=Fake()
     assert run.execute(tmp_path/'expired',backend)['verdict']=='PARK-INCOMPLETE' and backend.calls==0
+
+@pytest.mark.parametrize('bad',[['x'],{'k':1}])
+def test_fix2_local_id(bad):
+    w=window()
+    got=extract.validate(wire(w,[item(),item(bad)]),w)
+    assert len(got['items'])==1 and len(got['rejected'])==1
+
+def test_fix2_quota_pause_resume(tmp_path):
+    from bench.fmp import models
+    class QuotaFake(Fake):
+        def __init__(self):
+            super().__init__()
+            self.quota=models.Quota(tmp_path/'quota.json')
+        def call(self,spec,*args,**kw):
+            self.quota.check(models.parse_spec(spec)[0])
+            if not self.calls:
+                self.calls+=1
+                self.quota.stop('codex')
+                raise models.BudgetStopped()
+            return super().call(spec,*args,**kw)
+    run.freeze(tmp_path,bundle())
+    backend=QuotaFake()
+    assert run.execute(tmp_path,backend).get('status')=='PAUSED'
+    assert not (tmp_path/'report.json').exists()
+    assert not list((tmp_path/'responses').glob('*.excluded.json'))
+    assert run.execute(tmp_path,backend)['verdict']!='PARK-INCOMPLETE'
+
+@pytest.mark.parametrize('status',[429,500,503,529])
+def test_fix2_real_backend_status(tmp_path,status):
+    import subprocess
+    from bench.fmp import models
+    def runner(*args,**kw):
+        return subprocess.CompletedProcess([],1,json.dumps(dict(type='result',is_error=True,
+            api_error_status=status,result='Service Unavailable')),'')
+    backend=models.Claude(tmp_path,models.Quota(tmp_path/'quota.json'),kind='glm',runner=runner)
+    import os
+    old=os.environ.get('GLM_API_KEY')
+    os.environ['GLM_API_KEY']='synthetic'
+    try:
+        c=cached(tmp_path/'cache',backend)
+        c.deadline=time.time()+3600
+        with pytest.raises(cache.Excluded):
+            c.call(run.JUDGES[1],[dict(role='user',content='synthetic')],[],role='judge',rubric='r',sources={},max_tokens=32)
+    finally:
+        backend.close()
+        if old is None:
+            os.environ.pop('GLM_API_KEY',None)
+        else:
+            os.environ['GLM_API_KEY']=old
+
+def test_fix2_drift_parse_and_exclusion(tmp_path):
+    b=bundle() | dict(repeat_ids=['q1'])
+    a=b['baselines']['q1']
+    ident=request_identity(run.READER,a,endpoint={},effort='medium',temperature=None,max_tokens=32000,
+        tools=None,tool_choice='none',rubric='fmp-single',renderer={},sources={})
+    response=dict(content='historical')
+    b['controls']={'q1':dict(identity=ident,status='ok',response=response,response_sha256=sha(encoded(response)))}
+    class Invalid(Fake):
+        def call(self,*args,**kw):
+            r=super().call(*args,**kw)
+            if kw['max_tokens']==4096:
+                r['content']='yes and no'
+            return r
+    assert not run.drift(b,cached(tmp_path/'invalid',Invalid()),tmp_path)
+    assert not run.drift(b,cached(tmp_path/'invalid',Fake()),tmp_path)
+    assert (tmp_path/'drift.json').exists()
+
+def test_fix2_extraction_exclusion_interim(tmp_path):
+    b=bundle()
+    b['questions'][1]['sessions'][0]['turns'][0]['content']='I prefer coffee'
+    run.freeze(tmp_path,b)
+    h=extract.source_view(b['questions'][1])['haystack_hash']
+    cache.snapshot(tmp_path/'extraction.json',dict(items=[],relations=[],ledger=[dict(source=h,state='excluded')]))
+    run.execute(tmp_path,Fake())
+    assert (tmp_path/'interim.json').exists()

@@ -5,7 +5,7 @@ from collections import Counter
 from .common import sha
 from .datasets import iso
 from .delivery import tokens
-from .derived_cache import Excluded, snapshot
+from .derived_cache import Excluded, Paused, snapshot
 from .dev_cache import Incomplete
 from .dev_panel import encoded
 SCHEMA = 'dm0-v1'
@@ -85,14 +85,14 @@ def validate(wire, window, prior=()):
                 end=row['start']+offset+len(quote), sha256=row['row_sha256'], role=row['role'], speaker=row['speaker'], date=row['date']))
         return out
     accepted, rejected, mapping = [], [], {}
-    counts = Counter(i.get('local_id') for i in wire['items'] if isinstance(i, dict))
+    counts = Counter(i.get('local_id') for i in wire['items'] if isinstance(i, dict) and isinstance(i.get('local_id'),str))
     for n, raw in enumerate(wire['items']):
         try:
             i = {k: raw[k] for k in ('kind','subject_key','subject_resolution','predicate_key','object_value',
                  'value_text','polarity','scope_key','event_at','valid_from','valid_to','explicitness')}
             if any(not isinstance(i[k],str) for k in ('value_text','subject_key')):
                 raise ValueError('invalid field type')
-            if counts[raw['local_id']] != 1 or i['explicitness'] != 'explicit' or i['kind'] not in (
+            if not isinstance(raw['local_id'],str) or counts[raw['local_id']] != 1 or i['explicitness'] != 'explicit' or i['kind'] not in (
                     'fact','event','preference','commitment','status','request','intention','quotation','question'):
                 raise ValueError('invalid type/id')
             refs = resolve(raw['sources'])
@@ -160,6 +160,8 @@ def execute(views, cache, spec, root):
                     ledger.append(dict(window=w['window_id'], source=view['haystack_hash'], state=got['state'],
                                        rejected=got['rejected'], extracted_count=len(raw['items']) if isinstance(raw,dict) else 1,
                                        rejected_count=sum('item' in r for r in got['rejected']),calls=calls))
+            except Paused:
+                raise
             except Excluded:
                 ledger.extend(dict(window=w['window_id'],source=view['haystack_hash'],state='excluded',reason='transient retries exhausted',calls=calls) for w in batch)
             except (Incomplete, ValueError, TypeError, KeyError):

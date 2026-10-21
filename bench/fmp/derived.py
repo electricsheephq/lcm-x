@@ -11,7 +11,7 @@ from . import derived_panel as panel
 from . import derived_score as scoring
 from .closeout import card_tool
 from .common import digest_file, load_lcm, sha
-from .derived_cache import Cache, Excluded, immutable, snapshot
+from .derived_cache import Cache, Excluded, Paused, immutable, snapshot
 from .dev import judge_messages
 from .dev_cache import Incomplete, endpoint, request_identity, source_identity
 from .dev_panel import encoded
@@ -89,8 +89,11 @@ def execute(root, backend, stage='all'):
         return snapshot(root/'report.json')
     cache = Cache(root/'responses',backend,b['endpoints'],b['deadline'],b['renderer'])
     views = {sha(encoded(extraction.source_view(q))):extraction.source_view(q) for q in b['questions']}
-    extracted = (snapshot(root/'extraction.json') if (root/'extraction.json').exists() else
-                 extraction.execute(list(views.values()),cache,READER,root))
+    try:
+        extracted = (snapshot(root/'extraction.json') if (root/'extraction.json').exists() else
+                     extraction.execute(list(views.values()),cache,READER,root))
+    except Paused:
+        return dict(status='PAUSED',reason='paused: quota')
     if any(w['state']=='failed' for w in extracted['ledger']):
         return dict(verdict='PARK-INCOMPLETE',reasons=['unsettled extraction; resume same run'])
     if stage=='extract':
@@ -104,20 +107,15 @@ def execute(root, backend, stage='all'):
     ordered = sorted(b['panel'],key=lambda e:(not e['target'],e['id']))
     try:
         if not b.get('synthetic'):
-            evaluation['drift_valid']=drift(b,cache,root)
-            if not evaluation['drift_valid']:
-                raise Incomplete('historical control drift')
+            evaluation['drift_valid']=drift(b,cache,root,evaluation['exclusions'])
         ordered = sorted(b['panel'],key=lambda e:(not e['target'],e['id']))
         qs = {q['qid']:datasets.Question(**q) for q in b['questions']}
         for index,e in enumerate(ordered):
             q=qs[e['id']]
             view=extraction.source_view(asdict(q))
             h=view['haystack_hash']
-            if h in {w['source'] for w in extracted['ledger'] if w['state']=='excluded'}:
+            if h in {w['source'] for w in extracted['ledger'] if w['state']=='excluded'} and e['id'] not in {x['id'] for x in evaluation['exclusions']}:
                 evaluation['exclusions'].append(dict(id=e['id'],reason='extraction transient retries exhausted'))
-                if len(evaluation['exclusions'])>len(ordered)*.03:
-                    break
-                continue
             group=[i for i in extracted['items'] if i['haystack_hash']==h]
             rel=[r for r in extracted['relations'] if r['from_id'] in {i['id'] for i in group}]
             block,omitted=memory.render(group,rel,q.question)
@@ -144,18 +142,11 @@ def execute(root, backend, stage='all'):
                 for judge in JUDGES:
                     jm,ds=judge_messages(q,response['content'])
                     try:
-                        for replay in range(2):
-                            judgment=cache.call(judge,jm,calls,role='judge',rubric=sha(encoded(jm)),sources=sources,
-                                max_tokens=4096,temperature=None if ds.startswith('lme') else 0,replay=replay)
-                            correct=judges.parse(judgment['content'],ds)
-                            if correct is not None:
-                                break
+                        correct=verdict(cache,judge,jm,ds,calls,sources)
                     except Excluded:
                         evaluation['exclusions'].append(dict(id=e['id'],reason='judge transient retries exhausted'))
                         break
                     rows.append(dict(id=e['id'],arm=arm,judge=judge,correct=correct,answer_sha256=sha(encoded(response)),calls=list(calls)))
-            if len(evaluation['exclusions'])>len(ordered)*.03:
-                break
             if e['target'] and (index+1==len(ordered) or not ordered[index+1]['target']):
                 interim=scoring.evaluate(ordered[:index+1],rows,**(evaluation | dict(complete=False)))
                 immutable(root/'interim.json',interim)
@@ -164,7 +155,11 @@ def execute(root, backend, stage='all'):
                     snapshot(root/'rows.json',rows)
                     snapshot(root/'report.json',interim)
                     return interim
+            if len(evaluation['exclusions'])>len(ordered)*.03:
+                break
         report=scoring.evaluate(ordered,rows,**evaluation)
+    except Paused:
+        return dict(status='PAUSED',reason='paused: quota')
     except (Incomplete,ValueError,KeyError,TypeError):
         return dict(verdict='PARK-INCOMPLETE',reasons=['unsettled call; resume same run'])
     snapshot(root/'evaluation-inputs.json',dict(entries=ordered,parameters=evaluation))
@@ -172,29 +167,49 @@ def execute(root, backend, stage='all'):
     snapshot(root/'deliveries.json',deliveries)
     snapshot(root/'report.json',report)
     return report
-def drift(b,cache,root):
-    """Outcome-blind 44-row repeat; stale historical controls never promote."""
+def verdict(cache,judge,jm,ds,calls,sources):
+    for replay in range(2):
+        out=cache.call(judge,jm,calls,role='judge',rubric=sha(encoded(jm)),sources=sources,
+            max_tokens=4096,temperature=None if ds.startswith('lme') else 0,replay=replay)
+        correct=judges.parse(out['content'],ds)
+        if correct is not None:
+            break
+    return correct
+def drift(b,cache,root,exclusions=None):
+    """Outcome-blind repeat with symmetric exclusions and per-arm invalid budgets."""
+    exclusions=[] if exclusions is None else exclusions
+    if (root/'drift-admission.json').exists():
+        saved=snapshot(root/'drift-admission.json')
+        snapshot(root/'drift.json')
+        exclusions.extend(saved['exclusions'])
+        return saved['valid']
     rows=[]
     for ident in b['repeat_ids']:
-        raw=next(q for q in b['questions'] if q['qid']==ident)
-        q=datasets.Question(**raw)
+        q=datasets.Question(**next(q for q in b['questions'] if q['qid']==ident))
         saved=b['controls'][ident]
         old=memory.import_baseline(saved,saved['identity'],b['baselines'][ident])
         calls=[]
-        fresh=cache.call(READER,b['baselines'][ident],calls,role='reader',rubric='fmp-single',
-            sources=dict(repeat=ident,product=b['product']),max_tokens=32000)
-        for judge in JUDGES:
-            pair=[]
-            for response in (old,fresh):
-                jm,ds=judge_messages(q,response['content'])
-                out=cache.call(judge,jm,calls,role='judge',rubric=sha(encoded(jm)),sources=dict(repeat=ident),
-                    max_tokens=4096,temperature=None if ds.startswith('lme') else 0)
-                pair.append(judges.parse(out['content'],ds))
-            if None in pair:
-                raise Incomplete('drift judge incomplete')
-            rows.append(dict(id=ident,judge=judge,flip=pair[0]!=pair[1],calls=list(calls)))
+        try:
+            fresh=cache.call(READER,b['baselines'][ident],calls,role='reader',rubric='fmp-single',
+                sources=dict(repeat=ident,product=b['product']),max_tokens=32000)
+            for judge in JUDGES:
+                pair=[]
+                for response in (old,fresh):
+                    jm,ds=judge_messages(q,response['content'])
+                    pair.append(verdict(cache,judge,jm,ds,calls,dict(repeat=ident)))
+                rows.append(dict(id=ident,judge=judge,pair=pair,flip=None if None in pair else pair[0]!=pair[1],calls=list(calls)))
+        except Excluded:
+            exclusions.append(dict(id=ident,reason='drift transient retries exhausted'))
+    excluded={e['id'] for e in exclusions}
+    rows=[r for r in rows if r['id'] not in excluded]
     snapshot(root/'drift.json',rows)
-    return len(rows)==88 and all(sum(r['flip'] for r in rows if r['judge']==j)/44<=.05 for j in JUDGES)
+    n=len(b['repeat_ids'])-len(excluded)
+    valid=n>0 and len(exclusions)<=len(b['panel'])*.03 and all(
+        all(sum(r['pair'][a] is None for r in rows if r['judge']==j)<=n*.02 for a in range(2)) and
+        sum(r['flip'] is True for r in rows if r['judge']==j)/max(1,sum(r['flip'] is not None for r in rows if r['judge']==j))<=.05
+        for j in JUDGES)
+    snapshot(root/'drift-admission.json',dict(valid=valid,exclusions=exclusions))
+    return valid
 def card(root):
     report=snapshot(root/'report.json')
     tool=card_tool()
@@ -213,7 +228,7 @@ def card(root):
     invoke('headline','--benchmark','DM0/synthetic' if inputs(root).get('synthetic') else 'DM0-886-v1','--metric','go_to_stage1',
            '--value',str(int(report['verdict']=='GO')),'--n',str(len(inputs(root)['panel'])),'--source','report.json')
     invoke('add','inputs.json','run-manifest.json','responses','extraction.json','evaluation-inputs.json','rows.json','report.json','RESULT.md','--role','per-item')
-    for name in ('deliveries.json','interim.json','drift.json'):
+    for name in ('deliveries.json','interim.json','drift.json','drift-admission.json'):
         if (root/name).exists():
             invoke('add',name,'--role','per-item')
     invoke('rescore','--command','python -m bench.fmp.derived score --product PRODUCT --source inputs.json --run RUN','--input','inputs.json','evaluation-inputs.json','rows.json')

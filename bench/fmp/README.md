@@ -296,11 +296,16 @@ Only separately authorized live runs use `extract`/`answer --activate`: subscrip
 Sol/medium extraction/readers and Sol/low plus GLM 5.3 judgments, both on every answer.
 The launcher supplies GLM credentials; the instrument never reads credential files.
 Resume uses immutable inputs and successful calls; uncertain sends require disposition.
-Known transient failures retry the unchanged request after 60, 180 and 600 seconds.
+Timeouts, HTTP 5xx/429 without a usage marker, resets/refusals and stream/protocol
+failures retry the unchanged request after 60, 180 and 600 seconds.
+Quota/usage stops return `PAUSED` without exclusions or a settled report. Rerun the
+same directory after reset to retry the paused call and reuse saved calls; paused
+wall time does not consume the frozen deadline.
 Exhausted questions are excluded from both arms and judges; more than 3% is INCOMPLETE.
 Valid extraction siblings survive rejection; more than 5% rejected items is INCOMPLETE.
-An invalid main-panel judge reply retries once unchanged; persistent invalids are
-reported per arm/judge, with more than 2% INCOMPLETE. Unsettled runs are resumable.
+Invalid judge replies in the main panel and drift retry once unchanged; persistent
+invalids are reported per arm/judge, with more than 2% INCOMPLETE. Drift exhaustion
+excludes the question from all main-panel arms and judges. Unsettled runs are resumable.
 When memory is empty, controls reuse the A0 answer. Cards include rejection counts/rates.
 Source-only 16k-token windows plus at most 2k context are batched three per call.
 Whole source-linked groups, including quotes/references/header, fit an 8,192-token cap.
