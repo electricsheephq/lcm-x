@@ -2780,9 +2780,9 @@ def test_recall_event_time_cap_strip_keeps_the_read_error_reason(
     main, exact = _event_time_cap_baseline(recall_engine, monkeypatch, request)
     _fail_event_time_read(monkeypatch, "read_error")
     partial = json.loads(lcm_tools.lcm_recall(request, engine=recall_engine))
-    # Hydrated hits keep the event time they were read with; the failed read
-    # covered the rest.
-    assert any("event_time" in hit for hit in partial["hits"])
+    # The single provenance batch covers hydrated and unhydrated hits together;
+    # failed disclosure must not publish a possibly carried time as certain.
+    assert not any("event_time" in hit for hit in partial["hits"])
     assert any(
         hit["store_id"] in observed and "event_time" not in hit
         for hit in partial["hits"]
@@ -2794,8 +2794,7 @@ def test_recall_event_time_cap_strip_keeps_the_read_error_reason(
     encoded = lcm_tools.lcm_recall(request, engine=recall_engine)
     payload = json.loads(encoded)
     assert len(encoded) <= capped
-    # The cap stripped the fields the read did deliver, yet the reason stays
-    # the read failure, never ``response_cap``.
+    # The cap keeps the read failure reason, never ``response_cap``.
     assert not any("event_time" in hit for hit in payload["hits"])
     assert payload["event_time_unavailable"] is True
     assert payload["event_time_unavailable_reason"] == "read_error"

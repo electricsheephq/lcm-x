@@ -3002,6 +3002,8 @@ def _lcm_recall_event_time(stored: dict[str, Any] | None) -> dict[str, str]:
     source = stored.get("observed_at_source")
     if source:
         fields["event_time_source"] = str(source)
+    if stored.get("time_uncertain") == "carried":
+        fields["time_uncertain"] = "carried"
     return fields
 
 
@@ -3018,8 +3020,8 @@ def _lcm_recall_event_time_rows(
     optional, so the read gets a private read-only connection whose busy wait
     and statement run are bounded by the remaining budget, the idiom of
     ``_lcm_recall_summary_source_hits``; the shared store connection's 30 s busy
-    timeout is never used and never changed. It selects only the three columns
-    the field needs, never ``content`` or ``tool_calls``, and a read that ends
+    timeout is never used and never changed. It selects only time metadata and
+    carried relation IDs, never ``content`` or ``tool_calls``, and a read that ends
     past the deadline is dropped rather than returned late (#995).
     """
     if time.monotonic() >= deadline:
@@ -3048,6 +3050,12 @@ def _lcm_recall_event_time_rows(
             f"WHERE store_id IN ({placeholders})",
             store_ids,
         ).fetchall()
+        # The writer cannot mark an unstamped row, and recall shows no event
+        # time for one. Avoid adding relation reads to that ordinary path.
+        timed_ids = [int(sid) for sid, observed, _source in rows if observed is not None]
+        carried_ids = (
+            engine._store.get_carried_stamp_ids(timed_ids, connection=conn) if timed_ids else set()
+        )
     except (sqlite3.Error, OSError) as exc:
         logger.debug("lcm_recall event_time read failed: %s", exc)
         if expired[0] or time.monotonic() >= deadline:
@@ -3059,7 +3067,10 @@ def _lcm_recall_event_time_rows(
     if time.monotonic() >= deadline:
         return {}, "deadline"
     return {
-        int(store_id): {"observed_at": observed_at, "observed_at_source": source}
+        int(store_id): {
+            "observed_at": observed_at, "observed_at_source": source,
+            **({"time_uncertain": "carried"} if int(store_id) in carried_ids else {}),
+        }
         for store_id, observed_at, source in rows
     }, None
 
@@ -4405,7 +4416,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         session_delivery = partial(
             deliver_session, engine=engine, deadline=deadline, excluded=excluded_session_ids,
             allowed=candidate_session_ids, seen_refs=seen_refs, delta_requested=delta_requested,
-            event_time_fields=_lcm_recall_event_time, occurrence=include_occurrence_time,
+            event_time_fields=_lcm_recall_event_time,
+            occurrence=include_occurrence_time,
             summary_leads=summary_leads,
         )
     return recall_delivery.deliver_recall(

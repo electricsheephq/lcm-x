@@ -306,12 +306,15 @@ def _observation_time(
             datetime.fromtimestamp(ingested_at, tz=timezone.utc).date().isoformat()
         )
         source = "ingest_fallback"
-    return {
+    result = {
         "observed_at": observed_at,
         "ingested_at": ingested_at,
         "date": observed_day,
         "source": source,
     }
+    if row.get("time_uncertain") == "carried":
+        result["time_uncertain"] = "carried"
+    return result
 
 
 def _resolve_candidate(
@@ -320,6 +323,7 @@ def _resolve_candidate(
     engine: Any,
     budgets: PackBudgets,
     plan: EvidencePlan | None,
+    carried_ids: set[int] | None = None,
 ) -> tuple[ResolvedCandidate | None, str | None]:
     if not isinstance(raw, Mapping):
         return None, "candidate_not_object"
@@ -330,6 +334,8 @@ def _resolve_candidate(
     row = engine._store.get(store_id)
     if row is None:
         return None, "missing_source_row"
+    if store_id in (carried_ids if carried_ids is not None else engine._store.get_carried_stamp_ids([store_id])):
+        row = {**row, "time_uncertain": "carried"}
     content = str(row.get("content") or "")
     if (
         declared_start < 0
@@ -456,7 +462,16 @@ def _resolve_candidate(
     }
     if raw.get("duplicate_store_ids"):
         public["duplicate_store_ids"] = raw["duplicate_store_ids"]
+    if row.get("time_uncertain") == "carried":
+        public["occurrence_time"]["time_uncertain"] = "carried"
     return ResolvedCandidate(operand=operand, public=public), None
+
+
+def _ground_pack_evidence(resolved, *, engine, as_of):
+    """Apply the lower-bound and independent occurrence cutoffs in one indexed pass."""
+    options = dict(messages=engine._store, assertions=getattr(engine, "_assertions", None),
+                   session_dates=getattr(engine, "_session_occurrence_dates", None))
+    return ground_evidence([item.operand for item in resolved], as_of=as_of, **options)
 
 
 def _completeness(
@@ -630,6 +645,11 @@ def _latest_selection(
 ) -> dict[str, Any] | None:
     if plan is None or plan.operation != "latest_fact" or not candidates:
         return None
+    uncertain = [c.public["exact_ref"] for c in candidates
+                 if c.public["observation_time"].get("time_uncertain") == "carried"]
+    if uncertain:
+        return dict(status="fallback", basis=None, exact_refs=[], uncertain_refs=uncertain,
+                    reason_code="uncertain_source_observation_time")
     occurrence_dates = [
         str(candidate.public.get("occurrence_time", {}).get("event_date") or "")
         for candidate in candidates
@@ -714,6 +734,9 @@ def build_evidence_pack(
         )
     input_count = len(raw_refs)
     processed_refs = raw_refs[: budgets.max_refs]
+    carried_ids = engine._store.get_carried_stamp_ids([
+        parsed[0] for raw in processed_refs if isinstance(raw, Mapping)
+        and (parsed := _parse_exact_ref(raw)) is not None])
 
     resolved: list[ResolvedCandidate] = []
     rejections: list[dict[str, Any]] = []
@@ -725,6 +748,7 @@ def build_evidence_pack(
             engine=engine,
             budgets=budgets,
             plan=plan,
+            carried_ids=carried_ids,
         )
         if error:
             rejections.append({"index": index, "reason_code": error})
@@ -757,23 +781,21 @@ def build_evidence_pack(
                     {
                         "exact_ref": item.public["exact_ref"],
                         "reason_code": "source_observed_after_question_as_of",
+                        **({"time_uncertain": "carried"} if observation.get("time_uncertain") else {}),
                     }
                 )
                 continue
             as_of_eligible.append(item)
         resolved = as_of_eligible
     grounding = (
-        ground_evidence(
-            [item.operand for item in resolved],
-            messages=engine._store,
-            assertions=getattr(engine, "_assertions", None),
-            as_of=as_of,
-            session_dates=getattr(engine, "_session_occurrence_dates", None),
-        )
+        _ground_pack_evidence(resolved, engine=engine, as_of=as_of)
         if resolved
         else None
     )
     if grounding is None or grounding.status != "grounded":
+        exclusions.extend(dict(exact_ref=item.public["exact_ref"],
+            reason_code="operand_grounding_failed", time_uncertain="carried")
+            for item in resolved if item.public["observation_time"].get("time_uncertain"))
         if resolved:
             rejections.append(
                 {
@@ -815,7 +837,21 @@ def build_evidence_pack(
     )
     computation: dict[str, Any] | None = None
     computation_reason: str | None = None
-    if plan is not None and completeness["state"] == "closed":
+    uncertain_date_refs = {
+        item.public["exact_ref"] for item in resolved
+        if item.public["observation_time"].get("time_uncertain")
+        and item.public["occurrence_time"].get("event_time_source") != "explicit"
+    }
+    if as_of is not None and any(
+        item.public["observation_time"].get("time_uncertain") for item in resolved
+    ):
+        computation_reason = "uncertain_source_observation_time"
+    elif any(
+        operand.evidence_date is not None and operand.citation in uncertain_date_refs
+        for operand in grounded_operands
+    ):
+        computation_reason = "uncertain_source_observation_time"
+    elif plan is not None and completeness["state"] == "closed":
         alignment_error = validate_selector_alignment(question, plan, grounded_operands)
         if alignment_error:
             computation_reason = alignment_error
