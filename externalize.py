@@ -688,22 +688,37 @@ def _raw_payload_preview(content: str, room: int) -> str:
 
 def _media_payload_preview_content(content: str) -> str:
     """Extract text only; remove opaque media before the bounded preview slices it."""
-    from .ingest_content import _BASE64_RUN_RE, _replace_wrapped_base64_blocks
-    from .message_content import text_content_for_pattern_matching
+    from .ingest_content import _BASE64_RUN_RE, _JSON_ESCAPED_SLASH_RE, _replace_wrapped_base64_blocks
+    from .message_content import _extract_text_part_value
 
     try:
         value = json.loads(content)
     except (ValueError, TypeError):
         value = content
     if isinstance(value, list):
-        parts = [part for part in value if isinstance(part, str) or (
-            isinstance(part, dict) and part.get("type") in {"text", "input_text", "output_text"})]
-        text = text_content_for_pattern_matching(parts) if parts else ""
+        parts = []
+        for part in value:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict) and part.get("type") in {"text", "input_text", "output_text"}:
+                text = _extract_text_part_value(part.get("text"))
+                if text is None:
+                    text = _extract_text_part_value(part.get("content"))
+                if text:
+                    parts.append(text)
+        text = "\n".join(parts)
     else:
         text = value if isinstance(value, str) else ""
-    text = re.sub(r"data:[^,\s]*;base64,[A-Za-z0-9+/=]*", "", text or "", flags=re.IGNORECASE)
+    # Use the detector's bounded prefix/alphabet, without its 256-character floor:
+    # even short data URIs must disappear from previews.
+    text = re.sub(
+        rf"data:(?:[A-Za-z0-9.+-]|{_JSON_ESCAPED_SLASH_RE})*"
+        rf"(?:;[A-Za-z0-9_.+%-]+=(?:[-A-Za-z0-9_.+%]|{_JSON_ESCAPED_SLASH_RE})*)*"
+        rf";base64,(?:[A-Za-z0-9+=]|{_JSON_ESCAPED_SLASH_RE})*",
+        "", text or "", flags=re.IGNORECASE,
+    )
     text = _BASE64_RUN_RE.sub("", text)
-    return _replace_wrapped_base64_blocks(text, lambda _: "")
+    return _replace_wrapped_base64_blocks(text, lambda _: "").strip()
 
 
 def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | None = None) -> str:
