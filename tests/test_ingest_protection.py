@@ -531,9 +531,9 @@ def test_fsync_directory_still_fsyncs_on_posix(tmp_path, monkeypatch):
     opened_flags = []
     real_open = os.open
 
-    def recording_open(path, flags, *args):
+    def recording_open(path, flags, *args, **kwargs):
         opened_flags.append(flags)
-        return real_open(path, flags, *args)
+        return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", recording_open)
     externalize_module._fsync_directory(tmp_path)

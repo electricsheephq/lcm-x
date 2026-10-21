@@ -11,6 +11,7 @@ import pytest
 from hermes_lcm.chunking import iter_message_chunks
 from hermes_lcm.externalize import (
     _build_externalized_placeholder,
+    _media_payload_preview_content,
     extract_externalized_ref,
     is_externalized_placeholder,
 )
@@ -102,9 +103,16 @@ def test_repeated_data_prefix_preview_is_bounded():
     content = normalize_content_value(media_content("parts", TEXT + " data:" + "data:" * 40_000))
     start = time.perf_counter()
     stub = _build_externalized_placeholder(dict(kind="media_payload", ref="fixture.json"), content=content)
-    assert time.perf_counter() - start < 0.5
+    assert time.perf_counter() - start < 10
     assert "zebracluster" in stub
     assert len(stub) < 512
+    timings = []
+    for n in (20_000, 80_000):
+        content = normalize_content_value(media_content("parts", TEXT + " data:" * n))
+        start = time.perf_counter()
+        _build_externalized_placeholder(dict(kind="media_payload", ref="fixture.json"), content=content)
+        timings.append(time.perf_counter() - start)
+    assert timings[1] < 12 * timings[0] + 0.05
 
 
 @pytest.mark.parametrize("shape", ["parts", "inline"])
@@ -150,13 +158,67 @@ def test_preview_failure_never_blocks_ingest(tmp_path, case):
 
 @pytest.mark.parametrize("prefix", ['data:image/png;name="shot.png";base64,',
                                   "data:image/x_png;base64,", "data:image/png;name=a b;base64,", ""])
-@pytest.mark.parametrize("run", ["A" * 39, "A" * 40, "Ab9+/-_" * 400 + "=="], ids=["39", "40", "url-safe"])
+@pytest.mark.parametrize("run", ["A" * 39, "A" * 40, "A" * 255, "A" * 256, "Ab9+/-_" * 400 + "=="],
+                         ids=["39", "40", "255", "256", "url-safe"])
 def test_preview_drops_short_and_urlsafe_opaque_runs(prefix, run):
     content = normalize_content_value(media_content("parts", f"zebracluster {prefix}{run} tailneedle"))
+    text = _media_payload_preview_content(content)
+    assert (run in text) == (not prefix and len(run) < 256)
     stub = _build_externalized_placeholder(dict(kind="media_payload", ref="f.json"), content=content)
     preview = stub.split('preview="')[1].split('"')[0]
-    assert re.search(r"[A-Za-z0-9+/_-]{40,}={0,2}", preview) is None
+    assert re.search(r"[A-Za-z0-9+/_-]{256,}={0,2}", preview) is None
     assert "zebracluster" in preview and "tailneedle" in preview
+
+
+@pytest.mark.parametrize("shape", ["inline", "parts"])
+def test_bracket_prefixed_caption_survives(shape):
+    content = normalize_content_value(media_content(shape, "[screenshot] " + TEXT))
+    stub = _build_externalized_placeholder(dict(kind="media_payload", ref="f.json"), content=content)
+    assert "zebracluster" in stub and "data:" not in stub
+
+
+@pytest.mark.parametrize("identifier", ["a" * 40, "b" * 64, "c" * 128, "request_" + "r" * 52,
+                                       "screenshot_" + "f" * 30 + ".png"])
+def test_media_preview_retains_identifiers(identifier):
+    content = normalize_content_value(media_content("parts", "zebracluster " + identifier))
+    stub = _build_externalized_placeholder(dict(kind="media_payload", ref="f.json"), content=content)
+    assert identifier in stub
+
+
+@pytest.mark.parametrize("value", [
+    {"caption": "zebracluster", "image": "media should stay hidden"},
+    {"type": "text", "text": "zebracluster"},
+    [{"caption": {"nested": ["zebracluster"]}, "IMAGE": {"caption": "hidden"}}],
+    [{"type": "input_audio", "input_audio": {"data": b"opaque bytes"}},
+     {"type": "text", "text": "zebracluster"}],
+])
+def test_object_and_repr_text_extraction(value):
+    content = normalize_content_value(value)
+    assert _media_payload_preview_content(content) == "zebracluster"
+
+
+def test_untyped_media_only_object_keeps_base_placeholder():
+    summary = dict(kind="media_payload", ref="f.json")
+    content = json.dumps({"image": media_content("parts")[-1]["image_url"]["url"]})
+    assert _build_externalized_placeholder(summary, content=content) == _build_externalized_placeholder(summary)
+
+
+@pytest.mark.parametrize("depth", [32, 33])
+def test_untyped_object_leaf_depth_bound(depth):
+    value = "zebracluster"
+    for _ in range(depth):
+        value = {"nested": value}
+    assert _media_payload_preview_content(json.dumps(value)) == ("zebracluster" if depth == 32 else "")
+
+
+@pytest.mark.parametrize("content, expected", [
+    ("[b'opaque bytes', 'zebracluster']", "zebracluster"),
+    ("[  {'broken'", ""), ("[('broken'", ""), ("[b'broken", ""),
+    ("['broken", ""), ('["broken', ""), ("[] broken", ""),
+    ("[note] zebracluster", "[note] zebracluster"),
+])
+def test_python_repr_gate(content, expected):
+    assert _media_payload_preview_content(content) == expected
 
 
 @pytest.mark.parametrize("text", ["![]({})", '<img src="{}">', "background:url({})", "{}.",

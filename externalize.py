@@ -690,44 +690,57 @@ def _media_payload_preview_content(content: str) -> str:
     """Extract text only; remove opaque media before the bounded preview slices it."""
     import ast
 
-    from .ingest_content import _JSON_ESCAPED_SLASH_RE, _replace_wrapped_base64_blocks
+    from .ingest_content import _MEDIA_VALUE_KEYS, _replace_wrapped_base64_blocks
     from .message_content import _extract_text_part_value
 
     try:
         value = json.loads(content)
     except json.JSONDecodeError:
         value = content
-        if content.lstrip().startswith("["):
+        if re.match(r"\s*\[\s*(?:[\{\('\"\]]|b['\"])", content):
             # Normalization may have used repr for non-JSON media parts. Never preview that repr.
             try:
                 value = ast.literal_eval(content)
             except (ValueError, SyntaxError):
                 return ""
+    if isinstance(value, dict):
+        value = [value]
     if isinstance(value, list):
         parts = []
         for part in value:
             if isinstance(part, str):
                 parts.append(part)
-            elif isinstance(part, dict) and part.get("type") in {"text", "input_text", "output_text"}:
-                text = _extract_text_part_value(part.get("text"))
-                if text is None:
-                    text = _extract_text_part_value(part.get("content"))
-                if text:
-                    parts.append(text)
+            elif isinstance(part, dict):
+                if "type" in part:
+                    if part.get("type") in {"text", "input_text", "output_text"}:
+                        text = _extract_text_part_value(part.get("text"))
+                        if text is None:
+                            text = _extract_text_part_value(part.get("content"))
+                        if text:
+                            parts.append(text)
+                else:
+                    stack = [(part, 0)]
+                    while stack:
+                        leaf, depth = stack.pop()
+                        if depth > 32:
+                            continue
+                        if isinstance(leaf, str):
+                            parts.append(leaf)
+                        elif isinstance(leaf, dict):
+                            stack.extend((v, depth + 1) for k, v in reversed(list(leaf.items()))
+                                         if str(k).lower() not in _MEDIA_VALUE_KEYS)
+                        elif isinstance(leaf, list):
+                            stack.extend((v, depth + 1) for v in reversed(leaf))
         text = "\n".join(parts)
     else:
         text = value if isinstance(value, str) else ""
-    # Use the detector's bounded prefix/alphabet, without its 256-character floor:
-    # even short data URIs must disappear from previews.
+    # Strip even short media bodies with lenient headers; the header bound keeps scanning linear.
     text = re.sub(
-        rf"data:(?:[A-Za-z0-9.+-]|{_JSON_ESCAPED_SLASH_RE})*"
-        rf"(?:;[A-Za-z0-9_.+%-]+=(?:[-A-Za-z0-9_.+%]|{_JSON_ESCAPED_SLASH_RE})*)*"
-        rf";base64,(?:[A-Za-z0-9+=]|{_JSON_ESCAPED_SLASH_RE})*",
+        r"data:[^,\n]{0,256}?;base64,(?:[A-Za-z0-9+/=_-]|\\/|\\u002[fF])*",
         "", text or "", flags=re.IGNORECASE,
     )
-    # One linear run scan, including short bodies and both base64 alphabets. Preview only:
-    # long alphanumeric words also disappear here, but remain in the expandable payload.
-    text = re.sub(r"[A-Za-z0-9+/_-]{40,}={0,2}", "", text)
+    # Bare media-sized runs only: retain shorter identifiers, hashes and filenames.
+    text = re.sub(r"[A-Za-z0-9+/_-]{256,}={0,2}", "", text)
     text = _replace_wrapped_base64_blocks(text, lambda _: "").strip()
     text = re.sub(r"<img\s+src\s*=\s*(['\"])\s*\1\s*/?>|background\s*:\s*url\(\s*\)",
                   "", text, flags=re.IGNORECASE)
