@@ -122,7 +122,7 @@ def execute(root, backend, stage='all'):
     evaluation['exclusions']=[dict(id=q['qid'],reason='extraction transient retries exhausted') for q in b['questions']
         if extraction.source_view(q)['haystack_hash'] in excluded_sources and q['qid'] in {e['id'] for e in b['panel']}]
     if extracted.get('terminal_reason'):
-        evaluation['incomplete_reason']=extracted['terminal_reason']
+        evaluation.update(complete=False,incomplete_reason=extracted['terminal_reason'])
     ordered = sorted(b['panel'],key=lambda e:(not e['target'],e['id']))
     if not semantic or len(evaluation['exclusions'])>len(ordered)*.03:
         report=scoring.evaluate(ordered,rows,**evaluation)
