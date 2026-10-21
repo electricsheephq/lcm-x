@@ -4579,6 +4579,10 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             and ("pending" not in scan or (isinstance(scan["pending"], list)
                  and all(type(i) is int for i in scan["pending"])))
             and ("ceiling" not in scan or type(scan["ceiling"]) is int)
+            and ("walk" not in scan or (isinstance(scan["walk"], dict)
+                 and type(scan["walk"].get("below")) is int
+                 and isinstance(scan["walk"].get("pending"), list)
+                 and all(type(i) is int for i in scan["walk"]["pending"])))
         )
         if not valid:
             scan = {}
@@ -4617,32 +4621,55 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             record({"revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high, "ceiling": ceiling})
 
     reached = 0
-    page_ceiling = ceiling
+    initial_ceiling = ceiling
+    walk = scan.get("walk", {}) if scan.get("high") == high and "pending" not in scan else {}
+    page_ceiling = walk.get("below", ceiling)
+    replay = sorted({i for i in walk.get("pending", []) if i >= low}, reverse=True)
+    unpublished = []
     range_complete = low > high
     # Fetch each page completely: no SQLite cursor survives a yield to a writer.
-    while not range_complete and reached < limit:
+    while (replay or not range_complete) and reached < limit:
         take = min(page_size, limit - reached)
-        rows = conn.execute(
-            f"SELECT store_id, role, content FROM messages AS m "
-            f"WHERE store_id >= ? AND store_id <= ? AND store_id < ? "
-            f"AND lower(trim(role)) IN ({roles}) AND trim(COALESCE(content, '')) != '' "
-            "AND NOT EXISTS (SELECT 1 FROM lcm_chunk_meta AS c "
-            "WHERE c.store_id = m.store_id AND c.identity_hash = ?) "
-            "ORDER BY store_id DESC LIMIT ?",
-            (low, high, page_ceiling, identity_hash, take),
-        ).fetchall()
-        range_complete = len(rows) < take
+        if replay:
+            batch, replay = replay[:take], replay[take:]
+            rows = conn.execute(
+                "SELECT store_id, role, content FROM messages AS m "
+                f"WHERE store_id IN ({','.join('?' for _ in batch)}) "
+                "AND NOT EXISTS (SELECT 1 FROM lcm_chunk_meta AS c "
+                "WHERE c.store_id=m.store_id AND c.identity_hash=?) ORDER BY store_id DESC",
+                (*batch, identity_hash),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT store_id, role, content FROM messages AS m "
+                f"WHERE store_id >= ? AND store_id <= ? AND store_id < ? "
+                f"AND lower(trim(role)) IN ({roles}) AND trim(COALESCE(content, '')) != '' "
+                "AND NOT EXISTS (SELECT 1 FROM lcm_chunk_meta AS c "
+                "WHERE c.store_id = m.store_id AND c.identity_hash = ?) "
+                "ORDER BY store_id DESC LIMIT ?",
+                (low, min(high, page_ceiling - 1), page_ceiling, identity_hash, take),
+            ).fetchall()
+            range_complete = len(rows) < take
+            if rows:
+                page_ceiling = rows[-1][0]
+        unpublished.extend(row[0] for row in rows)
         for row in rows:
             reached += 1
             if any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
                 if not candidates:
                     record_ceiling()  # Deterministic, before the first candidate escapes.
+                if gap_scan_state is not None and "pending" not in scan and ceiling == initial_ceiling:
+                    # A walk position is not coverage: retain the WHOLE fetched
+                    # page, including rows the consumer has not requested yet.
+                    gap_scan_state["walk_progress"] = {
+                        "revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
+                        "ceiling": ceiling,
+                        "walk": {"below": page_ceiling, "pending": [*unpublished, *replay]},
+                    }
                 candidates.append(row[0])
                 yield row
             elif not candidates:
                 ceiling = min(ceiling, row[0])
-        if rows:
-            page_ceiling = rows[-1][0]
     # A saved pending range is older than the new range; replay it newest first.
     for start in range(0, len(pending_ids), min(500, page_size)):
         batch = pending_ids[start:start + min(500, page_size)]
@@ -4665,6 +4692,8 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
         if gap_scan_state is not None:
             gap_scan_state["unproven"] = False
         if len(candidates) < limit:
+            if gap_scan_state is not None:
+                gap_scan_state.pop("walk_progress", None)
             # Only natural exhaustion certifies every range row and pending id.
             progress = {"revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
                         "pending": candidates}
@@ -4675,6 +4704,16 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             record(progress, values)
     if not range_complete:
         record_ceiling(pending_complete=True)
+
+
+def _record_chunk_gapfill_walk(conn, identity_hash, state):
+    """Writer-only: persist selection's replay proof before any provider work."""
+    if progress := state.get("walk_progress"):
+        conn.execute(
+            "INSERT INTO metadata(key,value) VALUES(?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value != excluded.value",
+            (f"chunk_gapfill_scan:{identity_hash}", json.dumps(progress)),
+        )
 
 
 def _chunk_frontier_rows(
@@ -5198,11 +5237,15 @@ def _chunk_backfill_run(
             )
             authorized_uncertain_ids = {row[0] for row in rows}
         else:
+            gap_scan_state = {}
             pending, rows, chunk_meta = _chunk_pending_rows(
                 conn, identity, policy, limit, incremental=incremental,
                 record_progress=incremental, chunk_cache=chunk_cache,
                 partial_window=partial_window, partial_turn=partial_turn,
+                gap_scan_state=gap_scan_state,
             )
+            if incremental:
+                _record_chunk_gapfill_walk(conn, identity, gap_scan_state)
             authorized_uncertain_ids = set()
         if maintenance_slice:
             # Keep the existing whole-message slice selection.

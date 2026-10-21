@@ -1727,6 +1727,15 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
     vectors, keyed on ``(chunk_id, identity_hash)`` where ``chunk_id`` is
     ``store_id:chunk_index``.
     """
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='metadata' AND type='table'").fetchone():
+        observed = conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+            "AND name IN ('lcm_chunk_gapfill_delete', 'lcm_chunk_gapfill_update')",
+        ).fetchone()[0]
+        if observed != 2:
+            # Legacy proof predates mutation observation; revalidate it once.
+            conn.execute("DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%' "
+                         "OR key LIKE 'chunk_policy_revision_through:%'")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS lcm_chunk_meta (
@@ -1762,6 +1771,21 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
             bits BLOB NOT NULL,
             PRIMARY KEY(chunk_id, identity_hash)
         );
+
+        -- A skip proof certifies derived coverage, never immutable source data.
+        -- Raw SQL repair and chunk replacement must invalidate it atomically.
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_delete
+        AFTER DELETE ON lcm_chunk_meta BEGIN
+            DELETE FROM metadata WHERE key IN (
+                'chunk_gapfill_scan:' || OLD.identity_hash,
+                'chunk_policy_revision_through:' || OLD.identity_hash);
+        END;
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_update
+        AFTER UPDATE OF store_id, identity_hash, chunk_id, char_start, char_end ON lcm_chunk_meta BEGIN
+            DELETE FROM metadata WHERE key IN (
+                'chunk_gapfill_scan:' || OLD.identity_hash,
+                'chunk_policy_revision_through:' || OLD.identity_hash);
+        END;
         """
     )
 
