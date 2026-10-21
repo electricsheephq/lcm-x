@@ -184,51 +184,62 @@ class IdentityAnchorMixin:
             memo[store_id] = {form[1] for form in forms if not _lossy(form)}
         return memo[store_id]
 
-    def _identity_anchor_alias_uid_keys(self, rows, canonical_stamps, keys_of, occurrences, messages):
-        """Forbid only alias/occurrence pairs with positive conflicting host UIDs (#1519)."""
+    def _observe_alias_uid_conflicts(self, rows, canonical_stamps, keys_of, occurrences, messages):
+        """Count conflicting alias edges; never change matching or persisted state (#1519)."""
         from .config import host_message_uid_mode
         from .host_uid import _valid_uid
 
         mode = host_message_uid_mode()
         if mode == "off":
-            return set()
+            return
         incoming = {idx: messages[idx].get("message_uid") for idx, _key in occurrences
                     if _valid_uid(messages[idx].get("message_uid"))}
         incoming_keys = {key for idx, key in occurrences if idx in incoming}
         row_keys = {id(r): set(keys_of(r)) for r in rows} if incoming_keys else {}
-        if canonical_stamps is None:  # a transport discarded ephemeral provenance: re-read
-            canonical_stamps = {sid: r.get("observed_at") for sid, r in
-                                self._store.get_batch(sorted({int(r["store_id"]) for r in rows})).items()}
+        if canonical_stamps is None:  # discarded provenance cannot justify extra diagnostic reads
+            return
         aliases = [r for r in rows
                    if int(r["store_id"]) in canonical_stamps
                    and _normalize_observed_at(canonical_stamps[int(r["store_id"])]) != float(r["observed_at"])
                    and incoming_keys.intersection(row_keys.get(id(r), ()))]
         if not aliases:
-            return set()
+            return
         lineage, _problem = self._host_uid_lineage_key()
         if lineage is None:
-            return set()
-        canonical = self._store.host_uid_uids_of_stores(lineage, [r["store_id"] for r in aliases], ("canonical",))
+            return
+        if not self._store._host_uid_table_exists():
+            return
+        # JSON key sets keep these two indexed reads bounded even above SQLite's bind-variable limit.
+        canonical = defaultdict(set)
+        for sid, uid in self._store._conn.execute(
+            "SELECT store_id, uid FROM host_uid_bindings INDEXED BY idx_host_uid_store "
+            "WHERE store_id IN (SELECT value FROM json_each(?)) AND lineage_key = ? AND kind = 'canonical'",
+            (json.dumps(sorted({int(r["store_id"]) for r in aliases})), lineage),
+        ):
+            canonical[int(sid)].add(str(uid))
         if not canonical:
-            return set()
+            return
         uids = set(incoming.values()) | {uid for values in canonical.values() for uid in values if _valid_uid(uid)}
-        engine = self._store.host_uid_bindings_for(lineage, uids, ("engine",))
+        engine = {str(uid) for (uid,) in self._store._conn.execute(
+            "SELECT uid FROM host_uid_bindings WHERE lineage_key = ? AND kind = 'engine' "
+            "AND uid IN (SELECT value FROM json_each(?))", (lineage, json.dumps(sorted(uids))))}
         incoming = {idx: uid for idx, uid in incoming.items() if uid not in engine}
         canonical = {sid: {uid for uid in values if _valid_uid(uid) and uid not in engine}
                      for sid, values in canonical.items()}
-        by_key = defaultdict(list)
+        by_key = defaultdict(Counter)
         for idx, key in occurrences:
             if idx in incoming:
-                by_key[key].append(idx)
-        forbidden = {(int(row["store_id"]), idx) for row in aliases
-                if len(canonical.get(int(row["store_id"]), ())) == 1
-                for key in row_keys[id(row)] for idx in by_key[key]
-                if incoming[idx] not in canonical[int(row["store_id"])]}
-        if mode == "shadow":
-            if forbidden:
-                logger.debug("LCM identity-anchor host UID shadow would reject alias edges: count=%d", len(forbidden))
-            return set()
-        return forbidden
+                by_key[key][incoming[idx]] += 1
+        totals = {key: sum(uids.values()) for key, uids in by_key.items()}
+        # Count via the key index without materialising the potentially quadratic edge set.
+        count = 0
+        for row in aliases:
+            known = canonical.get(int(row["store_id"]), ())
+            if len(known) == 1:
+                uid = next(iter(known))
+                count += sum(totals.get(key, 0) - by_key[key][uid] for key in row_keys[id(row)])
+        if count:
+            logger.debug("LCM identity-anchor host UID shadow would reject alias edges: count=%d", count)
 
     def _identity_anchor_prematch(self, messages, identity_messages, cursor: int, audit_from: Optional[int] = None,
                                   *, accepted_prefix: int = 0) -> Dict[str, Any]:
@@ -321,10 +332,9 @@ class IdentityAnchorMixin:
                        if stamps[idx] in wanted and identity_at(idx) is not None]
         def keys_of(r):
             return {(float(r["observed_at"]), form) for form in forms_of[id(r)]}
-        forbidden = self._identity_anchor_alias_uid_keys(
+        self._observe_alias_uid_conflicts(
             rows, getattr(rows, "canonical_stamps", None), keys_of, occurrences, identity_messages)
-        skipped = set()
-        for store_id, idx in _match_occurrences(rows, keys_of, occurrences, forbidden=forbidden, skipped=skipped).items():
+        for store_id, idx in _match_occurrences(rows, keys_of, occurrences).items():
             consumed.add(store_id)
             matched[idx] = [next(r for r, _forms in by_stamp[stamps[idx]] if int(r["store_id"]) == store_id)]
             if idx >= start:
@@ -384,10 +394,6 @@ class IdentityAnchorMixin:
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
                 del plan["remainders"][idx]
-        rejected = {idx for _sid, idx in forbidden - skipped if idx not in matched and idx < plan["cursor"]}
-        if rejected:  # a rejected edge is not positional proof that the occurrence was stored
-            plan["cursor"] = min(rejected)
-            plan["replayed"].update(matched)
         plan["explained"] = plan["replayed"] - plan.get("positional", set())
         plan["replayed"] = {idx for idx in plan["replayed"] if idx >= plan["cursor"]}
         plan["carry"] = [row for idx in plan["replayed"] | set(plan["remainders"]) for row in matched.get(idx, ())]

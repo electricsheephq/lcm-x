@@ -1,4 +1,4 @@
-"""I1/I2: PR #1780 forbids edges without reordering other host occurrences."""
+"""I1/I2: PR #1780 observes conflicts without reordering host occurrences."""
 from copy import copy, deepcopy
 from itertools import permutations
 import pickle
@@ -60,19 +60,22 @@ def test_exact_resend_preserves_binding_agreement(tmp_path):
 
 
 @pytest.mark.parametrize("uids", list(permutations(("uid-one", "uid-new", None))))
-def test_rejected_occurrence_inside_cursor_is_stored(tmp_path, uids):
+def test_conflict_inside_cursor_is_observed(tmp_path, uids, caplog):
     """Astra A1 and its sibling orders: two aliases and three host occurrences."""
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
         eng.ingest([message(TEXT, 10., message_uid="uid-one"), message(TEXT, 20., message_uid="uid-two")])
         eng._store.add_message_relations([[(r["store_id"], "alt_stamp", None, None, 99.)] for r in targets(eng)])
     view = [message(TEXT, 99., **({"message_uid": u} if u else {})) for u in uids]
-    for _ in range(4):
+    for turn in range(4):
         with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
+            if not turn:
+                with caplog.at_level("DEBUG", logger="hermes_lcm.identity_anchor"):
+                    plan = eng._identity_anchor_prematch(view, view, 0)
+                assert set(plan["matched"]) == {0, 1}
+                assert any("would reject" in r.message for r in caplog.records)
             eng.ingest(deepcopy(view))
             assert len(targets(eng)) == 3
-            found = [r for r in targets(eng) if any(b[0] == "uid-new" for b in bindings(eng, r["store_id"]))]
-            assert len(found) == 1
-            assert found[0]["observed_at"] == 99.
+
 
 
 @pytest.mark.parametrize("transport", [copy, deepcopy, lambda v: pickle.loads(pickle.dumps(v))],
@@ -88,36 +91,24 @@ def test_lookup_metadata_is_ephemeral(tmp_path, transport):
         assert b"canonical_stamps" not in pickle.dumps(value)
 
 
-def test_plain_list_lookup_fails_closed(tmp_path, monkeypatch):
+def test_plain_list_lookup_skips_observation_without_provenance(tmp_path, monkeypatch, caplog):
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
         prepare(eng, "same_known_key")
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
         lookup = eng._store.find_rows_by_observed_at
         monkeypatch.setattr(eng._store, "find_rows_by_observed_at", lambda *a, **k: list(lookup(*a, **k)))
-        eng.ingest([message(TEXT, 30., message_uid="host-new")])
-        assert len(targets(eng)) == 2
-        assert any(b[0] == "host-new" for b in bindings(eng, targets(eng)[1]["store_id"]))
+        def unexpected(*args, **kwargs):
+            pytest.fail("discarded provenance triggered a diagnostic re-read")
 
+        observe = eng._observe_alias_uid_conflicts
 
-def test_forbidden_pairs_keep_maximum_and_allowed_base_assignments():
-    from hermes_lcm.recognition_matching import _match_occurrences
-    from tests.test_issue_436_matching import _instance, _maximum
+        def without_diagnostic_reread(*args, **kwargs):
+            with monkeypatch.context() as patch:
+                patch.setattr(eng._store, "get_batch", unexpected)
+                return observe(*args, **kwargs)
 
-    rng = random.Random(1780)
-    for _ in range(2000):
-        rows, occurrences = _instance(rng, 2)
-        forbidden = {(r["store_id"], o) for r in rows for o, _key in occurrences if rng.random() < .3}
-        def keys_of(r):
-            return r["keys"]
-        base = _match_occurrences(rows, keys_of, occurrences)
-        result = _match_occurrences(rows, keys_of, occurrences, forbidden=forbidden)
-        allowed = [{**r, "keys": [o for o, key in occurrences
-                                  if key in r["keys"] and (r["store_id"], o) not in forbidden]} for r in rows]
-        assert len(result) == _maximum(allowed, [(o, o) for o, _key in occurrences])
-        assert len(set(result.values())) == len(result)
-        assert all((sid, o) not in forbidden for sid, o in result.items())
-        assert all(dict(occurrences)[o] in next(r["keys"] for r in rows if r["store_id"] == sid)
-                   for sid, o in result.items())
-        assert result == _match_occurrences(rows, keys_of, occurrences, forbidden=forbidden)
-        if not any((sid, o) in forbidden for sid, o in base.items()):
-            assert list(result.items()) == list(base.items())
+        monkeypatch.setattr(eng, "_observe_alias_uid_conflicts", without_diagnostic_reread)
+        with caplog.at_level("DEBUG", logger="hermes_lcm.identity_anchor"):
+            eng.ingest([message(TEXT, 30., message_uid="host-new")])
+        assert len(targets(eng)) == 1
+        assert not any("would reject" in r.message for r in caplog.records)

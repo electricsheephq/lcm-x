@@ -1,4 +1,4 @@
-"""I1/I2: an alias cannot consume a positively distinct same-lineage host occurrence."""
+"""I1/I2: alias UID-conflict observation preserves the existing ingest decisions."""
 from __future__ import annotations
 
 from copy import deepcopy
@@ -118,33 +118,28 @@ def prepare(engine, case):
 
 
 @pytest.mark.parametrize("case", CASES)
-def test_cold_alias_replay(tmp_path, case, record_property):
+def test_cold_alias_replay(tmp_path, case, record_property, caplog):
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
         replay = prepare(engine, case)
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
         old = targets(engine)[0]
         sid = old["store_id"]
-        old_bindings = bindings(engine, sid)
-        engine.ingest(replay)
+        with caplog.at_level("DEBUG", logger="hermes_lcm.identity_anchor"):
+            engine.ingest(replay)
         # Every row field, including the pinned clock fields, contributes to the ordered hash list.
         proof = {"ordered_row_hashes": [digest(r) for r in rows(engine)],
                  "bindings_hash": digest([bindings(engine, r["store_id"]) for r in rows(engine)])}
         record_property("byte_identity", json.dumps(proof, sort_keys=True))
         assert digest(next(r for r in rows(engine) if r["store_id"] == sid)) == digest(old)
+        assert len(targets(engine)) == 1
         if case == "different_known_key":
-            assert bindings(engine, sid) == old_bindings
-            assert [r["observed_at"] for r in targets(engine)] == [20., 30.]
-            fresh = targets(engine)[1]
-            lineage, _ = engine._host_uid_lineage_key()
-            assert engine._store.host_uid_uids_of_stores(lineage, [fresh["store_id"]], ("canonical",)) == {
-                fresh["store_id"]: {"host-new"}}
-        else:
-            assert len(targets(engine)) == 1
+            assert any("would reject" in r.message for r in caplog.records)
+
 
 
 @pytest.mark.parametrize("conflict_first", [True, False])
 @pytest.mark.parametrize("other_uid", [None, "host-old"])
-def test_only_conflicting_edge_is_removed(tmp_path, conflict_first, other_uid):
+def test_conflicting_edge_is_observed_without_changing_match(tmp_path, conflict_first, other_uid, caplog):
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
         prepare(engine, "same_known_key")
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
@@ -152,10 +147,11 @@ def test_only_conflicting_edge_is_removed(tmp_path, conflict_first, other_uid):
         conflict = message(TEXT, 30., message_uid="host-new")
         other = message(TEXT, 30., **({"message_uid": other_uid} if other_uid else {}))
         view = [conflict, other] if conflict_first else [other, conflict]
-        plan = engine._identity_anchor_prematch(view, view, 0)
-        other_idx = 1 if conflict_first else 0
-        assert plan["replayed"] == {other_idx}
-        assert plan["matched"][other_idx][0]["store_id"] == old["store_id"]
+        with caplog.at_level("DEBUG", logger="hermes_lcm.identity_anchor"):
+            plan = engine._identity_anchor_prematch(view, view, 0)
+        assert plan["replayed"] == {0}
+        assert plan["matched"][0][0]["store_id"] == old["store_id"]
+        assert any("would reject" in r.message for r in caplog.records)
         engine.ingest([*view, message("Synthetic final reply", 51., "assistant")])
         assert [r["observed_at"] for r in targets(engine)] == [20., 30.]
         assert digest(targets(engine)[0]) == digest(old)
@@ -174,7 +170,13 @@ def test_no_binding_read_without_validated_alias_edge(tmp_path, monkeypatch, sta
         monkeypatch.setattr(engine._store, "host_uid_uids_of_stores", unexpected)
         monkeypatch.setattr(engine._store, "host_uid_bindings_for", unexpected)
         view = [message(TEXT if same_text else "Synthetic distinct occurrence", stamp, message_uid=uid)]
-        engine._identity_anchor_prematch(view, view, 0)
+        sql = []
+        engine._store._conn.set_trace_callback(sql.append)
+        try:
+            engine._identity_anchor_prematch(view, view, 0)
+        finally:
+            engine._store._conn.set_trace_callback(None)
+        assert not [s for s in sql if s.lstrip().upper().startswith("SELECT") and "host_uid_bindings" in s]
 
 
 def test_lookup_provenance_preserves_public_rows(tmp_path):
