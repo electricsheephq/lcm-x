@@ -6,9 +6,11 @@ import importlib.util
 import json
 import re
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from dataclasses import asdict
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -438,7 +440,18 @@ def test_sidecars_refused_before_open(tmp_path, monkeypatch, suffix):
     path = _copy(tmp_path, _messages())
     Path(str(path) + suffix).write_bytes(b"private payload")
     before, files = path.read_bytes(), _copy_files(path)
-    monkeypatch.setattr(inspector.sqlite3, "connect", lambda *_a, **_k: pytest.fail("opened sidecar store"))
+    monkeypatch.setattr(inspector, "sqlite3", SimpleNamespace(
+        connect=lambda *_a, **_k: pytest.fail("opened sidecar store"),
+        Row=sqlite3.Row, Error=sqlite3.Error,
+    ))
+    # Rollup maintenance can open its own schema-check connection while the
+    # inspector's refusal double is installed. That unrelated read must work.
+    def background_read():
+        with closing(sqlite3.connect(":memory:")) as connection:
+            return connection.execute("SELECT 1").fetchone()
+
+    with ThreadPoolExecutor(max_workers=1) as worker:
+        assert worker.submit(background_read).result(timeout=5) == (1,)
     with pytest.raises(inspector.InspectionRefused, match="^sidecar_present$"):
         inspector.inspect_store(path, session_id="S", conversation_id="conv")
     assert path.read_bytes() == before and _copy_files(path) == files
