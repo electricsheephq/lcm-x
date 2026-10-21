@@ -74,7 +74,7 @@ def _is_correct(row):
 
 
 def _unscorable(row):
-    return (not _failed(row) and "correct" not in row and "score" not in row
+    return (not _failed(row) and row.get("correct") is None and row.get("score") is None
             and not str(row.get("label") or "").strip())
 
 
@@ -110,7 +110,19 @@ def bootstrap_bounds(clusters):
             samples[math.ceil(0.975 * len(samples)) - 1])
 
 
-def _record_identities(document, identities):
+def _record_identities(document, identities, issues):
+    for role in ("answererProvenance", "judgeProvenance"):
+        provenance = document.get(role)
+        if not isinstance(provenance, dict):
+            continue
+        for key, value in provenance.items():
+            mixed = (value in ("mixed", "mixed stored CLI call identities")
+                     or (key == "mixedExecutionIdentity" and value is True)
+                     or (key == "executionIdentityCount" and isinstance(value, (int, float))
+                         and value > 1))
+            issue = f"identity mixed within run: {role}.{key}"
+            if mixed and issue not in issues:
+                issues.append(issue)
     for field in IDENTITY_FIELDS:
         value = document
         for key in field.split("."):
@@ -130,7 +142,7 @@ def _check_rows(values, source, identities, issues):
         if qid in seen:
             duplicates.append(qid)
         seen.add(qid)
-        _record_identities(row, identities)
+        _record_identities(row, identities, issues)
     if duplicates:
         issues.append(f"duplicate question ids: {len(duplicates)}; first id: {duplicates[0]} ({source})")
 
@@ -140,7 +152,7 @@ def _load_run(root):
     report = json.loads((root / "report.json").read_text())
     identities = {field: [] for field in IDENTITY_FIELDS}
     issues = []
-    _record_identities(report, identities)
+    _record_identities(report, identities, issues)
     _check_rows(report.get("evaluations", []), "report.json", identities, issues)
     # Validate each input before load_rows collapses IDs. A single detail row
     # overlaying a report row is legitimate; repeated IDs within a file are not.
@@ -155,7 +167,7 @@ def _load_run(root):
     checkpoint_path = root / "checkpoint.json"
     if checkpoint_path.exists():
         checkpoint = json.loads(checkpoint_path.read_text())
-        _record_identities(checkpoint, identities)
+        _record_identities(checkpoint, identities, issues)
         questions = checkpoint.get("questions", {})
         for qid in checkpoint.get("targetQuestionIds") or questions:
             question = questions.get(qid, {})
@@ -166,12 +178,16 @@ def _load_run(root):
                 row["recallHealth"] = phases.get("search", {}).get("recallHealth")
             row["_failed"] = any(phases.get(p, {}).get("status") != "completed"
                                  for p in ("search", "answer", "evaluate"))
+    issues += [f"identity mixed within run: {field}" for field, values in identities.items()
+               if len(values) > 1]
     return report, rows, identities, issues
 
 
-def _compare_identities(candidate, baseline):
+def _compare_identities(candidate, baseline, *, placebo=False):
     issues, missing_both = [], []
     for field in IDENTITY_FIELDS:
+        if field == "recallConfig" and not placebo:
+            continue
         left, right = candidate[field], baseline[field]
         if not left and not right:
             missing_both.append(field)
@@ -192,7 +208,7 @@ def _category(row, name):
 def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
     candidate_report, candidate, candidate_ids, candidate_issues = _load_run(candidate_run)
     baseline_report, baseline, baseline_ids, baseline_issues = _load_run(baseline_run)
-    issues, missing_both = _compare_identities(candidate_ids, baseline_ids)
+    issues, missing_both = _compare_identities(candidate_ids, baseline_ids, placebo=placebo)
     issues += [f"{side}: {issue}" for side, values in
                (("candidate", candidate_issues), ("baseline", baseline_issues)) for issue in values]
     benchmark = baseline_report.get("benchmark", "")
@@ -215,6 +231,7 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
     rate_pass = None if placebo else (not cr["INCOMPLETE"] and not br["INCOMPLETE"]
                                      and cr["rate_points"] <= br["rate_points"] + 1)
     result = {"categories": {}, "runs": overall, "excluded_absent_from_baseline": extra,
+              "recall_configs": {"candidate": cc, "baseline": bc},
               "INCOMPLETE": incomplete, "d8_row": not subset,
               "mode": "placebo" if placebo else "non-inferiority", "rate_pass": rate_pass}
     result["identities_missing_both"] = missing_both

@@ -37,7 +37,6 @@ def update_report(root, change):
      {"model": "judge", "reasoningEffort": "high"}),
     ("scoringPath", "score-v1", "score-v2"),
     ("promptVersion", "v1", "v2"),
-    ("recallConfig", "OFF", "LOCAL"),
 ])
 @pytest.mark.parametrize("placebo", [False, True])
 def test_identity_mismatch_is_incomplete(tmp_path, field, left, right, placebo):
@@ -155,3 +154,85 @@ def test_cli_identity_failure_keeps_json_shape(tmp_path, capsys):
     assert result["rate_pass"] is None
     assert result["d8_row"] is False
     assert "judge" in result["reason"]
+
+
+def test_recall_configs_compare_only_for_placebo_and_stay_consistent_within_run(tmp_path, capsys):
+    baseline = write_run(tmp_path / "b")
+    candidate = write_run(tmp_path / "c", recallConfig="LOCAL")
+
+    def local_health(report):
+        for row in report["evaluations"]:
+            row["recallHealth"]["coverage"].update(summary="full", chunk="full")
+
+    update_report(candidate, local_health)
+    result = compare_runs(candidate, baseline, subset=True)
+    assert result["pass"]
+    assert not result["INCOMPLETE"]
+    assert result["recall_configs"] == {"candidate": "LOCAL", "baseline": "OFF"}
+    assert all(run["degraded"] == 0 for run in result["runs"].values())
+
+    assert main([str(candidate), str(baseline), "--subset", "--placebo"]) == 1
+    placebo = json.loads(capsys.readouterr().out)
+    assert placebo["INCOMPLETE"]
+    assert "identity mismatch: recallConfig" in placebo["reason"]
+
+    (candidate / "checkpoint.json").write_text(json.dumps({"recallConfig": "OFF"}))
+    for placebo_mode in (False, True):
+        mixed = compare_runs(candidate, baseline, subset=True, placebo=placebo_mode)
+        assert mixed["INCOMPLETE"]
+        assert "candidate: identity mixed within run: recallConfig" in mixed["reason"]
+
+
+@pytest.mark.parametrize("source", ["report.json", "checkpoint.json", "per_question.jsonl",
+                                   "results/per_question.jsonl"])
+@pytest.mark.parametrize("role", ["answererProvenance", "judgeProvenance"])
+@pytest.mark.parametrize("field,value", [
+    ("model", "mixed stored CLI call identities"), ("reasoningEffort", "mixed"),
+    ("mixedExecutionIdentity", True), ("executionIdentityCount", 2),
+])
+@pytest.mark.parametrize("placebo", [False, True])
+def test_matching_writer_mixed_identity_is_incomplete(tmp_path, source, role, field, value, placebo):
+    baseline = write_run(tmp_path / "b")
+    candidate = write_run(tmp_path / "c")
+    for root in (candidate, baseline):
+        document = {role: {field: value}}
+        if source == "report.json":
+            update_report(root, lambda report: report.update(document))
+        else:
+            path = root / source
+            path.parent.mkdir(exist_ok=True)
+            path.write_text(json.dumps({"questionId": "c", **document}) + "\n")
+    result = compare_runs(candidate, baseline, subset=True, placebo=placebo)
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+    for side in ("candidate", "baseline"):
+        assert f"{side}: identity mixed within run: {role}.{field}" in result["reason"]
+
+
+@pytest.mark.parametrize("placebo", [False, True])
+def test_matching_ordinary_writer_identity_passes(tmp_path, placebo):
+    metadata = {role: {"model": "reader", "reasoningEffort": "low",
+                       "mixedExecutionIdentity": False, "executionIdentityCount": 1}
+                for role in ("answererProvenance", "judgeProvenance")}
+    baseline = write_run(tmp_path / "b", **metadata)
+    candidate = write_run(tmp_path / "c", **metadata)
+    assert compare_runs(candidate, baseline, subset=True, placebo=placebo)["pass"]
+
+
+@pytest.mark.parametrize("field", ["score", "correct"])
+@pytest.mark.parametrize("label", [None, "", "   "])
+def test_null_verdict_without_label_is_unscorable(tmp_path, field, label):
+    baseline = write_run(tmp_path / "b")
+    candidate = write_run(tmp_path / "c")
+
+    def null_verdict(report):
+        row = report["evaluations"][2]
+        del row["score"]
+        row.update({field: None, "label": label})
+
+    update_report(candidate, null_verdict)
+    result = compare_runs(candidate, baseline, subset=True)
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+    assert result["runs"]["candidate"]["unscorable"] == 1
+    assert "candidate: unscorable rows: 1" in result["reason"]
