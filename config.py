@@ -656,6 +656,7 @@ def embedding_provider_id(spelling: str) -> str:
 
 
 _ENV_CHOICES = {
+    "recall_delivery_unit": (("hits", "session"), str.lower, "ignored; using 'hits'"),
     "embedding_provider": (
         tuple(spelling for spellings in EMBEDDING_PROVIDER_SPELLINGS.values() for spelling in spellings),
         str.lower, "provider resolution raises ProviderUnavailable when requested",
@@ -789,6 +790,7 @@ ENV_FIELD_SPECS: tuple[_EnvFieldSpec, ...] = (
     _EnvFieldSpec("recall_scan_max_rows", "LCM_RECALL_SCAN_MAX_ROWS", int),
     _EnvFieldSpec("recall_scan_budget_s", "LCM_RECALL_SCAN_BUDGET_S", float),
     _EnvFieldSpec("recall_reference_strict", "LCM_RECALL_REFERENCE_STRICT", bool),
+    _EnvFieldSpec("recall_delivery_unit", "LCM_RECALL_DELIVERY_UNIT", str),
     _EnvFieldSpec("recall_fts_anchor", "LCM_RECALL_FTS_ANCHOR", bool),
     _EnvFieldSpec("proactive_recall_enabled", "LCM_PROACTIVE_RECALL_ENABLED", bool),
     _EnvFieldSpec("proactive_recall_min_score", "LCM_PROACTIVE_RECALL_MIN_SCORE", float),
@@ -1159,6 +1161,7 @@ class LCMConfig:
     # that renders recall without citations and wants summary hits back; disabled,
     # the answer_ready response is byte-identical to the pre-F35 delivery.
     recall_reference_strict: bool = True
+    recall_delivery_unit: str = "hits"
     # lcm_recall FTS anchor slot: with two or more arms, the FTS arm's best
     # message is kept inside the delivered window (at most one session evicted).
     # Evidence (#950): frozen LongMemEval-M LOCAL replay, R@10 0.898 -> 0.905 (470 q).
@@ -1462,6 +1465,10 @@ class LCMConfig:
                     f"deprecated: {spec.env_key} is set; this experiment is removed in {removal} (#1246). "
                     "Until then it behaves as before."
                 )
+
+        c.recall_delivery_unit = c.recall_delivery_unit.strip().lower()
+        if c.recall_delivery_unit not in ("hits", "session"):
+            c.recall_delivery_unit = "hits"
 
         # Pattern-list overrides carry a source sidecar and stay explicit.
         raw_sensitive_patterns = lcm_env_get("LCM_SENSITIVE_PATTERNS")

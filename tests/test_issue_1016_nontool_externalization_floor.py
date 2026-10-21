@@ -360,7 +360,8 @@ def test_d_base64_data_uri_user_message_is_still_externalized_as_media(tmp_path)
 
     [row] = [r for r in _stored(engine) if r["role"] == "user"]
     assert row["content"].startswith("[Externalized payload: kind=media_payload; role=user;")
-    assert "preview=" not in row["content"]
+    assert 'preview="Please inspect the screenshot.' in row["content"]
+    assert "data:image" not in row["content"]
     payloads = [json.loads(p.read_text()) for p in _payload_files(tmp_path)]
     assert [p["kind"] for p in payloads] == ["media_payload"]
     assert payloads[0]["content"] == content

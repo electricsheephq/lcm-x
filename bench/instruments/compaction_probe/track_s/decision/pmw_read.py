@@ -41,6 +41,8 @@ def engine_turn_wait(summary, rows):
     stop = summary.get("stop_row_index")
     if stop is None or "events" not in summary:
         return {"complete": False, "reason": "missing stop_row_index or events"}
+    if type(stop) is not int or not 0 <= stop < len(rows):
+        return {"complete": False, "reason": "invalid stop_row_index: expected integer within material rows"}
     replay = rows[:stop + 1]
     if not replay or any(r.get("turn") is None for r in replay):
         return {"complete": False, "reason": "missing material turns"}

@@ -9,6 +9,7 @@ import os
 import subprocess
 import sys
 import time
+from contextlib import ExitStack
 from pathlib import Path
 
 if __package__ in (None, ""):
@@ -25,6 +26,13 @@ class Reader:
     def __init__(self, spec, engine, offered, log):
         self.spec, self.engine, self.offered, self.log = spec, engine, offered, Path(log)
         self.counted = 0
+        self.startup_status = "ok"
+
+    def event(self, name, **metadata):
+        names = sorted(s["function"]["name"] for s in self.offered)
+        with self.log.open("a") as stream:
+            stream.write(json.dumps(dict(at=utc(), event=name, startup_status=self.startup_status,
+                offered_tools=len(names), offered_tools_hash=sha("\n".join(names).encode()), **metadata)) + "\n")
 
     def tools(self):
         return [{"name": s["function"]["name"], "description": s["function"].get("description", ""),
@@ -63,16 +71,20 @@ class Reader:
             result = {"tools": self.tools()}
         elif method == "tools/call":
             params = request.get("params") or {}
+            if self.startup_status != "ok":
+                return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": "tools unavailable"}}
             raw, error = self.call(params.get("name"), params.get("arguments"))
             result = {"content": [{"type": "text", "text": raw}], "isError": error}
         elif method == "ping":
             result = {}
         else:
             return {"jsonrpc": "2.0", "id": ident, "error": {"code": -32601, "message": "method not found"}}
+        if method in ("initialize", "tools/list"):
+            self.event(method)
         return {"jsonrpc": "2.0", "id": ident, "result": result}
 
 
-def serve(spec, stdin, stdout):
+def prepare(spec, stack):
     from . import datasets, delivery
     from .stores import Stores
     if spec["config"].partition("+rerank:")[0] == "voyage" and not os.environ.get("VOYAGE_API_KEY"):
@@ -86,8 +98,20 @@ def serve(spec, stdin, stdout):
                                  spec["question"]["session_map"])
     stores = Stores(spec["store_root"], spec["config"], spec["repo"], spec["dataset_sha"], lme,
                     spec["summaries"], spec.get("embed_cache"), spec.get("store_text", "speaker-prefix"))
-    with stores.engine(question) as (engine, _):
-        reader = Reader(spec, engine, delivery.schemas(engine), spec["log"])
+    engine, _ = stack.enter_context(stores.engine(question))
+    if spec.get("delivery_unit", "hits") == "session":
+        delivery.session_mode(engine)
+    return Reader(spec, engine, delivery.schemas(engine), spec["log"])
+
+
+def serve(spec, stdin, stdout):
+    with ExitStack() as stack:
+        try:
+            reader = prepare(spec, stack)  # Stores resolves a warmed provider before protocol reads.
+        except Exception as exc:
+            reader = Reader(spec, None, [], spec["log"])
+            reader.startup_status = "startup_failed"
+            reader.event("startup_failed", reason=type(exc).__name__)
         for line in stdin:
             if not line.strip():
                 continue

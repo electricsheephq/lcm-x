@@ -61,6 +61,11 @@ def aggregate(args):
         material_digest = hashlib.sha256((material / "material.manifest.json").read_bytes()).hexdigest()
         for arm, label, directory, checkpoints in runs(seed, args):
             key = f"{arm}|{label}"
+            # Invalidate this run's prior outputs before any rejection or checkpoint skip.
+            name = f"{arm}.seed-{seed}.{label}.json"
+            for population in ("scores", "loss"):
+                for checkpoint_dir in (args.out / population).glob("cp-*"):
+                    (checkpoint_dir / name).unlink(missing_ok=True)
             receipt = args.logs / f"s2-{arm}-{label}.log.wall"
             if not receipt.exists() or re.findall(r"^exit (\d+) end", receipt.read_text(), re.M) != ["0"] or not (directory / "summary.json").exists():
                 per_run[key] = {"arm": arm, "result": "INCOMPLETE", "reason": "missing successful wall receipt or summary"}
@@ -68,7 +73,14 @@ def aggregate(args):
             summary = jload(directory / "summary.json")
             if summary.get("material_sha256") != material_digest:
                 raise ValueError(f"run material digest mismatch: {key}")
+            field = "host_sha" if arm == "H" else "worktree_head"
+            expected = getattr(args, "expected_host_sha" if arm == "H" else "expected_product_sha", None)
+            if not expected or summary.get(field) != expected:
+                per_run[key] = {"arm": arm, "result": "INCOMPLETE",
+                                "reason": f"missing or mismatched code pin: {field}; expected pin required"}
+                continue
             result = {"arm": arm, "result": "COMPLETE" if summary.get("status") == "DONE" else "INCOMPLETE", "checkpoints": {}}
+            pending = []
             for checkpoint, sub in checkpoints.items():
                 if not (directory / sub / "summary.json").exists():
                     result["result"] = "INCOMPLETE"
@@ -76,14 +88,17 @@ def aggregate(args):
                 cp_summary = jload(directory / sub / "summary.json")
                 if cp_summary.get("material_sha256") != material_digest:
                     raise ValueError(f"checkpoint material digest mismatch: {key}/cp-{checkpoint}")
+                if cp_summary.get(field) != expected:
+                    result["result"] = "INCOMPLETE"
+                    result.setdefault("reasons", []).append(f"cp-{checkpoint}: missing or mismatched code pin: {field}")
+                    continue
                 scored = score(material, directory / sub, arm)
                 loss = classify_loss(scored)
                 fk, corrected = scored["metrics"]["facts_kept"], scored["metrics"]["deep_corrected"]
                 result["checkpoints"][str(checkpoint)] = {"facts": fk, "corrected": corrected, "loss_counts": loss["counts"]}
                 for population, payload in (("scores", scored), ("loss", loss)):
                     target = args.out / population / f"cp-{checkpoint}" / f"{arm}.seed-{seed}.{label}.json"
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(json.dumps(payload, indent=1) + "\n")
+                    pending.append((target, payload))
                 if not fk["complete"] or not corrected["complete"]:
                     result["result"] = "INCOMPLETE"
             result["continuity"] = continuity_events(summary)
@@ -100,8 +115,15 @@ def aggregate(args):
                 result["result"] = "INCOMPLETE"
             if any(v is None for k, v in result["summary_tokens"].items() if k != "estimated_calls"):
                 result["result"] = "INCOMPLETE"
+            # Publish only when every checkpoint and run input scored. A FAIL verdict on complete
+            # evidence is a measured result and keeps its files; any INCOMPLETE cause publishes nothing.
+            accepted = result["result"] == "COMPLETE"
             if result["continuity"]["result"] == "FAIL" or result["dag"]["generation_gate"] == "FAIL":
                 result["result"] = "FAIL"
+            if accepted:
+                for target, payload in pending:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(json.dumps(payload, indent=1) + "\n")
             per_run[key] = result
     for arm in args.arms:
         records = [r for r in per_run.values() if r["arm"] == arm]
@@ -166,6 +188,8 @@ def main(argv=None):
     parser.add_argument("--arms", nargs="+", default=["LCMX-fleet-rc3", "H"])
     parser.add_argument("--seeds", nargs="+", type=int, default=[1, 2, 3])
     parser.add_argument("--checkpoints", nargs="+", help="exact numeric rows or last; default: all deep answer keys")
+    parser.add_argument("--expected-product-sha", help="required product pin for LCM-X runs")
+    parser.add_argument("--expected-host-sha", help="required host pin for Hermes runs")
     result = write_deep(parser.parse_args(argv))
     return exit_status(result)
 

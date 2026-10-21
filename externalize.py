@@ -686,9 +686,77 @@ def _raw_payload_preview(content: str, room: int) -> str:
     return f"{text[:head]}{_RAW_PAYLOAD_PREVIEW_JOINER}{text[len(text) - (keep - head):]}"
 
 
+def _media_payload_preview_content(content: str) -> str:
+    """Extract text only; remove opaque media before the bounded preview slices it."""
+    import ast
+
+    from .ingest_content import _MEDIA_VALUE_KEYS, _replace_wrapped_base64_blocks
+    from .message_content import _extract_text_part_value
+
+    try:
+        value = json.loads(content)
+    except json.JSONDecodeError:
+        value = content
+        if re.match(r"\s*\[\s*(?:[\{\('\"\]]|b['\"])", content):
+            # Normalization may have used repr for non-JSON media parts. Never preview that repr.
+            try:
+                value = ast.literal_eval(content)
+            except (ValueError, SyntaxError):
+                return ""
+    if isinstance(value, dict):
+        value = [value]
+    if isinstance(value, list):
+        parts = []
+        for part in value:
+            if isinstance(part, str):
+                parts.append(part)
+            elif isinstance(part, dict):
+                if "type" in part:
+                    if part.get("type") in {"text", "input_text", "output_text"}:
+                        text = _extract_text_part_value(part.get("text"))
+                        if text is None:
+                            text = _extract_text_part_value(part.get("content"))
+                        if text:
+                            parts.append(text)
+                else:
+                    stack = [(part, 0)]
+                    while stack:
+                        leaf, depth = stack.pop()
+                        if depth > 32:
+                            continue
+                        if isinstance(leaf, str):
+                            parts.append(leaf)
+                        elif isinstance(leaf, dict):
+                            stack.extend((v, depth + 1) for k, v in reversed(list(leaf.items()))
+                                         if str(k).lower() not in _MEDIA_VALUE_KEYS)
+                        elif isinstance(leaf, list):
+                            stack.extend((v, depth + 1) for v in reversed(leaf))
+        text = "\n".join(parts)
+    else:
+        text = value if isinstance(value, str) else ""
+    # Strip even short media bodies with lenient headers; the header bound keeps scanning linear.
+    text = re.sub(
+        r"data:[^,\n]{0,256}?;base64,(?:[A-Za-z0-9+/=_-]|\\/|\\u002[fF])*",
+        "", text or "", flags=re.IGNORECASE,
+    )
+    # Bare media-sized runs only: retain shorter identifiers, hashes and filenames.
+    text = re.sub(r"[A-Za-z0-9+/_-]{256,}={0,2}", "", text)
+    text = _replace_wrapped_base64_blocks(text, lambda _: "").strip()
+    text = re.sub(r"<img\s+src\s*=\s*(['\"])\s*\1\s*/?>|background\s*:\s*url\(\s*\)",
+                  "", text, flags=re.IGNORECASE)
+    return text if any(ch.isalnum() for ch in text) else ""
+
+
 def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | None = None) -> str:
     kind = _placeholder_metadata(summary.get("kind", "tool_result") or "tool_result")
-    if kind == "raw_payload" and content:
+    if kind == "media_payload" and content:
+        try:
+            content = _media_payload_preview_content(content)
+        except MemoryError:
+            raise
+        except Exception:
+            return _build_externalized_placeholder(summary)
+    if kind in {"raw_payload", "media_payload"} and content:
         # #1016: say what the payload holds and how to read it, within the 512 rule; ``ref=`` stays last.
         ref = summary.get("ref", "")
         head = (
@@ -699,7 +767,14 @@ def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | N
         # Strictly under the 512 rule, as raw_payload stubs always were.
         room = _PLACEHOLDER_MAX_CHARS - 1 - len(head) - len(rest) - len('preview=""; ')
         if room >= _RAW_PAYLOAD_PREVIEW_MIN_CHARS:
-            return f'{head}preview="{_raw_payload_preview(content, room)}"; {rest}'
+            try:
+                return f'{head}preview="{_raw_payload_preview(content, room)}"; {rest}'
+            except MemoryError:
+                raise
+            except Exception:
+                if kind != "media_payload":
+                    raise
+                return _build_externalized_placeholder(summary)
         if len(head) + len(rest) < _PLACEHOLDER_MAX_CHARS:
             return f"{head}{rest}"
     if kind != "tool_result":

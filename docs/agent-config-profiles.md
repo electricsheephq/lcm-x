@@ -101,6 +101,11 @@ the agent needs "which run printed that error?".
 
 ## Profile: long-horizon personal / companion agent
 
+Optional session-pack recall: `export LCM_RECALL_DELIVERY_UNIT=session` returns
+source neighborhoods within a fixed 16,000 estimated-token / 64,000-character
+JSON budget. The default `hits` retains the existing response; session mode can
+return partial sessions and more messages than the ranked-seed `limit`.
+
 For agents that live for weeks and get asked "what did we do last Tuesday?"
 and "have we talked about this before?".
 

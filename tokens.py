@@ -141,6 +141,13 @@ def _count_tokens_cached(text: str, generation: int) -> int:
 _MAX_CACHEABLE_TOKEN_TEXT_CHARS = 32_768
 
 
+def count_tokens_with_encoder(text, *, encoder) -> int:
+    """Count with a response's fixed estimator without changing legacy calls."""
+    if not text:
+        return 0
+    return len(encoder.encode(text, disallowed_special=())) if encoder is not None else _fallback_token_estimate(text)
+
+
 def count_tokens(text) -> int:
     """Count tokens in a string."""
     if not text:

@@ -37,6 +37,9 @@ def client(tmp_path, monkeypatch):
 
 
 def reply(cmd, **kwargs):
+    if "stdin" in kwargs:
+        from bench.fmp.tests.test_mcp_readiness import fake_mcp_ready
+        fake_mcp_ready(Path(kwargs["stdin"].name).parent)
     return subprocess.CompletedProcess(cmd, 0, "\n".join(map(json.dumps, [
         {"type": "assistant", "message": {"model": "glm-5.3", "content": []}},
         {"type": "result", "subtype": "success", "is_error": False, "result": "CORRECT",

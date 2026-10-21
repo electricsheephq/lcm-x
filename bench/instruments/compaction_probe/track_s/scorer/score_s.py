@@ -443,9 +443,11 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
     stale_ids, head_ids = [], []
     for f in sup:
         a = normalize((by_id.get(f["id"]) or {}).get("answer"))
-        if a and normalize(f["stale"]) in a:
+        # Deep-v2 facts keep earlier superseded values in stale_history; each one counts.
+        superseded = [f["stale"]] + [v["value"] for v in f.get("stale_history", [])]
+        if a and any(normalize(v) and normalize(v) in a for v in superseded):
             stale_ids.append(f["id"])
-        if a and normalize(f["stale"].split(" because ")[0]) in a:
+        if a and any(normalize(v.split(" because ")[0]) and normalize(v.split(" because ")[0]) in a for v in superseded):
             head_ids.append(f["id"])
     ms = missing(f["id"] for f in sup)
     m["stale_rate"] = metric(len(stale_ids) / len(sup) if sup else None,
@@ -459,6 +461,7 @@ def score(material: Path, run_dir: Path, arm: str) -> dict:
             answer = normalize((by_id.get(f["id"]) or {}).get("answer"))
             old = [v["value"] for v in f.get("versions", []) if v["value"] != f["value"]]
             old += [f["stale"]] if f.get("stale") else []
+            old += [v["value"] for v in f.get("stale_history", [])]
             stale = any(normalize(v) and normalize(v) in answer for v in old)
             if stale:
                 old_hits.append(f["id"])

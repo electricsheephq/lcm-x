@@ -74,6 +74,8 @@ def main():
     ap.add_argument("--arms", nargs="+", help="score only these arms")
     ap.add_argument("--seeds", type=int, nargs="+", default=None)
     ap.add_argument("--checkpoints", nargs="+", default=None, help="v3 rows or v4 ids/lifecycle")
+    ap.add_argument("--expected-product-sha", help="expected LCM-X code pin for deep scoring")
+    ap.add_argument("--expected-host-sha", help="expected Hermes code pin for deep scoring")
     args = ap.parse_args()
     if args.material is None or args.out is None:
         ap.error("provide --material/--out or TRACK_S_MATERIAL/TRACK_S_OUT")

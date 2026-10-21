@@ -56,6 +56,10 @@ def invalid(row, models):
     calls = row.get("calls", []) + [c for c in row.get("judge_calls", [])
                                     if not c.get("requested_model") or c.get("requested_model") in requested]
     reasons = {c.get("error") for c in calls} & {"timeout", "model_mismatch"}
+    terminal = (row.get("calls") or [{}])[-1]
+    if terminal.get("error") == "mcp_unavailable" or ("mcp_ready" in terminal and (
+            not terminal["mcp_ready"] or terminal.get("offered_tools", 0) == 0)):
+        reasons.add("mcp_unavailable")  # A recovered first attempt does not invalidate the answer.
     if row["status"] == "tool_violation" or any(c.get("violations") or c.get("status") == "tool_violation" for c in calls):
         reasons.add("tool_violation")
     if row["status"] != "ok" and not reasons:
@@ -74,6 +78,11 @@ IDENTITY = ("lcmx_commit", "harness_commit", "split_label", "dataset_sha256", "i
             "agreement_judge", "summaries", "agreement_sample", "agreement_seed", "agreement_fraction",
             "harness_tree_sha256", "toolset", "store_text", "hit_label")
 TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "wrapper_overhead_tokens")
+
+
+def delivery_identity(manifest):
+    # Historical manifests predate P and are exactly the default hits arm.
+    return manifest.get("delivery_unit", "hits"), manifest.get("delivery_budget")
 
 
 def ok_verdict(row, model):
@@ -115,6 +124,9 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         arm = "/".join([manifest["config"], manifest["delivery"], manifest["reader"]])
         if "store_text" in manifest or "hit_label" in manifest:
             arm += "/" + manifest["store_text"] + "/" + manifest["hit_label"]
+        unit, budget = delivery_identity(manifest)
+        if (unit, budget) != ("hits", None):
+            arm += f"/{unit}-{budget}"
         if pair_across_commits:
             identity = manifest["lcmx_commit"]
             arm += "@" + (identity if identity.endswith("-dirty") else identity[:12])
@@ -151,12 +163,18 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         disagreements += [{k: r[k] for k in ("qid", "question", "gold", "hypothesis")} for r in valid
                           if r["judges"][pair[0]]["correct"] != r["judges"][pair[1]]["correct"]]
         calls = [c for r in rows for c in r.get("calls", [])]
+        mcp = [c for c in calls if "mcp_ready" in c]
+        mcp_summary = {"ready_rate": mean([c["mcp_ready"] for c in mcp]),
+            "offered_tools_distribution": dict(Counter(c["offered_tools"] for c in mcp)),
+            "zero_lcm_calls_ready": sum(c["mcp_ready"] and c["lcm_tool_calls"] == 0 for c in mcp),
+            "mcp_unavailable_retried": sum(c.get("retries", 0) == 1 for c in mcp),
+            "mcp_unavailable_excluded": sum("mcp_unavailable" in invalid(r, full) for r in rows)}
         finishes = [c.get("finish_reason") for c in calls if c.get("status") == "ok"]
         judge_calls = [c for r in rows for c in r.get("judge_calls", [])]
         attempted = [r for r in rows if r["status"] not in EXCLUDED]
         accuracy = {m: mean([bool(correct(r, m)) for r in attempted]) for m in full}
         sampled = [r for r in eligible if extra and extra in r.get("judges", {}) and ok_verdict(r, extra)]
-        summaries[arm] = {"n": len(rows), "scored_n": len(attempted), "accuracy": accuracy,
+        summaries[arm] = {"n": len(rows), "scored_n": len(attempted), "accuracy": accuracy, "mcp": mcp_summary,
             "valid_n": len(eligible), "invalid_by_reason": dict(Counter(k for r in rows for k in invalid(r, full))),
             "reader_tokens_unknown": {k: sum(c.get(k) is None for c in calls) for k in TOKEN_KEYS},
             "judge_tokens_unknown": {k: sum(c.get(k) is None for c in judge_calls) for k in TOKEN_KEYS},
@@ -195,7 +213,8 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         for accuracies in summary["by_type"].values():
             accuracies["primary"] = mean(list(accuracies.values())) if all(v is not None for v in accuracies.values()) else None
     for left, right in itertools.combinations(arms, 2):
-        if pair_across_commits and (manifests[left]["lcmx_commit"] == manifests[right]["lcmx_commit"] or any(
+        if pair_across_commits and (manifests[left]["lcmx_commit"] == manifests[right]["lcmx_commit"] or
+                delivery_identity(manifests[left]) != delivery_identity(manifests[right]) or any(
                 manifests[left].get(key) != manifests[right].get(key) for key in ("config", "delivery", "reader", "store_text", "hit_label"))):
             continue
         # An error in either arm (reader error, budget or tool violation) removes the question
@@ -270,6 +289,12 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         for arm, s in summaries.items():
             sample_acc = s["agreement_sample"]["accuracy"]
             lines.append(f"| {arm} | {s['agreement_sample']['n']} | {fmt(sample_acc[full[0]])} | {fmt(sample_acc[extra])} |")
+    lines += ["", "| Arm | MCP ready rate | Offered tools distribution | Zero LCM calls ready | "
+              "mcp_unavailable retried/excluded |", "|---|---:|---|---:|---|"]
+    for arm, s in summaries.items():
+        m = s["mcp"]
+        lines.append(f"| {arm} | {fmt(m['ready_rate'])} | {m['offered_tools_distribution']} | "
+                     f"{m['zero_lcm_calls_ready']} | {m['mcp_unavailable_retried']}/{m['mcp_unavailable_excluded']} |")
     lines += ["", "| Arm | Question type | " + " | ".join(f"{m} accuracy" for m in full) + " |",
               "|---|---|" + "---:|" * len(full)]
     for arm, summary in summaries.items():
@@ -282,6 +307,10 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
                                        *[str(s["per_judge"][m]["p"]) for m in full],
                                        str((s["both_agree"] or {}).get("p", "n/a")),
                                        str(s["primary_difference_ci95"])]) + " |")
+    lines += ["", "| Comparison | Exclusions |", "|---|---|"]
+    for pair_name, s in comparisons.items():
+        lines.append("| " + pair_name + " | " + ", ".join(
+            f"{reason}={count}" for reason, count in sorted(s["dropped_by_reason"].items())) + " |")
     if "full_run_estimate" in report:
         e = report["full_run_estimate"]
         lines += ["", "| Estimate (assumptions in report.json) | Value |", "|---|---|",
