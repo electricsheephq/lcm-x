@@ -276,6 +276,10 @@ It is bench-only and leaves product flags, V4 publication and existing FMP defau
 `freeze` requires complete LOCAL/25 retrieval/store identities, rebuilds DM0-886 from
 hash-pinned datasets, and snapshots a create-only manifest before any model call.
 Incomplete LOCAL/25 receipts refuse admission; OFF/25 cannot substitute.
+Freeze binds panel IDs and A0 bytes to verified retrievals; live `w1_cache` cannot be null.
+Added questions need `added_receipt` in the same verified LOCAL/25 cache. Imported
+controls must match their original response records and verified source identities.
+The manifest pins renderer/endpoints and the transport implementation digest.
 
 INPUT is a private JSON export: schema `dm0-v1`, pinned `product` source hash and
 `product_commit`, `source_files`/`dataset_sha256`, `normalizer_sha256`, `dev_ids`,
@@ -291,7 +295,13 @@ hard cases and the conservative `v4_row_candidate` diagnostic cannot certify X05
 Only separately authorized live runs use `extract`/`answer --activate`: subscription
 Sol/medium extraction/readers and Sol/low plus GLM 5.3 judgments, both on every answer.
 The launcher supplies GLM credentials; the instrument never reads credential files.
-Resume uses the same immutable inputs and send receipts; pending/error sends never replay.
+Resume uses immutable inputs and successful calls; uncertain sends require disposition.
+Known transient failures retry the unchanged request after 60, 180 and 600 seconds.
+Exhausted questions are excluded from both arms and judges; more than 3% is INCOMPLETE.
+Valid extraction siblings survive rejection; more than 5% rejected items is INCOMPLETE.
+An invalid main-panel judge reply retries once unchanged; persistent invalids are
+reported per arm/judge, with more than 2% INCOMPLETE. Unsettled runs are resumable.
+When memory is empty, controls reuse the A0 answer. Cards include rejection counts/rates.
 Source-only 16k-token windows plus at most 2k context are batched three per call.
 Whole source-linked groups, including quotes/references/header, fit an 8,192-token cap.
 A0 hit/question bytes stay fixed; only the declared memory insertion changes M8192.

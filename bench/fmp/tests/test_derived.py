@@ -194,6 +194,143 @@ def bundle():
         questions=[asdict(q) for q in qs], panel=[dict(id=q.qid,dataset=q.dataset,cluster=q.qid,
             category=q.qtype,target=True,guard=False) for q in qs],
         baselines={q.qid:run.baseline_messages(q,"HIT") for q in qs})
+
+@pytest.fixture(autouse=True)
+def fake_disk_and_wait(monkeypatch):
+    monkeypatch.setattr(cache.shutil, 'disk_usage', lambda p: type('Disk', (), {'free':100*1024**3})())
+    monkeypatch.setattr(cache.time, 'sleep', lambda seconds: None)
+
+@pytest.mark.parametrize('returned,accepted', [(['glm-5.3'],True),(['wrong'],False),(['glm-5.3','wrong'],False)])
+def test_fix1_glm_identity(tmp_path, returned, accepted):
+    class GLM(Fake):
+        def call(self, *args, **kw):
+            response=super().call(*args, **kw)
+            args[2][-1]['returned_model']=returned
+            return response
+    c=cached(tmp_path,GLM())
+    def call():
+        return c.call(run.JUDGES[1],[dict(role='user',content='judge')],[],role='judge',rubric='r',sources={},max_tokens=4096)
+    if accepted:
+        assert call()['content']=='yes'
+    else:
+        with pytest.raises(Incomplete):
+            call()
+
+@pytest.mark.parametrize('bad', [dict(value_text=5),dict(value_text=['tea']),dict(subject_key=None),None])
+def test_fix1_malformed(bad):
+    w=window()
+    got=extract.validate(wire(w,[item(),item('bad') | bad if bad is not None else 5]),w)
+    assert len(got['items'])==1 and got['rejected'][0]['reason']
+    assert extract.validate(5,w)['rejected']
+
+def test_fix1_partial_threshold(tmp_path):
+    class Partial(Fake):
+        def call(self,*args,**kw):
+            response=super().call(*args,**kw)
+            if kw['max_tokens']==16384:
+                data=json.loads(response['content'])
+                data[0]['items']=[item(str(i)) | dict(scope_key=str(i)) for i in range(20)]+[item('bad') | dict(value_text=5)]
+                response['content']=json.dumps(data)
+            return response
+    run.freeze(tmp_path,bundle())
+    report=run.execute(tmp_path,Partial())
+    assert report['verdict']!='PARK-INCOMPLETE'
+    assert report['rejection_rate']==pytest.approx(1/21)
+
+def test_fix1_retry_and_resume(tmp_path,monkeypatch):
+    delays=[]
+    monkeypatch.setattr(cache.time,'sleep',delays.append)
+    class Flaky(Fake):
+        def call(self,*args,**kw):
+            if not getattr(self,'tripped',False):
+                self.tripped=True
+                raise TimeoutError()
+            return super().call(*args,**kw)
+    run.freeze(tmp_path,bundle() | dict(deadline=time.time()+3600))
+    backend=Flaky()
+    assert run.execute(tmp_path,backend)['verdict']!='PARK-INCOMPLETE'
+    assert delays==[60]
+    warm=Fake()
+    run.execute(tmp_path,warm)
+    assert warm.calls==0
+
+def test_fix1_parse_retry(tmp_path):
+    class Invalid(Fake):
+        def call(self,*args,**kw):
+            response=super().call(*args,**kw)
+            if kw['max_tokens']==4096 and not getattr(self,'tripped',False):
+                self.tripped=True
+                response['content']='yes and no'
+            return response
+    run.freeze(tmp_path,bundle())
+    assert run.execute(tmp_path,Invalid())['verdict']!='PARK-INCOMPLETE'
+
+@pytest.mark.parametrize('null_cache',[True,False])
+def test_fix1_live_binding(tmp_path,monkeypatch,null_cache):
+    b=bundle() | dict(synthetic=False,w1_cache=None if null_cache else str(tmp_path),repeat_ids=list(range(44)),w1_receipt={})
+    b['panel']*=443
+    b['w1_panel']=dict(items=[dict(id='q1')])
+    (tmp_path/'retrieval').mkdir()
+    (tmp_path/'retrieval/k.json').write_text(json.dumps(dict(value=dict(evidence='WRONG'),identity=dict(
+        query_sha256=sha(b'Which drink?'),date='2024-03-01'))))
+    monkeypatch.setattr(panel,'local25',lambda *a,**kw:[dict(id='q1',delivered_sha256=sha(b'WRONG'),sources={},cache_key='k')])
+    with pytest.raises(Incomplete,match='cache required|A0 bytes'):
+        run.freeze(tmp_path/'run',b)
+
+def test_fix1_empty_control(tmp_path):
+    b=bundle()
+    a=b['baselines']['q1']
+    b.update(w1_endpoint={'v':'w1'},w1_renderer={'r':'w1'},w1_sources={'q1':{'s':'w1'}})
+    ident=request_identity(run.READER,a,endpoint=b['w1_endpoint'],effort='medium',temperature=None,max_tokens=32000,
+        tools=None,tool_choice='none',rubric='fmp-single',renderer=b['w1_renderer'],sources=b['w1_sources']['q1'])
+    response=dict(content='historical')
+    b['controls']={'q1':dict(identity=ident,status='ok',response=response,response_sha256=sha(encoded(response)))}
+    class Empty(Fake):
+        def call(self,*args,**kw):
+            response=super().call(*args,**kw)
+            if kw['max_tokens']==16384:
+                data=json.loads(response['content'])
+                data[0]['items']=[]
+                response['content']=json.dumps(data)
+            return response
+    run.freeze(tmp_path,b)
+    run.execute(tmp_path,Empty())
+    rows=cache.snapshot(tmp_path/'rows.json')
+    assert len({r['answer_sha256'] for r in rows if r['id']=='q1'})==1
+
+def test_fix1_transport_pin(tmp_path,monkeypatch):
+    run.freeze(tmp_path,bundle())
+    original=run.digest_file
+    monkeypatch.setattr(run,'digest_file',lambda p: 'changed' if p.name=='models.py' else original(p))
+    with pytest.raises(Incomplete):
+        run.inputs(tmp_path)
+
+def test_fix1_conservative_label(monkeypatch):
+    entries=[dict(id='q',target=True,guard=False,dataset='lme-s',category='target')]
+    rows=[dict(id='q',arm=a,judge=j,correct=True) for a in run.ARMS for j in run.JUDGES]
+    monkeypatch.setattr(score,'table',lambda *a:dict(n=1,delta=0,p=1,ci95=[0,.01],paired95=[0,.06]))
+    assert score.evaluate(entries,rows)['verdict']=='PARK-NO-SIGNAL'
+
+def test_fix1_exhaustion_and_symmetric_exclusion(tmp_path,monkeypatch):
+    delays=[]
+    monkeypatch.setattr(cache.time,'sleep',delays.append)
+    class Down(Fake):
+        def call(self,*args,**kw):
+            self.calls+=1
+            raise ConnectionError('transport')
+    backend=Down()
+    c=cached(tmp_path,backend)
+    c.deadline=time.time()+3600
+    args=dict(role='reader',rubric='r',sources={},max_tokens=32)
+    for _ in range(2):
+        with pytest.raises(Incomplete):
+            c.call(run.READER,[dict(role='user',content='synthetic')],[],**args)
+    assert backend.calls==4 and delays==[60,180,600]
+    entries=[dict(id=str(i),target=True,guard=False,dataset='lme-s',category='target',cluster=str(i)) for i in range(100)]
+    rows=[dict(id=e['id'],arm=a,judge=j,correct=True) for e in entries for a in run.ARMS for j in run.JUDGES]
+    result=score.evaluate(entries,rows,exclusions=[dict(id='0',reason='transient')])
+    assert result['verdict']!='PARK-INCOMPLETE'
+    assert all(t['overall']['n']==99 for t in result['judges'].values())
 def test_10_mock_e2e_snapshots_warm_resume_and_corruption(tmp_path):
     b=bundle()
     backend=Fake()
@@ -230,6 +367,9 @@ def test_11_threshold_edges_and_two_judge_conjunction():
     rows=[dict(id=e['id'],arm=a,judge=j,correct=True) for e in entries for a in run.ARMS for j in run.JUDGES]
     assert score.evaluate(entries,rows,exclusions=list(range(4)))['verdict']=='PARK-INCOMPLETE'
     rows[-1]['correct']=None
+    assert score.evaluate(entries,rows)['verdict']!='PARK-INCOMPLETE'
+    for ident in ('0','1'):
+        next(r for r in rows if r['id']==ident and r['judge']==run.JUDGES[1] and r['arm']=='M8192')['correct']=None
     assert score.evaluate(entries,rows)['verdict']=='PARK-INCOMPLETE'
 def test_12_cli_score_activation_missing_baseline_and_deadline(tmp_path,monkeypatch):
     b=bundle()

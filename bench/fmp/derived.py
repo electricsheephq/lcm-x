@@ -11,7 +11,7 @@ from . import derived_panel as panel
 from . import derived_score as scoring
 from .closeout import card_tool
 from .common import digest_file, load_lcm, sha
-from .derived_cache import Cache, immutable, snapshot
+from .derived_cache import Cache, Excluded, immutable, snapshot
 from .dev import judge_messages
 from .dev_cache import Incomplete, endpoint, request_identity, source_identity
 from .dev_panel import encoded
@@ -23,12 +23,45 @@ RULES = dict(target=.05, overall=.02, category=-.02, guard_strict=-.02, alpha=.0
 def baseline_messages(q, hits):
     return [dict(role='system',content=delivery.INSTRUCTIONS.format(date=q.question_date)+delivery.EVIDENCE),
             dict(role='user',content='History evidence:\n'+hits+'\nQuestion: '+q.question)]
+def implementation():
+    return {p.name:digest_file(p) for p in [*Path(__file__).parent.glob('derived*.py'),Path(models.__file__)]}
+def bind(bundle):
+    if bundle['w1_cache'] is None:
+        raise Incomplete('W1 LOCAL/25 cache required')
+    rows=panel.local25(bundle['w1_receipt'],bundle['product'],bundle['w1_cache'])
+    if {r['id'] for r in rows}!={r['id'] for r in bundle.get('w1_panel',{}).get('items',[])}:
+        raise Incomplete('W1 panel identity mismatch')
+    if bundle.get('added_receipt'):
+        rows+=panel.local25(bundle['added_receipt'],bundle['product'],bundle['w1_cache'],population=None)
+    verified={r['id']:r for r in rows}
+    if len(verified)!=len(rows):
+        raise Incomplete('duplicate baseline provenance')
+    for raw in bundle['questions']:
+        q=datasets.Question(**raw)
+        r=verified.get(q.qid)
+        if r is None:
+            raise Incomplete('missing verified baseline ID')
+        rec=json.loads((Path(bundle['w1_cache'])/'retrieval'/(r['cache_key']+'.json')).read_bytes())
+        if (bundle['baselines'][q.qid]!=baseline_messages(q,rec['value']['evidence']) or
+                rec['identity']['query_sha256']!=sha(q.question.encode()) or rec['identity']['date']!=q.question_date):
+            raise Incomplete('A0 bytes/question identity mismatch')
+        if q.qid in bundle.get('controls',{}):
+            saved=bundle['controls'][q.qid]
+            sources=dict(store=r['sources'],retrieval=rec['value']['source_sha256'])
+            if bundle['w1_sources'][q.qid]!=sources:
+                raise Incomplete('control source identity mismatch')
+            original=json.loads((Path(bundle['w1_cache'])/'responses'/(sha(encoded(saved['identity']))+'.json')).read_bytes())
+            if saved['identity']!=original['identity'] or saved['response']!=original['response']:
+                raise Incomplete('control record mismatch')
+            expected=request_identity(READER,bundle['baselines'][q.qid],endpoint=bundle['w1_endpoint'],effort='medium',temperature=None,
+                max_tokens=32000,tools=None,tool_choice='none',rubric='fmp-single',renderer=bundle['w1_renderer'],sources=sources)
+            memory.import_baseline(original,expected,bundle['baselines'][q.qid])
 def freeze(root, bundle):
     root = Path(root)
     if bundle.get('schema') != 'dm0-v1' or not bundle.get('product') or not bundle.get('questions'):
         raise Incomplete('unresolved input identities')
     if not bundle.get('synthetic'):
-        panel.local25(bundle['w1_receipt'],bundle['product'],bundle['w1_cache'])
+        bind(bundle)
         if len(bundle['panel']) != 886 or len(bundle.get('repeat_ids',[])) != 44:
             raise Incomplete('DM0 panel/repeat freeze incomplete')
     if set(bundle['baselines']) != {e['id'] for e in bundle['panel']}:
@@ -37,12 +70,12 @@ def freeze(root, bundle):
         memory.messages(bundle['baselines'][q['qid']],q['question'],'')
     immutable(root/'inputs.json',bundle)
     immutable(root/'run-manifest.json',dict(input_sha256=sha(encoded(bundle)),rules=RULES,reader=READER,judges=JUDGES,
-        prompt_sha256=sha(extraction.PROMPT.encode()), schema='dm0-v1', implementation={p.name:digest_file(p) for p in Path(__file__).parent.glob('derived*.py')}))
+        prompt_sha256=sha(extraction.PROMPT.encode()), schema='dm0-v1', implementation=implementation(),renderer=bundle['renderer'],endpoints=bundle['endpoints']))
 def inputs(root):
     b = json.loads((root/'inputs.json').read_bytes())
     m = json.loads((root/'run-manifest.json').read_bytes())
     if (m['input_sha256'] != sha(encoded(b)) or m['rules'] != RULES or m['prompt_sha256'] != sha(extraction.PROMPT.encode()) or
-            m['implementation'] != {p.name:digest_file(p) for p in Path(__file__).parent.glob('derived*.py')}):
+            m['implementation'] != implementation() or m['renderer']!=b['renderer'] or m['endpoints']!=b['endpoints']):
         raise Incomplete('frozen input/source corruption')
     return b
 def execute(root, backend, stage='all'):
@@ -58,11 +91,16 @@ def execute(root, backend, stage='all'):
     views = {sha(encoded(extraction.source_view(q))):extraction.source_view(q) for q in b['questions']}
     extracted = (snapshot(root/'extraction.json') if (root/'extraction.json').exists() else
                  extraction.execute(list(views.values()),cache,READER,root))
+    if any(w['state']=='failed' for w in extracted['ledger']):
+        return dict(verdict='PARK-INCOMPLETE',reasons=['unsettled extraction; resume same run'])
     if stage=='extract':
         return dict(status='COMPLETE',windows=len(extracted['ledger']))
     rows, deliveries = [], []
-    semantic=b.get('semantic_valid',False) and bool(extracted['items']) and bool(extracted['ledger']) and all(w['state'] in ('succeeded','empty') for w in extracted['ledger'])
+    rejected=sum(w.get('rejected_count',0) for w in extracted['ledger'])
+    total=sum(w.get('extracted_count',0) for w in extracted['ledger'])
+    semantic=b.get('semantic_valid',False) and bool(extracted['items']) and bool(extracted['ledger']) and rejected/max(1,total)<=.05
     evaluation=dict(complete=True,semantic_valid=semantic,drift_valid=b.get('drift_valid',False) if b.get('synthetic') else False)
+    evaluation.update(rejection_rate=rejected/max(1,total),rejected_items=rejected,extracted_items=total,exclusions=[])
     ordered = sorted(b['panel'],key=lambda e:(not e['target'],e['id']))
     try:
         if not b.get('synthetic'):
@@ -75,33 +113,49 @@ def execute(root, backend, stage='all'):
             q=qs[e['id']]
             view=extraction.source_view(asdict(q))
             h=view['haystack_hash']
+            if h in {w['source'] for w in extracted['ledger'] if w['state']=='excluded'}:
+                evaluation['exclusions'].append(dict(id=e['id'],reason='extraction transient retries exhausted'))
+                if len(evaluation['exclusions'])>len(ordered)*.03:
+                    break
+                continue
             group=[i for i in extracted['items'] if i['haystack_hash']==h]
             rel=[r for r in extracted['relations'] if r['from_id'] in {i['id'] for i in group}]
             block,omitted=memory.render(group,rel,q.question)
-            if omitted and not block:
-                evaluation['semantic_valid']=False
             a=b['baselines'][e['id']]
             m,meta=memory.messages(a,q.question,block)
             deliveries.append(dict(id=e['id'],omitted=omitted,**meta))
             for arm in (ARMS if index%2==0 else ARMS[::-1]):
+                if e['id'] in {r['id'] for r in evaluation['exclusions']}:
+                    break
                 msgs=a if arm=='A0' else m
                 calls=[]
                 sources=dict(product=b['product'],source=h)
-                saved=b.get('controls',{}).get(e['id']) if arm=='A0' else None
+                saved=b.get('controls',{}).get(e['id']) if arm=='A0' or m==a else None
                 if saved:
                     expected=request_identity(READER,a,endpoint=b['w1_endpoint'],effort='medium',temperature=None,
                         max_tokens=32000,tools=None,tool_choice='none',rubric='fmp-single',renderer=b['w1_renderer'],sources=b['w1_sources'][e['id']])
                     response=memory.import_baseline(saved,expected,a)
                 else:
-                    response=cache.call(READER,msgs,calls,role='reader',rubric='fmp-single',sources=sources,max_tokens=32000)
+                    try:
+                        response=cache.call(READER,msgs,calls,role='reader',rubric='fmp-single',sources=sources,max_tokens=32000)
+                    except Excluded:
+                        evaluation['exclusions'].append(dict(id=e['id'],reason='reader transient retries exhausted'))
+                        break
                 for judge in JUDGES:
                     jm,ds=judge_messages(q,response['content'])
-                    judgment=cache.call(judge,jm,calls,role='judge',rubric=sha(encoded(jm)),sources=sources,
-                        max_tokens=4096,temperature=None if ds.startswith('lme') else 0)
-                    correct=judges.parse(judgment['content'],ds)
-                    if correct is None:
-                        raise Incomplete('invalid required judge')
+                    try:
+                        for replay in range(2):
+                            judgment=cache.call(judge,jm,calls,role='judge',rubric=sha(encoded(jm)),sources=sources,
+                                max_tokens=4096,temperature=None if ds.startswith('lme') else 0,replay=replay)
+                            correct=judges.parse(judgment['content'],ds)
+                            if correct is not None:
+                                break
+                    except Excluded:
+                        evaluation['exclusions'].append(dict(id=e['id'],reason='judge transient retries exhausted'))
+                        break
                     rows.append(dict(id=e['id'],arm=arm,judge=judge,correct=correct,answer_sha256=sha(encoded(response)),calls=list(calls)))
+            if len(evaluation['exclusions'])>len(ordered)*.03:
+                break
             if e['target'] and (index+1==len(ordered) or not ordered[index+1]['target']):
                 interim=scoring.evaluate(ordered[:index+1],rows,**(evaluation | dict(complete=False)))
                 immutable(root/'interim.json',interim)
@@ -112,8 +166,7 @@ def execute(root, backend, stage='all'):
                     return interim
         report=scoring.evaluate(ordered,rows,**evaluation)
     except (Incomplete,ValueError,KeyError,TypeError):
-        evaluation['semantic_valid']=False
-        report=scoring.evaluate(ordered,rows,**evaluation)
+        return dict(verdict='PARK-INCOMPLETE',reasons=['unsettled call; resume same run'])
     snapshot(root/'evaluation-inputs.json',dict(entries=ordered,parameters=evaluation))
     snapshot(root/'rows.json',rows)
     snapshot(root/'deliveries.json',deliveries)
@@ -154,7 +207,8 @@ def card(root):
     invoke('init','--project','lcm-x','--kind','benchmark','--owner-lane','dm0','--code-dir',str(Path(__file__).resolve().parents[2]),
            '--command','python -m bench.fmp.derived score --product PRODUCT --source INPUT --run RUN','--claim-class','advisory','--local-raw','false')
     (root/'RESULT.md').write_text('# DM0 instrument\n\n| Result | Receipt |\n|---|---|\n| '+report['verdict']+
-        ' | report.json |\n\nRe-score: python -m bench.fmp.derived score --product PRODUCT --source inputs.json --run RUN\n\n'
+        ' | report.json |\n\nAdmission: '+json.dumps({k:report.get(k) for k in ('rejection_rate','rejected_items','extracted_items','exclusions','invalid_verdicts')})+
+        '\n\nRe-score: python -m bench.fmp.derived score --product PRODUCT --source inputs.json --run RUN\n\n'
         'Not proven: extraction quality, benchmark gain, issue acceptance, release/runtime/customer readiness.\nT1: unpublished. T2: unpublished.\n')
     invoke('headline','--benchmark','DM0/synthetic' if inputs(root).get('synthetic') else 'DM0-886-v1','--metric','go_to_stage1',
            '--value',str(int(report['verdict']=='GO')),'--n',str(len(inputs(root)['panel'])),'--source','report.json')

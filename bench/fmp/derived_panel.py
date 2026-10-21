@@ -38,15 +38,17 @@ def select(questions, w1, dev_ids, dev_histories, strict=True):
         if counts != EXPECTED or Counter(e['dataset'] for e in entries) != {'lme-s':179,'locomo':707}:
             raise Incomplete('DM0 population counts drift')
     return sorted(entries, key=lambda e:(not e['target'], sha(('1191:'+e['id']).encode())))
-def local25(receipt, product, cache=None):
+def local25(receipt, product, cache=None, population=450):
     if receipt.get('status') != 'COMPLETE' or receipt.get('product') != product or not receipt.get('rows'):
         raise Incomplete('W1 LOCAL/25 incomplete')
     if any(not r.get('sources') or not r.get('cache_key') or r.get('observed',{}).get('limit') != 25 for r in receipt['rows']):
         raise Incomplete('W1 LOCAL/25 retrieval identity incomplete')
+    if cache is None:
+        raise Incomplete('W1 LOCAL/25 cache required')
     if cache is not None:
         root=Path(cache)
         stores={digest_file(p):p.parent for p in (root/'stores').glob('*/*/build-manifest.json')}
-        if len(receipt['rows'])!=450 or len({r['id'] for r in receipt['rows']})!=450:
+        if (population is not None and len(receipt['rows'])!=population) or len({r['id'] for r in receipt['rows']})!=len(receipt['rows']):
             raise Incomplete('W1 LOCAL/25 population incomplete')
         for r in receipt['rows']:
             rec=json.loads((root/'retrieval'/(r['cache_key']+'.json')).read_bytes())

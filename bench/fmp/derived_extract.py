@@ -5,7 +5,7 @@ from collections import Counter
 from .common import sha
 from .datasets import iso
 from .delivery import tokens
-from .derived_cache import snapshot
+from .derived_cache import Excluded, snapshot
 from .dev_cache import Incomplete
 from .dev_panel import encoded
 SCHEMA = 'dm0-v1'
@@ -58,6 +58,8 @@ def windows(view, source_tokens=16000, context_tokens=2000):
 def request(batch, prior=()):
     return [dict(role='system', content=PROMPT), dict(role='user', content=json.dumps(dict(windows=batch, prior_index=[i for i in prior if i['haystack_hash'] in {w['haystack_hash'] for w in batch}]), ensure_ascii=False))]
 def validate(wire, window, prior=()):
+    if not isinstance(wire,dict):
+        return dict(items=[],relations=[],rejected=[dict(item=0,reason='non-object window')],state='partial')
     if any(wire.get(k) != window[k] for k in ('schema_version', 'haystack_hash', 'window_id')):
         raise Incomplete('extraction envelope mismatch')
     if not isinstance(wire.get('items'), list) or not isinstance(wire.get('relations'), list):
@@ -88,6 +90,8 @@ def validate(wire, window, prior=()):
         try:
             i = {k: raw[k] for k in ('kind','subject_key','subject_resolution','predicate_key','object_value',
                  'value_text','polarity','scope_key','event_at','valid_from','valid_to','explicitness')}
+            if any(not isinstance(i[k],str) for k in ('value_text','subject_key')):
+                raise ValueError('invalid field type')
             if counts[raw['local_id']] != 1 or i['explicitness'] != 'explicit' or i['kind'] not in (
                     'fact','event','preference','commitment','status','request','intention','quotation','question'):
                 raise ValueError('invalid type/id')
@@ -154,9 +158,14 @@ def execute(views, cache, spec, root):
                     all_items.update({i['id']:i for i in got['items']})
                     all_relations.update({sha(encoded(r)):r for r in got['relations']})
                     ledger.append(dict(window=w['window_id'], source=view['haystack_hash'], state=got['state'],
-                                       rejected=got['rejected'], calls=calls))
+                                       rejected=got['rejected'], extracted_count=len(raw['items']) if isinstance(raw,dict) else 1,
+                                       rejected_count=sum('item' in r for r in got['rejected']),calls=calls))
+            except Excluded:
+                ledger.extend(dict(window=w['window_id'],source=view['haystack_hash'],state='excluded',reason='transient retries exhausted',calls=calls) for w in batch)
             except (Incomplete, ValueError, TypeError, KeyError):
                 ledger.extend(dict(window=w['window_id'], source=view['haystack_hash'], state='failed', calls=calls) for w in batch)
+                return dict(items=list(all_items.values()),relations=list(all_relations.values()),ledger=ledger)
     result = dict(items=list(all_items.values()), relations=list(all_relations.values()), ledger=ledger)
-    snapshot(root / 'extraction.json', result)
+    if not any(w['state']=='failed' for w in ledger):
+        snapshot(root / 'extraction.json', result)
     return result
