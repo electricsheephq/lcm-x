@@ -1,0 +1,10 @@
+{
+  "base_sha": "f6e2beb145a49b78ee3d04f78f65fcbf38005dec",
+  "sha256": {
+    "paste_mid_rot": "4dbb85969797b6152104dd11b81837f46cd9108e512f598034be676642ebcde1",
+    "paste_start_rot": "cf6120cb66fe8a9a0b26e2c748289744b967392fabc622d2243d0750c5e4bd5e",
+    "paste_mid_echo_rot": "2f4f19c9aeaa460063045f871f06e927d0a90477aba93de9b1474d1429ed081a",
+    "paste_mid_echo_rotcold": "09501dfafa465c0efe30b0b3598d0f02d26c1d43f45e81d0ca5f47793d50347e",
+    "plain_rot": "3c1541c1ef6daefc5dd1ed659f629b71c7af79ecb5a5d502b4aa57ecb9dc2472"
+  }
+}

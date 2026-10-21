@@ -1607,6 +1607,17 @@ class LCMEngine(
                 ingest_protection_config=self._config,
                 hermes_home=hermes_home,
             )
+            self.__dict__.pop("_carry_history_seen", None)
+            # One discovery at store-open; OFF ingest does no additional reads when absent.
+            carry_conversations = self._store._conn.execute(
+                "SELECT DISTINCT json_extract(value, '$.conversation_id') FROM metadata "
+                "WHERE key GLOB 'compaction_commit_proof:*' "
+                "AND json_valid(value) AND json_extract(value, '$.hermes_home') = ? "
+                "AND (json_extract(value, '$.user_carry_emitted') = 1 "
+                "OR json_array_length(value, '$.input_emissions') > 0)", (str(hermes_home or ""),),
+            ).fetchall()
+            if carry_conversations:
+                self._carry_history_seen = {row[0] for row in carry_conversations}
             self._dag = SummaryDAG(db_path)
             if self._config.temporal_rollups_enabled:
                 # Install the transaction-coupled summary mutation triggers before
@@ -3639,17 +3650,23 @@ class LCMEngine(
 
     def _carry_reset_allows(self, row):
         try:
-            state = self._lifecycle.get_by_conversation(getattr(self, "_carry_conversation_id", self._conversation_id))
+            state = self._lifecycle.get_by_conversation(self._conversation_id)
             return state is not None and (state.last_reset_at is None or
                 float(row.get("ingested_at") or 0) > float(state.last_reset_at))
         except Exception:
             return False
+
+    def _has_user_carry_history(self):
+        return self._conversation_id in getattr(self, "_carry_history_seen", ())
 
     def _user_carry_lineage(self):
         return [self._session_id, *self._rotation_predecessor_session_ids(self._session_id, max_hops=2**63 - 1)]
 
     def _plan_user_carry(self, tail, retained=None, anchor_source=(), anchor_part=None, role="user", budget=None):
         cap = max(0, int(self._config.user_carry_tokens))
+        requested = getattr(self, "_carry_conversation_id", None)
+        if requested and requested != self._conversation_id:
+            return ""  # base's conflicting explicit binding cannot authorize either history
         if not cap or not self._session_id or self._bypasses_lcm_context_management():
             return ""
         cap = min(cap, budget) if budget is not None else cap
@@ -3675,14 +3692,18 @@ class LCMEngine(
                     return ""
                 anchor_id = source_map.get(id(latest))
                 if anchor_id is None:
-                    from .db_bootstrap import owned_conversation_values
-                    owned = owned_conversation_values(self._store._conn, getattr(self, "_carry_conversation_id", self._conversation_id))
-                    matches = [row for sid in self._user_carry_lineage() for row in self._store.find_session_rows_by_content(
-                        sid, "user", normalize_content_value(latest.get("content")) or "", 2**63 - 1)
-                        if row.get("conversation_id") in owned and self._is_durable_real_user_row(row)]
-                    if len(matches) != 1:
-                        return ""
-                    anchor_id = int(matches[0]["store_id"])
+                    # The compression pass mapped these objects before advancing its frontier.
+                    anchor_id = (self._compress_run.store_ids_by_message_id or {}).get(id(latest))
+                if anchor_id is None:
+                    # A repeated objective scaffold inherits the emitting proof's row identity.
+                    proof = self._active_emission_proof() or {}
+                    occurrences, _ = self._replay_occurrences(list(anchor_source), proof)
+                    if any(m is latest and entry.generated_span is not None
+                           for m, (entry, _) in zip(anchor_source, occurrences)):
+                        anchor_id = proof.get("carry_anchor_store_id")
+                if anchor_id is None:
+                    return ""
+                self._pending_carry_anchor_store_id = anchor_id
                 excluded.add(anchor_id)
             cutoff = min(mapped.values()) if mapped else max(source_map.values(), default=0) + 1
             lineage = self._user_carry_lineage()
@@ -3690,7 +3711,7 @@ class LCMEngine(
             def scan(newest=False):
                 cursor = cutoff if newest else 0
                 while page := self._store.load_lineage_user_rows(
-                        lineage, getattr(self, "_carry_conversation_id", self._conversation_id), cursor, newest_first=newest):
+                        lineage, self._conversation_id, cursor, newest_first=newest):
                     for row in page:
                         if self._is_durable_real_user_row(row):
                             yield row
@@ -3721,7 +3742,7 @@ class LCMEngine(
                 return None
             found = self._store.get_batch(ids)
             lineage = set(self._user_carry_lineage())
-            conversations = owned_conversation_values(self._store._conn, getattr(self, "_carry_conversation_id", self._conversation_id))
+            conversations = owned_conversation_values(self._store._conn, self._conversation_id)
             rows = [found[i] for i in ids]
             if any(row.get("session_id") not in lineage or row.get("conversation_id") not in conversations
                    or not self._is_durable_real_user_row(row) for row in rows):
@@ -4837,7 +4858,7 @@ class LCMEngine(
         previous_conversation_id = self._conversation_id
         requested_conversation_id = str(kwargs.get("conversation_id") or session_id)
         if self._config.user_carry_tokens > 0:
-            self._carry_conversation_id = requested_conversation_id
+            self._carry_conversation_id = kwargs.get("conversation_id")
         self._lcm_current_start_allows_bypass_lineage = False
         requested_platform = str(kwargs.get("platform") or self._session_platform or "")
         pre_reset_preserve_ambiguous_no_frame_old_session = False
@@ -6807,6 +6828,16 @@ class LCMEngine(
                 self._persist_compress_commit_proof(proof)
 
     def _persist_compress_commit_proof(self, proof, last_store_id=None) -> None:
+        if self._has_user_carry_history():
+            # Native/filtered/stub-first publications must not retire older carry authority.
+            prior = self._durable_commit_proof_payload() or {}
+            history = list(proof.get("input_emissions", []))
+            for item in [*prior.get("input_emissions", []),
+                         *(prior.get("emissions", []) if prior.get("user_carry_output") else [])]:
+                if item not in history:
+                    history.append(item)
+            if history:
+                proof.update(input_emissions=history, user_carry_emitted=True)
         super()._persist_compress_commit_proof(proof, last_store_id=last_store_id)
         if "output_metadata" not in proof:
             return
@@ -6833,6 +6864,9 @@ class LCMEngine(
         payload = super()._durable_commit_proof_payload(session_id)
         if payload is None:
             return None
+        if payload.get("user_carry_emitted") or payload.get("input_emissions"):
+            # Piggyback on the existing scoped proof read, including cold disabled binds.
+            self.__dict__.setdefault("_carry_history_seen", set()).add(payload["conversation_id"])
         try:
             raw = self._store.read_metadata_json(self._replay_snapshot_metadata_key(
                 _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, session_id))
@@ -6912,24 +6946,25 @@ class LCMEngine(
 
     def _ingest_messages(self, messages, **kwargs):
         # Default-off ingest takes the original path without extra proof reads.
-        if self._config.user_carry_tokens <= 0 and not getattr(self, "_last_user_carry", None):
+        if self._config.user_carry_tokens <= 0 and not self._has_user_carry_history():
             return self._ingest_messages_impl(messages, **kwargs)
         # Replay authority is the engine's scoped descriptor, never packet-shaped text.
         had_registry = "_compress_occurrences" in self.__dict__
         saved = getattr(self, "_compress_occurrences", None)
         proof = self._active_emission_proof()
-        parent = None
-        if self._config.user_carry_tokens > 0:
-            predecessors = self._rotation_predecessor_session_ids(self._session_id, max_hops=1)
-            parent = self._durable_commit_proof_payload(predecessors[0]) if predecessors else None
+        parents = [self._durable_commit_proof_payload(sid) for sid in self._user_carry_lineage()[1:]]
+        authorities = []
+        for source in [proof, *parents]:
+            if source:
+                authorities.extend((source, {**source, "output": [], "emissions": source.get("input_emissions", [])}))
         try:
-            for authority in (proof, {**proof, "emissions": proof.get("input_emissions", [])} if proof else None, parent):
+            for authority in authorities:
                 if not authority:
                     continue
                 packets = list(self._carry_packets(messages, authority))
                 if not packets:
                     continue
-                if authority is parent:
+                if authority.get("session_id") != self._session_id:
                     # Preserve base's cold-rotation re-store; remove only the proven packet.
                     replacements = {}
                     for row, packet, _ in packets:

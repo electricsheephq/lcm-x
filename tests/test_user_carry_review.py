@@ -174,7 +174,8 @@ def test_collision_filters_owned_rows(factory):
     rows = _seed(a, ('ALPHA after rotation', 'ALPHA live'))
     text = _text(_emit(a, rows, tail=rows[-2:]))
     assert 'BRAVO' not in text
-    assert 'ALPHA origin' in text
+    # Base binds this conflicting explicit request to convB. Fail closed until host binding is repaired.
+    assert HEADER not in text
 
 
 @pytest.mark.parametrize('unit', ['👨\u200d👩\u200d👧\u200d👦', 'a\u0301'])

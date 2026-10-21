@@ -662,7 +662,7 @@ class CompactionMixin:
             return True, "forced overflow recovery", 0
 
         occurrences = dict(zip(map(id, messages), self._replay_occurrences(messages)[0])) \
-            if any("[Earlier user messages, verbatim reference;" in str(m.get("content", "")) for m in messages) else {}
+            if self._config.user_carry_tokens > 0 else {}
         raw_tokens_outside_tail = self._raw_messages_counter(candidate_raw, occurrences)(candidate_raw)
         if allow_partial_leaf:
             return True, "eligible partial threshold-sweep leaf", raw_tokens_outside_tail
@@ -719,8 +719,7 @@ class CompactionMixin:
         candidate_raw: List[Dict[str, Any]],
         working_leaf_chunk_tokens: int,
     ) -> List[Dict[str, Any]]:
-        counter = self._raw_message_tokens if any(
-            "[Earlier user messages, verbatim reference;" in str(m.get("content", "")) for m in candidate_raw) else None
+        counter = self._raw_message_tokens if self._config.user_carry_tokens > 0 else None
         return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens, counter)
 
     def compress(self, messages: List[Dict[str, Any]],
@@ -1033,7 +1032,7 @@ class CompactionMixin:
             return
         try:
             prior_carry_proof = (self._durable_commit_proof_payload() or self._active_emission_proof()) if (
-                self._config.user_carry_tokens > 0 or getattr(self, "_last_user_carry", None)) else None
+                self._config.user_carry_tokens > 0 or self._has_user_carry_history()) else None
             self._compress_commit_proof = None
             if (
                 not self._session_id
@@ -1072,8 +1071,21 @@ class CompactionMixin:
                 ),
                 "emissions": emissions,
             }
-            if prior_carry_proof and list(self._carry_packets(messages, prior_carry_proof)):
-                proof["input_emissions"] = copy.deepcopy(prior_carry_proof.get("emissions", []))
+            if self._config.user_carry_tokens > 0 or prior_carry_proof:
+                prior = prior_carry_proof or {}
+                history = copy.deepcopy(prior.get("input_emissions", []))
+                if prior.get("user_carry_output") or list(self._carry_packets(messages, prior)):
+                    for item in prior.get("emissions", []):
+                        if item not in history:
+                            history.append(copy.deepcopy(item))
+                emitted = bool(list(self._carry_packets(result, proof)))
+                if emitted or history or prior.get("user_carry_emitted"):
+                    proof["user_carry_emitted"] = True
+                    self.__dict__.setdefault("_carry_history_seen", set()).add(self._conversation_id)
+                    proof["input_emissions"] = history
+                    proof["user_carry_output"] = emitted
+                if emitted and getattr(self, "_pending_carry_anchor_store_id", None) is not None:
+                    proof["carry_anchor_store_id"] = self._pending_carry_anchor_store_id
             for item in emissions:  # multiplicity witness for carried-forward proofs, which omit "output"
                 item["output_multiplicity"] = proof["output"].count(proof["output"][item["output_occurrence"]["index"]])
             if proof["output"] == proof["input"]:
@@ -1114,7 +1126,7 @@ class CompactionMixin:
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "emissions": copy.deepcopy(emissions),
-                **({"input_emissions": proof["input_emissions"]} if "input_emissions" in proof else {}),
+                **{k: proof[k] for k in ("input_emissions", "user_carry_emitted", "user_carry_output", "carry_anchor_store_id") if k in proof},
             }
             self._compress_commit_proof = proof
             if any(d.get("kind") == "recovery" for d in getattr(self, "_pending_emission_candidates", ())):
@@ -1234,8 +1246,9 @@ class CompactionMixin:
                 ],
                 "emissions": copy.deepcopy(proof.get("emissions") or []),
             }
-            if proof.get("input_emissions"):
-                payload["input_emissions"] = copy.deepcopy(proof["input_emissions"])
+            for key in ("input_emissions", "user_carry_emitted", "user_carry_output", "carry_anchor_store_id"):
+                if key in proof:
+                    payload[key] = copy.deepcopy(proof[key])
             if proof.get("filtered_row_keys") is not None:
                 payload["filtered_row_keys"] = [list(key) for key in proof["filtered_row_keys"]]
             if not payload["effective_sha256"]:
@@ -1338,10 +1351,6 @@ class CompactionMixin:
         anchor_claims: dict[int, list[int]] = {}  # #436 R4: id(input row) -> the store ids its text covers
         for message, claims in anchored_input or [(message, []) for message in selected_input]:
             remainder = self._generated_context_carrier_remainder(message)
-            if "[Earlier user messages, verbatim reference;" in str(message.get("content", "")):
-                occurrence = (getattr(self, "_compress_occurrences", None) or {}).get(id(message))
-                if occurrence is None or occurrence[0].generated_span is None:
-                    remainder = None  # an authored paste is source text, including its quoted packet
             if remainder is not None:
                 original = message
                 message = {**message, "content": remainder}
