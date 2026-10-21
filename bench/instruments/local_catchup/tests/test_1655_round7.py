@@ -229,10 +229,16 @@ def test_f4_floor_nonpass_exits_after_summary_and_labels(tmp_path, monkeypatch, 
         "--out", str(out), "--model-cache", str(tmp_path/"cache"), "--cgroup", str(tmp_path),
         "--limited", "--cell", cell])
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(floor.subprocess, "check_output", lambda *a, **kw: "CPU fixture\n")
+    monkeypatch.setattr(floor, "standalone", lambda *a: {"standalone_calibration_s": .572})
     monkeypatch.setattr(floor, "measured_limits", lambda _: dict(verified=True))
     monkeypatch.setattr(floor, "isolated", lambda *a: None)
     monkeypatch.setattr(floor, "build", lambda *a: {})
-    monkeypatch.setattr(floor, "run", lambda a: {})
+    def run(a):
+        a.out.mkdir()
+        (a.out/"events.jsonl").write_text("")
+        return {}
+    monkeypatch.setattr(floor, "run", run)
     monkeypatch.setattr(floor, "rate", lambda *a: dict(state=state))
     def recall_run(*a, **kw):
         (out/"recall").mkdir()

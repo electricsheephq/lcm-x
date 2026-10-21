@@ -2,7 +2,7 @@ import pytest
 
 from bench.instruments.local_catchup.turns import paired_bar
 from bench.instruments.local_catchup.recall import overlapping, score
-from bench.instruments.local_catchup.floor import command, rate, verify_limits
+from bench.instruments.local_catchup.floor import command, verify_limits
 
 
 @pytest.mark.parametrize('off,on,limit,state', [(100,150,50,'PASS'), (1000,1100,100,'PASS'), (100,151,50,'FAIL'), (500,550,50,'PASS')])
@@ -60,6 +60,10 @@ def test_floor_command_and_effective_limits():
 
 
 def test_floor_rate_needs_sustained_incomplete_two_hours():
+    from bench.instruments.local_catchup.tests.test_1586_v2 import events
+    def rate(*a):
+        from bench.instruments.local_catchup.floor import rate as calibrated_rate
+        return calibrated_rate(*a, events=events())
     assert rate(dict(state='INCOMPLETE',rows_s=10,audit=dict(complete=False)),7200,250000)['state'] == 'PASS'
     assert rate(dict(state='COMPLETE',rows_s=10),7200,250000)['state'] == 'INVALID'
     assert rate(dict(state='INCOMPLETE',rows_s=.1,audit=dict(complete=False)),7200,250000)['state'] == 'FAIL'

@@ -121,3 +121,10 @@ baseline has a PASS row. The workflow moves its shell into the cgroup as root,
 then executes the unprivileged Python process; Python only verifies the limits.
 Neither synthetic summaries nor functional smoke establish live summary-route,
 quiet-host timing, smallest-host, release, customer, or default-flip readiness.
+
+Declaration v2 adds `coverage-pair`: short runs empty then upgrade, mixed reverses
+that order, with separate two-hour cells and evidence directories. Single-cell
+`coverage-rate` remains available. Calibration records `lscpu`, model preparation,
+five standalone 32-leaf calls, and the median of at least five in-worker summary
+calls writing exactly 32 vectors. Coverage gates the larger of raw implied hours
+and raw × 0.572 / calibration. Missing in-worker calibration makes the cell INVALID.

@@ -6,7 +6,7 @@ on:
         description: Floor surrogate cell
         required: true
         type: choice
-        options: [coverage-rate, recall]
+        options: [coverage-rate, coverage-pair, recall]
       shape:
         description: Declared corpus shape
         type: choice
@@ -24,7 +24,7 @@ on:
       max_minutes:
         description: Maximum minutes (121 to 330)
         type: number
-        default: 150
+        default: 330
 permissions:
   contents: read
 jobs:
@@ -78,6 +78,7 @@ jobs:
           git -C . rev-parse HEAD > evidence/harness-sha.txt
           git -C product rev-parse HEAD > evidence/product-sha.txt
           git -C host rev-parse HEAD > evidence/host-sha.txt
+          lscpu > evidence/lscpu.txt
       - name: Record and ensure runner temp disk headroom
         run: |
           # Each measured cell refuses to start under 26 GiB free, and the corpus build before the

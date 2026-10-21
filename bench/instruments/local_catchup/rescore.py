@@ -20,10 +20,30 @@ def verdict(path, max_wall):
     return final
 
 
+def v2(root):
+    from .floor import rate
+    def lines(path):
+        return [json.loads(s) for s in path.read_text().splitlines()]
+    if (root/"summary.json").exists() and "cells" in load(root/"summary.json"):
+        recorded = load(root/"summary.json")
+        cells = [v2(root/c["baseline"]) for c in recorded["cells"]]
+        assert recorded["state"] == ("PASS" if all(c["state"] == "PASS" for c in cells) else "FAIL")
+        return dict(state=recorded["state"], cells=cells)
+    if (root/"catchup").is_dir():
+        recorded = load(root/"summary.json")
+        computed = rate(load(root/"catchup/summary.json"), recorded["measured_seconds"],
+            load(root/"manifest.json")["rows"], lines(root/"catchup/events.jsonl"))
+        assert all(recorded[k] == v for k, v in computed.items())
+    return computed
+
+
 if __name__ == "__main__":
     import sys
     for name in sys.argv[1:]:
         root = Path(name)
+        if (root/"catchup").is_dir() or "cells" in load(root/"summary.json"):
+            print(json.dumps(v2(root)))
+            continue
         summary, audit = load(root/"summary.json"), load(root/"final-audit.json")
         final = verdict(root/"progress.jsonl", summary["max_wall"])
         coverage = sum(v["covered"] for v in audit["classes"].values())/sum(v["expected"] for v in audit["classes"].values())
