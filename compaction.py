@@ -1025,6 +1025,7 @@ class CompactionMixin:
         if self._bypasses_lcm_context_management():
             return
         try:
+            prior_carry_proof = self._durable_commit_proof_payload() or self._active_emission_proof()
             self._compress_commit_proof = None
             if (
                 not self._session_id
@@ -1063,6 +1064,8 @@ class CompactionMixin:
                 ),
                 "emissions": emissions,
             }
+            if prior_carry_proof and list(self._carry_packets(messages, prior_carry_proof)):
+                proof["input_emissions"] = copy.deepcopy(prior_carry_proof.get("emissions", []))
             for item in emissions:  # multiplicity witness for carried-forward proofs, which omit "output"
                 item["output_multiplicity"] = proof["output"].count(proof["output"][item["output_occurrence"]["index"]])
             if proof["output"] == proof["input"]:
@@ -1103,6 +1106,7 @@ class CompactionMixin:
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "emissions": copy.deepcopy(emissions),
+                **({"input_emissions": proof["input_emissions"]} if "input_emissions" in proof else {}),
             }
             self._compress_commit_proof = proof
             if any(d.get("kind") == "recovery" for d in getattr(self, "_pending_emission_candidates", ())):
@@ -1222,6 +1226,8 @@ class CompactionMixin:
                 ],
                 "emissions": copy.deepcopy(proof.get("emissions") or []),
             }
+            if proof.get("input_emissions"):
+                payload["input_emissions"] = copy.deepcopy(proof["input_emissions"])
             if proof.get("filtered_row_keys") is not None:
                 payload["filtered_row_keys"] = [list(key) for key in proof["filtered_row_keys"]]
             if not payload["effective_sha256"]:

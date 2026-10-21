@@ -945,7 +945,9 @@ class ReconcileMixin:
         # identity (#488): a stored row is exactly what was durably written.
         carrier_rest = getattr(self, "_generated_context_carrier_remainder", None)
         if role == "user" and strip_carrier and not stored_row and callable(carrier_rest):
-            glued_row = carrier_rest({"role": "user", "content": content})
+            occurrence = (getattr(self, "_compress_occurrences", None) or {}).get(id(msg))
+            glued_row = carrier_rest(msg if occurrence and content == msg.get("content")
+                                    else {"role": "user", "content": content})
             if glued_row is not None:
                 content = glued_row
         # Strip volatile compaction scaffolding suffixes so identity matching
@@ -2773,6 +2775,8 @@ class ReconcileMixin:
     def _replay_head(self, messages, start: int, frontier: int) -> tuple[int, bool]:
         """End of the LCM-emitted head rows at ``start``, and whether a DAG-verified carrier
         follows them. Shared by the #524 replay term and the #457 resume so they agree."""
+        if proof := getattr(self, "_ingest_carry_proof", None):
+            self._compress_occurrences.update(zip(map(id, messages), self._replay_occurrences(messages, proof)[0]))
         while start < len(messages) and self._is_lcm_emitted_head_row(messages[start], frontier):
             start += 1
         return start, start < len(messages) and self._generated_context_carrier_remainder(messages[start]) is not None

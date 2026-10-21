@@ -6757,6 +6757,9 @@ class LCMEngine(
             if id(message) in generated_message_ids:
                 self._generated_ignored_active_replay_placeholder_message_ids.add(id(redacted_message))
                 self._generated_ignored_active_replay_placeholder_messages[id(redacted_message)] = redacted_message
+            registry = getattr(self, "_compress_occurrences", None)
+            if registry is not None and id(message) in registry:
+                registry[id(redacted_message)] = registry[id(message)]
             redacted_replay_messages.append(redacted_message)
         return redacted_replay_messages
 
@@ -6882,7 +6885,43 @@ class LCMEngine(
             matched += 1
         return result
 
-    def _ingest_messages(
+    def _ingest_messages(self, messages, **kwargs):
+        # Replay authority is the engine's scoped descriptor, never packet-shaped text.
+        saved = getattr(self, "_compress_occurrences", None)
+        proof = self._active_emission_proof()
+        parent = None
+        if self._config.user_carry_tokens > 0:
+            predecessors = self._rotation_predecessor_session_ids(self._session_id, max_hops=1)
+            parent = self._durable_commit_proof_payload(predecessors[0]) if predecessors else None
+        try:
+            for authority in (proof, {**proof, "emissions": proof.get("input_emissions", [])} if proof else None, parent):
+                if not authority:
+                    continue
+                packets = list(self._carry_packets(messages, authority))
+                if not packets:
+                    continue
+                if authority is parent:
+                    # Preserve base's cold-rotation re-store; remove only the proven packet.
+                    replacements = {}
+                    for row, packet, _ in packets:
+                        content = row["content"]
+                        start = content.index(packet)
+                        begin = start - 7 if content[:start].endswith("\n\n---\n\n") else start
+                        end = start + len(packet)
+                        if not begin and content[end:].startswith("\n\n"):
+                            end += 2
+                        replacements[id(row)] = {**row, "content": content[:begin] + content[end:]}
+                    messages = [replacements.get(id(row), row) for row in messages]
+                else:
+                    self._ingest_carry_proof = authority
+                    self._compress_occurrences = dict(zip(map(id, messages), self._replay_occurrences(messages, authority)[0]))
+                    break
+            return self._ingest_messages_impl(messages, **kwargs)
+        finally:
+            self._compress_occurrences = saved
+            self.__dict__.pop("_ingest_carry_proof", None)
+
+    def _ingest_messages_impl(
         self,
         messages: List[Dict[str, Any]],
         *,
