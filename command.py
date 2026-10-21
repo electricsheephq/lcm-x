@@ -4673,7 +4673,7 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             if not candidates:
                 values.append((f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)))
             record(progress, values)
-    if not candidates and not range_complete:
+    if not range_complete:
         record_ceiling(pending_complete=True)
 
 

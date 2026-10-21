@@ -289,6 +289,58 @@ def test_pinned_candidate_then_zero_chunk_run_does_not_starve(local_store, monke
         assert expected[1][0][0] == "139:0" and expected[1][1][0] == "39:0"
 
 
+def test_saved_pending_held_row_does_not_freeze_gap_discovery(local_store):
+    engine, _ = local_store
+    identity = seed(engine, 2110)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("UPDATE messages SET content='\t\n' WHERE store_id BETWEEN 10 AND 2109")
+        conn.execute("UPDATE messages SET content='Deeper uncovered fact.' WHERE store_id=50")
+        put(conn, identity, "chunk_policy_revision", CHUNK_POLICY_REVISION)
+        put(conn, identity, "chunk_policy_revision_through", 4)
+        scan_record(conn, identity, 9, pending=[5])
+        hold(conn, identity, [5])
+        _, docs, _ = select(conn, identity, record_progress=True)
+        first_scan = get(conn, identity, "chunk_gapfill_scan")
+        selected = {doc[0] for doc in docs}
+        for _ in range(4):
+            if "50:0" in selected:
+                break
+            _, docs, _ = select(conn, identity, record_progress=True)
+            selected.update(doc[0] for doc in docs)
+        assert "50:0" in selected, "held saved pending row must not freeze discovery"
+        assert "5:0" not in selected
+        assert first_scan == dict(revision=CHUNK_POLICY_REVISION, policy="conversational",
+                                  high=2110, ceiling=110)
+
+
+def test_empty_pending_held_row_under_zero_prefix_does_not_freeze_gap_discovery(local_store):
+    engine, _ = local_store
+    identity = seed(engine, 3501)
+    publish(engine, identity, range(2, 1001))
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("UPDATE messages SET content='\t\n' WHERE store_id BETWEEN 1501 AND 2999 "
+                     "OR store_id BETWEEN 3001 AND 3500")
+        put(conn, identity, "chunk_policy_revision", CHUNK_POLICY_REVISION)
+        put(conn, identity, "chunk_policy_revision_through", 1000)
+        scan_record(conn, identity, 1000, pending=[])
+        hold(conn, identity, [3000])
+    expected = set(range(1001, 1501))
+    for pass_index in range(40):
+        result = command._chunk_backfill_run(engine._config, engine._store.db_path,
+            apply=True, limit=32, retry_uncertain=False, policy="conversational", incremental=True)
+        assert not result["error"] and not result["failed"], result
+        with sqlite3.connect(engine._store.db_path) as conn:
+            if pass_index == 0:
+                first_scan = get(conn, identity, "chunk_gapfill_scan")
+            covered = {r[0] for r in conn.execute("SELECT store_id FROM lcm_chunk_meta")}
+        if expected <= covered:
+            break
+    assert expected <= covered, "held candidate must not hide deeper chunkable rows"
+    assert 3000 not in covered
+    assert first_scan == dict(revision=CHUNK_POLICY_REVISION, policy="conversational",
+                              high=3501, ceiling=3001)
+
+
 @pytest.mark.parametrize("legacy_pending", [False, True])
 def test_zero_chunk_run_longer_than_window_advances_and_cycle_continues(local_store, legacy_pending):
     engine, _ = local_store
