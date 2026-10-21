@@ -380,6 +380,65 @@ GUARDS = [
 
 
 @pytest.mark.parametrize("state", ["OFF", "ON-catching-up", "ON-covered"])
+@pytest.mark.parametrize("health", ["timeout", "error"])
+@pytest.mark.parametrize("partial", [True, False])
+def test_guard_preserves_preceding_failure(tmp_path, state, health, partial):
+    entries = receipts(tmp_path)
+    cell = tmp_path/f"0-{state}"
+    rows = list(map(json.loads, (cell/"recalls.jsonl").read_text().splitlines()))
+    rows[0]["health"] = health
+    write(cell/"recalls.jsonl", rows[:1] if partial else rows)
+    (cell/"final-audit.json").unlink()  # A guard can interrupt before the final audit.
+    request = common.load(cell/"request.json")
+    common.dump(cell/"request.json", dict(request, root=str(cell)))
+    def denied(_):
+        common.append(cell/"events.jsonl", dict(violation="network_attempt"))
+        raise RuntimeError("offline instrument denies network")
+    measurement.guarded_worker(denied, cell/"request.json")
+    result = common.load(cell/"raw-summary.json")
+    common.dump(cell/"summary.json", result)
+    assert rescore.v2(cell)["state"] == "FAIL"
+    for entry in entries:
+        if entry["state"] == state:
+            entry["result"] = result
+    recall.finalize_block(NS(out=tmp_path, seed=1586, standalone_calibration_s=.572), 0, entries)
+    assert result["state"] == rescore.v2(cell)["state"] == "FAIL"
+    common.dump(tmp_path/"summary.json", dict(state="FAIL", blocks=entries))
+    assert rescore.v2(tmp_path)["state"] == "FAIL"
+
+
+@pytest.mark.parametrize("state", ["OFF", "ON-catching-up", "ON-covered"])
+def test_aborted_root_preserves_failure_without_publications(tmp_path, state):
+    entries = receipts(tmp_path)
+    cell = tmp_path/f"0-{state}"
+    rows = list(map(json.loads, (cell/"recalls.jsonl").read_text().splitlines()))
+    rows[0]["health"] = "timeout"
+    write(cell/"recalls.jsonl", rows)
+    (cell/"publications.jsonl").unlink()  # publish() never creates an empty stream.
+    result = recall.score(rows, [], state=state, activity=dict(catchup_activity=False))
+    result.update(measurement_valid=True, catchup_activity=False)
+    for name in ("raw-summary.json", "summary.json"):
+        common.dump(cell/name, result)
+    for entry in entries:
+        if entry["state"] == state:
+            entry["result"] = result
+    recall.finalize_block(NS(out=tmp_path, seed=1586, standalone_calibration_s=.572), 0, entries)
+    common.dump(tmp_path/"summary.json", dict(state="ABORTED", reason="floor_deadline"))
+    assert rescore.v2(tmp_path)["state"] == "FAIL"
+    assert rescore.v2(cell)["state"] == "FAIL"
+
+
+@pytest.mark.parametrize("baseline,expected", [("empty", "ABORTED"), ("upgrade", "FAIL")])
+def test_aborted_coverage_rate_entry_scores_directly(tmp_path, baseline, expected):
+    source = tmp_path/"source"
+    coverage_pair(source)
+    root = tmp_path/"rate"
+    shutil.copytree(source/baseline, root)
+    common.dump(root/"summary.json", dict(state="ABORTED", reason="floor_deadline"))
+    assert rescore.v2(root)["state"] == expected
+
+
+@pytest.mark.parametrize("state", ["OFF", "ON-catching-up", "ON-covered"])
 @pytest.mark.parametrize("partial", [0, 5])
 @pytest.mark.parametrize("message,event,reason", GUARDS)
 def test_event_backed_guard_receipts(tmp_path, state, partial, message, event, reason):

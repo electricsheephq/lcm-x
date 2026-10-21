@@ -10,7 +10,7 @@ from .audit import audit, vector_counts
 from .common import REFERENCE_CALIBRATION_S, append, dump, foreground_request, load, rollup
 from .floor import calibration
 from .cpu import percentile
-from .measurement import SMOKE, arguments, bootstrap, catchup_activity, cell, guarded_worker, integrity, prepare, runtime, safety, trace, wait_covered
+from .measurement import SMOKE, arguments, bootstrap, catchup_activity, cell, guard_reason, guarded_worker, integrity, prepare, runtime, safety, trace, wait_covered
 
 INCOMPLETE_SEMANTIC_REASONS = (
     r"\b{arm} semantic index catching up\b",
@@ -328,6 +328,27 @@ def worker(request):
             engine.shutdown()
 
 
+def guarded_result(root, recorded):
+    """Keep a guard denial INVALID unless its existing receipts prove FAIL."""
+    def lines(path):
+        return [json.loads(s) for s in path.read_text().splitlines()] if path.is_file() else []
+    reason = recorded.get("reason")
+    if not reason or guard_reason(lines(root/"events.jsonl")) != reason:
+        return None
+    rows = lines(root/"recalls.jsonl")
+    if not rows:
+        return recorded
+    request = load(root/"request.json")
+    pubs = lines(root/"publications.jsonl")
+    counted = overlapping(rows, pubs)
+    activity = catchup_activity(root, min(r["start"] for r in counted), max(r["end"] for r in counted),
+        min(counted, key=lambda r: r["start"])["coverage_start"],
+        max(counted, key=lambda r: r["end"])["coverage_end"]) if counted else dict(catchup_activity=False)
+    calibrated = window_calibration(lines(root.parent/f"{request['block']}-ON-catching-up/events.jsonl"))
+    computed = score(rows, pubs, request["seed"], request["state"], activity, calibrated)
+    return dict(recorded, state=rollup([computed["state"], "INVALID"]))
+
+
 def finalize_block(a, block, results):
     root = a.out/f"{block}-ON-catching-up"
     def lines(path):
@@ -335,9 +356,14 @@ def finalize_block(a, block, results):
     calibrated = window_calibration(lines(root/"events.jsonl"))
     for entry in results:
         result = entry["result"]
-        if "classes" not in result:  # Early INVALID has no recall receipts to score.
-            continue
         root = a.out/f"{block}-{entry['state']}"
+        if "classes" not in result:
+            guarded = guarded_result(root, result)
+            if guarded is not None:
+                result.update(guarded)
+                for name in ("raw-summary.json", "summary.json"):
+                    dump(root/name, dict(load(root/name), **result))
+            continue
         scored = score(lines(root/"recalls.jsonl"), lines(root/"publications.jsonl"),
             a.seed, entry["state"], result, calibrated)
         if result.get("measurement_valid") is False:

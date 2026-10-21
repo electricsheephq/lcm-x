@@ -22,10 +22,16 @@ def verdict(path, max_wall):
 
 def v2(root, *, _entry=True):
     from .floor import rate
-    from .recall import score, window_calibration, overlapping
-    from .measurement import catchup_activity, guard_reason
+    from .recall import score, window_calibration, overlapping, guarded_result
+    from .measurement import catchup_activity
     def lines(path):
         return [json.loads(s) for s in path.read_text().splitlines()]
+    def coverage(cell):
+        raw = load(cell/"catchup/summary.json")
+        seconds = raw.get("end_to_end_s")
+        if seconds is None:
+            seconds = max(r["elapsed_s"] for r in lines(cell/"catchup/progress.jsonl"))
+        return rate(raw, seconds, load(cell/"manifest.json")["rows"], lines(cell/"catchup/events.jsonl"))
     if not (root/"summary.json").is_file() and not (root/"raw-summary.json").is_file():
         raise ValueError(f"missing root summary.json: {root}")
     recorded = load(root/"summary.json" if (root/"summary.json").exists() else root/"raw-summary.json")
@@ -35,24 +41,26 @@ def v2(root, *, _entry=True):
         for path in root.rglob("raw-summary.json"):
             cell = path.parent
             if all((cell/name).is_file() for name in (
-                    "request.json", "recalls.jsonl", "publications.jsonl", "final-audit.json")):
+                    "request.json", "recalls.jsonl", "final-audit.json")):
                 complete.append(v2(cell, _entry=False))
         for path in root.rglob("catchup/summary.json"):
             cell = path.parent.parent
             if (cell/"summary.json").is_file() and (cell/"manifest.json").is_file() and (cell/"catchup/events.jsonl").is_file():
-                complete.append(v2(cell, _entry=False))
+                complete.append(coverage(cell) if cell == root else v2(cell, _entry=False))
         return dict(recorded, state="FAIL") if any(c["state"] == "FAIL" for c in complete) else recorded
     raw_summary = load(root/"raw-summary.json") if (root/"raw-summary.json").exists() else {}
     events = lines(root/"events.jsonl") if (root/"events.jsonl").is_file() else []
-    if raw_summary.get("state", recorded.get("state")) == recorded.get("state") == "INVALID":
+    if raw_summary.get("state", recorded.get("state")) == recorded.get("state") in ("INVALID", "FAIL"):
         reason = raw_summary.get("reason", recorded.get("reason"))
         same_reason = recorded.get("reason") == reason
-        if (same_reason and reason == "covered_store_incomplete" and root.name.endswith("-ON-covered")
+        if (recorded["state"] == "INVALID" and same_reason and reason == "covered_store_incomplete" and root.name.endswith("-ON-covered")
                 and not (root/"recalls.jsonl").exists() and "classes" not in raw_summary and "classes" not in recorded):
             return recorded
-        if same_reason and "classes" not in raw_summary and "classes" not in recorded and guard_reason(events) == reason and reason:
-            return recorded
-        if same_reason and reason == "volume_cap" and any(e.get("event") == "volume_cap" for e in events):
+        if same_reason and "classes" not in raw_summary and "classes" not in recorded:
+            guarded = guarded_result(root, recorded)
+            if guarded is not None:
+                return guarded
+        if recorded["state"] == "INVALID" and same_reason and reason == "volume_cap" and any(e.get("event") == "volume_cap" for e in events):
             if not (root/"recalls.jsonl").exists() or not lines(root/"recalls.jsonl"):
                 assert raw_summary.get("measurement_valid") is False
                 return recorded
@@ -81,19 +89,15 @@ def v2(root, *, _entry=True):
         return dict(state=recorded["state"], blocks=cells)
     if (root/"catchup").is_dir():
         recorded = load(root/"summary.json")
-        raw = load(root/"catchup/summary.json")
-        seconds = raw.get("end_to_end_s")
-        if seconds is None:
-            seconds = max(r["elapsed_s"] for r in lines(root/"catchup/progress.jsonl"))
-        computed = rate(raw, seconds,
-            load(root/"manifest.json")["rows"], lines(root/"catchup/events.jsonl"))
+        computed = coverage(root)
         assert all(recorded[k] == v for k, v in computed.items())
     else:
         assert (root/"recalls.jsonl").is_file(), "recall receipts or event-backed early INVALID required"
         recorded = load(root/"raw-summary.json")
         request = load(root/"request.json")
         calibrated = window_calibration(lines(root.parent/f"{request['block']}-ON-catching-up/events.jsonl"))
-        rows, pubs = lines(root/"recalls.jsonl"), lines(root/"publications.jsonl")
+        rows = lines(root/"recalls.jsonl")
+        pubs = lines(root/"publications.jsonl") if (root/"publications.jsonl").is_file() else []
         counted = overlapping(rows, pubs)
         activity = catchup_activity(root, min(r["start"] for r in counted), max(r["end"] for r in counted),
             min(counted, key=lambda r: r["start"])["coverage_start"],
