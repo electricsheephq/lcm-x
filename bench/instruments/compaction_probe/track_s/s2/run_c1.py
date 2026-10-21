@@ -62,7 +62,9 @@ def main():
             wall = logs / f"{name}.log.wall"
             if (run / "summary.json").exists():
                 summary = json.loads((run / "summary.json").read_text())
-                if summary.get("status") == "DONE" and summary.get("material_sha256") == material_sha and all(
+                if summary.get("status") == "DONE" and summary.get("material_sha256") == material_sha and (
+                        summary.get("worktree_head") == head if arm.startswith("LCMX") else
+                        summary.get("host_sha") == host_sha and summary.get("worktree_head") == host_sha) and all(
                         (run / f"cp-{cp}" / "summary.json").exists() for cp in cps):
                     print(f"SKIP completed {arm} seed-{seed}", flush=True)
                     continue

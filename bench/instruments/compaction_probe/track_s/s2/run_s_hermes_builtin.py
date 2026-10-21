@@ -137,7 +137,7 @@ def main():
               (reader.SolLowReader if a.reader == "sol-low" else reader.AstraLowReader)(out / "reader-scratch"))
     summary = dict(context_length=a.context_length, threshold_tokens=run.engine.threshold_tokens,
                    threshold_percent=run.engine.real.threshold_percent, tail_mode=run.engine.real.tail_mode,
-                   timeout_s=S2.replay_timeout(man["decision_checkpoint"]["tokens"]), arm=arm, worktree_head=host["sha"], worktree=str(src), isolation=isolation, status="DONE", seed=f"seed-{a.seed}",
+                   timeout_s=S2.replay_timeout(man["decision_checkpoint"]["tokens"]), arm=arm, host_sha=host["sha"], worktree_head=host["sha"], worktree=str(src), isolation=isolation, status="DONE", seed=f"seed-{a.seed}",
                    stop_row_index=cps[-1]["row_index"], reader_readback=rd.readback,
                    material_sha256=S2.sha(sdir / "material.manifest.json"), late_corrected_value_checkpoint=S2.CP.late_checkpoint(sdir))
     for cp in run.snaps:
