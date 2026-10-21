@@ -241,6 +241,8 @@ def test_12_cli_score_activation_missing_baseline_and_deadline(tmp_path,monkeypa
     run.execute(tmp_path/'run',Fake())
     monkeypatch.setattr('sys.argv',['derived','score','--product','unused','--source',str(tmp_path/'run'/'inputs.json'),'--run',str(tmp_path/'run')])
     assert run.main()==0 and (tmp_path/'run'/'RESULT-MANIFEST.json').exists()
+    before=(tmp_path/'run'/'RESULT-MANIFEST.json').read_bytes()
+    assert run.main()==0 and (tmp_path/'run'/'RESULT-MANIFEST.json').read_bytes()==before
     monkeypatch.setattr('sys.argv',['derived','answer','--product','unused','--source',str(tmp_path/'run'/'inputs.json'),'--run',str(tmp_path/'run')])
     assert run.main()==2
     incomplete=bundle() | dict(synthetic=False,w1_receipt=dict(status='INCOMPLETE'),w1_cache='missing')

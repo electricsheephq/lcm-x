@@ -148,6 +148,9 @@ def card(root):
     def invoke(*args):
         if tool.execute(tool.parser().parse_args([args[0],str(root),*args[1:]])):
             raise Incomplete('result card')
+    if (root/'RESULT-MANIFEST.json').exists():
+        invoke('check')
+        return
     invoke('init','--project','lcm-x','--kind','benchmark','--owner-lane','dm0','--code-dir',str(Path(__file__).resolve().parents[2]),
            '--command','python -m bench.fmp.derived score --product PRODUCT --source INPUT --run RUN','--claim-class','advisory','--local-raw','false')
     (root/'RESULT.md').write_text('# DM0 instrument\n\n| Result | Receipt |\n|---|---|\n| '+report['verdict']+
