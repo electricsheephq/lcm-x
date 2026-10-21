@@ -248,7 +248,8 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
     elif name == "compaction_progress":
         command = ("inspect lcm_status zero_leaf_streak and the 'LCM compaction stop' lines: reason= names what stops "
                    "the leaf, and for a retained occurrence blocked= gives its store_id, role and kind; stored rows stay intact and "
-                   "reachable (lcm_grep / lcm_expand); a new session clears a stop that persists")
+                   "reachable (lcm_grep / lcm_expand); a new session clears a stop that persists; "
+                   "offline diagnosis: docs/operations/store-wedge-inspect.md")
         warning_only = True
         rationale = ("over-threshold passes that store no leaf leave the session over its threshold, so every turn pays "
                      "for the whole prompt; this is an operating state, not persisted-state corruption")
