@@ -1,8 +1,8 @@
 # Frontier Measurement Protocol v1
 
 Refs electricsheephq/lcm-x#1189. This harness produces local measurement
-artifacts; the 30-question smoke is not a published quality row. No host contract
-changes. LCM-X is imported from the explicitly selected checkout, never edited.
+artifacts; the smoke (30 LME-S questions plus every LoCoMo conv-30 question outside
+category 5) is not a published quality row. No host contract changes. LCM-X is imported from the explicitly selected checkout, never edited.
 
 Run from the checkout with Python 3.11+ and `httpx`; reuse an existing LCM-X
 environment. Local embeddings require exactly fastembed 0.8.0. No install is
@@ -71,8 +71,10 @@ Judging uses the CLI defaults: Sol/medium on every answer and Opus on a seeded
 All commands use four workers and share the subscription quota ledger `quota.json`;
 there is no spend ledger or dollar cap in this smoke. OpenRouter remains a separate
 opt-in path. The output must be outside the checkout (for example, an absolute run
-directory). The script skips existing answer/judge files; individual `answer` and
-`judge` commands refuse to overwrite them. Use a new output directory for a new run.
+directory). The script skips an answer step only when both paired arms' `answers.jsonl`
+files already exist, and it does not check that they are complete; individual `answer`
+and `judge` commands refuse to overwrite existing files. After an interrupted answer step,
+or for a new run, use a new output directory.
 
 Smoke matrix and selection: [run_smoke.sh](run_smoke.sh). CLI defaults and options:
 [run.py](run.py); model defaults: [models.py](models.py).
