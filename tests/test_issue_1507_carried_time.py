@@ -76,7 +76,7 @@ def test_recall_discloses_without_rewriting(source, monkeypatch, mode):
     (hit,) = [hit for hit in payload["hits"] if hit["store_id"] == row["store_id"]]
     assert hit.get("time_uncertain") == ("carried" if uncertain else None)
     assert hit["event_time"] == ("2024-03-21T12:00:00Z" if not uncertain else "2024-03-20T12:00:00Z")
-    if mode not in {"snippets", "session"}:
+    if mode != "snippets":
         for field in ("observation_time", "occurrence_time"):
             assert hit[field].get("time_uncertain") == ("carried" if uncertain else None)
 
@@ -97,9 +97,10 @@ def test_evidence_as_of_retains_uncertain_rows(source, question_date):
         question="What is the project status?", question_date=question_date,
         baseline_refs=[dict(exact_ref=f"lcm:{row['store_id']}:0-{len(TEXT)}")],
     ), engine=engine))
-    if question_date == "2024-03-19" and not uncertain:
+    if question_date == "2024-03-19":
         assert payload["evidence"] == []
         assert payload["exclusions"][0]["reason_code"] == "source_observed_after_question_as_of"
+        assert payload["exclusions"][0].get("time_uncertain") == ("carried" if uncertain else None)
         return
     (item,) = payload["evidence"]
     for field in ("observation_time", "occurrence_time"):
@@ -130,8 +131,8 @@ def test_as_of_mixed_sources_keep_ordinary_filter(source):
         baseline_refs=[dict(exact_ref=f"lcm:{item['store_id']}:0-{len(item['content'])}")
                        for item in (prior, row)],
     ), engine=engine))
-    assert [item["store_id"] for item in payload["evidence"]] == ([row["store_id"]] if uncertain else [])
-    assert len(payload["exclusions"]) == (1 if uncertain else 2)
+    assert payload["evidence"] == []
+    assert len(payload["exclusions"]) == 2
 
 
 def test_relation_read_does_not_create_schema(tmp_path):

@@ -1268,7 +1268,7 @@ class MessageStore:
             self._commit()
         return added
 
-    def get_carried_stamp_ids(self, store_ids: List[int], *, connection=None) -> set[int]:
+    def get_carried_stamp_ids(self, store_ids: List[int], *, connection=None, session_ids=None) -> set[int]:
         """Read carried-time provenance without creating schema or changing rows.
 
         A caller's read-only connection keeps recall's existing deadline policy.
@@ -1276,10 +1276,17 @@ class MessageStore:
         """
         ids = sorted({int(i) for i in store_ids})
         conn = connection if connection is not None else self._conn
-        if not ids or not conn.execute(
+        if not (ids or session_ids) or not conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
         ).fetchone():
             return set()
+        if session_ids:
+            # Collect the entire candidate ID set in SQL before session formatting,
+            # including neighbors later rejected by the payload budget.
+            return {int(row[0]) for row in conn.execute(
+                "SELECT store_id FROM message_relations WHERE kind = 'carried_stamp' "
+                "AND store_id IN (SELECT store_id FROM messages WHERE session_id IN ("
+                + ",".join("?" for _ in session_ids) + "))", session_ids)}
         found: set[int] = set()
         for start in range(0, len(ids), 500):
             chunk = ids[start:start + 500]

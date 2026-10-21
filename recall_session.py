@@ -11,6 +11,7 @@ import time
 from . import tokens
 from .message_analysis import _tool_call_id
 from .reasoning import resolve_occurrence_time
+from .recall_delivery import _without_event_time
 from .retrieval_context import RetrievalContext
 
 TOKEN_BUDGET, CHAR_BUDGET = 16_000, 64_000
@@ -105,7 +106,13 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
     def evidence_fits():
         # Pointers never outrank source evidence, during admission or refit.
         while not fits():
-            if delivery.get("seed_leads"):
+            uncertain = [h for g in admitted for h in g if h.get("time_uncertain")]
+            if uncertain:
+                hit = uncertain[-1]
+                stripped = _without_event_time(hit)
+                hit.clear()
+                hit.update(stripped)
+            elif delivery.get("seed_leads"):
                 delivery["seed_leads"].pop()
             elif delivery["summary_leads"]:
                 delivery["summary_leads"].pop()
@@ -176,6 +183,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
 
     def item(row):
         sid = row["store_id"]
+        if sid in carried_ids:
+            row = {**row, "time_uncertain": "carried"}
         text = row.get("content") or ""
         seed = matched.get(sid)
         hit = dict(kind="message_excerpt", session_id=row["session_id"], store_id=sid,
@@ -201,6 +210,9 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 ingested_at=row.get("ingested_at") or row.get("timestamp"),
                 source="benchmark_session_date" if row["session_id"] in dates else
                        "host_message_timestamp" if row.get("observed_at") is not None else "ingest_fallback")
+            if row.get("time_uncertain"):
+                for key in ("observation_time", "occurrence_time"):
+                    hit[key]["time_uncertain"] = "carried"
         return hit
 
     try:
@@ -251,6 +263,9 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
             eligible += 1
             if eligible >= response["limit"]:
                 break
+        check()
+        carried_ids = store.get_carried_stamp_ids([], session_ids=list(sessions))
+        check()
         for sid, meta in sessions.items():
             queue = deque(meta["seed_ids"])
             visited, emitted = set(), set()

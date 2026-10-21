@@ -3007,14 +3007,6 @@ def _lcm_recall_event_time(stored: dict[str, Any] | None) -> dict[str, str]:
     return fields
 
 
-def _lcm_recall_time_row(engine, row):
-    """Add read-side uncertainty without changing a stored row or its time."""
-    if (row and row.get("observed_at") is not None
-            and engine._store.get_carried_stamp_ids([row["store_id"]])):
-        return {**row, "time_uncertain": "carried"}
-    return row
-
-
 def _lcm_recall_event_time_rows(
     engine: "LCMEngine", store_ids: list[int], *, deadline: float
 ) -> tuple[dict[int, dict[str, Any]], str | None]:
@@ -3110,8 +3102,6 @@ def _lcm_recall_answer_ready_content(
     stored_by_id = (
         rows_by_id if rows_by_id is not None else engine._store.get_batch(store_ids)
     )
-    timed_ids = [sid for sid in store_ids if stored_by_id.get(sid, {}).get("observed_at") is not None]
-    carried_ids = engine._store.get_carried_stamp_ids(timed_ids) if timed_ids else set()
     hydrated: dict[tuple, dict[str, Any]] = {}
 
     for entry in selected:
@@ -3199,9 +3189,7 @@ def _lcm_recall_answer_ready_content(
             "content_source": "message",
             "role": stored.get("role"),
             "source": stored.get("source") or "",
-            **_lcm_recall_event_time({
-                **stored, **({"time_uncertain": "carried"} if int(raw_store_id) in carried_ids else {}),
-            }),
+            **_lcm_recall_event_time(stored),
         }
     return hydrated
 
@@ -4428,7 +4416,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         session_delivery = partial(
             deliver_session, engine=engine, deadline=deadline, excluded=excluded_session_ids,
             allowed=candidate_session_ids, seen_refs=seen_refs, delta_requested=delta_requested,
-            event_time_fields=lambda row: _lcm_recall_event_time(_lcm_recall_time_row(engine, row)),
+            event_time_fields=_lcm_recall_event_time,
             occurrence=include_occurrence_time,
             summary_leads=summary_leads,
         )
@@ -4470,7 +4458,7 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         event_time_fields=_lcm_recall_event_time,
         read_occurrence_source=lambda store_id: (
             getattr(engine, "_session_occurrence_dates", {}) or {},
-            _lcm_recall_time_row(engine, engine._store.get(store_id)),
+            engine._store.get(store_id),
         ),
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
         session_delivery=session_delivery,
