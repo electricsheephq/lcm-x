@@ -592,6 +592,8 @@ class FakeCodex:
         self.text, self.model, self.items, self.calls, self.used, self.failure = text, model, items, calls, used, failure
 
     def __call__(self, cmd, stdin, capture_output, text, env, cwd, timeout):
+        from bench.fmp.tests.test_mcp_readiness import fake_mcp_ready
+        fake_mcp_ready(Path(stdin.name).parent)
         self.commands.append(cmd)
         self.envs.append(env)
         self.stdins.append(Path(stdin.name).read_text())
@@ -700,6 +702,8 @@ class FakeClaude:
         self.models, self.tools, self.limit, self.deny, self.commands, self.envs = models_seen, tools, limit, deny, [], []
 
     def __call__(self, cmd, stdin, capture_output, text, env, cwd, timeout):
+        from bench.fmp.tests.test_mcp_readiness import fake_mcp_ready
+        fake_mcp_ready(Path(stdin.name).parent)
         self.commands.append(cmd)
         self.envs.append(dict(env))
         self.cwds = [*getattr(self, "cwds", []), Path(cwd)]
@@ -726,6 +730,9 @@ def claude_backend(tmp_path, monkeypatch, **fake):
 
 
 def test_claude_backend_isolated_auth_no_tools_and_model_check(tmp_path, monkeypatch):
+    home = tmp_path / "synthetic-home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
     backend, _ = claude_backend(tmp_path, monkeypatch)
     records = []
     message = backend.call(OPUS, [{"role": "system", "content": "Sys."}, {"role": "user", "content": "Q?"}], records)
@@ -817,7 +824,7 @@ def test_mcp_reader_serves_production_outputs_unchanged(stores, question, tmp_pa
     assert replies[1]["result"]["tools"][0]["inputSchema"] == offered[0]["function"]["parameters"]
     assert replies[2]["result"]["content"][0]["text"] == local and "teal" in local
     assert json.loads(replies[4]["result"]["content"][0]["text"])["error"].startswith("tool budget exhausted")
-    entries = [json.loads(x) for x in log.read_text().splitlines()]
+    entries = [entry for x in log.read_text().splitlines() if "tool" in (entry := json.loads(x))]
     assert [e["counted"] for e in entries] == [True, True, False]
     assert set(entries[0]) == {"at", "tool", "counted", "error", "args_sha256", "latency_s", "output_bytes"}
     assert "teal" not in log.read_text()

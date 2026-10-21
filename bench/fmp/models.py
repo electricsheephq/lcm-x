@@ -18,7 +18,7 @@ from pathlib import Path
 
 import httpx
 
-from .common import utc, write_json
+from .common import sha, utc, write_json
 
 READERS = ("openai/gpt-6.1-sol", "anthropic/claude-opus-5.5", "anthropic/claude-fable-5.1")
 JUDGES = READERS[:2]
@@ -288,6 +288,9 @@ class Harness:
         env = {"HOME": str(Path.home()), "PATH": os.environ.get("PATH", ""), "HERMES_DISABLE_LAZY_INSTALLS": "1",
                "PYTHONDONTWRITEBYTECODE": "1", **{k: "4" for k in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS",
                                                                      "MKL_NUM_THREADS", "ORT_NUM_THREADS")}}
+        env.update({k: os.environ[k] for k in ("TMPDIR", "FMP_CACHE_ROOT", "LCM_LONGMEMEVAL_FASTEMBED_CACHE",
+            "FASTEMBED_CACHE_PATH", "HF_HOME", "HF_HUB_CACHE", "HUGGINGFACE_HUB_CACHE", "TRANSFORMERS_CACHE",
+            "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE", "HF_HUB_DISABLE_TELEMETRY") if k in os.environ})
         return {"command": sys.executable, "args": [str(Path(__file__).with_name("mcp_reader.py")), str(call / "server.json")],
                 "env": env}
 
@@ -316,7 +319,37 @@ class Harness:
         return proc
 
     def agentic(self, spec, messages, records, server):
-        return self.call(spec, messages, records, server=server)
+        for attempt in range(2):
+            failure = None
+            start = len(records)
+            try:
+                result = self.call(spec, messages, records, server=server)
+            except (RuntimeError, ToolViolation, BudgetStopped) as exc:
+                if len(records) == start:
+                    raise
+                failure = exc
+            record = records[-1]
+            log = Path(record["mcp_log"])
+            events = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+            initialized = next((e for e in events if e.get("event") == "initialize"), {})
+            offered = next((e for e in reversed(events) if e.get("event") == "tools/list"), {})
+            status = initialized.get("startup_status", "no_initialize")
+            if any(e.get("event") == "startup_failed" for e in events):
+                status = "startup_failed"
+            count = offered.get("offered_tools", 0)
+            record.update(mcp_ready=status == "ok" and count > 0, offered_tools=count,
+                offered_tools_hash=offered.get("offered_tools_hash", sha(b"")), startup_status=status,
+                lcm_tool_calls=sum("tool" in e for e in events), retries=attempt)
+            if isinstance(failure, (ToolViolation, BudgetStopped)):
+                raise failure
+            if not record["mcp_ready"] or not count:
+                record.update(status="error", error="mcp_unavailable")
+                if not attempt:
+                    continue
+                raise RuntimeError("mcp_unavailable")
+            if failure:
+                raise failure
+            return result
 
 
 class Codex(Harness):
