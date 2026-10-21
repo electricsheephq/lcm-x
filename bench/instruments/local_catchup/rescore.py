@@ -40,6 +40,12 @@ def v2(root, *, _entry=True):
         complete = []
         for path in root.rglob("raw-summary.json"):
             cell = path.parent
+            raw = load(path)
+            if "classes" not in raw and raw.get("state") in ("INVALID", "FAIL"):
+                guarded = guarded_result(cell, raw)
+                if guarded is not None:
+                    complete.append(guarded if cell == root else v2(cell, _entry=False))
+                    continue
             if all((cell/name).is_file() for name in (
                     "request.json", "recalls.jsonl", "final-audit.json")):
                 complete.append(v2(cell, _entry=False))

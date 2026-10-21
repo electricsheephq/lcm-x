@@ -382,7 +382,8 @@ GUARDS = [
 @pytest.mark.parametrize("state", ["OFF", "ON-catching-up", "ON-covered"])
 @pytest.mark.parametrize("health", ["timeout", "error"])
 @pytest.mark.parametrize("partial", [True, False])
-def test_guard_preserves_preceding_failure(tmp_path, state, health, partial):
+@pytest.mark.parametrize("aborted", [False, True])
+def test_guard_preserves_preceding_failure(tmp_path, state, health, partial, aborted):
     entries = receipts(tmp_path)
     cell = tmp_path/f"0-{state}"
     rows = list(map(json.loads, (cell/"recalls.jsonl").read_text().splitlines()))
@@ -403,7 +404,8 @@ def test_guard_preserves_preceding_failure(tmp_path, state, health, partial):
             entry["result"] = result
     recall.finalize_block(NS(out=tmp_path, seed=1586, standalone_calibration_s=.572), 0, entries)
     assert result["state"] == rescore.v2(cell)["state"] == "FAIL"
-    common.dump(tmp_path/"summary.json", dict(state="FAIL", blocks=entries))
+    summary = dict(state="ABORTED", reason="floor_deadline") if aborted else dict(state="FAIL", blocks=entries)
+    common.dump(tmp_path/"summary.json", summary)
     assert rescore.v2(tmp_path)["state"] == "FAIL"
 
 
