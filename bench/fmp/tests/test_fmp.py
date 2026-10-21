@@ -624,7 +624,11 @@ def codex_backend(tmp_path, **fake):
     return backend, quota
 
 
-def test_codex_backend_isolated_text_call_and_accounting(tmp_path):
+def test_codex_backend_isolated_text_call_and_accounting(tmp_path, monkeypatch):
+    owner = tmp_path / "owner"
+    (owner / ".codex").mkdir(parents=True)
+    (owner / ".codex/auth.json").write_text("{}")
+    monkeypatch.setenv("HOME", str(owner))
     backend, quota = codex_backend(tmp_path)
     records = []
     try:
