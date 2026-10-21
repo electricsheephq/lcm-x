@@ -730,9 +730,8 @@ def claude_backend(tmp_path, monkeypatch, **fake):
 
 
 def test_claude_backend_isolated_auth_no_tools_and_model_check(tmp_path, monkeypatch):
-    home = tmp_path / "synthetic-home"
-    home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    # HOME is tmp_path, so a call cwd regressing under the run directory would sit inside HOME.
+    monkeypatch.setenv("HOME", str(tmp_path))
     backend, _ = claude_backend(tmp_path, monkeypatch)
     records = []
     message = backend.call(OPUS, [{"role": "system", "content": "Sys."}, {"role": "user", "content": "Q?"}], records)

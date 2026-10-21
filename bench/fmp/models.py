@@ -343,10 +343,11 @@ class Harness:
             if isinstance(failure, (ToolViolation, BudgetStopped)):
                 raise failure
             if not record["mcp_ready"] or not count:
-                record.update(status="error", error="mcp_unavailable")
+                # Keep the backend's own failure (timeout, model_mismatch, ...) beside the readiness label.
+                record.update(status="error", error="mcp_unavailable", backend_error=record.get("error"))
                 if not attempt:
                     continue
-                raise RuntimeError("mcp_unavailable")
+                raise RuntimeError("mcp_unavailable") from failure
             if failure:
                 raise failure
             return result
