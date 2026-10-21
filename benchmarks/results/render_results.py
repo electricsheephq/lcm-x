@@ -36,7 +36,7 @@ def render_readme_results(data):
     """The short README subsection shares the page's data and ranking logic."""
     entries = strongest_entries(data)
     placements = "; ".join(
-        f'[{entry["benchmark"]}: {placement(data, entry["benchmark"])}]({entry["source_url"]}#result-summary)'
+        f'[{entry["benchmark"]} {entry["value"]:.2f}: {placement(data, entry["benchmark"])}]({entry["source_url"]}#result-summary)'
         for entry in entries
     )
     first = entries[0]
@@ -82,7 +82,7 @@ def render_results(data):
         "Not yet run: " + ", ".join(
             entry["benchmark"] for entry in data["entries"] if entry["status"] == "not_run"
         ) + ".",
-        f'In review: {data["in_review"]["board"]} entry is {data["in_review"]["status"]}.',
+        f'In review: our {data["in_review"]["board"]} entry; the board publishes its own results.',
         "",
     ]
     return "\n".join(lines)

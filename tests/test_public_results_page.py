@@ -80,8 +80,9 @@ def test_page_values_and_placements_match_snapshot(data):
         assert suffix == expected_suffix
         assert entry["source_url"] in links and entry["evidence_url"] in links
     assert "Not yet run: BEAM 10M." in page
-    assert "In review: Agent Memory Leaderboard Cycle 2 entry is in review." in page
-    assert page.split("In review:")[1].strip() == "Agent Memory Leaderboard Cycle 2 entry is in review."
+    expected_review = "our Agent Memory Leaderboard Cycle 2 entry; the board publishes its own results."
+    assert f"In review: {expected_review}" in page
+    assert page.split("In review:")[1].strip() == expected_review
     for entry in entries:
         assert entry["disclosures"] in page
 
@@ -103,7 +104,7 @@ def test_readme_results_only_quote_sourced_claims(data):
         rank = scores.index(entry["value"]) + 1
         suffix = {1: "st", 2: "nd"}[rank]
         claims.append(
-            f'[{entry["benchmark"]}: {rank}{suffix} of {len(scores)}]({entry["source_url"]}#result-summary)'
+            f'[{entry["benchmark"]} {entry["value"]:.2f}: {rank}{suffix} of {len(scores)}]({entry["source_url"]}#result-summary)'
         )
     assert lines[3] == "; ".join(claims) + "."
     assert lines[4] == "[Results, configuration, evidence and disclosures](benchmarks/RESULTS.md)."

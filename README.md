@@ -159,7 +159,7 @@ gaps, and proof boundaries.
 ### Results
 
 [OmniMemEval](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md): contributor-run, accepted upstream.
-[BEAM 100K: 1st of 12](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary); [LongMemEval: 2nd of 13](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary).
+[BEAM 100K 71.84: 1st of 12](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary); [LongMemEval 87.00: 2nd of 13](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary).
 [Results, configuration, evidence and disclosures](benchmarks/RESULTS.md).
 
 ## LCM vs built-in compression
