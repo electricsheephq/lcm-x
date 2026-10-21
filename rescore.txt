@@ -1,0 +1,20 @@
+import json
+from pathlib import Path
+run=Path(__file__).resolve().parent
+sha="e1dc2a164c66d2419d8d580852d69eb851f95eed"
+stock=json.loads((run/"stock-probe.json").read_text())
+fixed=json.loads((run/"fixed-probe.json").read_text())
+summary={"baseline_sha":sha,"fixed_command_sha256":fixed["command_py_sha256"],"provider":"fake/offline","rows_per_cell":6000,"notes":"same machine, stock then fixed, fresh deterministic cells; first productive slice profiled and excluded from timing; no sleep or real embedding cost", "cells":{}}
+for shape in ("empty","upgrade"):
+    assert stock["cells"][shape]["initial_selection_signature"] == fixed["cells"][shape]["initial_selection_signature"]
+    row={"initial_selection_equal":True}
+    for variant,data in (("stock",stock),("fixed",fixed)):
+        slices=data["cells"][shape]["slices"]
+        productive=[r for r in slices if r["index"]%4==1]
+        timings=[r["elapsed_s"] for r in productive if not r["profiled"]]
+        row[variant]={"ordinary_gap_chunkings":[r["chunk_calls"].get("_chunk_gapfill_rows",0) for r in productive], "retry_gap_chunkings":[r["chunk_calls"].get("_chunk_gapfill_rows",0) for r in slices if r["index"]%4==3], "productive_seconds":timings,"productive_seconds_mean":sum(timings)/len(timings)}
+    summary["cells"][shape]=row
+assert fixed["acceptance"]==dict(ordinary_bound=True,retry_bound=True)
+assert stock["acceptance"]==dict(ordinary_bound=False,retry_bound=False)
+(run/"paired-summary.json").write_text(json.dumps(summary,indent=2)+"\n")
+print(json.dumps(summary,indent=2),flush=True)

@@ -1,0 +1,763 @@
+{
+  "code_sha": "e1dc2a164c66d2419d8d580852d69eb851f95eed",
+  "command_py_sha256": "2e3939d7feaad65290004c25ba5e49d60d1a361fcf98ae02b14a1d523e7267a4",
+  "provider": "fake/offline",
+  "rows": 6000,
+  "slice_delays": "computed by product, not slept",
+  "cells": {
+    "empty": {
+      "build_seconds": 4.096158792002825,
+      "tokenizer": "NoneType",
+      "initial_selection_signature": "343906fef33d6c05c2f2c4d91c68a7a08a9e3eaa813a0b9de029a6c3ed1118b2",
+      "expected_chunks": 8008,
+      "long_chunks": 0,
+      "slices": [
+        {
+          "index": 0,
+          "control": false,
+          "elapsed_s": 0.0061162919737398624,
+          "result": {
+            "vectors_written": 12,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154625.236900083,
+            "uncertain": false,
+            "cycle_remaining": false,
+            "stage": 1,
+            "cycle_progress": 12,
+            "active_s": 0.006088875001296401,
+            "overrun_s": 0.0,
+            "delay": 0.009133312501944602,
+            "stop_reason": "",
+            "rows_written": 12,
+            "outcome": "summaries=complete:12"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 1,
+          "control": false,
+          "elapsed_s": 0.021420707984361798,
+          "result": {
+            "vectors_written": 31,
+            "scan_frontier_advance": true,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154625.243047458,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 2,
+            "cycle_progress": 44,
+            "active_s": 0.02137037500506267,
+            "overrun_s": 0.0,
+            "delay": 0.032055562507594004,
+            "stop_reason": "",
+            "rows_written": 31,
+            "outcome": "chunks=complete:31"
+          },
+          "chunk_calls": {
+            "_chunk_pending_rows": 22
+          },
+          "chunk_seconds": {
+            "_chunk_pending_rows": 0.009013915929244831
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5979,
+          "source_id_max": 6000,
+          "profiled": true
+        },
+        {
+          "index": 2,
+          "control": false,
+          "elapsed_s": 0.005465291993459687,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154625.265878625,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 3,
+            "cycle_progress": 44,
+            "active_s": 0.005434165999758989,
+            "overrun_s": 0.0,
+            "delay": 0.008151248999638483,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "summaries=complete:0"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 3,
+          "control": false,
+          "elapsed_s": 0.0063581669819541276,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154625.271348083,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 0,
+            "cycle_progress": 0,
+            "active_s": 0.006327082985080779,
+            "overrun_s": 0.0,
+            "delay": 0.009490624477621168,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "chunks=complete:0"
+          },
+          "chunk_calls": {
+            "_chunk_pending_rows": 1
+          },
+          "chunk_seconds": {
+            "_chunk_pending_rows": 0.0008047910232562572
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5979,
+          "source_id_max": 5979,
+          "profiled": false
+        },
+        {
+          "index": 4,
+          "control": false,
+          "elapsed_s": 0.0056212079944089055,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154625.277710666,
+            "uncertain": false,
+            "cycle_remaining": false,
+            "stage": 1,
+            "cycle_progress": 0,
+            "active_s": 0.0055799169931560755,
+            "overrun_s": 0.0,
+            "delay": 0.008369875489734113,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "summaries=complete:0"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 5,
+          "control": false,
+          "elapsed_s": 0.01870333301485516,
+          "result": {
+            "vectors_written": 32,
+            "scan_frontier_advance": true,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154625.283336708,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 2,
+            "cycle_progress": 33,
+            "active_s": 0.018671416997676715,
+            "overrun_s": 0.0,
+            "delay": 0.028007125496515073,
+            "stop_reason": "",
+            "rows_written": 32,
+            "outcome": "chunks=complete:32"
+          },
+          "chunk_calls": {
+            "_chunk_pending_rows": 24
+          },
+          "chunk_seconds": {
+            "_chunk_pending_rows": 0.008833919040625915
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5958,
+          "source_id_max": 6000,
+          "profiled": false
+        },
+        {
+          "index": 6,
+          "control": false,
+          "elapsed_s": 0.005063750024419278,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154625.302046,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 3,
+            "cycle_progress": 33,
+            "active_s": 0.0050374160055071115,
+            "overrun_s": 0.0,
+            "delay": 0.007556124008260667,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "summaries=complete:0"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 7,
+          "control": false,
+          "elapsed_s": 0.005204834014875814,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154625.307113666,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 0,
+            "cycle_progress": 0,
+            "active_s": 0.005170458985958248,
+            "overrun_s": 0.0,
+            "delay": 0.0077556884789373726,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "chunks=complete:0"
+          },
+          "chunk_calls": {
+            "_chunk_pending_rows": 1
+          },
+          "chunk_seconds": {
+            "_chunk_pending_rows": 8.917006198316813e-06
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5958,
+          "source_id_max": 5958,
+          "profiled": false
+        },
+        {
+          "index": 8,
+          "control": false,
+          "elapsed_s": 0.005365958000766113,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154625.312322458,
+            "uncertain": false,
+            "cycle_remaining": false,
+            "stage": 1,
+            "cycle_progress": 0,
+            "active_s": 0.005323958001099527,
+            "overrun_s": 0.0,
+            "delay": 0.00798593700164929,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "summaries=complete:0"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 9,
+          "control": false,
+          "elapsed_s": 0.02014470801805146,
+          "result": {
+            "vectors_written": 31,
+            "scan_frontier_advance": true,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154625.317693541,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 2,
+            "cycle_progress": 32,
+            "active_s": 0.020101625006645918,
+            "overrun_s": 0.0,
+            "delay": 0.030152437509968877,
+            "stop_reason": "",
+            "rows_written": 31,
+            "outcome": "chunks=complete:31"
+          },
+          "chunk_calls": {
+            "_chunk_pending_rows": 24
+          },
+          "chunk_seconds": {
+            "_chunk_pending_rows": 0.009176165942335501
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5937,
+          "source_id_max": 6000,
+          "profiled": false
+        },
+        {
+          "index": 10,
+          "control": false,
+          "elapsed_s": 0.005561875004786998,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154625.337845166,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 3,
+            "cycle_progress": 32,
+            "active_s": 0.005532458977540955,
+            "overrun_s": 0.0,
+            "delay": 0.008298688466311432,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "summaries=complete:0"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 11,
+          "control": false,
+          "elapsed_s": 0.006311707984423265,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154625.343411125,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 0,
+            "cycle_progress": 0,
+            "active_s": 0.006280250003328547,
+            "overrun_s": 0.0,
+            "delay": 0.00942037500499282,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "chunks=complete:0"
+          },
+          "chunk_calls": {
+            "_chunk_pending_rows": 1
+          },
+          "chunk_seconds": {
+            "_chunk_pending_rows": 0.0008123749867081642
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5937,
+          "source_id_max": 5937,
+          "profiled": false
+        }
+      ]
+    },
+    "upgrade": {
+      "build_seconds": 7.128308749990538,
+      "tokenizer": "NoneType",
+      "initial_selection_signature": "85f5c3c016ef1e4ef1b409fdf3a54a7b1bebdb60280b23465972c699b42c0918",
+      "expected_chunks": 8047,
+      "long_chunks": 40,
+      "slices": [
+        {
+          "index": 0,
+          "control": false,
+          "elapsed_s": 0.005618541006697342,
+          "result": {
+            "vectors_written": 12,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154632.331350375,
+            "uncertain": false,
+            "cycle_remaining": false,
+            "stage": 1,
+            "cycle_progress": 12,
+            "active_s": 0.005588500003796071,
+            "overrun_s": 0.0,
+            "delay": 0.008382750005694106,
+            "stop_reason": "",
+            "rows_written": 12,
+            "outcome": "summaries=complete:12"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 1,
+          "control": false,
+          "elapsed_s": 0.03862554201623425,
+          "result": {
+            "vectors_written": 32,
+            "scan_frontier_advance": false,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154632.336996708,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 2,
+            "cycle_progress": 44,
+            "active_s": 0.03857695800252259,
+            "overrun_s": 0.0,
+            "delay": 0.05786543700378388,
+            "stop_reason": "",
+            "rows_written": 32,
+            "outcome": "chunks=complete:32"
+          },
+          "chunk_calls": {
+            "_chunk_pending_rows": 21,
+            "_chunk_gapfill_rows": 22
+          },
+          "chunk_seconds": {
+            "_chunk_pending_rows": 0.010493163950741291,
+            "_chunk_gapfill_rows": 0.011343542981194332
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5973,
+          "source_id_max": 6000,
+          "profiled": true
+        },
+        {
+          "index": 2,
+          "control": false,
+          "elapsed_s": 0.0033001660194713622,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154632.376736583,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 3,
+            "cycle_progress": 44,
+            "active_s": 0.0032731249812059104,
+            "overrun_s": 0.0,
+            "delay": 0.004909687471808866,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "summaries=complete:0"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 3,
+          "control": false,
+          "elapsed_s": 0.004449290980119258,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154632.380039,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 0,
+            "cycle_progress": 0,
+            "active_s": 0.004419665987370536,
+            "overrun_s": 0.0,
+            "delay": 0.006629498981055804,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "chunks=complete:0"
+          },
+          "chunk_calls": {
+            "_chunk_gapfill_rows": 2,
+            "_chunk_pending_rows": 1
+          },
+          "chunk_seconds": {
+            "_chunk_gapfill_rows": 0.000815875013358891,
+            "_chunk_pending_rows": 3.583991201594472e-06
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5973,
+          "source_id_max": 5974,
+          "profiled": false
+        },
+        {
+          "index": 4,
+          "control": false,
+          "elapsed_s": 0.003150833013933152,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154632.384493041,
+            "uncertain": false,
+            "cycle_remaining": false,
+            "stage": 1,
+            "cycle_progress": 0,
+            "active_s": 0.0031251249893102795,
+            "overrun_s": 0.0,
+            "delay": 0.004687687483965419,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "summaries=complete:0"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 5,
+          "control": false,
+          "elapsed_s": 0.03471229100250639,
+          "result": {
+            "vectors_written": 31,
+            "scan_frontier_advance": false,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154632.387648041,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 2,
+            "cycle_progress": 31,
+            "active_s": 0.03467475000070408,
+            "overrun_s": 0.0,
+            "delay": 0.05201212500105612,
+            "stop_reason": "",
+            "rows_written": 31,
+            "outcome": "chunks=complete:31"
+          },
+          "chunk_calls": {
+            "_chunk_pending_rows": 21,
+            "_chunk_gapfill_rows": 23
+          },
+          "chunk_seconds": {
+            "_chunk_pending_rows": 0.010278165980707854,
+            "_chunk_gapfill_rows": 0.012628626980585977
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5947,
+          "source_id_max": 6000,
+          "profiled": false
+        },
+        {
+          "index": 6,
+          "control": false,
+          "elapsed_s": 0.003223874984541908,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154632.422365791,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 3,
+            "cycle_progress": 31,
+            "active_s": 0.003198874997906387,
+            "overrun_s": 0.0,
+            "delay": 0.00479831249685958,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "summaries=complete:0"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 7,
+          "control": false,
+          "elapsed_s": 0.006487707985797897,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154632.425595833,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 0,
+            "cycle_progress": 0,
+            "active_s": 0.006458957999711856,
+            "overrun_s": 0.0,
+            "delay": 0.009688436999567784,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "chunks=complete:0"
+          },
+          "chunk_calls": {
+            "_chunk_gapfill_rows": 2,
+            "_chunk_pending_rows": 1
+          },
+          "chunk_seconds": {
+            "_chunk_gapfill_rows": 0.001588000013725832,
+            "_chunk_pending_rows": 0.0007816670113243163
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5947,
+          "source_id_max": 5949,
+          "profiled": false
+        },
+        {
+          "index": 8,
+          "control": false,
+          "elapsed_s": 0.003079916990827769,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154632.432088791,
+            "uncertain": false,
+            "cycle_remaining": false,
+            "stage": 1,
+            "cycle_progress": 0,
+            "active_s": 0.003058249974856153,
+            "overrun_s": 0.0,
+            "delay": 0.00458737496228423,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "summaries=complete:0"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 9,
+          "control": false,
+          "elapsed_s": 0.03339145801146515,
+          "result": {
+            "vectors_written": 32,
+            "scan_frontier_advance": false,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154632.435171958,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 2,
+            "cycle_progress": 32,
+            "active_s": 0.033364958013407886,
+            "overrun_s": 0.0,
+            "delay": 0.05004743702011183,
+            "stop_reason": "",
+            "rows_written": 32,
+            "outcome": "chunks=complete:32"
+          },
+          "chunk_calls": {
+            "_chunk_pending_rows": 21,
+            "_chunk_gapfill_rows": 22
+          },
+          "chunk_seconds": {
+            "_chunk_pending_rows": 0.010735458985436708,
+            "_chunk_gapfill_rows": 0.011552417039638385
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5922,
+          "source_id_max": 6000,
+          "profiled": false
+        },
+        {
+          "index": 10,
+          "control": false,
+          "elapsed_s": 0.003062666015466675,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": false,
+            "continue": true,
+            "deadline": 154632.468569166,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 3,
+            "cycle_progress": 32,
+            "active_s": 0.003029999992577359,
+            "overrun_s": 0.0,
+            "delay": 0.004544999988866039,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "summaries=complete:0"
+          },
+          "chunk_calls": {},
+          "chunk_seconds": {},
+          "long_id_1_calls": 0,
+          "source_id_min": null,
+          "source_id_max": null,
+          "profiled": false
+        },
+        {
+          "index": 11,
+          "control": false,
+          "elapsed_s": 0.006661458988673985,
+          "result": {
+            "vectors_written": 0,
+            "scan_frontier_advance": false,
+            "remaining": true,
+            "continue": true,
+            "deadline": 154632.471635291,
+            "uncertain": false,
+            "cycle_remaining": true,
+            "stage": 0,
+            "cycle_progress": 0,
+            "active_s": 0.006621709006140009,
+            "overrun_s": 0.0,
+            "delay": 0.009932563509210013,
+            "stop_reason": "",
+            "rows_written": 0,
+            "outcome": "chunks=complete:0"
+          },
+          "chunk_calls": {
+            "_chunk_gapfill_rows": 2,
+            "_chunk_pending_rows": 1
+          },
+          "chunk_seconds": {
+            "_chunk_gapfill_rows": 0.0007996250060386956,
+            "_chunk_pending_rows": 0.0007682499999646097
+          },
+          "long_id_1_calls": 0,
+          "source_id_min": 5922,
+          "source_id_max": 5923,
+          "profiled": false
+        }
+      ]
+    }
+  },
+  "acceptance": {
+    "ordinary_bound": true,
+    "retry_bound": true
+  }
+}

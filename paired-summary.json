@@ -1,0 +1,83 @@
+{
+  "baseline_sha": "e1dc2a164c66d2419d8d580852d69eb851f95eed",
+  "fixed_command_sha256": "2e3939d7feaad65290004c25ba5e49d60d1a361fcf98ae02b14a1d523e7267a4",
+  "provider": "fake/offline",
+  "rows_per_cell": 6000,
+  "notes": "same machine, stock then fixed, fresh deterministic cells; first productive slice profiled and excluded from timing; no sleep or real embedding cost",
+  "cells": {
+    "empty": {
+      "initial_selection_equal": true,
+      "stock": {
+        "ordinary_gap_chunkings": [
+          0,
+          0,
+          0
+        ],
+        "retry_gap_chunkings": [
+          0,
+          0,
+          0
+        ],
+        "productive_seconds": [
+          0.01986699999542907,
+          0.020773583004483953
+        ],
+        "productive_seconds_mean": 0.02032029149995651
+      },
+      "fixed": {
+        "ordinary_gap_chunkings": [
+          0,
+          0,
+          0
+        ],
+        "retry_gap_chunkings": [
+          0,
+          0,
+          0
+        ],
+        "productive_seconds": [
+          0.01870333301485516,
+          0.02014470801805146
+        ],
+        "productive_seconds_mean": 0.01942402051645331
+      }
+    },
+    "upgrade": {
+      "initial_selection_equal": true,
+      "stock": {
+        "ordinary_gap_chunkings": [
+          4000,
+          4000,
+          4000
+        ],
+        "retry_gap_chunkings": [
+          2000,
+          2000,
+          2000
+        ],
+        "productive_seconds": [
+          0.994611125002848,
+          0.9753855000017211
+        ],
+        "productive_seconds_mean": 0.9849983125022845
+      },
+      "fixed": {
+        "ordinary_gap_chunkings": [
+          22,
+          23,
+          22
+        ],
+        "retry_gap_chunkings": [
+          2,
+          2,
+          2
+        ],
+        "productive_seconds": [
+          0.03471229100250639,
+          0.03339145801146515
+        ],
+        "productive_seconds_mean": 0.03405187450698577
+      }
+    }
+  }
+}

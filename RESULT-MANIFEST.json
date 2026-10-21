@@ -1,0 +1,127 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "20261021-1586-gap-discovery-paired",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "lcmx-1586-gapfix",
+  "claim_class": "advisory",
+  "created": "2026-10-21T10:59:15Z",
+  "settled": "2026-10-21T10:59:28Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "eb6a8aee77beba0130b78596ae30b986850a36b0",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python paired-probe-source.txt (stock then fixed, environment-selected isolated checkouts); python rescore.txt",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "mixed-upgrade-stock",
+      "metric": "ordinary_gap_chunkings_max",
+      "value": 4000.0,
+      "n": 3,
+      "source": "paired-summary.json"
+    },
+    {
+      "benchmark": "mixed-upgrade-stock",
+      "metric": "retry_gap_chunkings_max",
+      "value": 2000.0,
+      "n": 3,
+      "source": "paired-summary.json"
+    },
+    {
+      "benchmark": "mixed-upgrade-stock",
+      "metric": "productive_slice_seconds_mean",
+      "value": 0.9849983125022845,
+      "n": 2,
+      "source": "paired-summary.json"
+    },
+    {
+      "benchmark": "mixed-upgrade-fixed",
+      "metric": "ordinary_gap_chunkings_max",
+      "value": 23.0,
+      "n": 3,
+      "source": "paired-summary.json"
+    },
+    {
+      "benchmark": "mixed-upgrade-fixed",
+      "metric": "retry_gap_chunkings_max",
+      "value": 2.0,
+      "n": 3,
+      "source": "paired-summary.json"
+    },
+    {
+      "benchmark": "mixed-upgrade-fixed",
+      "metric": "productive_slice_seconds_mean",
+      "value": 0.03405187450698577,
+      "n": 2,
+      "source": "paired-summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "stock-probe.json",
+      "role": "per-item",
+      "sha256": "92080ef0a42149d6e14e46ceb217a1b8b66cc30f9651947d241728877e34eed2",
+      "bytes": 23773
+    },
+    {
+      "path": "fixed-probe.json",
+      "role": "per-item",
+      "sha256": "dd0609afcd99f7f6dcc0b3ff33f4fd4e4b91526e1d7b29e035123e22fdb70065",
+      "bytes": 23782
+    },
+    {
+      "path": "paired-summary.json",
+      "role": "per-item",
+      "sha256": "1fe641409fff8f63bc7b2fb0dfccc7605ac341a415afc31611bad8f2f7b775e9",
+      "bytes": 1942
+    },
+    {
+      "path": "paired-probe-source.txt",
+      "role": "receipt",
+      "sha256": "e3b9493763635a0c964d65266740009553b3a9e61839ffb13614653c40b2d1a4",
+      "bytes": 5306
+    },
+    {
+      "path": "rescore.txt",
+      "role": "receipt",
+      "sha256": "12edb60d2690c83fb90c7f684a90a7d843bb3988d17c34eb70bbcd1483c19420",
+      "bytes": 1560
+    },
+    {
+      "path": "validation-receipt.md",
+      "role": "receipt",
+      "sha256": "1496aa1e86a83b1c46e7811612642b606e4fae6b8ffb9b7531b46a5767055161",
+      "bytes": 2252
+    }
+  ],
+  "rescore": {
+    "command": "python rescore.txt",
+    "inputs": [
+      "stock-probe.json",
+      "fixed-probe.json",
+      "paired-probe-source.txt",
+      "rescore.txt"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "fixed-probe.json",
+    "paired-probe-source.txt",
+    "paired-summary.json",
+    "rescore.txt",
+    "stock-probe.json",
+    "validation-receipt.md"
+  ]
+}

@@ -1,0 +1,108 @@
+"""Offline causal probe of pinned product; all stores/homes are disposable generated fixtures."""
+import collections
+import cProfile
+import hashlib
+import io
+import json
+import os
+from pathlib import Path
+import pstats
+import shutil
+import socket
+import sys
+import time
+
+ROOT = Path(os.environ["PROBE_OUT"])
+ROOT.mkdir(parents=True, exist_ok=True)
+SCRATCH = Path(os.environ["PROBE_SCRATCH"])
+SCRATCH.mkdir(parents=True, exist_ok=True)
+REPO = Path(os.environ["PROBE_REPO"])
+HOST = Path(os.environ["PROBE_HOST"])
+for k in list(os.environ):
+    if k.startswith('LCM_'):
+        del os.environ[k]
+os.environ.update(HOME=str(SCRATCH/'home'), HERMES_HOME=str(SCRATCH/'home'),
+    LCM_HERMES_BASE_DIR=str(SCRATCH), TMPDIR=str(SCRATCH), HF_HUB_OFFLINE='1',
+    TRANSFORMERS_OFFLINE='1', TOKENIZERS_PARALLELISM='false', OMP_NUM_THREADS='1')
+(SCRATCH/'home').mkdir(exist_ok=True)
+def deny(*a, **kw):
+    raise RuntimeError('RCA probe forbids network')
+socket.socket.connect = socket.socket.connect_ex = deny
+socket.getaddrinfo = deny
+
+from bench.instruments.local_catchup.common import product, config, MODEL
+from bench.instruments.local_catchup.corpus import build
+mod = product(REPO, HOST)
+command, maintenance, providers = mod('command'), mod('embedding_maintenance'), mod('embedding_provider')
+# Use the instrument's actual tokenizer; the existing tiktoken cache is copied below
+# only by the launcher if needed. Network is unconditionally denied.
+class Fake:
+    provider_id, model_id, dim = 'fastembed', MODEL, 384
+    last_skipped_documents, last_usage_tokens = [], 1
+    def embed_document_batches(self, texts, *, before_dispatch):
+        indexes = tuple(range(len(texts)))
+        before_dispatch(indexes)
+        yield providers.EmbeddedDocumentBatch(indexes, tuple(tuple([1.0]+[0.0]*383) for _ in texts))
+command.resolve_provider = lambda *a, **kw: Fake()
+providers.probe_provider_availability = lambda c: {'available': True, 'detail': 'fake/offline'}
+
+original_chunk = command.chunk_message
+original_gap = command._chunk_gapfill_rows
+counts, chunk_seconds, seen_ids = collections.Counter(), collections.Counter(), collections.Counter()
+def counted_chunk(*a, **kw):
+    caller = sys._getframe(1).f_code.co_name
+    begin = time.perf_counter()
+    result = original_chunk(*a, **kw)
+    chunk_seconds[caller] += time.perf_counter()-begin
+    counts[caller] += 1
+    seen_ids[int(a[0])] += 1
+    return result
+command.chunk_message = counted_chunk
+def signature(db):
+    c = command._embedding_read_connection(db)
+    try:
+        identity = command._chunk_current_profile(c)['identity_hash']
+        _, rows, meta = command._chunk_pending_rows(c, identity, 'conversational', 32, incremental=True)
+        return hashlib.sha256(json.dumps([rows, meta], sort_keys=True).encode()).hexdigest()
+    finally:
+        c.close()
+
+results = {'code_sha':os.environ['PROBE_SHA'], 'command_py_sha256':hashlib.sha256((REPO/'command.py').read_bytes()).hexdigest(), 'provider':'fake/offline',
+           'rows':6000,'slice_delays':'computed by product, not slept', 'cells':{}}
+for baseline in ('empty','upgrade'):
+    if shutil.disk_usage(SCRATCH).free < 60*2**30:
+        raise RuntimeError('disk stop')
+    db = SCRATCH/f'{baseline}.db'
+    began=time.monotonic()
+    manifest=build(REPO,HOST,db,rows=6000,shape='mixed',baseline=baseline)
+    cfg=config(mod,db)
+    initial_sig = signature(db)
+    state={}
+    rows=[]
+    for i in range(12):
+        counts.clear(); chunk_seconds.clear(); seen_ids.clear()
+        profile=cProfile.Profile() if i==1 else None
+        if profile: profile.enable()
+        before=time.monotonic()
+        result=maintenance.run_incremental_embedding_pass(db,cfg,slice_state=state)
+        elapsed=time.monotonic()-before
+        if profile:
+            profile.disable()
+            stream=io.StringIO(); pstats.Stats(profile,stream=stream).sort_stats('cumulative').print_stats(45)
+            (ROOT/f'{baseline}-profile.txt').write_text(stream.getvalue())
+        assert result['outcome'] != 'error',result
+        rows.append(dict(index=i,control=False,elapsed_s=elapsed,result=result,
+            chunk_calls=dict(counts),chunk_seconds=dict(chunk_seconds),
+            long_id_1_calls=seen_ids[1],source_id_min=min(seen_ids,default=None),
+            source_id_max=max(seen_ids,default=None),profiled=bool(profile)))
+    results['cells'][baseline]=dict(build_seconds=time.monotonic()-began,
+        tokenizer=mod('tokens')._encoder.__class__.__name__,
+        initial_selection_signature=initial_sig,
+        expected_chunks=len(manifest['expected']['chunks']),long_chunks=manifest['upgrade_long_chunks'],
+        slices=rows)
+    (ROOT/'probe-results.json').write_text(json.dumps(results,indent=2)+'\n')
+    print(baseline,[(r['index'],r['control'],round(r['result']['active_s'],4),r['result']['vectors_written'],r['chunk_calls']) for r in rows],flush=True)
+
+results['acceptance'] = {'ordinary_bound': all(r['chunk_calls'].get('_chunk_gapfill_rows',0) <= 64 for r in results['cells']['upgrade']['slices'] if r['index']%4 == 1), 'retry_bound': all(r['chunk_calls'].get('_chunk_gapfill_rows',0) <= 32 for r in results['cells']['upgrade']['slices'] if r['index']%4 == 3)}
+(ROOT/'probe-results.json').write_text(json.dumps(results,indent=2)+'\n')
+print(results['acceptance'],flush=True)
