@@ -56,6 +56,24 @@ def test_non_json_dict_repr_filters_media(media_key):
     assert_caption_preview(content)
 
 
+@pytest.mark.parametrize("first_key", [0, (1, 2), None, 1.5, True])
+def test_non_json_dict_repr_with_non_string_first_key(first_key):
+    value = {first_key: b"opaque media bytes", "image": b"opaque media bytes", "caption": CAPTION}
+    content = normalize_content_value(value)
+    assert content == str(value)
+    assert_caption_preview(content)
+
+
+@pytest.mark.parametrize("prefix", ["{} ", "{  } ", "{'broken ", '{"broken ', "{b'broken "])
+def test_dict_like_caption_gate(prefix):
+    content = prefix + CAPTION + "\ndata:image/png;base64,QUJD\n" + "QUJD" * 100
+    expected = prefix + CAPTION if prefix.replace(" ", "") == "{}" else ""
+    assert _media_payload_preview_content(content) == expected
+    stub = _build_externalized_placeholder(SUMMARY, content=content)
+    assert "data:" not in stub and "QUJD" not in stub
+    assert (CAPTION in stub) == bool(expected)
+
+
 @pytest.mark.parametrize("key", DESCRIPTOR_KEYS)
 def test_media_descriptor_metadata_is_not_caption(key):
     content = normalize_content_value({key.upper(): "image/png", "data": "QUJD" * 100})

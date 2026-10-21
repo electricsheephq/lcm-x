@@ -716,7 +716,11 @@ def _media_payload_preview_content(content: str) -> str:
         value = json.loads(content)
     except json.JSONDecodeError:
         value = content
-        if re.match(r"\s*(?:\[\s*(?:[\{\('\"]|b['\"])|\{\s*(?:['\"}]|b['\"]))", content):
+        stripped = content.strip()
+        # A dict repr may start with any key type (0, None, a tuple), but always spans {...}; an empty
+        # {} or [] followed by prose cannot be a container repr.
+        if re.match(r"\s*(?:\[\s*(?:[\{\('\"]|b['\"])|\{\s*(?:['\"]|b['\"]))", content) or (
+                stripped.startswith("{") and stripped.endswith("}")):
             # Normalization may have used repr for non-JSON media parts. Never preview that repr.
             # Bound both repr shapes before allocating an AST; the full source stays expandable.
             if len(content) > 1_048_576:
