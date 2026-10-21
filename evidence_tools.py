@@ -552,7 +552,8 @@ def lcm_retrieve(args: Dict[str, Any], **kwargs: Any) -> str:
 
     action = str(args.get("action") or "").strip().casefold()
     def dispatch(name: str, payload: dict[str, Any]) -> str:
-        return engine.handle_tool_call(name, payload)
+        return engine.handle_tool_call(name, payload,
+            **({"delivery_unit": "hits"} if name == "lcm_recall" else {}))
     try:
         if action == "start":
             result = controller.start(

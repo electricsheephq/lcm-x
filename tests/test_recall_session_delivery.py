@@ -102,7 +102,7 @@ def test_fix4_real_preanswer_evidence_hits_identity(internal_recall, monkeypatch
     assert plugin._pre_llm_context(e, payload) == expected
 
 
-@pytest.mark.parametrize("consumer", ["pack", "proposal", "auto", "requirements"])
+@pytest.mark.parametrize("consumer", ["pack", "proposal", "auto", "requirements", "adaptive"])
 def test_fix4_internal_evidence_hits_identity(internal_recall, monkeypatch, consumer):
     from types import SimpleNamespace
     from hermes_lcm import answer_contract, evidence_compiler, evidence_pack
@@ -118,7 +118,11 @@ def test_fix4_internal_evidence_hits_identity(internal_recall, monkeypatch, cons
                         lambda *a: SimpleNamespace(status="planned"))
     e._config.preanswer_evidence_enabled = True
     e._config.preanswer_evidence_mode = "requirements_v1"
+    e._adaptive_retrieval = SimpleNamespace(search=lambda dispatch, **kw:
+        consume(retrieve=lambda recall_args: dispatch("lcm_recall", recall_args)))
     def invoke():
+        if consumer == "adaptive":
+            return json.loads(tools.lcm_retrieve({"action": "search"}, engine=e))
         if consumer == "requirements":
             return plugin._pre_llm_context(e, {"user_message": "needle", "baseline_refs": []})
         if consumer == "pack":
