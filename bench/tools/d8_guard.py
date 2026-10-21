@@ -176,12 +176,15 @@ def _load_run(root):
     # overlaying a report row is legitimate; repeated IDs within a file are not.
     detail = next((path for path in (root / "per_question.jsonl", root / "results/per_question.jsonl")
                    if path.is_file()), None)
+    detail_rows = []
     if detail:
-        _check_rows([json.loads(line) for line in detail.read_text().splitlines() if line.strip()],
-                    detail.name, identities, issues)
+        detail_rows = [json.loads(line) for line in detail.read_text().splitlines() if line.strip()]
+        _check_rows(detail_rows, detail.name, identities, issues)
     has_rows = (report.get("evaluations") or (root / "per_question.jsonl").exists()
                 or (root / "results/per_question.jsonl").exists())
     rows = {_qid(row): row for row in load_rows(root)} if has_rows else {}
+    # A selected detail row replaces the report row; verdict fields must not leak across sources.
+    rows.update({_qid(row): row for row in detail_rows})
     checkpoint_path = root / "checkpoint.json"
     if checkpoint_path.exists():
         checkpoint = json.loads(checkpoint_path.read_text())

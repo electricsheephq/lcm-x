@@ -19,6 +19,7 @@ FAIL_CLOSE_MARKERS = (
 
 
 def _qid(row: dict[str, Any]) -> str:
+    # First present key decides; no fallback past a present invalid value.
     for key in ("questionId", "question_id", "qid", "id"):
         if key not in row:
             continue

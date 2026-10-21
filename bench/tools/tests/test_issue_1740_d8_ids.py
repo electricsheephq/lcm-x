@@ -59,12 +59,14 @@ def test_unrecognised_label_is_unscorable(tmp_path, capsys, side, source, label)
     runs = {name: write_run(tmp_path / name) for name in ("candidate", "baseline")}
     report_path = runs[side] / "report.json"
     report = json.loads(report_path.read_text())
-    row = report["evaluations"][2]
+    row = dict(report["evaluations"][2])
     del row["score"]
     row["label"] = label
     # Detail overlays must not inherit a report score.
-    report_path.write_text(json.dumps(report))
-    if source != "report.json":
+    if source == "report.json":
+        report["evaluations"][2] = row
+        report_path.write_text(json.dumps(report))
+    else:
         path = runs[side] / source
         path.parent.mkdir(exist_ok=True)
         path.write_text(json.dumps(row) + "\n")
@@ -75,6 +77,53 @@ def test_unrecognised_label_is_unscorable(tmp_path, capsys, side, source, label)
     assert f"{side}: unscorable rows: 1" in result["reason"]
     with pytest.raises(ValueError, match="unrecognised label"):
         _correct(row)
+
+
+@pytest.mark.parametrize("side", ["candidate", "baseline"])
+@pytest.mark.parametrize("source", ["per_question.jsonl", "results/per_question.jsonl"])
+def test_valid_overlay_replaces_malformed_report_verdict(tmp_path, capsys, side, source):
+    runs = {name: write_run(tmp_path / name) for name in ("candidate", "baseline")}
+    report_path = runs[side] / "report.json"
+    report = json.loads(report_path.read_text())
+    row = report["evaluations"][2]
+    overlay = dict(row)
+    del overlay["score"]
+    overlay["label"] = "correct"
+    row["correct"] = "malformed"
+    report_path.write_text(json.dumps(report))
+    path = runs[side] / source
+    path.parent.mkdir(exist_ok=True)
+    path.write_text(json.dumps(overlay) + "\n")
+    # The selected detail row replaces the report verdict, including invalid fields.
+    assert main([str(runs["candidate"]), str(runs["baseline"]), "--subset"]) == 0
+    result = json.loads(capsys.readouterr().out)
+    assert not result["INCOMPLETE"]
+    assert result["pass"]
+    assert result["runs"][side].get("unscorable", 0) == 0
+
+
+@pytest.mark.parametrize("preferred,later", [
+    ("questionId", "question_id"), ("questionId", "qid"), ("questionId", "id"),
+    ("question_id", "qid"), ("question_id", "id"), ("qid", "id"),
+])
+@pytest.mark.parametrize("value", [None, ""])
+@pytest.mark.parametrize("side", ["candidate", "baseline"])
+def test_invalid_preferred_id_does_not_fall_back(tmp_path, capsys, preferred, later, value, side):
+    aliases = {preferred: value, later: "c"}
+    with pytest.raises(ValueError, match="invalid question id"):
+        _qid(aliases)
+    runs = {name: write_run(tmp_path / name) for name in ("candidate", "baseline")}
+    report_path = runs[side] / "report.json"
+    report = json.loads(report_path.read_text())
+    row = report["evaluations"][2]
+    del row["questionId"]
+    row.update(aliases)
+    report_path.write_text(json.dumps(report))
+    assert main([str(runs["candidate"]), str(runs["baseline"]), "--subset"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+    assert "invalid question id" in result["error"]
 
 
 @pytest.mark.parametrize("value", [0, 1, -1, "c", "  c  "])
