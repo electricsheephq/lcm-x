@@ -159,8 +159,10 @@ The V1 track uses a third-party CLI benchmark harness (memorybench-benchmark-too
 provider adapter for this product.
 
 D4 and D8 rows must use memorybench commit
-[`203ba758e9ca788179bfb47658a6c0f09a4af99a`](https://github.com/electricsheephq/memorybench-benchmark-tool/commit/203ba758e9ca788179bfb47658a6c0f09a4af99a)
-(PR #17 targeting `bench/locomo-fulltext-arm`). Earlier writers lack dataset and scoring/prompt
+[`802096d86782ebc8db240fbf0ebda39c3fd395c7`](https://github.com/electricsheephq/memorybench-benchmark-tool/commit/802096d86782ebc8db240fbf0ebda39c3fd395c7)
+([PR #17](https://github.com/electricsheephq/memorybench-benchmark-tool/pull/17), merged on
+`bench/locomo-fulltext-arm`). The D8 writer fixtures were generated at the reviewed head
+[`a2bc93d46ae7681427d3af34b5e836cc6ae32016`](https://github.com/electricsheephq/memorybench-benchmark-tool/commit/a2bc93d46ae7681427d3af34b5e836cc6ae32016). Earlier writers lack dataset and scoring/prompt
 identities; the D8 guard reports them as missing. Old checkpoints resume without backfilling them.
 
 - **CLI shape:** `-p/--provider -b/--benchmark -j/--judge -r/--run-id -m/--answering-model --force`.

@@ -1,6 +1,6 @@
 # Writer-produced D8 identity fixtures
 
-Generated with [memorybench PR #17](https://github.com/electricsheephq/memorybench-benchmark-tool/pull/17), head `203ba758e9ca788179bfb47658a6c0f09a4af99a`, targeting `bench/locomo-fulltext-arm`.
+Writer: [memorybench PR #17](https://github.com/electricsheephq/memorybench-benchmark-tool/pull/17), merged as [`802096d86782ebc8db240fbf0ebda39c3fd395c7`](https://github.com/electricsheephq/memorybench-benchmark-tool/commit/802096d86782ebc8db240fbf0ebda39c3fd395c7) on `bench/locomo-fulltext-arm`. Fixtures generated at the reviewed head [`a2bc93d46ae7681427d3af34b5e836cc6ae32016`](https://github.com/electricsheephq/memorybench-benchmark-tool/commit/a2bc93d46ae7681427d3af34b5e836cc6ae32016).
 From that writer checkout, with `LCMX` set to the consumer checkout:
 ```sh
 bun scripts/emit-identity-fixture.ts "$LCMX/bench/tools/tests/fixtures/d8_writer_pair/a" A

@@ -324,6 +324,17 @@ def test_writer_generated_matching_identities_are_present():
     assert not result["INCOMPLETE"]
     for field in ("datasetSha256", "datasetPath", "promptVersion", "scoringPath"):
         assert field not in result["identities_missing_both"]
+    for filename in ("checkpoint.json", "report.json"):
+        documents = {arm: json.loads((WRITER_FIXTURES / arm / filename).read_text())
+                     for arm in ("a", "b", "c")}
+        for field in ("questionSetSha256", "readerPromptVersion", "answerPresentationMode"):
+            assert documents["a"][field]
+            assert documents["a"][field] == documents["c"][field]
+        assert documents["a"]["datasetSha256"] != documents["b"]["datasetSha256"]
+        varying = {"datasetSha256", "runId", "dataSourceRunId", "createdAt", "updatedAt",
+                   "timestamp"}
+        assert {key: value for key, value in documents["a"].items() if key not in varying} == {
+            key: value for key, value in documents["b"].items() if key not in varying}
 
 
 def test_writer_generated_dataset_byte_mismatch_is_incomplete():
