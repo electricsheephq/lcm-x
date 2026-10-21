@@ -108,7 +108,7 @@ why in the PR.
 
 Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 
-- enforcement is strict exact-head CI: the seven required checks (the six `CI` checks plus `differential`) must pass on the pinned
+- enforcement is exact-head CI: all nine checks (including `bench-tests`, `tests-ran`, and `differential`) must pass on the pinned
   `headRefOid` with trusted workflow identities;
 - AI review is recorded evidence, not enforcement: every PR needs at least one independent
   review of the exact head, and review-provenance-policy or LCM memory-preservation risk (the
@@ -119,8 +119,8 @@ Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 - every review thread is resolved before merge; a bot thread is resolved only after a reply
   that records its disposition;
 - accepted issues, exact-head state, and product/security decisions are re-fetched before merge;
-- merges use merge commits only (`gh pr merge --merge --match-head-commit <head>`)—never squash,
-  rebase, direct-main push, auto-merge, or bypass outside a recorded owner emergency.
+- enqueue the reviewed head with `gh pr merge --merge --match-head-commit <head>` after checks pass and threads are resolved; never squash,
+  rebase, direct-main push, auto-merge, or bypass outside a recorded owner emergency. Do not update the branch first; stop on dequeue.
 
 After merging, maintainers verify the merge commit is current `main`, linked issue disposition,
 and the required checks on the exact merge commit. Maintainers curate user-facing release notes;

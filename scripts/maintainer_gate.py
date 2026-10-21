@@ -18,10 +18,12 @@ REQUIRED_CI_CHECK_PAIRS = (
     ("test (3.12)", 15368),
     ("test (3.13)", 15368),
     ("test (3.14)", 15368),
+    ("bench-tests", 15368),
+    ("tests-ran", 15368),
 )
-# Required on the PR head only. The Differential workflow runs on pull requests (plus nightly and on dispatch),
-# not on pushes to main. Strict mode makes the PR's merge-ref run cover the merged tree, so post-merge
-# verification checks the CI pairs above on the merge commit.
+# Required on the PR head and merge group. Differential does not run on pushes to main;
+# the merge-group run covers the merged tree. Post-merge verification checks the CI pairs
+# above on the merge commit.
 REQUIRED_PR_ONLY_CHECK_PAIRS = (("differential", 15368),)
 REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS + REQUIRED_PR_ONLY_CHECK_PAIRS
 # Changed-path risk map for the land-pr review obligation. It is a readiness hint
@@ -197,7 +199,8 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
-        or policy.get("strict_required_status_checks_policy") is not True
+        or policy.get("strict_required_status_checks_policy") is not False
+        or policy.get("merge_queue") != {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN"}
         or [_pair(item) for item in policy.get("required_checks", [])]
         != list(REQUIRED_CHECK_PAIRS)
     ):
@@ -425,7 +428,8 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
-        or policy.get("strict_required_status_checks_policy") is not True
+        or policy.get("strict_required_status_checks_policy") is not False
+        or policy.get("merge_queue") != {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN"}
         or [_pair(item) for item in policy.get("required_checks", [])]
         != list(REQUIRED_CHECK_PAIRS)
     ):

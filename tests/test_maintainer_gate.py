@@ -22,10 +22,12 @@ REQUIRED = [
     {"context": "test (3.12)", "integration_id": 15368},
     {"context": "test (3.13)", "integration_id": 15368},
     {"context": "test (3.14)", "integration_id": 15368},
+    {"context": "bench-tests", "integration_id": 15368},
+    {"context": "tests-ran", "integration_id": 15368},
     {"context": "differential", "integration_id": 15368},
 ]
-# Checked on the merge commit after landing; differential runs on PRs only.
-CI_REQUIRED = REQUIRED[:6]
+# Checked on the merge commit after landing; differential covers merge groups instead.
+CI_REQUIRED = REQUIRED[:-1]
 BOTH_LANES = ["acceptance", "adversarial"]
 TURN_PATH_PACKET = [
     "Consumer enumeration: rg call sites for every changed helper and effects on each consumer.",
@@ -69,7 +71,8 @@ def ready_payload(mode: str = "readiness") -> dict[str, object]:
             "base_ref": "main",
             "base_sha": BASE,
             "ruleset_id": 20888757,
-            "strict_required_status_checks_policy": True,
+            "strict_required_status_checks_policy": False,
+            "merge_queue": {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN"},
             "required_checks": deepcopy(REQUIRED),
             "bypass_actors": [],
         },
@@ -447,14 +450,65 @@ def test_wrong_ruleset_id_is_an_owner_gate():
     assert "PROTECTED_POLICY_UNTRUSTED" in receipt["blocker_codes"]
 
 
-def test_non_strict_required_checks_policy_is_an_owner_gate():
-    payload = ready_payload()
-    payload["protected_policy"]["strict_required_status_checks_policy"] = False
+@pytest.mark.parametrize("mode", ["readiness", "landing", "post_merge"])
+def test_merge_queue_policy_is_trusted(mode):
+    payload = post_merge_payload() if mode == "post_merge" else ready_payload(mode)
+    if mode == "landing":
+        payload["merge_authorization"] = exact_authorization()
+
+    receipt = evaluate(payload)
+
+    assert receipt["decision"] == (
+        "POST_MERGE_VERIFIED" if mode == "post_merge" else "READY_FOR_AUTHORIZED_LANDING"
+    )
+    assert "PROTECTED_POLICY_UNTRUSTED" not in receipt["blocker_codes"]
+
+
+@pytest.mark.parametrize("mode", ["readiness", "landing", "post_merge"])
+@pytest.mark.parametrize(
+    "policy_delta",
+    [
+        {"strict_required_status_checks_policy": True},
+        {"merge_queue": None},
+        {"merge_queue": {}},
+        {"merge_queue": {"merge_method": "SQUASH", "grouping_strategy": "ALLGREEN"}},
+        {"merge_queue": {"merge_method": "MERGE", "grouping_strategy": "HEADGREEN"}},
+    ],
+    ids=["strict-true", "missing-queue", "empty-queue", "wrong-method", "wrong-grouping"],
+)
+def test_untrusted_merge_queue_policy_is_an_owner_gate(mode, policy_delta):
+    payload = post_merge_payload() if mode == "post_merge" else ready_payload(mode)
+    if mode == "landing":
+        payload["merge_authorization"] = exact_authorization()
+    payload["protected_policy"].update(policy_delta)
+    if payload["protected_policy"].get("merge_queue") is None:
+        payload["protected_policy"].pop("merge_queue")
 
     receipt = evaluate(payload)
 
     assert receipt["decision"] == "OWNER_GATE"
     assert "PROTECTED_POLICY_UNTRUSTED" in receipt["blocker_codes"]
+
+
+@pytest.mark.parametrize("mode", ["readiness", "post_merge"])
+@pytest.mark.parametrize("context", ["bench-tests", "tests-ran"])
+def test_test_execution_checks_are_required(mode, context):
+    payload = post_merge_payload() if mode == "post_merge" else ready_payload(mode)
+    payload["checks"] = [c for c in payload["checks"] if c["context"] != context]
+
+    receipt = evaluate(payload)
+
+    assert f"TRUSTED_CHECK_UNSATISFIED:{context}:15368" in receipt["blocker_codes"]
+
+
+@pytest.mark.parametrize("context", ["bench-tests", "tests-ran"])
+def test_test_execution_checks_cannot_be_omitted_from_protected_policy(context):
+    payload = ready_payload()
+    payload["protected_policy"]["required_checks"] = [
+        item for item in REQUIRED if item["context"] != context
+    ]
+
+    assert "PROTECTED_POLICY_UNTRUSTED" in evaluate(payload)["blocker_codes"]
 
 
 def test_normal_exact_authorization_is_ready_for_landing():
