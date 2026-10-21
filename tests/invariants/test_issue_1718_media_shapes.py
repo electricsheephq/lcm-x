@@ -68,7 +68,8 @@ def test_non_json_dict_repr_with_non_string_first_key(first_key):
 @pytest.mark.parametrize("prefix", ["{} ", "{  } ", "{'broken ", '{"broken ', "{b'broken "])
 def test_dict_like_caption_gate(prefix):
     content = prefix + CAPTION + "\ndata:image/png;base64,QUJD\n" + "QUJD" * 100
-    expected = prefix + CAPTION if prefix.replace(" ", "") == "{}" else ""
+    # Fix-round clarification: failed parses without bytes are prose, even with a quote prefix.
+    expected = "" if "b'" in prefix else prefix + CAPTION
     assert _media_payload_preview_content(content) == expected
     stub = _build_externalized_placeholder(SUMMARY, content=content)
     assert "data:" not in stub and "QUJD" not in stub
@@ -93,7 +94,8 @@ def test_list_like_caption_gate_preserves_truncated_repr_fallback(prefix):
     encoded = base64.b64encode(bytes(range(256)) * 20).decode("ascii")
     wrapped = "\n".join(encoded[i:i + 76] for i in range(0, len(encoded), 76))
     content = prefix + CAPTION + "\ndata:image/png;base64,QUJD\n" + "QUJD" * 100 + "\n" + wrapped
-    expected = prefix + CAPTION if prefix == "[] " else ""
+    # Only bytes-bearing truncated reprs fail closed; no-bytes strings retain their prose.
+    expected = "" if "b'" in prefix else prefix + CAPTION
     assert _media_payload_preview_content(content) == expected
     stub = _build_externalized_placeholder(SUMMARY, content=content)
     if expected:
