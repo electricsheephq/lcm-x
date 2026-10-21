@@ -133,9 +133,11 @@ def execute(root, backend, stage='all'):
         return report
     if stage=='extract':
         return dict(status='COMPLETE',windows=len(extracted['ledger']))
+    phase, completed = 'drift', 0
     try:
         if not b.get('synthetic'):
             evaluation['drift_valid']=drift(b,cache,root,evaluation['exclusions'])
+        phase = 'main'
         ordered = sorted(b['panel'],key=lambda e:(not e['target'],e['id']))
         qs = {q['qid']:datasets.Question(**q) for q in b['questions']}
         # Invalid drift settles below without spending any main-panel calls.
@@ -174,6 +176,7 @@ def execute(root, backend, stage='all'):
                         evaluation['exclusions'].append(dict(id=e['id'],reason='judge transient retries exhausted'))
                         break
                     rows.append(dict(id=e['id'],arm=arm,judge=judge,correct=correct,answer_sha256=sha(encoded(response)),calls=list(calls)))
+            completed = index+1
             if e['target'] and (index+1==len(ordered) or not ordered[index+1]['target']):
                 interim=scoring.evaluate(ordered[:index+1],rows,**(evaluation | dict(complete=False)))
                 immutable(root/'interim.json',interim)
@@ -188,7 +191,14 @@ def execute(root, backend, stage='all'):
     except Paused:
         return dict(status='PAUSED',reason='paused: quota')
     except Deadline:
-        evaluation.update(complete=False,drift_valid=False,incomplete_reason='deadline expired')
+        evaluation.update(complete=False,incomplete_reason='deadline expired')
+        if phase == 'drift':
+            evaluation['drift_valid'] = False
+        else:
+            ordered = ordered[:completed]
+            prefix_ids = {e['id'] for e in ordered}
+            rows = [r for r in rows if r['id'] in prefix_ids]
+            deliveries = [d for d in deliveries if d['id'] in prefix_ids]
         report=scoring.evaluate(ordered,rows,**evaluation)
     except (Incomplete,ValueError,KeyError,TypeError):
         return dict(verdict='PARK-INCOMPLETE',reasons=['unsettled call; resume same run'])
