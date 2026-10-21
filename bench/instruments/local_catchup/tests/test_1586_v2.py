@@ -243,14 +243,18 @@ def test_measured_covered_worker_never_backfills_and_rows_have_diagnostics(tmp_p
 @pytest.mark.parametrize("valid", [True, False])
 def test_rescore_saved_recall_classes(tmp_path, publications, valid):
     samples = rows()+rows(query_class="broad_nl")
-    recorded = recall.score(samples, publications, calibration_s=.1)
+    recorded = recall.score(samples, publications, calibration_s=floor.calibration(events(.1)))
     recorded["measurement_valid"] = valid
     if not valid:
         recorded["state"] = "INVALID"
     for name, value in (("recalls", samples), ("publications", publications)):
         (tmp_path/f"{name}.jsonl").write_text("".join(json.dumps(v)+"\n" for v in value))
     floor.dump(tmp_path/"raw-summary.json", recorded)
-    floor.dump(tmp_path/"request.json", dict(seed=1586, state="OFF", standalone_calibration_s=.1))
+    floor.dump(tmp_path/"request.json", dict(seed=1586, state="OFF", block=0, standalone_calibration_s=.1))
+    catchup = tmp_path.parent/"0-ON-catching-up"
+    catchup.mkdir(exist_ok=True)
+    (catchup/"events.jsonl").write_text("".join(json.dumps(v)+"\n" for v in
+        [dict(event="calibration_window_start", at=-1), *events(.1), dict(event="calibration_window_end", at=10)]))
     assert rescore.v2(tmp_path)["state"] == recorded["state"]
     recorded["classes"]["broad_nl"]["overlapping"] = 999
     floor.dump(tmp_path/"raw-summary.json", recorded)

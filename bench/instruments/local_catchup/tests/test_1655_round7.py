@@ -227,7 +227,7 @@ def test_f4_floor_nonpass_exits_after_summary_and_labels(tmp_path, monkeypatch, 
     monkeypatch.setattr(floor.sys, "argv", ["floor", "--lcmx-repo", str(tmp_path),
         "--hermes-source", str(tmp_path), "--scratch", str(tmp_path/"scratch"),
         "--out", str(out), "--model-cache", str(tmp_path/"cache"), "--cgroup", str(tmp_path),
-        "--limited", "--cell", cell])
+        "--limited", "--cell", cell, "--max-minutes", "330"])
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(floor.subprocess, "check_output", lambda *a, **kw: "CPU fixture\n")
     monkeypatch.setattr(floor, "standalone", lambda *a: {"standalone_calibration_s": .572})

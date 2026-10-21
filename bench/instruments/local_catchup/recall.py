@@ -1,5 +1,6 @@
 """Bar 3: real recall intervals overlapping committed compaction publications."""
 import json
+from bisect import bisect_right
 import random
 import re
 import threading
@@ -74,6 +75,58 @@ def overlapping(rows, publications):
 
 def overlapping_publications(counted, publications):
     return len({p.get("node_id", i) for i, p in enumerate(publications) if overlapping([p], counted)})
+
+
+class OverlapCounter:
+    """Serial recall/commit intervals; visit only new intervals and their overlaps."""
+    def __init__(self, state):
+        self.state, self.rows, self.ends, self.pubs, self.pub_ends = state, [], [], [], []
+        self.counted = {c: set() for c in ("canary", "broad_nl")}
+        self.publications = {c: set() for c in self.counted}
+
+    def match(self, i, j):
+        row, pub = self.rows[i], self.pubs[j]
+        if (row["start"] < pub["end"] and pub["start"] < row["end"] and not
+                (self.state == "ON-catching-up" and row["semantic_healthy"] and row["semantic_empty"])):
+            self.counted[row["query_class"]].add(i)
+            self.publications[row["query_class"]].add(pub.get("node_id", j))
+
+    def add(self, row, publications):
+        self.rows.append(row)
+        self.ends.append(row["end"])
+        for j in range(bisect_right(self.pub_ends, row["start"]), len(self.pubs)):
+            if self.pubs[j]["start"] >= row["end"]:
+                break
+            self.match(len(self.rows)-1, j)
+        for pub in publications[len(self.pubs):]:
+            self.pubs.append(pub)
+            self.pub_ends.append(pub["end"])
+            for i in range(bisect_right(self.ends, pub["start"]), len(self.rows)):
+                if self.rows[i]["start"] >= pub["end"]:
+                    break
+                self.match(i, len(self.pubs)-1)
+
+
+def window_calibration(events):
+    starts = [e["at"] for e in events if e.get("event") == "calibration_window_start"]
+    ends = [e["at"] for e in events if e.get("event") == "calibration_window_end"]
+    return calibration([e for e in events if starts and ends and
+        starts[0] <= e.get("at", -1) < e.get("end", -1) <= ends[0]])
+
+
+def calibration_window(a):
+    path, start = a.root/"events.jsonl", time.perf_counter()
+    append(path, dict(event="calibration_window_start", at=start))
+    while time.perf_counter()-start < 600:
+        events = [json.loads(s) for s in path.read_text().splitlines()]
+        if calibration([e for e in events if e.get("at", -1) >= start]) is not None:
+            break
+        safety(a)
+        time.sleep(.1)
+    end = time.perf_counter()
+    append(path, dict(event="calibration_window_end", at=min(end, start+600)))
+    # This unloaded window consumes the ON-catching-up state's fixed 100-minute budget.
+    a.volume_seconds = max(0, getattr(a, "volume_seconds", VOLUME_SECONDS)-(end-start))
 
 
 def score(rows, publications, seed=1586, state="OFF", activity=None, calibration_s=None, reference_calibration_s=REFERENCE_CALIBRATION_S):
@@ -173,6 +226,8 @@ def worker(request):
                 return
         initial = audit(a.db, manifest)
         dump(a.root/"initial-audit.json", initial)
+        if a.state == "ON-catching-up":
+            calibration_window(a)
         original = engine._dag.add_node
         def publish(node, **kw):
             start = time.perf_counter()
@@ -191,6 +246,7 @@ def worker(request):
                 fts, original_fts = diagnostics(mod("tools"), reader)
                 started.set()
                 i = 0
+                counter = OverlapCounter(a.state)
                 deadline = time.monotonic()+getattr(a, "volume_seconds", VOLUME_SECONDS)
                 a._volume_deadline = deadline
                 while time.monotonic() < deadline and (not halt.is_set() or i < len(pinned)):
@@ -220,9 +276,9 @@ def worker(request):
                     rows.append(row)
                     append(a.root/"recalls.jsonl", row)
                     i += 1
-                    counted = [r for r in overlapping(rows, publications) if not (a.state == "ON-catching-up" and r["semantic_healthy"] and r["semantic_empty"])]
-                    if i >= len(pinned) and all(len(part := [r for r in counted if r["query_class"] == c]) >= 200
-                            and overlapping_publications(part, publications) >= 10 for c in ("canary", "broad_nl")):
+                    counter.add(row, publications)
+                    if i >= len(pinned) and all(len(counter.counted[c]) >= 200
+                            and len(counter.publications[c]) >= 10 for c in counter.counted):
                         enough.set()
                         break
             except Exception as exc:
@@ -273,7 +329,7 @@ def finalize_block(a, block, results):
     root = a.out/f"{block}-ON-catching-up"
     def lines(path):
         return [json.loads(s) for s in path.read_text().splitlines()] if path.exists() else []
-    calibrated = calibration(lines(root/"events.jsonl"))
+    calibrated = window_calibration(lines(root/"events.jsonl"))
     for entry in results:
         result = entry["result"]
         if "classes" not in result:  # Early INVALID has no recall receipts to score.
@@ -282,9 +338,9 @@ def finalize_block(a, block, results):
         scored = score(lines(root/"recalls.jsonl"), lines(root/"publications.jsonl"),
             a.seed, entry["state"], result, calibrated)
         if result.get("measurement_valid") is False:
-            scored["state"] = "INVALID"
+            scored["state"] = rollup([scored["state"], "INVALID"])
         if calibrated is None and result.get("measurement_valid") is not False:
-            scored["reason"] = "insufficient_calibration_batches"
+            scored["reason"] = "calibration_window_short"
         result.update(scored, calibration_s=calibrated,
             standalone_calibration_s=a.standalone_calibration_s)
         for name in ("raw-summary.json", "summary.json"):

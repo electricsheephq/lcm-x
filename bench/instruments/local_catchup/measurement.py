@@ -57,6 +57,8 @@ def prepare(a):
     # Isolate corpus construction too, before any product import.
     isolated(a.scratch/"builder-home", a.model_cache)
     os.environ["HOME"] = str(a.scratch/"builder-home")
+    os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+    os.environ["CFFIXED_USER_HOME"] = os.environ["HOME"]
     if source := getattr(a, "resume_covered_store", None):
         manifest = load(source/"manifest.json")
         if any(manifest[k] != getattr(a, k) for k in ("rows", "shape", "baseline", "seed")):
@@ -83,10 +85,21 @@ def cell(a, state, block, kind):
     # Only baseline + one serial cell copy live; rescore uses the JSONL receipts.
     db = a.scratch/"cell.db"
     source = a.covered_store/"store.db" if state == "ON-covered" and getattr(a, "covered_store", None) else a.scratch/"baseline.db"
-    if state == "ON-covered" and not audit(source, load(a.out/"manifest.json"))["complete"]:
-        result = dict(state="INVALID", reason="covered_store_incomplete")
-        dump(root/"summary.json", result)
-        return result
+    if state == "ON-covered":
+        try:
+            if not getattr(a, "covered_store", None) or not source.is_file():
+                raise FileNotFoundError("covered store or store.db absent")
+            checked = audit(source, load(a.out/"manifest.json"))
+            detail = dict(changed_vectors=len(checked["changed_vectors"]), changed_metadata=len(checked["changed_metadata"]),
+                missing_count=sum(v["missing_count"] for v in checked["classes"].values()),
+                reason="covered_store_changed" if not checked["raw_unchanged"] or checked["changed_vectors"] or checked["changed_metadata"]
+                    else "covered_store_unfinished", audit=checked)
+        except (FileNotFoundError, sqlite3.DatabaseError) as exc:
+            checked, detail = dict(complete=False), dict(reason=str(exc))
+        if not checked["complete"]:
+            result = dict(state="INVALID", reason="covered_store_incomplete", pre_audit=detail)
+            dump(root/"summary.json", result)
+            return result
     with connect(source) as src, sqlite3.connect(db) as dst:
         src.backup(dst)
     spec = dict(vars(a), state=state, block=block, kind=kind, db=db, root=root,
@@ -399,7 +412,7 @@ def fill_covered(a, mod, engine, manifest):
                     getattr(mod("command"), name)(engine._config, a.db, apply=True, limit=4096,
                         retry_uncertain=False, include_next_hint=False, **extra)
         except Exception as exc:
-            failures.append(type(exc).__name__)
+            failures.append(f"{type(exc).__name__}: {exc}")
     thread = threading.Thread(target=fill, name="i2-covered-setup")
     thread.start()
     thread.join(a.max_seconds+1)

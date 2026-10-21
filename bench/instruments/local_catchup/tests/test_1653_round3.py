@@ -97,6 +97,7 @@ def test_worker_semantic_arms_cannot_pass_fts_only(tmp_path, monkeypatch, state,
                 "tools": NS(lcm_recall=call)}[name]
     # Declaration item 6: isolate the existing health probe from the new FTS observer.
     monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
+    monkeypatch.setattr(recall, "calibration_window", lambda *a: None)  # Separate raw-window regressions in fix2.
     monkeypatch.setattr(recall, "runtime", lambda _: (a, mod, engine, 1))
     reads = iter([dict(chunks=0, leaves=0) if i % 2 == 0 else dict(chunks=1, leaves=0) for i in range(800)])
     monkeypatch.setattr(recall, "vector_counts", lambda *args: dict(chunks=2, leaves=1) if state == "ON-covered" else next(reads))

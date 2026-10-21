@@ -112,3 +112,5 @@ jobs:
             evidence/covered/audit.json
             evidence/covered/manifest.json
             evidence/covered/coverage.jsonl
+            evidence/covered/progress.jsonl
+            evidence/covered/file-access.jsonl

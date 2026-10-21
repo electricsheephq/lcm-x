@@ -120,6 +120,7 @@ def test_17_payload_disclosure_requires_semantic_coverage(tmp_path, monkeypatch,
             "tools": Namespace(lcm_recall=lambda *args, **kw: json.dumps(payload))}[name]
     # Declaration item 6: isolate the existing health probe from the new FTS observer.
     monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
+    monkeypatch.setattr(recall, "calibration_window", lambda *a: None)  # Separate raw-window regressions in fix2.
     monkeypatch.setattr(recall, "runtime", lambda _: (a, mod, engine, 1))
     monkeypatch.setattr(recall, "vector_counts", lambda *args: dict(chunks=0, leaves=1))
     monkeypatch.setattr(recall, "audit", lambda *args: {})

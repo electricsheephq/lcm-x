@@ -91,6 +91,8 @@ def main():
         raise ValueError("coverage-rate requires at least 150 minutes: build + 2h window + final audit")
     if a.cell == "coverage-pair" and a.max_minutes < 300:
         raise ValueError("coverage-pair requires at least 300 minutes")
+    if a.cell == "recall" and a.max_minutes < 330:
+        raise ValueError("recall requires at least 330 minutes: fixed setup and state caps")
     if not a.limited:
         proc = subprocess.Popen(command(sys.argv[1:]), start_new_session=True)
         timed_out = False
@@ -155,9 +157,9 @@ def limited(a):
             "--lcmx-repo", str(a.lcmx_repo), "--hermes-source", str(a.hermes_source),
             "--scratch", str(a.scratch/"recall"), "--out", str(a.out/"recall"), "--rows", str(a.rows),
             "--model-cache", str(a.model_cache), "--shape", a.shape, "--baseline", a.baseline,
-            "--block", str(a.block), "--covered-store", str(a.covered_store),
+            "--block", str(a.block),
             "--standalone-calibration-s", str(calibrated["standalone_calibration_s"]),
-            "--label", LABEL], check=True, timeout=a.max_minutes*60)
+            "--label", LABEL, *(["--covered-store", str(a.covered_store)] if a.covered_store else [])], check=True, timeout=a.max_minutes*60)
         summary = __import__("json").loads((a.out/"recall/summary.json").read_text())
     elif a.cell == "coverage-pair":
         cells = []

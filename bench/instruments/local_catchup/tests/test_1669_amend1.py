@@ -33,6 +33,7 @@ def test_honesty_uses_disclosure_and_before_after_counts(tmp_path, monkeypatch, 
     counts = iter([dict(zip(("chunks", "leaves"), values)) for values in (before, after)])
     # Declaration item 6: isolate the existing health probe from the new FTS observer.
     monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
+    monkeypatch.setattr(recall, "calibration_window", lambda *a: None)  # Separate raw-window regressions in fix2.
     monkeypatch.setattr(recall, "runtime", lambda _: (a, lambda _: NS(lcm_recall=lambda *a, **kw: json.dumps(payload)), engine, 0))
     monkeypatch.setattr(recall, "recall_reader", lambda *a: NS(_dag=store, _store=store))
     monkeypatch.setattr(recall, "vector_counts", lambda *a: next(counts))

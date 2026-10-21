@@ -96,12 +96,13 @@ def test_production_block_calibration(tmp_path, monkeypatch, batch_s, samples, e
         root = tmp_path/f"{block}-{state}"
         root.mkdir()
         for name, values in (("recalls", data), ("publications", pubs),
-                ("events", events(batch_s)[:samples] if state == "ON-catching-up" else [])):
+                ("events", ([dict(event="calibration_window_start", at=-1)]+events(batch_s)[:samples]
+                    +[dict(event="calibration_window_end", at=10)]) if state == "ON-catching-up" else [])):
             (root/f"{name}.jsonl").write_text("".join(json.dumps(v)+"\n" for v in values))
         raw = recall.score(data, pubs, state=state, activity=dict(catchup_activity=True))
         raw.update(measurement_valid=True, catchup_activity=True)
         common.dump(root/"raw-summary.json", raw)
-        common.dump(root/"request.json", dict(seed=1586, state=state))
+        common.dump(root/"request.json", dict(seed=1586, state=state, block=block))
         common.dump(root/"summary.json", raw)
         return raw
     monkeypatch.setattr(recall, "cell", cell)
@@ -116,7 +117,7 @@ def test_production_block_calibration(tmp_path, monkeypatch, batch_s, samples, e
         if expected == "FAIL":
             assert result["classes"]["canary"]["normalized_statistics"]["p90"]["seconds"] == pytest.approx(9.)
         if expected == "UNCALIBRATED":
-            assert result["reason"] == "insufficient_calibration_batches"
+            assert result["reason"] == "calibration_window_short"
         assert rescore.v2(tmp_path/f"0-{entry['state']}")["state"] == expected
 
 

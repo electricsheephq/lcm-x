@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 from .catchup import state
-from .common import load, rollup
+from .common import REFERENCE_CALIBRATION_S, load, rollup
 
 
 def verdict(path, max_wall):
@@ -22,13 +22,16 @@ def verdict(path, max_wall):
 
 def v2(root):
     from .floor import rate
-    from .recall import score
+    from .recall import score, window_calibration
     def lines(path):
         return [json.loads(s) for s in path.read_text().splitlines()]
     for name in ("raw-summary.json", "summary.json"):
         if (root/name).exists():
             early = load(root/name)
-            if early.get("state") == "INVALID" and early.get("reason") == "covered_store_incomplete":
+            if early.get("state") == "INVALID" and "classes" not in early and early.get("reason") in (
+                    "covered_store_incomplete", "foreground_preparation_backfill_join_or_network",
+                    "offline_subprocess_launch", "foreground_preparation_forbidden", "foreground_backfill_forbidden",
+                    "foreground_embedding_join_forbidden", "offline_network_forbidden"):
                 return early
     if (root/"summary.json").exists() and "cells" in load(root/"summary.json"):
         recorded = load(root/"summary.json")
@@ -53,11 +56,13 @@ def v2(root):
     else:
         recorded = load(root/"raw-summary.json")
         request = load(root/"request.json")
+        calibrated = window_calibration(lines(root.parent/f"{request['block']}-ON-catching-up/events.jsonl"))
         computed = score(lines(root/"recalls.jsonl"), lines(root/"publications.jsonl"),
-            request["seed"], request["state"], recorded, recorded.get("calibration_s", recorded.get("standalone_calibration_s")),
-            recorded["reference_calibration_s"])
+            request["seed"], request["state"], recorded, calibrated, REFERENCE_CALIBRATION_S)
         if recorded.get("measurement_valid") is False:
-            computed["state"] = "INVALID"
+            computed["state"] = rollup([computed["state"], "INVALID"])
+        if calibrated is None and recorded.get("measurement_valid") is not False:
+            computed["reason"] = "calibration_window_short"
         assert all(recorded[k] == v for k, v in computed.items())
     return computed
 
@@ -67,7 +72,7 @@ if __name__ == "__main__":
     for name in sys.argv[1:]:
         root = Path(name)
         if (root/"catchup").is_dir() or (root/"raw-summary.json").exists() or any(
-                k in load(root/"summary.json") for k in ("cells", "blocks")) or load(root/"summary.json").get("reason") == "covered_store_incomplete":
+                k in load(root/"summary.json") for k in ("cells", "blocks")) or load(root/"summary.json").get("state") == "INVALID":
             print(json.dumps(v2(root)))
             continue
         summary, audit = load(root/"summary.json"), load(root/"final-audit.json")

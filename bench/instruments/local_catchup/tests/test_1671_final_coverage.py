@@ -27,6 +27,7 @@ def test_final_expected_coverage_after_trace_ingestion(corpus, tmp_path, monkeyp
         coverage=dict(chunk="full", summary="full")))
     # Declaration item 6: isolate the existing health probe from the new FTS observer.
     monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
+    monkeypatch.setattr(recall, "calibration_window", lambda *a: None)  # Separate raw-window regressions in fix2.
     monkeypatch.setattr(recall, "runtime", lambda _: (a, lambda _: NS(
         lcm_recall=lambda *a, **kw: json.dumps(payload)), engine, 0))
     store = NS(close=lambda: None)
@@ -34,6 +35,9 @@ def test_final_expected_coverage_after_trace_ingestion(corpus, tmp_path, monkeyp
     monkeypatch.setattr(recall, "safety", lambda *a: {})
     monkeypatch.setattr(recall, "overlapping", lambda rows, _: rows)
     monkeypatch.setattr(recall, "overlapping_publications", lambda *a: 10)
+    monkeypatch.setattr(recall, "OverlapCounter", lambda _: NS(add=lambda *a: None,
+        counted={c: set(range(200)) for c in ("canary", "broad_nl")},
+        publications={c: set(range(10)) for c in ("canary", "broad_nl")}))
     monkeypatch.setattr(recall, "catchup_activity", lambda *a: dict(catchup_activity=True))
     monkeypatch.setattr(recall, "score", lambda *a: dict(state="PASS"))
     class Thread:

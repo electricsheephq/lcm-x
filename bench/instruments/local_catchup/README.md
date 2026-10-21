@@ -134,16 +134,23 @@ pre-covered store, and alternates unchanged canaries with three fixed broad
 questions. Each class requires 200 overlaps across ten publications and gates
 separately. Rows include FTS duration, budget, hit count, coverage and cap reason.
 Recall uses the same `calibration(events)` as coverage: at least five in-worker
-32-vector summary batches from ON-catching-up, with reference 0.572 s. A ratio
+32-vector summary batches in an unloaded ON-catching-up calibration window before
+the recall reader and trace start, with reference 0.572 s. Start/end events bound
+the raw batches used by both finalization and rescore. A ratio
 (reference / calibration) above 1.25 additionally gates p50, p90 and upper95 after
 scaling every state in the block; raw statistics stay unchanged. Fewer qualifying
-batches make the block `UNCALIBRATED`. The standalone five-run median is informational.
+batches within ten minutes make the block `UNCALIBRATED` (`calibration_window_short`);
+recall and raw statistics still run. The standalone five-run median is informational.
 Publication continues with the same seeded trace until both classes meet volume.
 Each state reserves 95 minutes for volume and five for audit/shutdown, leaving
-30 minutes of the 330-minute block for setup. Exhaustion is `INVALID` (`volume_cap`),
+30 minutes of the 330-minute block for setup. The calibration window consumes part
+of ON-catching-up's 100-minute state budget, reducing its volume time.
+Exhaustion is `INVALID` (`volume_cap`),
 an inconclusive result. Summaries record turns used and per-class overlaps.
 Local ON-covered setup is two-step: `--build-covered`, then `--covered-store <dir>`
 as above. Without `--covered-store`, ON-covered is `INVALID` by design.
+The Mac setup process carries the same `ORT_DISABLE_TELEMETRY=1` and
+`CFFIXED_USER_HOME` isolation as cell children, using its builder home.
 Covered-store setup chains four artifact jobs with 240-minute fill budgets; each
 resumes the prior store and manifest, and only the final job requires completeness.
 All setup jobs calibrate under confinement first, then fill outside it with no
