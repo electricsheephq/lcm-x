@@ -1,0 +1,81 @@
+name: Diagnostic 1753 real-host loop
+
+# Diagnostic-only branch; this workflow must never merge.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: diag-1753-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  diag-1753:
+    if: github.head_ref == 'diag/1753-real-host-loop'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        host: [floor-0.21.3, r34.10-0.21.5, r34.15-0.21.5, ref-0.21.5]
+    env:
+      HERMES_DISABLE_LAZY_INSTALLS: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # PluginManager identity tests archive the legacy GA commit.
+
+      - name: Set up Python (harness)
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: "3.13"
+
+      - name: Install harness dependencies
+        run: pip install uv==0.11.26 pytest numpy
+
+      # ci.py prep recreates its venv; it does not support prepared-host cache reuse.
+      - name: Prepare the pinned Hermes tree
+        run: nice -n 19 python -m bench.instruments.reliability.ci prep --host "${{ matrix.host }}" --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
+
+      - name: Export prepared host paths
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          hosts = json.loads((Path(os.environ["RUNNER_TEMP"]) / "hosts.json").read_text())
+          host = hosts["hosts"]["${{ matrix.host }}"]
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"FASTEMBED_CACHE_PATH={os.environ['RUNNER_TEMP']}/fastembed-empty\n")
+              env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}\n")
+              env.write(f"LCM_REAL_HERMES_SRC={host['src']}\n")
+              env.write(f"PYTHONPATH={os.environ['GITHUB_WORKSPACE']}:{host['src']}\n")
+          PY
+
+      - name: Run unchanged regression in both arms, 300 iterations each
+        env:
+          DIAG_1753_ITERATIONS: "300"
+          RCA_TRACE_DIR: ${{ runner.temp }}/diag-1753/captures
+        # LCM_REAL_HERMES_LONG stays unset, matching real-host.yml.
+        run: |
+          mkdir -p "$RUNNER_TEMP/diag-1753"
+          cp "$RUNNER_TEMP/hosts.json" "$RUNNER_TEMP/diag-1753/hosts.json"
+          nice -n 19 python -m pytest -p no:cacheprovider -q -ra \
+            -p tests.diag_1753.capture_1753 tests/diag_1753/test_loop.py \
+            --tb=no --show-capture=no \
+            --basetemp="$RUNNER_TEMP/pt-diag-1753" \
+            --junitxml="$RUNNER_TEMP/diag-1753/results.xml"
+
+      - name: Upload structural captures and results
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: diag-1753-${{ matrix.host }}
+          path: ${{ runner.temp }}/diag-1753/
+          if-no-files-found: warn
