@@ -686,9 +686,31 @@ def _raw_payload_preview(content: str, room: int) -> str:
     return f"{text[:head]}{_RAW_PAYLOAD_PREVIEW_JOINER}{text[len(text) - (keep - head):]}"
 
 
+def _media_payload_preview_content(content: str) -> str:
+    """Extract text only; remove opaque media before the bounded preview slices it."""
+    from .ingest_content import _BASE64_RUN_RE, _replace_wrapped_base64_blocks
+    from .message_content import text_content_for_pattern_matching
+
+    try:
+        value = json.loads(content)
+    except (ValueError, TypeError):
+        value = content
+    if isinstance(value, list):
+        parts = [part for part in value if isinstance(part, str) or (
+            isinstance(part, dict) and part.get("type") in {"text", "input_text", "output_text"})]
+        text = text_content_for_pattern_matching(parts) if parts else ""
+    else:
+        text = value if isinstance(value, str) else ""
+    text = re.sub(r"data:[^,\s]*;base64,[A-Za-z0-9+/=]*", "", text or "", flags=re.IGNORECASE)
+    text = _BASE64_RUN_RE.sub("", text)
+    return _replace_wrapped_base64_blocks(text, lambda _: "")
+
+
 def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | None = None) -> str:
     kind = _placeholder_metadata(summary.get("kind", "tool_result") or "tool_result")
-    if kind == "raw_payload" and content:
+    if kind == "media_payload" and content:
+        content = _media_payload_preview_content(content)
+    if kind in {"raw_payload", "media_payload"} and content:
         # #1016: say what the payload holds and how to read it, within the 512 rule; ``ref=`` stays last.
         ref = summary.get("ref", "")
         head = (
