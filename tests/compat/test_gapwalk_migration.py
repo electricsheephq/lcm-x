@@ -94,11 +94,21 @@ def test_gapwalk_forward(tmp_path, old_tree, host_root):
 
 
 @pytest.mark.parametrize("reader", ["gapwalk-base", "v0.28.1", PREVIOUS_GA])
-def test_gapwalk_rollback(tmp_path, old_tree, host_root, reader):
+@pytest.mark.parametrize("trigger", ["normal", "abort", "noop"])
+def test_gapwalk_rollback(tmp_path, old_tree, host_root, reader, trigger):
     old = old_tree(reader, {**READERS, "gapwalk-base": BASE,
                             "v0.28.1": "77b2b4f795fb6a4f84c55abf6d0441da4469971e"})
     original = run_old(old, tmp_path, host_root, OLD_CHUNKS, mode="write")
     upgrade(tmp_path / "lcm.db", original["identity"])
+    if trigger != "normal":
+        with sqlite3.connect(tmp_path / "lcm.db") as conn:
+            conn.execute("DROP TRIGGER lcm_chunk_gapfill_message")
+            body = "SELECT RAISE(ABORT, 'message-trigger-sentinel')" if trigger == "abort" else "SELECT 1"
+            conn.execute("CREATE TRIGGER lcm_chunk_gapfill_message AFTER UPDATE OF content ON messages "
+                         f"WHEN NEW.role='user' BEGIN {body}; END")
+        with pytest.raises(AssertionError, match="message-trigger-sentinel|destination proof"):
+            run_old(old, tmp_path, host_root, OLD_CHUNKS)
+        return
     assert run_old(old, tmp_path, host_root, OLD_CHUNKS) == original
     with sqlite3.connect(tmp_path / "lcm.db") as conn:
         before = list(conn.execute("SELECT * FROM messages ORDER BY store_id"))
