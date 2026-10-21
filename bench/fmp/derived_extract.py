@@ -88,14 +88,10 @@ def replacements(raw, original, target):
         matches = [i for i in raw['items'] if isinstance(i, dict) and i.get('local_id') == entry['local_id']]
         if len(matches) == 1:
             items[entry['item']] = matches[0]
-        elif not matches:
-            items.pop(entry['item'])
     for entry in target['relations']:
         matches = [r for r in raw['relations'] if isinstance(r, dict) and r.get('repair_relation') == entry['relation']]
         if len(matches) == 1:
             relations[entry['relation']] = matches[0]
-        elif not matches:
-            relations.pop(entry['relation'])
     return raw | dict(items=list(items.values()), relations=list(relations.values()))
 def validate(wire, window, prior=()):
     if not isinstance(wire,dict):

@@ -345,6 +345,16 @@ def build_recall_or_query(query: str) -> str:
     return " OR ".join(recall_content_terms(query))
 
 
+def is_identifier_shaped_query(query: str) -> bool:
+    """Recognize unquoted compound identifiers without changing prose/LIKE routes."""
+    if not query or '"' in query or any(char.isspace() for char in query):
+        return False
+    if "_" not in query and not any(char.isdigit() for char in query):
+        return False
+    safe = sanitize_fts5_query(query)
+    return not requires_like_fallback(query, safe) and len(safe.split()) >= 2
+
+
 def escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 

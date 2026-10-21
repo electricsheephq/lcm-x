@@ -90,7 +90,8 @@ from .retrieval_core import (
     run_knn,
 )
 from .search_query import (
-    AGE_DECAY_RATE, build_recall_or_query, contains_emoji, normalize_search_sort, recall_content_terms,
+    AGE_DECAY_RATE, build_recall_or_query, contains_emoji, is_identifier_shaped_query,
+    normalize_search_sort, recall_content_terms,
     requires_like_fallback, sanitize_fts5_query,
 )
 from .store import _normalize_observed_at, build_message_fts_spec
@@ -1577,7 +1578,9 @@ def _lcm_grep_full_text_with_deadline(
     def invoke() -> dict[str, Any]:
         message_conn: sqlite3.Connection | None = None
         dag_conn: sqlite3.Connection | None = None
-        expired = [False]
+        stop = threading.Event()
+        close_lock = threading.Lock()
+        watchdog: threading.Thread | None = None
 
         def require_remaining(stage: str) -> float:
             stage_remaining = deadline - time.monotonic()
@@ -1585,11 +1588,21 @@ def _lcm_grep_full_text_with_deadline(
                 raise TimeoutError(f"lcm full-text deadline exhausted before {stage}")
             return stage_remaining
 
-        def interrupt_if_expired() -> int:
-            if time.monotonic() >= deadline:
-                expired[0] = True
-                return 1
-            return 0
+        def interrupt_when_expired() -> None:
+            if stop.wait(max(0.0, deadline - time.monotonic())):
+                return
+            while not stop.is_set():
+                with close_lock:
+                    if stop.is_set():
+                        return
+                    for conn in (message_conn, dag_conn):
+                        if conn is not None:
+                            try:
+                                conn.interrupt()
+                            except sqlite3.ProgrammingError:
+                                pass
+                # Sticky cancellation also covers statements begun after an interrupt.
+                stop.wait(0.01)
 
         try:
             require_remaining("database path resolution")
@@ -1615,8 +1628,10 @@ def _lcm_grep_full_text_with_deadline(
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA query_only=ON")
                 require_remaining("connection setup")
-                conn.set_progress_handler(interrupt_if_expired, 1000)
-                require_remaining("connection setup")
+            watchdog = threading.Thread(
+                target=interrupt_when_expired, name="full-text-deadline", daemon=True,
+            )
+            watchdog.start()
             read_engine = copy.copy(engine)
             read_io = RetrievalContext(engine._store, engine._dag).bind(
                 message_conn, dag_conn,
@@ -1631,16 +1646,20 @@ def _lcm_grep_full_text_with_deadline(
                     _limit_cap=limit_cap,
                 )
             )
-            if expired[0] or time.monotonic() >= deadline:
+            if time.monotonic() >= deadline:
                 return _lcm_grep_deadline_error(
                     str(args.get("mode") or "semantic").lower(), "full_text"
                 )
             return payload
         finally:
-            if message_conn is not None:
-                message_conn.close()
-            if dag_conn is not None:
-                dag_conn.close()
+            stop.set()
+            with close_lock:
+                if message_conn is not None:
+                    message_conn.close()
+                if dag_conn is not None:
+                    dag_conn.close()
+            if watchdog is not None:
+                watchdog.join()
 
     try:
         return _run_within_deadline(
@@ -3217,21 +3236,35 @@ def _lcm_recall_fts_arm(
     """FTS arm: raw messages across all eligible sessions."""
     # Emoji cannot reach MATCH: keep the raw query on the existing LIKE route.
     or_query = "" if contains_emoji(query) else build_recall_or_query(query)
-    payload = _lcm_grep_full_text_with_deadline(
-        {
-            "query": or_query or query,
-            "_allow_operators": bool(or_query),
-            "_stemmed": True,
-            "sort": "relevance" if or_query or contains_emoji(query) else "recency",
-            "mode": "recall",
-            "session_scope": "all",
-            "limit": candidate_limit,
-            "_excluded_session_ids": excluded_session_ids,
-        },
-        engine=engine,
-        deadline=deadline,
-        limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
-    )
+    args = {
+        "query": or_query or query,
+        "_allow_operators": bool(or_query),
+        "_stemmed": True,
+        "sort": "relevance" if or_query or contains_emoji(query) else "recency",
+        "mode": "recall",
+        "session_scope": "all",
+        "limit": candidate_limit,
+        "_excluded_session_ids": excluded_session_ids,
+    }
+    payload = None
+    if is_identifier_shaped_query(query):
+        payload = _lcm_grep_full_text_with_deadline(
+            {**args, "query": f'"{query}"', "_allow_operators": True, "sort": "relevance"},
+            engine=engine,
+            deadline=deadline,
+            limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
+        )
+        # A clean literal miss alone may broaden; errors keep their disclosure
+        # and never spend the semantic reservation on a second full-text query.
+        if not payload.get("results") and "error" not in payload and not payload.get("message_search_error"):
+            payload = None
+    if payload is None:
+        payload = _lcm_grep_full_text_with_deadline(
+            args,
+            engine=engine,
+            deadline=deadline,
+            limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
+        )
     if "error" in payload:
         return [], payload
     # Grep survives a message-search crash on its other stages, but THIS arm

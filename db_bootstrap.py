@@ -966,17 +966,29 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         )
 
     def ensure_index(name: str, create_sql: str) -> None:
-        existing = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
-            (name,),
-        ).fetchone()
         def normalize(value: object) -> str:
             return " ".join(str(value or "").lower().split())
-        if existing is not None and normalize(existing[0]) == normalize(create_sql):
-            return
-        if existing is not None:
-            conn.execute(f"DROP INDEX {name}")
-        conn.execute(create_sql)
+        for attempt in range(5):  # A delayed peer DROP can remove a winning index.
+            existing = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,),
+            ).fetchone()
+            if existing is not None and normalize(existing[0]) == normalize(create_sql):
+                return
+            if existing is not None:
+                conn.execute(f"DROP INDEX IF EXISTS {name}")
+            try:
+                conn.execute(create_sql)
+                return
+            except sqlite3.OperationalError as exc:
+                if str(exc) != f"index {name} already exists":
+                    raise
+                concurrent = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,),
+                ).fetchone()
+                if concurrent is not None and normalize(concurrent[0]) == normalize(create_sql):
+                    return
+                if attempt == 4:
+                    raise
 
     ensure_index(
         "idx_lcm_rollups_ready_period",
