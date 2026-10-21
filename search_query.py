@@ -463,9 +463,14 @@ def normalize_search_sort(sort: str | None) -> str:
 
 
 def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
+    return build_snippet_with_span(text, terms, width)[0]
+
+
+def build_snippet_with_span(text: str, terms: List[str], width: int = 80) -> tuple[str, int, int]:
+    """Return the legacy preview and its undecorated source span."""
     content = (text or "")
     if not content:
-        return ""
+        return "", 0, 0
     lowered = content.lower()
     for term in terms:
         if not term:
@@ -479,5 +484,5 @@ def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
                 snippet = "..." + snippet
             if end < len(content):
                 snippet = snippet + "..."
-            return snippet
-    return content[:width] + ("..." if len(content) > width else "")
+            return snippet, start, end
+    return content[:width] + ("..." if len(content) > width else ""), 0, min(len(content), width)
