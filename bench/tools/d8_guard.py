@@ -84,8 +84,11 @@ def _unscorable(row):
     if "score" in row:
         score = row["score"]
         return not (isinstance(score, Real) and not isinstance(score, bool) and score == score)
-    label = row.get("label")
-    return not (isinstance(label, bool) or isinstance(label, str) and bool(label.strip()))
+    try:
+        _correct(row)
+    except ValueError:
+        return True
+    return False
 
 
 def degraded_rate(rows, config):
@@ -150,7 +153,10 @@ def _check_rows(values, source, identities, issues):
     for row in values:
         if not isinstance(row, dict):
             raise ValueError(f"{source} row is not a JSON object")
-        qid = _qid(row)
+        try:
+            qid = _qid(row)
+        except ValueError as error:
+            raise ValueError(f"{source}: {error}") from error
         if qid in seen:
             duplicates.append(qid)
         seen.add(qid)
@@ -181,10 +187,10 @@ def _load_run(root):
         checkpoint = json.loads(checkpoint_path.read_text())
         _record_identities(checkpoint, identities, issues)
         questions = checkpoint.get("questions", {})
-        targets = [_qid({"questionId": qid}) for qid in checkpoint.get("targetQuestionIds") or questions]
-        _check_rows([{"questionId": qid} for qid in targets],
-                    "checkpoint.json targetQuestionIds", identities, issues)
-        for qid in targets:
+        targets = [{"questionId": qid} for qid in checkpoint.get("targetQuestionIds") or questions]
+        _check_rows(targets, "checkpoint.json targetQuestionIds", identities, issues)
+        for target in targets:
+            qid = _qid(target)
             question = questions.get(qid, {})
             phases = question.get("phases", {})
             row = rows.setdefault(qid, {"questionId": qid,

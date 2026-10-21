@@ -20,10 +20,14 @@ FAIL_CLOSE_MARKERS = (
 
 def _qid(row: dict[str, Any]) -> str:
     for key in ("questionId", "question_id", "qid", "id"):
-        value = row.get(key)
-        if value is not None:
+        if key not in row:
+            continue
+        value = row[key]
+        if ((isinstance(value, str) and value.strip())
+                or (isinstance(value, int) and not isinstance(value, bool))):
             return str(value)
-    raise ValueError("per-question row has no question id")
+        raise ValueError(f"invalid question id: {key} must be a non-empty string or integer")
+    raise ValueError("invalid question id: missing question id")
 
 
 def _normalise(text: Any) -> str:
@@ -71,10 +75,16 @@ def _correct(row: dict[str, Any]) -> bool:
         return bool(row["correct"])
     if "score" in row:
         return row["score"] == 1
-    label = str(row.get("label", "")).strip().lower()
-    if label:
-        return label in {"correct", "pass", "passed"}
-    raise ValueError(f"question {_qid(row)!r} has no score")
+    label = row.get("label")
+    if isinstance(label, bool):
+        return False  # Preserve the existing boolean-label scoring convention.
+    if isinstance(label, str):
+        label = label.strip().lower()
+        if label in {"correct", "pass", "passed"}:
+            return True
+        if label == "incorrect":
+            return False
+    raise ValueError("unrecognised label: no usable verdict")
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
