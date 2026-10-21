@@ -199,13 +199,11 @@ jobs:
           TMPDIR: ${{ runner.temp }}
         shell: bash
         run: |
-          # FOLLOWUP: corpus canonical store digest differs from its frozen golden; product unchanged.
-          deselect=(--deselect bench/instruments/local_catchup/tests/test_fix_round4.py::test_corpus_reuses_reader_and_preserves_bytes)
           status=0
           for root in bench/aml bench/fmp/tests bench/instruments/local_catchup/tests bench/instruments/compaction_probe bench/instruments/compaction_probe/track_s/decision/tests bench/instruments/compaction_probe/track_s/scorer/tests bench/instruments/scale389/tests bench/scoreboard bench/tools/tests; do
             targets=("$root")
             if [[ "$root" == bench/instruments/compaction_probe ]]; then targets=("$root"/test*.py); fi
-            python -m pytest "${targets[@]}" "${deselect[@]}" -q -n 4 -o junit_family=xunit1 --junitxml="reports/${root//\//-}.xml" || status=1
+            python -m pytest "${targets[@]}" -q -n 4 -o junit_family=xunit1 --junitxml="reports/${root//\//-}.xml" || status=1
           done
           exit "$status"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
