@@ -4613,7 +4613,7 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
     def record_ceiling(*, pending_complete=False):
         # Keep unread pending ids. A fully replayed, empty list needs no skip
         # certificate; dropping it reopens the whole range below the ceiling.
-        if ceiling < high + 1 and ("pending" not in scan or pending_complete):
+        if ceiling < high + 1 and ("pending" not in scan or not pending_ids or pending_complete):
             record({"revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high, "ceiling": ceiling})
 
     reached = 0

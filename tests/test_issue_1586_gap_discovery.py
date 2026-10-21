@@ -434,6 +434,46 @@ def test_ceiling_is_leading_and_written_before_yield(local_store):
         assert get(conn, identity, "chunk_policy_revision_through") is None
 
 
+@pytest.mark.parametrize("pending", [[], [1, 16]], ids=["empty", "filtered"])
+def test_empty_pending_saves_grown_ceiling_before_slice_stops(local_store, monkeypatch, pending):
+    engine, _ = local_store
+    identity = seed(engine, 16)
+    publish(engine, identity, range(2, 16))
+    with sqlite3.connect(engine._store.db_path) as conn:
+        scan_record(conn, identity, 16, pending=pending)
+        put(conn, identity, "chunk_policy_revision", CHUNK_POLICY_REVISION)
+        put(conn, identity, "chunk_policy_revision_through", 16)
+        conn.executemany(
+            "INSERT INTO messages(store_id, session_id, role, content, timestamp) "
+            "VALUES (?, 'seed', 'user', ?, 0)",
+            [(i, "\t\n" if 82 <= i <= 145 else f"New fact {i}.") for i in range(17, 147)],
+        )
+    publish(engine, identity, [146])
+    original = command.chunk_message
+    gap_calls = []
+
+    def counted(*args, **kwargs):
+        if sys._getframe(1).f_code.co_name == "_chunk_gapfill_rows":
+            gap_calls.append(args[0])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(command, "chunk_message", counted)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        _, docs, _ = select(conn, identity, record_progress=True)
+        assert [row[0] for row in docs] == [f"{i}:0" for i in range(81, 49, -1)]
+        assert set(range(82, 146)) <= set(gap_calls)
+        assert get(conn, identity, "chunk_gapfill_scan") == {
+            "revision": CHUNK_POLICY_REVISION, "policy": "conversational", "high": 146, "ceiling": 82,
+        }
+        assert get(conn, identity, "chunk_policy_revision_through") == 16
+    publish(engine, identity, range(50, 82))
+    gap_calls.clear()
+    with sqlite3.connect(engine._store.db_path) as conn:
+        _, docs, _ = select(conn, identity, record_progress=True)
+        assert [row[0] for row in docs] == [f"{i}:0" for i in range(49, 17, -1)]
+        assert gap_calls and not set(range(82, 146)).intersection(gap_calls)
+
+
 def test_zero_chunk_prefix_rewalk_after_high_change(local_store, monkeypatch):
     engine, _ = local_store
     identity = seed(engine, 140)
