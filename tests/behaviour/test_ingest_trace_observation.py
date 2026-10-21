@@ -184,7 +184,7 @@ def test_protected_replay_keeps_source_list_isolated(tmp_path: Path, name: str) 
     isolated: list[bool] = []
 
     def observe_return(frame: Any, event: str, arg: Any) -> Any:
-        if frame.f_code.co_name != "_ingest_messages":
+        if frame.f_code.co_name != "_ingest_messages_impl":
             return None
         values = frame.f_locals
         if event == "return" and "protected_messages" in values:
