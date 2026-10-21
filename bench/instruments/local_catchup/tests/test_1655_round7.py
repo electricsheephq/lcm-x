@@ -172,11 +172,11 @@ def test_f2_full_counts_wait_for_clean_boundary_audit(corpus, tmp_path, monkeypa
     a = NS(db=db, root=tmp_path, max_seconds=2)
     engine = NS(_config=None)
     if outcome == "drain":
-        measurement.wait_covered(a, mod, engine, manifest)
+        measurement.fill_covered(a, mod, engine, manifest)
         assert audit.audit(db, manifest)["complete"]
     else:
         with pytest.raises(RuntimeError, match="covered setup failed"):
-            measurement.wait_covered(a, mod, engine, manifest)
+            measurement.fill_covered(a, mod, engine, manifest)
     rows = [json.loads(line) for line in (tmp_path/"coverage.jsonl").read_text().splitlines()]
     if outcome == "corruption":
         assert not sleeps and len(rows) == 2
@@ -227,12 +227,18 @@ def test_f4_floor_nonpass_exits_after_summary_and_labels(tmp_path, monkeypatch, 
     monkeypatch.setattr(floor.sys, "argv", ["floor", "--lcmx-repo", str(tmp_path),
         "--hermes-source", str(tmp_path), "--scratch", str(tmp_path/"scratch"),
         "--out", str(out), "--model-cache", str(tmp_path/"cache"), "--cgroup", str(tmp_path),
-        "--limited", "--cell", cell])
+        "--limited", "--cell", cell, "--max-minutes", "330"])
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(floor.subprocess, "check_output", lambda *a, **kw: "CPU fixture\n")
+    monkeypatch.setattr(floor, "standalone", lambda *a: {"standalone_calibration_s": .572})
     monkeypatch.setattr(floor, "measured_limits", lambda _: dict(verified=True))
     monkeypatch.setattr(floor, "isolated", lambda *a: None)
     monkeypatch.setattr(floor, "build", lambda *a: {})
-    monkeypatch.setattr(floor, "run", lambda a: {})
+    def run(a):
+        a.out.mkdir()
+        (a.out/"events.jsonl").write_text("")
+        return dict(end_to_end_s=7200)
+    monkeypatch.setattr(floor, "run", run)
     monkeypatch.setattr(floor, "rate", lambda *a: dict(state=state))
     def recall_run(*a, **kw):
         (out/"recall").mkdir()

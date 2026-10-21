@@ -2,6 +2,7 @@
 from dataclasses import asdict, replace
 import hashlib
 import json
+import itertools
 import os
 from pathlib import Path
 import random
@@ -33,6 +34,13 @@ def arguments(description):
     p.add_argument("--smoke", action="store_true")
     p.add_argument("--label", default="Mac")
     p.add_argument("--worker", type=Path)
+    p.add_argument("--block", type=int, choices=(0, 1, 2))
+    p.add_argument("--covered-store", type=Path)
+    p.add_argument("--build-covered", action="store_true")
+    p.add_argument("--standalone-calibration-s", type=float)
+    p.add_argument("--resume-covered-store", type=Path)
+    p.add_argument("--build-seconds", type=float)
+    p.add_argument("--allow-partial", action="store_true")
     return p.parse_args()
 
 
@@ -49,6 +57,17 @@ def prepare(a):
     # Isolate corpus construction too, before any product import.
     isolated(a.scratch/"builder-home", a.model_cache)
     os.environ["HOME"] = str(a.scratch/"builder-home")
+    os.environ["ORT_DISABLE_TELEMETRY"] = "1"
+    os.environ["CFFIXED_USER_HOME"] = os.environ["HOME"]
+    if source := getattr(a, "resume_covered_store", None):
+        manifest = load(source/"manifest.json")
+        if any(manifest[k] != getattr(a, k) for k in ("rows", "shape", "baseline", "seed")):
+            raise ValueError("covered store corpus mismatch")
+        from contextlib import closing
+        with closing(connect(source/"store.db")) as src, closing(sqlite3.connect(a.scratch/"baseline.db")) as dst:
+            src.backup(dst)
+        dump(a.out/"manifest.json", manifest)
+        return manifest
     pilot = build(a.lcmx_repo, a.hermes_source, a.scratch/"pilot.db", pilot_rows(1000, a.rows, a.shape), a.shape, a.baseline)
     estimate = 5*(pilot["database_bytes"]+len(pilot["expected"]["chunks"])*2048)*a.rows/pilot["rows"]
     if estimate > 6*2**30:
@@ -65,7 +84,23 @@ def cell(a, state, block, kind):
     root.mkdir()
     # Only baseline + one serial cell copy live; rescore uses the JSONL receipts.
     db = a.scratch/"cell.db"
-    with connect(a.scratch/"baseline.db") as src, sqlite3.connect(db) as dst:
+    source = a.covered_store/"store.db" if state == "ON-covered" and getattr(a, "covered_store", None) else a.scratch/"baseline.db"
+    if state == "ON-covered":
+        try:
+            if not getattr(a, "covered_store", None) or not source.is_file():
+                raise FileNotFoundError("covered store or store.db absent")
+            checked = audit(source, load(a.out/"manifest.json"))
+            detail = dict(changed_vectors=len(checked["changed_vectors"]), changed_metadata=len(checked["changed_metadata"]),
+                missing_count=sum(v["missing_count"] for v in checked["classes"].values()),
+                reason="covered_store_changed" if not checked["raw_unchanged"] or checked["changed_vectors"] or checked["changed_metadata"]
+                    else "covered_store_unfinished", audit=checked)
+        except (FileNotFoundError, sqlite3.DatabaseError) as exc:
+            checked, detail = dict(complete=False), dict(reason=str(exc))
+        if not checked["complete"]:
+            result = dict(state="INVALID", reason="covered_store_incomplete", pre_audit=detail)
+            dump(root/"summary.json", result)
+            return result
+    with connect(source) as src, sqlite3.connect(db) as dst:
         src.backup(dst)
     spec = dict(vars(a), state=state, block=block, kind=kind, db=db, root=root,
                 home=a.scratch/f"{block}-{state}-home")
@@ -152,6 +187,8 @@ def runtime(request):
     isolated(a.home, a.model_cache)
     os.environ["ORT_DISABLE_TELEMETRY"] = "1"
     mod = product(a.lcmx_repo, a.hermes_source)
+    if a.state == "ON-covered":
+        mod("embedding_provider").resolve_provider(config(mod, a.db), for_backfill=True)._ensure_local(allow_download=False)
     guards(mod, a.root/"events.jsonl")
     original_join = threading.Thread.join
     def join(thread, *args, **kw):
@@ -174,17 +211,23 @@ def runtime(request):
         "Earlier turns " + hashlib.sha256(prompt.encode()).hexdigest()[:16] + ".\nExpand for details about: turns")
     start = time.perf_counter()
     engine = mod("engine").LCMEngine(config=cfg, hermes_home=str(a.home))
+    if a.state == "ON-covered":
+        engine._schedule_embedding_maintenance = lambda: None  # Bind resets the retirement flag; freeze scheduling too.
     engine.on_session_start("i2-trace", platform="eval", conversation_id="i2-trace", context_length=6000)
+    if a.state == "ON-covered":
+        engine._embedding_maintenance_retired = True
     bind = (time.perf_counter()-start)*1000
     dump(a.root/"config.json", dict(config=asdict(cfg), bind_ms=bind, ort_threads=mod("embedding_provider")._FASTEMBED_THREADS))
     a._ready = lambda: mod("embedding_provider").probe_provider_availability(cfg).get("available", False)
     return a, mod, engine, bind
 
 
-def trace(engine, mod, count, seed, observe, check):
+def trace(engine, mod, count, seed, observe, check, done=None):
     from bench.instruments.compaction_probe.bgprep.replay import workload
     view, batch, expected = [], [], []
-    for i in range(count):
+    for i in itertools.count():
+        if (count is not None and i >= count) or (done is not None and done()):
+            break
         if i % 64 == 0:
             batch = workload(seed+i//64)
         pair = batch[i % 64]
@@ -324,6 +367,13 @@ def catchup_activity(root, start, end, coverage_start, coverage_end, require_pre
 
 
 def wait_covered(a, mod, engine, manifest):
+    checked = audit(a.db, manifest)
+    append(a.root/"coverage.jsonl", dict(at=time.monotonic(), phase="covered_initial", audit=checked))
+    if not checked["complete"]:
+        raise RuntimeError("covered_store_incomplete")
+
+
+def fill_covered(a, mod, engine, manifest):
     """Explicit covered-store setup; never counted as autonomous catch-up evidence."""
     failures = []
     def fill():
@@ -335,6 +385,8 @@ def wait_covered(a, mod, engine, manifest):
                 return
             start, changed, previous = time.monotonic(), time.monotonic(), None
             while True:
+                if getattr(a, "build_seconds", None) is not None and time.monotonic()-start >= a.build_seconds:
+                    return  # Persist this audited partial store for the next setup job.
                 counts = vector_counts(a.db, manifest)
                 if all(counts[k] >= len(v) for k, v in manifest["expected"].items()):
                     checked = audit(a.db, manifest)
@@ -357,11 +409,10 @@ def wait_covered(a, mod, engine, manifest):
                 if time.monotonic()-changed >= 600 or time.monotonic()-start > a.max_seconds:
                     raise RuntimeError("covered setup deadline/no-progress stop")
                 for name, extra in (("_embedding_backfill_summary_run", {}), ("_chunk_backfill_run", {"policy": "conversational", "incremental": True})):
-                    getattr(mod("command"), name)(engine._config, a.db, apply=True, limit=32,
+                    getattr(mod("command"), name)(engine._config, a.db, apply=True, limit=4096,
                         retry_uncertain=False, include_next_hint=False, **extra)
-                time.sleep(.1)
         except Exception as exc:
-            failures.append(type(exc).__name__)
+            failures.append(f"{type(exc).__name__}: {exc}")
     thread = threading.Thread(target=fill, name="i2-covered-setup")
     thread.start()
     thread.join(a.max_seconds+1)
