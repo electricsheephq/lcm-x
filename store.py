@@ -76,6 +76,25 @@ _MESSAGE_SELECT_COLUMN_COUNT = len(_MESSAGE_SELECT_COLUMNS.split(","))
 _UNKNOWN_SOURCE = "unknown"
 
 
+class _ObservedAtRows(list):
+    """Lookup rows with private, non-persisted provenance from the same fetched data."""
+
+    def __init__(self, rows, canonical_stamps):
+        super().__init__(rows)
+        self.canonical_stamps = canonical_stamps
+
+    def __reduce__(self):
+        return list, (list(self),)
+
+    def __copy__(self):
+        return list(self)
+
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
+
+        return deepcopy(list(self), memo)
+
+
 def _fetch_ranked_search_rows(conn: sqlite3.Connection, sql: str, args: list[Any]) -> list[list[Any]]:
     # A single SQLite result avoids reacquiring Python's GIL for every candidate.
     # JSON1 rounds REALs; tagged round-trip decimals preserve the original bits.
@@ -1212,9 +1231,10 @@ class MessageStore:
         (indexed; bounded by the distinct stamps asked for)."""
         values, sessions = sorted(set(observed_ats)), set(session_ids)
         if not values or not sessions:
-            return []
+            return _ObservedAtRows([], {})
         self._ensure_identity_anchor_schema()
         found: dict[tuple[int, float], Dict[str, Any]] = {}
+        canonical_stamps = {}
         for start in range(0, len(values), 500):
             chunk = values[start:start + 500]
             marks = ",".join("?" * len(chunk))
@@ -1230,13 +1250,15 @@ class MessageStore:
             for r in rows:
                 row = self._row_to_dict(r)
                 if str(row.get("session_id") or "") in sessions:
+                    canonical_stamps[int(row["store_id"])] = row.get("observed_at")
                     found[(int(row["store_id"]), float(row["observed_at"]))] = row
             batch = self.get_batch(sorted({int(store_id) for store_id, _stamp in aliased}))
             for store_id, stamp in aliased:  # the one occurrence an H1 unstable stamp was proven for (R5)
                 row = batch.get(int(store_id))
                 if row is not None and str(row.get("session_id") or "") in sessions:
+                    canonical_stamps[int(store_id)] = row.get("observed_at")
                     found[(int(store_id), float(stamp))] = {**row, "observed_at": float(stamp)}
-        return [found[key] for key in sorted(found)]
+        return _ObservedAtRows([found[key] for key in sorted(found)], canonical_stamps)
 
     def add_message_relations(self, groups: List[List[tuple]]) -> int:
         """Append relation GROUPS; each group is ``[(store_id, kind, related_store_id, ordinal,
