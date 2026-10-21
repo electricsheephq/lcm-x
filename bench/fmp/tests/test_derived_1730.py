@@ -94,7 +94,9 @@ def test_3_typed_items_reject_locally_and_repair(tmp_path):
     backend = Repair()
     result = extract.execute([extract.source_view(asdict(qid()))], cached(tmp_path/'responses', backend), run.READER, tmp_path)
     assert backend.calls == 2, 'malformed typed item must receive the existing repair attempt'
-    assert len(result['items']) == 1 and result['ledger'][0]['state'] == 'succeeded'
+    assert len(result['items']) == 1 and result['ledger'][0]['state'] == 'partial'
+    # The repair omits 'bad'; its unreplaced rejection must remain visible to the 5% cap.
+    assert result['ledger'][0]['rejected_count'] == 1
     assert delivery.render(result['items'], [], 'drink')[0]
 
 
