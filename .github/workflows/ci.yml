@@ -202,7 +202,7 @@ jobs:
           status=0
           for root in bench/aml bench/fmp/tests bench/instruments/local_catchup/tests bench/instruments/compaction_probe bench/instruments/compaction_probe/track_s/decision/tests bench/instruments/compaction_probe/track_s/scorer/tests bench/instruments/reliability bench/instruments/scale389/tests bench/scoreboard bench/tools/tests; do
             targets=("$root")
-            if [[ "$root" == bench/instruments/compaction_probe || "$root" == bench/instruments/reliability ]]; then targets=("$root"/test*.py); fi
+            if [[ "$root" == bench/instruments/compaction_probe ]]; then targets=("$root"/test*.py); fi
             python -m pytest "${targets[@]}" -q -n 4 -o junit_family=xunit1 --junitxml="reports/${root//\//-}.xml" || status=1
           done
           exit "$status"
