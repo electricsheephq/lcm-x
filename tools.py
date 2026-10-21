@@ -95,7 +95,7 @@ from .search_query import (
     requires_like_fallback, sanitize_fts5_query,
 )
 from .store import _normalize_observed_at, build_message_fts_spec
-from .vector_store import VectorStore
+from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import LCMConfig, embedding_provider_id, profile_bound
 
 if TYPE_CHECKING:
@@ -356,16 +356,8 @@ def _retrieval_candidate_session_ids(
     if deadline is not None and time.monotonic() >= deadline:
         return [], True
     sessions: set[str] = set()
-    # A progress handler is CONNECTION-GLOBAL, and ``MessageStore._conn`` is
-    # explicitly shared across threads (opened ``check_same_thread=False``).
-    # Installing this request's deadline there would let it interrupt a
-    # concurrent read/ingest on the same connection, and the `finally` teardown
-    # would clear a concurrent request's handler -- silently disabling ITS
-    # timeout. So the enumeration gets a private read-only connection and owns
-    # its handler alone: the same idiom every other deadline-guarded read path
-    # here uses (``_lcm_recall_summary_sources``, the chunk/summary hydrators in
-    # ``retrieval_core``). Python's sqlite3 exposes no getter for the installed
-    # handler, so save/restore on the shared connection is not expressible.
+    # Deadline ownership stays on a private connection; the shared store may
+    # already carry another operation's connection-global progress handler.
     connection: sqlite3.Connection | None = None
     try:
         db_path = Path(engine._store.db_path).resolve()
@@ -379,15 +371,23 @@ def _retrieval_candidate_session_ids(
             ),
         )
         connection.execute("PRAGMA query_only=ON")
-        if deadline is not None:
-            connection.set_progress_handler(
-                lambda: 1 if time.monotonic() >= deadline else 0, 1000
-            )
-        for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
-            rows = connection.execute(
-                _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
-            ).fetchall()
-            sessions.update(str(row[0]) for row in rows if row[0] is not None)
+        with _interrupt_read_on_deadline(connection, deadline):
+            for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
+                sql = _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
+                try:
+                    row = connection.execute(
+                        f"SELECT json_group_array(session_id) FROM ({sql})"
+                    ).fetchone()
+                    sessions.update(json.loads(row[0]))
+                except (sqlite3.Error, MemoryError) as exc:
+                    if not isinstance(exc, MemoryError) and getattr(exc, "sqlite_errorcode", None) not in (
+                        sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM,
+                    ):
+                        raise
+                    rows = connection.execute(sql).fetchall()
+                    sessions.update(str(row[0]) for row in rows if row[0] is not None)
+            if deadline is not None and time.monotonic() >= deadline:
+                return [], True
     except sqlite3.OperationalError:
         if deadline is not None and time.monotonic() >= deadline:
             return [], True

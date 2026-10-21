@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import logging
 import math
 import sqlite3
@@ -41,6 +42,37 @@ from .sqlite_util import _is_sqlite_locked_error
 logger = logging.getLogger(__name__)
 
 _monotonic = time.monotonic
+
+
+@contextmanager
+def _interrupt_read_on_deadline(connection, deadline):
+    """Own cancellation of a private read connection without hot GIL callbacks."""
+    stop = threading.Event()
+
+    def interrupt_when_expired():
+        if stop.wait(max(0.0, deadline - _monotonic())):
+            return
+        while not stop.is_set():
+            try:
+                connection.interrupt()
+            except sqlite3.ProgrammingError:
+                return
+            # Cancellation stays sticky across statements started after expiry.
+            stop.wait(0.01)
+
+    watchdog = None
+    if deadline is not None:
+        watchdog = threading.Thread(
+            target=interrupt_when_expired, name="sqlite-read-deadline", daemon=True,
+        )
+        watchdog.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        if watchdog is not None:
+            # Drain BEFORE the owner closes the connection: no close/interrupt race.
+            watchdog.join()
 
 
 def _prescreen_deadline_expired(deadline: float | None, scanned_rows: int) -> bool:
@@ -1762,9 +1794,9 @@ class VectorStore:
                 if conversation_table is not None
                 else ""
             )
-            rows = self._conn.execute(
+            return self._fetch_binary_matrix(numpy,
                 f"""
-                SELECT b.chunk_id, b.bits
+                SELECT b.chunk_id AS binary_id, b.bits
                 FROM lcm_chunk_binary b
                 JOIN lcm_chunk_meta cm
                   ON cm.chunk_id = b.chunk_id AND cm.identity_hash = b.identity_hash
@@ -1773,8 +1805,7 @@ class VectorStore:
                 WHERE {' AND '.join(where)}
                 """,
                 args,
-            ).fetchall()
-        return self._binary_rows_to_matrix(numpy, rows)
+            )
 
     def _load_embedding_binary_matrix(
         self,
@@ -1815,9 +1846,9 @@ class VectorStore:
                 if conversation_table is not None
                 else ""
             )
-            rows = self._conn.execute(
+            return self._fetch_binary_matrix(numpy,
                 f"""
-                SELECT b.embedded_id, b.bits
+                SELECT b.embedded_id AS binary_id, b.bits
                 FROM lcm_embedding_binary b
                 JOIN lcm_embedding_meta m
                   ON m.embedded_id = b.embedded_id AND m.identity_hash = b.identity_hash
@@ -1826,8 +1857,7 @@ class VectorStore:
                 WHERE {' AND '.join(where)}
                 """,
                 args,
-            ).fetchall()
-        return self._binary_rows_to_matrix(numpy, rows)
+            )
 
     def _cached_binary_matrix(
         self, cache: "OrderedDict[tuple[str, int], tuple[list[str], Any]]",
@@ -1911,18 +1941,19 @@ class VectorStore:
                 check_same_thread=False,
             )
             conn.row_factory = sqlite3.Row
-            conn.set_progress_handler(interrupt_if_expired, 1000)
             reader = copy.copy(self)
             reader._borrowed_view = True
             reader._conn = conn
             reader._write_lock = threading.RLock()
             reader._cache_lock = threading.RLock()
-            loaded = loader(reader)
-            if _monotonic() >= deadline:
-                raise _PrescreenDeadlineExpired()
-            return loaded
+            with _interrupt_read_on_deadline(conn, deadline):
+                loaded = loader(reader)
+                if _monotonic() >= deadline:
+                    raise _PrescreenDeadlineExpired()
+                return loaded
         except sqlite3.OperationalError as exc:
-            if expired[0] or _monotonic() >= deadline:
+            if (getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT
+                    or expired[0] or _monotonic() >= deadline):
                 raise _PrescreenDeadlineExpired() from exc
             raise
         finally:
@@ -1934,6 +1965,39 @@ class VectorStore:
     def _read_with_deadline(self, loader, deadline: float | None):
         """Run a candidate read through the shared interruptible read path."""
         return self._load_binary_with_deadline(loader, deadline)
+
+    def _fetch_binary_matrix(self, numpy, sql, args):
+        # Both aggregates consume the same scan stream, pairing IDs and bytes
+        # in the row-wise loader's order without materialization or a temp sort.
+        packed = f"""SELECT json_group_array(json_array(binary_id, length(bits))),
+                            group_concat(hex(bits), '') FROM ({sql})"""
+        try:
+            metadata, hex_bits = self._conn.execute(packed, args).fetchone()
+        except (sqlite3.Error, MemoryError) as exc:
+            code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+            if not isinstance(exc, MemoryError) and code not in (
+                sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM,
+                sqlite3.SQLITE_FULL, sqlite3.SQLITE_IOERR,
+            ):
+                raise
+            return self._binary_rows_to_matrix(numpy, self._conn.execute(sql, args).fetchall())
+        raw = bytes.fromhex(hex_bits or "")
+        del hex_bits
+        metadata = json.loads(metadata)
+        if metadata and metadata[0][1] and all(row[1] == metadata[0][1] for row in metadata):
+            ids = [str(row[0]) for row in metadata]
+            return ids, numpy.frombuffer(raw, dtype=numpy.uint8).reshape(len(ids), metadata[0][1])
+        offset = 0
+
+        def rows():
+            nonlocal offset
+            for ident, width in metadata:
+                width = int(width)
+                end = offset + width
+                yield ident, raw[offset:end]
+                offset = end
+
+        return self._binary_rows_to_matrix(numpy, rows())
 
     @staticmethod
     def _binary_rows_to_matrix(numpy: Any, rows: Sequence[sqlite3.Row]) -> tuple[list[str], Any]:
