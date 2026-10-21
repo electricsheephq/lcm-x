@@ -3,7 +3,7 @@
 import copy
 import io
 import json
-import shutil
+import sqlite3
 import subprocess
 import sys
 import tarfile
@@ -54,6 +54,17 @@ try:
 finally:
     engine.shutdown()
 """
+
+
+def _copy_store(src, dst):
+    """Copy committed state, WAL frames included: a plain file copy can miss frames
+    a concurrent reader kept PASSIVE checkpointing from moving (#1102 CI flake)."""
+    source, target = sqlite3.connect(src), sqlite3.connect(dst)
+    try:
+        source.backup(target)
+    finally:
+        source.close()
+        target.close()
 
 
 def _without_uids(messages):
@@ -109,7 +120,7 @@ def test_persisted_shadow_uids_are_inert_to_rollback_reader(tmp_path, monkeypatc
     results = []
     for name, messages in (("uid", persisted), ("control", control)):
         db = tmp_path / f"{name}.db"
-        shutil.copy2(tmp_path / "lcm.db", db)
+        _copy_store(tmp_path / "lcm.db", db)
         host_file = tmp_path / f"{name}.json"
         host_file.write_text(json.dumps(messages))
         result = subprocess.run(
