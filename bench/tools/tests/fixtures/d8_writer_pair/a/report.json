@@ -1,0 +1,205 @@
+{
+  "recallConfig": "OFF",
+  "datasetSha256": "f3e751d8b8ca5409e566016b727a42c4fe01a90eccf1dc6cc4dc0fef2019b946",
+  "datasetPath": "./synthetic.json",
+  "promptVersion": "sha256:2c108cbb79b914f28e6b4331f7eaa20cd4db0a38743ad581184c1c3c9e89a6fd",
+  "scoringPath": "fixture-judge/default/score-v1",
+  "answerPresentationMode": "raw_json_v1",
+  "provider": "fixture",
+  "benchmark": "longmemeval",
+  "runId": "a",
+  "dataSourceRunId": "a",
+  "judge": "fixture-judge",
+  "answeringModel": "fixture-reader",
+  "timestamp": "2026-10-21T14:54:27.210Z",
+  "summary": {
+    "totalQuestions": 2,
+    "correctCount": 2,
+    "accuracy": 1
+  },
+  "latency": {
+    "ingest": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    },
+    "indexing": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    },
+    "search": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    },
+    "answer": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    },
+    "evaluate": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    },
+    "total": {
+      "min": 0,
+      "max": 0,
+      "mean": 0,
+      "median": 0,
+      "p95": 0,
+      "p99": 0,
+      "stdDev": 0,
+      "count": 0
+    }
+  },
+  "byQuestionType": {
+    "single-session-user": {
+      "total": 1,
+      "correct": 1,
+      "accuracy": 1,
+      "latency": {
+        "search": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        },
+        "answer": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        },
+        "total": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        }
+      }
+    },
+    "knowledge-update": {
+      "total": 1,
+      "correct": 1,
+      "accuracy": 1,
+      "latency": {
+        "search": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        },
+        "answer": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        },
+        "total": {
+          "min": 0,
+          "max": 0,
+          "mean": 0,
+          "median": 0,
+          "p95": 0,
+          "p99": 0,
+          "stdDev": 0,
+          "count": 0
+        }
+      }
+    }
+  },
+  "questionTypeRegistry": {},
+  "evaluations": [
+    {
+      "questionId": "one_abs",
+      "questionType": "single-session-user",
+      "question": "Synthetic question",
+      "score": 1,
+      "label": "correct",
+      "explanation": "",
+      "hypothesis": "Synthetic answer",
+      "groundTruth": "Synthetic answer",
+      "searchResults": [],
+      "recallHealth": {
+        "coverage": {
+          "fts": "ok"
+        },
+        "degraded": false,
+        "degradedReason": null,
+        "timeout": false
+      },
+      "searchDurationMs": 0,
+      "answerDurationMs": 0,
+      "totalDurationMs": 0
+    },
+    {
+      "questionId": "two",
+      "questionType": "knowledge-update",
+      "question": "Synthetic question",
+      "score": 1,
+      "label": "correct",
+      "explanation": "",
+      "hypothesis": "Synthetic answer",
+      "groundTruth": "Synthetic answer",
+      "searchResults": [],
+      "recallHealth": {
+        "coverage": {
+          "fts": "ok"
+        },
+        "degraded": false,
+        "degradedReason": null,
+        "timeout": false
+      },
+      "searchDurationMs": 0,
+      "answerDurationMs": 0,
+      "totalDurationMs": 0
+    }
+  ]
+}

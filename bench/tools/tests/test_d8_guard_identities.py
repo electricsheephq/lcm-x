@@ -1,5 +1,6 @@
 """Synthetic regressions for #1729; no real run outputs or model calls."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -312,3 +313,21 @@ def test_outcome_types_use_scorer_precedence(tmp_path, evaluation, scorable):
     assert result["runs"]["candidate"].get("unscorable", 0) == int(not scorable)
     assert _unscorable(evaluation) is (not scorable)
     assert not _unscorable({**evaluation, "status": "failed"})
+
+
+WRITER_FIXTURES = Path(__file__).parent / "fixtures" / "d8_writer_pair"
+
+
+def test_writer_generated_matching_identities_are_present():
+    result = compare_runs(WRITER_FIXTURES / "a", WRITER_FIXTURES / "c", subset=True)
+    assert result["pass"]
+    assert not result["INCOMPLETE"]
+    for field in ("datasetSha256", "datasetPath", "promptVersion", "scoringPath"):
+        assert field not in result["identities_missing_both"]
+
+
+def test_writer_generated_dataset_byte_mismatch_is_incomplete():
+    result = compare_runs(WRITER_FIXTURES / "a", WRITER_FIXTURES / "b", subset=True)
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+    assert "identity mismatch: datasetSha256" in result["reason"]
