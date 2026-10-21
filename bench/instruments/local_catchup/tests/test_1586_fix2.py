@@ -152,12 +152,14 @@ def test_setup_diagnostic_allowlist():
     assert not any(p.endswith("store.db") or p == "evidence/covered/" for p in paths)
 
 
-def test_guarded_worker_receipt_rescores(tmp_path):
-    tmp_path = tmp_path/"0-ON-covered"
+@pytest.mark.parametrize("state", ["OFF", "ON-catching-up", "ON-covered"])
+def test_guarded_worker_receipt_rescores(tmp_path, state):
+    tmp_path = tmp_path/f"0-{state}"
     tmp_path.mkdir()
     request = tmp_path/"request.json"
     common.dump(request, dict(root=str(tmp_path)))
     def denied(*a):
+        common.append(tmp_path/"events.jsonl", dict(violation="subprocess_launch"))
         raise RuntimeError("offline subprocess launch")
     measurement.guarded_worker(denied, request)
     assert rescore.v2(tmp_path) == dict(state="INVALID", reason="offline_subprocess_launch")

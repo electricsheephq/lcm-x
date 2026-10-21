@@ -222,6 +222,7 @@ def worker(request):
             except RuntimeError as exc:
                 if str(exc) != "covered_store_incomplete":
                     raise
+                append(a.root/"events.jsonl", dict(violation="covered_store_incomplete"))
                 dump(a.root/"raw-summary.json", dict(state="INVALID", reason=str(exc)))
                 return
         initial = audit(a.db, manifest)

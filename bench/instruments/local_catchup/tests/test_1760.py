@@ -146,6 +146,7 @@ def receipts(root, *, valid=True, activity=True, kinds=("pass", "pass"), host=(.
         cell.mkdir()
         if state == "ON-covered" and early:
             raw = dict(state="INVALID", reason="covered_store_incomplete")
+            write(cell/"events.jsonl", [dict(violation="covered_store_incomplete")])
         else:
             ev = window_batches(*host)
             if not valid:

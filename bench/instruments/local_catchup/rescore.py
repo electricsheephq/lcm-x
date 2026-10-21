@@ -20,41 +20,57 @@ def verdict(path, max_wall):
     return final
 
 
-def v2(root):
+def v2(root, *, _entry=True):
     from .floor import rate
     from .recall import score, window_calibration, overlapping
-    from .measurement import catchup_activity
+    from .measurement import catchup_activity, guard_reason
     def lines(path):
         return [json.loads(s) for s in path.read_text().splitlines()]
     if not (root/"summary.json").is_file() and not (root/"raw-summary.json").is_file():
         raise ValueError(f"missing root summary.json: {root}")
     recorded = load(root/"summary.json" if (root/"summary.json").exists() else root/"raw-summary.json")
     if recorded.get("state") == "ABORTED":
-        return recorded
+        assert _entry, "ABORTED is only valid at the entry root"
+        complete = []
+        for path in root.rglob("raw-summary.json"):
+            cell = path.parent
+            if all((cell/name).is_file() for name in (
+                    "request.json", "recalls.jsonl", "publications.jsonl", "final-audit.json")):
+                complete.append(v2(cell, _entry=False))
+        for path in root.rglob("catchup/summary.json"):
+            cell = path.parent.parent
+            if (cell/"summary.json").is_file() and (cell/"manifest.json").is_file() and (cell/"catchup/events.jsonl").is_file():
+                complete.append(v2(cell, _entry=False))
+        return dict(recorded, state="FAIL") if any(c["state"] == "FAIL" for c in complete) else recorded
     raw_summary = load(root/"raw-summary.json") if (root/"raw-summary.json").exists() else {}
-    early_covered = (root.name.endswith("-ON-covered") and not (root/"recalls.jsonl").exists()
-                     and "classes" not in raw_summary)
-    for name in ("raw-summary.json", "summary.json"):
-        if (root/name).exists():
-            early = load(root/name)
-            if early_covered and early.get("state") == "INVALID" and "classes" not in early and early.get("reason") in (
-                    "covered_store_incomplete", "foreground_preparation_backfill_join_or_network",
-                    "offline_subprocess_launch", "foreground_preparation_forbidden", "foreground_backfill_forbidden",
-                    "foreground_embedding_join_forbidden", "offline_network_forbidden"):
-                return early
+    events = lines(root/"events.jsonl") if (root/"events.jsonl").is_file() else []
+    if raw_summary.get("state", recorded.get("state")) == recorded.get("state") == "INVALID":
+        reason = raw_summary.get("reason", recorded.get("reason"))
+        same_reason = recorded.get("reason") == reason
+        if (same_reason and reason == "covered_store_incomplete" and root.name.endswith("-ON-covered")
+                and not (root/"recalls.jsonl").exists() and "classes" not in raw_summary and "classes" not in recorded):
+            return recorded
+        if same_reason and "classes" not in raw_summary and "classes" not in recorded and guard_reason(events) == reason and reason:
+            return recorded
+        if same_reason and reason == "volume_cap" and any(e.get("event") == "volume_cap" for e in events):
+            if not (root/"recalls.jsonl").exists() or not lines(root/"recalls.jsonl"):
+                assert raw_summary.get("measurement_valid") is False
+                return recorded
     if (root/"summary.json").exists() and "cells" in load(root/"summary.json"):
         recorded = load(root/"summary.json")
         present = {p.name for p in root.iterdir() if p.is_dir() and p.name in ("empty", "upgrade")}
         names = [c["baseline"] for c in recorded["cells"]]
-        assert names and len(names) == len(set(names)) and set(names) == present
-        cells = [v2(root/name) for name in names]
+        assert names and len(names) == len(set(names)) and set(names) == present == {"empty", "upgrade"}
+        cells = [v2(root/name, _entry=False) for name in names]
         assert recorded["state"] == rollup(c["state"] for c in cells)
         return dict(state=recorded["state"], cells=cells)
     if (root/"summary.json").exists() and "blocks" in load(root/"summary.json"):
         recorded = load(root/"summary.json")
         base = root if (root/"0-OFF").exists() else root/"recall" if (root/"recall").is_dir() else root
         present = {p.name for p in base.iterdir() if p.is_dir() and any(p.name.endswith("-"+s) for s in ("OFF", "ON-catching-up", "ON-covered"))}
-        cells = {name: v2(base/name) for name in sorted(present)}
+        assert all(not (base/name/"request.json").exists() or load(base/name/"request.json")["block"] == int(name.split("-", 1)[0])
+                   for name in present)
+        cells = {name: v2(base/name, _entry=False) for name in sorted(present)}
         names = [f"{c['block']}-{c['state']}" for c in recorded["blocks"]]
         assert names and len(names) == len(set(names)) and set(names) == present
         assert all({f"{b}-{s}" for s in ("OFF", "ON-catching-up", "ON-covered")} <= present
@@ -73,7 +89,7 @@ def v2(root):
             load(root/"manifest.json")["rows"], lines(root/"catchup/events.jsonl"))
         assert all(recorded[k] == v for k, v in computed.items())
     else:
-        assert (root/"recalls.jsonl").is_file(), "recall receipts required outside early ON-covered INVALID"
+        assert (root/"recalls.jsonl").is_file(), "recall receipts or event-backed early INVALID required"
         recorded = load(root/"raw-summary.json")
         request = load(root/"request.json")
         calibrated = window_calibration(lines(root.parent/f"{request['block']}-ON-catching-up/events.jsonl"))
@@ -108,7 +124,8 @@ if __name__ == "__main__":
     for name in sys.argv[1:]:
         root = Path(name)
         if not (root/"summary.json").is_file() and not (root/"raw-summary.json").is_file():
-            raise ValueError(f"missing root summary.json: {root}")
+            print(f"missing root summary.json: {root}", file=sys.stderr)
+            raise SystemExit(2)
         if (root/"catchup").is_dir() or (root/"raw-summary.json").exists() or any(
                 k in load(root/"summary.json") for k in ("cells", "blocks")) or load(root/"summary.json").get("state") in ("INVALID", "ABORTED"):
             print(json.dumps(v2(root)))

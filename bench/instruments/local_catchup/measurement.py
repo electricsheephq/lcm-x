@@ -118,6 +118,7 @@ def cell(a, state, block, kind):
             checked, detail = dict(complete=False), dict(reason=str(exc))
         if not checked["complete"]:
             result = dict(state="INVALID", reason="covered_store_incomplete", pre_audit=detail)
+            append(root/"events.jsonl", dict(violation="covered_store_incomplete"))
             dump(root/"summary.json", result)
             return result
     with connect(source) as src, sqlite3.connect(db) as dst:
@@ -160,6 +161,20 @@ def cell(a, state, block, kind):
     return result
 
 
+def guard_reason(events):
+    reasons = {"network_attempt": "offline_network_forbidden", "subprocess_launch": "offline_subprocess_launch",
+               "foreground_join": "foreground_embedding_join_forbidden"}
+    for event in events:
+        key = event.get("violation") or event.get("event")
+        if event.get("foreground") and key == "prepare":
+            return "foreground_preparation_forbidden"
+        if event.get("foreground") and key in ("_chunk_backfill_run", "_embedding_backfill_summary_run"):
+            return "foreground_backfill_forbidden"
+        if key in reasons:
+            return reasons[key]
+    return None
+
+
 def guarded_worker(worker, request):
     root = Path(load(request)["root"])
     events_path = root/"events.jsonl"
@@ -180,20 +195,7 @@ def guarded_worker(worker, request):
             with events_path.open("rb") as stream:
                 stream.seek(event_offset)
                 events = [json.loads(s) for s in stream.read().splitlines()]
-        event_reasons = {"network_attempt": "offline_network_forbidden", "subprocess_launch": "offline_subprocess_launch",
-                         "foreground_join": "foreground_embedding_join_forbidden"}
-        for event in events:
-            key = event.get("violation") or event.get("event")
-            if event.get("foreground"):
-                if key == "prepare":
-                    event_reasons[key] = "foreground_preparation_forbidden"
-                elif key in ("_chunk_backfill_run", "_embedding_backfill_summary_run"):
-                    event_reasons[key] = "foreground_backfill_forbidden"
-            if key in event_reasons:
-                reason = event_reasons[key]
-                break
-        else:
-            reason = reasons.get(str(exc))
+        reason = guard_reason(events) or reasons.get(str(exc))
         if reason is None:
             raise
         dump(root/"raw-summary.json", dict(state="INVALID", reason=reason))

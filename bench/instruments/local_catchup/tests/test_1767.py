@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import shutil
 import subprocess
 
 import pytest
@@ -91,13 +92,19 @@ def test_missing_root_summary_is_clear(tmp_path):
     with pytest.raises(ValueError, match="missing root summary.json"):
         rescore.v2(tmp_path)
     proc = subprocess.run([os.sys.executable, "-B", "-m", rescore.__name__, str(tmp_path)], capture_output=True, text=True)
-    assert proc.returncode != 0 and "missing root summary.json" in proc.stderr
+    assert proc.returncode == 2 and "missing root summary.json" in proc.stderr
+    assert str(tmp_path) in proc.stderr and "Traceback" not in proc.stderr
+    assert len(proc.stderr.splitlines()) == 1
 
 
-def test_zero_recall_rows_capped_is_invalid(tmp_path, monkeypatch):
+@pytest.mark.parametrize("state", ["OFF", "ON-catching-up", "ON-covered"])
+def test_zero_recall_rows_capped_is_invalid(tmp_path, monkeypatch, state):
+    out = tmp_path
+    tmp_path = out/f"0-{state}"
+    tmp_path.mkdir()
     common.dump(tmp_path/"manifest.json", dict(canaries=[], expected=dict(chunks={}, leaves={})))
-    common.dump(tmp_path/"queries.json", [dict(id=str(i), query_class="broad_nl", text="fixture") for i in range(200)])
-    a = NS(out=tmp_path, root=tmp_path, db=tmp_path/"db", home=tmp_path, state="OFF",
+    common.dump(out/"queries.json", [dict(id=str(i), query_class="broad_nl", text="fixture") for i in range(200)])
+    a = NS(out=out, root=tmp_path, db=tmp_path/"db", home=tmp_path, state=state,
            smoke=False, rows=250000, seed=1586, block=0)
     engine = NS(_dag=NS(add_node=lambda *a, **kw: None), _config=NS(recall_query_timeout_s=1), shutdown=lambda: None)
     monkeypatch.setattr(recall, "runtime", lambda _: (a, None, engine, 0))
@@ -112,11 +119,28 @@ def test_zero_recall_rows_capped_is_invalid(tmp_path, monkeypatch):
     monkeypatch.setattr(recall, "publication_trace", lambda *a: ([], 0, True))
     monkeypatch.setattr(recall, "safety", lambda *a: {})
     monkeypatch.setattr(recall, "integrity", lambda *a: None)
-    monkeypatch.setattr(recall, "audit", lambda *a: dict(classes={}))
+    monkeypatch.setattr(recall, "audit", lambda *a: dict(classes=dict(chunks=dict(missing_count=1), leaves=dict(missing_count=1))))
+    common.dump(tmp_path/"request.json", dict(root=str(tmp_path), state=state, seed=1586, block=0, rows=250000, smoke=False))
+    monkeypatch.setattr(recall, "wait_covered", lambda *a: None)
+    monkeypatch.setattr(recall, "calibration_window", lambda *a: None)
     recall.worker(None)
     raw = common.load(tmp_path/"raw-summary.json")
     assert (raw["state"], raw["reason"], raw["measurement_valid"]) == ("INVALID", "volume_cap", False)
     assert any(e["event"] == "volume_cap" for e in map(json.loads, (tmp_path/"events.jsonl").read_text().splitlines()))
+    entries = []
+    for name in ("OFF", "ON-catching-up", "ON-covered"):
+        cell = out/f"0-{name}"
+        if name != state:
+            shutil.copytree(tmp_path, cell)
+        common.dump(cell/"summary.json", raw)
+        entries.append(dict(state=name, block=0, result=dict(raw)))
+    recall.finalize_block(NS(out=out, seed=1586, standalone_calibration_s=.572), 0, entries)
+    common.dump(out/"summary.json", dict(state="INVALID", blocks=entries))
+    assert rescore.v2(tmp_path)["reason"] == "volume_cap"
+    assert rescore.v2(out)["state"] == "INVALID"
+    write(tmp_path/"events.jsonl", [])
+    with pytest.raises(AssertionError):
+        rescore.v2(tmp_path)
 
 
 @pytest.mark.parametrize("problem", ["absent", "empty", "one-pin", "metadata-absent", "metadata-empty", "metadata-one-pin", "integer", "null"])
@@ -203,13 +227,14 @@ def test_catchup_foreign_files_receives_original_home(fake_catchup, tmp_path, mo
     assert seen
 
 
-def test_chain_assertion_rejects_substring_dependency(monkeypatch):
+@pytest.mark.parametrize("needs", ["covered-store-1-suffix", ["covered-store-1", "validate"]])
+def test_chain_assertion_rejects_substring_dependency(monkeypatch, needs):
     from bench.instruments.local_catchup.tests.test_1586_v2 import test_artifact_chain_and_confinement_are_explicit
     original = yaml.safe_load
     def forged(text):
         workflow = original(text)
         if "covered-store-2" in workflow["jobs"]:
-            workflow["jobs"]["covered-store-2"]["needs"] = "covered-store-1-suffix"
+            workflow["jobs"]["covered-store-2"]["needs"] = needs
         return workflow
     monkeypatch.setattr(yaml, "safe_load", forged)
     with pytest.raises(AssertionError):
@@ -248,3 +273,153 @@ def test_non_smoke_rescore_derivations(tmp_path, case, expected):
     assert cell["catchup_activity"] is (case != "inactive")
     assert cell["measurement_valid"] is (case == "active")
     assert (cell.get("reason") == "volume_cap") is (case == "volume_cap")
+
+
+@pytest.mark.parametrize("floor_name", ["rows", "queries"])
+def test_non_smoke_minimum_floors(tmp_path, floor_name):
+    entries = receipts(tmp_path)
+    if floor_name == "queries":
+        common.dump(tmp_path/"queries.json", [{}]*199)
+    for entry in entries:
+        cell = tmp_path/f"0-{entry['state']}"
+        if floor_name == "rows":
+            request = common.load(cell/"request.json")
+            request["rows"] = 249999
+            common.dump(cell/"request.json", request)
+        entry["result"].update(state="INVALID", measurement_valid=False)
+        for name in ("raw-summary.json", "summary.json"):
+            common.dump(cell/name, entry["result"])
+    common.dump(tmp_path/"summary.json", dict(state="INVALID", blocks=entries))
+    assert rescore.v2(tmp_path)["state"] == "INVALID"
+
+
+def test_coverage_pair_requires_both_baselines(tmp_path):
+    source, target = tmp_path/"source", tmp_path/"target"
+    summary = coverage_pair(source)
+    target.mkdir()
+    shutil.copytree(source/"empty", target/"empty")
+    common.dump(target/"summary.json", dict(state="PASS", cells=[summary["cells"][0]]))
+    with pytest.raises(AssertionError):
+        rescore.v2(target)
+
+
+@pytest.mark.parametrize("block", [1, 2])
+def test_single_block_root_and_request_identity(tmp_path, block):
+    source, target = tmp_path/"source", tmp_path/"target"
+    source.mkdir()
+    entries = receipts(source)
+    target.mkdir()
+    shutil.copyfile(source/"queries.json", target/"queries.json")
+    for entry in entries:
+        state = entry["state"]
+        shutil.copytree(source/f"0-{state}", target/f"{block}-{state}")
+        entry["block"] = block
+        request = common.load(target/f"{block}-{state}/request.json")
+        common.dump(target/f"{block}-{state}/request.json", dict(request, block=block))
+    common.dump(target/"summary.json", dict(state="PASS", blocks=entries))
+    assert rescore.v2(target)["state"] == "PASS"
+    common.dump(target/f"{block}-OFF/request.json", dict(request, block=0))
+    with pytest.raises(AssertionError):
+        rescore.v2(target)
+
+
+@pytest.mark.parametrize("kind", ["recall", "pair", "floor"])
+def test_aborted_root_cannot_hide_complete_fail(tmp_path, kind):
+    if kind == "pair":
+        coverage_pair(tmp_path)
+    elif kind == "floor":
+        receipts(tmp_path/"recall", kinds=("timeout", "pass"))
+    else:
+        receipts(tmp_path, kinds=("timeout", "pass"))
+    common.dump(tmp_path/"summary.json", dict(state="ABORTED", reason="floor_deadline"))
+    assert rescore.v2(tmp_path)["state"] == "FAIL"
+
+
+@pytest.mark.parametrize("kind", ["recall", "pair"])
+@pytest.mark.parametrize("state", ["OFF", "ON-catching-up", "ON-covered"])
+def test_aborted_child_summary_rejected(tmp_path, kind, state):
+    if kind == "pair":
+        summary = coverage_pair(tmp_path)
+        cell = tmp_path/"upgrade"
+        summary["cells"][1]["state"] = "ABORTED"
+        summary["state"] = "INVALID"
+    else:
+        entries = receipts(tmp_path)
+        cell = tmp_path/f"0-{state}"
+        for entry in entries:
+            if entry["state"] == state:
+                entry["result"] = dict(state="ABORTED", reason="worker_exit:1")
+        summary = dict(state="INVALID", blocks=entries)
+    common.dump(cell/"summary.json", dict(state="ABORTED", reason="worker_exit:1"))
+    common.dump(tmp_path/"summary.json", summary)
+    with pytest.raises(AssertionError):
+        rescore.v2(tmp_path)
+
+
+@pytest.mark.parametrize("shape", ["floor_deadline", "outer_deadline", "partial-recall", "partial-pair"])
+def test_honest_aborted_entry_shapes(tmp_path, shape):
+    if shape == "partial-recall":
+        receipts(tmp_path/"recall")
+        # Only cell receipts are needed; no recursive root summary is consulted.
+    elif shape == "partial-pair":
+        (tmp_path/"empty/catchup").mkdir(parents=True)
+    summary = dict(state="ABORTED", reason="outer_deadline" if shape == "outer_deadline" else "floor_deadline")
+    common.dump(tmp_path/"summary.json", summary)
+    assert rescore.v2(tmp_path) == summary
+    proc = subprocess.run([os.sys.executable, "-B", "-m", rescore.__name__, str(tmp_path)], capture_output=True, text=True)
+    assert proc.returncode == 0 and json.loads(proc.stdout) == summary
+
+
+GUARDS = [
+    ("offline instrument denies network", dict(violation="network_attempt"), "offline_network_forbidden"),
+    ("offline subprocess launch", dict(violation="subprocess_launch"), "offline_subprocess_launch"),
+    ("foreground/download preparation forbidden", dict(event="prepare", foreground=True), "foreground_preparation_forbidden"),
+    ("foreground backfill forbidden", dict(event="_chunk_backfill_run", foreground=True), "foreground_backfill_forbidden"),
+    ("foreground embedding join forbidden", dict(violation="foreground_join"), "foreground_embedding_join_forbidden"),
+]
+
+
+@pytest.mark.parametrize("state", ["OFF", "ON-catching-up", "ON-covered"])
+@pytest.mark.parametrize("partial", [0, 5])
+@pytest.mark.parametrize("message,event,reason", GUARDS)
+def test_event_backed_guard_receipts(tmp_path, state, partial, message, event, reason):
+    source, target = tmp_path/"source", tmp_path/"target"
+    source.mkdir()
+    entries = receipts(source)
+    target.mkdir()
+    cell = target/f"0-{state}"
+    for path in source.iterdir():
+        if path.name != cell.name:
+            if path.is_dir():
+                shutil.copytree(path, target/path.name)
+            else:
+                shutil.copyfile(path, target/path.name)
+    cell.mkdir()
+    old_cell = source/cell.name
+    ev = list(map(json.loads, (old_cell/"events.jsonl").read_text().splitlines()))
+    write(cell/"events.jsonl", ev)
+    common.dump(cell/"request.json", dict(root=str(cell), seed=1586, state=state, block=0, rows=250000, smoke=False))
+    def denied(_):
+        if partial:
+            rows = list(map(json.loads, (old_cell/"recalls.jsonl").read_text().splitlines()))[:partial]
+            write(cell/"recalls.jsonl", rows)
+            shutil.copyfile(old_cell/"publications.jsonl", cell/"publications.jsonl")
+        common.append(cell/"events.jsonl", event)
+        raise RuntimeError(message)
+    measurement.guarded_worker(denied, cell/"request.json")
+    result = common.load(cell/"raw-summary.json")
+    common.dump(cell/"summary.json", result)
+    for entry in entries:
+        if entry["state"] == state:
+            entry["result"] = result
+    recall.finalize_block(NS(out=target, seed=1586, standalone_calibration_s=.572), 0, entries)
+    common.dump(target/"summary.json", dict(state=common.rollup(e["result"]["state"] for e in entries), blocks=entries))
+    assert result == dict(state="INVALID", reason=reason)
+    assert rescore.v2(cell) == result
+    assert rescore.v2(target)["state"] == "INVALID"
+    for changed in (ev, ev+[dict(violation="covered_store_incomplete")]):
+        write(cell/"events.jsonl", changed)
+        with pytest.raises((AssertionError, FileNotFoundError)):
+            rescore.v2(cell)
+        with pytest.raises((AssertionError, FileNotFoundError)):
+            rescore.v2(target)
