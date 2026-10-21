@@ -148,6 +148,7 @@ def execute(views, cache, spec, root):
             key = sha(encoded(batch))
             terminal_reason=None
             retained=None
+            extracted_counts=None
             try:
                 msgs = request(batch, list(all_items.values()))
                 for attempt in range(2):
@@ -162,6 +163,8 @@ def execute(views, cache, spec, root):
                             got = validate(raw, w, [*all_items.values(), *batch_items.values()])
                             admitted.append(got)
                             batch_items.update({i['id']:i for i in got['items']})
+                        if extracted_counts is None:
+                            extracted_counts=[len(raw['items']) if isinstance(raw,dict) else 1 for raw in output]
                         if attempt or not any(g['rejected'] for g in admitted):
                             break
                         retained = admitted
@@ -169,17 +172,21 @@ def execute(views, cache, spec, root):
                         msgs[0]['content'] += '\nRepair rejected items; same schema and sources. Return the array only.'
                     except (Incomplete, ValueError, TypeError):
                         if attempt:
+                            if retained is not None:
+                                admitted=retained
+                                break
                             terminal_reason='extraction invalid after retry'
                             raise Incomplete('invalid extraction JSON') from None
                         msgs = request(batch, list(all_items.values())) + [dict(role='user', content='Repair invalid JSON; same schema and sources. Return the array only.')]
-                for index, (w, raw, got) in enumerate(zip(batch, output, admitted, strict=True)):
+                for index, (w, got) in enumerate(zip(batch, admitted, strict=True)):
                     if retained is not None:
                         got['items'] = list({i['id']:i for i in [*retained[index]['items'], *got['items']]}.values())
                         got['relations'] = list({sha(encoded(r)):r for r in [*retained[index]['relations'], *got['relations']]}.values())
+                        got['state']='partial' if got['rejected'] else 'succeeded' if got['items'] else 'empty'
                     all_items.update({i['id']:i for i in got['items']})
                     all_relations.update({sha(encoded(r)):r for r in got['relations']})
                     ledger.append(dict(window=w['window_id'], source=view['haystack_hash'], state=got['state'],
-                                       rejected=got['rejected'], extracted_count=len(raw['items']) if isinstance(raw,dict) else 1,
+                                       rejected=got['rejected'], extracted_count=extracted_counts[index],
                                        rejected_count=sum('item' in r for r in got['rejected']),calls=calls))
             except Paused:
                 raise

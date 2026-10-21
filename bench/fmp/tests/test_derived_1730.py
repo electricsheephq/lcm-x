@@ -98,12 +98,23 @@ def test_3_typed_items_reject_locally_and_repair(tmp_path):
     assert delivery.render(result['items'], [], 'drink')[0]
 
 
-def test_4_drift_exclusions_use_repeat_population(tmp_path):
+def test_4_drift_exclusions_use_repeat_population(tmp_path, monkeypatch):
     b = repeats()
     assert run.drift(b, cached(tmp_path/'responses'), tmp_path, [dict(id='outside')]*50)
     other = tmp_path/'two-lost'
-    assert not run.drift(b, cached(other/'responses'), other, [dict(id='r0'), dict(id='r1')]), \
+    class LostRepeats(Fake):
+        def call(self, spec, messages, *args, **kw):
+            if messages in (b['baselines']['r0'], b['baselines']['r1']):
+                raise ConnectionError('transport reset')
+            return super().call(spec, messages, *args, **kw)
+    monkeypatch.setattr(cache.time, 'sleep', lambda seconds: None)
+    c = cached(other/'responses', LostRepeats())
+    c.deadline += 3600
+    assert not run.drift(b, c, other), \
         'two lost repeats exceed 3% of 44 even with an 886-item panel'
+    exclusions = [dict(id='r0')]
+    assert not run.drift(b, c, other, exclusions)
+    assert [e['id'] for e in exclusions] == ['r0', 'r1']
 
 
 def test_5_drift_checkpoint_crash_resumes(tmp_path, monkeypatch):
@@ -175,3 +186,98 @@ def test_7_card_uses_each_scored_denominator(tmp_path, monkeypatch, interim):
     assert {h['n'] for h in card['headline']} == {t['overall']['n'] for t in report['judges'].values()}
     assert len(card['headline']) == len(run.JUDGES)
     assert 'Panel length: 100' in (tmp_path/'RESULT.md').read_text()
+
+
+def extraction_panel(tmp_path, monkeypatch, n_other=6, excluded=('x0',)):
+    """Reviewer fixture: 44 repeats plus a tail, with independent source histories."""
+    b = repeats()
+    qs = [qid(f'r{i}') for i in range(44)] + [qid(f'x{i}') for i in range(n_other)]
+    for q in qs:
+        q.question += q.qid
+        q.sessions[0]['turns'][0]['content'] += ' ' + q.qid
+    b.update(questions=[asdict(q) for q in qs],
+        panel=[b['panel'][0] | dict(id=q.qid, cluster=q.qid, target=q.qid.startswith('r')) for q in qs],
+        baselines={q.qid: run.baseline_messages(q, 'HIT') for q in qs},
+        w1_endpoint={}, w1_renderer={}, w1_sources={f'r{i}': {} for i in range(44)})
+    for q in qs[:44]:
+        b['controls'][q.qid]['identity'] = request_identity(run.READER, b['baselines'][q.qid],
+            endpoint={}, effort='medium', temperature=None, max_tokens=32000, tools=None,
+            tool_choice='none', rubric='fmp-single', renderer={}, sources={})
+    run.freeze(tmp_path, b)
+    good = extract.validate(wire(window(), [item()]), window())['items']
+    cache.snapshot(tmp_path/'extraction.json', dict(items=good, relations=[], ledger=[
+        dict(source=extract.source_view(q)['haystack_hash'],
+             state='excluded' if q['qid'] in excluded else 'succeeded', extracted_count=1)
+        for q in b['questions']]))
+    monkeypatch.setattr(run, 'inputs', lambda root: b | dict(synthetic=False))
+    return b
+
+
+def test_fix_round1_resume_deduplicates_extraction_exclusions(tmp_path, monkeypatch):
+    extraction_panel(tmp_path, monkeypatch)
+    class QuotaAfterInterim(Fake):
+        def call(self, *args, **kw):
+            if (tmp_path/'interim.json').exists():
+                raise RuntimeError('usage limit reached')
+            return super().call(*args, **kw)
+    assert run.execute(tmp_path, QuotaAfterInterim())['status'] == 'PAUSED'
+    assert (tmp_path/'interim.json').exists()
+    report = run.execute(tmp_path, Fake())
+    assert (tmp_path/'report.json').exists(), report
+    assert cache.snapshot(tmp_path/'report.json') == report
+    ids = [e['id'] for e in report['exclusion_details']]
+    assert ids == ['x0'] and len(ids) == len(set(ids))
+    admission = cache.snapshot(tmp_path/'drift-admission.json')
+    assert admission['exclusions'] == []
+
+
+class BatchRepair(Fake):
+    def __init__(self, repair):
+        super().__init__()
+        self.repair = repair
+    def call(self, *args, **kw):
+        response = super().call(*args, **kw)
+        if kw['max_tokens'] == 16384:
+            data = json.loads(response['content'])
+            good = [item(str(i)) | dict(scope_key=str(i)) for i in range(40)]
+            bad = item('bad') | dict(value_text='unquoted')
+            data[0]['items'] = good + [bad] if self.calls == 1 else [bad]
+            response['content'] = 'not json' if self.calls == 2 and self.repair == 'invalid' else json.dumps(data)
+        return response
+
+
+def test_fix_round1_invalid_repair_keeps_valid_items(tmp_path):
+    run.freeze(tmp_path, bundle())
+    report = run.execute(tmp_path, BatchRepair('invalid'))
+    extracted = cache.snapshot(tmp_path/'extraction.json')
+    assert len(extracted['items']) == 40
+    assert 'terminal_reason' not in extracted
+    assert extracted['ledger'][0]['state'] == 'partial'
+    assert report['rejection_rate'] == pytest.approx(1/41)
+    assert report['judges'], report
+
+
+def test_fix_round1_repair_rejection_denominator(tmp_path):
+    run.freeze(tmp_path, bundle())
+    report = run.execute(tmp_path, BatchRepair('still-bad'))
+    extracted = cache.snapshot(tmp_path/'extraction.json')
+    assert len(extracted['items']) == 40
+    ledger = extracted['ledger'][0]
+    assert ledger['extracted_count'] == 41 and ledger['rejected_count'] == 1
+    assert report['rejection_rate'] == pytest.approx(1/41)
+    assert report['judges'], report
+
+
+def test_fix_round1_extraction_lost_repeats_skip_drift(tmp_path, monkeypatch):
+    b = extraction_panel(tmp_path, monkeypatch, n_other=56, excluded=('r0', 'r1'))
+    backend = Fake()
+    report = run.execute(tmp_path, backend)
+    lost = {encoded(b['baselines'][i]) for i in ('r0', 'r1')}
+    pending = [json.loads(p.read_bytes()) for p in (tmp_path/'responses').glob('*.pending.json')]
+    drift_calls = [p for p in pending if 'repeat' in p['identity']['retrieved_sources']]
+    assert all(p['identity']['retrieved_sources']['repeat'] not in ('r0', 'r1') for p in drift_calls)
+    assert not any(encoded(p['request']) in lost for p in pending)
+    admission = cache.snapshot(tmp_path/'drift-admission.json')
+    assert admission['valid'] is True and admission['extraction_skipped'] == 2
+    assert admission['exclusions'] == []
+    assert report['exclusions'] == 2 and report['judges'], report

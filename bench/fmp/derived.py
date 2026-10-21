@@ -208,13 +208,17 @@ def verdict(cache,judge,jm,ds,calls,sources):
 def drift(b,cache,root,exclusions=None):
     """Outcome-blind repeat with symmetric exclusions and per-arm invalid budgets."""
     exclusions=[] if exclusions is None else exclusions
+    exclusions[:]=list({e['id']:e for e in exclusions}.values())
     if (root/'drift-admission.json').exists():
         saved=snapshot(root/'drift-admission.json')
         snapshot(root/'drift.json')
-        exclusions.extend(saved['exclusions'])
+        exclusions[:]=list({e['id']:e for e in [*exclusions,*saved['exclusions']]}.values())
         return saved['valid']
-    rows=[]
+    rows,drift_exclusions=[],[]
+    extraction_excluded={e['id'] for e in exclusions}
     for ident in b['repeat_ids']:
+        if ident in extraction_excluded:
+            continue
         q=datasets.Question(**next(q for q in b['questions'] if q['qid']==ident))
         saved=b['controls'][ident]
         old=memory.import_baseline(saved,saved['identity'],b['baselines'][ident])
@@ -230,18 +234,20 @@ def drift(b,cache,root,exclusions=None):
                 rows.append(dict(id=ident,judge=judge,pair=pair,flip=None if None in pair else pair[0]!=pair[1],
                     calls=[{k:v for k,v in c.items() if k!='cache'} for c in calls]))
         except Excluded:
-            exclusions.append(dict(id=ident,reason='drift transient retries exhausted'))
+            drift_exclusions.append(dict(id=ident,reason='drift transient retries exhausted'))
+    exclusions.extend(drift_exclusions)
     excluded={e['id'] for e in exclusions}
     rows=[r for r in rows if r['id'] not in excluded]
     snapshot(root/'drift.json',rows)
     repeat_ids=set(b['repeat_ids'])
     n=len(repeat_ids-excluded)
-    valid=n>0 and len(excluded & repeat_ids)<=len(repeat_ids)*.03 and all(
+    valid=n>0 and len(drift_exclusions)<=len(repeat_ids)*.03 and all(
         any(r['flip'] is not None for r in rows if r['judge']==j) and
         all(sum(r['pair'][a] is None for r in rows if r['judge']==j)<=max(1,math.ceil(n*.02)) for a in range(2)) and
         sum(r['flip'] is True for r in rows if r['judge']==j)/max(1,sum(r['flip'] is not None for r in rows if r['judge']==j))<=.05
         for j in JUDGES)
-    snapshot(root/'drift-admission.json',dict(valid=valid,exclusions=exclusions))
+    snapshot(root/'drift-admission.json',dict(valid=valid,exclusions=drift_exclusions,
+        extraction_skipped=len(extraction_excluded & repeat_ids)))
     return valid
 def card(root):
     report=snapshot(root/'report.json')
