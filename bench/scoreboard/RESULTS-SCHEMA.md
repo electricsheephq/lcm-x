@@ -21,7 +21,7 @@ disclosure fields does not render** — the schema IS the seven-point standard
 | `reader` | answering model + effort/config |
 | `retrieval_config` | delivery/fusion/embedder/cap config, every knob named |
 | `dataset_exposure` | known dataset defects exposure (corrupted-gold ceiling etc.) or `none documented` |
-| `breakdown` | per-category numbers or artifact path holding them |
+| `breakdown` | per-category numbers or artifact path holding them. This field is a string; put structured data in the evidence file and link it here. |
 | `variance` | run count + variance/noise-floor statement (A/A′ discordants, p-values) |
 | `failclose` | fail-close accounting (rows excluded/scored-zero by instrument fault) |
 | `evidence` | non-empty list of durable URLs backing every claim above (except the frozen legacy IDs below): GitHub release-download asset URLs or blob URLs pinned to a full 40-hex commit SHA |
