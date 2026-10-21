@@ -256,6 +256,7 @@
       "fts": 0.4,
       "summary": 0.9
     },
+    "recall_delivery_unit": "hits",
     "recall_fts_anchor": true,
     "recall_query_timeout_s": 8.0,
     "recall_reference_strict": true,

@@ -343,5 +343,5 @@ def test_structured_consumers_preserve_duplicate_ids(engine, consumer):
         spec = importlib.util.spec_from_file_location("hermes_lcm.issue1681_plugin", Path(__file__).parents[1] / "__init__.py")
         plugin = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(plugin)
-        result = plugin._answer_ready_baseline(SimpleNamespace(handle_tool_call=lambda *_: {"hits": [hit]}), "q", {})[0]
+        result = plugin._answer_ready_baseline(SimpleNamespace(handle_tool_call=lambda *_, **kw: {"hits": [hit]}), "q", {})[0]
     assert result["duplicate_store_ids"] == [second]

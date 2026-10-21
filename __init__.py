@@ -253,6 +253,7 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
             "scope_bias": 0.0,
             "include_occurrence_time": True,
         },
+        delivery_unit="hits",
     )
     recalled = json.loads(raw) if isinstance(raw, str) else raw
     hits = recalled.get("hits") if isinstance(recalled, dict) else None
@@ -333,7 +334,7 @@ def _pre_llm_context(active_engine, payload: dict) -> dict | None:
                 baseline_refs=baseline_refs,
                 question_as_of=question_date,
                 retrieve=lambda recall_args: active_engine.handle_tool_call(
-                    "lcm_recall", recall_args
+                    "lcm_recall", recall_args, delivery_unit="hits"
                 ),
                 enabled=True,
                 render_baseline_context=baseline_was_internal,
@@ -697,6 +698,9 @@ def register(ctx):
     # shadow Path B and lose current-turn ingest, so the Path B fallback is the
     # expected healthy behavior there.
     _TOOLS = [(spec.name, spec.schema, spec.emoji) for spec in TOOL_REGISTRY]
+    if getattr(engine._config, "recall_delivery_unit", "hits") == "session":
+        from .recall_session import session_schema
+        _TOOLS = [(name, session_schema(schema), emoji) for name, schema, emoji in _TOOLS]
     # Share the loaded-config filter with the native context-engine path:
     # explicitly disabled and flag-dormant tools cost no schema tokens.
     _disabled = engine._omitted_tool_names()

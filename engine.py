@@ -5616,6 +5616,9 @@ class LCMEngine(
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
         disabled = self._omitted_tool_names()
         schemas = [spec.schema for spec in TOOL_REGISTRY]
+        if getattr(getattr(self, "_config", None), "recall_delivery_unit", "hits") == "session":
+            from .recall_session import session_schema
+            schemas = [session_schema(s) for s in schemas]
         if disabled:
             return [s for s in schemas if s.get("name") not in disabled]
         return schemas
@@ -5661,7 +5664,8 @@ class LCMEngine(
         }
         handler = handlers.get(name)
         if handler:
-            return handler(args, engine=self)
+            return handler(args, engine=self,
+                           **{k: v for k, v in kwargs.items() if k == "delivery_unit"})
         return json.dumps({"error": f"Unknown LCM tool: {name}"})
 
     def _database_path_source(self) -> str:
@@ -8749,6 +8753,7 @@ class LCMEngine(
                 # relevance floor below filters the 6 hits without refill, so an
                 # FTS-only anchor under the floor would displace an eligible hit.
                 fts_anchor=False,
+                delivery_unit="hits",
             )
             payload = json.loads(raw)
         except EmbeddingPrivacyPolicyError as exc:

@@ -76,6 +76,11 @@ IDENTITY = ("lcmx_commit", "harness_commit", "split_label", "dataset_sha256", "i
 TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "wrapper_overhead_tokens")
 
 
+def delivery_identity(manifest):
+    # Historical manifests predate P and are exactly the default hits arm.
+    return manifest.get("delivery_unit", "hits"), manifest.get("delivery_budget")
+
+
 def ok_verdict(row, model):
     return not invalid(row, [model])
 
@@ -115,6 +120,9 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         arm = "/".join([manifest["config"], manifest["delivery"], manifest["reader"]])
         if "store_text" in manifest or "hit_label" in manifest:
             arm += "/" + manifest["store_text"] + "/" + manifest["hit_label"]
+        unit, budget = delivery_identity(manifest)
+        if (unit, budget) != ("hits", None):
+            arm += f"/{unit}-{budget}"
         if pair_across_commits:
             identity = manifest["lcmx_commit"]
             arm += "@" + (identity if identity.endswith("-dirty") else identity[:12])
@@ -195,7 +203,8 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         for accuracies in summary["by_type"].values():
             accuracies["primary"] = mean(list(accuracies.values())) if all(v is not None for v in accuracies.values()) else None
     for left, right in itertools.combinations(arms, 2):
-        if pair_across_commits and (manifests[left]["lcmx_commit"] == manifests[right]["lcmx_commit"] or any(
+        if pair_across_commits and (manifests[left]["lcmx_commit"] == manifests[right]["lcmx_commit"] or
+                delivery_identity(manifests[left]) != delivery_identity(manifests[right]) or any(
                 manifests[left].get(key) != manifests[right].get(key) for key in ("config", "delivery", "reader", "store_text", "hit_label"))):
             continue
         # An error in either arm (reader error, budget or tool violation) removes the question
