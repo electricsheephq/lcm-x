@@ -4,6 +4,7 @@ import base64
 import json
 from pathlib import Path
 import time
+import tracemalloc
 
 import pytest
 
@@ -183,3 +184,77 @@ def test_tuple_and_set_captions_in_dict_repr(wrap):
     content = normalize_content_value(value)
     assert content == str(value)
     assert_caption_preview(content)
+
+
+@pytest.mark.parametrize("content", [
+    "{'image': b'opaque', 'caption': '" + CAPTION + "', 'histogram': [0,0,0,0]}",
+    "{'a': {'b': {'c': {'caption': '" + CAPTION + "'}}}, 'image': b'opaque'}",
+])
+def test_repr_element_limit_fails_closed(monkeypatch, content):
+    import hermes_lcm.externalize as externalize
+
+    # The base has no element bound; keep its RED result behavioural.
+    monkeypatch.setattr(externalize, "_MEDIA_REPR_ELEMENT_LIMIT", 4, raising=False)
+    assert content.count(",") + content.count(":") > 4
+    assert _media_payload_preview_content(content) == ""
+    assert _build_externalized_placeholder(SUMMARY, content=content) == _build_externalized_placeholder(SUMMARY)
+
+
+def test_real_size_histogram_repr_has_bounded_peak_memory():
+    content = "{'image': b'\\x89PNG', 'caption': '" + CAPTION + "', 'histogram': [" + "0," * 2_000_000 + "]}"
+    tracemalloc.start()
+    try:
+        preview = _media_payload_preview_content(content)
+        stub = _build_externalized_placeholder(SUMMARY, content=content)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    print(f"histogram repr peak_mib={peak / 1_048_576:.3f}")
+    assert peak < 200 * 1_048_576
+    assert preview == ""
+    assert stub == _build_externalized_placeholder(SUMMARY)
+
+
+@pytest.mark.parametrize("as_repr", [False, True])
+@pytest.mark.parametrize("shape, expected", [
+    ({"error": {"detail": CAPTION}, "image": "URI"}, CAPTION),
+    ({"Content-Type": CAPTION, "image": "URI"}, ""),
+    ({"msg": {"encoding": CAPTION}, "x": "URI"}, CAPTION),
+    ({"format": CAPTION, "image_url": "URI"}, ""),
+    ({"data": CAPTION, "image": "URI"}, ""),
+])
+def test_descriptor_leaves_are_scoped_to_media_dicts(as_repr, shape, expected):
+    value = {k: "data:image/png;base64," + "QUJD" * 200 if v == "URI" else v for k, v in shape.items()}
+    content = str(value) if as_repr else json.dumps(value, sort_keys=True)
+    assert _media_payload_preview_content(content) == expected
+    if expected:
+        assert_caption_preview(content)
+    else:
+        assert _build_externalized_placeholder(SUMMARY, content=content) == _build_externalized_placeholder(SUMMARY)
+
+
+def test_literal_eval_unhashable_set_is_treated_as_brace_prose():
+    content = '{["x"]}'
+    assert _media_payload_preview_content(content) == content
+    assert 'preview="' in _build_externalized_placeholder(SUMMARY, content=content)
+
+
+@pytest.mark.parametrize("container", ["dict", "list"])
+def test_literal_eval_deep_unary_chain_keeps_base_placeholder(container):
+    part = "{'caption': '" + CAPTION + "', 'n': " + "-" * 6000 + "1, 'image': b'\\x89PNG'}"
+    content = part if container == "dict" else "[" + part + "]"
+    assert _media_payload_preview_content(content) == ""
+    assert _build_externalized_placeholder(SUMMARY, content=content) == _build_externalized_placeholder(SUMMARY)
+
+
+@pytest.mark.parametrize("error", [TypeError, MemoryError])
+def test_literal_eval_parser_errors_fail_closed(monkeypatch, error):
+    import ast
+
+    def fail(_content):
+        raise error("parser failure")
+
+    monkeypatch.setattr(ast, "literal_eval", fail)
+    content = "{'image': b'opaque', 'caption': '" + CAPTION + "'}"
+    assert _media_payload_preview_content(content) == ""
+    assert _build_externalized_placeholder(SUMMARY, content=content) == _build_externalized_placeholder(SUMMARY)

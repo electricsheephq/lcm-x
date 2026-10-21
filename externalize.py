@@ -704,6 +704,7 @@ def _media_payload_text_part(part: Dict[str, Any]) -> str | None:
 # A media repr above this is never parsed or previewed (it only bounds a pathological AST); a few MiB
 # of media bytes in a repr parse in milliseconds.
 _MEDIA_REPR_PARSE_LIMIT = 64 * 1_048_576
+_MEDIA_REPR_ELEMENT_LIMIT = 50_000
 
 
 def _media_payload_preview_content(content: str) -> str:
@@ -718,6 +719,7 @@ def _media_payload_preview_content(content: str) -> str:
         "data", "mime_type", "mimetype", "mime", "content_type", "content-type", "contenttype",
         "media_type", "media-type", "mediatype", "format", "encoding", "detail",
     }
+    media_descriptor_keys = media_keys | (descriptor_keys - {"format", "encoding", "detail"})
     text_types = {"text", "input_text", "output_text"}
     containers = (dict, list, tuple, set, frozenset)
     generic_repr = False
@@ -735,10 +737,12 @@ def _media_payload_preview_content(content: str) -> str:
             # never preview an oversized candidate unparsed: it may be a repr with a non-string first key.
             if len(content) > _MEDIA_REPR_PARSE_LIMIT:
                 return ""
+            if content.count(",") + content.count(":") > _MEDIA_REPR_ELEMENT_LIMIT:
+                return ""
             parsed, ok = None, False
             try:
                 parsed, ok = ast.literal_eval(content), True
-            except (ValueError, SyntaxError, RecursionError):
+            except (ValueError, SyntaxError, RecursionError, TypeError, MemoryError):
                 pass
             if repr_like and not ok:
                 return ""
@@ -770,9 +774,11 @@ def _media_payload_preview_content(content: str) -> str:
                         if isinstance(leaf, str):
                             parts.append(leaf)
                         elif isinstance(leaf, dict):
+                            media_descriptor = any(str(k).lower() in media_descriptor_keys for k in leaf)
                             stack.extend((v, depth + 1) for k, v in reversed(list(leaf.items()))
                                          if (key := str(k).lower()) not in media_keys
-                                         and (key not in descriptor_keys or isinstance(v, containers)))
+                                         and (not media_descriptor or key not in descriptor_keys
+                                              or isinstance(v, containers)))
                         elif isinstance(leaf, (list, tuple)):
                             stack.extend((v, depth + 1) for v in reversed(leaf))
                         elif isinstance(leaf, (set, frozenset)):
