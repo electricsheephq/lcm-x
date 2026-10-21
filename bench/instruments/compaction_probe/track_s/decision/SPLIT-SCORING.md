@@ -1,4 +1,4 @@
-# C1b split scoring (`c1b-terms-v1`)
+# C1b split scoring (`c1b-terms-v2`; historical v1 selectable)
 
 This is an offline diagnostic of existing reader answers. It makes no model
 calls and changes neither `score_s.py` nor `score_deep.py`'s historical metrics.
@@ -22,6 +22,18 @@ It refuses to overwrite an existing snapshot. Recompute from that snapshot:
 python3 -B bench/instruments/compaction_probe/track_s/decision/rescore_split.py \
   --inputs "$OUT/inputs" --out "$RECOMPUTED"
 ```
+
+New runs default to `--rule c1b-terms-v2`. Select `--rule c1b-terms-v1`
+to reproduce the original split verdicts unchanged. V2 also rejects identifiers
+from earlier `versions`, `correction_source`, and `stale_history`, in addition
+to `stale`. This changes association and its dependent semantic verdict only;
+strict, verbatim and scalar retain their existing rules. Even a quoted denial
+containing a superseded identifier fails conservatively.
+
+Deep material v2 preserves the original stale source/value in `stale_history`,
+alongside every later superseded version. Frozen deep-v1 inputs remain valid
+and are never regenerated in place; their omitted oldest stale value cannot
+be recovered by the scorer from those inputs alone.
 
 Snapshot digests and the original material-manifest digests are checked. The
 historical strict results, context-presence flags and event flags are checked

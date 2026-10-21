@@ -12,7 +12,7 @@ import json
 import shutil
 from pathlib import Path
 
-from split_scoring import RULE_VERSION, fact_verdicts, request_ground_truth, score_event
+from split_scoring import RULE_VERSION, RULES, fact_verdicts, request_ground_truth, score_event
 
 
 def load(path):
@@ -71,7 +71,7 @@ def count(records, field):
 
 
 def render(result, output):
-    text = ["# C1b retained-receipt rescore", "", "Claim class: advisory bench instrument. Rule: " + RULE_VERSION,
+    text = ["# C1b retained-receipt rescore", "", "Claim class: advisory bench instrument. Rule: " + result["rule_version"],
             "Strict (historical) is unchanged. Columns are independent diagnostics, not a replacement quality score.",
             "", "## Completed seed 1 checkpoints", "",
             "| Checkpoint | strict (historical) | verbatim | semantic | scalar (numeric only) | association |",
@@ -97,7 +97,7 @@ def render(result, output):
     (output / "RESCORE.md").write_text("\n".join(text) + "\n")
 
 
-def rescore(inputs, output):
+def rescore(inputs, output, rule=RULE_VERSION):
     for entry in load(inputs / "INPUT-MANIFEST.json")["entries"]:
         if digest(inputs / entry["path"]) != entry["sha256"]:
             raise ValueError("snapshot digest mismatch: " + entry["path"])
@@ -128,7 +128,7 @@ def rescore(inputs, output):
                 for f in facts:
                     row = answers.get(f["id"], {})
                     strict = historical["probes"][f["id"]]["success"]
-                    verdicts = fact_verdicts(f, row.get("answer"), context, facts, historical=strict)
+                    verdicts = fact_verdicts(f, row.get("answer"), context, facts, historical=strict, rule=rule)
                     trace = rca_facts[int(cp), f["id"]]
                     if strict != trace["reader_success"] or verdicts["verbatim"] != trace["present_exact"]:
                         raise ValueError(f"historical/RCA mismatch: {cp}/{f['id']}")
@@ -162,7 +162,7 @@ def rescore(inputs, output):
         }
         event_counts[f"{seed} / {'completed' if seed == 1 else 'partial'}"] = dict(n=len(records), **{
             k: count([dict(value=v) for v in values], "value") for k, values in columns.items()})
-    result = dict(schema="c1b-split-score-v1", rule_version=RULE_VERSION, checkpoints=checkpoints, events=event_counts)
+    result = dict(schema="c1b-split-score-v1", rule_version=rule, checkpoints=checkpoints, events=event_counts)
     output.mkdir(parents=True, exist_ok=True)
     for name, records in (("facts-split", facts_out), ("events-split", events_out)):
         (output / f"{name}.jsonl").write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in records))
@@ -178,13 +178,14 @@ def main():
     parser.add_argument("--rca", type=Path)
     parser.add_argument("--inputs", type=Path)
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--rule", choices=RULES, default=RULE_VERSION)
     args = parser.parse_args()
     if args.inputs is None:
         if args.source is None or args.rca is None:
             parser.error("provide --inputs or both --source and --rca")
         args.inputs = args.out / "inputs"
         snapshot(args.source, args.rca, args.inputs)
-    result = rescore(args.inputs, args.out)
+    result = rescore(args.inputs, args.out, rule=args.rule)
     print(json.dumps(dict(checkpoints=len(result["checkpoints"]), events=sum(c["n"] for c in result["events"].values()),
                          historical="unchanged; checked against retained scorer and RCA", model_calls=0)))
 

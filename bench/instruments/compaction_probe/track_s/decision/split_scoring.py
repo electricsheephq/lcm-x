@@ -11,7 +11,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scorer"))
 from score_s import classify  # noqa: E402
 
-RULE_VERSION = "c1b-terms-v1"
+RULE_VERSION = "c1b-terms-v2"
+RULES = ("c1b-terms-v1", RULE_VERSION)
 NUMERIC_CLASSES = {"limit", "tool_number"}
 
 
@@ -57,13 +58,15 @@ def qualifiers(fact, answer):
     return all(re.search(pattern, text) for pattern in required)
 
 
-def fact_verdicts(fact, answer, context, siblings, *, historical=None):
+def fact_verdicts(fact, answer, context, siblings, *, historical=None, rule=RULE_VERSION):
     """Missing evidence -> None; known wrong answer -> False; scalar N/A -> None.
 
     Binding is the recorded probe-id→fixture mapping. A bare correct identifier
     suffices for association; qualifiers are semantic's separate responsibility.
     Any conflicting sibling/stale identifier or explicit other fixture fails it.
     """
+    if rule not in RULES:
+        raise ValueError("unknown split scoring rule: " + rule)
     readable = isinstance(answer, str) and bool(answer.strip())
     ident = identifier(fact)
     bound = contains(answer, ident) if readable else None
@@ -73,8 +76,14 @@ def fact_verdicts(fact, answer, context, siblings, *, historical=None):
                 other_ident = identifier(other)
                 if (other_ident != ident and contains(answer, other_ident)) or contains(answer, other["fixture"]):
                     bound = False
-        if fact.get("stale"):
-            stale = identifier(dict(fact, value=fact["stale"]))
+        obsolete = [fact["stale"]] if fact.get("stale") else []
+        if rule == "c1b-terms-v2":
+            obsolete += [v["value"] for v in fact.get("versions", [])]
+            obsolete += [v["value"] for v in fact.get("stale_history", [])]
+            if fact.get("correction_source"):
+                obsolete.append(fact["correction_source"]["value"])
+        for value in obsolete:
+            stale = identifier(dict(fact, value=value))
             if stale != ident and contains(answer, stale):
                 bound = False
     return {
