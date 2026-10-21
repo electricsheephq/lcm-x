@@ -342,3 +342,45 @@ def test_writer_generated_dataset_byte_mismatch_is_incomplete():
     assert result["INCOMPLETE"]
     assert not result["pass"]
     assert "identity mismatch: datasetSha256" in result["reason"]
+
+
+def copy_writer_run(tmp_path, arm, name):
+    root = tmp_path / name
+    root.mkdir()
+    for filename in ("checkpoint.json", "report.json"):
+        (root / filename).write_text((WRITER_FIXTURES / arm / filename).read_text())
+    return root
+
+
+def edit_writer_run(root, field, value):
+    for filename in ("checkpoint.json", "report.json"):
+        path = root / filename
+        document = json.loads(path.read_text())
+        if value is None:
+            del document[field]
+        else:
+            document[field] = value
+        path.write_text(json.dumps(document))
+
+
+@pytest.mark.parametrize("field", ["questionSetSha256", "readerPromptVersion"])
+def test_writer_identity_mismatch_is_incomplete(tmp_path, field):
+    baseline = copy_writer_run(tmp_path, "a", "baseline")
+    candidate = copy_writer_run(tmp_path, "c", "candidate")
+    assert compare_runs(candidate, baseline, subset=True)["pass"]
+    edit_writer_run(candidate, field, "changed-" + field)
+    result = compare_runs(candidate, baseline, subset=True)
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+    assert f"identity mismatch: {field}" in result["reason"]
+
+
+@pytest.mark.parametrize("field", ["questionSetSha256", "readerPromptVersion"])
+def test_writer_identity_missing_on_one_side_is_incomplete(tmp_path, field):
+    baseline = copy_writer_run(tmp_path, "a", "baseline")
+    candidate = copy_writer_run(tmp_path, "c", "candidate")
+    edit_writer_run(baseline, field, None)
+    result = compare_runs(candidate, baseline, subset=True)
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+    assert f"identity missing: {field}" in result["reason"]
