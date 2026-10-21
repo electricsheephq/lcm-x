@@ -21,6 +21,7 @@ from .answer_contract import (
     EvidenceSlot,
     compile_answer_contract,
 )
+from .evidence_compiler import observation_independent
 from .occurrence_time import resolve_occurrence_time
 from .reasoning import (
     EvidencePlan,
@@ -798,14 +799,21 @@ def _candidate_inventory(
         if not candidate.get("time_uncertain"):
             continue
         candidate["occurrence_time"] = {**candidate["occurrence_time"], "time_uncertain": "carried"}
-        if result is not None and not _available_as_of(candidate, contract):
-            exclusion = dict(exact_ref=candidate["exact_ref"], time_uncertain="carried",
-                             reason_code="source_observed_after_question_as_of")
-            if exclusion not in result.setdefault("exclusions", []):
-                result["exclusions"].append(exclusion)
-    return _temporally_eligible_candidates(
-        extracted, contract
-    )
+    return _temporally_eligible_candidates(extracted, contract, result=result)
+
+
+def _record_exclusion(result, candidate, reason, *, count=False):
+    if result is None:
+        return
+    item = dict(exact_ref=candidate["exact_ref"], time_uncertain="carried", reason_code=reason)
+    if reason == "event_outside_temporal_window":
+        result["_uncertain_window_exclusion"] = True
+    records = result.setdefault("exclusions", [])
+    if item not in records and len(records) < result["budgets"]["max_candidates"]:
+        records.append(item)
+    if count:
+        counts = result.setdefault("exclusion_counts", {})
+        counts[reason] = counts.get(reason, 0) + 1
 
 
 def _open_slots(
@@ -912,6 +920,9 @@ def _select_temporal_event(
             "adapter_session_date",
         }
     ]
+    if any(item.get("time_uncertain") and _candidate_time(item)[1] == "uncertain_source_observation_time"
+           for item in eligible):
+        return None, "uncertain_source_observation_time"
     if not eligible:
         return None, "event_in_window_not_found"
     # Input order preserves the product rank.  Anchor score may improve that
@@ -1003,21 +1014,27 @@ def _available_as_of(candidate: Mapping[str, Any], contract: AnswerContract) -> 
 
 
 def _temporally_eligible_candidates(
-    candidates: Sequence[Mapping[str, Any]], contract: AnswerContract
+    candidates: Sequence[Mapping[str, Any]], contract: AnswerContract, *, result=None
 ) -> list[dict[str, Any]]:
     eligible: list[dict[str, Any]] = []
     for candidate in candidates:
         if not _available_as_of(candidate, contract):
+            if candidate.get("time_uncertain"):
+                _record_exclusion(result, candidate, "source_observed_after_question_as_of")
             continue
         if contract.temporal_window is not None:
             event_day, basis = _candidate_event_day(candidate)
             if event_day is None:
+                if candidate.get("time_uncertain"):
+                    _record_exclusion(result, candidate, "event_outside_temporal_window")
                 continue
             if not (
                 contract.temporal_window.start
                 <= event_day
                 < contract.temporal_window.end
             ):
+                if candidate.get("time_uncertain") and (candidate.get("occurrence_time") or {}).get("event_time_source") != "explicit":
+                    _record_exclusion(result, candidate, "event_outside_temporal_window")
                 continue
             candidate = {**candidate, "temporal_match_basis": basis}
         eligible.append(dict(candidate))
@@ -1234,8 +1251,8 @@ def _compute(
     )
     if grounding.status != "grounded":
         return None, operands, f"grounding_failed:{grounding.reason}"
-    if any(c.get("time_uncertain") and o.evidence_date is not None
-           and (c.get("occurrence_time") or {}).get("event_time_source") != "explicit"
+    if any(c.get("time_uncertain") and (contract.question_as_of or
+           (o.evidence_date is not None and not observation_independent(o)))
            for c, o in zip(operands, grounding.operands)):
         return None, operands, "uncertain_source_observation_time"
     computed = execute_plan(plan, grounding.operands)
@@ -1363,6 +1380,11 @@ def _base_result(
 
 
 def _finish(result: dict[str, Any], *, started: float) -> dict[str, Any]:
+    if result.pop("_uncertain_window_exclusion", False):
+        result.update(status="no_augmentation", state="unknown", reason_code="uncertain_source_observation_time",
+                      context=None, computation=None, computation_sha256=None, direct_fact=None,
+                      evidence=[], novel_exact_refs=[], closed_requirements=[], finite_coverage=False,
+                      open_requirements=[slot["name"] for slot in (result.get("contract") or {}).get("slots", [])])
     context = result.get("context")
     result["metrics"]["latency_ms"] = round(
         (time.perf_counter() - started) * 1_000.0, 3
@@ -1607,12 +1629,16 @@ def _retrieve_sources(
             continue
         _merge_usage(result["retrieval"], payload)
         hits = payload.get("hits")
-        for hit in hits if isinstance(hits, list) else []:
-            hydrated = _normalize_ref(hit, engine=engine, origin="targeted_retrieval")
+        hydrated_hits = [_normalize_ref(hit, engine=engine, origin="targeted_retrieval")
+                         for hit in hits if isinstance(hit, Mapping)] if isinstance(hits, list) else []
+        carried = engine._store.get_carried_stamp_ids([h["store_id"] for h in hydrated_hits if h])
+        for hydrated in hydrated_hits:
+            if hydrated and hydrated["store_id"] in carried:
+                hydrated = {**hydrated, "time_uncertain": "carried"}
             if hydrated is None or hydrated["exact_ref"] in seen:
                 continue
             marginal = _temporally_eligible_candidates(
-                _extract_candidates([hydrated], contract), contract
+                _extract_candidates([hydrated], contract), contract, result=result
             )
             open_names = {item.name for item in open_slots}
             if not marginal or (
@@ -1832,8 +1858,7 @@ def _finite_enumeration(
                 continue
             if not _available_as_of(hydrated, contract):
                 if hydrated.get("time_uncertain") and result is not None:
-                    result.setdefault("exclusions", []).append(dict(exact_ref=hydrated["exact_ref"],
-                        reason_code="source_observed_after_question_as_of", time_uncertain="carried"))
+                    _record_exclusion(result, hydrated, "source_observed_after_question_as_of", count=True)
                 certificate["unavailable_as_of_clauses"] += 1
                 continue
             time_bases.add(basis)
@@ -1845,8 +1870,7 @@ def _finite_enumeration(
                 if hydrated.get("time_uncertain") and hydrated["occurrence_time"].get("event_time_source") != "explicit":
                     uncertain_window_exclusion = True
                     if result is not None:
-                        result.setdefault("exclusions", []).append(dict(exact_ref=hydrated["exact_ref"],
-                            reason_code="event_outside_temporal_window", time_uncertain="carried"))
+                        _record_exclusion(result, hydrated, "event_outside_temporal_window", count=True)
                 continue
             grounding_key = _finite_event_key(clause, contract.requested_unit)
             key = _finite_event_key(
@@ -1910,8 +1934,8 @@ def _finite_enumeration(
     )
     if grounding.status != "grounded":
         return None, operands, certificate, f"finite_grounding_failed:{grounding.reason}"
-    if any(c.get("time_uncertain") and o.evidence_date is not None
-           and c["occurrence_time"].get("event_time_source") != "explicit"
+    if any(c.get("time_uncertain") and (contract.question_as_of or
+           (o.evidence_date is not None and not observation_independent(o)))
            for c, o in zip(operands, grounding.operands)):
         return None, operands, certificate, "uncertain_source_observation_time"
     grounded_operands = tuple(

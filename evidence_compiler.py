@@ -631,7 +631,7 @@ def _validate_claim(
         carried_ids=carried_ids,
     )
     payload = json.loads(raw)
-    claim_exclusions = payload.get("exclusions", [])
+    claim_exclusions = [item for item in payload.get("exclusions", []) if item.get("time_uncertain")]
     exclusions.extend(claim_exclusions)
     errors.extend(str(item["reason_code"]) for item in claim_exclusions)
     evidence = payload.get("evidence") if isinstance(payload, Mapping) else None
@@ -1316,12 +1316,21 @@ def compile_preanswer_evidence(*args, **kwargs):
     return _compile(*args, **kwargs)
 
 
-def uncertain_observation_operands(operands, store) -> bool:
-    """Check validated date operands with one batched carried-stamp lookup."""
-    from .occurrence_time import resolve_occurrence_time
+def observation_independent(operand) -> bool:
+    """Use the grounded parser's absolute-date grammar, not observation time."""
+    from .reasoning import _quote_supports_day
 
-    dated = [operand for operand in operands if operand.evidence_date is not None]
-    carried = store.get_carried_stamp_ids([operand.store_id for operand in dated])
-    return any(operand.store_id in carried and resolve_occurrence_time(
-        operand.quote, observed_at=0.0,
-    ).get("event_time_source") != "explicit" for operand in dated)
+    return operand.evidence_date is not None and _quote_supports_day(operand.quote, operand.evidence_date, "")
+
+
+def uncertain_observation_operands(operands, store, as_of=None) -> bool:
+    """Fail closed on unavailable provenance, with one batched lookup."""
+    import sqlite3
+
+    dated = list(operands) if as_of is not None else [o for o in operands if o.evidence_date is not None]
+    try:
+        carried = store.get_carried_stamp_ids([operand.store_id for operand in dated])
+    except sqlite3.Error:
+        return True
+    return any(operand.store_id in carried and (as_of is not None or not observation_independent(operand))
+               for operand in dated)

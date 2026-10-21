@@ -78,7 +78,7 @@ def test_compile_order_and_compute(tmp_path, monkeypatch, carried, absolute, que
         before = engine._store.connection.total_changes
         computed = json.loads(tools.lcm_compute(compute_args(ids, texts, question_date=question_date), engine=engine))
         compiled = json.loads(tools.lcm_compile_evidence(compile_args(ids, texts, question_date=question_date), engine=engine))
-        blocked = carried and not absolute
+        blocked = carried and (not absolute or question_date is not None)
         assert (computed["status"] == "computed") is not blocked
         assert (compiled["state"] == "computation_sufficient") is not blocked
         if blocked:
@@ -173,12 +173,9 @@ def test_finite_enumeration_respects_carried_dates(tmp_path, absolute):
         ids = plant(engine, texts, True)
         obj = json.loads(tools.lcm_compile_evidence(compile_args(ids, texts,
             question="How many vacations did I take this year?", question_date="2024-03-22"), engine=engine))
-        if absolute:
-            assert obj["state"] == "computation_sufficient"
-            assert obj["evidence"][0]["time_uncertain"] == "carried"
-        else:
-            assert obj["reason_code"] == REASON
-            assert obj["computation"] is None
+        # An as-of cutoff depends on source observation even for an explicit date.
+        assert obj["reason_code"] == REASON
+        assert obj["computation"] is None
 
 
 def test_real_preanswer_hook_discloses_time(tmp_path, monkeypatch):

@@ -339,7 +339,7 @@ def lcm_compute(args: Dict[str, Any], **kwargs: Any) -> str:
 
     alignment_error = (
         "uncertain_source_observation_time"
-        if uncertain_observation_operands(grounding.operands, engine._store)
+        if uncertain_observation_operands(grounding.operands, engine._store, as_of)
         else validate_selector_alignment(question, plan, grounding.operands)
     )
     if alignment_error:

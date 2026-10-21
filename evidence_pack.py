@@ -839,10 +839,12 @@ def build_evidence_pack(
     )
     computation: dict[str, Any] | None = None
     computation_reason: str | None = None
+    from .evidence_compiler import observation_independent
+
     uncertain_date_refs = {
         item.public["exact_ref"] for item in resolved
         if item.public["observation_time"].get("time_uncertain")
-        and item.public["occurrence_time"].get("event_time_source") != "explicit"
+        and not any(o.citation == item.public["exact_ref"] and observation_independent(o) for o in grounded_operands)
     }
     if as_of is not None and any(
         item.public["observation_time"].get("time_uncertain") for item in resolved

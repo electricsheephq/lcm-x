@@ -45,6 +45,10 @@ def test_proposal_preserves_cutoff_exclusion(source):  # noqa: F811
     engine, row, uncertain = source
     obj = json.loads(tools.lcm_compile_evidence(proposal_args([row["store_id"]],
         [row["content"]], "2024-03-19"), engine=engine))
+    if not uncertain:
+        assert "exclusions" not in obj
+        assert all(x["reason_code"] == "claim_grounding_failed" for x in obj["rejections"])
+        return
     assert any(x.get("reason_code") == "source_observed_after_question_as_of"
         and x.get("time_uncertain") == ("carried" if uncertain else None)
         for x in obj.get("exclusions", []))
@@ -78,7 +82,12 @@ def test_relation_existence_cache_is_positive_and_per_connection(tmp_path):
         assert store.get_carried_stamp_ids([1], connection=conn) == {1}
         assert len(sql) == 2
         assert store.get_carried_stamp_ids([1], connection=conn) == {1}
-        assert len(sql) == 2
+        assert len(sql) == 3  # private caller connections are intentionally not retained
+        own_sql = []
+        store.connection.set_trace_callback(lambda s: own_sql.append(s) if "sqlite_master" in s else None)
+        assert store.get_carried_stamp_ids([1]) == {1}
+        assert store.get_carried_stamp_ids([1]) == {1}
+        assert own_sql == []  # writer already cached its owned connection
     finally:
         conn.close()
         store.close()

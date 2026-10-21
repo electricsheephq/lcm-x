@@ -1285,7 +1285,7 @@ class MessageStore:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
             ).fetchone():
                 return set()
-            if not conn.in_transaction:
+            if conn is self._conn and not conn.in_transaction:
                 self._carried_relation_connections.add(conn)
         if session_ids:
             # Collect the entire candidate ID set in SQL before session formatting,
