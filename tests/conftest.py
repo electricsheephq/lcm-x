@@ -111,10 +111,15 @@ def _wait_scheduler_idle(scheduler, timeout: float) -> bool:
 
     deadline = time.monotonic() + timeout
     with scheduler._condition:
-        while (scheduler._queued_keys or scheduler._active_keys or scheduler._follow_up_key) and \
-                time.monotonic() < deadline:
+        # The same background work the scheduler's own drain() waits for: deferred jobs are promoted
+        # once the active one finishes. Exclusive keys belong to the test's own synchronous rebuilds.
+        def busy():
+            return (scheduler._queued_keys or scheduler._deferred_jobs or scheduler._active_keys
+                    or scheduler._follow_up_key)
+
+        while busy() and time.monotonic() < deadline:
             scheduler._condition.wait(max(0.0, deadline - time.monotonic()))
-        return not (scheduler._queued_keys or scheduler._active_keys or scheduler._follow_up_key)
+        return not busy()
 
 
 @pytest.fixture(autouse=True)
