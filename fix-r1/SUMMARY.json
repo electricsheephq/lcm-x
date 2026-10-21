@@ -1,0 +1,331 @@
+{
+  "base": {
+    "sessions": {
+      "busy": {
+        "callbacks": [
+          36,
+          36,
+          36,
+          36,
+          36
+        ],
+        "exceeded_deadline": 0,
+        "max": 4.2720089580107015,
+        "median": 3.2975129169935826,
+        "min": 3.1701879169850145,
+        "n": 5,
+        "rows": [
+          1000,
+          1000,
+          1000,
+          1000,
+          1000
+        ],
+        "timeouts": 0
+      },
+      "busy_idle_ratio": 1313.1615978299335,
+      "idle": {
+        "callbacks": [
+          36,
+          36,
+          36,
+          36,
+          36
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.0026329170214012265,
+        "median": 0.002511124999728054,
+        "min": 0.0024042080040089786,
+        "n": 5,
+        "rows": [
+          1000,
+          1000,
+          1000,
+          1000,
+          1000
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "f33b8a2cc4340d9a581ac77f5e8dfe8c735e64eb97cb854def8366ea2ba8df55"
+    },
+    "vector.chunk": {
+      "busy": {
+        "callbacks": [
+          28,
+          28,
+          32,
+          29,
+          1149
+        ],
+        "exceeded_deadline": 5,
+        "max": 8.281799916003365,
+        "median": 8.160382375004701,
+        "min": 8.026514417026192,
+        "n": 5,
+        "rows": [
+          1645,
+          1645,
+          1880,
+          1704,
+          67586
+        ],
+        "timeouts": 5
+      },
+      "busy_idle_ratio": 31.471639529130528,
+      "idle": {
+        "callbacks": [
+          4250,
+          4250,
+          4250,
+          4250,
+          4250
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.2906266250065528,
+        "median": 0.2592932080151513,
+        "min": 0.257243500003824,
+        "n": 5,
+        "rows": [
+          250000,
+          250000,
+          250000,
+          250000,
+          250000
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "778d093347ec043044f097cd57c565effbb93abaa88a0f64b29181c709629e1a"
+    },
+    "vector.summary": {
+      "busy": {
+        "callbacks": [
+          9,
+          9,
+          9,
+          9,
+          9
+        ],
+        "exceeded_deadline": 0,
+        "max": 1.7735431659966707,
+        "median": 1.6566938330070116,
+        "min": 1.3907535829930566,
+        "n": 5,
+        "rows": [
+          500,
+          500,
+          500,
+          500,
+          500
+        ],
+        "timeouts": 0
+      },
+      "busy_idle_ratio": 1021.8620372706389,
+      "idle": {
+        "callbacks": [
+          9,
+          9,
+          9,
+          9,
+          9
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.0038293750258162618,
+        "median": 0.0016212500049732625,
+        "min": 0.0015902080049272627,
+        "n": 5,
+        "rows": [
+          500,
+          500,
+          500,
+          500,
+          500
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "8a86a51c02184c3285a24f5ce8f72011d7519e772cda45357f6a9c1cb5c6ae5a"
+    }
+  },
+  "limits": {
+    "1m-128": {
+      "deadline": {
+        "base": 4,
+        "passed": true,
+        "product": 4
+      },
+      "memory": {
+        "base": 583,
+        "passed": false,
+        "product": 1127,
+        "ratio": 1.9331046312178388
+      },
+      "speed": {
+        "base": 1.0825,
+        "passed": true,
+        "product": 0.9684999999999999,
+        "ratio": 0.8946882217090069
+      }
+    },
+    "1m-384": {
+      "memory": {
+        "base": 1107,
+        "passed": false,
+        "product": 2947,
+        "ratio": 2.6621499548328815
+      }
+    },
+    "250k-48": {
+      "speed": {
+        "base": 0.2355,
+        "passed": true,
+        "product": 0.212,
+        "ratio": 0.9002123142250531
+      }
+    }
+  },
+  "product": {
+    "sessions": {
+      "busy": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.1423802500066813,
+        "median": 0.11281608301214874,
+        "min": 0.10698591600521468,
+        "n": 5,
+        "rows": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "timeouts": 0
+      },
+      "busy_idle_ratio": 53.46629878484766,
+      "idle": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.0022551250003743917,
+        "median": 0.0021100410085637122,
+        "min": 0.0019916669989470392,
+        "n": 5,
+        "rows": [
+          2,
+          2,
+          2,
+          2,
+          2
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "f33b8a2cc4340d9a581ac77f5e8dfe8c735e64eb97cb854def8366ea2ba8df55"
+    },
+    "vector.chunk": {
+      "busy": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.34257987499586307,
+        "median": 0.33568108300096355,
+        "min": 0.3167527500190772,
+        "n": 5,
+        "rows": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "timeouts": 0
+      },
+      "busy_idle_ratio": 1.6896837072742439,
+      "idle": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.22226295800646767,
+        "median": 0.19866504101082683,
+        "min": 0.19717287499224767,
+        "n": 5,
+        "rows": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "778d093347ec043044f097cd57c565effbb93abaa88a0f64b29181c709629e1a"
+    },
+    "vector.summary": {
+      "busy": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.14253741700667888,
+        "median": 0.11789395799860358,
+        "min": 0.08822637499542907,
+        "n": 5,
+        "rows": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "timeouts": 0
+      },
+      "busy_idle_ratio": 65.746223269473,
+      "idle": {
+        "callbacks": [
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        "exceeded_deadline": 0,
+        "max": 0.0018812090274877846,
+        "median": 0.001793167000869289,
+        "min": 0.001761667022947222,
+        "n": 5,
+        "rows": [
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "timeouts": 0
+      },
+      "payload_sha256": "8a86a51c02184c3285a24f5ce8f72011d7519e772cda45357f6a9c1cb5c6ae5a"
+    }
+  }
+}

@@ -1,0 +1,32 @@
+[
+  {
+    "command": "python -m pytest tests/test_recall_row_handoff.py -q -k \"aggregate_errors or temp_btree or spill_threshold\" -p no:cacheprovider --basetemp=\"$LCMX_SCRATCH/pt-fix1-red\"",
+    "result": "12 failed, 6 passed, 3 skipped, 9 deselected in 16.23s",
+    "classification": "EXPECTED_NEGATIVE"
+  },
+  {
+    "command": "python -m pytest tests/test_recall_row_handoff.py tests/test_fulltext_sql_cost.py tests/test_lcm_recall.py tests/test_vector_store.py tests/test_int8_two_stage_knn.py tests/test_prescreen_flip_blackout.py -q -m \"not latency\" -p no:cacheprovider --basetemp=\"$LCMX_SCRATCH/pt-fix1-focused\"",
+    "result": "398 passed, 3 skipped, 1 deselected in 44.07s",
+    "classification": "COMPLETE"
+  },
+  {
+    "command": "ulimit -n 1024; python -m pytest tests/ -q -m \"not latency\" -n 4 --ignore=tests/test_embedding_privacy.py -p no:cacheprovider --basetemp=\"$LCMX_SCRATCH/pt-fix1-full\"",
+    "result": "15963 passed, 140 skipped, 64 xfailed, 23 warnings in 280.18s (0:04:40)",
+    "classification": "COMPLETE"
+  },
+  {
+    "command": "python -m pytest tests/test_embedding_privacy.py -q -m \"not latency\" -p no:cacheprovider --basetemp=\"$LCMX_SCRATCH/pt-fix1-privacy\"",
+    "result": "77 passed in 2.24s",
+    "classification": "COMPLETE"
+  },
+  {
+    "command": "uv tool run --from ruff==0.15.13 ruff check .",
+    "result": "All checks passed!",
+    "classification": "COMPLETE"
+  },
+  {
+    "command": "git diff --check",
+    "result": "exit 0; no output",
+    "classification": "COMPLETE"
+  }
+]

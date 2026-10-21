@@ -1,0 +1,190 @@
+{
+  "before-chunk": {
+    "query": "WITH binary_rows AS MATERIALIZED (\n        SELECT row_number() OVER () AS ordinal, * FROM (\n                SELECT b.chunk_id AS binary_id, b.bits\n                FROM lcm_chunk_binary b\n                JOIN lcm_chunk_meta cm\n                  ON cm.chunk_id = b.chunk_id AND cm.identity_hash = b.identity_hash\n                JOIN messages m ON m.store_id = cm.store_id\n                \n                WHERE cm.identity_hash = ? AND cm.archived = 0\n                )\n    ) SELECT json_group_array(json_array(binary_id, length(bits))),\n             group_concat(hex(bits), '')\n      FROM (SELECT * FROM binary_rows ORDER BY ordinal)",
+    "args": [
+      "38905b4cbe4030a9b2431a6f5288b73ceb17edaa2aa64dad130f5087cef88bb0"
+    ],
+    "plan": [
+      [
+        2,
+        0,
+        0,
+        "CO-ROUTINE (subquery-3)"
+      ],
+      [
+        5,
+        2,
+        0,
+        "MATERIALIZE binary_rows"
+      ],
+      [
+        8,
+        5,
+        0,
+        "CO-ROUTINE (subquery-5)"
+      ],
+      [
+        15,
+        8,
+        62,
+        "SEARCH cm USING INDEX idx_lcm_chunk_meta_identity_embedded_at (identity_hash=?)"
+      ],
+      [
+        22,
+        8,
+        47,
+        "SEARCH b USING INDEX sqlite_autoindex_lcm_chunk_binary_1 (chunk_id=? AND identity_hash=?)"
+      ],
+      [
+        31,
+        8,
+        45,
+        "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)"
+      ],
+      [
+        46,
+        5,
+        48,
+        "SCAN (subquery-5)"
+      ],
+      [
+        88,
+        2,
+        48,
+        "SCAN binary_rows"
+      ],
+      [
+        96,
+        2,
+        0,
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      [
+        107,
+        0,
+        48,
+        "SCAN (subquery-3)"
+      ]
+    ]
+  },
+  "before-summary": {
+    "query": "WITH binary_rows AS MATERIALIZED (\n        SELECT row_number() OVER () AS ordinal, * FROM (\n                SELECT b.embedded_id AS binary_id, b.bits\n                FROM lcm_embedding_binary b\n                JOIN lcm_embedding_meta m\n                  ON m.embedded_id = b.embedded_id AND m.identity_hash = b.identity_hash\n                JOIN summary_nodes sn ON sn.node_id = CAST(b.embedded_id AS INTEGER)\n                \n                WHERE m.identity_hash = ? AND m.archived = 0\n                )\n    ) SELECT json_group_array(json_array(binary_id, length(bits))),\n             group_concat(hex(bits), '')\n      FROM (SELECT * FROM binary_rows ORDER BY ordinal)",
+    "args": [
+      "2f9d21f9470349182f4718a55724908466a45d9e6efec0a8e91b97339f7efb7c"
+    ],
+    "plan": [
+      [
+        2,
+        0,
+        0,
+        "CO-ROUTINE (subquery-3)"
+      ],
+      [
+        5,
+        2,
+        0,
+        "MATERIALIZE binary_rows"
+      ],
+      [
+        8,
+        5,
+        0,
+        "CO-ROUTINE (subquery-5)"
+      ],
+      [
+        15,
+        8,
+        62,
+        "SEARCH m USING INDEX idx_lcm_embedding_meta_identity_embedded_at (identity_hash=?)"
+      ],
+      [
+        22,
+        8,
+        47,
+        "SEARCH b USING INDEX sqlite_autoindex_lcm_embedding_binary_1 (embedded_id=? AND identity_hash=?)"
+      ],
+      [
+        31,
+        8,
+        45,
+        "SEARCH sn USING INTEGER PRIMARY KEY (rowid=?)"
+      ],
+      [
+        47,
+        5,
+        48,
+        "SCAN (subquery-5)"
+      ],
+      [
+        89,
+        2,
+        48,
+        "SCAN binary_rows"
+      ],
+      [
+        97,
+        2,
+        0,
+        "USE TEMP B-TREE FOR ORDER BY"
+      ],
+      [
+        108,
+        0,
+        48,
+        "SCAN (subquery-3)"
+      ]
+    ]
+  },
+  "after-chunk": {
+    "query": "SELECT json_group_array(json_array(binary_id, length(bits))),\n                            group_concat(hex(bits), '') FROM (\n                SELECT b.chunk_id AS binary_id, b.bits\n                FROM lcm_chunk_binary b\n                JOIN lcm_chunk_meta cm\n                  ON cm.chunk_id = b.chunk_id AND cm.identity_hash = b.identity_hash\n                JOIN messages m ON m.store_id = cm.store_id\n                \n                WHERE cm.identity_hash = ? AND cm.archived = 0\n                )",
+    "args": [
+      "38905b4cbe4030a9b2431a6f5288b73ceb17edaa2aa64dad130f5087cef88bb0"
+    ],
+    "plan": [
+      [
+        8,
+        0,
+        62,
+        "SEARCH cm USING INDEX idx_lcm_chunk_meta_identity_embedded_at (identity_hash=?)"
+      ],
+      [
+        15,
+        0,
+        47,
+        "SEARCH b USING INDEX sqlite_autoindex_lcm_chunk_binary_1 (chunk_id=? AND identity_hash=?)"
+      ],
+      [
+        24,
+        0,
+        45,
+        "SEARCH m USING INTEGER PRIMARY KEY (rowid=?)"
+      ]
+    ]
+  },
+  "after-summary": {
+    "query": "SELECT json_group_array(json_array(binary_id, length(bits))),\n                            group_concat(hex(bits), '') FROM (\n                SELECT b.embedded_id AS binary_id, b.bits\n                FROM lcm_embedding_binary b\n                JOIN lcm_embedding_meta m\n                  ON m.embedded_id = b.embedded_id AND m.identity_hash = b.identity_hash\n                JOIN summary_nodes sn ON sn.node_id = CAST(b.embedded_id AS INTEGER)\n                \n                WHERE m.identity_hash = ? AND m.archived = 0\n                )",
+    "args": [
+      "2f9d21f9470349182f4718a55724908466a45d9e6efec0a8e91b97339f7efb7c"
+    ],
+    "plan": [
+      [
+        8,
+        0,
+        62,
+        "SEARCH m USING INDEX idx_lcm_embedding_meta_identity_embedded_at (identity_hash=?)"
+      ],
+      [
+        15,
+        0,
+        47,
+        "SEARCH b USING INDEX sqlite_autoindex_lcm_embedding_binary_1 (embedded_id=? AND identity_hash=?)"
+      ],
+      [
+        24,
+        0,
+        45,
+        "SEARCH sn USING INTEGER PRIMARY KEY (rowid=?)"
+      ]
+    ]
+  }
+}

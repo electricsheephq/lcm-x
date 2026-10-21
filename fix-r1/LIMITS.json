@@ -1,0 +1,470 @@
+[
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 250000,
+        "sha": "778d093347ec0430",
+        "elapsed": 11.141
+      }
+    ],
+    "shape": "250k-48",
+    "mode": "speed",
+    "phase": "base",
+    "repeat": 0
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 250000,
+        "sha": "778d093347ec0430",
+        "elapsed": 0.212
+      }
+    ],
+    "shape": "250k-48",
+    "mode": "speed",
+    "phase": "product",
+    "repeat": 0
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 250000,
+        "sha": "778d093347ec0430",
+        "elapsed": 0.235
+      }
+    ],
+    "shape": "250k-48",
+    "mode": "speed",
+    "phase": "base",
+    "repeat": 1
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 250000,
+        "sha": "778d093347ec0430",
+        "elapsed": 0.213
+      }
+    ],
+    "shape": "250k-48",
+    "mode": "speed",
+    "phase": "product",
+    "repeat": 1
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 250000,
+        "sha": "778d093347ec0430",
+        "elapsed": 0.236
+      }
+    ],
+    "shape": "250k-48",
+    "mode": "speed",
+    "phase": "base",
+    "repeat": 2
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 250000,
+        "sha": "778d093347ec0430",
+        "elapsed": 0.205
+      }
+    ],
+    "shape": "250k-48",
+    "mode": "speed",
+    "phase": "product",
+    "repeat": 2
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 250000,
+        "sha": "778d093347ec0430",
+        "elapsed": 0.235
+      }
+    ],
+    "shape": "250k-48",
+    "mode": "speed",
+    "phase": "base",
+    "repeat": 3
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 250000,
+        "sha": "778d093347ec0430",
+        "elapsed": 0.212
+      }
+    ],
+    "shape": "250k-48",
+    "mode": "speed",
+    "phase": "product",
+    "repeat": 3
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 8.908
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "speed",
+    "phase": "base",
+    "repeat": 0
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 0.969
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "speed",
+    "phase": "product",
+    "repeat": 0
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 1.072
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "speed",
+    "phase": "base",
+    "repeat": 1
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 0.967
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "speed",
+    "phase": "product",
+    "repeat": 1
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 1.093
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "speed",
+    "phase": "base",
+    "repeat": 2
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 0.982
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "speed",
+    "phase": "product",
+    "repeat": 2
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 1.069
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "speed",
+    "phase": "base",
+    "repeat": 3
+  },
+  {
+    "busy": 0,
+    "deadline": 300.0,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 0.968
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "speed",
+    "phase": "product",
+    "repeat": 3
+  },
+  {
+    "busy": 0,
+    "deadline": 1.6,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 1.187
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "deadline",
+    "phase": "base",
+    "repeat": 0
+  },
+  {
+    "busy": 0,
+    "deadline": 1.6,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 0.98
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "deadline",
+    "phase": "product",
+    "repeat": 0
+  },
+  {
+    "busy": 0,
+    "deadline": 1.6,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 1.114
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "deadline",
+    "phase": "base",
+    "repeat": 1
+  },
+  {
+    "busy": 0,
+    "deadline": 1.6,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 1.003
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "deadline",
+    "phase": "product",
+    "repeat": 1
+  },
+  {
+    "busy": 0,
+    "deadline": 1.6,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 1.091
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "deadline",
+    "phase": "base",
+    "repeat": 2
+  },
+  {
+    "busy": 0,
+    "deadline": 1.6,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 0.969
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "deadline",
+    "phase": "product",
+    "repeat": 2
+  },
+  {
+    "busy": 0,
+    "deadline": 1.6,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 1.092
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "deadline",
+    "phase": "base",
+    "repeat": 3
+  },
+  {
+    "busy": 0,
+    "deadline": 1.6,
+    "filtered": false,
+    "runs": [
+      {
+        "result": "ok",
+        "n": 1000000,
+        "sha": "1c4f06020092791d",
+        "elapsed": 0.954
+      }
+    ],
+    "shape": "1m-128",
+    "mode": "deadline",
+    "phase": "product",
+    "repeat": 3
+  },
+  {
+    "filtered": false,
+    "n": 1000000,
+    "w": 128,
+    "before_mb": 45,
+    "after_mb": 628,
+    "delta_mb": 583,
+    "matrix_mb": 128,
+    "elapsed": 0.97,
+    "sha": "1c4f06020092791d",
+    "shape": "1m-128",
+    "mode": "memory",
+    "phase": "base",
+    "repeat": 0
+  },
+  {
+    "filtered": false,
+    "n": 1000000,
+    "w": 128,
+    "before_mb": 45,
+    "after_mb": 1172,
+    "delta_mb": 1127,
+    "matrix_mb": 128,
+    "elapsed": 0.89,
+    "sha": "1c4f06020092791d",
+    "shape": "1m-128",
+    "mode": "memory",
+    "phase": "product",
+    "repeat": 0
+  },
+  {
+    "filtered": false,
+    "n": 1000000,
+    "w": 384,
+    "before_mb": 45,
+    "after_mb": 1152,
+    "delta_mb": 1107,
+    "matrix_mb": 384,
+    "elapsed": 1.13,
+    "sha": "88330dc875abcb90",
+    "shape": "1m-384",
+    "mode": "memory",
+    "phase": "base",
+    "repeat": 0
+  },
+  {
+    "filtered": false,
+    "n": 1000000,
+    "w": 384,
+    "before_mb": 45,
+    "after_mb": 2993,
+    "delta_mb": 2947,
+    "matrix_mb": 384,
+    "elapsed": 1.38,
+    "sha": "88330dc875abcb90",
+    "shape": "1m-384",
+    "mode": "memory",
+    "phase": "product",
+    "repeat": 0
+  }
+]

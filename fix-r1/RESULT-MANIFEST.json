@@ -1,0 +1,159 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1749-fix-r1-public",
+  "project": "lcm-x",
+  "kind": "eval",
+  "status": "settled",
+  "owner_lane": "pr-1757-fix-r1",
+  "claim_class": "advisory",
+  "created": "2026-10-21T14:19:18Z",
+  "settled": "2026-10-21T14:19:19Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "8d18e7943152d132f0af292911c88098b66685aa",
+    "dirty": true,
+    "diff_sha256": "fa8411c21ba78856c8f7afc5ce58cfb7eb443e173d859bd68f086437ab170748"
+  },
+  "env": {
+    "command": "python rescore.py",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "row-handoff-fix-r1",
+      "metric": "session_busy_median_s",
+      "value": 0.11281608301214874,
+      "n": 5,
+      "baseline_run": "e0db1b846-generated-250k",
+      "source": "SUMMARY.json"
+    },
+    {
+      "benchmark": "row-handoff-fix-r1",
+      "metric": "chunk_busy_median_s",
+      "value": 0.33568108300096355,
+      "n": 5,
+      "baseline_run": "e0db1b846-generated-250k",
+      "source": "SUMMARY.json"
+    },
+    {
+      "benchmark": "row-handoff-fix-r1",
+      "metric": "summary_busy_median_s",
+      "value": 0.11789395799860358,
+      "n": 5,
+      "baseline_run": "e0db1b846-generated-250k",
+      "source": "SUMMARY.json"
+    },
+    {
+      "benchmark": "row-handoff-fix-r1",
+      "metric": "1m-128-rss-ratio",
+      "value": 1.9331046312178388,
+      "n": 1,
+      "baseline_run": "e0db1b846-generated",
+      "source": "SUMMARY.json"
+    },
+    {
+      "benchmark": "row-handoff-fix-r1",
+      "metric": "1m-384-rss-ratio",
+      "value": 2.6621499548328815,
+      "n": 1,
+      "baseline_run": "e0db1b846-generated",
+      "source": "SUMMARY.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "CHECKS.json",
+      "role": "per-item",
+      "sha256": "1fe7f4a3bfa4c255cb8c1eaf40aa75715775d526cf8bea04254f4c6d01b99fe7",
+      "bytes": 1535
+    },
+    {
+      "path": "CODE.json",
+      "role": "per-item",
+      "sha256": "10e9ef64f68ef02325c0189b70f182f4c18d4f490af3b7fe9ce7d8619206dffe",
+      "bytes": 897
+    },
+    {
+      "path": "EQP.json",
+      "role": "per-item",
+      "sha256": "250f8ef4121ddfd3673ab082c696003197df539b4394c8298725191e7929e00a",
+      "bytes": 5797
+    },
+    {
+      "path": "LIMITS.json",
+      "role": "per-item",
+      "sha256": "f374035b194ed0c2ff14289d812cee821fa647631d50bb6a8ca34c43b2d8ac20",
+      "bytes": 8247
+    },
+    {
+      "path": "SAMPLES.json",
+      "role": "per-item",
+      "sha256": "288a8253ab2419c34fa520b21931538ea72392761f6f34e237fd144e472fea8a",
+      "bytes": 20626
+    },
+    {
+      "path": "SUMMARY.json",
+      "role": "per-item",
+      "sha256": "2b087157d54f123800f1aced48bf9aec0886c0d09ab7cf3307fba62ac07e56c2",
+      "bytes": 6642
+    },
+    {
+      "path": "corpus-recipe.json",
+      "role": "per-item",
+      "sha256": "d8a823afd80c120640196d55489fe9852469aca23574e2498ddbb9805330692f",
+      "bytes": 410
+    },
+    {
+      "path": "fix.patch",
+      "role": "per-item",
+      "sha256": "fa8411c21ba78856c8f7afc5ce58cfb7eb443e173d859bd68f086437ab170748",
+      "bytes": 8122
+    },
+    {
+      "path": "memory-stages.log",
+      "role": "per-item",
+      "sha256": "b47997f6a0ccc53e2d070362707e3bf3ad14c81dd4bef8a08f4331f359177958",
+      "bytes": 92
+    },
+    {
+      "path": "product-file-hashes.json",
+      "role": "per-item",
+      "sha256": "39144d9efcd1e91b7146f4de34d623262c918e0feca78ec1b153ddbecdba3173",
+      "bytes": 280
+    },
+    {
+      "path": "rescore.py",
+      "role": "per-item",
+      "sha256": "1d746fe38e6bc5e161b2b3c723e09ed1678f7c5aa8892663c17eedb5799ab3c3",
+      "bytes": 2499
+    }
+  ],
+  "rescore": {
+    "command": "python rescore.py",
+    "inputs": [
+      "SAMPLES.json",
+      "LIMITS.json",
+      "rescore.py"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "CHECKS.json",
+    "CODE.json",
+    "EQP.json",
+    "LIMITS.json",
+    "RESULT.md",
+    "SAMPLES.json",
+    "SUMMARY.json",
+    "corpus-recipe.json",
+    "fix.patch",
+    "memory-stages.log",
+    "product-file-hashes.json",
+    "rescore.py"
+  ]
+}

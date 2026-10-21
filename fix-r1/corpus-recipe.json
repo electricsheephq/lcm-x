@@ -1,0 +1,12 @@
+{
+  "rows": 250000,
+  "sessions": 500,
+  "seed": 1586,
+  "generator": "bench.instruments.local_catchup.corpus.build; shape=short; baseline=empty",
+  "chunk_identity": "38905b4cbe4030a9b2431a6f5288b73ceb17edaa2aa64dad130f5087cef88bb0",
+  "summary_identity": "2f9d21f9470349182f4718a55724908466a45d9e6efec0a8e91b97339f7efb7c",
+  "vectors": {
+    "lcm_chunk_binary": 250000,
+    "lcm_embedding_binary": 500
+  }
+}
