@@ -1,0 +1,18 @@
+{
+  "baseline_sha": "fe209618fabc513e71b1a7f42b03fdcfe2adeaaf",
+  "measurement": "tracemalloc around preview extraction; input constructed before tracing",
+  "single": {
+    "content_chars": 33554495,
+    "baseline_peak_bytes": 234906080,
+    "candidate_peak_bytes": 34496,
+    "caption_kept": true
+  },
+  "two_parts": {
+    "content_chars": 33554562,
+    "baseline_peak_bytes": 218129202,
+    "candidate_peak_bytes": 44594,
+    "caption_kept": true
+  },
+  "source_ceiling_bytes": 67108864,
+  "ceiling_interpretation": "Two 16 MiB literals exercise caption recovery below the unchanged ceiling; two 32 MiB literals exceed it and return an empty preview."
+}

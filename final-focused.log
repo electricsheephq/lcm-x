@@ -1,0 +1,11 @@
+.....................bytes_repr count=1 content_chars=33554495 peak_bytes=34496
+.bytes_repr count=2 content_chars=33554562 peak_bytes=44594
+..
+============================= slowest 25 durations =============================
+1.55s setup    tests/invariants/test_issue_1733_media_preview.py::test_issue_shapes[list-repr]
+0.41s call     tests/invariants/test_issue_1733_media_preview.py::test_large_bytes_caption_recovery_memory[1]
+0.39s call     tests/invariants/test_issue_1733_media_preview.py::test_large_bytes_caption_recovery_memory[2]
+0.02s call     tests/invariants/test_issue_1733_media_preview.py::test_two_32_mib_literals_still_obey_source_ceiling
+
+(21 durations < 0.005s hidden.  Use -vv to show these durations.)
+24 passed in 3.13s

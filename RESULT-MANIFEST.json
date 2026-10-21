@@ -1,0 +1,128 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "20261021-media-preview",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "media-preview",
+  "claim_class": "advisory",
+  "created": "2026-10-21T12:52:06Z",
+  "settled": "2026-10-21T12:52:06Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "bc8c0c51f3ea43c65b889adf279d24b8c4fdb8bd",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python -m pytest tests/invariants/test_issue_1733_media_preview.py -q -s -p no:cacheprovider",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "media-preview-single-32MiB",
+      "metric": "peak_bytes",
+      "value": 34496.0,
+      "n": 1,
+      "baseline_run": "fe209618f",
+      "source": "memory.json"
+    },
+    {
+      "benchmark": "media-preview-two-part-32MiB",
+      "metric": "peak_bytes",
+      "value": 44594.0,
+      "n": 1,
+      "baseline_run": "fe209618f",
+      "source": "memory.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "memory.json",
+      "role": "receipt",
+      "sha256": "8d7ad8a955b8278ea202fefabdc5644031b6c72f87155608c4b2dd018c8c2ce5",
+      "bytes": 657
+    },
+    {
+      "path": "differential.json",
+      "role": "receipt",
+      "sha256": "982c0db438003794b8397a4caf28b62ee9d9717e4aaaa04c66c3389939b38013",
+      "bytes": 62472
+    },
+    {
+      "path": "differential-summary.json",
+      "role": "receipt",
+      "sha256": "58d36ed73a4c5263ffd5ed5f96a055038e3b6e36b5f6e1bb26b016e3f970b136",
+      "bytes": 114
+    },
+    {
+      "path": "base.log",
+      "role": "receipt",
+      "sha256": "2da0ddc2d67267659d097b5513621149f6fda359ff3b9ee1ffa61eb0f3eacafa",
+      "bytes": 29219
+    },
+    {
+      "path": "red.log",
+      "role": "receipt",
+      "sha256": "f30da290fd446ef6004e2be099a775b21a2ac5362b87640ddf413a8e25541692",
+      "bytes": 32567
+    },
+    {
+      "path": "final-focused.log",
+      "role": "receipt",
+      "sha256": "7a9f7dbe26674e120feaa5b7e81e02650dceef842f6f589804221a9d416a312c",
+      "bytes": 742
+    },
+    {
+      "path": "shapes-green.log",
+      "role": "receipt",
+      "sha256": "fd992b85ae0124c4c8c41d621a907507b0642b36f0ee381706135b5262addd19",
+      "bytes": 1154
+    },
+    {
+      "path": "full-suite.log",
+      "role": "receipt",
+      "sha256": "8fee6ea4c293ee2f7f72886e71bb27d4ff875e1e48a9aa70afa19b35439c52ec",
+      "bytes": 23958
+    },
+    {
+      "path": "ruff-final.log",
+      "role": "receipt",
+      "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "bytes": 19
+    },
+    {
+      "path": "preview_probe.py",
+      "role": "receipt",
+      "sha256": "cd161bdc2a86417a88975de7b627fac437a2a9f0d24c9665ca74bbc6923ac2ce",
+      "bytes": 1231
+    }
+  ],
+  "rescore": {
+    "command": "python -m json.tool memory.json; python -m json.tool differential-summary.json",
+    "inputs": [
+      "memory.json",
+      "differential.json",
+      "differential-summary.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "base.log",
+    "differential-summary.json",
+    "differential.json",
+    "final-focused.log",
+    "full-suite.log",
+    "memory.json",
+    "preview_probe.py",
+    "red.log",
+    "ruff-final.log",
+    "shapes-green.log"
+  ]
+}

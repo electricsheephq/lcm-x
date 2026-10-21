@@ -1,0 +1,1308 @@
+{
+  "base_sha": "fe209618fabc513e71b1a7f42b03fdcfe2adeaaf",
+  "common": 367,
+  "changes": [
+    {
+      "input_sha256": "cebfe1103cd00177f3dec22fb26f2a3807a2a0a588f9937fa720bbbd5ea83f73",
+      "length": 91,
+      "before": "deployment failed on the zebracluster\nimage",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "8bd8f93b82026202fcb5512fa65226b8add7067385c37af52303fb032dc214cb",
+      "length": 97,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "6a9b6cc5dac17677b708e322da08672d0a9b0b77f242fa3e4a178da7627bf229",
+      "length": 104,
+      "before": "",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "0b2255b24ba6d45f31400b8bfbf6dba5e6ecc4cede602b3930a9ec2f4ef62d9b",
+      "length": 92,
+      "before": "deployment failed on the zebracluster\nimage",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "0fe300cb74fe689cff93e044da3ad06e57235ed41768916acd953a4eb1473742",
+      "length": 94,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": ""
+    },
+    {
+      "input_sha256": "90c30dbedcc6dc387bbe0adac89c45f05642019e772fa6a2576721d620a57132",
+      "length": 97,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "c1b8bec8983460e40db788acd465a511b0727af31b8380b72baa84e4722fb17c",
+      "length": 87,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "eeff951288eb2b4c2459766eaa2d0ceb293be0da2ce9b68d89f74a8df0269207",
+      "length": 94,
+      "before": "deployment failed on the zebracluster\nimage",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "3df50a0c63f91c36541bb0254943d219de0fa6b94f61a2b8d5528d404cddd1a7",
+      "length": 97,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "53f89b896d50bc73132ed4dd708e816033ef33ee6136d9708d8e3e773e84e8a4",
+      "length": 95,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": ""
+    },
+    {
+      "input_sha256": "8dd50e9716ebe697aa53318bb6f01878d2fa3bc7db2294f5f9a639a95d0aa2e7",
+      "length": 106,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "6c06a35c7b2d2bf32946f70362a1b444a1bbbbff7d8249d5a270c7da44fd6b22",
+      "length": 95,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "5fbaf82af0c68e927ec320a6bc4008867035d0f8655570926c01d64dbda2e7ab",
+      "length": 78,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "67c0f3cb2a587c525a014499c715387650ee9a86e22bdc27742daa3bab497b41",
+      "length": 102,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": ""
+    },
+    {
+      "input_sha256": "cae7162a2e39ae086d5d2b3608aaa318ee6de662c89947afd81be46311ce49e6",
+      "length": 96,
+      "before": "",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "42a11e505999913ca436b44c565e267717a559bab0cc1c7eddff8b06a104c79e",
+      "length": 108,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "217b6cf5cff2a558383c8ea9d9bead7e06f0ff4e34865e91b0b6c5ef4c73ee44",
+      "length": 84,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "459eaa9dcd90c2758e2829a1d06a59737a6c369e66665962e2a840dcaa64417b",
+      "length": 97,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "5639158d50c25f17d78997634155daefaa4325cfc1d6731382aba39147a4c421",
+      "length": 93,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "64481168ae2f3394a0fe20ad7b1f8bd5ee60217bd8b07305bceb29520217d48c",
+      "length": 82,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "9f5bf8835cfd4f50d5f9fccbe25ced34a634fbd6c6f456311df5e76dd599e549",
+      "length": 92,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": ""
+    },
+    {
+      "input_sha256": "59b1c817efce637e9dc9a40dd68f8a5a87fb05bdc39e8cc61c53f121ccdd94ec",
+      "length": 94,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "9623217d68a4d367890f1ca43041cf062def1d1de230766ab954acf8bbabf9f0",
+      "length": 95,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "0b0f2a45820d04b214685a42e30e4405b5e5a7e6d8f7d25cd94c786e921883f5",
+      "length": 78,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "2dd38fdd1dfae783f31813475bd7cea9557f796de928be18f328780ff39533e8",
+      "length": 103,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "a70cdd30c68bcc3bc553209f7acf5859af07a5f6bd98028333f0727351eb917a",
+      "length": 93,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": ""
+    },
+    {
+      "input_sha256": "34a8dec1a221943f110e86b75eafd62d715ac947595c343a2270a63cc4464d35",
+      "length": 93,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "34b6d7b74f1118e9e4b5b43bb2ec8180d809872165041beaea441ca118b6e8db",
+      "length": 105,
+      "before": "",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "4e29714ebd9e62ae325015f7062997f1b4b3525403a183bb87751704a9684c7b",
+      "length": 79,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "ed4ab2306b906853e7dcbbb714ba75a43b00cab3d9ca1eee5cc0e7866c9f90c0",
+      "length": 115,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "3946643fc9328e6f95082059f5eb897bf1c72b77af38ae4cf48503fe2670353b",
+      "length": 108,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "3eaec4245136d400e85f8c8d13d134e77bb4302ae19c4b7850588983ff89f4d3",
+      "length": 107,
+      "before": "",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "5915158f736eb4978356877f80ef57f7fe61657aaf1885d1c1099b9470f5cc9a",
+      "length": 112,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "ddfc02c39fa22c3eb9f3a285407bdcee16a215a1f6ec0102c28709fca9417ca7",
+      "length": 98,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": ""
+    },
+    {
+      "input_sha256": "362cbafe1dd40c558bea0a7d3110024d5d27ff56d94bb8b1d33d697bbc333056",
+      "length": 77,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "b9c8117c7a6077bac9143bbee90ff8edae7519a2538352c1f9d2d76eb4cdf56d",
+      "length": 99,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "14368845e944dc320845d2fd3254e92f9fab470dfd0566ac03e8fca9c57a197e",
+      "length": 96,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "86f817a0100d0dd5cb9c75eb605244bf9e2200c81e3f7b04c2b7d352ef16ffb7",
+      "length": 99,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "b38c62a2701f7ee162b84008234f5c2de7c68c12e9d5f0b70e8d351c17db48f7",
+      "length": 93,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "504731d56a425c05a44f797a63182d644d55225bbae7611e1091a1dc83a505d1",
+      "length": 82,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "805d93606f7532972d37a720ca1c1c0404c3c4022c36ece0c85e1bb15b1018ac",
+      "length": 77,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "25a4a096afb7e349f45e2967a1a324f63aa5799517ec07a9e1f24d960e236470",
+      "length": 78,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "4427e5562fa658f440927893f120d0c50c6f096d9dcbb392e64d210bddadca5f",
+      "length": 94,
+      "before": "deployment failed on the zebracluster\nimage",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "ce3ee408052ed68bd59a6db475eab5250346938ceef344fff4f913ac5f3a6a8a",
+      "length": 101,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "b043cbf066bd24cfe319c4d6c15cfbb4001ee9cd4458ddd4bd07590333c6eebe",
+      "length": 108,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "12f0698f3a8216128f00af151945b386bcbb2836a02a77db40a5b1063c12425c",
+      "length": 101,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "23a8e6914c20db4b1677ce980e884de2ed021d18d58416801717da1ebd787c50",
+      "length": 86,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "3cf4780fec1cf6c365c1f992954f9c960a142196bbbdbd307f54215a92f990c7",
+      "length": 106,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "48808d4f86e69a3f3f73a617dffb76ced78bf6cd38bea9533dbd256eec225715",
+      "length": 80,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "22ff502983a3d9c453592de3745015dbbd9eebea3a55ef0848161060c22e5c63",
+      "length": 100,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "f2923ec94c455b2867ecbe224d9bfaaafa8170723733a39bfd5153f42316ee0e",
+      "length": 100,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "7f2385230844a966f1182afa35b37b1d0226624d84946f034b555d5d82637207",
+      "length": 108,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "cc67abb0ea748e752b208ad00b0fdea2db9b65ff00a6c86ee76f897ff1d15e16",
+      "length": 107,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "36bd8adf82208accd4d9a1af2af3f6d84120c68db7d9aa1bf3921e0d08672487",
+      "length": 104,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "36eeb54ba8d4c6069ec69fefbf670868f884b23653f15cff4b248dfe6bd05fdf",
+      "length": 108,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "c9f2a43c169667b6d264af4a7402e618fc68d9653953db4d1dfe1e75ff59d4f8",
+      "length": 104,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "b85893e43471580440f79380a35d422c924427eab78fd77fd1968e1890d06b72",
+      "length": 77,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "6d50f2e4e20dbe26b27bbb909f110c7a7a2402aa4ccb8f0c57d52a85eb15d6e1",
+      "length": 97,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "e36f25208b97108f5e33efb500630154770efc66eb49f3e5f20f24062684a3f0",
+      "length": 104,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "3acad3fd35007c09ab6017c19a3df07f45e4dbb659decaa0d3b180e24edb70d6",
+      "length": 105,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "570774f97e146682523604b0984b3f31d432cb71dc9cffca1fc1eca794f885a1",
+      "length": 96,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "e0c9c28fc6a362906cfc002821220203a395c98bd2955517a50f032a55b48389",
+      "length": 105,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "7a3038656f569f4755ce26b09f4d779d612f7d8b2ca8eeedc74455c58fcd857b",
+      "length": 99,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "f048f113e9b00b42f38a2b02039019fe420cb7a7b7b9ac937ec34989f0bc4ae8",
+      "length": 80,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "5f0956ef8cdcc031fb7f8e0d29b233b95e98872f9605b18ea4e6b0faa721a72c",
+      "length": 100,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "c0c508142749683680527e224af5c21f9dfcef233a4a4cda8c208f7a06c24425",
+      "length": 79,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "ae8e79f81ba57bd6d32a4ea2be2e802b1b95921f3461f3db613ed95930b6cb2b",
+      "length": 110,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "6c2c64cd3ebfe6aa1157e1787c4afb6daa931a2b8ec679fc09fbcace09fc4fdb",
+      "length": 99,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "f97f20b0bc2269e25e029c2d1ff4be50f0b83c3af0c04cc23f276292237ceef2",
+      "length": 111,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "2b1d07c1492c17578bdcf1fb17db0eb4b163d4dce41fa51ff4ef2aead1f16b74",
+      "length": 97,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "0776dff2785705f1e435637ed41d0388a59006ac18f0d2db151518c88180abb2",
+      "length": 93,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "d4dc122dd0e1ae2dbb1a716bed7928218708226729610b98d0ed217064776236",
+      "length": 79,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "01d9e38c11e067d605f0d55a84753ed7f7c9be4dd9bc7321e3d67e47433b6859",
+      "length": 99,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "9b4e39f20977987750d0fe5d258c43c31eafb6989a38bba981c61b181370a19b",
+      "length": 80,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "a0ea83d562513e72707310211c92934cdd54d6aa5c8b70d312f050c19dde11f2",
+      "length": 82,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "ee34828f9d0c9afc6acf7cae52ed2cb1dab3b04b57483775e7b863895a9ea24c",
+      "length": 97,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "f7f2395d65bdbd0709c56c6de905f21d57b7d7042b2c2af82c16fb78c2aeaf64",
+      "length": 93,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "fafebd7818c34663269cd2c360b27e3ec25e18df9a1b151c80401083526fc7df",
+      "length": 96,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "7234bcb8472335b646f593a1f7ec90cd20db83a7616e4be0851a61d84e6c00cc",
+      "length": 96,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": ""
+    },
+    {
+      "input_sha256": "818f0d61decf1592f00ea32b8f5dc41f1f4df7287c9db22b6fc39c6b4a33d83a",
+      "length": 80,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "6406da0a220855e0a2d5de956071da0e3cbca747bb43c23e7560f1e0dc1f93c4",
+      "length": 77,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "e118acf3531f3e0240aaab8679c65bf6427afa7cd39ddd26dc69b202a67cf671",
+      "length": 100,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": ""
+    },
+    {
+      "input_sha256": "6460502e07c8b9863766f214034e954755852418eb52b16209c9f67b11080f78",
+      "length": 98,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "f53259b4e2d90050b6f257bf586d1fab32843efe654b5f1c819875c89f32295d",
+      "length": 97,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "7882b4679c0cece4cb9a5d0bbef03b2152ff38ef877f78026306ae5d644cfa85",
+      "length": 104,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "69132e9275c925e1dfe19d0630131894108a107a2d38b8fafe9d69b34a292bde",
+      "length": 95,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "a785c714c48455191e8b86350b3c3ce9d505da9655a918b0c781e74e16587269",
+      "length": 110,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "8e69a9867bc097176efe9031caceacdc9eeef9edd38a735a4e202e66be281217",
+      "length": 77,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "fbef808fade832ee149737f3cd63338acca8774eea26fb44d8b39978cf2e3a7f",
+      "length": 80,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "a22d86d92d53ef8dbbe0e64116c17e48131d189d3d9fbe3870dae6293809cbd8",
+      "length": 94,
+      "before": "",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "f8add3c69c6e9656354bca938ad51b72a1958ea61720b981a1873221dbb91090",
+      "length": 110,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "7e9076030ea3fcf90ef11ff0abbade100ce72f77d25a23afa17ab14b9b8ff0fe",
+      "length": 90,
+      "before": "deployment failed on the zebracluster\nimage",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "93b963d6c212790721ee954af072b78fa75cb0ba4b727af4742c91d5776c760a",
+      "length": 107,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "559e214daa23fecac2fca4db2e8b7653bda587a83a9c785dfe3653d46e45bad2",
+      "length": 100,
+      "before": "",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "1bf9117b2f097cf5ff50a3bfa4bd73dbfff261fc0d040e69df8ba6954fe58f74",
+      "length": 103,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "515bf8ce503b8122991a0a37cfe7e1539efd1baf3342ce237f48c13390d0657e",
+      "length": 105,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "c34c212c2a1a83dbcd2e6c4682dfb9f96769c5badc971979e2d6d45e2f5a501d",
+      "length": 78,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "66bc60d2bb3fe845ed234d7092ea3013774ee95f9147fd433c98ae50f9521ab0",
+      "length": 104,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "65a2b5ec392b0d2b05352f6e2cbda3cdce7fd6cb3ef1c92785c88efc9d500af1",
+      "length": 96,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": ""
+    },
+    {
+      "input_sha256": "9fb54cd5cc302086a05618ad9f76b4f1e00d34f6ad1a7d02c63821c489feab61",
+      "length": 114,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "60f53b3ba0aebc0ad15dfbf26f290b953c5ee58bb49474e46db74a9770fde22b",
+      "length": 107,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "5c60a850cfc4344a60d78009482fa30a0620fd57a0ad8859b3a2152800a44d08",
+      "length": 100,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "ddecc12008c15f940441ea50f3576670901d4d6331230be7911ae7f0c818efe2",
+      "length": 112,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "9b3669fd215fbe503c2efb9f74b76819011fa793592d1768508cc35e0d06c68a",
+      "length": 108,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "3ce0cf1f039c2fc3782c47cfea1605436a86628a3ea7ccab918480b56d006909",
+      "length": 96,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "6364540b9d90b691ece6a87b10ff82e70a06fd7987522ecdceb0f659e29b9239",
+      "length": 107,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "ce571feda221644a40aba41e79c74979bcb46b51903dbbbc3b527d40296ba5ac",
+      "length": 96,
+      "before": "",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "2675d75673afd78e0402b98e0786fc2a314a2b2211fb56ea435fddd7d2124243",
+      "length": 112,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "4237bc383cfbf0d1d4e38643ffcd3cc3efa0196be0f8f18bcb26f4452c130af6",
+      "length": 96,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "3456c4b7465c7c71daf7d9a6cb6b658f576e9047199eea8371eeca7c94fc64b9",
+      "length": 83,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "74475a32b038d479b016172947bc5eafdd2f7b5ab4882b75be34a034da4f833c",
+      "length": 108,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "f7cdd8f037b14a11a4e45712095943a8946c999b750c4631151df814a26891e1",
+      "length": 93,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "51720c68459285c9f855ddc8c4b256d77927aa108b6c9316145a973ca5edce9a",
+      "length": 93,
+      "before": "",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "07d2443869d3e783662d28d3cd83ff30d57f1b56f0278e091bf46e0d2400cedf",
+      "length": 96,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "cc8a61e0fe17eb40a83ee65b21a985a6845ff6723925d8322dc666d6f43952c4",
+      "length": 98,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "5fce80da42ad91a92823ffbdb91133b3a4132b23be9c5167f1a91ad6ccc3e003",
+      "length": 79,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "60368aee3d77dec1c2c12fded496c4fd988d5560222b834c311955b877196e19",
+      "length": 96,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "6ac4bd93e5c322d84fc904b580ec1567de0ceaf1358e48517b3396f813bd51c2",
+      "length": 84,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "e82fceb3c251516c940a2bb743d8c1c24f77648861e33e50e72c303f96c9f8a3",
+      "length": 100,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "fbee7ba7c51eaa71ca20c7c6346fa45035a767ab66c6f2b77eff35d553b9e288",
+      "length": 105,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "33ca53f2ea4144531a38ed53d73c59167ddde5ba5cf3020f385bf3943d0bbd61",
+      "length": 97,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "d3ac1835248033084c02d69d777e1444ce2338b6069079e2f1ba55c90e2b17d9",
+      "length": 97,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "16566a1c7ff3d9d81d90e2f24fcececc7253cf7d3cc910a12158e9239cda565d",
+      "length": 108,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "0c82c25bd731e84cfd3c3f3e7c75598e6366095e2cc7a6ecb691a75e992b94eb",
+      "length": 94,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "95a9886ee26ec3fd3b0d731173f27795d19b633a593df1aab5e435faed9a71f2",
+      "length": 96,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "6512f96740cd75959e1fd13d0050fa29b9134ff1d5590de794d46e85bbd0ef57",
+      "length": 95,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "0ff492b97c6c3e9f1b5baaac8a89d87a1cce020a74e556261f85aa8c3032b724",
+      "length": 106,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "61067388d967c8f12de06ecd06b23bb14afffc97cd23180d1e116e15b2550d59",
+      "length": 95,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": ""
+    },
+    {
+      "input_sha256": "0c9fef5a0c3afe36ea27191071a0015d853625ab25f502cc75c675a286993557",
+      "length": 83,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "869c7d0098fd8f6fe14b1419ce176eadc6270a89a1a1bbf419df1e81c1e807bb",
+      "length": 95,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "70f6a8ae40a36cd836f476864a298312f96b94ddb2b221ae5fd49bc4cd9c7022",
+      "length": 81,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "b74935b6b8d986ef03e202f5a31ac701a5b5cfcdc24072100aeb1733486d8390",
+      "length": 99,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "3a26f2f8975bcf2221d1dcaebf55ff12f71133f68d7de63ae6bf47ae8937a3ea",
+      "length": 98,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "28addca3084422530bd5b31f587373355e2644717cd1ae5fe9084f18d904c9fa",
+      "length": 94,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": ""
+    },
+    {
+      "input_sha256": "9da04a374917b68ac9e955d27f8bd6f4733cf374f320909f239751a007b78c24",
+      "length": 94,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "0e2fc5bcc5596118febb438393a042f894f5c8a32d65f4b0b047dda462fb82a7",
+      "length": 92,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": ""
+    },
+    {
+      "input_sha256": "350766bfa675b36a4a3651ac9b29191e8a6b7a7bc8d61ff378d9fb4b610536b2",
+      "length": 96,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "a1d6261afc087c6ae49884a03edc8a67fb12237fdadbc55e053c26ab76b8cf55",
+      "length": 102,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": ""
+    },
+    {
+      "input_sha256": "d0ac055dc222c3edc558b16f6b037cf5e01ca6999467b98d6cafbf0e0e5fd96e",
+      "length": 79,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "2990cea2f10712e81c11cf51d1da776e0e3d490885fba51503b5b4071d8c7ab6",
+      "length": 95,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "8ee2b7fcd941fa6c7e8b8f3abc9861cf2bd8f1d9f11addde3930535e382722dd",
+      "length": 91,
+      "before": "deployment failed on the zebracluster\nimage",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "7fea2ad83a5c7c185fc346df83be0304a754a1134bc7674f7c999307723f2500",
+      "length": 108,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "f93547d60e06e9e7dd334cb508c7215605751517b7656d3b05ae1d3e3ae63886",
+      "length": 96,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "51c592ccaf3251d5a7ad4021d0f9fb5fdc7fd9f324269ac7f6029286f4680081",
+      "length": 103,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "3511f9026c499e5032b77ca554dfa3e94ca6ea3498c3d5d10afed859ebbe7f38",
+      "length": 103,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "615a268ef2011199fc004e01e8980a84e4cabceba0626c58b062034ea75a2611",
+      "length": 94,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": ""
+    },
+    {
+      "input_sha256": "18749baf5c6c9423808c16808cc2ec6705c75327565237b87eff8c287175def2",
+      "length": 98,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "6326fa420cc9041ac267be8cae4826c3bcb75a2f7580e450d9e76955c7b52241",
+      "length": 98,
+      "before": "deployment failed on the zebracluster\nimage",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "eaa6724bfb4dc6a075a0cc3ddf3a31d4a6e5e0e7f9d1e039d7cd976aa291e140",
+      "length": 110,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "b8548f932c67c74c1549a7a3086b8c2376463b716f1c11f5858aa7678df423f7",
+      "length": 96,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": ""
+    },
+    {
+      "input_sha256": "b58b32fd1ba7d8e5a3d7e9275685b27054f6678685bf3931853d59a1358a88fc",
+      "length": 80,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "6491ea3979641b8542d4ff9f527174fcb197c040c14195fdfda259b7dd60fd02",
+      "length": 76,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "11b4141aca2acd605eb867e0158f723d6f840d5f9b224a94fe6a5235e224c630",
+      "length": 83,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "8711045e2f39ba68fcc7dfb0fd4410bff6fe6fe2cef40e7ee60ac4013e99d344",
+      "length": 83,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "d6ad046ad75b42d8a94622a2f865ef6addb60b6e74e8757c387c62d59aeb7ea4",
+      "length": 99,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "a330eb369595a15eb980f391230477cb46ed458e0bf8ab3688c7711edec5136a",
+      "length": 95,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "58b75f353313d9a927edf45bec27e182ff39cd127d64c0dda575882d2bd2cbf1",
+      "length": 98,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": ""
+    },
+    {
+      "input_sha256": "ebe9392cb3b36e838849837290333dcda8e8cc275790f22ef1dabc2daeb708fc",
+      "length": 92,
+      "before": "",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "c46cfa2a34b9f50700fd0c260edb4969b35ad655eafce32e3f20aec132dcd720",
+      "length": 80,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "bf5d2563ceb0a26b81303d7def5f94fc62d74ba40cb68bdb36903d02b93bd301",
+      "length": 104,
+      "before": "",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "1fcf874465feaef16173760c5f4829a31c8d2f5566634ec55966b46b9b5bf3a6",
+      "length": 101,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "1aee52837d2a05208e62b34fd8ea2583bc3741e7a65c53d735d0ee5415773327",
+      "length": 105,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "cf0d69bb8d64f9789daddce43f254d4ba47f8933a827b63b120bedb75c0062ab",
+      "length": 106,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "ec1d58eb117e27da223819be43116a3c71fd7e91ef5bb675d2afb552d03f3759",
+      "length": 81,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "2c399e532fc91076a8c70ba988fc0ac6357cdc237f768114038f3ed52fb44c82",
+      "length": 79,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "8f0a764206cd298a08a2eacfe2c389bd4fa3e0a86021c61222982027e7d54856",
+      "length": 108,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "0941a2e31ba5cba7f16166d2b35c6e79249baa7ca9594829678542771f91b2e2",
+      "length": 111,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "008ecea0122affe130dbcd8b92e03a2d41e087ec979ccf3910b3a08a0b8bf976",
+      "length": 80,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "1f462bb7a00612307cb23e65b68939df2efa3571125ea9f6864061d4a8eb0332",
+      "length": 94,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'text'}]",
+      "after": ""
+    },
+    {
+      "input_sha256": "e44daf3ea7353976046342a8cfdca4b7e629258ddb7cbd2c2a2c852a8d8281a3",
+      "length": 96,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "edf7016eb5ec341969286fd759fb4d1696330b396296fde956fa330aa8b65357",
+      "length": 107,
+      "before": "",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "780a5cfb0875a6be7cf168fd0f2f6965963a8be8e7c9db740f5cfa65823116ac",
+      "length": 103,
+      "before": "",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "8d25f528bf23acb1021c25b6a1481e53acb62dce30dbbdb33ebce24dc197abb4",
+      "length": 111,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "c801688bcab37862586bf667387a0ae8fc1cf6a5c1fd9a710b64327538762344",
+      "length": 93,
+      "before": "",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "aec508b021f1e367cfe2f440330a4b81b5969da72da194c22b2c203f598b8f3a",
+      "length": 105,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "867ade815a466305dbffb1ebd8c316981f91ba690c20fb2ca4c7c0fcf0312d79",
+      "length": 94,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "23a433071979c627dd285074f409e8ba37b7f1573493c7faffac81d998ceb598",
+      "length": 97,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "9cf9018ca70a153dcf9b9f3ae8c9e8d0c2cfbf117591c9eb8513b936d95748f8",
+      "length": 108,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "ac23e649e6372ba4e4002af21180d60ccfba92a1c24c46d0e871887a28b5d104",
+      "length": 95,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "7c2e1d21f935ef08e7f237c5090f9d9732fd99cd6ae1b6c878957243ee4de6f6",
+      "length": 96,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "52e2492be675a134fba42ee40a235ce87dab50403c03bc64efbfdbaaca4cba2b",
+      "length": 96,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "041a37693a98c25165c10cb4f55a210eb4eb528a92dbc6aa69a59eae8cd31d16",
+      "length": 86,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "fde5b7960efd266846fb72c8bc407e139d0c304c73599dcc9123518d6df16953",
+      "length": 109,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "4d046301ef1397f406cd73ab593992cfa412a58da0f7253037610da8afec5a4a",
+      "length": 78,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "3f351b5600c838db4270c32ab5569d7da21b79afda6a63abd37d0f09beaef67b",
+      "length": 108,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "2b06b97b6b6b1448429f4cb7aeb76c79d98ca4347b7873bd01d0c0807581a661",
+      "length": 114,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "59054d16a65e70fa900b8668060237273769f72c15733c95e773623cf6917f30",
+      "length": 97,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "df0ddd695f97fb86ff6ed819c03a06015798e39cba059ea3fe3d00f4c85ae813",
+      "length": 111,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "39193de1ff680d1844739a39005f802ca9337acc429a3058e833249a1bcf85bf",
+      "length": 80,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "5d69f020b9b38999ee3681beea67e5eccbb85a5aab4f5055153404c44c4ae51c",
+      "length": 87,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "00006477c009de5f7a0f4c7b3456eea6c70a596058d6437a567cd0b26727e054",
+      "length": 92,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": ""
+    },
+    {
+      "input_sha256": "fb7b56426944c3938f9317daf0c1c549977a549b01bddc95daecfa837e71a015",
+      "length": 96,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "1c1fd6a7489a69620f19d04ba89c7ad61e6609e4bfb8aff847eee8740204cc88",
+      "length": 80,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "49476df88310d165156dfa6a5a4a29bfed543d2c0bbe4d7fb9ec1eb24400ad36",
+      "length": 111,
+      "before": "",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "dae6b9268e3846a4af932b5a9d8689081f988fb89e0b31458d8774c87e39b07a",
+      "length": 93,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": ""
+    },
+    {
+      "input_sha256": "5df988debbe9232fd64aeb616e63fae7c8d92fadf08c2d7cae54d21ebaac7be9",
+      "length": 94,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "c794fa10b7f80389506572232b33773cc14d050eb64b59422b5087f261e9b0b0",
+      "length": 109,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "95d3b4f6193d0937da5281324eea708acd61bca9dd4fe650542d0b08ea3fd497",
+      "length": 84,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "5c2af4f8359f0935dbd3a70d94964a0169852e141528db59cec90e9650acd86f",
+      "length": 80,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "66cbac2f2da28edaf861af50ab1c3aa3bc0f440775b28850587aac46295a57c3",
+      "length": 107,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "7bdadce518ffb043cb149ea9198be623ecc31a76aa0626a3e1c882e0e6275fb1",
+      "length": 77,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "99b28be7c1db43d784bd94b3a921bad269f62ca0648daabcad5ff4b860aa3e33",
+      "length": 80,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "4682c9a5de7d0efc5ea9d270f6aaee2e900ded85eae8b194f9131aa3c06f4fe2",
+      "length": 94,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "24b1c8f08ce7e4733553eac9303549883477f69deb100e6f399e536a7effacdc",
+      "length": 76,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "c74622ba86372bdd5f5e21b1db1db86640be9164efe0d57c836ccd63313823c7",
+      "length": 96,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": ""
+    },
+    {
+      "input_sha256": "f105fdc59c749e98601fc2a0b3ff1f5e422950d08db38b6a80671d11fa08e190",
+      "length": 95,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'image'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "d7181a31cefb0605f359215da37bce8bb7bc183051fd509f1906049eba4129b5",
+      "length": 76,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'alt': 'deployment failed on the zebracluster'}",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "d1938e9cec973e33f2fda8838b7fd940e9460bd10e677dceda47e0b80218bdcd",
+      "length": 99,
+      "before": "[] [{'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster', 'type': 'image'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "01a380a8cfb9cd60383f5c8be321e5ba2b94ee326f98500419aaf173d774b9ef",
+      "length": 97,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "75945ca55c48188e788b571694190fb55f2d8bc12cfeea92fb280bc520692490",
+      "length": 94,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "815b44e33fdee0c11885f7c133f3d711407797d86c9ed8d2592469f020625d83",
+      "length": 93,
+      "before": "({'image': b'\\x89PNG\\r\\n', 'text': 'deployment failed on the zebracluster', 'type': 'text'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "f7f3506baee3fcd116be0c1287ab0a0e011215faae602149debee920f8e7ded0",
+      "length": 106,
+      "before": "{} {'image': b'\\x89PNG\\r\\n', 'title': 'deployment failed on the zebracluster', 'type': 'deployment_error'}",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "5a2cebd648a8c02e6074946e22ee0c4290168d9b8ff36e199ced3cd6c0149cbd",
+      "length": 97,
+      "before": "[] ({'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'image'},)",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "b32122e9e78bf4b5cf5c9dfef534c1efc7bdbcf54617e9217c269cd2cb2385fe",
+      "length": 107,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'name': 'deployment failed on the zebracluster', 'type': 'deployment_error'}]",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "3935b08f4422cc64ad336ef9d17d62ab84ae03cb79c55fa05c6d440318caa923",
+      "length": 82,
+      "before": "{} [{'image': b'\\x89PNG\\r\\n', 'content': 'deployment failed on the zebracluster'}]",
+      "after": "deployment failed on the zebracluster"
+    },
+    {
+      "input_sha256": "d16b2bd228a6abcb47ca9cdb4616deaf4cded24a82fa9968018ffda203d447ed",
+      "length": 115,
+      "before": "{} ({'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'deployment_error'},)",
+      "after": "deployment failed on the zebracluster\ndeployment_error"
+    },
+    {
+      "input_sha256": "dd05db0d193cbfd74b20f69d8519da4808f39d46982682520a17977cb161b44c",
+      "length": 100,
+      "before": "[] {'image': b'\\x89PNG\\r\\n', 'description': 'deployment failed on the zebracluster', 'type': 'text'}",
+      "after": ""
+    }
+  ]
+}

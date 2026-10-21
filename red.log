@@ -1,0 +1,666 @@
+FFFFFFFFFFFFF.FFFFFFFbytes_repr count=1 content_chars=33554495 peak_bytes=234906080
+Fbytes_repr count=2 content_chars=33554562 peak_bytes=218129202
+F
+=================================== FAILURES ===================================
+_________________________ test_issue_shapes[list-repr] _________________________
+
+content = "[{'type': 'image', 'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed'}]"
+expected = 'deployment failed'
+
+    @pytest.mark.parametrize("content,expected", [
+        (str([PART]), CAPTION),
+        (json.dumps([{"type": "image", "image_url": "data:...", "caption": CAPTION}]), CAPTION),
+        (str((PART,)), CAPTION),
+        (str({"type": "image", "image": b"\x89PNG\r\n"}), ""),
+        ("{0, b'opaque', 'deployment failed', 'data:image/png;base64,QUJD'}", CAPTION),
+        ("[]\n" + str([{"type": "image", "image": b"\x89PNG\r\n"}, "caption words"]), "caption words"),
+        ("[] " + str([b"\x89PNG\r\n"]), ""),
+        ("{} " + str(PART), CAPTION),
+    ], ids=["list-repr", "list-json", "tuple-repr", "typed-metadata", "numeric-set",
+            "empty-list-list-repr", "empty-list-bytes-repr", "empty-dict-dict-repr"])
+    def test_issue_shapes(content, expected):
+>       assert_preview(content, expected)
+
+tests/invariants/test_issue_1733_media_preview.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "[{'type': 'image', 'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed'}]"
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+        assert "\\x" not in preview
+        assert "b'" not in preview
+        assert not re.search(r"[A-Za-z0-9+/_-]{64,}={0,2}", preview)
+>       assert preview == expected
+E       AssertionError: assert '' == 'deployment failed'
+E         
+E         - deployment failed
+
+tests/invariants/test_issue_1733_media_preview.py:22: AssertionError
+_________________________ test_issue_shapes[list-json] _________________________
+
+content = '[{"type": "image", "image_url": "data:...", "caption": "deployment failed"}]'
+expected = 'deployment failed'
+
+    @pytest.mark.parametrize("content,expected", [
+        (str([PART]), CAPTION),
+        (json.dumps([{"type": "image", "image_url": "data:...", "caption": CAPTION}]), CAPTION),
+        (str((PART,)), CAPTION),
+        (str({"type": "image", "image": b"\x89PNG\r\n"}), ""),
+        ("{0, b'opaque', 'deployment failed', 'data:image/png;base64,QUJD'}", CAPTION),
+        ("[]\n" + str([{"type": "image", "image": b"\x89PNG\r\n"}, "caption words"]), "caption words"),
+        ("[] " + str([b"\x89PNG\r\n"]), ""),
+        ("{} " + str(PART), CAPTION),
+    ], ids=["list-repr", "list-json", "tuple-repr", "typed-metadata", "numeric-set",
+            "empty-list-list-repr", "empty-list-bytes-repr", "empty-dict-dict-repr"])
+    def test_issue_shapes(content, expected):
+>       assert_preview(content, expected)
+
+tests/invariants/test_issue_1733_media_preview.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = '[{"type": "image", "image_url": "data:...", "caption": "deployment failed"}]'
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+        assert "\\x" not in preview
+        assert "b'" not in preview
+        assert not re.search(r"[A-Za-z0-9+/_-]{64,}={0,2}", preview)
+>       assert preview == expected
+E       AssertionError: assert '' == 'deployment failed'
+E         
+E         - deployment failed
+
+tests/invariants/test_issue_1733_media_preview.py:22: AssertionError
+________________________ test_issue_shapes[tuple-repr] _________________________
+
+content = "({'type': 'image', 'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed'},)"
+expected = 'deployment failed'
+
+    @pytest.mark.parametrize("content,expected", [
+        (str([PART]), CAPTION),
+        (json.dumps([{"type": "image", "image_url": "data:...", "caption": CAPTION}]), CAPTION),
+        (str((PART,)), CAPTION),
+        (str({"type": "image", "image": b"\x89PNG\r\n"}), ""),
+        ("{0, b'opaque', 'deployment failed', 'data:image/png;base64,QUJD'}", CAPTION),
+        ("[]\n" + str([{"type": "image", "image": b"\x89PNG\r\n"}, "caption words"]), "caption words"),
+        ("[] " + str([b"\x89PNG\r\n"]), ""),
+        ("{} " + str(PART), CAPTION),
+    ], ids=["list-repr", "list-json", "tuple-repr", "typed-metadata", "numeric-set",
+            "empty-list-list-repr", "empty-list-bytes-repr", "empty-dict-dict-repr"])
+    def test_issue_shapes(content, expected):
+>       assert_preview(content, expected)
+
+tests/invariants/test_issue_1733_media_preview.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "({'type': 'image', 'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed'},)"
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+>       assert "\\x" not in preview
+E       assert '\\x' not in "({'type': '...t failed'},)"
+E         
+E         '\\x' is contained here:
+E           ({'type': 'image', 'image': b'\x89PNG\r\n', 'caption': 'deployment failed'},)
+E         ?                               ++
+
+tests/invariants/test_issue_1733_media_preview.py:19: AssertionError
+______________________ test_issue_shapes[typed-metadata] _______________________
+
+content = "{'type': 'image', 'image': b'\\x89PNG\\r\\n'}", expected = ''
+
+    @pytest.mark.parametrize("content,expected", [
+        (str([PART]), CAPTION),
+        (json.dumps([{"type": "image", "image_url": "data:...", "caption": CAPTION}]), CAPTION),
+        (str((PART,)), CAPTION),
+        (str({"type": "image", "image": b"\x89PNG\r\n"}), ""),
+        ("{0, b'opaque', 'deployment failed', 'data:image/png;base64,QUJD'}", CAPTION),
+        ("[]\n" + str([{"type": "image", "image": b"\x89PNG\r\n"}, "caption words"]), "caption words"),
+        ("[] " + str([b"\x89PNG\r\n"]), ""),
+        ("{} " + str(PART), CAPTION),
+    ], ids=["list-repr", "list-json", "tuple-repr", "typed-metadata", "numeric-set",
+            "empty-list-list-repr", "empty-list-bytes-repr", "empty-dict-dict-repr"])
+    def test_issue_shapes(content, expected):
+>       assert_preview(content, expected)
+
+tests/invariants/test_issue_1733_media_preview.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "{'type': 'image', 'image': b'\\x89PNG\\r\\n'}", expected = ''
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+        assert "\\x" not in preview
+        assert "b'" not in preview
+        assert not re.search(r"[A-Za-z0-9+/_-]{64,}={0,2}", preview)
+>       assert preview == expected
+E       AssertionError: assert 'image' == ''
+E         
+E         + image
+
+tests/invariants/test_issue_1733_media_preview.py:22: AssertionError
+________________________ test_issue_shapes[numeric-set] ________________________
+
+content = "{0, b'opaque', 'deployment failed', 'data:image/png;base64,QUJD'}"
+expected = 'deployment failed'
+
+    @pytest.mark.parametrize("content,expected", [
+        (str([PART]), CAPTION),
+        (json.dumps([{"type": "image", "image_url": "data:...", "caption": CAPTION}]), CAPTION),
+        (str((PART,)), CAPTION),
+        (str({"type": "image", "image": b"\x89PNG\r\n"}), ""),
+        ("{0, b'opaque', 'deployment failed', 'data:image/png;base64,QUJD'}", CAPTION),
+        ("[]\n" + str([{"type": "image", "image": b"\x89PNG\r\n"}, "caption words"]), "caption words"),
+        ("[] " + str([b"\x89PNG\r\n"]), ""),
+        ("{} " + str(PART), CAPTION),
+    ], ids=["list-repr", "list-json", "tuple-repr", "typed-metadata", "numeric-set",
+            "empty-list-list-repr", "empty-list-bytes-repr", "empty-dict-dict-repr"])
+    def test_issue_shapes(content, expected):
+>       assert_preview(content, expected)
+
+tests/invariants/test_issue_1733_media_preview.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "{0, b'opaque', 'deployment failed', 'data:image/png;base64,QUJD'}"
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+        assert "\\x" not in preview
+>       assert "b'" not in preview
+E       assert "b'" not in "{0, b'opaqu...failed', ''}"
+E         
+E         "b'" is contained here:
+E           {0, b'opaque', 'deployment failed', ''}
+E         ?     ++
+
+tests/invariants/test_issue_1733_media_preview.py:20: AssertionError
+___________________ test_issue_shapes[empty-list-list-repr] ____________________
+
+content = "[]\n[{'type': 'image', 'image': b'\\x89PNG\\r\\n'}, 'caption words']"
+expected = 'caption words'
+
+    @pytest.mark.parametrize("content,expected", [
+        (str([PART]), CAPTION),
+        (json.dumps([{"type": "image", "image_url": "data:...", "caption": CAPTION}]), CAPTION),
+        (str((PART,)), CAPTION),
+        (str({"type": "image", "image": b"\x89PNG\r\n"}), ""),
+        ("{0, b'opaque', 'deployment failed', 'data:image/png;base64,QUJD'}", CAPTION),
+        ("[]\n" + str([{"type": "image", "image": b"\x89PNG\r\n"}, "caption words"]), "caption words"),
+        ("[] " + str([b"\x89PNG\r\n"]), ""),
+        ("{} " + str(PART), CAPTION),
+    ], ids=["list-repr", "list-json", "tuple-repr", "typed-metadata", "numeric-set",
+            "empty-list-list-repr", "empty-list-bytes-repr", "empty-dict-dict-repr"])
+    def test_issue_shapes(content, expected):
+>       assert_preview(content, expected)
+
+tests/invariants/test_issue_1733_media_preview.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "[]\n[{'type': 'image', 'image': b'\\x89PNG\\r\\n'}, 'caption words']"
+expected = 'caption words'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+>       assert "\\x" not in preview
+E       assert '\\x' not in "[]\n[{'type...tion words']"
+E         
+E         '\\x' is contained here:
+E           []
+E           [{'type': 'image', 'image': b'\x89PNG\r\n'}, 'caption words']
+E         ?                               ++
+
+tests/invariants/test_issue_1733_media_preview.py:19: AssertionError
+___________________ test_issue_shapes[empty-list-bytes-repr] ___________________
+
+content = "[] [b'\\x89PNG\\r\\n']", expected = ''
+
+    @pytest.mark.parametrize("content,expected", [
+        (str([PART]), CAPTION),
+        (json.dumps([{"type": "image", "image_url": "data:...", "caption": CAPTION}]), CAPTION),
+        (str((PART,)), CAPTION),
+        (str({"type": "image", "image": b"\x89PNG\r\n"}), ""),
+        ("{0, b'opaque', 'deployment failed', 'data:image/png;base64,QUJD'}", CAPTION),
+        ("[]\n" + str([{"type": "image", "image": b"\x89PNG\r\n"}, "caption words"]), "caption words"),
+        ("[] " + str([b"\x89PNG\r\n"]), ""),
+        ("{} " + str(PART), CAPTION),
+    ], ids=["list-repr", "list-json", "tuple-repr", "typed-metadata", "numeric-set",
+            "empty-list-list-repr", "empty-list-bytes-repr", "empty-dict-dict-repr"])
+    def test_issue_shapes(content, expected):
+>       assert_preview(content, expected)
+
+tests/invariants/test_issue_1733_media_preview.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "[] [b'\\x89PNG\\r\\n']", expected = ''
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+>       assert "\\x" not in preview
+E       assert '\\x' not in "[] [b'\\x89PNG\\r\\n']"
+E         
+E         '\\x' is contained here:
+E           [] [b'\x89PNG\r\n']
+E         ?       ++
+
+tests/invariants/test_issue_1733_media_preview.py:19: AssertionError
+___________________ test_issue_shapes[empty-dict-dict-repr] ____________________
+
+content = "{} {'type': 'image', 'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed'}"
+expected = 'deployment failed'
+
+    @pytest.mark.parametrize("content,expected", [
+        (str([PART]), CAPTION),
+        (json.dumps([{"type": "image", "image_url": "data:...", "caption": CAPTION}]), CAPTION),
+        (str((PART,)), CAPTION),
+        (str({"type": "image", "image": b"\x89PNG\r\n"}), ""),
+        ("{0, b'opaque', 'deployment failed', 'data:image/png;base64,QUJD'}", CAPTION),
+        ("[]\n" + str([{"type": "image", "image": b"\x89PNG\r\n"}, "caption words"]), "caption words"),
+        ("[] " + str([b"\x89PNG\r\n"]), ""),
+        ("{} " + str(PART), CAPTION),
+    ], ids=["list-repr", "list-json", "tuple-repr", "typed-metadata", "numeric-set",
+            "empty-list-list-repr", "empty-list-bytes-repr", "empty-dict-dict-repr"])
+    def test_issue_shapes(content, expected):
+>       assert_preview(content, expected)
+
+tests/invariants/test_issue_1733_media_preview.py:42: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "{} {'type': 'image', 'image': b'\\x89PNG\\r\\n', 'caption': 'deployment failed'}"
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+>       assert "\\x" not in preview
+E       assert '\\x' not in "{} {'type':...ent failed'}"
+E         
+E         '\\x' is contained here:
+E           {} {'type': 'image', 'image': b'\x89PNG\r\n', 'caption': 'deployment failed'}
+E         ?                                 ++
+
+tests/invariants/test_issue_1733_media_preview.py:19: AssertionError
+____________________ test_failed_dict_repr_is_not_prose[0] _____________________
+
+key = '0'
+
+    @pytest.mark.parametrize("key", ["0", "None", "(1, 2)"])
+    def test_failed_dict_repr_is_not_prose(key):
+        content = "{" + key + ": " + "[" * 250 + "0" + "]" * 250 + ", 'image': b'\\x89PNG'}"
+>       assert_preview(content, "")
+
+tests/invariants/test_issue_1733_media_preview.py:48: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "{0: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], 'image': b'\\x89PNG'}"
+expected = ''
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+>       assert "\\x" not in preview
+E       assert '\\x' not in "{0: [[[[[[[...b'\\x89PNG'}"
+E         
+E         '\\x' is contained here:
+E           image': b'\x89PNG'}
+E         ?           ++
+
+tests/invariants/test_issue_1733_media_preview.py:19: AssertionError
+___________________ test_failed_dict_repr_is_not_prose[None] ___________________
+
+key = 'None'
+
+    @pytest.mark.parametrize("key", ["0", "None", "(1, 2)"])
+    def test_failed_dict_repr_is_not_prose(key):
+        content = "{" + key + ": " + "[" * 250 + "0" + "]" * 250 + ", 'image': b'\\x89PNG'}"
+>       assert_preview(content, "")
+
+tests/invariants/test_issue_1733_media_preview.py:48: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "{None: [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], 'image': b'\\x89PNG'}"
+expected = ''
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+>       assert "\\x" not in preview
+E       assert '\\x' not in "{None: [[[[...b'\\x89PNG'}"
+E         
+E         '\\x' is contained here:
+E           image': b'\x89PNG'}
+E         ?           ++
+
+tests/invariants/test_issue_1733_media_preview.py:19: AssertionError
+__________________ test_failed_dict_repr_is_not_prose[(1, 2)] __________________
+
+key = '(1, 2)'
+
+    @pytest.mark.parametrize("key", ["0", "None", "(1, 2)"])
+    def test_failed_dict_repr_is_not_prose(key):
+        content = "{" + key + ": " + "[" * 250 + "0" + "]" * 250 + ", 'image': b'\\x89PNG'}"
+>       assert_preview(content, "")
+
+tests/invariants/test_issue_1733_media_preview.py:48: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "{(1, 2): [[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[[...]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]]], 'image': b'\\x89PNG'}"
+expected = ''
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+>       assert "\\x" not in preview
+E       assert '\\x' not in "{(1, 2): [[...b'\\x89PNG'}"
+E         
+E         '\\x' is contained here:
+E           image': b'\x89PNG'}
+E         ?           ++
+
+tests/invariants/test_issue_1733_media_preview.py:19: AssertionError
+______________ test_empty_container_before_prose_stays_prose[[] ] ______________
+
+prefix = '[] '
+
+    @pytest.mark.parametrize("prefix", ["[] ", "[]\n", "{} ", "{  } "])
+    def test_empty_container_before_prose_stays_prose(prefix):
+>       assert_preview(prefix + CAPTION, prefix.strip() + " " + CAPTION if "\n" not in prefix else "[]\n" + CAPTION)
+
+tests/invariants/test_issue_1733_media_preview.py:53: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = '[] deployment failed', expected = '[] deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+        assert "\\x" not in preview
+        assert "b'" not in preview
+        assert not re.search(r"[A-Za-z0-9+/_-]{64,}={0,2}", preview)
+        assert preview == expected
+        stub = _build_externalized_placeholder(SUMMARY, content=content)
+        if expected:
+>           assert expected in stub
+E           assert '[] deployment failed' in '[Externalized payload: kind=media_payload; role=user; chars=0; bytes=0; preview="() deployment failed"; read it with lcm_expand(externalized_ref="fixture.json"); ref=fixture.json]'
+
+tests/invariants/test_issue_1733_media_preview.py:25: AssertionError
+_____________ test_empty_container_before_prose_stays_prose[[]\n] ______________
+
+prefix = '[]\n'
+
+    @pytest.mark.parametrize("prefix", ["[] ", "[]\n", "{} ", "{  } "])
+    def test_empty_container_before_prose_stays_prose(prefix):
+>       assert_preview(prefix + CAPTION, prefix.strip() + " " + CAPTION if "\n" not in prefix else "[]\n" + CAPTION)
+
+tests/invariants/test_issue_1733_media_preview.py:53: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = '[]\ndeployment failed', expected = '[]\ndeployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+        assert "\\x" not in preview
+        assert "b'" not in preview
+        assert not re.search(r"[A-Za-z0-9+/_-]{64,}={0,2}", preview)
+        assert preview == expected
+        stub = _build_externalized_placeholder(SUMMARY, content=content)
+        if expected:
+>           assert expected in stub
+E           assert '[]\ndeployment failed' in '[Externalized payload: kind=media_payload; role=user; chars=0; bytes=0; preview="() deployment failed"; read it with lcm_expand(externalized_ref="fixture.json"); ref=fixture.json]'
+
+tests/invariants/test_issue_1733_media_preview.py:25: AssertionError
+_____________ test_empty_container_before_prose_stays_prose[{  } ] _____________
+
+prefix = '{  } '
+
+    @pytest.mark.parametrize("prefix", ["[] ", "[]\n", "{} ", "{  } "])
+    def test_empty_container_before_prose_stays_prose(prefix):
+>       assert_preview(prefix + CAPTION, prefix.strip() + " " + CAPTION if "\n" not in prefix else "[]\n" + CAPTION)
+
+tests/invariants/test_issue_1733_media_preview.py:53: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = '{  } deployment failed', expected = '{  } deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+        assert "\\x" not in preview
+        assert "b'" not in preview
+        assert not re.search(r"[A-Za-z0-9+/_-]{64,}={0,2}", preview)
+        assert preview == expected
+        stub = _build_externalized_placeholder(SUMMARY, content=content)
+        if expected:
+>           assert expected in stub
+E           assert '{  } deployment failed' in '[Externalized payload: kind=media_payload; role=user; chars=0; bytes=0; preview="{ } deployment failed"; read it with lcm_expand(externalized_ref="fixture.json"); ref=fixture.json]'
+
+tests/invariants/test_issue_1733_media_preview.py:25: AssertionError
+__________________ test_wrapped_caption_fields[caption-list] ___________________
+
+wrapper = <class 'list'>, field = 'caption'
+
+    @pytest.mark.parametrize("wrapper", [list, tuple])
+    @pytest.mark.parametrize("field", ["caption", "alt", "title"])
+    def test_wrapped_caption_fields(wrapper, field):
+        content = repr(wrapper([{"type": "image", "image": b"\x89PNG", field: CAPTION}]))
+>       assert_preview(content, CAPTION)
+
+tests/invariants/test_issue_1733_media_preview.py:60: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "[{'type': 'image', 'image': b'\\x89PNG', 'caption': 'deployment failed'}]"
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+        assert "\\x" not in preview
+        assert "b'" not in preview
+        assert not re.search(r"[A-Za-z0-9+/_-]{64,}={0,2}", preview)
+>       assert preview == expected
+E       AssertionError: assert '' == 'deployment failed'
+E         
+E         - deployment failed
+
+tests/invariants/test_issue_1733_media_preview.py:22: AssertionError
+__________________ test_wrapped_caption_fields[caption-tuple] __________________
+
+wrapper = <class 'tuple'>, field = 'caption'
+
+    @pytest.mark.parametrize("wrapper", [list, tuple])
+    @pytest.mark.parametrize("field", ["caption", "alt", "title"])
+    def test_wrapped_caption_fields(wrapper, field):
+        content = repr(wrapper([{"type": "image", "image": b"\x89PNG", field: CAPTION}]))
+>       assert_preview(content, CAPTION)
+
+tests/invariants/test_issue_1733_media_preview.py:60: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "({'type': 'image', 'image': b'\\x89PNG', 'caption': 'deployment failed'},)"
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+>       assert "\\x" not in preview
+E       assert '\\x' not in "({'type': '...t failed'},)"
+E         
+E         '\\x' is contained here:
+E           ({'type': 'image', 'image': b'\x89PNG', 'caption': 'deployment failed'},)
+E         ?                               ++
+
+tests/invariants/test_issue_1733_media_preview.py:19: AssertionError
+____________________ test_wrapped_caption_fields[alt-list] _____________________
+
+wrapper = <class 'list'>, field = 'alt'
+
+    @pytest.mark.parametrize("wrapper", [list, tuple])
+    @pytest.mark.parametrize("field", ["caption", "alt", "title"])
+    def test_wrapped_caption_fields(wrapper, field):
+        content = repr(wrapper([{"type": "image", "image": b"\x89PNG", field: CAPTION}]))
+>       assert_preview(content, CAPTION)
+
+tests/invariants/test_issue_1733_media_preview.py:60: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "[{'type': 'image', 'image': b'\\x89PNG', 'alt': 'deployment failed'}]"
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+        assert "\\x" not in preview
+        assert "b'" not in preview
+        assert not re.search(r"[A-Za-z0-9+/_-]{64,}={0,2}", preview)
+>       assert preview == expected
+E       AssertionError: assert '' == 'deployment failed'
+E         
+E         - deployment failed
+
+tests/invariants/test_issue_1733_media_preview.py:22: AssertionError
+____________________ test_wrapped_caption_fields[alt-tuple] ____________________
+
+wrapper = <class 'tuple'>, field = 'alt'
+
+    @pytest.mark.parametrize("wrapper", [list, tuple])
+    @pytest.mark.parametrize("field", ["caption", "alt", "title"])
+    def test_wrapped_caption_fields(wrapper, field):
+        content = repr(wrapper([{"type": "image", "image": b"\x89PNG", field: CAPTION}]))
+>       assert_preview(content, CAPTION)
+
+tests/invariants/test_issue_1733_media_preview.py:60: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "({'type': 'image', 'image': b'\\x89PNG', 'alt': 'deployment failed'},)"
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+>       assert "\\x" not in preview
+E       assert '\\x' not in "({'type': '...t failed'},)"
+E         
+E         '\\x' is contained here:
+E           ({'type': 'image', 'image': b'\x89PNG', 'alt': 'deployment failed'},)
+E         ?                               ++
+
+tests/invariants/test_issue_1733_media_preview.py:19: AssertionError
+___________________ test_wrapped_caption_fields[title-list] ____________________
+
+wrapper = <class 'list'>, field = 'title'
+
+    @pytest.mark.parametrize("wrapper", [list, tuple])
+    @pytest.mark.parametrize("field", ["caption", "alt", "title"])
+    def test_wrapped_caption_fields(wrapper, field):
+        content = repr(wrapper([{"type": "image", "image": b"\x89PNG", field: CAPTION}]))
+>       assert_preview(content, CAPTION)
+
+tests/invariants/test_issue_1733_media_preview.py:60: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "[{'type': 'image', 'image': b'\\x89PNG', 'title': 'deployment failed'}]"
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+        assert "\\x" not in preview
+        assert "b'" not in preview
+        assert not re.search(r"[A-Za-z0-9+/_-]{64,}={0,2}", preview)
+>       assert preview == expected
+E       AssertionError: assert '' == 'deployment failed'
+E         
+E         - deployment failed
+
+tests/invariants/test_issue_1733_media_preview.py:22: AssertionError
+___________________ test_wrapped_caption_fields[title-tuple] ___________________
+
+wrapper = <class 'tuple'>, field = 'title'
+
+    @pytest.mark.parametrize("wrapper", [list, tuple])
+    @pytest.mark.parametrize("field", ["caption", "alt", "title"])
+    def test_wrapped_caption_fields(wrapper, field):
+        content = repr(wrapper([{"type": "image", "image": b"\x89PNG", field: CAPTION}]))
+>       assert_preview(content, CAPTION)
+
+tests/invariants/test_issue_1733_media_preview.py:60: 
+_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ 
+
+content = "({'type': 'image', 'image': b'\\x89PNG', 'title': 'deployment failed'},)"
+expected = 'deployment failed'
+
+    def assert_preview(content, expected):
+        preview = _media_payload_preview_content(content)
+>       assert "\\x" not in preview
+E       assert '\\x' not in "({'type': '...t failed'},)"
+E         
+E         '\\x' is contained here:
+E           ({'type': 'image', 'image': b'\x89PNG', 'title': 'deployment failed'},)
+E         ?                               ++
+
+tests/invariants/test_issue_1733_media_preview.py:19: AssertionError
+_________________ test_large_bytes_caption_recovery_memory[1] __________________
+
+count = 1
+
+    @pytest.mark.parametrize("count", [1, 2])
+    def test_large_bytes_caption_recovery_memory(count):
+        # A 32 MiB aggregate stays below the unchanged 64 MiB source ceiling.
+        part = "{'type': 'image', 'image': b'" + "x" * (32 * 1_048_576 // count) + "', 'caption': 'deployment failed'}"
+        content = part if count == 1 else "[" + ", ".join([part] * count) + "]"
+        tracemalloc.start()
+        try:
+            preview = _media_payload_preview_content(content)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        print(f"bytes_repr count={count} content_chars={len(content)} peak_bytes={peak}")
+>       assert peak <= 2 * len(content)
+E       assert 234906080 <= (2 * 33554495)
+E        +  where 33554495 = len("{'type': 'image', 'image': b'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'caption': 'deployment failed'}")
+
+tests/invariants/test_issue_1733_media_preview.py:75: AssertionError
+_________________ test_large_bytes_caption_recovery_memory[2] __________________
+
+count = 2
+
+    @pytest.mark.parametrize("count", [1, 2])
+    def test_large_bytes_caption_recovery_memory(count):
+        # A 32 MiB aggregate stays below the unchanged 64 MiB source ceiling.
+        part = "{'type': 'image', 'image': b'" + "x" * (32 * 1_048_576 // count) + "', 'caption': 'deployment failed'}"
+        content = part if count == 1 else "[" + ", ".join([part] * count) + "]"
+        tracemalloc.start()
+        try:
+            preview = _media_payload_preview_content(content)
+            peak = tracemalloc.get_traced_memory()[1]
+        finally:
+            tracemalloc.stop()
+        print(f"bytes_repr count={count} content_chars={len(content)} peak_bytes={peak}")
+>       assert peak <= 2 * len(content)
+E       assert 218129202 <= (2 * 33554562)
+E        +  where 33554562 = len("[{'type': 'image', 'image': b'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx...xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx', 'caption': 'deployment failed'}]")
+
+tests/invariants/test_issue_1733_media_preview.py:75: AssertionError
+============================= slowest 25 durations =============================
+0.49s setup    tests/invariants/test_issue_1733_media_preview.py::test_issue_shapes[list-repr]
+0.21s call     tests/invariants/test_issue_1733_media_preview.py::test_large_bytes_caption_recovery_memory[1]
+0.20s call     tests/invariants/test_issue_1733_media_preview.py::test_large_bytes_caption_recovery_memory[2]
+
+(22 durations < 0.005s hidden.  Use -vv to show these durations.)
+=========================== short test summary info ============================
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_issue_shapes[list-repr]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_issue_shapes[list-json]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_issue_shapes[tuple-repr]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_issue_shapes[typed-metadata]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_issue_shapes[numeric-set]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_issue_shapes[empty-list-list-repr]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_issue_shapes[empty-list-bytes-repr]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_issue_shapes[empty-dict-dict-repr]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_failed_dict_repr_is_not_prose[0]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_failed_dict_repr_is_not_prose[None]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_failed_dict_repr_is_not_prose[(1, 2)]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_empty_container_before_prose_stays_prose[[] ]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_empty_container_before_prose_stays_prose[[]\n]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_empty_container_before_prose_stays_prose[{  } ]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_wrapped_caption_fields[caption-list]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_wrapped_caption_fields[caption-tuple]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_wrapped_caption_fields[alt-list]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_wrapped_caption_fields[alt-tuple]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_wrapped_caption_fields[title-list]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_wrapped_caption_fields[title-tuple]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_large_bytes_caption_recovery_memory[1]
+FAILED tests/invariants/test_issue_1733_media_preview.py::test_large_bytes_caption_recovery_memory[2]
+22 failed, 1 passed in 1.24s
