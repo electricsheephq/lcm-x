@@ -159,8 +159,18 @@ def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequen
     if any((sid, occurrence) in forbidden for sid, occurrence in result.items()):
         result = {sid: occurrence for sid, occurrence in result.items() if (sid, occurrence) not in forbidden}
         owners = {occurrence: sid for sid, occurrence in result.items()}
+        key_of = dict(occurrences)
+        free = {key: dict.fromkeys(o for o in values if o not in owners) for key, values in slots.items()}
         for sid in kinds:  # retain base assignments; augment only after removing a forbidden edge
             if sid in result:
+                continue
+            direct = next(((sid, o) for key in kinds[sid] for o in free[key] if (sid, o) not in forbidden), None)
+            if direct is not None:  # like the base matcher, free slots need no displacement search
+                result[sid] = direct[1]
+                owners[direct[1]] = sid
+                del free[key_of[direct[1]]][direct[1]]
+                continue
+            if spent:
                 continue
             parents, queue, seen = {sid: (None, None)}, [sid], set()
             endpoint = None
@@ -182,6 +192,9 @@ def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequen
                         queue.append(holder)
                 if endpoint or spent:
                     break
+            if endpoint:
+                del free[key_of[endpoint[1]]][endpoint[1]]
+            # Commit only a complete augmenting path. Exhaustion changes no held edge.
             while endpoint and endpoint[0] is not None:
                 current, occurrence = endpoint
                 result[current] = occurrence

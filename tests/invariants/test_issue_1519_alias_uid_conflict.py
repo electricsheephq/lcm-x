@@ -47,6 +47,7 @@ def bindings(engine, store_id):
 
 @pytest.fixture(autouse=True)
 def deterministic_host(tmp_path, monkeypatch):
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
     pin_char_counter(monkeypatch)
     monkeypatch.setattr(time, "time", lambda: 1700000000.)
     home = tmp_path / "home"

@@ -186,18 +186,23 @@ class IdentityAnchorMixin:
 
     def _identity_anchor_alias_uid_keys(self, rows, canonical_stamps, keys_of, occurrences, messages):
         """Forbid only alias/occurrence pairs with positive conflicting host UIDs (#1519)."""
+        from .config import host_message_uid_mode
         from .host_uid import _valid_uid
 
+        mode = host_message_uid_mode()
+        if mode == "off":
+            return set()
         incoming = {idx: messages[idx].get("message_uid") for idx, _key in occurrences
                     if _valid_uid(messages[idx].get("message_uid"))}
         incoming_keys = {key for idx, key in occurrences if idx in incoming}
+        row_keys = {id(r): set(keys_of(r)) for r in rows} if incoming_keys else {}
         if canonical_stamps is None:  # a transport discarded ephemeral provenance: re-read
             canonical_stamps = {sid: r.get("observed_at") for sid, r in
                                 self._store.get_batch(sorted({int(r["store_id"]) for r in rows})).items()}
         aliases = [r for r in rows
                    if int(r["store_id"]) in canonical_stamps
                    and _normalize_observed_at(canonical_stamps[int(r["store_id"])]) != float(r["observed_at"])
-                   and incoming_keys.intersection(keys_of(r))]
+                   and incoming_keys.intersection(row_keys.get(id(r), ()))]
         if not aliases:
             return set()
         lineage, _problem = self._host_uid_lineage_key()
@@ -211,10 +216,19 @@ class IdentityAnchorMixin:
         incoming = {idx: uid for idx, uid in incoming.items() if uid not in engine}
         canonical = {sid: {uid for uid in values if _valid_uid(uid) and uid not in engine}
                      for sid, values in canonical.items()}
-        return {(int(row["store_id"]), idx) for row in aliases
+        by_key = defaultdict(list)
+        for idx, key in occurrences:
+            if idx in incoming:
+                by_key[key].append(idx)
+        forbidden = {(int(row["store_id"]), idx) for row in aliases
                 if len(canonical.get(int(row["store_id"]), ())) == 1
-                for idx, key in occurrences if key in keys_of(row) and idx in incoming
-                and incoming[idx] not in canonical[int(row["store_id"])]}
+                for key in row_keys[id(row)] for idx in by_key[key]
+                if incoming[idx] not in canonical[int(row["store_id"])]}
+        if mode == "shadow":
+            if forbidden:
+                logger.debug("LCM identity-anchor host UID shadow would reject alias edges: count=%d", len(forbidden))
+            return set()
+        return forbidden
 
     def _identity_anchor_prematch(self, messages, identity_messages, cursor: int, audit_from: Optional[int] = None,
                                   *, accepted_prefix: int = 0) -> Dict[str, Any]:

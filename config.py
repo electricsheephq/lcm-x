@@ -247,8 +247,9 @@ _host_message_uid_mode_warned = False
 
 
 def host_message_uid_mode() -> str:
-    """``LCM_HOST_MESSAGE_UID`` (v0.26.0): ``off`` | ``shadow`` (default) | ``on`` (reserved for slice C; runs as
-    ``shadow`` today). An unknown value means ``shadow``, with one WARNING per process."""
+    """``LCM_HOST_MESSAGE_UID``: ``off`` disables UID capture and alias-guard reads; ``shadow`` (default)
+    observes only; ``on`` additionally enables only the alias UID-conflict guard (#1519).
+    An unknown value means ``shadow``, with one WARNING per process."""
     global _host_message_uid_mode_warned
     raw = (lcm_env_get("LCM_HOST_MESSAGE_UID") or "").strip().lower()
     if raw and raw not in _HOST_MESSAGE_UID_MODES and not _host_message_uid_mode_warned:
