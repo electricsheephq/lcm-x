@@ -3045,11 +3045,7 @@ class ReconcileMixin:
         if not self._session_id or not messages:
             return 0
 
-        try:
-            session_count = self._store.get_session_count(self._session_id)
-        except Exception as exc:  # pragma: no cover - defensive only
-            logger.debug("LCM ingest cursor reconciliation count failed: %s", exc)
-            return 0
+        session_count = self._store.get_session_count(self._session_id)
         run = _StoreCursorRun(
             messages=messages, session_count=session_count,
             allow_session_end_replay_proof=allow_session_end_replay_proof,
