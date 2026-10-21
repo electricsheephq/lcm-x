@@ -26,7 +26,8 @@ with closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as origina
         original.backup(destination)
         assert destination.execute("PRAGMA journal_mode=DELETE").fetchone()[0] == "delete"
 assert not any(Path(str(copy) + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))
-assert copy.read_bytes()[18:20] == b"\x01\x01"
+with copy.open("rb") as header:
+    assert header.read(20)[18:20] == b"\x01\x01"
 ```
 
 If either check fails, stop and prepare another standalone copy; do not delete
@@ -90,7 +91,9 @@ exit 2 using argparse's usage message. Inspection failures emit no traceback.
 | `snapshot_invalid` | View is absent, malformed, mismatched to the copy/scope/capture/config, or cannot be processed. |
 | `unsupported_view_evidence` | Special host identity, external payload or carrier evidence is required. |
 | `source_time_unavailable` | Supported schema-v5 copy lacks optional source-time columns; database findings remain available, but view attribution is unassessed. |
-| `identity_anchor_unsupported` | A captured user timestamp has an owned persisted composite witness. The inspector conservatively leaves all view findings unassessed because engine claim resolution can write relations; even a witness the engine might reject leaves evidence unknown. |
+| `identity_anchor_unsupported` | A timestamped user message has an owned composite witness or is an exact join of stored text, even without a witness. Engine claim resolution can write relations, so all view findings remain unassessed. |
+| `leaf_admission_unassessed` | Raw backlog is below the configured leaf threshold, or dynamic sizing is enabled. V1 lacks the force, fit, sweep and deferred-maintenance state needed to assess admission safely. |
+| `copy_exclusions_unassessed` | Persisted host UID bindings exist, but V1 lacks the active host lineage and UID mode needed to reproduce copy exclusions. Database copy findings remain available. |
 | `unverified_ancestry` | Captured compaction carry ancestry cannot be established. |
 | `blocker_evidence_missing` | The retained blocker cannot be located in the captured view. |
 
@@ -113,9 +116,17 @@ external payloads, summary carriers and host-dependent identity forms produce
 `unknown`, retaining database-only findings. No host files are opened.
 Legacy blank, NULL and padded conversation IDs share the selected conversation's
 ownership. Replay matching considers every row in the selected session, while
-coverage and pollution stay conversation-scoped. A summary DAG wholly owned by
+coverage and pollution stay conversation-scoped. A replay mapping to a foreign
+conversation leaves all view findings unassessed. A summary DAG wholly owned by
 another conversation is skipped; mixed or malformed target lineage is refused.
-Configured ignored messages are removed before selecting the probe leaf.
+Source lists must be nonempty and unique; message sources follow store order,
+and child-node sources follow creation time. Parent message sources inside a
+persisted carry range are accepted after validating the range and conversation;
+view ancestry remains unassessed without host evidence.
+Configured ignored active or mapped stored messages are removed before selecting
+the probe leaf. Dependent replies remain in selection and are omitted only from
+summarizer input. Persisted dependent-reply records, active replay placeholders,
+and special identity metadata leave view findings unassessed before attribution.
 
 **Does NOT repair:** no reconstruction, frontier rewind, replay manifest,
 ingest, compression, schema migration or live host adoption is performed.

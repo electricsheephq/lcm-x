@@ -130,7 +130,7 @@ def test_ignored_view_candidate_is_filtered_before_leaf_selection(tmp_path, monk
     monkeypatch.setattr(inspector, "compile_message_patterns", lambda patterns: [Pattern(p) for p in patterns])
     messages = [{**m, "role": "user"} for m in _messages(4)]
     path = _copy(tmp_path, messages)
-    inputs = _inputs(path, [messages[0], messages[2], messages[1]], selection_budget=1)
+    inputs = _inputs(path, [messages[0], messages[2], messages[1]], leaf_chunk_tokens=1, selection_budget=1)
     inputs["effective_config"]["lcm_config"]["ignore_message_patterns"] = ["private payload 0"]
     inputs["view_snapshot"]["effective_config"] = copy.deepcopy(inputs["effective_config"])
     result = _inspect(path, **inputs)
@@ -145,7 +145,9 @@ def test_reused_session_mapping_keeps_foreign_replay_candidates(tmp_path):
         connection.execute("UPDATE messages SET conversation_id='other' WHERE store_id=1")
     result = _inspect(path, **_inputs(path, messages))
     assert result["source_rows"] == 3
-    assert result["unreachable_source_ids"] == [2]
+    assert result["view_state"] == "unknown" and not result["healthy"]
+    assert result["evidence_code"] == "unsupported_view_evidence"
+    assert result["unreachable_source_ids"] is None
 
 
 @pytest.mark.parametrize("shape", ["foreign", "mixed", "missing"])
@@ -165,7 +167,7 @@ def test_reused_session_dag_uses_conversation_lineage(tmp_path, shape):
         with pytest.raises(inspector.InspectionRefused, match="^invalid_dag$"):
             _inspect(path)
     else:
-        result = _inspect(path, **_inputs(path, messages[1:]))
+        result = _inspect(path, **_inputs(path, messages[1:], leaf_chunk_tokens=1))
         assert result["source_rows"] == 2 and result["covered_rows"] == 0
         assert result["unreachable_source_ids"] == [] and result["healthy"]
 
@@ -320,7 +322,7 @@ def test_documented_backup_conversion_is_accepted(tmp_path, monkeypatch):
 def test_healthy_matching_view_and_input_unchanged(tmp_path):
     messages = _messages()
     path = _copy(tmp_path, messages)
-    result = _inspect(path, **_inputs(path, messages))
+    result = _inspect(path, **_inputs(path, messages, leaf_chunk_tokens=1))
     assert result["healthy"] and result["view_state"] == "complete"
     assert result["unreachable_source_ids"] == []
     assert not result["prefix_over_leaf_budget"] and not result["blocker_in_fresh_tail"]
@@ -362,7 +364,7 @@ def test_equal_real_user_turns_are_never_confirmed_by_text_or_timestamp(tmp_path
     messages = [{"role": "user", "content": "private payload repeated", "timestamp": 100.0},
                 {"role": "user", "content": "private payload repeated", "timestamp": 200.0}]
     path = _copy(tmp_path, messages)
-    result = _inspect(path, **_inputs(path, messages))
+    result = _inspect(path, **_inputs(path, messages, leaf_chunk_tokens=1))
     assert result["polluted_copies"] == "suspected" and result["confirmed_source_ids"] == []
     assert result["source_rows"] == 2 and result["unreachable_source_ids"] == []
 
@@ -413,7 +415,8 @@ def test_reachability_checks_below_and_above_frontier_and_dag(tmp_path):
 
 def test_no_source_branch(tmp_path):
     path = _copy(tmp_path, _messages(1), frontier=1)
-    result = _inspect(path, **_inputs(path, [{"role": "user", "content": "unpersisted"}], fresh_tail_count=0))
+    result = _inspect(path, **_inputs(path, [{"role": "user", "content": "unpersisted"}],
+                                    fresh_tail_count=0, leaf_chunk_tokens=1))
     assert result["empty_input_kind"] == "no_source"
     assert result["view_state"] == "unknown" and not result["healthy"]
 
