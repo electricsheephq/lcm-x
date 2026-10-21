@@ -10,7 +10,6 @@ from pathlib import Path
 import pytest
 
 from hermes_lcm import message_patterns
-from hermes_lcm.store_complete import StoreCompleteMixin
 from hermes_lcm.tokens import count_messages_tokens
 from tests.harness import make_engine
 from tests.harness.provider import ScriptedSummarizer
@@ -99,15 +98,8 @@ def _e1_copy(tmp_path):
     return path, messages
 
 
-def _production_twins(self, rows, carry):
-    self._conversation_id = "conv"
-    self._identity_anchor_owned = lambda row, carry: row["session_id"] == self._session_id
-    self._host_uid_lineage_key = lambda: (None, "no lineage captured")
-    return StoreCompleteMixin._store_complete_copy_twins(self, rows, carry)
-
-
 @pytest.mark.parametrize("empty_bindings", [False, True], ids=["absent", "empty"])
-def test_e1_prefix(tmp_path, monkeypatch, empty_bindings):
+def test_e1_prefix(tmp_path, empty_bindings):
     path, messages = _e1_copy(tmp_path)
     if empty_bindings:
         with sqlite3.connect(path) as connection:
@@ -116,11 +108,16 @@ def test_e1_prefix(tmp_path, monkeypatch, empty_bindings):
     inputs = _inputs(path, [messages[8], messages[9], messages[7]],
                      leaf_chunk_tokens=60, selection_budget=2000, fresh_tail_count=1)
     result = inspector.inspect_store(path, session_id="S", conversation_id="conv", **copy.deepcopy(inputs))
-    monkeypatch.setattr(inspector._Probe, "_store_complete_copy_twins", _production_twins)
-    production = inspector.inspect_store(path, session_id="S", conversation_id="conv", **copy.deepcopy(inputs))
-    assert production["prefix_over_leaf_budget"] is False
-    assert production["prefix_tokens"] == 14 and production["prefix_rows"] == 2
-    assert result == production
+    # Frozen oracle: covered tool twins 5/6 are excluded; the prefix contains
+    # hidden row 7 and retained row 8 (14 fallback tokens). Do not call the
+    # inspector a second time through the same inherited helper as an oracle.
+    assert result == dict(
+        polluted_copies="suspected", polluted_source_ids=[2, 3, 5, 6], confirmed_source_ids=[],
+        source_rows=10, covered_rows=4, frontier=4, view_state="complete", healthy=False,
+        prefix_over_leaf_budget=False, blocker_in_fresh_tail=True, blocker_source_ids=[8],
+        empty_input_kind="none", unreachable_source_ids=[5, 6, 7], prefix_tokens=14, prefix_rows=2,
+        leaf_budget=60, selection_budget=2000, selection_failed=False,
+    )
 
 
 def test_e1_only_hidden_copies_are_a_noop(tmp_path):

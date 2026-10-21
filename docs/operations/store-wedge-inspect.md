@@ -79,14 +79,14 @@ exit 2 using argparse's usage message. Inspection failures emit no traceback.
 | `schema_mismatch` | SQLite header, schema stamp or required columns do not match. |
 | `scope_mismatch` | Conversation lifecycle is absent or its active session differs; finalized-only sessions remain refused. |
 | `invalid_dag` | Summary lineage has an invalid edge, source list, source type or cycle. |
-| `unverified_ancestry` | Summary ancestry is outside verified session ownership, or rotation-predecessor metadata is missing, contradictory, foreign to the conversation, or cyclic. |
+| `unverified_ancestry` | Summary ancestry is outside verified session ownership, or rotation-predecessor metadata is missing, malformed, cyclic, or names rows with inconsistent conversation ownership. |
 | `invalid_store` | Malformed store values or database read failure, including a non-integer frontier. |
 | `input_changed` | Copy hash changed during inspection; preserve the evidence and stop. |
 | `invalid_input` | Other input failure or unexpected exception, including output serialization failure. |
 
 | Evidence code | Meaning (`view_state=unknown`, database findings retained) |
 | --- | --- |
-| `config_incomplete` | Effective config is absent, incomplete, malformed, has extra LCM fields or invalid required budgets. |
+| `config_incomplete` | Effective config is absent, incomplete, malformed, has extra LCM fields or invalid required budgets, or captures an armed pressure-yield limit while yielding is disabled or the fresh-tail count is zero. These opt-outs contradict an armed limit in production. |
 | `token_counter_unavailable` | Captured counter cannot be reproduced without a download or global counter change. |
 | `snapshot_invalid` | View is absent, malformed, mismatched to the copy/scope/capture/config, or cannot be processed. |
 | `unsupported_view_evidence` | Special host identity, external payload or carrier evidence is required. |
@@ -128,10 +128,14 @@ view ancestry remains unassessed without host evidence. Rotation-predecessor
 chains allow empty hops (which contribute no rows), and every hop with rows
 must have consistent conversation ownership, including all-blank or NULL predecessors;
 missing or contradictory evidence and cycles refuse with `unverified_ancestry`.
-Validated predecessor message sources contribute to coverage even though raw
-rows remain in their original session.
+The inspector follows a predecessor even when another conversation's lifecycle
+names that session, matching production. Validated predecessor message sources
+contribute to database-only coverage counts even though raw rows remain in their
+original session; the selected-session row count does not include those rows.
 Configured ignored active or mapped stored messages are removed before selecting
-the probe leaf. Dependent replies remain in selection and are omitted only from
+the probe leaf. Unpersisted view messages matching production's ingest ignore
+predicate do not make the completeness comparison fail. Dependent replies remain
+in selection and are omitted only from
 summarizer input. Persisted dependent-reply records, active replay placeholders,
 and special identity metadata leave view findings unassessed before attribution.
 The no-op check keeps shown-but-unmapped retained occurrences in the backlog,
