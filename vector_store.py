@@ -1967,27 +1967,31 @@ class VectorStore:
         return self._load_binary_with_deadline(loader, deadline)
 
     def _fetch_binary_matrix(self, numpy, sql, args):
-        # One aggregate row avoids one GIL reacquisition per vector. Number the
-        # original scan before packing so both aggregates retain its exact order.
-        packed = f"""WITH binary_rows AS MATERIALIZED (
-            SELECT row_number() OVER () AS ordinal, * FROM ({sql})
-        ) SELECT json_group_array(json_array(binary_id, length(bits))),
-                 group_concat(hex(bits), '')
-          FROM (SELECT * FROM binary_rows ORDER BY ordinal)"""
+        # Both aggregates consume the same scan stream, pairing IDs and bytes
+        # in the row-wise loader's order without materialization or a temp sort.
+        packed = f"""SELECT json_group_array(json_array(binary_id, length(bits))),
+                            group_concat(hex(bits), '') FROM ({sql})"""
         try:
             metadata, hex_bits = self._conn.execute(packed, args).fetchone()
-        except sqlite3.Error as exc:
-            if getattr(exc, "sqlite_errorcode", None) not in (
+        except (sqlite3.Error, MemoryError) as exc:
+            code = getattr(exc, "sqlite_errorcode", 0) & 0xff
+            if not isinstance(exc, MemoryError) and code not in (
                 sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM,
+                sqlite3.SQLITE_FULL, sqlite3.SQLITE_IOERR,
             ):
                 raise
             return self._binary_rows_to_matrix(numpy, self._conn.execute(sql, args).fetchall())
         raw = bytes.fromhex(hex_bits or "")
+        del hex_bits
+        metadata = json.loads(metadata)
+        if metadata and metadata[0][1] and all(row[1] == metadata[0][1] for row in metadata):
+            ids = [str(row[0]) for row in metadata]
+            return ids, numpy.frombuffer(raw, dtype=numpy.uint8).reshape(len(ids), metadata[0][1])
         offset = 0
 
         def rows():
             nonlocal offset
-            for ident, width in json.loads(metadata):
+            for ident, width in metadata:
                 width = int(width)
                 end = offset + width
                 yield ident, raw[offset:end]

@@ -3,6 +3,8 @@ import hashlib
 import json
 from pathlib import Path
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -47,6 +49,8 @@ class Connection(sqlite3.Connection):
 
     def execute(self, sql, *args, **kwargs):
         if self.fail_code is not None and 'json_group_array' in sql:
+            if self.fail_code == sqlite3.SQLITE_NOMEM:
+                raise MemoryError('SQLite allocation failed')
             exc = sqlite3.OperationalError('synthetic aggregate failure')
             exc.sqlite_errorcode = self.fail_code
             raise exc
@@ -179,9 +183,14 @@ def test_binary_order_and_bytes_match_stock_with_filters_and_bad_widths(seeded, 
         assert actual[1].tobytes() == expected[1].tobytes()
 
 
-@pytest.mark.parametrize('code', [sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM, sqlite3.SQLITE_INTERRUPT])
+@pytest.mark.parametrize('code', [sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM, sqlite3.SQLITE_FULL,
+                                  sqlite3.SQLITE_IOERR_WRITE, sqlite3.SQLITE_IOERR_GETTEMPPATH,
+                                  sqlite3.SQLITE_INTERRUPT])
 @pytest.mark.parametrize('site', ['sessions', 'chunk', 'summary'])
 def test_aggregate_errors_keep_resource_fallback_and_terminal_interrupt(seeded, counted, monkeypatch, code, site):
+    if site == 'sessions' and code not in (sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM,
+                                          sqlite3.SQLITE_INTERRUPT):
+        pytest.skip('temp-storage fallback belongs to the binary loader')
     engine, vs, identities = seeded
     connect = sqlite3.connect
 
@@ -270,3 +279,64 @@ def test_fixed_30_query_recall_ids_order_and_payload_identity(seeded, monkeypatc
             if i % 2 == 0:
                 assert actual_grep.get('results'), actual_grep
             assert actual_grep['results'] == expected_grep['results']
+
+
+@pytest.mark.parametrize('chunk', [True, False])
+def test_packed_query_needs_no_temp_btree(seeded, chunk):
+    _, vs, identities = seeded
+    queries = []
+    vs.connection.set_trace_callback(queries.append)
+    try:
+        load(vs, identities, chunk)
+    finally:
+        vs.connection.set_trace_callback(None)
+    packed = next(sql for sql in queries if 'json_group_array' in sql)
+    plan = [row[3] for row in vs.connection.execute('EXPLAIN QUERY PLAN '+packed)]
+    assert not any('MATERIALIZE' in row or 'USE TEMP B-TREE' in row for row in plan), plan
+
+
+def test_binary_load_above_spill_threshold_with_temp_file_limit(tmp_path):
+    # Separate process: a failed temp write must not alter pytest's file limits.
+    script = r"""
+import importlib, json, resource, signal, sqlite3, sys, types
+import numpy as np
+package = types.ModuleType('hermes_lcm')
+package.__path__ = [sys.argv[1]]
+sys.modules['hermes_lcm'] = package
+vm = importlib.import_module('hermes_lcm.vector_store')
+conn = sqlite3.connect(sys.argv[2])
+conn.execute('PRAGMA temp_store=FILE')
+conn.execute('CREATE TABLE vectors(binary_id TEXT, bits BLOB)')
+conn.executemany('INSERT INTO vectors VALUES (?, ?)',
+                 ((f'odd:{i}:\"', bytes([i % 256])*48) for i in range(60000)))
+conn.commit()
+reader = vm.VectorStore.__new__(vm.VectorStore)
+reader._conn = conn
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (1000000, resource.getrlimit(resource.RLIMIT_FSIZE)[1]))
+ids, matrix = reader._fetch_binary_matrix(np, 'SELECT binary_id, bits FROM vectors', ())
+assert len(ids) == 60000 and matrix.shape == (60000, 48)
+assert matrix[-1].tobytes() == bytes([59999 % 256])*48
+print(json.dumps({'rows': len(ids), 'shape': list(matrix.shape)}))
+"""
+    result = subprocess.run([sys.executable, '-c', script, str(Path(vm.__file__).parent),
+                             str(tmp_path/'spill.db')], capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)['rows'] == 60000
+
+
+@pytest.mark.parametrize('reverse', [0, 1])
+def test_packed_odd_ids_mixed_empty_widths_match_rowwise(seeded, reverse):
+    _, vs, _ = seeded
+    conn = vs.connection
+    conn.execute('CREATE TABLE odd_vectors(binary_id, bits)')
+    conn.executemany('INSERT INTO odd_vectors VALUES (?, ?)', [
+        ('empty', b''), ('quote"\\', b'\x00\xff'), ('雪', b'\x80'),
+        ('[null]', b'\x01\xfe'), (42, b''), ('last', b'\x03\x04')])
+    conn.execute(f'PRAGMA reverse_unordered_selects={reverse}')
+    sql = 'SELECT binary_id, bits FROM odd_vectors'
+    expected = vs._binary_rows_to_matrix(np, conn.execute(sql).fetchall())
+    actual = vs._fetch_binary_matrix(np, sql, ())
+    assert actual[0] == expected[0]
+    assert actual[1].shape == expected[1].shape
+    assert actual[1].tobytes() == expected[1].tobytes()

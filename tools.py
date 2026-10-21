@@ -379,8 +379,8 @@ def _retrieval_candidate_session_ids(
                         f"SELECT json_group_array(session_id) FROM ({sql})"
                     ).fetchone()
                     sessions.update(json.loads(row[0]))
-                except sqlite3.Error as exc:
-                    if getattr(exc, "sqlite_errorcode", None) not in (
+                except (sqlite3.Error, MemoryError) as exc:
+                    if not isinstance(exc, MemoryError) and getattr(exc, "sqlite_errorcode", None) not in (
                         sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM,
                     ):
                         raise
