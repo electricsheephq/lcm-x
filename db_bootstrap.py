@@ -975,8 +975,20 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         if existing is not None and normalize(existing[0]) == normalize(create_sql):
             return
         if existing is not None:
-            conn.execute(f"DROP INDEX {name}")
-        conn.execute(create_sql)
+            conn.execute(f"DROP INDEX IF EXISTS {name}")
+        try:
+            conn.execute(create_sql)
+        except sqlite3.OperationalError as exc:
+            # Another bootstrap may have created (or replaced) it since our
+            # probe. Accept only the required definition, never just the name.
+            if str(exc) != f"index {name} already exists":
+                raise
+            concurrent = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
+                (name,),
+            ).fetchone()
+            if concurrent is None or normalize(concurrent[0]) != normalize(create_sql):
+                raise
 
     ensure_index(
         "idx_lcm_rollups_ready_period",
