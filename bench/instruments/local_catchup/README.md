@@ -1,6 +1,6 @@
 # LOCAL catch-up instrument (I1)
 
-Binding authority: [#1586, Gate declaration (release manager), v1](https://github.com/electricsheephq/lcm-x/issues/1586#issuecomment-6283060211).
+Binding authority: [#1586, declaration v2](https://github.com/electricsheephq/lcm-x/issues/1586#issuecomment-6314340418), retaining the [v1 bars](https://github.com/electricsheephq/lcm-x/issues/1586#issuecomment-6283060211).
 Read the declaration before running; the instrument does not change its bars.
 Use Python 3.11+ with pytest, psutil (mandatory), FastEmbed and ruff 0.15.13.
 The Hermes source supplies the host ContextEngine contract; its CLI is never run.
@@ -91,20 +91,21 @@ Recall uses product recall defaults, a pinned query-ID manifest derived from
 corpus canaries, separate thread-owned connections, and the bgprep deterministic
 summary route. Real leaf inserts with fenced publication callbacks define the
 committed publication intervals; a call that misses every interval is excluded.
-Every block needs 200 overlapping calls and 10 publications. Nearest-rank p50/p90
+Every block needs 200 overlapping calls and 10 publications per query class. Nearest-rank p50/p90
 and their 10,000-resample upper95 bounds must meet 2 s/8 s. Errors, timeouts,
-missing FTS hits or undisclosed incomplete coverage in overlapping calls fail health.
+missing FTS hits or undisclosed incomplete coverage in any recall fail health.
 Honestly empty semantic arms during catch-up neither fail health nor count toward
 the 200 semantic latency samples; covered cells still require both arms. ON-covered
-explicitly prepares vectors in a setup thread before measurement; this is not
-autonomous coverage evidence. Repeated canaries in small smoke stores do not
+starts from a private copy of the audited covered-store artifact and rejects an
+incomplete first audit. Model preparation happens before measurement; maintenance
+is retired for this state so the measured trace cannot build coverage. Repeated canaries in small smoke stores do not
 qualify the 200-query full-size cell. Raw samples and per-block summaries persist.
 ON-catching-up requires positive coverage progress or a background backfill that
 embedded rows within the overlapping recall window. Per-recall identity counts
 exclude new trace rows; full expected-ID audits run at block start and end.
 
 Dispatch manually with `gh workflow run lcmx-1586-floor.yml --ref <branch or tag whose commit is the product under test>`
-plus `-f cell=<cell> -f rows=<rows> -f shape=<shape> -f baseline=<baseline> -f max_minutes=<minutes>` for `cell`, `rows`,
+plus `-f cell=<cell> -f rows=<rows> -f shape=<shape> -f baseline=<baseline> -f max_minutes=<minutes> -f block=<0|1|2>` for `cell`, `rows`,
 `shape` (`short`/`mixed`), `baseline` (`empty`/`upgrade`), and
 `max_minutes` (121–330). The product commit must contain this workflow and instrument
 (based on main after this stack lands). It prepares the cache before measurement, then enters
@@ -127,4 +128,12 @@ that order, with separate two-hour cells and evidence directories. Single-cell
 `coverage-rate` remains available. Calibration records `lscpu`, model preparation,
 five standalone 32-leaf calls, and the median of at least five in-worker summary
 calls writing exactly 32 vectors. Coverage gates the larger of raw implied hours
-and raw × 0.572 / calibration. Missing in-worker calibration makes the cell INVALID.
+and raw × 0.572 / calibration. Recall takes `block=0|1|2`, downloads an audited
+pre-covered store, and alternates unchanged canaries with three fixed broad
+questions. Each class requires 200 overlaps across ten publications and gates
+separately. Rows include FTS duration, budget, hit count, coverage and cap reason.
+The standalone reference is null: host checking reports `UNCALIBRATED` until set.
+Covered-store setup chains four artifact jobs with 240-minute fill budgets; each
+resumes the prior store and manifest, and only the final job requires completeness.
+All setup jobs calibrate under confinement first, then fill outside it with no
+duty wait. An incomplete final audit stops the dependent recall block.

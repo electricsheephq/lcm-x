@@ -41,7 +41,7 @@ def test_health_failures_use_publication_overlap():
                honest_coverage=True, semantic_healthy=True)
     bad = dict(row, start=2, end=3, health="error")
     result = recall.score([row]*200+[bad], [dict(start=0, end=1, node_id=i) for i in range(10)])
-    assert result["state"] == "PASS" and result["failures"] == 0
+    assert result["state"] == "FAIL" and result["failures"] == 1  # v2 item 5: health covers every recall.
 
 
 def test_request_scheduled_maintenance_captures_background_context(corpus, monkeypatch, tmp_path):

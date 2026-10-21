@@ -22,6 +22,7 @@ def verdict(path, max_wall):
 
 def v2(root):
     from .floor import rate
+    from .recall import score
     def lines(path):
         return [json.loads(s) for s in path.read_text().splitlines()]
     if (root/"summary.json").exists() and "cells" in load(root/"summary.json"):
@@ -34,6 +35,15 @@ def v2(root):
         computed = rate(load(root/"catchup/summary.json"), recorded["measured_seconds"],
             load(root/"manifest.json")["rows"], lines(root/"catchup/events.jsonl"))
         assert all(recorded[k] == v for k, v in computed.items())
+    else:
+        recorded = load(root/"raw-summary.json")
+        request = load(root/"request.json")
+        computed = score(lines(root/"recalls.jsonl"), lines(root/"publications.jsonl"),
+            request["seed"], request["state"], recorded, request.get("standalone_calibration_s"),
+            recorded["reference_standalone_s"])
+        if recorded.get("measurement_valid") is False:
+            computed["state"] = "INVALID"
+        assert all(recorded[k] == v for k, v in computed.items())
     return computed
 
 
@@ -41,7 +51,7 @@ if __name__ == "__main__":
     import sys
     for name in sys.argv[1:]:
         root = Path(name)
-        if (root/"catchup").is_dir() or "cells" in load(root/"summary.json"):
+        if (root/"catchup").is_dir() or (root/"recalls.jsonl").exists() or "cells" in load(root/"summary.json"):
             print(json.dumps(v2(root)))
             continue
         summary, audit = load(root/"summary.json"), load(root/"final-audit.json")

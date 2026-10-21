@@ -146,6 +146,8 @@ def test_recall_loop_uses_cheap_counts_and_boundary_audits(tmp_path, monkeypatch
         return {"store": SimpleNamespace(MessageStore=lambda *args: store),
             "dag": SimpleNamespace(SummaryDAG=lambda *args: dag),
             "tools": SimpleNamespace(lcm_recall=lambda *args, **kw: json.dumps({"hits": []}))}[name]
+    # Declaration item 6: isolate the existing health probe from the new FTS observer.
+    monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
     monkeypatch.setattr(recall, "runtime", lambda request: (a, mod, engine, 1))
     audits, counts = [], []
     monkeypatch.setattr(recall, "audit", lambda *args: audits.append(1) or {"complete": False})

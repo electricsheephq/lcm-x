@@ -172,11 +172,11 @@ def test_f2_full_counts_wait_for_clean_boundary_audit(corpus, tmp_path, monkeypa
     a = NS(db=db, root=tmp_path, max_seconds=2)
     engine = NS(_config=None)
     if outcome == "drain":
-        measurement.wait_covered(a, mod, engine, manifest)
+        measurement.fill_covered(a, mod, engine, manifest)
         assert audit.audit(db, manifest)["complete"]
     else:
         with pytest.raises(RuntimeError, match="covered setup failed"):
-            measurement.wait_covered(a, mod, engine, manifest)
+            measurement.fill_covered(a, mod, engine, manifest)
     rows = [json.loads(line) for line in (tmp_path/"coverage.jsonl").read_text().splitlines()]
     if outcome == "corruption":
         assert not sleeps and len(rows) == 2

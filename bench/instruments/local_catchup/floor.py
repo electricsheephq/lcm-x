@@ -77,6 +77,8 @@ def main():
     for name in ("scratch", "out", "model-cache", "cgroup"):
         p.add_argument("--"+name, type=Path, required=True)
     p.add_argument("--cell", choices=("coverage-rate", "coverage-pair", "recall", "calibration"), required=True)
+    p.add_argument("--block", type=int, choices=(0, 1, 2), default=0)
+    p.add_argument("--covered-store", type=Path)
     p.add_argument("--rows", type=int, default=250000)
     p.add_argument("--shape", choices=("short", "mixed"), default="short")
     p.add_argument("--baseline", choices=("empty", "upgrade"), default="empty")
@@ -153,6 +155,8 @@ def limited(a):
             "--lcmx-repo", str(a.lcmx_repo), "--hermes-source", str(a.hermes_source),
             "--scratch", str(a.scratch/"recall"), "--out", str(a.out/"recall"), "--rows", str(a.rows),
             "--model-cache", str(a.model_cache), "--shape", a.shape, "--baseline", a.baseline,
+            "--block", str(a.block), "--covered-store", str(a.covered_store),
+            "--standalone-calibration-s", str(calibrated["standalone_calibration_s"]),
             "--label", LABEL], check=True, timeout=a.max_minutes*60)
         summary = __import__("json").loads((a.out/"recall/summary.json").read_text())
     elif a.cell == "coverage-pair":

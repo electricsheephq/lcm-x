@@ -1,0 +1,109 @@
+name: LCM-X 1586 covered-store stage
+on:
+  workflow_call:
+    inputs:
+      stage: {type: string, required: true}
+      previous_stage: {type: string, default: ''}
+      shape: {type: string, required: true}
+      baseline: {type: string, required: true}
+      rows: {type: number, required: true}
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    env:
+      PRODUCT_REF: ${{ github.sha }}
+      SHAPE: ${{ inputs.shape }}
+      BASELINE: ${{ inputs.baseline }}
+      ROWS: ${{ inputs.rows }}
+      STAGE: ${{ inputs.stage }}
+      PREVIOUS_STAGE: ${{ inputs.previous_stage }}
+      HF_HUB_DISABLE_TELEMETRY: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          path: product
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: 71d34bad1045610252eda02ee79549436896e784
+          path: host
+          persist-credentials: false
+      - name: Verify checked-out commit SHAs
+        run: |
+          if [[ "$(git -C product rev-parse HEAD)" != "$GITHUB_SHA" ]]; then
+            echo "::error::product HEAD must match GITHUB_SHA"
+            exit 1
+          fi
+          if [[ "$(git -C host rev-parse HEAD)" != "71d34bad1045610252eda02ee79549436896e784" ]]; then
+            echo "::error::host HEAD must match the reviewed pin"
+            exit 1
+          fi
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Prepare dependencies and warm cache outside measured cell
+        run: |
+          pwd
+          python -m pip install fastembed psutil pyyaml rich python-dotenv requests platformdirs
+          python -c 'from fastembed import TextEmbedding; TextEmbedding("BAAI/bge-small-en-v1.5", cache_dir="model-cache", threads=2)'
+          chmod -R a-w model-cache
+          mkdir -p evidence
+          python -m pip freeze > evidence/pip-freeze.txt
+          git -C . rev-parse HEAD > evidence/harness-sha.txt
+          git -C product rev-parse HEAD > evidence/product-sha.txt
+          git -C host rev-parse HEAD > evidence/host-sha.txt
+          lscpu > evidence/lscpu.txt
+      - name: Record and ensure runner temp disk headroom
+        run: |
+          # Each measured cell refuses to start under 26 GiB free, and the corpus build before the
+          # first cell may use up to the 6 GiB live-store estimate cap, so require 34 GiB up front.
+          df -B1 "$RUNNER_TEMP" | tee evidence/disk-before.txt
+          required=$((34 * 1024 * 1024 * 1024))
+          free=$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n 1)
+          if (( free < required )); then
+            sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+          fi
+          df -B1 "$RUNNER_TEMP" | tee evidence/disk-after.txt
+          free=$(df -B1 --output=avail "$RUNNER_TEMP" | tail -n 1)
+          (( free >= required )) || { echo "::error::floor requires 34 GiB free in RUNNER_TEMP (26 GiB per-cell headroom + corpus build)"; exit 1; }
+      - name: Calibrate inside confinement before the unconstrained build
+        run: |
+          sudo mkdir /sys/fs/cgroup/lcmx-floor
+          echo 4294967296 | sudo tee /sys/fs/cgroup/lcmx-floor/memory.max
+          echo 0 | sudo tee /sys/fs/cgroup/lcmx-floor/memory.swap.max
+          echo $$ | sudo tee /sys/fs/cgroup/lcmx-floor/cgroup.procs
+          exec nice -n 19 python -B -m bench.instruments.local_catchup.floor --cell calibration \
+            --lcmx-repo "$GITHUB_WORKSPACE/product" --hermes-source "$GITHUB_WORKSPACE/host" \
+            --model-cache "$GITHUB_WORKSPACE/model-cache" --scratch "$RUNNER_TEMP/calibration-scratch" \
+            --out "$GITHUB_WORKSPACE/evidence/calibration" --cgroup /sys/fs/cgroup/lcmx-floor
+      - uses: actions/download-artifact@v4
+        if: inputs.previous_stage != ''
+        with:
+          name: lcmx-1586-covered-${{ inputs.previous_stage }}
+          path: prior-store
+      - name: Build and audit coverage outside confinement
+        run: |
+          args=()
+          if [[ -n "$PREVIOUS_STAGE" ]]; then args+=(--resume-covered-store "$GITHUB_WORKSPACE/prior-store"); fi
+          if [[ "$STAGE" != "store" ]]; then args+=(--allow-partial); fi
+          nice -n 19 python -B -m bench.instruments.local_catchup.recall --build-covered --build-seconds 14400 "${args[@]}" \
+            --lcmx-repo "$GITHUB_WORKSPACE/product" --hermes-source "$GITHUB_WORKSPACE/host" \
+            --model-cache "$GITHUB_WORKSPACE/model-cache" --scratch "$RUNNER_TEMP/covered-scratch" \
+            --out "$GITHUB_WORKSPACE/evidence/covered" --rows "$ROWS" --shape "$SHAPE" --baseline "$BASELINE"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lcmx-1586-covered-${{ inputs.stage }}
+          path: evidence/covered/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lcmx-1586-setup-evidence-${{ inputs.stage }}
+          path: evidence/

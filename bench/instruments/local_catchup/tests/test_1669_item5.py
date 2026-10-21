@@ -16,13 +16,15 @@ WORKFLOW = Path(__file__).resolve().parents[4]/".github/workflows/lcmx-1586-floo
 def test_item5_completion_during_recall_or_by_final_audit_invalidates(tmp_path, monkeypatch, post_complete, final_complete):
     common.dump(tmp_path/"manifest.json", dict(expected=dict(chunks={"1": 1}, leaves={"1": 1}),
                                                canaries=[dict(value="query")]))
-    common.dump(tmp_path/"queries.json", [dict(id=f"q{i}", canary=0) for i in range(200)])
+    common.dump(tmp_path/"queries.json", [dict(id=f"q{i}", canary=0, query_class="canary" if i % 2 == 0 else "broad_nl", text="What turn was acknowledged") for i in range(400)])
     a = NS(out=tmp_path, root=tmp_path, db=tmp_path/"db", home=tmp_path,
            state="ON-catching-up", smoke=False, rows=250000, queries=200, seed=1, block=0)
     engine = NS(_config=NS(recall_query_timeout_s=1), _dag=NS(add_node=lambda *a, **kw: 1), shutdown=lambda: None)
     store = NS(close=lambda: None)
     payload = dict(hits=[dict(arms=["fts"])], provenance=dict(arms_run=["chunk", "summary"],
                     coverage=dict(chunk="full", summary="full")))
+    # Declaration item 6: isolate the existing health probe from the new FTS observer.
+    monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
     monkeypatch.setattr(recall, "runtime", lambda _: (a, lambda _: NS(lcm_recall=lambda *a, **k: json.dumps(payload)), engine, 0))
     monkeypatch.setattr(recall, "recall_reader", lambda *a: NS(_dag=store, _store=store))
     calls = []

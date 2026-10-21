@@ -16,7 +16,7 @@ def test_checkout_inputs_are_removed():
     assert "inputs.host_ref" not in text
     # BaseLoader preserves the YAML `on` key as text.
     inputs = yaml.load(text, Loader=yaml.BaseLoader)["on"]["workflow_dispatch"]["inputs"]
-    assert set(inputs) == {"cell", "shape", "baseline", "rows", "max_minutes"}
+    assert set(inputs) == {"cell", "shape", "baseline", "rows", "max_minutes", "block"}
 
 
 def test_checkout_refs_are_absent_or_literal_commit_shas():

@@ -41,3 +41,23 @@ def standalone(a):
     dump(a.out/"calibration.json", value)
     return value
 
+
+def covered(a):
+    from .audit import audit
+    from .measurement import fill_covered, prepare
+    start = time.monotonic()
+    manifest = prepare(a)
+    corpus_s = time.monotonic()-start
+    db = a.scratch/"baseline.db"
+    mod = product(a.lcmx_repo, a.hermes_source)
+    a.db, a.root, a.home = db, a.out, a.scratch/"builder-home"
+    a._ready = lambda: True
+    fill_covered(a, mod, __import__("argparse").Namespace(_config=config(mod, db)), manifest)
+    audit_start = time.monotonic()
+    checked = audit(db, manifest)
+    dump(a.out/"audit.json", dict(checked, build_seconds=time.monotonic()-start,
+        corpus_seconds=corpus_s, audit_seconds=time.monotonic()-audit_start))
+    if not checked["complete"] and not getattr(a, "allow_partial", False):
+        raise RuntimeError("covered_store_incomplete")
+    with closing(sqlite3.connect(db)) as src, closing(sqlite3.connect(a.out/"store.db")) as dst:
+        src.backup(dst)

@@ -51,6 +51,8 @@ def test_item6_final_integrity_runs_after_shutdown(tmp_path, monkeypatch, kind):
         check()
     monkeypatch.setattr(module, "trace", trace)
     if kind == "recall":
+        # Declaration item 6: this fixture tests teardown, not the FTS observer.
+        monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
         monkeypatch.setattr(module, "recall_reader", lambda *a: NS(_dag=store, _store=store))
         monkeypatch.setattr(module, "audit", lambda *a: dict(complete=False))
     else:
