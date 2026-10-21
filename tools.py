@@ -90,7 +90,8 @@ from .retrieval_core import (
     run_knn,
 )
 from .search_query import (
-    AGE_DECAY_RATE, build_recall_or_query, contains_emoji, normalize_search_sort, recall_content_terms,
+    AGE_DECAY_RATE, build_recall_or_query, contains_emoji, is_identifier_shaped_query,
+    normalize_search_sort, recall_content_terms,
     requires_like_fallback, sanitize_fts5_query,
 )
 from .store import _normalize_observed_at, build_message_fts_spec
@@ -3217,21 +3218,35 @@ def _lcm_recall_fts_arm(
     """FTS arm: raw messages across all eligible sessions."""
     # Emoji cannot reach MATCH: keep the raw query on the existing LIKE route.
     or_query = "" if contains_emoji(query) else build_recall_or_query(query)
-    payload = _lcm_grep_full_text_with_deadline(
-        {
-            "query": or_query or query,
-            "_allow_operators": bool(or_query),
-            "_stemmed": True,
-            "sort": "relevance" if or_query or contains_emoji(query) else "recency",
-            "mode": "recall",
-            "session_scope": "all",
-            "limit": candidate_limit,
-            "_excluded_session_ids": excluded_session_ids,
-        },
-        engine=engine,
-        deadline=deadline,
-        limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
-    )
+    args = {
+        "query": or_query or query,
+        "_allow_operators": bool(or_query),
+        "_stemmed": True,
+        "sort": "relevance" if or_query or contains_emoji(query) else "recency",
+        "mode": "recall",
+        "session_scope": "all",
+        "limit": candidate_limit,
+        "_excluded_session_ids": excluded_session_ids,
+    }
+    payload = None
+    if is_identifier_shaped_query(query):
+        payload = _lcm_grep_full_text_with_deadline(
+            {**args, "query": f'"{query}"', "_allow_operators": True, "sort": "relevance"},
+            engine=engine,
+            deadline=deadline,
+            limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
+        )
+        # A clean literal miss alone may broaden; errors keep their disclosure
+        # and never spend the semantic reservation on a second full-text query.
+        if not payload.get("results") and "error" not in payload and not payload.get("message_search_error"):
+            payload = None
+    if payload is None:
+        payload = _lcm_grep_full_text_with_deadline(
+            args,
+            engine=engine,
+            deadline=deadline,
+            limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
+        )
     if "error" in payload:
         return [], payload
     # Grep survives a message-search crash on its other stages, but THIS arm

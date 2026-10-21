@@ -77,6 +77,172 @@ def recall_engine(tmp_path):
         store.close()
 
 
+@pytest.mark.parametrize("query", ["VALUE_S1586_SHARD000007_0000", "api:v2", "part-42", "alpha_beta", "3.14"])
+def test_recall_fts_arm_identifier_queries_literal_phrase_first(recall_engine, monkeypatch, query):
+    engine = recall_engine
+    target = engine._store.append("session-old", {"role": "user", "content": query})
+    for i in range(80):
+        engine._store.append(f"noise-{i}", {
+            "role": "user", "content": "VALUE S1586 unrelated SHARD000007 different 0000 api part alpha 3",
+        })
+    original = lcm_tools._lcm_grep_full_text_with_deadline
+    calls = []
+    statements = []
+    original_connect = sqlite3.connect
+
+    def connect(*args, **kwargs):
+        conn = original_connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    def capture(args, **kwargs):
+        calls.append((dict(args), kwargs))
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", capture)
+    monkeypatch.setattr(sqlite3, "connect", connect)
+    deadline = time.monotonic() + 5.0
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        engine, query, candidate_limit=10, deadline=deadline, excluded_session_ids=set(),
+    )
+    assert error is None
+    assert len(calls) == 1
+    assert calls[0][0]["query"] == f'"{query}"'
+    assert calls[0][0]["_stemmed"] is True
+    assert calls[0][0]["sort"] == "relevance"
+    assert calls[0][1]["deadline"] == deadline
+    assert [hit["store_id"] for hit in hits] == [target]
+    assert hits.fts_index == "stem"
+    from hermes_lcm.search_query import sanitize_fts5_query
+
+    phrase = sanitize_fts5_query(f'"{query}"')
+    assert any(" MATCH " in sql and phrase in sql for sql in statements)
+
+
+def test_recall_fts_arm_identifier_literal_miss_falls_back_to_or_query(recall_engine, monkeypatch):
+    engine = recall_engine
+    engine._store.append("session-old", {"role": "user", "content": "VALUE scattered S1586"})
+    deadline = time.monotonic() + 5.0
+    expected = lcm_tools._lcm_recall_fts_arm(
+        engine, "VALUE S1586", candidate_limit=10, deadline=deadline, excluded_session_ids=set(),
+    )
+    original = lcm_tools._lcm_grep_full_text_with_deadline
+    calls = []
+
+    def capture(args, **kwargs):
+        calls.append((dict(args), kwargs))
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", capture)
+    actual = lcm_tools._lcm_recall_fts_arm(
+        engine, "VALUE_S1586", candidate_limit=10, deadline=deadline, excluded_session_ids=set(),
+    )
+    assert [args["query"] for args, _ in calls] == ['"VALUE_S1586"', "VALUE OR S1586"]
+    assert all(kwargs["deadline"] == deadline for _, kwargs in calls)
+    assert calls[-1][0]["_allow_operators"] is True
+    assert actual == expected
+    assert actual[0].fts_index == expected[0].fts_index
+
+
+@pytest.mark.parametrize("failure", [
+    {"error": "full-text query timed out", "timeout": True},
+    {"error": "full-text worker capacity exhausted"},
+    {"message_search_error": "interrupted", "results": []},
+])
+def test_recall_fts_arm_identifier_literal_timeout_skips_or_fallback(recall_engine, monkeypatch, failure):
+    calls = []
+
+    def fail(args, **kwargs):
+        calls.append(args["query"])
+        return failure
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", fail)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        recall_engine, "VALUE_S1586", candidate_limit=10,
+        deadline=time.monotonic() + 2.0, excluded_session_ids=set(),
+    )
+    assert calls == ['"VALUE_S1586"']
+    assert hits == []
+    if "error" in failure:
+        assert error is failure
+    else:
+        assert error == {"error": "full-text message search failed: interrupted"}
+
+
+@pytest.mark.parametrize("literal_hit", [True, False])
+def test_recall_fts_arm_identifier_literal_honors_exclusions(recall_engine, monkeypatch, literal_hit):
+    engine = recall_engine
+    engine._store.append("excluded", {"role": "user", "content": "VALUE_S1586"})
+    target = engine._store.append("allowed", {
+        "role": "user", "content": "VALUE_S1586" if literal_hit else "VALUE scattered S1586",
+    })
+    original = lcm_tools._lcm_grep_full_text_with_deadline
+    calls = []
+    excluded = {"excluded"}
+
+    def capture(args, **kwargs):
+        calls.append(dict(args))
+        assert args["_excluded_session_ids"] is excluded
+        return original(args, **kwargs)
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", capture)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        engine, "VALUE_S1586", candidate_limit=10,
+        deadline=time.monotonic() + 5.0, excluded_session_ids=excluded,
+    )
+    assert error is None
+    assert calls[0]["query"] == '"VALUE_S1586"'
+    assert len(calls) == (1 if literal_hit else 2)
+    assert [hit["store_id"] for hit in hits] == [target]
+    assert all(hit["session_id"] == "allowed" for hit in hits)
+
+
+@pytest.mark.parametrize(("query", "expected_query", "operators", "sort"), [
+    ("What name did we give the beagle puppy?", "name OR we OR give OR beagle OR puppy", True, "relevance"),
+    ("art-related", "art OR related", True, "relevance"),
+    ('"VALUE_S1586"', '"VALUE S1586"', True, "relevance"),
+    ("東京_42", "東京 OR 42", True, "relevance"),
+    ("🚀_42", "🚀_42", False, "relevance"),
+    ("VALUE_S1586 extra", "VALUE OR S1586 OR extra", True, "relevance"),
+    ("single42", "single42", True, "relevance"),
+    ("what did the?", "what did the?", False, "recency"),
+])
+def test_recall_fts_arm_natural_language_and_hyphenated_queries_unchanged(
+    recall_engine, monkeypatch, query, expected_query, operators, sort,
+):
+    # Golden request and complete arm payload from the pre-fix route.
+    calls = []
+    excluded = {"excluded"}
+    deadline = time.monotonic() + 5.0
+
+    def respond(args, **kwargs):
+        calls.append((args, kwargs))
+        return {"fts_index": "stem", "results": [{
+            "store_id": 7, "session_id": "old", "role": "user", "timestamp": 123,
+            "snippet": "fixed source excerpt", "source": "fixture",
+        }]}
+
+    monkeypatch.setattr(lcm_tools, "_lcm_grep_full_text_with_deadline", respond)
+    hits, error = lcm_tools._lcm_recall_fts_arm(
+        recall_engine, query, candidate_limit=10, deadline=deadline, excluded_session_ids=excluded,
+    )
+    assert error is None
+    assert calls == [({
+        "query": expected_query, "_allow_operators": operators, "_stemmed": True,
+        "sort": sort, "mode": "recall", "session_scope": "all", "limit": 10,
+        "_excluded_session_ids": excluded,
+    }, {"engine": recall_engine, "deadline": deadline, "limit_cap": lcm_tools._LCM_GREP_HYBRID_CANDIDATE_CAP})]
+    assert hits.fts_index == "stem"
+    assert hits == [{
+        "kind": "message_excerpt", "store_id": 7, "session_id": "old", "source": "fixture",
+        "role": "user", "timestamp": 123, "content_offset": 0,
+        "snippet": "fixed source excerpt", "_fts_snippet": "fixed source excerpt",
+        "from_current_session": False, "expand_hint": lcm_tools._lcm_recall_excerpt_expand_hint({
+            "session_id": "old", "store_id": 7, "content_offset": 0,
+        }),
+    }]
+
+
 def test_fulltext_recall_natural_language_question(recall_engine):
     engine = recall_engine
     engine._config.embeddings_enabled = False
