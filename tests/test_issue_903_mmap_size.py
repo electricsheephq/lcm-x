@@ -46,7 +46,8 @@ def test_positive_bytes_are_applied(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("raw", ["abc", "-5", ""])
-def test_invalid_uses_default_and_warns_once(tmp_path, monkeypatch, caplog, raw):
+@pytest.mark.parametrize("other_logger", [None, "hermes_lcm_issue_900.config"])
+def test_invalid_uses_default_and_warns_once(tmp_path, monkeypatch, caplog, raw, other_logger):
     monkeypatch.setattr(config_mod, "_sqlite_mmap_size_warned", False, raising=False)
     monkeypatch.setenv("LCM_SQLITE_MMAP_SIZE", raw)
     expected = _pre_change_value(tmp_path / "baseline.db")
@@ -55,7 +56,15 @@ def test_invalid_uses_default_and_warns_once(tmp_path, monkeypatch, caplog, raw)
             assert _configured_value(tmp_path / f"invalid-{index}.db") == expected
         monkeypatch.setenv("LCM_SQLITE_MMAP_SIZE", "another-invalid-value")
         assert _configured_value(tmp_path / "other-invalid.db") == expected
-    warnings = [r for r in caplog.records if "LCM_SQLITE_MMAP_SIZE" in r.message]
+        # Independently loaded plugin aliases may log the same diagnostic.
+        if other_logger:
+            logging.getLogger(other_logger).warning(
+                "invalid env LCM_SQLITE_MMAP_SIZE ignored; using %s", DEFAULT_BYTES,
+            )
+    warnings = [
+        r for r in caplog.records
+        if r.name == config_mod.__name__ and "LCM_SQLITE_MMAP_SIZE" in r.message
+    ]
     assert len(warnings) == 1
     assert warnings[0].levelno == logging.WARNING
 

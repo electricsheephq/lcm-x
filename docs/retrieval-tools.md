@@ -243,6 +243,25 @@ erroring the tool. `lcm_grep`'s hybrid RRF is unaffected: it keeps implicit
 actually applied to the arms that ran are echoed back under
 `provenance.arm_weights`.
 
+#### Opt-in session packs (`LCM_RECALL_DELIVERY_UNIT`)
+
+The default `hits` preserves the ranked-hit response. Set
+`LCM_RECALL_DELIVERY_UNIT=session` to deliver full source messages around the
+best-ranked seeds, with unchanged ranking. Invalid environment values warn and
+fall back to `hits`. `limit` bounds ranked seeds (maximum 25), so `total_results`
+can exceed it. `include` selects seed arms; summary seeds can return raw messages.
+Both `detail` values use session delivery; `seen_refs` and occurrence-time
+options retain their `answer_ready` validation and exact-span semantics.
+
+The whole JSON response fits 16,000 estimated tokens and 64,000 characters,
+including metadata and escaping. It can contain partial sessions; inspect
+`provenance.delivery` for seed IDs, source-order ranges, completion, omissions,
+estimator and measured size. Tool-call/result groups are atomic. Oversized or
+unreadable groups carry bounded expansion hints; stored content is never changed.
+Event time comes from host observation, never the storage timestamp. Externalized
+markers remain markers. Proactive injection keeps its independent hits budget.
+This setting makes no answer-quality or host-context-fit guarantee.
+
 #### FTS anchor slot (`LCM_RECALL_FTS_ANCHOR`)
 
 `LCM_RECALL_FTS_ANCHOR` (default `true`) keeps the full-text arm's best match in

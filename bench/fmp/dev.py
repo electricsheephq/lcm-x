@@ -37,9 +37,11 @@ RECALL_CONFIG_KEYS = frozenset({
 def validate_overrides(overrides):
     if not isinstance(overrides, dict):
         raise ValueError("candidate config must be a JSON object")
-    unsupported = set(overrides) - RECALL_CONFIG_KEYS - {"recall_depth"}
+    unsupported = set(overrides) - RECALL_CONFIG_KEYS - {"recall_depth", "delivery_unit"}
     if unsupported:
         raise ValueError("unsupported recall-time override keys: " + ", ".join(sorted(unsupported)))
+    if overrides.get("delivery_unit", "hits") not in ("hits", "session"):
+        raise ValueError("delivery_unit must be hits or session")
 
 
 def renderer_identity():
@@ -94,6 +96,8 @@ def retrieve(q, store, overrides):
         for key, value in overrides.items():
             if key == "recall_depth":
                 continue
+            if key == "delivery_unit":
+                key = "recall_delivery_unit"
             if key not in vars(engine._config):
                 raise ValueError("recall-time override unavailable in selected checkout: " + key)
             setattr(engine._config, key, value)
@@ -112,22 +116,30 @@ def retrieve(q, store, overrides):
     expected = expected if expected is not None else observed
     counts = {sid: sum(h.get("session_id") == sid for h in hits) for sid in {h.get("session_id") for h in hits}}
     response_limit = effective.get("limit")
+    session = payload.get("provenance", {}).get("delivery", {})
+    is_session = overrides.get("delivery_unit", "hits") == "session"
+    delivery_valid = (session.get("unit") == "session" and session.get("seed_limit") == response_limit
+        and session.get("token_budget") == 16000 and session.get("char_budget") == 64000
+        and session.get("response_tokens", 16001) <= 16000 and len(raw) <= 64000
+        and session.get("message_count") == len(hits)) if is_session else (
+        len(hits) <= response_limit and expansion.get("per_session_limit") == expected["per_session"]
+        and expansion.get("expanded_hit_limit") == expected["expanded"]
+        and expansion.get("expanded_hit_count") == sum("content" in h for h in hits)
+        and expansion.get("expanded_hit_count", 0) <= expected["expanded"]
+        and max(counts.values(), default=0) <= expected["per_session"])
     valid = (bool(observed) and observed == expected and payload.get("limit") == response_limit
              and response_limit == min(effective["requested_limit"], observed["limit"])
              and payload.get("limit_clamped_from", effective["requested_limit"]) == effective["requested_limit"]
              and (depth is None or "limit_clamped_from" not in payload)
              and "error" not in payload and not payload.get("timeout")
-             and payload.get("total_results") == len(hits) and len(hits) <= response_limit
-             and expansion.get("per_session_limit") == expected["per_session"]
-             and expansion.get("expanded_hit_limit") == expected["expanded"]
-             and expansion.get("expanded_hit_count") == sum("content" in h for h in hits)
-             and expansion.get("expanded_hit_count", 0) <= expected["expanded"]
-             and max(counts.values(), default=0) <= expected["per_session"])
+             and payload.get("total_results") == len(hits) and delivery_valid)
     if not valid:
         raise Incomplete("effective recall readback mismatch")
     return dict(evidence=evidence, source_sha256=sha(raw.encode()), metadata=dict(
         declared=expected, observed=observed, response_limit=payload["limit"], hit_count=len(hits),
         expanded_count=expansion.get("expanded_hit_count"),
+        delivery_unit="session" if is_session else "hits", delivery_budget=16000 if is_session else None,
+        session_count=session.get("session_count"),
         degraded=bool(payload.get("degraded")), coverage=payload.get("provenance", {}).get("coverage", {}),
         degraded_reason_sha256=sha(str(payload.get("degraded_reason", "")).encode()),
         delivered_tokens_estimated=delivery.tokens(evidence), delivered_sha256=sha(evidence.encode())))
@@ -204,7 +216,9 @@ def _worker_rows(spec, product, written):
             store_id = dict(manifest_sha256=digest_file(manifest), database_sha256=digest_file(directory / "lcm.db"),
                             speakers_sha256=digest_file(directory / "speakers.json"))
             identity = dict(store=store_id, query_sha256=sha(q.question.encode()), date=q.question_date,
-                            product=product, config=spec["overrides"], renderer=renderer)
+                            product=product, config=spec["overrides"], renderer=renderer,
+                            delivery_unit=spec["overrides"].get("delivery_unit", "hits"),
+                            delivery_budget=16000 if spec["overrides"].get("delivery_unit") == "session" else None)
             key = sha(encoded(identity))
             cache = Path(spec["cache"]) / "retrieval" / (key + ".json")
             hit = cache.exists()
