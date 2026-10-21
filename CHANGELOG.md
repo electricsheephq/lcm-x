@@ -634,7 +634,7 @@ Hermes plugin-catalog admission (#471):
   (#477)
 
 - Governance: the required `AI review exact-head` check, its workflow and its validator are
-  retired (#474). Enforcement is exact-head CI (the six checks), required review-thread
+  retired (#474). Enforcement is strict exact-head CI (the six checks), required review-thread
   resolution and merge commits; AI review is recorded evidence under the `land-pr` review
   obligation, and `scripts/maintainer_gate.py` reports the required review lanes as a hint.
 
