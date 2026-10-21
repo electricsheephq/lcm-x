@@ -116,7 +116,7 @@ def test_verdict_unit_in_both_consumers(tmp_path, source, report_verdict, detail
     result = d8_guard.compare_runs(candidate, baseline, subset=True)
     assert result["INCOMPLETE"] is (expected is None)
     assert result["pass"] is (expected is True)
-    if expected is None and "label" in detail_verdict:
+    if expected is None:
         with pytest.raises(ValueError, match="unrecognised label"):
             failclose.account_run(candidate)
     elif expected is not None:
@@ -124,15 +124,20 @@ def test_verdict_unit_in_both_consumers(tmp_path, source, report_verdict, detail
 
 
 @pytest.mark.parametrize("source", SOURCES)
+@pytest.mark.parametrize("side", ["candidate", "baseline"])
 @pytest.mark.parametrize("preferred,later", [
     ("questionId", "question_id"), ("questionId", "qid"), ("questionId", "id"),
     ("question_id", "qid"), ("question_id", "id"), ("qid", "id"),
 ])
-def test_null_alias_in_both_overlay_paths(tmp_path, source, preferred, later):
+def test_null_alias_in_both_overlay_paths(tmp_path, capsys, source, side, preferred, later):
     candidate = write_run(tmp_path / "c", [row("a_abs"), row("b")])
     baseline = write_run(tmp_path / "b", [row("a_abs"), row("b")])
-    overlay(candidate, source, [{preferred: None, later: "a_abs", "score": 1}])
+    run = candidate if side == "candidate" else baseline
+    overlay(run, source, [{preferred: None, later: "a_abs", "score": 1}])
     with pytest.raises(ValueError, match="invalid question id"):
-        failclose.load_rows(candidate)
+        failclose.load_rows(run)
     with pytest.raises(ValueError, match="invalid question id"):
         d8_guard.compare_runs(candidate, baseline, subset=True)
+    assert d8_guard.main([str(candidate), str(baseline), "--subset"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["INCOMPLETE"] and not result["pass"]

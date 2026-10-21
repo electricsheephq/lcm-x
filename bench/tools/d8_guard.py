@@ -6,7 +6,6 @@ import json
 import math
 import random
 import re
-from numbers import Real
 from pathlib import Path
 
 from bench.tools.failclose import _correct, _failed, _qid, load_rows
@@ -70,13 +69,6 @@ def _is_correct(row):
 def _unscorable(row):
     if _failed(row):
         return False
-    # Follow _correct's key-presence precedence, but require typed outcomes
-    # rather than accepting its permissive bool()/str() coercions.
-    if "correct" in row:
-        return not isinstance(row["correct"], bool)
-    if "score" in row:
-        score = row["score"]
-        return not (isinstance(score, Real) and not isinstance(score, bool) and score == score)
     try:
         _correct(row)
     except ValueError:
@@ -158,7 +150,7 @@ def _check_rows(values, source, identities, issues):
         issues.append(f"duplicate question ids: {len(duplicates)}; first id: {duplicates[0]} ({source})")
 
 
-def _load_run(root):
+def _load_run(root, *, baseline=False):
     root = Path(root)
     report = json.loads((root / "report.json").read_text())
     identities = {field: [] for field in IDENTITY_FIELDS}
@@ -176,6 +168,18 @@ def _load_run(root):
     has_rows = (report.get("evaluations") or (root / "per_question.jsonl").exists()
                 or (root / "results/per_question.jsonl").exists())
     rows = {_qid(row): row for row in load_rows(root)} if has_rows else {}
+    if baseline:
+        report_rows = {_qid(row): row for row in report.get("evaluations", [])}
+        contradictions = []
+        for qid, detail_row in {_qid(row): row for row in detail_rows}.items():
+            if _failed(report_rows.get(qid, {})) and not _failed(detail_row):
+                try:
+                    _correct(rows[qid])  # An annotation may retain the report verdict.
+                except ValueError:
+                    continue
+                contradictions.append(qid)
+        if contradictions:
+            issues.append("failure contradicted by detail: " + ", ".join(sorted(contradictions)))
     checkpoint_path = root / "checkpoint.json"
     if checkpoint_path.exists():
         checkpoint = json.loads(checkpoint_path.read_text())
@@ -223,9 +227,10 @@ def _category(row, name):
 
 def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
     candidate_report, candidate, candidate_ids, candidate_issues = _load_run(candidate_run)
-    baseline_report, baseline, baseline_ids, baseline_issues = _load_run(baseline_run)
+    baseline_report, baseline, baseline_ids, baseline_issues = _load_run(baseline_run, baseline=True)
     issues, missing_both = _compare_identities(candidate_ids, baseline_ids, placebo=placebo)
-    issues += [f"{side}: {issue}" for side, values in
+    issues += [f"{side} {issue}" if issue.startswith("failure contradicted by detail:")
+               else f"{side}: {issue}" for side, values in
                (("candidate", candidate_issues), ("baseline", baseline_issues)) for issue in values]
     benchmark = baseline_report.get("benchmark", "")
     if benchmark != candidate_report.get("benchmark") or benchmark not in {"locomo", "longmemeval"}:

@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
+import sys
+from numbers import Real
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -77,7 +80,8 @@ def _overlay_row(report, detail):
     if any(key in detail for key in verdict_fields):
         for key in verdict_fields:
             merged.pop(key, None)
-    merged.update(detail)
+    merged.update({key: value for key, value in detail.items()
+                   if value is not None or key in verdict_fields or merged.get(key) is None})
     # A success annotation cannot erase either source's failure evidence.
     for key in ("_failed", "judge_fallback", *FAILURE_FLAGS, *FAILURE_TEXT_FIELDS):
         if key == "label":  # Verdicts stay atomic; retain its failure signature below.
@@ -88,16 +92,20 @@ def _overlay_row(report, detail):
     signature = fail_close_signature(detail) or fail_close_signature(report)
     if signature:
         merged["fail_close_signature"] = signature
-    if _failed(report) or _failed(detail):
-        merged["_failed"] = True
     return merged
 
 
 def _correct(row: dict[str, Any]) -> bool:
     if "correct" in row:
-        return bool(row["correct"])
+        if isinstance(row["correct"], bool):
+            return row["correct"]
+        raise ValueError("unrecognised label: correct must be a bool")
     if "score" in row:
-        return row["score"] == 1
+        score = row["score"]
+        if (isinstance(score, Real) and not isinstance(score, bool)
+                and score == score and score not in (math.inf, -math.inf)):
+            return score == 1
+        raise ValueError("unrecognised label: score must be a finite number, not a bool")
     label = row.get("label")
     if isinstance(label, bool):
         return False  # Preserve the existing boolean-label scoring convention.
@@ -206,6 +214,9 @@ def compare_rows(
             f"missing_left={missing_left}, missing_right={missing_right}"
         )
 
+    # Validate both arms before union-drop and short-circuit pair counting.
+    for row in (*left.values(), *right.values()):
+        _correct(row)
     dropped = sorted(
         qid
         for qid in left
@@ -241,10 +252,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    rows = load_rows(args.run_dir)
-    result = account_rows(rows)
-    if args.compare:
-        result["paired_comparison"] = compare_rows(rows, load_rows(args.compare))
+    run = args.run_dir
+    try:
+        rows = load_rows(run)
+        result = account_rows(rows)
+        if args.compare:
+            run = args.compare
+            result["paired_comparison"] = compare_rows(rows, load_rows(run))
+    except (ValueError, OSError) as error:
+        print(f"{run}: {' '.join(str(error).splitlines())}", file=sys.stderr)
+        return 2
     print(json.dumps(result, sort_keys=True))
     return 0
 

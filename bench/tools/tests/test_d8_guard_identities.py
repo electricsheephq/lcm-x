@@ -288,7 +288,7 @@ def test_presentation_mode_is_placebo_only_but_consistent_within_run(tmp_path):
     ({"correct": True}, True), ({"correct": False}, True),
     ({"correct": "yes"}, False), ({"correct": 1}, False), ({"correct": None}, False),
     ({"correct": {}, "score": 1}, False), ({"correct": False, "score": "x"}, True),
-    ({"score": 0}, True), ({"score": 0.5}, True), ({"score": float("inf")}, True),
+    ({"score": 0}, True), ({"score": 0.5}, True), ({"score": float("inf")}, False),
     ({"score": 10**400}, True), ({"score": True}, False),
     ({"score": float("nan")}, False), ({"score": "x"}, False),
     ({"score": None, "label": "pass"}, False),
