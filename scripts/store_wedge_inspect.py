@@ -106,6 +106,30 @@ def _coverage(connection, rows, session_id, session_rows, conversation_id):
                  and all(str(r[1] or "").strip() in owners for r in parent), "unverified_ancestry")
         carried.update(r[0] for r in parent)
     session_owned.update(carried)
+    # Compression rollover moves DAG nodes, but preserves predecessor raw rows.
+    # Validate every recorded hop against persisted conversation ownership.
+    current, seen = session_id, {session_id}
+    while True:
+        record = connection.execute("SELECT value FROM metadata WHERE key=?",
+                                    (f"rotation_predecessor_session:{current}",)).fetchone()
+        if record is None:
+            break
+        try:
+            predecessor = json.loads(record[0])
+        except (ValueError, TypeError):
+            raise InspectionRefused("unverified_ancestry") from None
+        _require(isinstance(predecessor, str) and bool(predecessor) and predecessor not in seen,
+                 "unverified_ancestry")
+        parent = connection.execute("SELECT store_id,conversation_id FROM messages WHERE session_id=?",
+                                    (predecessor,)).fetchall()
+        _require(bool(parent) and all(str(r[1] or "").strip() in owners for r in parent)
+                 and any(str(r[1] or "").strip() == str(conversation_id or "").strip() for r in parent),
+                 "unverified_ancestry")
+        parent_ids = {r[0] for r in parent}
+        session_owned.update(parent_ids)
+        owned.update(parent_ids)
+        seen.add(predecessor)
+        current = predecessor
     nodes = {row["node_id"]: dict(row) for row in connection.execute("SELECT * FROM summary_nodes")}
     done, visiting, covered = {}, set(), set()
 
@@ -120,24 +144,24 @@ def _coverage(connection, rows, session_id, session_rows, conversation_id):
             ids = json.loads(node["source_ids"])
         except (ValueError, TypeError):
             raise InspectionRefused("invalid_dag") from None
-        _require(isinstance(ids, list) and bool(ids) and all(type(i) is int and i > 0 for i in ids), "invalid_dag")
+        _require(isinstance(ids, list) and all(type(i) is int and i > 0 for i in ids), "invalid_dag")
         _require(len(ids) == len(set(ids)), "invalid_dag")
         _require(node["source_type"] in {"messages", "nodes"}, "invalid_dag")
         if node["source_type"] == "messages":
             _require(ids == sorted(ids), "invalid_dag")
             lineage = set(ids)
-            _require(lineage <= session_owned, "invalid_dag")
+            _require(lineage <= session_owned, "unverified_ancestry")
         else:
             # SummaryDAG.get_uncondensed_at_depth orders condensation inputs by
             # created_at, not by node id (repairs can insert older nodes later).
-            _require(all(child in nodes for child in ids), "invalid_dag")
+            _require(bool(ids) and all(child in nodes for child in ids), "invalid_dag")
             _require(ids == sorted(ids, key=lambda child: nodes[child]["created_at"]), "invalid_dag")
             lineage = set()
             for child in ids:
                 lineage.update(visit(child))
         # Like db_bootstrap.select_conversation_range, coverage belongs only to
         # this conversation; a reused session's wholly foreign DAG is not ours.
-        _require(not lineage & owned or lineage <= owned | carried, "invalid_dag")
+        _require(not lineage & owned or lineage <= owned | carried, "unverified_ancestry")
         covered.update(lineage & owned)
         visiting.remove(node_id)
         done[node_id] = lineage
@@ -170,11 +194,13 @@ class _ReadStore:
 class _Probe(StoreCompleteMixin, ReconcileMixin):
     """Read-only facade for ordinary raw views; unavailable host proof stays unknown."""
 
-    def __init__(self, connection, rows, session_id, frontier, config, covered):
+    def __init__(self, connection, rows, session_id, frontier, config, covered, conversation_id):
         self._store = _ReadStore(connection, rows)
         self._session_id, self._last_compacted_store_id = session_id, frontier
         self._config, self.covered = LCMConfig(**config), covered
+        self._conversation_id = str(conversation_id).strip()
         self.patterns = compile_message_patterns(self._config.ignore_message_patterns)
+        _require(len(self.patterns) == len(self._config.ignore_message_patterns), "ignore_patterns_unavailable")
         self._hermes_home = None
 
     def _message_replay_identity(self, message, **kwargs):
@@ -224,8 +250,11 @@ class _Probe(StoreCompleteMixin, ReconcileMixin):
     def _store_complete_node_covered(self, store_ids):
         return set(store_ids) & self.covered
 
-    def _store_complete_copy_twins(self, _rows, _carry):
-        return {}, set()  # Never infer a copy exclusion without host occurrence proof.
+    def _identity_anchor_owned(self, row, _carry):
+        return row["session_id"] == self._session_id  # Carry is refused before probing.
+
+    def _host_uid_lineage_key(self):
+        return None, "no host lineage"  # E1 needs no UID proof; bound stores are refused.
 
     def _matches_ignore_message_patterns(self, message, **_kwargs):
         return matches_message_pattern(normalize_content_value(message.get("content")) or "", self.patterns)
@@ -310,8 +339,8 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
                   "ignored_dependent_reply_hashes")]
     host_keys += [f"host_rewrite_identity:{r['store_id']}" for r in rows]
     _require(not any(json.loads(metadata[k]) for k in host_keys if k in metadata), "unsupported_view_evidence")
-    # StoreCompleteMixin._store_complete_copy_twins needs the active host UID
-    # lineage/mode to prove exclusions. A binding table alone cannot reproduce it.
+    # Reproduce E1 byte-identical tool copies with session-only ownership.
+    # Persisted UID bindings need unavailable active lineage/mode evidence.
     if connection.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='host_uid_bindings'").fetchone():
         _require(connection.execute("SELECT 1 FROM host_uid_bindings LIMIT 1").fetchone() is None,
                  "copy_exclusions_unassessed")
@@ -333,12 +362,25 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     _require(isinstance(view, list) and all(isinstance(m, dict) for m in view), "snapshot_invalid")
     _require(not any(k in m for m in view for k in ("message_uid", "_lcm", "store_id")),
              "unsupported_view_evidence")
+    try:
+        # ReconcileMixin._get_store_id_map_for_messages reads the whole session,
+        # while scanned attribution and coverage remain conversation-scoped.
+        probe = _Probe(connection, session_rows, session_id, frontier, config["lcm_config"], covered,
+                       snapshot["conversation_id"])
+    except InspectionRefused:
+        raise
+    except Exception:
+        raise InspectionRefused("config_incomplete") from None
+    # Check every row before entering helpers that could otherwise resolve an external payload.
+    for message in [*session_rows, *view]:
+        probe._message_replay_identity(message, stored_row=True)
     # IdentityAnchorMixin._identity_anchor_summary_input: the no-witness branch
     # may compose timestamped user rows and write a relation. Do not guess claims.
-    texts = {r["content"] for r in rows if isinstance(r.get("content"), str)}
+    texts = {text for row in rows for text in
+             {probe._message_replay_identity(row, stored_row=True)[1],
+              *(form[1] for form in probe._stored_row_forms(row))}}
     _require(not any(m.get("role") == "user" and _normalize_observed_at(m.get("timestamp")) is not None
-                     and isinstance(m.get("content"), str) and "\n\n" in m["content"]
-                     and _candidate_composite(m["content"], texts) for m in view),
+                     and _candidate_composite(probe._message_replay_identity(m)[1], texts) for m in view),
              "identity_anchor_unsupported")
     if connection.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='message_relations'").fetchone():
         # IdentityAnchorMixin._identity_anchor_summary_input can record new
@@ -351,15 +393,6 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
                         for r in connection.execute("SELECT store_id,observed_at FROM message_relations "
                                                     "WHERE kind='composite' AND observed_at IS NOT NULL"))
         _require(not witnessed, "identity_anchor_unsupported")
-    try:
-        # ReconcileMixin._get_store_id_map_for_messages reads the whole session,
-        # while scanned attribution and coverage remain conversation-scoped.
-        probe = _Probe(connection, session_rows, session_id, frontier, config["lcm_config"], covered)
-    except Exception:
-        raise InspectionRefused("config_incomplete") from None
-    # Check every row before entering helpers that could otherwise resolve an external payload.
-    for message in [*session_rows, *view]:
-        probe._message_replay_identity(message, stored_row=True)
     mapping = probe._get_store_id_map_for_messages(view)
     # The session-wide replay mapper can select a foreign conversation occurrence.
     _require(set(mapping.values()) <= {r["store_id"] for r in rows}, "unsupported_view_evidence")
@@ -411,7 +444,9 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     scanned = ([r for r in rows if r["store_id"] > frontier and (end is None or r["store_id"] <= end)], False)
     # CompactionMixin._select_leaf_candidate stops before attribution when there
     # is no candidate_raw and no hidden backlog (StoreCompleteMixin._store_complete_backlog).
-    hidden = [r for r in scanned[0] if r["store_id"] not in visible | covered
+    twins, twin_covered = probe._store_complete_copy_twins(scanned[0], [])
+    copies = {sid for sid, matches in twins.items() if sid not in visible and any(t in twin_covered for t in matches)}
+    hidden = [r for r in scanned[0] if r["store_id"] not in visible | covered | copies
               and r["role"] != "system" and not probe._matches_ignore_message_patterns(r)]
     noop = not raw and not hidden
 

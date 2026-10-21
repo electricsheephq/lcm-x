@@ -91,8 +91,11 @@ def test_item04_malformed_lineage_order_is_refused(tmp_path, sources, kind):
                                "VALUES (?,'S','summary',?,'messages',?)", (node_id, f"[{node_id}]", node_id))
         connection.execute("INSERT INTO summary_nodes(node_id,session_id,summary,source_ids,source_type,created_at) "
                            "VALUES (3,'S','summary',?,?,0)", (sources, kind))
-    with pytest.raises(inspector.InspectionRefused, match="^invalid_dag$"):
-        inspect(path)
+    if sources == "[]" and kind == "messages":
+        assert inspect(path)["covered_rows"] == 2
+    else:
+        with pytest.raises(inspector.InspectionRefused, match="^invalid_dag$"):
+            inspect(path)
 
 
 def test_item05_persisted_dependent_reply_is_unassessed(tmp_path):

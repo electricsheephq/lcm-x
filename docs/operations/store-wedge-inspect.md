@@ -48,7 +48,7 @@ scope identifiers, UIDs, SQL parameters or paths. It makes no model calls.
 | `polluted_copies=confirmed` | Equal stored identities share a captured host UID, lineage and version. Keep every source; this is diagnosis, not permission to delete. |
 | `polluted_copies=none` / `unknown` | No suspected pair found / not assessed. A first stored tool placeholder without an earlier different-content copy is not a salvage pair. |
 | `polluted_source_ids`, `confirmed_source_ids` | Sorted numeric source IDs suspected of pollution / confirmed by the captured binding evidence. Empty lists mean none found. |
-| `source_rows`, `covered_rows`, `frontier` | Scoped stored-row count, validated lineage-covered count, and stored integer frontier. Non-integer frontiers are refused, never echoed. |
+| `source_rows`, `covered_rows`, `frontier` | Selected-session stored-row count, validated lineage-covered count (including verified rotation predecessors), and stored integer frontier. Non-integer frontiers are refused, never echoed. |
 | `prefix_over_leaf_budget` | Cost through the named retained source exceeds the leaf budget, respecting the first oversized-group exception. Total backlog alone is insufficient. Follow #1162; do not widen budgets automatically. |
 | `blocker_in_fresh_tail` | The named source has an occurrence inside the captured protected tail. Keep the tail; follow #1162. |
 | `empty_input_kind` | Actual attribution branch: `retained`, `contiguity`, `no_source`, or `none`; `unknown` means unassessed. `none` also covers the product's no-op when no raw backlog exists outside the fresh tail and no hidden backlog is eligible. Budget diagnosis does not relabel contiguity. |
@@ -79,7 +79,7 @@ exit 2 using argparse's usage message. Inspection failures emit no traceback.
 | `schema_mismatch` | SQLite header, schema stamp or required columns do not match. |
 | `scope_mismatch` | Conversation lifecycle is absent or its active session differs; finalized-only sessions remain refused. |
 | `invalid_dag` | Summary lineage has an invalid edge, source list, source type or cycle. |
-| `unverified_ancestry` | Summary ancestry crosses session ownership. |
+| `unverified_ancestry` | Summary ancestry is outside verified session ownership, or rotation-predecessor metadata is missing, contradictory, foreign to the conversation, or cyclic. |
 | `invalid_store` | Malformed store values or database read failure, including a non-integer frontier. |
 | `input_changed` | Copy hash changed during inspection; preserve the evidence and stop. |
 | `invalid_input` | Other input failure or unexpected exception, including output serialization failure. |
@@ -91,9 +91,10 @@ exit 2 using argparse's usage message. Inspection failures emit no traceback.
 | `snapshot_invalid` | View is absent, malformed, mismatched to the copy/scope/capture/config, or cannot be processed. |
 | `unsupported_view_evidence` | Special host identity, external payload or carrier evidence is required. |
 | `source_time_unavailable` | Supported schema-v5 copy lacks optional source-time columns; database findings remain available, but view attribution is unassessed. |
-| `identity_anchor_unsupported` | A timestamped user message has an owned composite witness or is an exact join of stored text, even without a witness. Engine claim resolution can write relations, so all view findings remain unassessed. |
+| `identity_anchor_unsupported` | A timestamped user message has an owned composite witness or is an exact join of stored replay-identity forms, even without a witness. Engine claim resolution can write relations, so all view findings remain unassessed. |
 | `leaf_admission_unassessed` | Raw backlog is below the configured leaf threshold, or dynamic sizing is enabled. V1 lacks the force, fit, sweep and deferred-maintenance state needed to assess admission safely. |
-| `copy_exclusions_unassessed` | Persisted host UID bindings exist, but V1 lacks the active host lineage and UID mode needed to reproduce copy exclusions. Database copy findings remain available. |
+| `copy_exclusions_unassessed` | Nonempty persisted host UID bindings require active host lineage and UID mode unavailable in V1, so view copy exclusions are unassessed. With bindings absent or empty, the production helper reproduces E1 byte-identical assistant tool-call/tool-result exclusions using selected-session ownership and node/leaf coverage. Database copy findings remain available. |
+| `ignore_patterns_unavailable` | Configured ignore patterns cannot all be compiled with the production engine in this process (including missing optional `regex`). View filtering and attribution remain unassessed. |
 | `unverified_ancestry` | Captured compaction carry ancestry cannot be established. |
 | `blocker_evidence_missing` | The retained blocker cannot be located in the captured view. |
 
@@ -119,10 +120,15 @@ ownership. Replay matching considers every row in the selected session, while
 coverage and pollution stay conversation-scoped. A replay mapping to a foreign
 conversation leaves all view findings unassessed. A summary DAG wholly owned by
 another conversation is skipped; mixed or malformed target lineage is refused.
-Source lists must be nonempty and unique; message sources follow store order,
-and child-node sources follow creation time. Parent message sources inside a
+Source lists must be unique; message sources follow store order, and child-node
+sources must be nonempty and follow creation time. Empty message-source leaves
+are valid (filtered dependent replies) and contribute no coverage. Parent message sources inside a
 persisted carry range are accepted after validating the range and conversation;
-view ancestry remains unassessed without host evidence.
+view ancestry remains unassessed without host evidence. Rotation-predecessor
+chains are followed only when each hop has consistent conversation ownership;
+missing or contradictory evidence and cycles refuse with `unverified_ancestry`.
+Validated predecessor message sources contribute to coverage even though raw
+rows remain in their original session.
 Configured ignored active or mapped stored messages are removed before selecting
 the probe leaf. Dependent replies remain in selection and are omitted only from
 summarizer input. Persisted dependent-reply records, active replay placeholders,

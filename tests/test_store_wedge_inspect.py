@@ -164,7 +164,7 @@ def test_reused_session_dag_uses_conversation_lineage(tmp_path, shape):
         connection.execute("INSERT INTO summary_nodes(node_id,session_id,summary,source_ids,source_type,created_at) "
                            "VALUES (3,'S','private summary','[1,2]','nodes',0)")
     if shape != "foreign":
-        with pytest.raises(inspector.InspectionRefused, match="^invalid_dag$"):
+        with pytest.raises(inspector.InspectionRefused, match="^unverified_ancestry$"):
             _inspect(path)
     else:
         result = _inspect(path, **_inputs(path, messages[1:], leaf_chunk_tokens=1))
@@ -430,7 +430,7 @@ def test_contiguity_branch_uses_real_attribution_and_never_invents_blocker(tmp_p
         connection.execute("PRAGMA query_only=ON")
         connection.execute("BEGIN")
         rows = [dict(r) for r in connection.execute("SELECT * FROM messages ORDER BY store_id")]
-        probe = inspector._Probe(connection, rows, "S", 0, asdict(LCMConfig()), set())
+        probe = inspector._Probe(connection, rows, "S", 0, asdict(LCMConfig()), set(), "conv")
         chunk = [messages[2], messages[0]]
         result = probe._store_complete_input(chunk, {}, {id(messages[2]): 3, id(messages[0]): 1},
                                               chunk, chunk, 0, [], 1, scanned=(rows, False))
