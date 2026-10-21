@@ -92,6 +92,7 @@ def test_production_block_calibration(tmp_path, monkeypatch, batch_s, samples, e
     data = []
     for cls in ("canary", "broad_nl"):
         data += rows(160, seconds=.5, query_class=cls)+rows(40, seconds=4.5, query_class=cls)
+    data = [dict(r, incomplete=True, coverage_start=dict(chunks=0), coverage_end=dict(chunks=1)) for r in data]
     def cell(args, state, block, kind):
         root = tmp_path/f"{block}-{state}"
         root.mkdir()
@@ -102,7 +103,8 @@ def test_production_block_calibration(tmp_path, monkeypatch, batch_s, samples, e
         raw = recall.score(data, pubs, state=state, activity=dict(catchup_activity=True))
         raw.update(measurement_valid=True, catchup_activity=True)
         common.dump(root/"raw-summary.json", raw)
-        common.dump(root/"request.json", dict(seed=1586, state=state, block=block))
+        common.dump(root/"request.json", dict(seed=1586, state=state, block=block, rows=250000, smoke=False))
+        common.dump(root/"final-audit.json", dict(classes=dict(chunks=dict(missing_count=1))))
         common.dump(root/"summary.json", raw)
         return raw
     monkeypatch.setattr(recall, "cell", cell)
