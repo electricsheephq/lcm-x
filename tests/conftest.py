@@ -123,6 +123,14 @@ def _isolate_embedding_process_state(request):
     with pytest.MonkeyPatch.context() as patch:
         provider = sys.modules.get("hermes_lcm.embedding_provider")
         maintenance = sys.modules.get("hermes_lcm.embedding_maintenance")
+        engine = sys.modules.get("hermes_lcm.engine")
+        retrieval = sys.modules.get("hermes_lcm.retrieval_core")
+        # These caches are keyed by database path. tmp_path_retention_policy=failed deletes a
+        # passing test's tmp_path, so a later test can be handed the same path again.
+        if engine is not None:
+            patch.setattr(engine, "_EMBEDDING_SCHEMA_READY", set())
+        if retrieval is not None:
+            retrieval._reset_vector_store_pool()
         if provider is not None:
             patch.setattr(provider, "_FASTEMBED_MODELS", {})
             patch.setattr(provider, "_FASTEMBED_BUILD_LOCKS", {})

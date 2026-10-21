@@ -300,11 +300,13 @@ def test_checkpoint_is_fsynced_after_header_and_each_completed_question(
 
 
 def test_directory_fsync_skips_unsupported_platform(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        lme.os, "open", lambda *_args, **_kwargs: (_ for _ in ()).throw(NotImplementedError())
-    )
+    # Scoped so the failing os.open is gone before tmp_path cleanup runs.
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            lme.os, "open", lambda *_args, **_kwargs: (_ for _ in ()).throw(NotImplementedError())
+        )
 
-    lme._fsync_parent_directory(tmp_path / "checkpoint.jsonl")
+        lme._fsync_parent_directory(tmp_path / "checkpoint.jsonl")
 
 
 def test_question_checkpoint_record_does_not_mutate_scored_input():
