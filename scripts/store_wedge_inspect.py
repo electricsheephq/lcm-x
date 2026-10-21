@@ -22,7 +22,7 @@ if "hermes_lcm" not in sys.modules:
 from hermes_lcm import tokens  # noqa: E402
 from hermes_lcm.compaction import select_oldest_leaf_chunk  # noqa: E402
 from hermes_lcm.config import LCMConfig  # noqa: E402
-from hermes_lcm.db_bootstrap import SCHEMA_VERSION  # noqa: E402
+from hermes_lcm.db_bootstrap import SCHEMA_VERSION, _V5_CORE_OPTIONAL_COLUMNS  # noqa: E402
 from hermes_lcm.externalize import extract_externalized_ref  # noqa: E402
 from hermes_lcm.fresh_tail import resolve_fresh_tail_boundary  # noqa: E402
 from hermes_lcm.ingest_protection import (  # noqa: E402
@@ -34,6 +34,7 @@ from hermes_lcm.message_patterns import compile_message_patterns, matches_messag
 from hermes_lcm.recognition_matching import _match_occurrences  # noqa: E402
 from hermes_lcm.reconcile import ReconcileMixin, _HERMES_PRUNED_TOOL_PLACEHOLDER  # noqa: E402
 from hermes_lcm.store_complete import StoreCompleteMixin  # noqa: E402
+from hermes_lcm.store import _normalize_observed_at  # noqa: E402
 
 
 class InspectionRefused(ValueError):
@@ -68,6 +69,7 @@ def _sidecars(path):
 def _schema(connection):
     stamp = connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()
     _require(stamp is not None and str(stamp[0]) == str(SCHEMA_VERSION), "schema_mismatch")
+    missing_optional = set()
     for table, required in {
         "messages": "store_id session_id source conversation_id role content tool_call_id tool_calls tool_name "
                     "timestamp token_estimate pinned ingested_at observed_at observed_at_source",
@@ -75,33 +77,47 @@ def _schema(connection):
         "lcm_lifecycle_state": "conversation_id current_session_id current_frontier_store_id",
     }.items():
         columns = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
-        _require(set(required.split()) <= columns, "schema_mismatch")
+        # db_bootstrap._V5_CORE_OPTIONAL_COLUMNS permits pre-source-time v5 stores.
+        optional = _V5_CORE_OPTIONAL_COLUMNS.get(table, frozenset())
+        _require(set(required.split()) - optional <= columns, "schema_mismatch")
+        missing_optional.update(optional - columns)
+    return missing_optional
 
 
-def _coverage(connection, rows, session_id):
+def _coverage(connection, rows, session_id, session_rows):
     """Validate edges before counting coverage, including sources below the frontier."""
     owned = {row["store_id"] for row in rows}
+    session_owned = {row["store_id"] for row in session_rows}
     nodes = {row["node_id"]: dict(row) for row in connection.execute("SELECT * FROM summary_nodes")}
-    done, visiting, covered = set(), set(), set()
+    done, visiting, covered = {}, set(), set()
 
     def visit(node_id):
         _require(node_id in nodes and node_id not in visiting, "invalid_dag")
         if node_id in done:
-            return
+            return done[node_id]
         visiting.add(node_id)
         node = nodes[node_id]
         _require(node["session_id"] == session_id, "unverified_ancestry")
-        ids = json.loads(node["source_ids"])
+        try:
+            ids = json.loads(node["source_ids"])
+        except (ValueError, TypeError):
+            raise InspectionRefused("invalid_dag") from None
         _require(isinstance(ids, list) and all(type(i) is int and i > 0 for i in ids), "invalid_dag")
         _require(node["source_type"] in {"messages", "nodes"}, "invalid_dag")
         if node["source_type"] == "messages":
-            _require(set(ids) <= owned, "invalid_dag")
-            covered.update(ids)
+            lineage = set(ids)
+            _require(lineage <= session_owned, "invalid_dag")
         else:
+            lineage = set()
             for child in ids:
-                visit(child)
+                lineage.update(visit(child))
+        # Like db_bootstrap.select_conversation_range, coverage belongs only to
+        # this conversation; a reused session's wholly foreign DAG is not ours.
+        _require(not lineage & owned or lineage <= owned, "invalid_dag")
+        covered.update(lineage & owned)
         visiting.remove(node_id)
-        done.add(node_id)
+        done[node_id] = lineage
+        return lineage
 
     for node_id, node in nodes.items():
         if node["session_id"] == session_id:
@@ -207,13 +223,17 @@ class _Probe(StoreCompleteMixin, ReconcileMixin):
 def _pollution(connection, rows):
     groups, suspects = {}, set()
     for row in rows:
+        # rows already share owned_conversation_values() ownership: legacy blank,
+        # NULL and padded spellings must not split a copy group.
         key = tuple(json.dumps(row.get(k), sort_keys=True) for k in (
-            "session_id", "conversation_id", "source", "role", "content", "tool_call_id", "tool_calls", "tool_name"))
+            "session_id", "source", "role", "content", "tool_call_id", "tool_calls", "tool_name"))
         groups.setdefault(key, []).append(row["store_id"])
         if row["role"] == "tool" and row["content"] == _HERMES_PRUNED_TOOL_PLACEHOLDER:
             originals = {r["store_id"] for r in rows if r["role"] == "tool"
                          and r["tool_call_id"] and r["tool_call_id"] == row["tool_call_id"]
-                         and r["tool_name"] == row["tool_name"] and r["store_id"] < row["store_id"]
+                         # MessageStore.find_session_tool_rows allows an absent name.
+                         and (not r["tool_name"] or not row["tool_name"] or r["tool_name"] == row["tool_name"])
+                         and r["store_id"] < row["store_id"]
                          and r["content"] != row["content"]}
             if originals:
                 suspects.update(originals | {row["store_id"]})
@@ -242,7 +262,7 @@ def _empty_input_kind(actual, blocker, reason, chunk, mapping):
     return "none"
 
 
-def _view_probe(connection, rows, covered, frontier, session_id, config, snapshot):
+def _view_probe(connection, rows, covered, frontier, session_id, config, snapshot, session_rows):
     metadata = dict(connection.execute("SELECT key,value FROM metadata"))
     host_keys = [f"{prefix}:{session_id}" for prefix in
                  ("identity_anchor_carry", "folded_tail_lineage", "retained_user_anchor")]
@@ -264,12 +284,25 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
              and tokens._get_encoder() is None, "token_counter_unavailable")
     view = snapshot.get("messages")
     _require(isinstance(view, list) and all(isinstance(m, dict) for m in view), "snapshot_invalid")
+    if connection.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='message_relations'").fetchone():
+        # IdentityAnchorMixin._identity_anchor_summary_input can record new
+        # composites. Never run it here. Conservatively refuse a user stamp with
+        # an owned persisted witness (_identity_anchor_witnesses), even if text
+        # matching might ultimately reject that witness in the engine.
+        stamps = {_normalize_observed_at(m.get("timestamp")) for m in view if m.get("role") == "user"}
+        owned = {r["store_id"] for r in rows}
+        witnessed = any(r["store_id"] in owned and r["observed_at"] in stamps
+                        for r in connection.execute("SELECT store_id,observed_at FROM message_relations "
+                                                    "WHERE kind='composite' AND observed_at IS NOT NULL"))
+        _require(not witnessed, "identity_anchor_unsupported")
     try:
-        probe = _Probe(connection, rows, session_id, frontier, config["lcm_config"], covered)
+        # ReconcileMixin._get_store_id_map_for_messages reads the whole session,
+        # while scanned attribution and coverage remain conversation-scoped.
+        probe = _Probe(connection, session_rows, session_id, frontier, config["lcm_config"], covered)
     except Exception:
         raise InspectionRefused("config_incomplete") from None
     # Check every row before entering helpers that could otherwise resolve an external payload.
-    for message in [*rows, *view]:
+    for message in [*session_rows, *view]:
         probe._message_replay_identity(message, stored_row=True)
     mapping = probe._get_store_id_map_for_messages(view)
     shown = _match_occurrences([r for r in rows if r["store_id"] not in mapping.values()], probe._stored_row_forms,
@@ -284,9 +317,24 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     while leading < len(view) and view[leading].get("role") == "system":
         leading += 1
     raw = view[leading:max(leading, tail.start)]
+    # CompactionMixin._filter_leaf_backlog filters ignored raw messages before
+    # selection, excludes their sources and drops replies until the next prompt.
+    filtered, excluded, dependent = [], set(), False
+    for message in raw:
+        ignored = probe._matches_ignore_message_patterns(message)
+        role = message.get("role")
+        if ignored or (dependent and role in {"assistant", "tool"}):
+            if id(message) in mapping:
+                excluded.add(mapping[id(message)])
+            dependent = True
+            continue
+        dependent = dependent and role not in {"user", "system"}
+        filtered.append(message)
+    raw = filtered
     chunk = select_oldest_leaf_chunk(raw, config["selection_budget"])
     top = max((mapping[id(m)] for m in chunk if id(m) in mapping), default=0)
-    end = top - 1 if top > frontier else min((sid - 1 for sid in mapping.values() if sid > frontier), default=None)
+    end = top - 1 if top > frontier else min(
+        (sid - 1 for sid in mapping.values() if sid > frontier and sid not in excluded), default=None)
     scanned = ([r for r in rows if r["store_id"] > frontier and (end is None or r["store_id"] <= end)], False)
     # CompactionMixin._select_leaf_candidate stops before attribution when there
     # is no candidate_raw and no hidden backlog (StoreCompleteMixin._store_complete_backlog).
@@ -295,7 +343,8 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     noop = not raw and not hidden
 
     def attribute(budget):
-        return probe._store_complete_input(chunk, {}, mapping, view, chunk, frontier, [], budget, scanned=scanned)
+        return probe._store_complete_input(chunk, {}, mapping, view, chunk, frontier, [], budget,
+                                           accounted_ids=excluded, scanned=scanned)
 
     actual = None if noop else attribute(config["leaf_chunk_tokens"])
     reason = "" if noop else probe._store_complete_empty_reason
@@ -349,32 +398,36 @@ def inspect_store(copy, *, session_id, conversation_id, view_snapshot=None, effe
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA query_only=ON")
             connection.execute("BEGIN")
-            _schema(connection)
+            missing_optional = _schema(connection)
             state = connection.execute("SELECT current_session_id,current_frontier_store_id FROM lcm_lifecycle_state "
                                        "WHERE conversation_id=?", (conversation_id,)).fetchone()
             _require(state is not None and state[0] == session_id, "scope_mismatch")
             _require(type(state[1]) is int, "invalid_store")
-            rows = [dict(r) for r in connection.execute(
-                "SELECT * FROM messages WHERE session_id=? AND TRIM(COALESCE(conversation_id,'')) IN ('',?) "
-                "ORDER BY store_id", (session_id, conversation_id))]
-            covered = _coverage(connection, rows, session_id)
+            session_rows = [dict(r) for r in connection.execute(
+                "SELECT * FROM messages WHERE session_id=? ORDER BY store_id", (session_id,))]
+            # Mirror owned_conversation_values() without its process-global cache.
+            owners = {"", str(conversation_id or "").strip()}
+            rows = [r for r in session_rows if str(r.get("conversation_id") or "").strip() in owners]
+            covered = _coverage(connection, rows, session_id, session_rows)
             suspects, confirmed = _pollution(connection, rows)
             result.update(polluted_copies="confirmed" if confirmed else "suspected" if suspects else "none",
                           polluted_source_ids=suspects, confirmed_source_ids=confirmed,
                           source_rows=len(rows), covered_rows=len(covered), frontier=state[1])
-            for row in rows:
+            for row in session_rows:
                 if row.get("tool_calls"):
                     row["tool_calls"] = json.loads(row["tool_calls"])
             if view_snapshot is not None or effective_config is not None:
                 try:
                     snapshot, config = view_snapshot, effective_config
+                    _require(not missing_optional, "source_time_unavailable")
                     _require(isinstance(snapshot, dict), "snapshot_invalid")
                     _require(isinstance(config, dict), "config_incomplete")
                     _require(snapshot.get("source_sha256") == before and snapshot.get("session_id") == session_id
                              and snapshot.get("conversation_id") == conversation_id and bool(snapshot.get("capture_id"))
                              and snapshot.get("effective_config") == config, "snapshot_invalid")
                     with _quiet_helpers():
-                        findings = _view_probe(connection, rows, covered, state[1], session_id, config, snapshot)
+                        findings = _view_probe(connection, rows, covered, state[1], session_id, config, snapshot,
+                                               session_rows)
                     result.update(findings)
                 except InspectionRefused as error:
                     result["evidence_code"] = str(error)

@@ -79,6 +79,122 @@ def _copy_files(path):
     return {p for p in path.parent.iterdir() if p.name != "fixture"}
 
 
+def test_v5_optional_time_columns_leave_view_unknown(tmp_path):
+    messages = _messages()
+    path = _copy(tmp_path, messages)
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP INDEX IF EXISTS idx_msg_conversation_observed")
+        for column in ("ingested_at", "observed_at", "observed_at_source"):
+            connection.execute(f"ALTER TABLE messages DROP COLUMN {column}")
+    result = _inspect(path, **_inputs(path, messages))
+    assert result["source_rows"] == len(messages)
+    assert result["view_state"] == "unknown" and not result["healthy"]
+    assert result["evidence_code"] == "source_time_unavailable"
+    assert result["unreachable_source_ids"] is None
+
+
+@pytest.mark.parametrize("owner", [None, "", " \t ", " conv ", "\tconv\t"])
+def test_copy_groups_use_normalized_conversation_ownership(tmp_path, owner):
+    path = _copy(tmp_path, [{"role": "user", "content": "private payload repeated"}] * 2)
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE messages SET conversation_id=? WHERE store_id=1", (owner,))
+    result = _inspect(path)
+    assert result["source_rows"] == 2
+    assert result["polluted_copies"] == "suspected" and result["polluted_source_ids"] == [1, 2]
+
+
+@pytest.mark.parametrize("names", [("terminal", ""), ("", "terminal")])
+def test_salvage_pair_accepts_missing_tool_name(tmp_path, names):
+    path = _copy(tmp_path, _messages(2))
+    with sqlite3.connect(path) as connection:
+        for store_id, name in enumerate(names, 1):
+            connection.execute("UPDATE messages SET role='tool',tool_call_id='call',tool_name=?,content=? "
+                               "WHERE store_id=?", (name, "private payload" if store_id == 1
+                                                     else inspector._HERMES_PRUNED_TOOL_PLACEHOLDER, store_id))
+    result = _inspect(path)
+    assert result["polluted_copies"] == "suspected" and result["polluted_source_ids"] == [1, 2]
+
+
+def test_ignored_view_candidate_is_filtered_before_leaf_selection(tmp_path, monkeypatch):
+    # Exercise selection even in minimal installs without the optional regex
+    # package; this fixture pattern is bounded and uses the timeout interface.
+    class Pattern:
+        def __init__(self, pattern):
+            self.compiled = re.compile(pattern)
+
+        def search(self, text, *, timeout):
+            return self.compiled.search(text)
+
+    monkeypatch.setattr(inspector, "compile_message_patterns", lambda patterns: [Pattern(p) for p in patterns])
+    messages = [{**m, "role": "user"} for m in _messages(4)]
+    path = _copy(tmp_path, messages)
+    inputs = _inputs(path, [messages[0], messages[2], messages[1]], selection_budget=1)
+    inputs["effective_config"]["lcm_config"]["ignore_message_patterns"] = ["private payload 0"]
+    inputs["view_snapshot"]["effective_config"] = copy.deepcopy(inputs["effective_config"])
+    result = _inspect(path, **inputs)
+    assert result["empty_input_kind"] == "retained" and result["selection_failed"]
+    assert result["blocker_source_ids"] == [2] and result["blocker_in_fresh_tail"]
+
+
+def test_reused_session_mapping_keeps_foreign_replay_candidates(tmp_path):
+    messages = _messages(3)
+    path = _copy(tmp_path, [messages[0], *messages])
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE messages SET conversation_id='other' WHERE store_id=1")
+    result = _inspect(path, **_inputs(path, messages))
+    assert result["source_rows"] == 3
+    assert result["unreachable_source_ids"] == [2]
+
+
+@pytest.mark.parametrize("shape", ["foreign", "mixed", "missing"])
+def test_reused_session_dag_uses_conversation_lineage(tmp_path, shape):
+    messages = _messages(3)
+    path = _copy(tmp_path, messages)
+    with sqlite3.connect(path) as connection:
+        connection.execute("UPDATE messages SET conversation_id='other' WHERE store_id=1")
+        connection.execute("INSERT INTO summary_nodes(node_id,session_id,summary,source_ids,source_type,created_at) "
+                           "VALUES (1,'S','private summary','[1]','messages',0)")
+        sources = {"foreign": "[1]", "mixed": "[1,2]", "missing": "[1,999]"}[shape]
+        connection.execute("INSERT INTO summary_nodes(node_id,session_id,summary,source_ids,source_type,created_at) "
+                           "VALUES (2,'S','private summary',?,'messages',0)", (sources,))
+        connection.execute("INSERT INTO summary_nodes(node_id,session_id,summary,source_ids,source_type,created_at) "
+                           "VALUES (3,'S','private summary','[1,2]','nodes',0)")
+    if shape != "foreign":
+        with pytest.raises(inspector.InspectionRefused, match="^invalid_dag$"):
+            _inspect(path)
+    else:
+        result = _inspect(path, **_inputs(path, messages[1:]))
+        assert result["source_rows"] == 2 and result["covered_rows"] == 0
+        assert result["unreachable_source_ids"] == [] and result["healthy"]
+
+
+def test_witnessed_composite_view_leaves_attribution_unknown(tmp_path):
+    messages = [{"role": "user", "content": "private payload R", "timestamp": 500.0},
+                {"role": "user", "content": "private payload U", "timestamp": 510.0}]
+    path = _copy(tmp_path, messages)
+    with sqlite3.connect(path) as connection:
+        connection.executemany("INSERT INTO message_relations "
+                               "(store_id,kind,related_store_id,ordinal,observed_at,created_at) "
+                               "VALUES (1,'composite',?,?,500,1)", [(1, 0), (2, 1)])
+    view = [{"role": "user", "content": messages[0]["content"] + "\n\n" + messages[1]["content"],
+             "timestamp": 500.0}, {"role": "assistant", "content": "private payload reply"}]
+    result = _inspect(path, **_inputs(path, view))
+    assert result["view_state"] == "unknown" and not result["healthy"]
+    assert result["evidence_code"] == "identity_anchor_unsupported"
+    assert result["unreachable_source_ids"] is None and result["prefix_over_leaf_budget"] is None
+    assert "blocker_source_ids" not in result and "selection_failed" not in result
+
+
+@pytest.mark.parametrize("sources", ["{", '"private lineage"', "null", "{}", "[true]", "[0]"])
+def test_malformed_summary_sources_raise_invalid_dag(tmp_path, sources):
+    path = _copy(tmp_path, _messages())
+    with sqlite3.connect(path) as connection:
+        connection.execute("INSERT INTO summary_nodes(session_id,summary,source_ids,source_type,created_at) "
+                           "VALUES ('S','private summary',?,'messages',0)", (sources,))
+    with pytest.raises(inspector.InspectionRefused, match="^invalid_dag$"):
+        _inspect(path)
+
+
 @pytest.mark.parametrize("frontier", ["private frontier marker", 2.5, b"private frontier marker"])
 def test_noninteger_frontier_refused_without_echo(tmp_path, capsys, frontier):
     path = _copy(tmp_path, _messages(), frontier=frontier)

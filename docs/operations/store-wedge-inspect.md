@@ -89,6 +89,8 @@ exit 2 using argparse's usage message. Inspection failures emit no traceback.
 | `token_counter_unavailable` | Captured counter cannot be reproduced without a download or global counter change. |
 | `snapshot_invalid` | View is absent, malformed, mismatched to the copy/scope/capture/config, or cannot be processed. |
 | `unsupported_view_evidence` | Special host identity, external payload or carrier evidence is required. |
+| `source_time_unavailable` | Supported schema-v5 copy lacks optional source-time columns; database findings remain available, but view attribution is unassessed. |
+| `identity_anchor_unsupported` | A captured user timestamp has an owned persisted composite witness. The inspector conservatively leaves all view findings unassessed because engine claim resolution can write relations; even a witness the engine might reject leaves evidence unknown. |
 | `unverified_ancestry` | Captured compaction carry ancestry cannot be established. |
 | `blocker_evidence_missing` | The retained blocker cannot be located in the captured view. |
 
@@ -109,6 +111,11 @@ Capture actual effective settings, not environment defaults. V1 supports the
 `fallback-v1` counter and ordinary textual raw views. Unavailable counters,
 external payloads, summary carriers and host-dependent identity forms produce
 `unknown`, retaining database-only findings. No host files are opened.
+Legacy blank, NULL and padded conversation IDs share the selected conversation's
+ownership. Replay matching considers every row in the selected session, while
+coverage and pollution stay conversation-scoped. A summary DAG wholly owned by
+another conversation is skipped; mixed or malformed target lineage is refused.
+Configured ignored messages are removed before selecting the probe leaf.
 
 **Does NOT repair:** no reconstruction, frontier rewind, replay manifest,
 ingest, compression, schema migration or live host adoption is performed.
