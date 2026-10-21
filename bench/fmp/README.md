@@ -1,7 +1,7 @@
 # Frontier Measurement Protocol v1
 
 Refs electricsheephq/lcm-x#1189. This harness produces local measurement
-artifacts; the 20-question smoke is not a published quality row. No host contract
+artifacts; the 30-question smoke is not a published quality row. No host contract
 changes. LCM-X is imported from the explicitly selected checkout, never edited.
 
 Run from the checkout with Python 3.11+ and `httpx`; reuse an existing LCM-X
@@ -59,23 +59,40 @@ GLM readers support `single`, `full_context` (a conservative 128k admission cap)
 - Stores ingest at each session's date through the production store clock (format 3), so recency and
   event times behave as in a live store. Paired tests drop a question with an error in either arm.
 
-The smoke runs 30 cleaned LME-S questions stratified over question type plus
-abstention (seed 1189; ids in `lme-ids.json`/`lme-strata.json`) with `off`,
-Sol/high, three deliveries and two judges, and one LoCoMo conversation (conv-30)
-agentic and single. Its workers=3 and persistent shared $9.50 ledger cover all
-deliveries and judgments. Reruns must retain that ledger and cap. The default
-output must be outside the checkout (for example, an absolute run directory). Existing run files are never overwritten by
-answer/judge; use a new output directory.
+The subscription smoke selects 30 cleaned LME-S questions stratified over question
+type plus abstention (seed 1189; ids in `lme-ids.json`/`lme-strata.json`) and one
+LoCoMo conversation (conv-30, excluding category 5). Sol/high answers both sets
+with paired `off` and `local` configurations under `single` and `agentic` deliveries;
+`full_context` is available in the CLI but is not part of this smoke. A separate
+Opus agentic `off` arm uses a seeded 10 of the 30 LME-S ids (`opus-ids.json`).
+Both reader harnesses must pass their leakage canaries before the answer arms run.
+Judging uses the CLI defaults: Sol/medium on every answer and Opus on a seeded
+10% agreement sample, rather than two judges on every answer.
+All commands use four workers and share the subscription quota ledger `quota.json`;
+there is no spend ledger or dollar cap in this smoke. OpenRouter remains a separate
+opt-in path. The output must be outside the checkout (for example, an absolute run
+directory). The script skips existing answer/judge files; individual `answer` and
+`judge` commands refuse to overwrite them. Use a new output directory for a new run.
+
+Smoke matrix and selection: [run_smoke.sh](run_smoke.sh). CLI defaults and options:
+[run.py](run.py); model defaults: [models.py](models.py).
 
 For individual commands, use `nice -n 19 bash bench/fmp/run.sh COMMAND` with:
 
 - `--lcmx-repo CHECKOUT --dataset lme-s|lme-m|locomo --data FILE`
 - `--question-ids FILE --split-label LABEL` (JSON string array or one id per line)
 - `--config off|local|voyage[+rerank:MODEL] --summaries none|deterministic`
-- `--store-root DIR --output DIR --max-spend USD --spend-ledger FILE`
-- `--reader MODEL --delivery agentic|single|full_context --workers N` (default 12)
-- `--allow-dirty` (answer on an LCM-X tree with uncommitted changes; recorded as `<sha>-dirty`)
-- `--allow-partial` (score arms whose run question sets differ after a spend stop)
+- `--store-root DIR --output DIR --quota-ledger FILE --quota-stop PERCENT`
+  (quota ledger defaults to `<output>/quota.json`; Codex weekly stop defaults to 95%)
+- `--max-spend USD --spend-ledger FILE` (both required only for the metered OpenRouter path)
+- `--reader MODEL --delivery agentic|single|full_context --workers N` (default 4)
+- `--allow-dirty` (permit an LCM-X tree with uncommitted changes; recorded as
+  `<sha>-<content-sha256>-dirty`, hashing the tracked diff plus untracked names/content;
+  see [common.py](common.py))
+- `--allow-partial` (score incomplete runs or arms with unequal executed question sets
+  after a budget stop; declared question ids must still match)
+- `--pair-across-commits` (opt in to scoring different LCM-X commit identities;
+  default scoring requires matching commits and toolsets)
 
 Use `build-stores`, then `answer`, then `judge` with identical dataset, selection,
 split and output arguments. `answer` verifies/builds missing stores before API
@@ -122,7 +139,9 @@ code change) that fall back to the real clock on threads without a question.
 
 The agentic system prompt states the history is not in the prompt and must be
 retrieved with the tools; single and full-context carry the evidence block.
-The budget is 12 tool calls and 200k cumulative reported `prompt_tokens`. The next
+For the metered OpenRouter loop, the budget is 12 tool calls and 200k cumulative
+reported `prompt_tokens` ([delivery.py](delivery.py)); subscription agentic readers
+use the MCP harness's 30-call cap described above. In the metered loop, the next
 call's size is the previous call's reported `prompt_tokens` plus ceil(chars/4) of
 the appended messages; a tool round is offered only while a forced final after it
 still fits, reserving the largest tool result seen (at least 8k tokens) plus 4k for
@@ -130,8 +149,8 @@ the tool-call turn. A tool result that would break the budget is replaced by an
 error. The forced final keeps `tools` with `tool_choice: "none"`; rows record
 `forced_final` and every call's `finish_reason` (reader `max_tokens` 32k).
 
-The spend ledger reserves conservative maximum request cost (including model
-pricing overrides) before dispatch. A timeout or missing accounting consumes its
+For the metered OpenRouter path, the spend ledger reserves conservative maximum
+request cost (including model pricing overrides) before dispatch. A timeout or missing accounting consumes its
 reservation as estimated cost; actual and estimated charges are distinguished
 per call. In-flight reservations prevent dispatch beyond the cap. 429/5xx and
 transport timeouts, and HTTP-200 error payloads, get at most three retries. Provider fallback is disabled;
@@ -147,8 +166,11 @@ run state (as is HTTP 402, an exhausted OpenRouter balance): those rows are `not
 `incomplete`, and `score` refuses unequal run sets unless `--allow-partial`.
 Every `--judge` model is required: a stop from any required judge excludes the row.
 Only `--agreement-judge` stops and failures leave required verdicts intact and drop the sample from agreement.
-`score` also requires equal commits, offered toolsets, split label, dataset and id-list hashes.
-Explicit `--pair-across-commits` permits toolset changes and records each arm's toolset. Agreement uses only
+By default, `score` requires equal LCM-X commits, offered toolsets, split label,
+dataset and id-list hashes. Explicit `--pair-across-commits` requires at least two
+distinct LCM-X commit identities, permits toolset changes and records each arm's
+commit and toolset. Harness identity and the other pairing checks still apply
+([score.py](score.py)). Agreement uses only
 valid paired verdicts and reports its N. Paired comparisons exclude a question
 if either arm skipped it. Bootstrap uses 10,000 resamples with seed 1189.
 
