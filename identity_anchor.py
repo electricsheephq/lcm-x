@@ -323,7 +323,8 @@ class IdentityAnchorMixin:
             return {(float(r["observed_at"]), form) for form in forms_of[id(r)]}
         forbidden = self._identity_anchor_alias_uid_keys(
             rows, getattr(rows, "canonical_stamps", None), keys_of, occurrences, identity_messages)
-        for store_id, idx in _match_occurrences(rows, keys_of, occurrences, forbidden=forbidden).items():
+        skipped = set()
+        for store_id, idx in _match_occurrences(rows, keys_of, occurrences, forbidden=forbidden, skipped=skipped).items():
             consumed.add(store_id)
             matched[idx] = [next(r for r, _forms in by_stamp[stamps[idx]] if int(r["store_id"]) == store_id)]
             if idx >= start:
@@ -383,7 +384,7 @@ class IdentityAnchorMixin:
         for idx in list(plan["remainders"]):
             if idx in plan["replayed"]:
                 del plan["remainders"][idx]
-        rejected = {idx for _sid, idx in forbidden if idx not in matched and idx < plan["cursor"]}
+        rejected = {idx for _sid, idx in forbidden - skipped if idx not in matched and idx < plan["cursor"]}
         if rejected:  # a rejected edge is not positional proof that the occurrence was stored
             plan["cursor"] = min(rejected)
             plan["replayed"].update(matched)

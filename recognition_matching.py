@@ -67,7 +67,7 @@ def _decompositions(content: str, texts: set[str], *, partial: bool) -> list[tup
     return out
 
 
-def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequence[tuple[Any, Any]], *, forbidden=frozenset()) -> dict[int, Any]:
+def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequence[tuple[Any, Any]], *, forbidden=frozenset(), skipped=None) -> dict[int, Any]:
     """``{store_id: occurrence}``: a maximum matching of stored ``rows`` (store order; a row listed twice, e.g.
     under an alternate stamp, is one row) to view ``occurrences`` ``[(occurrence, key)]`` (view order) by any key
     of ``keys_of(row)``, each side once. A row takes its first key with a free occurrence, else an augmenting
@@ -75,7 +75,9 @@ def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequen
     admissible key get what an in-order walk gave them. Deterministic; O(rows + occurrences + keys) memory.
     Rows with the same keys are one type and a search walks types, not rows. The searches of one call share a
     work budget (key and type visits); once it is spent the remaining rows take only a free key of their own, the
-    result stays a valid deterministic matching that may fall short of maximum, and one WARNING (counts) is logged."""
+    result stays a valid deterministic matching that may fall short of maximum, and one WARNING (counts) is logged.
+    If forbidden-pair repair exhausts that budget, its unfinished connected key groups retain the base assignment;
+    their forbidden pairs are returned through ``skipped`` and a count-only debug diagnostic records the skip."""
     slots: dict[Any, list[Any]] = defaultdict(list)
     for occurrence, key in occurrences:
         slots[key].append(occurrence)
@@ -157,6 +159,7 @@ def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequen
             result[sid] = slots[k][taken[k]]
             taken[k] += 1
     if any((sid, occurrence) in forbidden for sid, occurrence in result.items()):
+        base, unfinished = result.copy(), set()
         result = {sid: occurrence for sid, occurrence in result.items() if (sid, occurrence) not in forbidden}
         owners = {occurrence: sid for sid, occurrence in result.items()}
         key_of = dict(occurrences)
@@ -171,6 +174,7 @@ def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequen
                 del free[key_of[direct[1]]][direct[1]]
                 continue
             if spent:
+                unfinished.add(sid)
                 continue
             parents, queue, seen = {sid: (None, None)}, [sid], set()
             endpoint = None
@@ -192,6 +196,8 @@ def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequen
                         queue.append(holder)
                 if endpoint or spent:
                     break
+            if spent:
+                unfinished.add(sid)
             if endpoint:
                 del free[key_of[endpoint[1]]][endpoint[1]]
             # Commit only a complete augmenting path. Exhaustion changes no held edge.
@@ -200,6 +206,29 @@ def _match_occurrences(rows: Iterable[Row], keys_of: KeysOf, occurrences: Sequen
                 result[current] = occurrence
                 owners[occurrence] = current
                 endpoint = parents[current]
+        if unfinished:
+            # Keys connected through a row form one assignment group. Roll back the
+            # whole unfinished group, including earlier repairs, to the base mapping.
+            by_key = defaultdict(list)
+            for sid, keys in kinds.items():
+                for key in keys:
+                    by_key[key].append(sid)
+            pending, seen_keys = list(unfinished), set()
+            for sid in pending:
+                for key in kinds[sid]:
+                    if key in seen_keys:
+                        continue
+                    seen_keys.add(key)
+                    for other in by_key[key]:
+                        if other not in unfinished:
+                            unfinished.add(other)
+                            pending.append(other)
+            result = {sid: occurrence for sid, occurrence in result.items() if sid not in unfinished}
+            result.update((sid, occurrence) for sid, occurrence in base.items() if sid in unfinished)
+            ignored = {pair for pair in forbidden if pair[0] in unfinished}
+            if skipped is not None:
+                skipped.update(ignored)
+            logger.debug("LCM identity-anchor host UID guard_skipped_budget: count=%d", len(ignored))
     if spent:
         logger.warning("LCM identity-anchor matching spent its work budget %d: rows=%d occurrences=%d keys=%d matched=%d",
                        budget, len(kinds), len(occurrences), len(slots), len(result))

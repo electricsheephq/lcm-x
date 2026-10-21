@@ -38,13 +38,13 @@ def test_exhausted_repair_keeps_every_original_allowed_occurrence(monkeypatch):
     from hermes_lcm import recognition_matching as matching
 
     # The first edge is forbidden. Repair would need to displace two held edges;
-    # stop inside that path and require the original allowed assignment verbatim.
+    # stop inside that path and require the entire original base assignment verbatim.
     monkeypatch.setattr(matching, "_MATCH_WORK_PER_ITEM", 0)
     monkeypatch.setattr(matching, "_MATCH_WORK_FLOOR", 2)
     stored = [{"store_id": i} for i in range(3)]
     result = matching._match_occurrences(stored, lambda r: ["k"], [(i, "k") for i in range(3)],
                                         forbidden={(0, 0), (0, 2), (1, 0)})
-    assert result == {1: 1, 2: 2}
+    assert result == {0: 0, 1: 1, 2: 2}
 
 
 def test_allowed_matching_is_maximum_up_to_seven(caplog):
