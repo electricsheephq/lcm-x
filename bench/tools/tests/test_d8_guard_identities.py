@@ -370,6 +370,13 @@ def test_writer_identity_mismatch_is_incomplete(tmp_path, field):
     assert compare_runs(candidate, baseline, subset=True)["pass"]
     edit_writer_run(candidate, field, "changed-" + field)
     result = compare_runs(candidate, baseline, subset=True)
+    if field == "questionSetSha256":
+        assert not result["INCOMPLETE"]
+        assert result["pass"]
+        assert result["identity_differences"] == {field: {
+            "candidate": "changed-" + field,
+            "baseline": json.loads((baseline / "report.json").read_text())[field]}}
+        return
     assert result["INCOMPLETE"]
     assert not result["pass"]
     assert f"identity mismatch: {field}" in result["reason"]
