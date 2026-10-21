@@ -1,0 +1,44 @@
+"""Re-score the public-safe snapshots: python SCORER.txt (stdlib only)."""
+from collections import defaultdict
+import json
+from pathlib import Path
+import statistics
+
+root = Path(__file__).parent
+samples = json.loads((root / 'SAMPLES.json').read_text())
+expected = json.loads((root / 'SUMMARY.json').read_text())
+for label in ('phase1', 'final'):
+    rows = samples[label]
+    groups = defaultdict(list)
+    for row in rows:
+        if row['phase'] == 'timing':
+            groups[row['candidate'], row['query'], row['busy']].append(row)
+    for summary in expected[label]['table']:
+        candidate = summary.get('candidate', 'product')
+        group = groups[candidate, summary['query'], summary['busy']]
+        times = [row['wall_s'] for row in group]
+        assert len(group) == summary['n'] == 5
+        assert statistics.median(times) == summary['median_s']
+        assert min(times) == summary['min_s'] and max(times) == summary['max_s']
+        assert sum(row['timeout'] for row in group) == summary['timeouts']
+    ranked = {(row['candidate'], row['query']): row for row in rows if row['phase'] == 'ranking'}
+    queries = {query for candidate, query in ranked if candidate == 'stock'}
+    candidates = ('D', 'D+B', 'A+B+D') if label == 'phase1' else ('product',)
+    for candidate in candidates:
+        comparison = expected[label]['ranking'][candidate] if label == 'phase1' else expected[label]['ranking']
+        pairs = [(ranked['stock', query], ranked[candidate, query]) for query in queries]
+        assert len(pairs) == comparison['n'] == 51
+        assert sum(a['ids'] == b['ids'] for a, b in pairs) == comparison['ids_identical'] == 51
+        assert sum(a['payload_sha256'] == b['payload_sha256'] for a, b in pairs) == comparison['payloads_identical'] == 51
+        drain = [row for row in rows if row['phase'] == 'deadline' and row['candidate'] == candidate]
+        target = expected[label]['deadlines'][candidate] if label == 'phase1' else expected[label]['deadline']
+        assert len(drain) == target['n'] == 5
+        assert max(row['drain_after_deadline_s'] for row in drain) == target['max_drain_s']
+    assert all(row['slots'] == 4 for row in rows)
+for summary in expected['profile']:
+    times = [row['wall_s'] for row in samples['profile'] if row['phase'] == summary['phase'] and row['index'] == summary['index']]
+    assert len(times) == summary['n'] == 5
+    assert statistics.median(times) == summary['median_s']
+    assert min(times) == summary['min_s'] and max(times) == summary['max_s']
+assert expected['phase1']['qualified'] == ['A+B+D'] and expected['final']['passed']
+print('PASS: profile, timing, 51-query identity, deadline drain, and slot summaries match raw snapshots')

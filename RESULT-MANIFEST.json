@@ -1,0 +1,78 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1586-sqlcost-v1-public",
+  "project": "lcm-x",
+  "kind": "eval",
+  "status": "settled",
+  "owner_lane": "lcmx-1586-sqlcost",
+  "claim_class": "advisory",
+  "created": "2026-10-21T11:31:38Z",
+  "settled": "2026-10-21T11:33:17Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "4b8d5ce6f47e4e2ce9384ae1b768ab87a481c3a0",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python SCORER.txt",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "sqlcost-v1",
+      "metric": "Q2_busy_median_s",
+      "value": 0.4311399580037687,
+      "n": 5,
+      "source": "SUMMARY.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "SUMMARY.json",
+      "role": "per-item",
+      "sha256": "56c3bc3a0636f162d81c7cdf8881d87975e3da03a287d11dce0153f08ae14051",
+      "bytes": 13388
+    },
+    {
+      "path": "SAMPLES.json",
+      "role": "per-item",
+      "sha256": "c4acbb7499cbc310aaee344a9a5810af85146947098c4fc0724081fb546c1e2a",
+      "bytes": 602114
+    },
+    {
+      "path": "CODE.json",
+      "role": "per-item",
+      "sha256": "d351f3365dbd5b6cdf00ba3e5628db3722f926467856ba5db70e4eb3969f1274",
+      "bytes": 536
+    },
+    {
+      "path": "SCORER.txt",
+      "role": "per-item",
+      "sha256": "70ce6a47af73edf8704458f414a2ea3a4b86684e44e2497e5c5d1ab53baf9768",
+      "bytes": 2718
+    }
+  ],
+  "rescore": {
+    "command": "python SCORER.txt",
+    "inputs": [
+      "SAMPLES.json",
+      "SUMMARY.json",
+      "CODE.json",
+      "SCORER.txt"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "CODE.json",
+    "RESULT.md",
+    "SAMPLES.json",
+    "SCORER.txt",
+    "SUMMARY.json"
+  ]
+}

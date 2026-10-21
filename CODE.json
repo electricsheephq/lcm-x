@@ -1,0 +1,14 @@
+{
+  "phase1_source": "33e0b5afd6d3d4d88a0a8cc61139a822554fdea2",
+  "base": "7582e302127d7d36ecbcb54e816309c484d7b7dc",
+  "head": "4b8d5ce6f47e4e2ce9384ae1b768ab87a481c3a0",
+  "contains_pr_1745": true,
+  "branch": "fix/1586-fulltext-cost",
+  "product_changed_lines": 93,
+  "test_added_lines": 332,
+  "generated_trace_changed_lines": 6,
+  "product_files_sha256": {
+    "store.py": "f9bd9e553e90aa6bf44ba5a4ddf3434797ea872a44cdd48073086a2df0b2f416",
+    "tools.py": "bf135e2777bd1974ba342796a585119009da2c8b033515cfd6dad68484ce6f89"
+  }
+}

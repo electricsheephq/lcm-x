@@ -1,0 +1,571 @@
+{
+  "profile": [
+    {
+      "index": "stem",
+      "phase": "P1",
+      "n": 5,
+      "median_s": 0.00790237498586066,
+      "min_s": 0.007602375000715256,
+      "max_s": 0.0115746250085067
+    },
+    {
+      "index": "stem",
+      "phase": "P2",
+      "n": 5,
+      "median_s": 0.1661397090065293,
+      "min_s": 0.14890237501822412,
+      "max_s": 0.18946583301294595
+    },
+    {
+      "index": "stem",
+      "phase": "P3",
+      "n": 5,
+      "median_s": 0.1754655830154661,
+      "min_s": 0.16424675000598654,
+      "max_s": 0.1774089999962598
+    },
+    {
+      "index": "stem",
+      "phase": "P4",
+      "n": 5,
+      "median_s": 0.2787122080044355,
+      "min_s": 0.2709107499977108,
+      "max_s": 0.28583749997778796
+    },
+    {
+      "index": "stem",
+      "phase": "P5",
+      "n": 5,
+      "median_s": 1.665694083989365,
+      "min_s": 1.5273867910145782,
+      "max_s": 1.7351158749952447
+    },
+    {
+      "index": "plain",
+      "phase": "P1",
+      "n": 5,
+      "median_s": 0.007609291991684586,
+      "min_s": 0.00758933401084505,
+      "max_s": 0.007827791007002816
+    },
+    {
+      "index": "plain",
+      "phase": "P2",
+      "n": 5,
+      "median_s": 0.16186345898313448,
+      "min_s": 0.15419649999239482,
+      "max_s": 0.17009541700826958
+    },
+    {
+      "index": "plain",
+      "phase": "P3",
+      "n": 5,
+      "median_s": 0.1747257079987321,
+      "min_s": 0.16764229102409445,
+      "max_s": 0.18147400001180358
+    },
+    {
+      "index": "plain",
+      "phase": "P4",
+      "n": 5,
+      "median_s": 0.27792791699175723,
+      "min_s": 0.2690457919961773,
+      "max_s": 0.28137816599337384
+    },
+    {
+      "index": "plain",
+      "phase": "P5",
+      "n": 5,
+      "median_s": 1.5131271670106798,
+      "min_s": 1.3993159160017967,
+      "max_s": 1.8061263329873327
+    }
+  ],
+  "phase1": {
+    "table": [
+      {
+        "candidate": "A+B+D",
+        "query": "Recall the filler from a turn",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.24094258301192895,
+        "min_s": 0.2290593330108095,
+        "max_s": 0.24221595900598913,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "candidate": "A+B+D",
+        "query": "Recall the filler from a turn",
+        "busy": true,
+        "n": 5,
+        "median_s": 0.4334889169840608,
+        "min_s": 0.4110855420003645,
+        "max_s": 0.43886699998984113,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "candidate": "A+B+D",
+        "query": "VALUE_S1586_SHARD000007_0000",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.19581508298870176,
+        "min_s": 0.19176604200038128,
+        "max_s": 0.20166637501097284,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "candidate": "A+B+D",
+        "query": "VALUE_S1586_SHARD000007_0000",
+        "busy": true,
+        "n": 5,
+        "median_s": 0.4122079160006251,
+        "min_s": 0.39247945800889283,
+        "max_s": 0.4270208330126479,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "candidate": "A+B+D",
+        "query": "What turn was acknowledged",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.22152774999267422,
+        "min_s": 0.21345191600266844,
+        "max_s": 0.23984091699821874,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "candidate": "A+B+D",
+        "query": "What turn was acknowledged",
+        "busy": true,
+        "n": 5,
+        "median_s": 0.41236658301204443,
+        "min_s": 0.4066661670221947,
+        "max_s": 0.4345398750156164,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "candidate": "A+B+D",
+        "query": "Which turn contains a value",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.20141283300472423,
+        "min_s": 0.19169612499536015,
+        "max_s": 0.20847133302595466,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "candidate": "A+B+D",
+        "query": "Which turn contains a value",
+        "busy": true,
+        "n": 5,
+        "median_s": 0.4056881249998696,
+        "min_s": 0.3829092080122791,
+        "max_s": 0.4343349160044454,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "candidate": "D",
+        "query": "Recall the filler from a turn",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.23813287500524893,
+        "min_s": 0.23060645800433122,
+        "max_s": 0.24140712499502115,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D",
+        "query": "Recall the filler from a turn",
+        "busy": true,
+        "n": 5,
+        "median_s": 8.01740474998951,
+        "min_s": 8.011855333024869,
+        "max_s": 8.02655512499041,
+        "timeouts": 5,
+        "sql_rows": [
+          0
+        ]
+      },
+      {
+        "candidate": "D",
+        "query": "VALUE_S1586_SHARD000007_0000",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.19208916599745862,
+        "min_s": 0.18819749998510815,
+        "max_s": 0.20099437498720363,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D",
+        "query": "VALUE_S1586_SHARD000007_0000",
+        "busy": true,
+        "n": 5,
+        "median_s": 8.020052500010934,
+        "min_s": 8.016592291998677,
+        "max_s": 8.042606833012542,
+        "timeouts": 5,
+        "sql_rows": [
+          0
+        ]
+      },
+      {
+        "candidate": "D",
+        "query": "What turn was acknowledged",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.22346541701699607,
+        "min_s": 0.21332170901587233,
+        "max_s": 0.23994954099180177,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D",
+        "query": "What turn was acknowledged",
+        "busy": true,
+        "n": 5,
+        "median_s": 8.011932084016735,
+        "min_s": 8.009050958993612,
+        "max_s": 8.029795041016769,
+        "timeouts": 5,
+        "sql_rows": [
+          0
+        ]
+      },
+      {
+        "candidate": "D",
+        "query": "Which turn contains a value",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.198815999989165,
+        "min_s": 0.19181649998063222,
+        "max_s": 0.205034416023409,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D",
+        "query": "Which turn contains a value",
+        "busy": true,
+        "n": 5,
+        "median_s": 8.012145292013884,
+        "min_s": 8.009646499995142,
+        "max_s": 8.018547333980678,
+        "timeouts": 5,
+        "sql_rows": [
+          0
+        ]
+      },
+      {
+        "candidate": "D+B",
+        "query": "Recall the filler from a turn",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.23565662500914186,
+        "min_s": 0.22495374997379258,
+        "max_s": 0.2388396250025835,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D+B",
+        "query": "Recall the filler from a turn",
+        "busy": true,
+        "n": 5,
+        "median_s": 1.0077285000006668,
+        "min_s": 0.8663604999892414,
+        "max_s": 1.3342533750110306,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D+B",
+        "query": "VALUE_S1586_SHARD000007_0000",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.19263187499018386,
+        "min_s": 0.18919679100508802,
+        "max_s": 0.19869070901768282,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D+B",
+        "query": "VALUE_S1586_SHARD000007_0000",
+        "busy": true,
+        "n": 5,
+        "median_s": 1.0425417090009432,
+        "min_s": 0.6972162500023842,
+        "max_s": 1.3144608330039773,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D+B",
+        "query": "What turn was acknowledged",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.21841891697840765,
+        "min_s": 0.21234295799513347,
+        "max_s": 0.2334348750009667,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D+B",
+        "query": "What turn was acknowledged",
+        "busy": true,
+        "n": 5,
+        "median_s": 1.0623686249891762,
+        "min_s": 0.949921916006133,
+        "max_s": 1.1870575419743545,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D+B",
+        "query": "Which turn contains a value",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.19897387499804609,
+        "min_s": 0.18809329101350158,
+        "max_s": 0.20242874999530613,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      },
+      {
+        "candidate": "D+B",
+        "query": "Which turn contains a value",
+        "busy": true,
+        "n": 5,
+        "median_s": 1.0620724170003086,
+        "min_s": 0.8672087079903577,
+        "max_s": 1.151023874990642,
+        "timeouts": 0,
+        "sql_rows": [
+          1000
+        ]
+      }
+    ],
+    "ranking": {
+      "D": {
+        "n": 51,
+        "ids_identical": 51,
+        "payloads_identical": 51,
+        "all_completed": true,
+        "mismatches": []
+      },
+      "D+B": {
+        "n": 51,
+        "ids_identical": 51,
+        "payloads_identical": 51,
+        "all_completed": true,
+        "mismatches": []
+      },
+      "A+B+D": {
+        "n": 51,
+        "ids_identical": 51,
+        "payloads_identical": 51,
+        "all_completed": true,
+        "mismatches": []
+      }
+    },
+    "deadlines": {
+      "D": {
+        "n": 5,
+        "max_drain_s": 0.14505183300934732,
+        "slots_restored": true,
+        "timeouts": 5,
+        "all_timeouts_max_drain_s": 0.20185566699365154
+      },
+      "D+B": {
+        "n": 5,
+        "max_drain_s": 0.08312308299355209,
+        "slots_restored": true,
+        "timeouts": 5,
+        "all_timeouts_max_drain_s": 0.08312308299355209
+      },
+      "A+B+D": {
+        "n": 5,
+        "max_drain_s": 0.10374441699241288,
+        "slots_restored": true,
+        "timeouts": 5,
+        "all_timeouts_max_drain_s": 0.10374441699241288
+      }
+    },
+    "qualified": [
+      "A+B+D"
+    ],
+    "total_samples": 347,
+    "all_slots_restored": true,
+    "phase_counts": {
+      "smoke": 8,
+      "timing": 120,
+      "ranking": 204,
+      "deadline": 15
+    }
+  },
+  "final": {
+    "table": [
+      {
+        "query": "Recall the filler from a turn",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.2449448750121519,
+        "min_s": 0.23970462501165457,
+        "max_s": 0.4488814590149559,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "query": "Recall the filler from a turn",
+        "busy": true,
+        "n": 5,
+        "median_s": 0.4311399580037687,
+        "min_s": 0.4069622080132831,
+        "max_s": 0.4489592919999268,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "query": "VALUE_S1586_SHARD000007_0000",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.0013733329833485186,
+        "min_s": 0.00113795799552463,
+        "max_s": 0.010933957993984222,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "query": "VALUE_S1586_SHARD000007_0000",
+        "busy": true,
+        "n": 5,
+        "median_s": 0.19744508399162441,
+        "min_s": 0.16574316698824987,
+        "max_s": 0.21387804200639948,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "query": "What turn was acknowledged",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.22621895899646915,
+        "min_s": 0.21848658300586976,
+        "max_s": 5.704882416001055,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "query": "What turn was acknowledged",
+        "busy": true,
+        "n": 5,
+        "median_s": 0.4200194589793682,
+        "min_s": 0.41184645899920724,
+        "max_s": 0.4254098340170458,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "query": "Which turn contains a value",
+        "busy": false,
+        "n": 5,
+        "median_s": 0.20210125000448897,
+        "min_s": 0.20067025002208538,
+        "max_s": 0.20588933399994858,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      },
+      {
+        "query": "Which turn contains a value",
+        "busy": true,
+        "n": 5,
+        "median_s": 0.4019620000035502,
+        "min_s": 0.3685388330195565,
+        "max_s": 0.4181248329987284,
+        "timeouts": 0,
+        "sql_rows": [
+          1
+        ]
+      }
+    ],
+    "ranking": {
+      "n": 51,
+      "ids_identical": 51,
+      "payloads_identical": 51,
+      "all_completed": true
+    },
+    "deadline": {
+      "n": 5,
+      "timeouts": 5,
+      "max_drain_s": 0.08969300001626834
+    },
+    "all_slots_restored": true,
+    "total_samples": 147,
+    "passed": true
+  }
+}
