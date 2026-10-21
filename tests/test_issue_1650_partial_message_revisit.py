@@ -8,7 +8,70 @@ import pytest
 from hermes_lcm import command, embedding_maintenance as maintenance, tools
 from hermes_lcm.embedding_provider import EmbeddedDocumentBatch
 from tests.test_issue_1014_incremental_embedding import FakeProvider
-from tests.test_issue_1586_local_pacing import local_store as local_store
+from tests.test_issue_1586_local_pacing import Clock, local_store as local_store
+
+
+def test_unsliced_operation_budget_expiry_resumes_automatically(local_store, monkeypatch):
+    """#1103: a budget cut between batches must not strand the cursor message."""
+    engine, _ = local_store
+    config = dataclasses.replace(engine._config, embedding_max_batch_items=3)
+    db = engine._store.db_path
+    engine._store.append("seed", {
+        "role": "assistant",
+        "content": "".join(f"Budget sentence {i}: amber detail. " for i in range(200)),
+    })
+    with sqlite3.connect(db) as conn:
+        messages = conn.execute("SELECT store_id, role, content FROM messages ORDER BY store_id").fetchall()
+    chunks = command.chunk_message(*messages[0], policy="conversational")
+    assert len(chunks) == 4  # Exactly two provider batches: three chunks, then one.
+    expected = {chunk.chunk_id for chunk in chunks}
+    clock = Clock()
+    calls = []
+    reports = []
+    real_run = command._chunk_backfill_run
+
+    class BudgetExpiry(FakeProvider):
+        def embed_document_batches(self, texts, *, before_dispatch):
+            calls.append(list(texts))
+            yield from super().embed_document_batches(texts, before_dispatch=before_dispatch)
+            if len(calls) == 1:
+                clock.now += 2.0  # Commit batch one, then exceed the operation budget.
+
+    def record_run(*args, **kwargs):
+        assert kwargs["incremental"] is True
+        assert kwargs.get("maintenance_slice", 0.0) == 0.0
+        result = real_run(*args, **kwargs)
+        if not kwargs["retry_uncertain"]:
+            reports.append(result)
+        return result
+
+    monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BUDGET_S", "1")
+    monkeypatch.setattr(command, "time", clock)
+    monkeypatch.setattr(command, "resolve_provider", lambda c, **_k: BudgetExpiry(c.embedding_provider, c.embedding_model))
+    monkeypatch.setattr(command, "_chunk_backfill_run", record_run)
+    first = maintenance.run_incremental_embedding_pass(db, config)
+    assert "chunks=partial:3" in first, first
+    assert reports[0]["stop_reason"] == "op_budget_exhausted", reports[0]
+    assert reports[0]["selected"] == 4 and reports[0]["remaining"] > 0, reports[0]
+    assert not reports[0]["failed"] and reports[0]["error"] is None, reports[0]
+    with sqlite3.connect(db) as conn:
+        before = dict(conn.execute("SELECT chunk_id, vec FROM lcm_chunk_vectors"))
+        assert set(before) == {chunk.chunk_id for chunk in chunks[:3]}
+        assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_backfill_inflight").fetchone()[0] == 0
+
+    # Same budget and clock, no manual/full backfill or stop-event reset.
+    second = maintenance.run_incremental_embedding_pass(db, config)
+    assert "chunks=complete:1" in second, second
+    assert reports[1]["stop_reason"] is None and reports[1]["remaining"] == 0, reports[1]
+    assert not reports[1]["failed"] and reports[1]["error"] is None, reports[1]
+    assert calls == [[chunk.text for chunk in chunks[:3]], [chunks[3].text]]
+    with sqlite3.connect(db) as conn:
+        after = dict(conn.execute("SELECT chunk_id, vec FROM lcm_chunk_vectors"))
+        assert set(after) == expected
+        assert all(after[key] == value for key, value in before.items())
+        assert conn.execute("SELECT COUNT(*) FROM lcm_chunk_meta").fetchone()[0] == len(expected)
+        assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_backfill_inflight").fetchone()[0] == 0
+        assert conn.execute("SELECT store_id, role, content FROM messages ORDER BY store_id").fetchall() == messages
 
 
 @pytest.mark.parametrize("slice_s", [0.0, 1.0])
