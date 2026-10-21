@@ -3663,6 +3663,7 @@ class LCMEngine(
         return [self._session_id, *self._rotation_predecessor_session_ids(self._session_id, max_hops=2**63 - 1)]
 
     def _plan_user_carry(self, tail, retained=None, anchor_source=(), anchor_part=None, role="user", budget=None):
+        self.__dict__.pop("_pending_carry_anchor_store_id", None)
         cap = max(0, int(self._config.user_carry_tokens))
         requested = getattr(self, "_carry_conversation_id", None)
         if requested and requested != self._conversation_id:
@@ -3670,20 +3671,7 @@ class LCMEngine(
         if not cap or not self._session_id or self._bypasses_lcm_context_management():
             return ""
         cap = min(cap, budget) if budget is not None else cap
-        if cap <= 0:
-            return ""
         try:
-            view = [*([retained] if retained else []), *tail]
-            occurrences, v4 = self._replay_occurrences(view)
-            rows = [(m, o) for m, o in zip(view, occurrences)
-                    if (o[1] is not None if v4 else not self._is_verified_replay_scaffold_message(m))]
-            raw = [m for m, _ in rows if not (m.get("role") == "tool" and m.get("tool_call_id")
-                   and m.get("content") == self._missing_tool_result_stub(m["tool_call_id"])["content"])]
-            rows = [(m, o) for m, o in rows if m in raw]
-            mapped = self._get_store_id_map_for_messages(raw, [o for _, o in rows] if v4 else None)
-            if any(id(m) not in mapped for m in raw):
-                return ""  # unresolved retained occurrences cannot define a safe older range
-            excluded = set(mapped.values())
             source_map = self._get_store_id_map_for_messages(list(anchor_source))
             if anchor_part:
                 latest = next((m for m in reversed(anchor_source) if m.get("role") == "user"
@@ -3701,9 +3689,42 @@ class LCMEngine(
                     if any(m is latest and entry.generated_span is not None
                            for m, (entry, _) in zip(anchor_source, occurrences)):
                         anchor_id = proof.get("carry_anchor_store_id")
+                        if anchor_id is None:
+                            # Current session first, then its nearest rotation predecessors.
+                            for sid in self._user_carry_lineage():
+                                prior = self._durable_commit_proof_payload(sid) or {}
+                                if prior.get("carry_anchor_store_id") is not None:
+                                    anchor_id = prior["carry_anchor_store_id"]
+                                    break
+                if anchor_id is None:
+                    # An earlier leaf pass may have retired both in-memory maps.
+                    # Text is a last resort, scoped to real rows in this lineage;
+                    # equal authored turns are ambiguous and must not pick one.
+                    from .db_bootstrap import owned_conversation_values
+                    owned = owned_conversation_values(self._store._conn, self._conversation_id)
+                    matches = [row for sid in self._user_carry_lineage()
+                               for row in self._store.find_session_rows_by_content(
+                                   sid, "user", normalize_content_value(latest.get("content")) or "", 2**63 - 1)
+                               if row.get("conversation_id") in owned and self._is_durable_real_user_row(row)]
+                    if len(matches) == 1:
+                        anchor_id = int(matches[0]["store_id"])
                 if anchor_id is None:
                     return ""
                 self._pending_carry_anchor_store_id = anchor_id
+            if cap <= 0:
+                return ""
+            view = [*([retained] if retained else []), *tail]
+            occurrences, v4 = self._replay_occurrences(view)
+            rows = [(m, o) for m, o in zip(view, occurrences)
+                    if (o[1] is not None if v4 else not self._is_verified_replay_scaffold_message(m))]
+            raw = [m for m, _ in rows if not (m.get("role") == "tool" and m.get("tool_call_id")
+                   and m.get("content") == self._missing_tool_result_stub(m["tool_call_id"])["content"])]
+            rows = [(m, o) for m, o in rows if m in raw]
+            mapped = self._get_store_id_map_for_messages(raw, [o for _, o in rows] if v4 else None)
+            if any(id(m) not in mapped for m in raw):
+                return ""  # unresolved retained occurrences cannot define a safe older range
+            excluded = set(mapped.values())
+            if anchor_part:
                 excluded.add(anchor_id)
             cutoff = min(mapped.values()) if mapped else max(source_map.values(), default=0) + 1
             lineage = self._user_carry_lineage()
@@ -6566,8 +6587,9 @@ class LCMEngine(
         if not isinstance(content, str):
             return None
         occurrence = (getattr(self, "_compress_occurrences", None) or {}).get(id(msg))
-        packet = self._carry_occurrence_packet(occurrence)
-        if not packet and self._config.user_carry_tokens > 0:
+        carry_enabled = self._config.user_carry_tokens > 0 or self._has_user_carry_history()
+        packet = self._carry_occurrence_packet(occurrence) if carry_enabled else None
+        if not packet and carry_enabled:
             entry = _project_emitted_occurrences([msg], proof=self._active_emission_proof()).entries[0]
             if self._carry_occurrence_packet((entry, entry.effective_identity)):
                 return None  # an emitted span at an unproven occurrence can be a user's paste
@@ -6602,7 +6624,7 @@ class LCMEngine(
     def _is_replayed_context_scaffold_message(self, msg: Dict[str, Any]) -> bool:
         """Return true for active-context scaffolding that should not be re-ingested."""
         occurrence = (getattr(self, "_compress_occurrences", None) or {}).get(id(msg))
-        if self._carry_occurrence_packet(occurrence):
+        if (self._config.user_carry_tokens > 0 or self._has_user_carry_history()) and self._carry_occurrence_packet(occurrence):
             return occurrence[1] is None
         if self._is_registered_folded_tail_message(msg):
             return False

@@ -59,7 +59,7 @@ OBJECTIVE = "[Current user objective preserved from compacted history]"
 PAD = " alpha beta gamma delta epsilon" * 40
 # Independent frozen data inventory, including external reconciliation side effects.
 OBSERVED_ATTRIBUTES = frozenset({
-    '_carry_conversation_id', '_pending_carry_anchor_store_id',
+    '_carry_conversation_id', '_carry_history_seen', '_pending_carry_anchor_store_id',
     '_LCM_SUMMARY_PART_HEADER_RE', '_compiled_ignore_message_patterns', '_compress_run',
     '_config', '_conversation_id', '_current_compress_placeholder_identity_counts',
     '_dag', '_hermes_home', '_kept_reply_mark', '_last_compacted_store_id', '_last_gate_tokens',
@@ -107,9 +107,14 @@ def engine_attributes(source: str) -> set[str]:
                         "Dynamic self lookup: update engine_attributes and OBSERVED_ATTRIBUTES/EXTERNAL_ATTRIBUTES.\n"
                         + TRACE_GUIDANCE)
                 attr = key.value
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == '__dict__'
+                    and isinstance(node.func.value.value, ast.Name) and node.func.value.value.id == 'self'
+                    and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                found.add(node.args[0].value)
             if attr in methods:
                 pending.append(attr)
-            elif attr is not None and attr != HOLDER_NAME and not callable(getattr(engine_module.LCMEngine, attr, None)):
+            elif attr is not None and attr not in {HOLDER_NAME, '__dict__'} and not callable(getattr(engine_module.LCMEngine, attr, None)):
                 found.add(attr)
     return found
 
@@ -424,7 +429,7 @@ def setup(engine: Any, case: Scenario, patch: pytest.MonkeyPatch) -> tuple[Messa
 def snapshot(engine: Any, canonical: Canonical, result: Any = None) -> dict[str, Any]:
     state = {}
     for name in sorted(OBSERVED_ATTRIBUTES):
-        if name in ('_carry_conversation_id', '_pending_carry_anchor_store_id') and not hasattr(engine, name):
+        if name in ('_carry_conversation_id', '_carry_history_seen', '_pending_carry_anchor_store_id') and not hasattr(engine, name):
             continue  # default-off has no carry state; enabled state remains observable
         value = observed_attribute(engine, name)
         if name == '_store':

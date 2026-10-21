@@ -748,6 +748,7 @@ class CompactionMixin:
             budget.pre_leaf.install([(self._store, "_conn"), (self._store, "_write_lock"), (self._dag, "_conn"),
                                      (self._dag, "_db_lock"), (self._lifecycle, "_conn"), (self._lifecycle, "_lock")])
             self._pending_emission_candidates = []
+            self.__dict__.pop("_pending_carry_anchor_store_id", None)
             self._survival_fit_emission = None
             self._compress_occurrences = None
             self._survival_fit_reason = None
@@ -1084,7 +1085,8 @@ class CompactionMixin:
                     self.__dict__.setdefault("_carry_history_seen", set()).add(self._conversation_id)
                     proof["input_emissions"] = history
                     proof["user_carry_output"] = emitted
-                if emitted and getattr(self, "_pending_carry_anchor_store_id", None) is not None:
+                if (getattr(self, "_pending_carry_anchor_store_id", None) is not None
+                        and any(item.get("kind") == "objective" for item in emissions)):
                     proof["carry_anchor_store_id"] = self._pending_carry_anchor_store_id
             for item in emissions:  # multiplicity witness for carried-forward proofs, which omit "output"
                 item["output_multiplicity"] = proof["output"].count(proof["output"][item["output_occurrence"]["index"]])
@@ -1878,6 +1880,23 @@ class CompactionMixin:
         self._compress_occurrences = {
             id(m): occurrence for m, occurrence in zip(state.working_messages, occurrences) if positions[id(m)] == 1
         } if v4 else None
+        if self._config.user_carry_tokens > 0 or self._has_user_carry_history():
+            # Ingest restores its registry on return. Rebuild carry authority for
+            # summarizer consumers too, including outputs the host never adopted.
+            sources = [self._active_emission_proof(),
+                       *[self._durable_commit_proof_payload(sid) for sid in self._user_carry_lineage()]]
+            for source in sources:
+                if not source:
+                    continue
+                for authority in (source, {**source, "output": [], "emissions": source.get("input_emissions", [])}):
+                    historical, _ = self._replay_occurrences(state.working_messages, authority)
+                    for message, occurrence in zip(state.working_messages, historical):
+                        key = id(message)
+                        if positions[key] == 1 and self._carry_occurrence_packet(occurrence):
+                            if self._compress_occurrences is None:
+                                self._compress_occurrences = {}
+                            if not self._carry_occurrence_packet(self._compress_occurrences.get(key)):
+                                self._compress_occurrences[key] = occurrence
         self._prepare_retained_user_anchor(state.working_messages)
         state.ingest_cleanup_changed_active_context = state.working_messages != messages
         # #651: below the host threshold, the automatic compress() a preflight
