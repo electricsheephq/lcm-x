@@ -6907,6 +6907,9 @@ class LCMEngine(
         return result
 
     def _ingest_messages(self, messages, **kwargs):
+        # Default-off ingest takes the original path without extra proof reads.
+        if self._config.user_carry_tokens <= 0 and not getattr(self, "_last_user_carry", None):
+            return self._ingest_messages_impl(messages, **kwargs)
         # Replay authority is the engine's scoped descriptor, never packet-shaped text.
         had_registry = "_compress_occurrences" in self.__dict__
         saved = getattr(self, "_compress_occurrences", None)

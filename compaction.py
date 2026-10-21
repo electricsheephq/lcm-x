@@ -1032,7 +1032,8 @@ class CompactionMixin:
         if self._bypasses_lcm_context_management():
             return
         try:
-            prior_carry_proof = self._durable_commit_proof_payload() or self._active_emission_proof()
+            prior_carry_proof = (self._durable_commit_proof_payload() or self._active_emission_proof()) if (
+                self._config.user_carry_tokens > 0 or getattr(self, "_last_user_carry", None)) else None
             self._compress_commit_proof = None
             if (
                 not self._session_id

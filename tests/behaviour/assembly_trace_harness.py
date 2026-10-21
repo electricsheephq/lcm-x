@@ -59,6 +59,7 @@ OBJECTIVE = "[Current user objective preserved from compacted history]"
 PAD = " alpha beta gamma delta epsilon" * 40
 # Independent frozen data inventory, including external reconciliation side effects.
 OBSERVED_ATTRIBUTES = frozenset({
+    '_carry_conversation_id',
     '_LCM_SUMMARY_PART_HEADER_RE', '_compiled_ignore_message_patterns', '_compress_run',
     '_config', '_conversation_id', '_current_compress_placeholder_identity_counts',
     '_dag', '_hermes_home', '_kept_reply_mark', '_last_compacted_store_id', '_last_gate_tokens',
@@ -423,6 +424,8 @@ def setup(engine: Any, case: Scenario, patch: pytest.MonkeyPatch) -> tuple[Messa
 def snapshot(engine: Any, canonical: Canonical, result: Any = None) -> dict[str, Any]:
     state = {}
     for name in sorted(OBSERVED_ATTRIBUTES):
+        if name in ('_carry_conversation_id',) and not hasattr(engine, name):
+            continue  # default-off has no carry state; enabled state remains observable
         value = observed_attribute(engine, name)
         if name == '_store':
             value = {table: [tuple(row) for row in engine._store._conn.execute(f'SELECT * FROM {table} ORDER BY 1')]
