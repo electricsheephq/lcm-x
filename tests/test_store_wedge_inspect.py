@@ -218,7 +218,9 @@ def test_cli_guards_unexpected_exceptions_and_serialization(tmp_path, monkeypatc
         monkeypatch.setattr(inspector, "inspect_store", fail)
     else:
         monkeypatch.setattr(inspector, "inspect_store", lambda *_a, **_k: {"healthy": False})
-        monkeypatch.setattr(inspector.json, "dumps", fail)
+        # A module-local double: patching json.dumps itself would also break
+        # unrelated background threads that serialize while this test runs.
+        monkeypatch.setattr(inspector, "json", SimpleNamespace(dumps=fail, loads=json.loads))
     code = inspector.main(["inspect", "--copy", str(path), "--session-id", "S",
                            "--conversation-id", "conv"])
     captured = capsys.readouterr()
