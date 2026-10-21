@@ -272,6 +272,10 @@ def _answer_ready_baseline(active_engine, question: str, payload: dict):
                     "content": quote,
                 }
             )
+        else:
+            continue
+        if hit.get("duplicate_store_ids"):
+            candidates[-1]["duplicate_store_ids"] = hit["duplicate_store_ids"]
     return tuple(candidates)
 
 

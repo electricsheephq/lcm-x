@@ -454,6 +454,8 @@ def _resolve_candidate(
             if key_name in operand and operand[key_name] is not None
         },
     }
+    if raw.get("duplicate_store_ids"):
+        public["duplicate_store_ids"] = raw["duplicate_store_ids"]
     return ResolvedCandidate(operand=operand, public=public), None
 
 

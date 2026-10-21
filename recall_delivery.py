@@ -214,6 +214,8 @@ def deliver_recall(
                 item["store_id"] = hit.get("store_id")
         else:
             item["store_id"] = hit.get("store_id")
+            if hit.get("duplicate_store_ids"):
+                item["duplicate_store_ids"] = hit["duplicate_store_ids"]
             if hit.get("chunk_span"):
                 item["chunk_span"] = hit["chunk_span"]
             if _hit_identity(hit) not in answer_ready_content and hit.get("store_id") is not None:
@@ -625,7 +627,11 @@ def _fts_anchor_delivered(
 ) -> bool:
     """Whether the FTS arm's anchored hit is among the returned ``hits`` (#950)."""
     anchor = _hit_identity(arm_hits["fts"][0])
-    return any(_hit_identity(hit) == anchor for hit in hits)
+    return any(
+        _hit_identity(hit) == anchor
+        or (anchor[0] == "message" and anchor[1] in hit.get("duplicate_store_ids", []))
+        for hit in hits
+    )
 
 
 # The opt-in empty-envelope call must not re-enter observer wrappers installed
