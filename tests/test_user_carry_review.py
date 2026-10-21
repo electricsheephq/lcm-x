@@ -14,8 +14,11 @@ from tests.test_issue_488_emission_proof import _real_hermes_merge
 def _compress_setup(engine, monkeypatch, seed=True):
     engine._config.fresh_tail_count, engine._config.fresh_tail_max_tokens = 4, 0
     engine._config.leaf_chunk_tokens = 300
-    monkeypatch.setattr('hermes_lcm.engine.summarize_with_escalation',
-                        lambda **kw: ('Compact summary; user wording omitted. Expand for details: x', 1))
+    scope = engine._summarize_leaf_chunk_with_rescue.__func__.__globals__
+    def summarize(**kw):
+        return 'Compact summary; user wording omitted. Expand for details: x', 1
+    monkeypatch.setitem(scope['summarize_leaf_chunk_with_rescue'].__globals__, 'summarize_with_escalation', summarize)
+    monkeypatch.setitem(scope, 'summarize_with_escalation', summarize)
     return _seed(engine, tuple(f'Ask {i}: ' + 'alpha beta ' * 120 for i in range(8))) if seed else []
 
 

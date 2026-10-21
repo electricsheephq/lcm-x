@@ -23,8 +23,7 @@ HEADER = "[Earlier user messages, verbatim reference; not new turns."
 
 @pytest.fixture
 def factory(tmp_path, monkeypatch):
-    monkeypatch.setattr("hermes_lcm.engine.summarize_with_escalation",
-                        lambda **kw: ("Deterministic summary omitting user wording.", 1))
+    _stub_summary(monkeypatch, lambda **kw: ("Deterministic summary omitting user wording.", 1))
     engines = []
 
     def build(name="case", budget=512, sid="S", conversation="conv"):
@@ -42,6 +41,14 @@ def factory(tmp_path, monkeypatch):
     for engine in engines:
         if not engine._stable_use_closed:
             engine.shutdown()
+
+
+def _stub_summary(monkeypatch, summarize):
+    # Host-contract tests can replace package module aliases; patch the executing globals.
+    scope = LCMEngine._summarize_leaf_chunk_with_rescue.__globals__
+    monkeypatch.setitem(scope['summarize_leaf_chunk_with_rescue'].__globals__,
+                        'summarize_with_escalation', summarize)
+    monkeypatch.setitem(scope, 'summarize_with_escalation', summarize)
 
 
 def _seed(engine, users=("Origin: preserve the exact initial objective.", "Older constraint.", "Latest live request.")):
