@@ -181,13 +181,18 @@ def test_pair_rollup_and_rescore(tmp_path, monkeypatch, states, expected):
     assert common.load(tmp_path/"summary.json")["state"] == expected
     # Independently re-score children without introducing fake coverage statistics.
     original = rescore.v2
-    monkeypatch.setattr(rescore, "v2", lambda path: common.load(path/"summary.json") if path != tmp_path else original(path))
+    monkeypatch.setattr(rescore, "v2", lambda path, **kw: common.load(path/"summary.json") if path != tmp_path else original(path, **kw))
     assert rescore.v2(tmp_path)["state"] == expected
 
 
 @pytest.mark.parametrize("worker", [False, True])
-def test_early_invalid_rescores_without_raw_files(tmp_path, worker):
+@pytest.mark.parametrize("event", [True, False])
+def test_early_invalid_rescores_without_raw_files(tmp_path, worker, event):
+    tmp_path = tmp_path/"0-ON-covered"
+    tmp_path.mkdir()
     value = dict(state="INVALID", reason="covered_store_incomplete")
+    if event:
+        common.append(tmp_path/"events.jsonl", dict(violation="covered_store_incomplete"))
     common.dump(tmp_path/("raw-summary.json" if worker else "summary.json"), value)
     assert rescore.v2(tmp_path) == value
 
@@ -204,6 +209,8 @@ def test_rescore_rejects_tampered_duration(tmp_path):
 
 
 def test_incomplete_worker_closes_without_fill(tmp_path, monkeypatch):
+    tmp_path = tmp_path/"0-ON-covered"
+    tmp_path.mkdir()
     common.dump(tmp_path/"manifest.json", dict(canaries=[], expected=dict(chunks={}, leaves={})))
     common.dump(tmp_path/"queries.json", [])
     calls = []
@@ -214,6 +221,7 @@ def test_incomplete_worker_closes_without_fill(tmp_path, monkeypatch):
     monkeypatch.setattr(measurement, "audit", lambda *a: dict(complete=False))
     recall.worker(None)
     assert common.load(tmp_path/"raw-summary.json") == dict(state="INVALID", reason="covered_store_incomplete")
+    assert rescore.v2(tmp_path) == dict(state="INVALID", reason="covered_store_incomplete")
     assert calls == ["shutdown"]
 
 

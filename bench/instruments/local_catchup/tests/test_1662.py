@@ -96,7 +96,7 @@ def test_synchronous_provider_bind_is_invalid_and_experiment_continues(tmp_path,
         root = tmp_path/f"{block}-{state}"
         root.mkdir()
         request = root/"request.json"
-        common.dump(request, dict(root=str(root)))
+        common.dump(request, dict(root=str(root), state=state, block=block))
         measurement.guarded_worker(experiment.worker, request)
         result = common.load(root/"raw-summary.json")
         results.append(result)

@@ -321,7 +321,9 @@ def test_artifact_chain_and_confinement_are_explicit():
     workflow = yaml.safe_load((root/".github/workflows/lcmx-1586-floor.yml").read_text())
     jobs = workflow["jobs"]
     chain = ["covered-store-1", "covered-store-2", "covered-store-3", "covered-store", "floor"]
-    assert all(a in jobs[b]["needs"] for a, b in zip(chain, chain[1:]))
+    for a, b in zip(chain, chain[1:]):
+        needs = jobs[b]["needs"]
+        assert ([needs] if isinstance(needs, str) else needs) == (["validate", a] if b == "floor" else [a])
     for name, stage, previous in zip(chain[:-1], ("1", "2", "3", "store"), ("", "1", "2", "3")):
         assert jobs[name]["uses"] == "./.github/workflows/lcmx-1586-covered-store.yml"
         assert jobs[name]["with"]["stage"] == stage
