@@ -304,25 +304,34 @@ the fatal outcome (last error if no turn failure) and stderr tail for classifica
 Timeouts, HTTP 5xx/unmarked 429 outside backend usage-limit predicates, resets/refusals
 and stream/protocol failures retry unchanged after 60, 180 and 600 seconds.
 Every retry rechecks the frozen deadline after sleeping, before recording or sending.
+Deadline expiry settles a partial PARK-INCOMPLETE with scoring snapshots; resume is a no-op.
 Usage limits match each backend, including GLM error-result 429 and rate-limit markers.
 Quota/usage stops return `PAUSED` without exclusions or a settled report. Rerun the
 same directory after reset to retry the paused call and reuse saved calls; paused
 wall time does not consume the frozen deadline.
 Exhausted questions are excluded from both arms and judges; more than 3% is INCOMPLETE.
 Each exclusion budget counts only IDs in its population, including targets-only interim.
+The drift cap is 3% of the 44 repeat IDs; two lost repeats fail admission.
+Extraction exclusions above 3% of panel IDs settle before any drift or main-panel call.
 Valid extraction siblings survive rejection; more than 5% rejected items is INCOMPLETE.
 Failed semantic admission (including missing approval or empty extraction) settles before
 drift or main-panel sends. Invalid extraction JSON (including non-string content),
-envelope identities or array types receive one repair attempt. A failed repair is terminal:
+envelope identities or array types receive one repair attempt. All item fields must be
+strings except nullable string dates and sources; malformed items get one repair while
+valid siblings survive. A failed envelope/JSON repair is terminal:
 the saved disposition settles PARK-INCOMPLETE; resume neither retries nor sends again.
 Invalid judge replies in the main panel and drift retry once unchanged; persistent
 invalids are reported per arm/judge. Main-panel invalids above 2% are INCOMPLETE;
 drift allows `max(1, ceil(0.02 * n))` invalids per judge/arm (one at 44 repeats).
 Invalid drift settles PARK-INCOMPLETE before any main-panel send; drift quota pauses.
 Drift exhaustion excludes the question from all main-panel arms and judges.
+Drift snapshots omit volatile cache-hit labels so an interrupted checkpoint replays identically.
 Unsettled calls remain resumable.
 When memory is empty, controls reuse the A0 answer. Cards include rejection counts/rates.
+Each judge's headline reports its scored overall n; panel and evaluated-prefix lengths appear separately.
 Source-only 16k-token windows plus at most 2k context are batched three per call.
+Chunk identity `overlap-v2` overlaps by the admissible quote limit (2,400 characters,
+or half the chunk limit for smaller windows); exact source offsets deduplicate overlap.
 Whole source-linked groups, including quotes/references/header, fit an 8,192-token cap.
 A0 hit/question bytes stay fixed; only the declared memory insertion changes M8192.
 

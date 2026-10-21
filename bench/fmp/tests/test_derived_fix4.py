@@ -94,10 +94,11 @@ def test_fix4_semantic_stops_before_drift(tmp_path, monkeypatch, stream, mode, s
     monkeypatch.setattr(run,'drift',lambda *a:drift_calls.append(a) or True)
     result=run.execute(tmp_path,backend,stage)
     assert result['verdict']=='PARK-INCOMPLETE'
-    assert not drift_calls and state['sends']==1  # extraction only; zero drift/main sends
+    sends=2 if mode=='rejected' else 1  # Rejected items now receive one repair attempt.
+    assert not drift_calls and state['sends']==sends  # extraction only; zero drift/main sends
     assert cache.snapshot(tmp_path/'rows.json')==[]
     assert cache.snapshot(tmp_path/'report.json')==result
-    assert run.execute(tmp_path,backend)==result and state['sends']==1
+    assert run.execute(tmp_path,backend)==result and state['sends']==sends
 
 @pytest.mark.parametrize('attempt',[1,2,3])
 def test_fix4_deadline_after_retry_sleep(tmp_path, monkeypatch, stream, attempt):

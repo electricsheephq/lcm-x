@@ -468,7 +468,8 @@ def test_fix2_extraction_exclusion_interim(tmp_path):
     cache.snapshot(tmp_path/'extraction.json',dict(items=got['items'],relations=[],ledger=[
         dict(source=w['haystack_hash'],state='succeeded',extracted_count=1),dict(source=h,state='excluded')]))
     run.execute(tmp_path,Fake())
-    assert (tmp_path/'interim.json').exists()
+    assert not (tmp_path/'interim.json').exists()  # >3% extraction exclusions settle before the panel.
+    assert cache.snapshot(tmp_path/'report.json')['verdict']=='PARK-INCOMPLETE'
 
 @pytest.mark.parametrize('kind,fatal,prelude', [
     ('codex','stream disconnected','Reconnecting: 403 Forbidden'),
