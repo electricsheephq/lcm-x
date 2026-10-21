@@ -120,6 +120,11 @@ def _wait_scheduler_idle(scheduler, timeout: float) -> bool:
 @pytest.fixture(autouse=True)
 def _isolate_embedding_process_state(request):
     """Keep process caches and model preparation inside the test that owns them."""
+    if "tmp_path" in request.fixturenames:
+        # Set tmp_path up first so it is torn down last: tmp_path_retention_policy=failed deletes a
+        # passing test's directory at its teardown, which must follow the model-preparation and
+        # background-maintenance drains below, not precede them.
+        request.getfixturevalue("tmp_path")
     with pytest.MonkeyPatch.context() as patch:
         provider = sys.modules.get("hermes_lcm.embedding_provider")
         maintenance = sys.modules.get("hermes_lcm.embedding_maintenance")
