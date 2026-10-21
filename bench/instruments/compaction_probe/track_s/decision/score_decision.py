@@ -80,11 +80,10 @@ def main():
     args.external_root = args.external_root or args.run_root.parent
     args.logs = args.logs or args.run_root.parent / "decision" / "logs"
     if (args.material / f"seed-{args.seeds[0] if args.seeds else 1}" / "deep_metadata.json").exists():
-        from score_deep import write_deep
+        from score_deep import write_deep, exit_status
         args.seeds = args.seeds or [1, 2, 3]
         args.arms = args.arms or ["LCMX-fleet-rc3", "H"]
-        write_deep(args)
-        return
+        return exit_status(write_deep(args))
     v4 = (args.material / f"seed-{args.seeds[0] if args.seeds else 1}" / "lifecycle_probes.jsonl").exists()
     args.seeds = args.seeds or list(range(1, 9) if v4 else range(1, 4))
     if not v4:
@@ -176,4 +175,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

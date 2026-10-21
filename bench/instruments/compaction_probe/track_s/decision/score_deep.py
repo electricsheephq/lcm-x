@@ -154,6 +154,11 @@ def write_deep(args):
     return result
 
 
+def exit_status(result):
+    return 1 if any(a["result"] == "FAIL" for a in result["per_arm"].values()) else 2 if any(
+        a["result"] != "COMPLETE" for a in result["per_arm"].values()) else 0
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("run-root", "material", "logs", "out"):
@@ -162,8 +167,7 @@ def main(argv=None):
     parser.add_argument("--seeds", nargs="+", type=int, default=[1, 2, 3])
     parser.add_argument("--checkpoints", nargs="+", help="exact numeric rows or last; default: all deep answer keys")
     result = write_deep(parser.parse_args(argv))
-    return 1 if any(a["result"] == "FAIL" for a in result["per_arm"].values()) else 2 if any(
-        a["result"] != "COMPLETE" for a in result["per_arm"].values()) else 0
+    return exit_status(result)
 
 
 if __name__ == "__main__":
