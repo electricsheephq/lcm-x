@@ -59,6 +59,84 @@
       "role": "per-item",
       "sha256": "ebae4097f9bf25a5888df9b0abc0da83c37501bb4209adebe54718f383ac7c51",
       "bytes": 174
+    },
+    {
+      "path": "CHECKS.json",
+      "role": "receipt",
+      "sha256": "3227538819bc3c2b49783588e3cbd7e7c5003729460c74764d1315ef2964b5fb",
+      "bytes": 454
+    },
+    {
+      "path": "product-vector.summary-uptime-before.txt",
+      "role": "receipt",
+      "sha256": "5525ece2928f3c351326a2bcc00364ac820444c572d76ca799aa478e93ae6ec7",
+      "bytes": 64
+    },
+    {
+      "path": "product-sessions-uptime-after.txt",
+      "role": "receipt",
+      "sha256": "8d19d24b0de98ea226a900fd31c9357c680e25b391896c7e7a82c6e4e375c547",
+      "bytes": 64
+    },
+    {
+      "path": "product-vector.chunk-uptime-before.txt",
+      "role": "receipt",
+      "sha256": "8d19d24b0de98ea226a900fd31c9357c680e25b391896c7e7a82c6e4e375c547",
+      "bytes": 64
+    },
+    {
+      "path": "base-sessions-uptime-after.txt",
+      "role": "receipt",
+      "sha256": "7f6d5eff63ffdfe80505dfcd795a806a480869ad8f7dc34f1af3437b451cc9b7",
+      "bytes": 66
+    },
+    {
+      "path": "base-vector.summary-uptime-before.txt",
+      "role": "receipt",
+      "sha256": "b856dc1bbc423009e070546086216aef7ebd6e9f428332e14d69db064223e171",
+      "bytes": 65
+    },
+    {
+      "path": "product-sessions-uptime-before.txt",
+      "role": "receipt",
+      "sha256": "c91b7e0f6c7224f7fe1c81e28942fdfb02f33ebb8e0cb3af080ea5a17c7e9715",
+      "bytes": 64
+    },
+    {
+      "path": "base-vector.chunk-uptime-before.txt",
+      "role": "receipt",
+      "sha256": "7f6d5eff63ffdfe80505dfcd795a806a480869ad8f7dc34f1af3437b451cc9b7",
+      "bytes": 66
+    },
+    {
+      "path": "base-vector.summary-uptime-after.txt",
+      "role": "receipt",
+      "sha256": "9543dbf66d3013d384a35c4a6bfeed559a857c1ef6f45b73fe1aea9d2b318db0",
+      "bytes": 65
+    },
+    {
+      "path": "base-vector.chunk-uptime-after.txt",
+      "role": "receipt",
+      "sha256": "b856dc1bbc423009e070546086216aef7ebd6e9f428332e14d69db064223e171",
+      "bytes": 65
+    },
+    {
+      "path": "base-sessions-uptime-before.txt",
+      "role": "receipt",
+      "sha256": "6cf407dc535482dd5bf8b53f54d769d00fb0fff44ed589864391cd25750c6ad6",
+      "bytes": 66
+    },
+    {
+      "path": "product-vector.summary-uptime-after.txt",
+      "role": "receipt",
+      "sha256": "5525ece2928f3c351326a2bcc00364ac820444c572d76ca799aa478e93ae6ec7",
+      "bytes": 64
+    },
+    {
+      "path": "product-vector.chunk-uptime-after.txt",
+      "role": "receipt",
+      "sha256": "5525ece2928f3c351326a2bcc00364ac820444c572d76ca799aa478e93ae6ec7",
+      "bytes": 64
     }
   ],
   "rescore": {
@@ -74,12 +152,24 @@
   "published": [],
   "links": [],
   "keep": [
+    "CHECKS.json",
     "CODE.json",
     "RESULT.md",
     "SAMPLES.json",
     "SUMMARY.json",
+    "base-sessions-uptime-after.txt",
+    "base-sessions-uptime-before.txt",
+    "base-vector.chunk-uptime-after.txt",
+    "base-vector.chunk-uptime-before.txt",
+    "base-vector.summary-uptime-after.txt",
+    "base-vector.summary-uptime-before.txt",
     "product-file-hashes.json",
+    "product-sessions-uptime-after.txt",
+    "product-sessions-uptime-before.txt",
+    "product-vector.chunk-uptime-after.txt",
+    "product-vector.chunk-uptime-before.txt",
+    "product-vector.summary-uptime-after.txt",
+    "product-vector.summary-uptime-before.txt",
     "rescore.py"
-  ],
-  "local_raw": "/Users/m1/Codex/session-notes/2026-10-21/lcmx-1749-gil/artifacts/public"
+  ]
 }
