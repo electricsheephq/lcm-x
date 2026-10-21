@@ -1578,7 +1578,9 @@ def _lcm_grep_full_text_with_deadline(
     def invoke() -> dict[str, Any]:
         message_conn: sqlite3.Connection | None = None
         dag_conn: sqlite3.Connection | None = None
-        expired = [False]
+        stop = threading.Event()
+        close_lock = threading.Lock()
+        watchdog: threading.Thread | None = None
 
         def require_remaining(stage: str) -> float:
             stage_remaining = deadline - time.monotonic()
@@ -1586,11 +1588,21 @@ def _lcm_grep_full_text_with_deadline(
                 raise TimeoutError(f"lcm full-text deadline exhausted before {stage}")
             return stage_remaining
 
-        def interrupt_if_expired() -> int:
-            if time.monotonic() >= deadline:
-                expired[0] = True
-                return 1
-            return 0
+        def interrupt_when_expired() -> None:
+            if stop.wait(max(0.0, deadline - time.monotonic())):
+                return
+            while not stop.is_set():
+                with close_lock:
+                    if stop.is_set():
+                        return
+                    for conn in (message_conn, dag_conn):
+                        if conn is not None:
+                            try:
+                                conn.interrupt()
+                            except sqlite3.ProgrammingError:
+                                pass
+                # Sticky cancellation also covers statements begun after an interrupt.
+                stop.wait(0.01)
 
         try:
             require_remaining("database path resolution")
@@ -1616,8 +1628,10 @@ def _lcm_grep_full_text_with_deadline(
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA query_only=ON")
                 require_remaining("connection setup")
-                conn.set_progress_handler(interrupt_if_expired, 1000)
-                require_remaining("connection setup")
+            watchdog = threading.Thread(
+                target=interrupt_when_expired, name="full-text-deadline", daemon=True,
+            )
+            watchdog.start()
             read_engine = copy.copy(engine)
             read_io = RetrievalContext(engine._store, engine._dag).bind(
                 message_conn, dag_conn,
@@ -1632,16 +1646,20 @@ def _lcm_grep_full_text_with_deadline(
                     _limit_cap=limit_cap,
                 )
             )
-            if expired[0] or time.monotonic() >= deadline:
+            if time.monotonic() >= deadline:
                 return _lcm_grep_deadline_error(
                     str(args.get("mode") or "semantic").lower(), "full_text"
                 )
             return payload
         finally:
-            if message_conn is not None:
-                message_conn.close()
-            if dag_conn is not None:
-                dag_conn.close()
+            stop.set()
+            with close_lock:
+                if message_conn is not None:
+                    message_conn.close()
+                if dag_conn is not None:
+                    dag_conn.close()
+            if watchdog is not None:
+                watchdog.join()
 
     try:
         return _run_within_deadline(
