@@ -227,6 +227,7 @@ warns without changing its behavior until removal.
 | `LCM_RECALL_SCAN_MAX_ROWS` | `int` | `0` | — | — |
 | `LCM_RECALL_SCAN_BUDGET_S` | `float` | `0.0` | — | — |
 | `LCM_RECALL_REFERENCE_STRICT` | `bool` | `true` | — | — |
+| `LCM_RECALL_DELIVERY_UNIT` | `str` | `"hits"` | `"hits"`, `"session"` | — |
 | `LCM_RECALL_FTS_ANCHOR` | `bool` | `true` | — | — |
 | `LCM_PROACTIVE_RECALL_ENABLED` | `bool` | `false` | — | — |
 | `LCM_PROACTIVE_RECALL_MIN_SCORE` | `float` | `0.01` | — | — |

@@ -160,7 +160,8 @@ def test_h_threshold_cooldown_system_and_returned_sections(monkeypatch, tmp_path
     assert h.main() == 1
     summary = sc.jload(run.dir / "cp-CP1/summary.json")
     assert summary["status"] == "FAILED" and summary["threshold_percent"] == .75
-    assert set(denied) == {s2.S2, h.src, tmp_path / ".hermes"}
+    assert set(denied) == {s2.S2, h.src}
+    assert summary["isolation"]["live_hermes_probe"].startswith("not attempted")
     monkeypatch.setattr(h.hosts, "verify", lambda *a: (_ for _ in ()).throw(ValueError("tree hash mismatch")))
     with pytest.raises(ValueError, match="tree hash mismatch"):
         module(TRACK / "s2/run_s_hermes_builtin.py", monkeypatch, tmp_path)

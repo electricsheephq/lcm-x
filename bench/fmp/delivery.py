@@ -87,6 +87,20 @@ def question_clock(date):
         CLOCK.local.now = None
 
 
+class DeliveryMismatch(RuntimeError):
+    pass
+
+
+def session_mode(engine):
+    if not hasattr(engine._config, "recall_delivery_unit"):
+        raise DeliveryMismatch("session delivery unavailable in selected checkout")
+    engine._config.recall_delivery_unit = "session"
+    recall = next((s["function"] for s in schemas(engine)
+                   if s["function"]["name"] == "lcm_recall"), {})
+    if "Session delivery" not in recall.get("description", ""):
+        raise DeliveryMismatch("session delivery schema unavailable in selected checkout")
+
+
 def dispatch(name, arguments, engine, offered=None):
     # D5: as the Hermes host does, failures become the tool result and the question continues.
     from hermes_lcm import tools as production
@@ -99,9 +113,14 @@ def dispatch(name, arguments, engine, offered=None):
     except ValueError as exc:
         return json.dumps({"error": f"Invalid JSON arguments for {name}: {exc}"}, ensure_ascii=False)
     try:
-        return getattr(production, name)(args, engine=engine)
+        raw = getattr(production, name)(args, engine=engine)
     except Exception as exc:
         return json.dumps({"error": f"Error executing {name}: {exc}"}, ensure_ascii=False)
+    if name == "lcm_recall" and getattr(getattr(engine, "_config", None), "recall_delivery_unit", "hits") == "session":
+        payload = json.loads(raw)
+        if "error" not in payload and payload.get("provenance", {}).get("delivery", {}).get("unit") != "session":
+            raise DeliveryMismatch("product response lacks session delivery provenance")
+    return raw
 
 
 def single(q, engine, speakers=None, hit_label="speaker", store_text="speaker-prefix"):
@@ -109,14 +128,18 @@ def single(q, engine, speakers=None, hit_label="speaker", store_text="speaker-pr
     payload = json.loads(raw)
     if "error" in payload:
         raise RuntimeError("recall_failed")
-    rows = engine._store.get_batch([h["store_id"] for h in payload.get("hits", [])
-                                    if isinstance(h.get("store_id"), int)])
+    session = payload.get("provenance", {}).get("delivery", {}).get("unit") == "session"
+    rows = ({h["store_id"]: {**h, "observed_at": None} for h in payload.get("hits", [])} if session else
+            engine._store.get_batch([h["store_id"] for h in payload.get("hits", [])
+                                    if isinstance(h.get("store_id"), int)]))
     lines = []
     for hit in payload.get("hits", []):
         row = rows.get(hit.get("store_id"))
         if row is not None:
             stamp = row.get("observed_at")
             date = datetime.fromtimestamp(stamp, timezone.utc).isoformat() if stamp else "unknown"
+            if session:
+                date = datetime.fromisoformat(row["event_time"]).isoformat() if row.get("event_time") else "unknown"
             speaker = (speakers or {}).get(str(row["store_id"])) if hit_label == "speaker" else None
             role = speaker or row["role"]
             content = row["content"]
@@ -172,6 +195,8 @@ def harness_agentic(q, client, reader, server, records):
             result["trace"] = [json.loads(line) for line in logs[-1].read_text().splitlines()]
         result["tool_calls"] = sum(bool(t.get("counted")) for t in result["trace"])
         result["forced_final"] = "tool_calls" if any(t.get("counted") is False for t in result["trace"]) else None
+    if any(t.get("fatal") == "DeliveryMismatch" for t in result["trace"]):
+        raise DeliveryMismatch("MCP session delivery verification failed")
     result["finish_reason"] = records[-1].get("finish_reason") if records else None
     result["hypothesis"] = message["content"]
     return result
@@ -194,6 +219,8 @@ def _answer(q, mode, client, reader, engine, speakers, tool_budget, input_budget
         return {**result, "status": "skipped", "reason": "does not fit"}
     offered = schemas(engine) if mode == "agentic" else None
     used, last, sent, reserve = 0, 0, 0, TOOL_RESULT_RESERVE
+    if getattr(getattr(engine, "_config", None), "recall_delivery_unit", "hits") == "session":
+        reserve = 16_000
 
     def pending():  # estimated prompt tokens of the next call
         return last + tokens(messages[sent:]) if sent else tokens([messages, offered])

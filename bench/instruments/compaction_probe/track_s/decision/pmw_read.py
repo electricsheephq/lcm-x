@@ -32,6 +32,36 @@ def mean(xs):
     return statistics.mean(xs) if xs else None
 
 
+def engine_turn_wait(summary, rows):
+    """Full replay engine-direct wait, including zero-wait turns; never host latency.
+
+    Missing event timing/turn identity makes the distribution incomplete, not zero.
+    Compactions per 100 uses material messages, whereas waits use distinct turns.
+    """
+    stop = summary.get("stop_row_index")
+    if stop is None or "events" not in summary:
+        return {"complete": False, "reason": "missing stop_row_index or events"}
+    if type(stop) is not int or not 0 <= stop < len(rows):
+        return {"complete": False, "reason": "invalid stop_row_index: expected integer within material rows"}
+    replay = rows[:stop + 1]
+    if not replay or any(r.get("turn") is None for r in replay):
+        return {"complete": False, "reason": "missing material turns"}
+    waits = dict.fromkeys(sorted({r["turn"] for r in replay}), 0.0)
+    events = summary["events"]
+    if any(e.get("turn") not in waits or e.get("compress_wall_s") is None or
+           not isinstance(e.get("is_compaction"), bool) for e in events):
+        return {"complete": False, "reason": "missing event timing, turn or compaction flag"}
+    for event in events:
+        waits[event["turn"]] += event["compress_wall_s"]
+    values = list(waits.values())
+    compactions = sum(e["is_compaction"] for e in events)
+    return {"complete": True, "messages": len(replay), "turns": len(waits), "compactions": compactions,
+            "compactions_per_100_messages": 100 * compactions / len(replay),
+            "mean_s": mean(values), "p90_s": p90(values), "max_s": max(values),
+            "waited_share_ge_1s": sum(v >= 1 for v in values) / len(values), "turn_waits_s": values,
+            "label": "engine-direct compress wall per material turn; not host latency"}
+
+
 _turns = {}
 
 

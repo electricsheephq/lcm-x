@@ -7,6 +7,28 @@ Related work: [#898](https://github.com/electricsheephq/lcm-x/issues/898),
 [#659](https://github.com/electricsheephq/lcm-x/issues/659).
 No product behavior changes. Keep this work draft until the v0.26.0 GA.
 
+## C1 deep continuity
+
+Generate each seed with `gen_material.py --seed N --out-dir DIR --deep`, then
+run `verify_material.py DIR`. The generator emits `track-s-deep-v2` with two
+threads and stale-history answer keys in `deep_metadata.json`. Legacy v3/v4
+generation is unchanged; frozen `track-s-deep-v1` inputs still score.
+Requested rows 176/304 shift to 177/305 to include paired tool results; the
+remaining checkpoints are 600/900/1023, all zero-based and inclusive.
+`s2/run_c1.py --help` describes the explicit scratch, product, material, host
+and evidence roots. It pins v0.28.1 and uses `gpt-6.1-sol` low through
+`codex exec` for summary and reader calls. The shared C1 budget serializes calls,
+reads weekly counters every 50 calls, pauses ten minutes at 85% or on 429,
+and stops after three consecutive blocks. Completed matching runs are skipped.
+Post-compaction probes require exact request/constraint/host quotes and an
+allowed audit action. Re-score retained snapshots with
+`decision/score_deep.py --run-root RUNS --material MATERIAL --logs LOGS --out OUT
+--expected-product-sha PRODUCT_SHA --expected-host-sha HOST_SHA`.
+The expected pin for each selected arm is required; missing or mismatched pins
+make the evidence incomplete. `score_decision.py` accepts the same pin flags.
+Wait means engine compress wall grouped by turn, not live-host latency. Token
+usage from Codex is explicitly estimated. Missing cells remain incomplete.
+
 ## Inputs and outputs
 
 Use Python 3.11+ (S4 uses Python 3.12+), bash 3.2+, and a clean product checkout.

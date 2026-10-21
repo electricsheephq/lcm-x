@@ -157,6 +157,7 @@ class Bridge:
         from hermes_lcm.config import LCMConfig
 
         return LCMConfig(
+            recall_delivery_unit="hits",  # Historical QA/AML hydration and slicing contract.
             database_path=str(db_path),
             embeddings_enabled=True,
             embedding_provider=self.provider_name,

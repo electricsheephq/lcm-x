@@ -178,13 +178,15 @@ class CodexEffortLane:
         (work := base / "work").mkdir(parents=True)
         prompt, out = base / "prompt.txt", base / "last-message.txt"
         prompt.write_text(lanes.flat_prompt(system, user_parts))
-        eff, limit = effort or "medium", float(timeout or lanes.CALL_TIMEOUT_S)
+        eff = effort or ("low" if os.environ.get("C1_BUDGET_ROOT") else "medium")
+        limit = float(timeout or lanes.CALL_TIMEOUT_S)
         cmd = ["codex", "exec", "--ephemeral", "--skip-git-repo-check", "--sandbox", "read-only", "-m", self.model,
                "-c", f"model_reasoning_effort={eff}", "-c", 'service_tier="default"', "--output-last-message", str(out), "-"]
         t0 = time.monotonic()
         try:
             with prompt.open() as stdin:
-                p = subprocess.run(cmd, cwd=work, stdin=stdin, capture_output=True, text=True, timeout=limit)
+                from . import c1_budget
+                p = c1_budget.run(cmd, cwd=work, stdin=stdin, capture_output=True, text=True, timeout=limit)
         except subprocess.TimeoutExpired:
             raise lanes.LaneError(f"timeout after {limit}s", limit)
         dt = round(time.monotonic() - t0, 2)
@@ -196,4 +198,7 @@ class CodexEffortLane:
         text = out.read_text() if out.exists() else ""
         shutil.rmtree(base, ignore_errors=True)
         return lanes.Reply(text, {"lane_model": self.model, "lane_effort": eff, "latency_s": dt,
+                                  "prompt_tokens": (len(prompt.read_text()) + 3) // 4 if prompt.exists() else
+                                  (len(lanes.flat_prompt(system, user_parts)) + 3) // 4,
+                                  "completion_tokens": (len(text) + 3) // 4, "estimated": True,
                                   "max_tokens_enforced": False})
