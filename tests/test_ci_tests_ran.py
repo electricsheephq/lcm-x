@@ -2,6 +2,7 @@
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import xml.etree.ElementTree as ET
@@ -262,6 +263,40 @@ def test_deleted_and_renamed_files(changed_repo, event):
 @pytest.mark.parametrize("event", ["push", "workflow_dispatch"])
 def test_push_has_no_changed_file_check(tmp_path, event):
     assert changed_tests(event, {}, tmp_path) == []
+
+
+@pytest.mark.parametrize("path,selected", [
+    ("bench/instruments/compaction_probe/tests_material_v4.py", True),
+    ("bench/instruments/compaction_probe/tests_compaction_probe_b.py", True),
+    ("bench/instruments/compaction_probe/testprobe.py", True),
+    ("bench/instruments/compaction_probe/helper.py", False),
+    ("bench/instruments/compaction_probe/nested/tests_material_v4.py", False),
+    ("bench/other/tests_material_v4.py", False),
+    ("tests/test_regular.py", True),
+    ("tests/regular_test.py", True),
+])
+def test_changed_test_selection_and_missing_evidence(evidence, monkeypatch, path, selected):
+    root, allowlist, report = evidence
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: (path + "\0").encode())
+    changed = changed_tests("merge_group", {"merge_group": {"base_sha": "base", "head_sha": "head"}}, root)
+    assert changed == ([path] if selected else [])
+    errors, _ = check(root, [report()], changed, allowlist)
+    assert errors == ([f"{path}: not collected by any CI job"] if selected else [])
+
+
+def test_compaction_probe_selection_matches_workflow_glob(monkeypatch):
+    root = Path(__file__).resolve().parents[1]
+    workflow = (root / ".github/workflows/ci.yml").read_text()
+    directory, pattern = re.findall(
+        r'if \[\[ "\$root" == (bench/instruments/compaction_probe) \]\]; '
+        r'then targets=\("\$root"/([^;)]+)\); fi', workflow,
+    )[0]
+    paths = sorted(p.relative_to(root).as_posix() for p in (root / directory).iterdir() if p.is_file())
+    monkeypatch.setattr(subprocess, "check_output", lambda *args, **kwargs: "\0".join(paths).encode())
+    selected = changed_tests("merge_group", {"merge_group": {"base_sha": "base", "head_sha": "head"}}, root)
+    expected = {p.relative_to(root).as_posix() for p in (root / directory).glob(pattern) if p.is_file()}
+    assert expected
+    assert set(selected) == expected
 
 
 def test_cli_writes_summary_and_fails_closed(evidence):

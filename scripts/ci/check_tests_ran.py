@@ -20,8 +20,11 @@ def changed_tests(event, payload, root):
         ["git", "diff", "--name-only", "-z", "--diff-filter=AMR", f"{base}...{head}"],
         cwd=root,
     ).decode().split("\0")
+    # Mirror .github/workflows/ci.yml:206: compaction_probe selects test*.py.
     return [p for p in paths if fnmatch.fnmatch(Path(p).name, "test_*.py")
-            or fnmatch.fnmatch(Path(p).name, "*_test.py")]
+            or fnmatch.fnmatch(Path(p).name, "*_test.py")
+            or (Path(p).parent == Path("bench/instruments/compaction_probe")
+                and fnmatch.fnmatch(Path(p).name, "test*.py"))]
 
 
 def check(root, reports, changed, allowlist):
