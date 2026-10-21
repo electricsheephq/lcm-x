@@ -148,6 +148,11 @@ def test_preview_failure_never_blocks_ingest(tmp_path, case):
         assert expanded["content"].encode() == normalized.encode()
         if case == "mixed-bytes":
             assert "zebracluster" in stub and "input_audio" not in stub
+        elif case == "deep":
+            # Whether json.loads gives up on the nesting (RecursionError) or parses down to the
+            # text depends on the interpreter; either way the stub carries no payload bytes.
+            assert stub.startswith("[Externalized payload: kind=media_payload;")
+            assert "QUJD" not in stub and "base64" not in stub
         else:
             assert stub == _build_externalized_placeholder(dict(
                 kind="media_payload", role="user", content_chars=len(normalized),
