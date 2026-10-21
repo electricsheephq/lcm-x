@@ -1785,7 +1785,9 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
         AFTER UPDATE OF store_id, identity_hash, chunk_id, char_start, char_end ON lcm_chunk_meta BEGIN
             DELETE FROM metadata WHERE key IN (
                 'chunk_gapfill_scan:' || OLD.identity_hash,
-                'chunk_policy_revision_through:' || OLD.identity_hash);
+                'chunk_policy_revision_through:' || OLD.identity_hash,
+                'chunk_gapfill_scan:' || NEW.identity_hash,
+                'chunk_policy_revision_through:' || NEW.identity_hash);
         END;
         """
     )
