@@ -267,3 +267,37 @@ Reports also retain per-ID caps/tokens, call-cache counts and timing; result
 cards name the guard margin and measured MDE. A warm cached A/A is an identity
 control (`INCOMPLETE/no-op-arm`), never an independent placebo sample. Result cards cover advisory timing;
 publication and the full acceptance pilot remain separate owner actions.
+
+### DM0 derived-memory instrument (#1191)
+
+`python -m bench.fmp.derived [inventory|freeze|extract|answer|score] --product PRODUCT
+--source INPUT.json --run RUN [--cache W1_CACHE]` defaults to read-only inventory.
+It is bench-only and leaves product flags, V4 publication and existing FMP defaults alone.
+`freeze` requires complete LOCAL/25 retrieval/store identities, rebuilds DM0-886 from
+hash-pinned datasets, and snapshots a create-only manifest before any model call.
+Incomplete LOCAL/25 receipts refuse admission; OFF/25 cannot substitute.
+
+INPUT is a private JSON export: schema `dm0-v1`, pinned `product` source hash and
+`product_commit`, `source_files`/`dataset_sha256`, `normalizer_sha256`, `dev_ids`,
+`w1_panel`, `w1_receipt`, `w1_cache`, exact `baselines` messages by canonical ID,
+original `controls` response records, `w1_endpoint`/`w1_renderer`/`w1_sources`,
+versioned Codex/GLM `endpoints`, `renderer`, frozen `repeat_ids` (44), and an absolute
+Unix `deadline`. Missing added-question baselines require pinned-product preparation
+before freeze; this command never builds W1 stores or substitutes retrievals.
+Synthetic fixtures instead provide `questions` and `panel` and set `synthetic=true`.
+Semantic-screen evidence remains a separate prerequisite (`semantic_valid`); fabricated
+hard cases and the conservative `v4_row_candidate` diagnostic cannot certify X05 quality.
+
+Only separately authorized live runs use `extract`/`answer --activate`: subscription
+Sol/medium extraction/readers and Sol/low plus GLM 5.3 judgments, both on every answer.
+The launcher supplies GLM credentials; the instrument never reads credential files.
+Resume uses the same immutable inputs and send receipts; pending/error sends never replay.
+Source-only 16k-token windows plus at most 2k context are batched three per call.
+Whole source-linked groups, including quotes/references/header, fit an 8,192-token cap.
+A0 hit/question bytes stay fixed; only the declared memory insertion changes M8192.
+
+The fixed target runs first; conservative paired and clustered bounds may stop futility.
+GO requires both judges' +5/+2-point, Holm, positive cluster-lower, category and strict
+combined-guard gates. PARK variants distinguish futility, uncertainty, no-go and incomplete
+coverage/transport/identity. GO funds Stage 1 only. `score` replays frozen scoring inputs
+and writes a result card; T1/T2 publication, live quality and product benefit remain unproven.

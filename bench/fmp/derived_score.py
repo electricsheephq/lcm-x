@@ -1,0 +1,81 @@
+"""Predeclared two-family DM0 investment gate, never issue acceptance."""
+import math
+from functools import lru_cache
+from .dev import compare
+from .score import mcnemar
+def holm(ps):
+    result, last = [0.0]*len(ps), 0
+    for rank,index in enumerate(sorted(range(len(ps)), key=ps.__getitem__)):
+        last = min(1, max(last, (len(ps)-rank)*ps[index]))
+        result[index] = last
+    return result
+@lru_cache(maxsize=4096)
+def cp(k, n):
+    def cdf(k, p):
+        return sum(math.exp(math.lgamma(n+1)-math.lgamma(j+1)-math.lgamma(n-j+1)+
+                   j*math.log(p)+(n-j)*math.log1p(-p)) for j in range(k+1))
+    def invert(k, target):
+        lo, hi = 0., 1.
+        for _ in range(55):
+            mid = (lo+hi)/2
+            if cdf(k,mid) > target:
+                lo = mid
+            else:
+                hi = mid
+        return (lo+hi)/2
+    return (invert(k-1,.975) if k else 0., invert(k,.025) if k<n else 1.)
+def paired_bounds(gains, losses, n):
+    if n <= 0:
+        return [-1.,1.]
+    g, loss = cp(gains,n), cp(losses,n)
+    return [g[0]-loss[1],g[1]-loss[0]]
+def table(entries, rows, judge):
+    selected = {(r['arm'],r['id']):r for r in rows if r['judge']==judge}
+    if not entries:
+        return dict(n=0,delta=None,ci95=[-1,1],paired95=[-1,1],p=1)
+    mapped = {(arm,e['id']):selected[(src,e['id'])] for e in entries for arm,src in (('baseline','A0'),('candidate','M8192'))}
+    result = compare(entries,mapped)
+    a,b = [[selected[(arm,e['id'])]['correct'] for e in entries] for arm in ('A0','M8192')]
+    exact = mcnemar(a,b)
+    return result | exact | dict(paired95=paired_bounds(exact['n01'],exact['n10'],len(entries)),
+        both_correct=sum(x and y for x,y in zip(a,b)), both_wrong=sum(not x and not y for x,y in zip(a,b)))
+def passes(tables):
+    target,overall,guard = [tables[k] for k in ('target','overall','guard')]
+    adjusted = holm([target['p'],overall['p']])
+    return (target['delta'] is not None and target['delta']>=.05 and overall['delta']>=.02 and
+        all(p<.05 for p in adjusted) and target['ci95'][0]>0 and overall['ci95'][0]>0 and
+        all(t['delta'] is None or t['delta']>=-.02 for t in tables['categories'].values()) and
+        min(guard['ci95'][0],guard['paired95'][0])>-.02)
+def evaluate(entries, rows, *, complete=True, semantic_valid=True, drift_valid=True, exclusions=()):
+    from .derived import ARMS, JUDGES
+    keys = {(r['id'],r['arm'],r['judge']) for r in rows if type(r.get('correct')) is bool}
+    expected = {(e['id'],a,j) for e in entries for a in ARMS for j in JUDGES}
+    missing = len(expected-keys)
+    result = dict(verdict='PARK-INCOMPLETE', reasons=[], judges={}, missing=missing,
+        exclusions=len(exclusions), claim_class='advisory', stage='Stage 0 only; GO funds Stage 1, never closes #1191')
+    if missing or len(keys)!=len(rows) or keys-expected or not semantic_valid or not drift_valid or len(exclusions)>len(entries)*.03:
+        result['reasons']=['missing/duplicate judge pairs, semantic/coverage, drift or >3% exclusions']
+        return result
+    target_entries = [e for e in entries if e['target']]
+    for judge in JUDGES:
+        categories = {c:table([e for e in entries if e['category']==c],rows,judge) for c in sorted({e['category'] for e in entries})}
+        tables = {name:table(group,rows,judge) for name,group in (
+            ('target',target_entries),('overall',entries),('guard',[e for e in entries if e['guard']]))}
+        tables['categories'] = categories
+        tables['holm'] = holm([tables['target']['p'],tables['overall']['p']])
+        tables['datasets'] = {d:table([e for e in entries if e['dataset']==d],rows,judge) for d in sorted({e['dataset'] for e in entries})}
+        tables['dataset_balanced_delta'] = sum(t['delta'] for t in tables['datasets'].values())/max(1,len(tables['datasets']))
+        result['judges'][judge] = tables
+    if not complete:
+        futile = all(max(t['target']['ci95'][1],t['target']['paired95'][1])<.05 for t in result['judges'].values())
+        result['verdict'] = 'PARK-FUTILITY' if futile else 'PARK-INCOMPLETE'
+        result['reasons'] = ['fixed target interim; never promotes']
+        return result
+    good = all(passes(t) for t in result['judges'].values())
+    uncertain = any(t['target']['ci95'][0]<=.05<=t['target']['ci95'][1] or
+                    t['overall']['ci95'][0]<=.02<=t['overall']['ci95'][1] for t in result['judges'].values())
+    result['verdict'] = 'GO' if good else 'PARK-NO-SIGNAL' if uncertain else 'PARK-NO-GO'
+    result['reasons'] = ['two-family conjunction' if good else 'predeclared conjunction not met']
+    result['caveats'] = ['Nominal McNemar assumes independent items; LoCoMo is clustered.',
+        'Combined guard does not certify the 25-row LME guard alone.', 'Synthetic/source admission is not extraction quality.']
+    return result
