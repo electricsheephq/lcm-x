@@ -71,6 +71,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Fetch the rollback-reader commits
+        run: git fetch --no-tags --depth=1 origin f3cc8de918ba14c21ae246099652762a26255554 77b2b4f795fb6a4f84c55abf6d0441da4469971e
+
       - name: Set up Python (harness)
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
         with:

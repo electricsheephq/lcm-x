@@ -1,5 +1,6 @@
 """#1586: lazy gap work must preserve stock selection and lossless coverage."""
 import sqlite3
+from contextlib import closing
 import json
 import random
 from types import SimpleNamespace
@@ -16,7 +17,7 @@ from tests.test_issue_1586_local_pacing import local_store as local_store
 
 def seed(engine, count, *, text="My bicycle is blue.", low=1, first_text=None):
     db = engine._store.db_path
-    with sqlite3.connect(db) as conn:
+    with closing(sqlite3.connect(db)) as conn, conn:
         conn.executemany(
             "INSERT INTO messages(store_id, session_id, role, content, timestamp) VALUES(?, 'seed', 'user', ?, 0)",
             [(i, first_text if i == 1 and first_text is not None else text) for i in range(1, count + 1)],
