@@ -11,6 +11,7 @@ from pathlib import Path
 from tests.phase0_hygiene import product_env_keys
 
 _IMPORT_FAILURES = {}
+pytest_plugins = ["tests.diag_1753_capture"]
 # Measured with/without the CI host stub: only engine needs agent.context_engine.
 # Allow that missing host dependency, never arbitrary errors in engine itself.
 _OPTIONAL_HOST_IMPORTS = {"hermes_lcm.engine": {"agent", "agent.context_engine"}}

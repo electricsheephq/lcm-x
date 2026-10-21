@@ -82,3 +82,12 @@ jobs:
           name: real-host-${{ matrix.host }}
           path: real-host-results.xml
           if-no-files-found: warn
+
+      - name: Upload failure-only structural capture
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: diag-1753-${{ matrix.host }}
+          path: diag-1753-captures/*.json
+          retention-days: 7
+          if-no-files-found: ignore
