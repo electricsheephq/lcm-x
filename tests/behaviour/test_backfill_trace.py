@@ -96,10 +96,14 @@ def reached(case: h.Scenario, payloads: list[str]) -> None:
         assert dict(reports[1])["embedded"] > 0
         if shape == "incremental-revision-gap-checkpoint":
             states = values(payloads, "discovery state")
-            # Lazy discovery stopped before draining the range: no coverage
-            # certificate may escape, even though selected intent is durable.
-            assert not any(key.startswith(("chunk_gapfill_scan:", "chunk_policy_revision_through:"))
+            # A walk is durable intent, not coverage: every fetched, unfilled
+            # row must remain replayable and no through certificate may escape.
+            assert not any(key.startswith("chunk_policy_revision_through:")
                            for key, _ in states[0]["tables"]["metadata"])
+            scan = next(json.loads(value) for key, value in states[0]["tables"]["metadata"]
+                        if key.startswith("chunk_gapfill_scan:"))
+            assert scan["walk"] == {"below": 2, "pending": [3, 2]}
+            assert "pending" not in scan
             final = states[-1]["tables"]
             assert len(final["lcm_chunk_meta"]) == 4
             assert any(key.startswith("chunk_policy_revision_through:") and value == "4"

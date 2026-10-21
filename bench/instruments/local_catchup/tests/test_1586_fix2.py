@@ -35,22 +35,24 @@ def block(tmp_path, monkeypatch, *, count=5, valid=True, slow=True):
         40, seconds=4.5 if slow else .1, query_class="broad_nl")
     if not valid and slow:
         data = data[1:]  # A short canary class makes the worker's pre-scaling rollup INVALID.
-    data = [dict(r, start=21, end=22) for r in data]
+    data = [dict(r, start=21, end=22, incomplete=True, coverage_start=dict(chunks=0), coverage_end=dict(chunks=1)) for r in data]
     results = []
     for state in ("OFF", "ON-catching-up", "ON-covered"):
         root = tmp_path/f"0-{state}"
         root.mkdir()
         loaded = [dict(e, at=e["at"]+20, end=e["end"]+20) for e in events(.45)]
-        raw_events = window_batches(.572/2.14, count)+loaded
+        raw_events = window_batches(.572/2.14, count)+loaded + ([] if valid else [dict(event="volume_cap")])
         for name, values in (("events", raw_events), ("recalls", data), ("publications", pubs)):
             (root/f"{name}.jsonl").write_text("".join(json.dumps(v)+"\n" for v in values))
         raw = recall.score(data, pubs, state=state, activity=dict(catchup_activity=True))
         raw.update(measurement_valid=valid, catchup_activity=True)
         if not valid:
-            raw["state"] = "INVALID"
+            raw.update(state="INVALID", reason="volume_cap")
         for name in ("raw-summary.json", "summary.json"):
             common.dump(root/name, raw)
-        common.dump(root/"request.json", dict(seed=1586, state=state, block=0))
+        common.dump(root/"request.json", dict(seed=1586, state=state, block=0, rows=250000, smoke=False))
+        common.dump(root/"final-audit.json", dict(classes=dict(chunks=dict(missing_count=1))))
+        common.dump(tmp_path/"queries.json", [{}]*400)
         results.append(dict(state=state, block=0, result=raw))
     recall.finalize_block(a, 0, results)
     common.dump(tmp_path/"summary.json", dict(state=common.rollup(r["result"]["state"] for r in results), blocks=results))
@@ -169,9 +171,12 @@ def test_cell_pre_audit_invalid_receipt(corpus, tmp_path, monkeypatch, problem):
             src.backup(dst)
         if problem == "tampered":
             cover(source/"store.db", manifest, mod)
-            measurement.audit(source/"store.db", manifest)  # Pin the first-seen digests.
+            measurement.audit(source/"store.db", manifest)
+            common.dump(source/"manifest.json", manifest)  # Persist setup digests, not recall memory.
             with sqlite3.connect(source/"store.db") as c:
                 c.execute("UPDATE lcm_chunk_vectors SET vec=zeroblob(1536) WHERE chunk_id='1:0'")
+        if problem == "unfinished":
+            common.dump(source/"manifest.json", manifest)
     if problem == "missing-directory":
         source = tmp_path/"nonexistent"
     if problem == "missing-table":

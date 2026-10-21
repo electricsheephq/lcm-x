@@ -60,7 +60,7 @@ def test_recall_activity_is_inside_overlap_window(tmp_path, at, foreground, embe
     common.append(tmp_path/"events.jsonl", dict(event="_chunk_backfill_run", at=at,
         end=at+.1, foreground=foreground, embedded=embedded))
     activity = measurement.catchup_activity(tmp_path, 2, 5, {"chunks": 0}, {"chunks": 0})
-    rows = [dict(start=2, end=5, seconds=.1, health="ok", fts_hits=True, honest_coverage=True)]*200
+    rows = [dict(start=2, end=5, seconds=.1, health="ok", fts_hits=True, honest_coverage=True, semantic_healthy=True)]*200
     result = recall.score(rows, [dict(start=2, end=5)]*10,
                           state="ON-catching-up", activity=activity)
     assert result["state"] == ("PASS" if expected else "INVALID")

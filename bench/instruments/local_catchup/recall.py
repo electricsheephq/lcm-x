@@ -162,10 +162,10 @@ def score_class(rows, publications, seed=1586, state="OFF", activity=None):
     failures = sum(r["health"] in ("error", "timeout") or not r["fts_hits"] or not r["honest_coverage"] or (state == "ON-catching-up" and r.get("fts_coverage") == "none") or (state != "OFF" and not r.get("semantic_healthy", False)) for r in rows)
     valid = len(counted) >= 200 and distinct >= 10
     passed = not failures and all(v["seconds"] <= v["limit_s"] and v["upper95_s"] <= v["limit_s"] for v in stats.values()) if counted else False
-    result = dict(state="INVALID" if not valid else "PASS" if passed else "FAIL", overlapping=len(counted),
+    result = dict(state="FAIL" if failures else "INVALID" if not valid else "PASS" if passed else "FAIL", overlapping=len(counted),
                 publications=len(publications), overlapping_publications=distinct,
                 failures=failures, statistics=stats, seed=seed, resamples=10000)
-    if state == "ON-catching-up" and not (activity or {}).get("catchup_activity"):
+    if not failures and state == "ON-catching-up" and not (activity or {}).get("catchup_activity"):
         result.update(state="INVALID", reason="on_no_catchup_activity")
     return result
 
@@ -207,7 +207,7 @@ def publication_trace(a, engine, mod, enough, halt):
 
 def worker(request):
     a, mod, engine, bind = runtime(request)
-    manifest = a._manifest = load(a.out/"manifest.json")
+    manifest = a._manifest = load(a.root/"manifest.json" if (a.root/"manifest.json").exists() else a.out/"manifest.json")
     pinned = load(a.out/"queries.json")
     queries = {q["id"]: q["text"] if q.get("query_class") == "broad_nl" else manifest["canaries"][q["canary"]]["value"] for q in pinned}
     rows, publications, errors = [], [], []
@@ -314,9 +314,11 @@ def worker(request):
         if a.smoke or a.rows < 250000 or len(pinned) < 200 or (a.state == "ON-catching-up" and
                 (all(final["classes"][kind]["missing_count"] == 0 for kind in manifest["expected"])
                  or not all(r["incomplete"] for r in overlapping(rows, publications)))):
-            result["state"] = "INVALID"
+            result["state"] = rollup([result["state"], "INVALID"])
+        capped = capped and any(c["overlapping"] < 200 or c["overlapping_publications"] < 10 for c in result["classes"].values())
         if capped:
-            result.update(state="INVALID", reason="volume_cap")
+            append(a.root/"events.jsonl", dict(event="volume_cap"))
+            result.update(state=rollup([result["state"], "INVALID"]), reason="volume_cap")
         result.update(turns_used=turns_used, measurement_valid=result["state"] != "INVALID", bind_ms=bind, safety=evidence, queries=len(pinned), **activity)
         dump(a.root/"raw-summary.json", result)
     finally:
