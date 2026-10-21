@@ -231,3 +231,68 @@ def test_round2_stale_rate_counts_stale_history(cell):
     metrics = score(mat, directory, "H")["metrics"]
     assert metrics["stale_rate"]["stale_ids"] == ["F1"]
     assert metrics["deep_corrected"]["stale_ids"] == ["F1"]
+
+
+@pytest.mark.parametrize("arm,field", [("H", "host_sha"), ("LCMX-fleet-rc3", "worktree_head")])
+@pytest.mark.parametrize("rejection", ["run-pin", "missing-run-pin", "expected-pin", "checkpoint-pin",
+                                      "missing-checkpoint-pin", "wall", "missing-wall", "summary", "checkpoint"])
+def test_rejected_rerun_removes_only_its_prior_scores(cell, tmp_path, arm, field, rejection):
+    import hashlib
+    from score_deep import exit_status, write_deep
+
+    mat, directory = cell
+    run = tmp_path / "runs" / arm / "seed-1/d1-r1"
+    summary = json.loads((directory / "summary.json").read_text())
+    summary.update(material_sha256=hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest(),
+                   events=[event()], **{field: "pinned"})
+    write(run / "summary.json", summary)
+    write(run / "cp-1/summary.json", summary)
+    rows = [dict(json.loads(line), arm=arm) for line in (directory / "results.jsonl").read_text().splitlines()]
+    (run / "cp-1/results.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    wall = tmp_path / "logs" / f"s2-{arm}-d1-r1.log.wall"
+    wall.parent.mkdir()
+    wall.write_text("exit 0 end now\n")
+    args = SimpleNamespace(material=mat.parent, run_root=tmp_path / "runs", logs=wall.parent,
+                           out=tmp_path / "out", arms=[arm], seeds=[1], checkpoints=["1"],
+                           expected_host_sha="pinned", expected_product_sha="pinned")
+    first = write_deep(args)
+    assert exit_status(first) == 0
+    assert first["per_run"][f"{arm}|d1-r1"]["continuity"]["result"] == "PASS"
+    name = f"{arm}.seed-1.d1-r1.json"
+    for population in ("scores", "loss"):
+        assert (args.out / population / "cp-1" / name).is_file()
+        # A previously selected checkpoint must also be invalidated on this rerun.
+        write(args.out / population / "cp-999" / name, {"old": True})
+    preserved = [args.out / "keep.json", args.out / "other" / "cp-1" / name]
+    for population in ("scores", "loss"):
+        preserved.extend(args.out / population / "cp-1" / filename for filename in
+                         (f"{arm}.seed-2.d2-r1.json", f"{arm}.seed-1.d1-r2.json", "other.seed-1.d1-r1.json"))
+        preserved.append(args.out / population / "not-a-checkpoint" / name)
+    for path in preserved:
+        write(path, {"keep": True})
+    before = {path: path.read_bytes() for path in preserved}
+
+    if rejection in ("run-pin", "missing-run-pin", "summary"):
+        if rejection == "summary":
+            (run / "summary.json").unlink()
+        else:
+            write(run / "summary.json", dict(summary, **{field: "other" if rejection == "run-pin" else None}))
+    elif rejection == "expected-pin":
+        setattr(args, "expected_host_sha" if arm == "H" else "expected_product_sha", None)
+    elif rejection in ("checkpoint-pin", "missing-checkpoint-pin", "checkpoint"):
+        if rejection == "checkpoint":
+            (run / "cp-1/summary.json").unlink()
+        else:
+            write(run / "cp-1/summary.json", dict(summary, **{field: "other" if rejection == "checkpoint-pin" else None}))
+    elif rejection == "wall":
+        wall.write_text("exit 1 end now\n")
+    else:
+        wall.unlink()
+
+    result = write_deep(args)
+    assert exit_status(result) == 2
+    assert result["per_run"][f"{arm}|d1-r1"]["result"] == "INCOMPLETE"
+    assert json.loads((args.out / "score-deep.json").read_text()) == result
+    for population in ("scores", "loss"):
+        assert not list((args.out / population).glob(f"cp-*/{name}"))
+    assert {path: path.read_bytes() for path in preserved} == before

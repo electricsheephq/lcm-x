@@ -61,6 +61,11 @@ def aggregate(args):
         material_digest = hashlib.sha256((material / "material.manifest.json").read_bytes()).hexdigest()
         for arm, label, directory, checkpoints in runs(seed, args):
             key = f"{arm}|{label}"
+            # Invalidate this run's prior outputs before any rejection or checkpoint skip.
+            name = f"{arm}.seed-{seed}.{label}.json"
+            for population in ("scores", "loss"):
+                for checkpoint_dir in (args.out / population).glob("cp-*"):
+                    (checkpoint_dir / name).unlink(missing_ok=True)
             receipt = args.logs / f"s2-{arm}-{label}.log.wall"
             if not receipt.exists() or re.findall(r"^exit (\d+) end", receipt.read_text(), re.M) != ["0"] or not (directory / "summary.json").exists():
                 per_run[key] = {"arm": arm, "result": "INCOMPLETE", "reason": "missing successful wall receipt or summary"}
