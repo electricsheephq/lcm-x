@@ -146,7 +146,7 @@ jobs:
       stage: '1'
       shape: ${{ inputs.shape }}
       baseline: ${{ inputs.baseline }}
-      rows: ${{ inputs.rows }}
+      rows: ${{ fromJSON(inputs.rows) }}
   covered-store-2:
     needs: covered-store-1
     uses: ./.github/workflows/lcmx-1586-covered-store.yml
@@ -155,7 +155,7 @@ jobs:
       previous_stage: '1'
       shape: ${{ inputs.shape }}
       baseline: ${{ inputs.baseline }}
-      rows: ${{ inputs.rows }}
+      rows: ${{ fromJSON(inputs.rows) }}
   covered-store-3:
     needs: covered-store-2
     uses: ./.github/workflows/lcmx-1586-covered-store.yml
@@ -164,7 +164,7 @@ jobs:
       previous_stage: '2'
       shape: ${{ inputs.shape }}
       baseline: ${{ inputs.baseline }}
-      rows: ${{ inputs.rows }}
+      rows: ${{ fromJSON(inputs.rows) }}
   covered-store:
     needs: covered-store-3
     uses: ./.github/workflows/lcmx-1586-covered-store.yml
@@ -173,4 +173,4 @@ jobs:
       previous_stage: '3'
       shape: ${{ inputs.shape }}
       baseline: ${{ inputs.baseline }}
-      rows: ${{ inputs.rows }}
+      rows: ${{ fromJSON(inputs.rows) }}
