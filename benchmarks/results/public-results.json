@@ -1,0 +1,302 @@
+{
+  "board": "OmniMemEval",
+  "description": "An open evaluation harness that requests the same data, prompts, answer model, judge model and metric logic for every backend within each benchmark (the disclosure below states how the LCM-X rows requested the models).",
+  "snapshot": {
+    "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+    "benchmarks": [
+      "LoCoMo",
+      "LongMemEval",
+      "BEAM 100K",
+      "BEAM 10M",
+      "PersonaMem v2",
+      "HaluMem"
+    ],
+    "rows": [
+      {
+        "backend": "Mem0",
+        "scores": {
+          "LoCoMo": 77.68,
+          "LongMemEval": 56.0,
+          "BEAM 100K": 70.41,
+          "BEAM 10M": 43.33,
+          "PersonaMem v2": 36.76,
+          "HaluMem": 73.64
+        }
+      },
+      {
+        "backend": "Zep / Graphiti",
+        "scores": {
+          "LoCoMo": 63.83,
+          "LongMemEval": 79.8,
+          "BEAM 100K": 68.7,
+          "BEAM 10M": 56.11,
+          "PersonaMem v2": 32.34,
+          "HaluMem": 81.71
+        }
+      },
+      {
+        "backend": "Supermemory",
+        "scores": {
+          "LoCoMo": 73.53,
+          "LongMemEval": 66.07,
+          "BEAM 100K": 65.98,
+          "BEAM 10M": 52.49,
+          "PersonaMem v2": 39.64,
+          "HaluMem": 52.61
+        }
+      },
+      {
+        "backend": "Viking",
+        "scores": {
+          "LoCoMo": 69.33,
+          "LongMemEval": 61.07,
+          "BEAM 100K": 70.76,
+          "BEAM 10M": 58.14,
+          "PersonaMem v2": 30.8,
+          "HaluMem": 77.39
+        }
+      },
+      {
+        "backend": "Cognee",
+        "scores": {
+          "LoCoMo": 83.48,
+          "LongMemEval": 51.8,
+          "BEAM 100K": 59.3,
+          "BEAM 10M": 56.02,
+          "PersonaMem v2": 26.46,
+          "HaluMem": 72.6
+        }
+      },
+      {
+        "backend": "Letta",
+        "scores": {
+          "LoCoMo": 77.12,
+          "LongMemEval": 77.67,
+          "BEAM 100K": 69.22,
+          "BEAM 10M": 52.3,
+          "PersonaMem v2": 35.12,
+          "HaluMem": 85.43
+        }
+      },
+      {
+        "backend": "Hindsight",
+        "scores": {
+          "LoCoMo": 81.99,
+          "LongMemEval": 72.2,
+          "BEAM 100K": 70.22,
+          "BEAM 10M": 59.75,
+          "PersonaMem v2": 37.98,
+          "HaluMem": 83.99
+        }
+      },
+      {
+        "backend": "Memori",
+        "scores": {
+          "LoCoMo": 41.34,
+          "LongMemEval": 20.8,
+          "BEAM 100K": null,
+          "BEAM 10M": null,
+          "PersonaMem v2": 33.16,
+          "HaluMem": 49.38
+        }
+      },
+      {
+        "backend": "EverOS",
+        "scores": {
+          "LoCoMo": 82.75,
+          "LongMemEval": 80.4,
+          "BEAM 100K": 58.64,
+          "BEAM 10M": 47.73,
+          "PersonaMem v2": 35.94,
+          "HaluMem": 88.66
+        }
+      },
+      {
+        "backend": "MemMachine",
+        "scores": {
+          "LoCoMo": 73.9,
+          "LongMemEval": 63.6,
+          "BEAM 100K": 64.8,
+          "BEAM 10M": 51.9,
+          "PersonaMem v2": 34.14,
+          "HaluMem": 47.02
+        }
+      },
+      {
+        "backend": "mem9",
+        "scores": {
+          "LoCoMo": 73.64,
+          "LongMemEval": 78.0,
+          "BEAM 100K": 65.75,
+          "BEAM 10M": 57.3,
+          "PersonaMem v2": 30.76,
+          "HaluMem": 72.8
+        }
+      },
+      {
+        "backend": "MemoryLake",
+        "scores": {
+          "LoCoMo": 72.49,
+          "LongMemEval": null,
+          "BEAM 100K": null,
+          "BEAM 10M": null,
+          "PersonaMem v2": null,
+          "HaluMem": null
+        }
+      },
+      {
+        "backend": "Backboard.io",
+        "scores": {
+          "LoCoMo": 22.4,
+          "LongMemEval": null,
+          "BEAM 100K": null,
+          "BEAM 10M": null,
+          "PersonaMem v2": null,
+          "HaluMem": null
+        }
+      },
+      {
+        "backend": "MemOS",
+        "scores": {
+          "LoCoMo": 88.83,
+          "LongMemEval": 89.2,
+          "BEAM 100K": 66.87,
+          "BEAM 10M": 56.75,
+          "PersonaMem v2": 40.58,
+          "HaluMem": 80.91
+        }
+      },
+      {
+        "backend": "LCM-X",
+        "scores": {
+          "LoCoMo": 78.83,
+          "LongMemEval": 87.0,
+          "BEAM 100K": 71.84,
+          "BEAM 10M": null,
+          "PersonaMem v2": 33.96,
+          "HaluMem": 81.68
+        }
+      }
+    ]
+  },
+  "entries": [
+    {
+      "board": "OmniMemEval",
+      "benchmark": "LoCoMo",
+      "metric": "LLM-as-a-judge accuracy",
+      "value": 78.83,
+      "status": "reported",
+      "lcmx_version": "v0.28.0-rc1",
+      "executable_identity": "executable code identical to v0.28.0",
+      "config": {
+        "embeddings": "local fastembed BAAI/bge-small-en-v1.5",
+        "top_k": 20
+      },
+      "run_date": "2026-10-18",
+      "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
+      "claim_class": "contributor-run, accepted upstream",
+      "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
+    },
+    {
+      "board": "OmniMemEval",
+      "benchmark": "LongMemEval",
+      "metric": "LLM-as-a-judge accuracy",
+      "value": 87.0,
+      "status": "reported",
+      "lcmx_version": "v0.28.0-rc1",
+      "executable_identity": "executable code identical to v0.28.0",
+      "config": {
+        "embeddings": "local fastembed BAAI/bge-small-en-v1.5",
+        "top_k": 20
+      },
+      "run_date": "2026-10-18",
+      "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
+      "claim_class": "contributor-run, accepted upstream",
+      "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
+    },
+    {
+      "board": "OmniMemEval",
+      "benchmark": "BEAM 100K",
+      "metric": "nugget score",
+      "value": 71.84,
+      "status": "reported",
+      "lcmx_version": "v0.28.0-rc1",
+      "executable_identity": "executable code identical to v0.28.0",
+      "config": {
+        "embeddings": "local fastembed BAAI/bge-small-en-v1.5",
+        "top_k": 20
+      },
+      "run_date": "2026-10-18",
+      "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
+      "claim_class": "contributor-run, accepted upstream",
+      "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
+    },
+    {
+      "board": "OmniMemEval",
+      "benchmark": "BEAM 10M",
+      "metric": "nugget score",
+      "value": null,
+      "status": "not_run",
+      "lcmx_version": "v0.28.0-rc1",
+      "executable_identity": "executable code identical to v0.28.0",
+      "config": {
+        "embeddings": "local fastembed BAAI/bge-small-en-v1.5",
+        "top_k": 20
+      },
+      "run_date": "2026-10-18",
+      "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
+      "claim_class": "contributor-run, accepted upstream",
+      "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
+    },
+    {
+      "board": "OmniMemEval",
+      "benchmark": "PersonaMem v2",
+      "metric": "rule-matching accuracy",
+      "value": 33.96,
+      "status": "reported",
+      "lcmx_version": "v0.28.0-rc1",
+      "executable_identity": "executable code identical to v0.28.0",
+      "config": {
+        "embeddings": "local fastembed BAAI/bge-small-en-v1.5",
+        "top_k": 20
+      },
+      "run_date": "2026-10-18",
+      "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
+      "claim_class": "contributor-run, accepted upstream",
+      "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
+    },
+    {
+      "board": "OmniMemEval",
+      "benchmark": "HaluMem",
+      "metric": "LLM-as-a-judge accuracy",
+      "value": 81.68,
+      "status": "reported",
+      "lcmx_version": "v0.28.0-rc1",
+      "executable_identity": "executable code identical to v0.28.0",
+      "config": {
+        "embeddings": "local fastembed BAAI/bge-small-en-v1.5",
+        "top_k": 20
+      },
+      "run_date": "2026-10-18",
+      "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
+      "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
+      "claim_class": "contributor-run, accepted upstream",
+      "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
+    }
+  ],
+  "in_review": {
+    "board": "Agent Memory Leaderboard Cycle 2",
+    "status": "in review"
+  }
+}
