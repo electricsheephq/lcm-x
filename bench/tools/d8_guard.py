@@ -11,6 +11,17 @@ from pathlib import Path
 from bench.tools.failclose import _correct, _qid, fail_close_signature, load_rows
 
 
+# Memorybench report/checkpoint identities, plus optional dataset/scorer pins.
+# Missing pins on both sides are disclosed, never invented from local files.
+IDENTITY_FIELDS = (
+    "datasetPath", "datasetSha256", "datasetSha", "dataset.path", "dataset.sha256",
+    "answeringModel", "answererProvenance.model", "answererProvenance.configuredModel",
+    "answererProvenance.reasoningEffort", "judge", "judgeProvenance.model",
+    "judgeProvenance.configuredModel", "judgeProvenance.reasoningEffort",
+    "scoringPath", "promptVersion", "answerPresentationMode", "recallConfig",
+)
+
+
 def classify_recall_health(health, config):
     """D1 OFF and #1723 LOCAL rules. Missing coverage (quota path) is missing."""
     if config not in {"OFF", "LOCAL"} or not isinstance(health, dict):
@@ -62,13 +73,22 @@ def _is_correct(row):
         return False
 
 
+def _unscorable(row):
+    return (not _failed(row) and "correct" not in row and "score" not in row
+            and not str(row.get("label") or "").strip())
+
+
 def degraded_rate(rows, config):
     states = [classify_recall_health(row.get("recallHealth"), config) for row in rows]
     missing = states.count("missing")
-    degraded = sum(state != "healthy" or _failed(row) for row, state in zip(rows, states))
-    return {"total": len(rows), "degraded": degraded,
+    unscorable = sum(_unscorable(row) for row in rows)
+    degraded = sum(state != "healthy" or _failed(row) or _unscorable(row) for row, state in zip(rows, states))
+    result = {"total": len(rows), "degraded": degraded,
             "rate_points": 100 * degraded / len(rows) if rows else None,
-            "missing": missing, "INCOMPLETE": bool(missing) or not rows}
+            "missing": missing, "INCOMPLETE": bool(missing or unscorable) or not rows}
+    if unscorable:
+        result["unscorable"] = unscorable
+    return result
 
 
 def bootstrap_bounds(clusters):
@@ -90,15 +110,52 @@ def bootstrap_bounds(clusters):
             samples[math.ceil(0.975 * len(samples)) - 1])
 
 
+def _record_identities(document, identities):
+    for field in IDENTITY_FIELDS:
+        value = document
+        for key in field.split("."):
+            value = value.get(key) if isinstance(value, dict) else None
+        if value is not None and value not in identities[field]:
+            identities[field].append(value)
+
+
+def _check_rows(values, source, identities, issues):
+    if not isinstance(values, list):
+        raise ValueError(f"{source} evaluations must be a list")
+    seen, duplicates = set(), []
+    for row in values:
+        if not isinstance(row, dict):
+            raise ValueError(f"{source} row is not a JSON object")
+        qid = _qid(row)
+        if qid in seen:
+            duplicates.append(qid)
+        seen.add(qid)
+        _record_identities(row, identities)
+    if duplicates:
+        issues.append(f"duplicate question ids: {len(duplicates)}; first id: {duplicates[0]} ({source})")
+
+
 def _load_run(root):
     root = Path(root)
     report = json.loads((root / "report.json").read_text())
+    identities = {field: [] for field in IDENTITY_FIELDS}
+    issues = []
+    _record_identities(report, identities)
+    _check_rows(report.get("evaluations", []), "report.json", identities, issues)
+    # Validate each input before load_rows collapses IDs. A single detail row
+    # overlaying a report row is legitimate; repeated IDs within a file are not.
+    detail = next((path for path in (root / "per_question.jsonl", root / "results/per_question.jsonl")
+                   if path.is_file()), None)
+    if detail:
+        _check_rows([json.loads(line) for line in detail.read_text().splitlines() if line.strip()],
+                    detail.name, identities, issues)
     has_rows = (report.get("evaluations") or (root / "per_question.jsonl").exists()
                 or (root / "results/per_question.jsonl").exists())
     rows = {_qid(row): row for row in load_rows(root)} if has_rows else {}
     checkpoint_path = root / "checkpoint.json"
     if checkpoint_path.exists():
         checkpoint = json.loads(checkpoint_path.read_text())
+        _record_identities(checkpoint, identities)
         questions = checkpoint.get("questions", {})
         for qid in checkpoint.get("targetQuestionIds") or questions:
             question = questions.get(qid, {})
@@ -109,7 +166,20 @@ def _load_run(root):
                 row["recallHealth"] = phases.get("search", {}).get("recallHealth")
             row["_failed"] = any(phases.get(p, {}).get("status") != "completed"
                                  for p in ("search", "answer", "evaluate"))
-    return report, rows
+    return report, rows, identities, issues
+
+
+def _compare_identities(candidate, baseline):
+    issues, missing_both = [], []
+    for field in IDENTITY_FIELDS:
+        left, right = candidate[field], baseline[field]
+        if not left and not right:
+            missing_both.append(field)
+        elif not left or not right:
+            issues.append(f"identity missing: {field}")
+        elif len(left) != 1 or len(right) != 1 or left != right:
+            issues.append(f"identity mismatch: {field}")
+    return issues, missing_both
 
 
 def _category(row, name):
@@ -120,8 +190,11 @@ def _category(row, name):
 
 
 def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
-    candidate_report, candidate = _load_run(candidate_run)
-    baseline_report, baseline = _load_run(baseline_run)
+    candidate_report, candidate, candidate_ids, candidate_issues = _load_run(candidate_run)
+    baseline_report, baseline, baseline_ids, baseline_issues = _load_run(baseline_run)
+    issues, missing_both = _compare_identities(candidate_ids, baseline_ids)
+    issues += [f"{side}: {issue}" for side, values in
+               (("candidate", candidate_issues), ("baseline", baseline_issues)) for issue in values]
     benchmark = baseline_report.get("benchmark", "")
     if benchmark != candidate_report.get("benchmark") or benchmark not in {"locomo", "longmemeval"}:
         raise ValueError("matching locomo or longmemeval benchmark required")
@@ -134,7 +207,9 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
     cc, bc = candidate_report.get("recallConfig"), baseline_report.get("recallConfig")
     overall = {"candidate": degraded_rate(list(candidate.values()), cc),
                "baseline": degraded_rate(list(baseline.values()), bc)}
-    incomplete = (bool(extra) or any(row["INCOMPLETE"] for row in overall.values())
+    issues += [f"{side}: unscorable rows: {rate['unscorable']}"
+               for side, rate in overall.items() if rate.get("unscorable")]
+    incomplete = (bool(issues) or bool(extra) or any(row["INCOMPLETE"] for row in overall.values())
                   or (not subset and len(baseline) != {"longmemeval": 500, "locomo": 1986}[benchmark]))
     cr, br = overall["candidate"], overall["baseline"]
     rate_pass = None if placebo else (not cr["INCOMPLETE"] and not br["INCOMPLETE"]
@@ -142,6 +217,9 @@ def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
     result = {"categories": {}, "runs": overall, "excluded_absent_from_baseline": extra,
               "INCOMPLETE": incomplete, "d8_row": not subset,
               "mode": "placebo" if placebo else "non-inferiority", "rate_pass": rate_pass}
+    result["identities_missing_both"] = missing_both
+    if issues:
+        result["reason"] = "; ".join(issues)
     for name in names:
         base = {qid: row for qid, row in baseline.items() if _category(row, name)}
         clusters = {}
