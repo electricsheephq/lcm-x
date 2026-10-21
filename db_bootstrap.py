@@ -1727,15 +1727,16 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
     vectors, keyed on ``(chunk_id, identity_hash)`` where ``chunk_id`` is
     ``store_id:chunk_index``.
     """
-    if conn.execute("SELECT 1 FROM sqlite_master WHERE name='metadata' AND type='table'").fetchone():
-        observed = conn.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
-            "AND name IN ('lcm_chunk_gapfill_delete', 'lcm_chunk_gapfill_update')",
-        ).fetchone()[0]
-        if observed != 2:
-            # Legacy proof predates mutation observation; revalidate it once.
-            conn.execute("DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%' "
-                         "OR key LIKE 'chunk_policy_revision_through:%'")
+    ensure_metadata_table(conn)
+    has_messages = conn.execute("SELECT 1 FROM sqlite_master WHERE name='messages' AND type='table'").fetchone()
+    observed = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+        "AND name IN ('lcm_chunk_gapfill_delete', 'lcm_chunk_gapfill_update', 'lcm_chunk_gapfill_message')",
+    ).fetchone()[0]
+    if observed != (3 if has_messages else 2):
+        # Legacy proof predates mutation observation; revalidate it once.
+        conn.execute("DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%' "
+                     "OR key LIKE 'chunk_policy_revision_through:%'")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS lcm_chunk_meta (
@@ -1788,6 +1789,19 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
         END;
         """
     )
+    if has_messages:
+        conn.executescript("""
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_message
+        AFTER UPDATE OF role, content ON messages
+        WHEN lower(trim(OLD.role)) IN ('user', 'assistant')
+          OR lower(trim(NEW.role)) IN ('user', 'assistant')
+          OR (OLD.role IS NOT NEW.role AND
+              (lower(trim(OLD.role)) = 'tool' OR lower(trim(NEW.role)) = 'tool'))
+        BEGIN
+            DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%'
+                OR key LIKE 'chunk_policy_revision_through:%';
+        END;
+        """)
 
 
 # The tables and indexes ``ensure_chunk_tables`` owns. Verified on chunk-corpus
