@@ -19,7 +19,8 @@ IDENTITY_FIELDS = (
     "answeringModel", "answererProvenance.model", "answererProvenance.configuredModel",
     "answererProvenance.reasoningEffort", "judge", "judgeProvenance.model",
     "judgeProvenance.configuredModel", "judgeProvenance.reasoningEffort",
-    "scoringPath", "promptVersion", "answerPresentationMode", "recallConfig",
+    "scoringPath", "promptVersion", "readerPromptVersion", "questionSetSha256",
+    "answerPresentationMode", "recallConfig",
 )
 
 

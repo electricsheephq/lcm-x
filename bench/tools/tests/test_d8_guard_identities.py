@@ -1,5 +1,6 @@
 """Synthetic regressions for #1729; no real run outputs or model calls."""
 import json
+from pathlib import Path
 
 import pytest
 
@@ -312,3 +313,74 @@ def test_outcome_types_use_scorer_precedence(tmp_path, evaluation, scorable):
     assert result["runs"]["candidate"].get("unscorable", 0) == int(not scorable)
     assert _unscorable(evaluation) is (not scorable)
     assert not _unscorable({**evaluation, "status": "failed"})
+
+
+WRITER_FIXTURES = Path(__file__).parent / "fixtures" / "d8_writer_pair"
+
+
+def test_writer_generated_matching_identities_are_present():
+    result = compare_runs(WRITER_FIXTURES / "a", WRITER_FIXTURES / "c", subset=True)
+    assert result["pass"]
+    assert not result["INCOMPLETE"]
+    for field in ("datasetSha256", "datasetPath", "promptVersion", "scoringPath"):
+        assert field not in result["identities_missing_both"]
+    for filename in ("checkpoint.json", "report.json"):
+        documents = {arm: json.loads((WRITER_FIXTURES / arm / filename).read_text())
+                     for arm in ("a", "b", "c")}
+        for field in ("questionSetSha256", "readerPromptVersion", "answerPresentationMode"):
+            assert documents["a"][field]
+            assert documents["a"][field] == documents["c"][field]
+        assert documents["a"]["datasetSha256"] != documents["b"]["datasetSha256"]
+        varying = {"datasetSha256", "runId", "dataSourceRunId", "createdAt", "updatedAt",
+                   "timestamp"}
+        assert {key: value for key, value in documents["a"].items() if key not in varying} == {
+            key: value for key, value in documents["b"].items() if key not in varying}
+
+
+def test_writer_generated_dataset_byte_mismatch_is_incomplete():
+    result = compare_runs(WRITER_FIXTURES / "a", WRITER_FIXTURES / "b", subset=True)
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+    assert "identity mismatch: datasetSha256" in result["reason"]
+
+
+def copy_writer_run(tmp_path, arm, name):
+    root = tmp_path / name
+    root.mkdir()
+    for filename in ("checkpoint.json", "report.json"):
+        (root / filename).write_text((WRITER_FIXTURES / arm / filename).read_text())
+    return root
+
+
+def edit_writer_run(root, field, value):
+    for filename in ("checkpoint.json", "report.json"):
+        path = root / filename
+        document = json.loads(path.read_text())
+        if value is None:
+            del document[field]
+        else:
+            document[field] = value
+        path.write_text(json.dumps(document))
+
+
+@pytest.mark.parametrize("field", ["questionSetSha256", "readerPromptVersion"])
+def test_writer_identity_mismatch_is_incomplete(tmp_path, field):
+    baseline = copy_writer_run(tmp_path, "a", "baseline")
+    candidate = copy_writer_run(tmp_path, "c", "candidate")
+    assert compare_runs(candidate, baseline, subset=True)["pass"]
+    edit_writer_run(candidate, field, "changed-" + field)
+    result = compare_runs(candidate, baseline, subset=True)
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+    assert f"identity mismatch: {field}" in result["reason"]
+
+
+@pytest.mark.parametrize("field", ["questionSetSha256", "readerPromptVersion"])
+def test_writer_identity_missing_on_one_side_is_incomplete(tmp_path, field):
+    baseline = copy_writer_run(tmp_path, "a", "baseline")
+    candidate = copy_writer_run(tmp_path, "c", "candidate")
+    edit_writer_run(baseline, field, None)
+    result = compare_runs(candidate, baseline, subset=True)
+    assert result["INCOMPLETE"]
+    assert not result["pass"]
+    assert f"identity missing: {field}" in result["reason"]

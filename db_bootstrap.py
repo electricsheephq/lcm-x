@@ -1139,16 +1139,31 @@ def ensure_temporal_rollup_invalidation_triggers(conn: sqlite3.Connection) -> No
     def normalized(sql: object) -> str:
         return re.sub(r"\s+", "", str(sql or "").lower()).rstrip(";")
 
-    for trigger_name, expected_sql in trigger_sql.items():
-        row = conn.execute(
+    # Healthy opens must remain read-only behind another WAL writer (#622).
+    # A repair still re-reads every definition after acquiring write ownership.
+    if all(
+        (row := conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
             (trigger_name,),
-        ).fetchone()
-        if row is not None and normalized(row[0]) != normalized(expected_sql):
-            conn.execute(f"DROP TRIGGER {trigger_name}")
-            row = None
-        if row is None:
-            conn.execute(expected_sql)
+        ).fetchone()) is not None
+        and normalized(row[0]) == normalized(expected_sql)
+        for trigger_name, expected_sql in trigger_sql.items()
+    ):
+        return
+
+    # Reuse schema-repair ownership: BEGIN IMMEDIATE before the decisive read,
+    # or a savepoint that leaves an existing caller transaction uncommitted.
+    with _fts_repair_ownership(conn):
+        for trigger_name, expected_sql in trigger_sql.items():
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger_name,),
+            ).fetchone()
+            if row is not None and normalized(row[0]) != normalized(expected_sql):
+                conn.execute(f"DROP TRIGGER {trigger_name}")
+                row = None
+            if row is None:
+                conn.execute(expected_sql)
 
 
 REQUIRED_TEMPORAL_ROLLUP_TABLES = (
