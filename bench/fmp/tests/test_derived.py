@@ -365,7 +365,7 @@ def test_11_threshold_edges_and_two_judge_conjunction():
     assert not score.passes(bad)
     entries=[dict(id=str(i),dataset='lme-s',cluster=str(i),category='target',target=True,guard=False) for i in range(100)]
     rows=[dict(id=e['id'],arm=a,judge=j,correct=True) for e in entries for a in run.ARMS for j in run.JUDGES]
-    assert score.evaluate(entries,rows,exclusions=list(range(4)))['verdict']=='PARK-INCOMPLETE'
+    assert score.evaluate(entries,rows,exclusions=[str(i) for i in range(4)])['verdict']=='PARK-INCOMPLETE'
     rows[-1]['correct']=None
     assert score.evaluate(entries,rows)['verdict']!='PARK-INCOMPLETE'
     for ident in ('0','1'):
@@ -434,7 +434,7 @@ def test_fix2_real_backend_status(tmp_path,status):
     try:
         c=cached(tmp_path/'cache',backend)
         c.deadline=time.time()+3600
-        with pytest.raises(cache.Excluded):
+        with pytest.raises(cache.Paused if status==429 else cache.Excluded):
             c.call(run.JUDGES[1],[dict(role='user',content='synthetic')],[],role='judge',rubric='r',sources={},max_tokens=32)
     finally:
         backend.close()
@@ -468,3 +468,102 @@ def test_fix2_extraction_exclusion_interim(tmp_path):
     cache.snapshot(tmp_path/'extraction.json',dict(items=[],relations=[],ledger=[dict(source=h,state='excluded')]))
     run.execute(tmp_path,Fake())
     assert (tmp_path/'interim.json').exists()
+
+@pytest.mark.parametrize('kind,fatal,prelude', [
+    ('codex','stream disconnected','Reconnecting: 403 Forbidden'),
+    ('codex','status 503','Reconnecting: 403 Forbidden'),
+    ('codex','stream disconnected',''),
+    ('codex',None,'Reconnecting: stream disconnected'),
+    ('codex',None,'Reconnecting: 403 Forbidden'),
+    ('codex',None,'usage limit reconnect'),
+    ('codex','Forbidden','Reconnecting: status 503'),
+    ('codex','quota reached','Reconnecting: 403 Forbidden'),
+    ('glm','HTTP 429 rate-limit',''), ('glm','API error: status=429 rate_limit','stderr'),
+])
+def test_fix3_fatal_outcome(tmp_path,monkeypatch,kind,fatal,prelude):
+    import subprocess
+    from bench.fmp import models
+    monkeypatch.setenv('GLM_API_KEY','synthetic')
+    events=[dict(type='error',message=prelude)] if prelude else []
+    if kind=='codex':
+        events += ([dict(type='turn.failed',error=dict(message=fatal))] if fatal else [
+            dict(type='item.completed',item=dict(type='agent_message',text='yes')),dict(type='turn.completed')])
+    elif prelude!='stderr':
+        events=[dict(type='result',is_error=True,api_error_status=429,result=fatal)]
+    else:
+        events=[]
+    def runner(*a,**kw):
+        return subprocess.CompletedProcess([],int(fatal is not None),'\n'.join(map(json.dumps,events)),
+            fatal if prelude=='stderr' else '')
+    quota=models.Quota(tmp_path/'quota.json')
+    backend=(models.Codex(tmp_path,quota,runner=runner) if kind=='codex' else
+             models.Claude(tmp_path,quota,kind='glm',runner=runner))
+    c=cached(tmp_path/'cache',backend)
+    c.deadline=time.time()+3600
+    args=dict(role='judge',rubric='r',sources={},max_tokens=32)
+    try:
+        if fatal is None:
+            assert c.call(run.JUDGES[0],[],[],**args)['content']=='yes'
+        else:
+            expected=cache.Paused if kind=='glm' or 'quota' in fatal else Incomplete if fatal=='Forbidden' else cache.Excluded
+            with pytest.raises(expected):
+                c.call(run.JUDGES[1 if kind=='glm' else 0],[],[],**args)
+            assert len(list((tmp_path/'cache').glob('*.retry-*.json')))==(3+1 if expected is cache.Excluded else 0)
+    finally:
+        backend.close()
+
+@pytest.mark.parametrize('bad_count',[1,2])
+def test_fix3_drift_budget_stops_main(tmp_path,monkeypatch,bad_count):
+    b=bundle() | dict(synthetic=False,repeat_ids=[],controls={})
+    qs=[qid(f'q{i:03d}') for i in range(44)]
+    for q in qs:
+        q.question=f'Which drink {q.qid}?'
+    b.update(questions=[asdict(q) for q in qs],panel=[dict(id=q.qid,dataset=q.dataset,cluster=q.qid,
+        category=q.qtype,target=True,guard=False) for q in qs],baselines={q.qid:run.baseline_messages(q,'HIT') for q in qs})
+    for q in qs:
+        a=b['baselines'][q.qid]
+        ident=request_identity(run.READER,a,endpoint={},effort='medium',temperature=None,max_tokens=32000,
+            tools=None,tool_choice='none',rubric='fmp-single',renderer={},sources={})
+        response=dict(content='historical')
+        b['controls'][q.qid]=dict(identity=ident,status='ok',response=response,response_sha256=sha(encoded(response)))
+        b['repeat_ids'].append(q.qid)
+    class Invalid(Fake):
+        def call(self,spec,messages,records,**kw):
+            out=super().call(spec,messages,records,**kw)
+            if spec==run.JUDGES[1] and 'historical' in json.dumps(messages) and any(
+                    f'Which drink q{i:03d}?' in json.dumps(messages) for i in range(bad_count)):
+                out['content']='yes and no'
+            return out
+    backend=Invalid()
+    assert run.drift(b,cached(tmp_path/'responses',backend),tmp_path)==(bad_count==1)
+    if bad_count==2:
+        monkeypatch.setattr(run,'inputs',lambda root:b)
+        result=run.execute(tmp_path,backend)
+        assert result['verdict']=='PARK-INCOMPLETE' and cache.snapshot(tmp_path/'rows.json')==[]
+        assert backend.calls==44*5+bad_count+1  # drift + parse replays + extraction; zero main sends
+        assert (tmp_path/'report.json').exists()
+        before=backend.calls
+        assert run.execute(tmp_path,backend)==result and backend.calls==before
+
+@pytest.mark.parametrize('module',['judges.py','prompts.py'])
+def test_fix3_implementation_resume(tmp_path,monkeypatch,module):
+    import shutil
+    source=tmp_path/'modules'
+    source.mkdir()
+    for p in __import__('pathlib').Path(run.__file__).parent.glob('*.py'):
+        shutil.copy2(p,source/p.name)
+    monkeypatch.setattr(run,'__file__',str(source/'derived.py'))
+    run.freeze(tmp_path/'run',bundle())
+    assert run.inputs(tmp_path/'run')
+    with (source/module).open('a') as stream:
+        stream.write('\n# changed fixture\n')
+    with pytest.raises(Incomplete,match=module):
+        run.inputs(tmp_path/'run')
+    run.freeze(tmp_path/'fresh',bundle())
+    assert run.inputs(tmp_path/'fresh')
+
+def test_fix3_population_exclusions():
+    entries=[dict(id=str(i),target=True,guard=False,dataset='lme-s',category='target',cluster=str(i)) for i in range(100)]
+    rows=[dict(id=e['id'],arm=a,judge=j,correct=True) for e in entries for a in run.ARMS for j in run.JUDGES]
+    exclusions=[dict(id=f'drift{i}') for i in range(4)]
+    assert score.evaluate(entries,rows,complete=False,exclusions=exclusions)['verdict']=='PARK-FUTILITY'

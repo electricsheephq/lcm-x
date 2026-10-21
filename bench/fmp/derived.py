@@ -1,6 +1,7 @@
 """DM0 frozen-hit instrument. Inventory is the default and never dispatches calls."""
 import argparse
 import json
+import math
 import subprocess
 from dataclasses import asdict
 from pathlib import Path
@@ -24,7 +25,7 @@ def baseline_messages(q, hits):
     return [dict(role='system',content=delivery.INSTRUCTIONS.format(date=q.question_date)+delivery.EVIDENCE),
             dict(role='user',content='History evidence:\n'+hits+'\nQuestion: '+q.question)]
 def implementation():
-    return {p.name:digest_file(p) for p in [*Path(__file__).parent.glob('derived*.py'),Path(models.__file__)]}
+    return {p.name:digest_file(p) for p in Path(__file__).parent.glob('*.py')}
 def bind(bundle):
     if bundle['w1_cache'] is None:
         raise Incomplete('W1 LOCAL/25 cache required')
@@ -74,8 +75,12 @@ def freeze(root, bundle):
 def inputs(root):
     b = json.loads((root/'inputs.json').read_bytes())
     m = json.loads((root/'run-manifest.json').read_bytes())
+    current=implementation()
+    changed=sorted(k for k in set(m['implementation']) | set(current) if m['implementation'].get(k)!=current.get(k))
+    if changed:
+        raise Incomplete('implementation changed: '+', '.join(changed))
     if (m['input_sha256'] != sha(encoded(b)) or m['rules'] != RULES or m['prompt_sha256'] != sha(extraction.PROMPT.encode()) or
-            m['implementation'] != implementation() or m['renderer']!=b['renderer'] or m['endpoints']!=b['endpoints']):
+            m['renderer']!=b['renderer'] or m['endpoints']!=b['endpoints']):
         raise Incomplete('frozen input/source corruption')
     return b
 def execute(root, backend, stage='all'):
@@ -110,7 +115,8 @@ def execute(root, backend, stage='all'):
             evaluation['drift_valid']=drift(b,cache,root,evaluation['exclusions'])
         ordered = sorted(b['panel'],key=lambda e:(not e['target'],e['id']))
         qs = {q['qid']:datasets.Question(**q) for q in b['questions']}
-        for index,e in enumerate(ordered):
+        # Invalid drift settles below without spending any main-panel calls.
+        for index,e in enumerate(ordered if evaluation['drift_valid'] else []):
             q=qs[e['id']]
             view=extraction.source_view(asdict(q))
             h=view['haystack_hash']
@@ -155,7 +161,7 @@ def execute(root, backend, stage='all'):
                     snapshot(root/'rows.json',rows)
                     snapshot(root/'report.json',interim)
                     return interim
-            if len(evaluation['exclusions'])>len(ordered)*.03:
+            if len({x['id'] for x in evaluation['exclusions']} & {e['id'] for e in ordered})>len(ordered)*.03:
                 break
         report=scoring.evaluate(ordered,rows,**evaluation)
     except Paused:
@@ -203,9 +209,11 @@ def drift(b,cache,root,exclusions=None):
     excluded={e['id'] for e in exclusions}
     rows=[r for r in rows if r['id'] not in excluded]
     snapshot(root/'drift.json',rows)
-    n=len(b['repeat_ids'])-len(excluded)
-    valid=n>0 and len(exclusions)<=len(b['panel'])*.03 and all(
-        all(sum(r['pair'][a] is None for r in rows if r['judge']==j)<=n*.02 for a in range(2)) and
+    repeat_ids=set(b['repeat_ids'])
+    n=len(repeat_ids-excluded)
+    valid=n>0 and len(excluded & {e['id'] for e in b['panel']})<=len(b['panel'])*.03 and all(
+        any(r['flip'] is not None for r in rows if r['judge']==j) and
+        all(sum(r['pair'][a] is None for r in rows if r['judge']==j)<=max(1,math.ceil(n*.02)) for a in range(2)) and
         sum(r['flip'] is True for r in rows if r['judge']==j)/max(1,sum(r['flip'] is not None for r in rows if r['judge']==j))<=.05
         for j in JUDGES)
     snapshot(root/'drift-admission.json',dict(valid=valid,exclusions=exclusions))
@@ -305,8 +313,9 @@ def main():
             backend.close()
         print(json.dumps(dict(verdict=result.get('verdict'),status=result.get('status'))))
         return 0
-    except (Incomplete,KeyError,ValueError):
-        print(json.dumps(dict(status='INCOMPLETE',reason='input, identity or activation preflight')))
+    except (Incomplete,KeyError,ValueError) as exc:
+        reason=str(exc) if str(exc).startswith('implementation changed: ') else 'input, identity or activation preflight'
+        print(json.dumps(dict(status='INCOMPLETE',reason=reason)))
         return 2
 if __name__=='__main__':
     raise SystemExit(main())

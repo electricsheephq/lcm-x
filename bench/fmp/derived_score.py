@@ -49,17 +49,17 @@ def passes(tables):
 def evaluate(entries, rows, *, complete=True, semantic_valid=True, drift_valid=True, exclusions=(),**admission):
     from .derived import ARMS, JUDGES
     population=len(entries)
-    excluded={r['id'] if isinstance(r,dict) else r for r in exclusions}
+    excluded={r['id'] if isinstance(r,dict) else r for r in exclusions} & {e['id'] for e in entries}
     entries=[e for e in entries if e['id'] not in excluded]
     rows=[r for r in rows if r['id'] not in excluded]
     keys = {(r['id'],r['arm'],r['judge']) for r in rows if r.get('correct') is None or type(r['correct']) is bool}
     expected = {(e['id'],a,j) for e in entries for a in ARMS for j in JUDGES}
     missing = len(expected-keys)
     result = dict(verdict='PARK-INCOMPLETE', reasons=[], judges={}, missing=missing,
-        exclusions=len(exclusions), claim_class='advisory', stage='Stage 0 only; GO funds Stage 1, never closes #1191')
+        exclusions=len(excluded), claim_class='advisory', stage='Stage 0 only; GO funds Stage 1, never closes #1191')
     invalid={j:{a:sum(r['correct'] is None for r in rows if r['judge']==j and r['arm']==a) for a in ARMS} for j in JUDGES}
     result.update(admission,exclusion_details=list(exclusions),invalid_verdicts=invalid)
-    if missing or len(keys)!=len(rows) or keys-expected or not semantic_valid or not drift_valid or len(exclusions)>population*.03 or any(
+    if missing or len(keys)!=len(rows) or keys-expected or not semantic_valid or not drift_valid or len(excluded)>population*.03 or any(
             n>len(entries)*.02 for counts in invalid.values() for n in counts.values()):
         result['reasons']=['missing/duplicate judge pairs, semantic/coverage, drift, >3% exclusions or >2% invalid verdicts']
         return result

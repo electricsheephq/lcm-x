@@ -1,4 +1,5 @@
 """Run-owned subscription cache; append-only send receipts, no uncertain replay."""
+import copy
 import fcntl
 import json
 import os
@@ -33,27 +34,53 @@ def backend_call(backend, spec, messages, records, **kwargs):
     target=backend.backend(spec)[0] if isinstance(backend,models.Backends) else backend
     if not isinstance(target,models.Harness):
         return backend.call(spec,messages,records,**kwargs)
-    original=target.runner
+    original=target.run
     def runner(*args,**kw):
-        proc=original(*args,**kw)
-        errors=[proc.stderr or ''] if proc.returncode else []
+        proc=original(*args,**kw)  # retain the unmodified event trace before outcome classification
+        events=[]
         for line in proc.stdout.splitlines():
             try:
-                event=json.loads(line)
+                events.append(json.loads(line))
             except ValueError:
                 continue
-            if event.get('type') in ('error','turn.failed') or event.get('is_error'):
-                errors.append(json.dumps(event))
-        reason=' '.join(errors)
-        if not models.limited(reason) and not re.search(r'403|forbidden',reason,re.I) and re.search(
+        stderr=(proc.stderr or '')[-4000:]
+        if isinstance(target,models.Codex):
+            done=any(e.get('type')=='turn.completed' for e in events)
+            fatal=next((e for e in reversed(events) if e.get('type')=='turn.failed'),None)
+            fatal=fatal or next((e for e in reversed(events) if e.get('type')=='error'),{})
+            # models.py must not reclassify non-fatal reconnects as usage limits.
+            proc=copy.copy(proc)
+            proc.stdout='\n'.join(json.dumps(e) for e in events if e.get('type') not in ('error','turn.failed') or (not done and e is fatal))
+            if done:
+                proc.returncode=0
+                return proc
+            reason=str((fatal.get('error') or {}).get('message') or fatal.get('message') or '')+' '+stderr
+            limited=models.limited(reason)
+        else:
+            result=next((e for e in reversed(events) if e.get('type')=='result'),{})
+            if proc.returncode==0 and result.get('subtype')=='success' and not result.get('is_error') and result.get('result'):
+                proc=copy.copy(proc)
+                proc.stdout='\n'.join(json.dumps(e) for e in events if e.get('type')!='rate_limit_event')
+                return proc
+            reason=str(result.get('result') or '')+' '+str(result.get('api_error_status') or '')+' '+stderr
+            limited=(any(e.get('type')=='rate_limit_event' and (e.get('rate_limit_info') or {}).get('status')=='rejected' for e in events)
+                or (target.kind=='glm' and (proc.returncode!=0 or result.get('is_error')) and (
+                    models.limited(result.get('result')) or models.limited(proc.stderr)
+                    or re.search(r'\b(?:http|status|error)[ :=]*429\b|rate[-_ ]limit',proc.stderr or '',re.I)))
+                or (result.get('is_error') and (result.get('api_error_status')==429 or models.limited(result.get('result')))))
+        if limited:
+            target.quota.stop(target.kind)
+            raise models.BudgetStopped()
+        if not re.search(r'403|forbidden',reason,re.I) and re.search(
                 r'\b(?:429|5\d\d)\b|connection|reset|refused|stream|protocol|transport',reason,re.I):
             raise ConnectionError('transient backend transport/status')
         return proc
-    target.runner=runner
+    target.run=runner
     try:
         return backend.call(spec,messages,records,**kwargs)
     finally:
-        target.runner=original
+        target.run=original
+
 class Cache:
     def __init__(self, root, backend, endpoints, deadline, renderer):
         self.root, self.backend = Path(root), backend

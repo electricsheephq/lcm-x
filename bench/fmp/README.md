@@ -279,7 +279,8 @@ Incomplete LOCAL/25 receipts refuse admission; OFF/25 cannot substitute.
 Freeze binds panel IDs and A0 bytes to verified retrievals; live `w1_cache` cannot be null.
 Added questions need `added_receipt` in the same verified LOCAL/25 cache. Imported
 controls must match their original response records and verified source identities.
-The manifest pins renderer/endpoints and the transport implementation digest.
+The manifest pins renderer/endpoints and byte digests of every `bench/fmp` Python module.
+Resume refuses changed modules by name; a fresh run directory freezes the new identity.
 
 INPUT is a private JSON export: schema `dm0-v1`, pinned `product` source hash and
 `product_commit`, `source_files`/`dataset_sha256`, `normalizer_sha256`, `dev_ids`,
@@ -296,16 +297,23 @@ Only separately authorized live runs use `extract`/`answer --activate`: subscrip
 Sol/medium extraction/readers and Sol/low plus GLM 5.3 judgments, both on every answer.
 The launcher supplies GLM credentials; the instrument never reads credential files.
 Resume uses immutable inputs and successful calls; uncertain sends require disposition.
-Timeouts, HTTP 5xx/429 without a usage marker, resets/refusals and stream/protocol
-failures retry the unchanged request after 60, 180 and 600 seconds.
+Completed turns remain successful despite non-fatal reconnects. Failed calls use only
+the fatal outcome (last error if no turn failure) and stderr tail for classification.
+Timeouts, HTTP 5xx/unmarked 429 outside backend usage-limit predicates, resets/refusals
+and stream/protocol failures retry unchanged after 60, 180 and 600 seconds.
+Usage limits match each backend, including GLM error-result 429 and rate-limit markers.
 Quota/usage stops return `PAUSED` without exclusions or a settled report. Rerun the
 same directory after reset to retry the paused call and reuse saved calls; paused
 wall time does not consume the frozen deadline.
 Exhausted questions are excluded from both arms and judges; more than 3% is INCOMPLETE.
+Each exclusion budget counts only IDs in its population, including targets-only interim.
 Valid extraction siblings survive rejection; more than 5% rejected items is INCOMPLETE.
 Invalid judge replies in the main panel and drift retry once unchanged; persistent
-invalids are reported per arm/judge, with more than 2% INCOMPLETE. Drift exhaustion
-excludes the question from all main-panel arms and judges. Unsettled runs are resumable.
+invalids are reported per arm/judge. Main-panel invalids above 2% are INCOMPLETE;
+drift allows `max(1, ceil(0.02 * n))` invalids per judge/arm (one at 44 repeats).
+Invalid drift settles PARK-INCOMPLETE before any main-panel send; drift quota pauses.
+Drift exhaustion excludes the question from all main-panel arms and judges.
+Unsettled calls remain resumable.
 When memory is empty, controls reuse the A0 answer. Cards include rejection counts/rates.
 Source-only 16k-token windows plus at most 2k context are batched three per call.
 Whole source-linked groups, including quotes/references/header, fit an 8,192-token cap.
