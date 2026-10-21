@@ -153,8 +153,12 @@ def test_off_rotation_bytes(tmp_path, scenario):
     expected = json.loads((root / 'tests/fixtures/user_carry_off_rotation.json').read_text())
     env = dict(os.environ)
     env.pop('LCM_USER_CARRY_TOKENS', None)
+    # The driver runs as a script, so its sys.path starts at tests/; the host's `agent` package (CI stubs it at
+    # the repo root) must still import.
+    env['PYTHONPATH'] = os.pathsep.join(filter(None, [str(root), env.get('PYTHONPATH')]))
     run = subprocess.run([sys.executable, '-B', str(root / 'tests/user_carry_off_driver.py'),
-                          str(root), scenario, str(tmp_path)], env=env, capture_output=True, text=True, check=True)
+                          str(root), scenario, str(tmp_path)], env=env, capture_output=True, text=True)
+    assert run.returncode == 0, run.stderr[-2000:]
     data = json.loads(run.stdout.replace(str(tmp_path), '<WORK>'))
     actual = json.dumps(data, sort_keys=True, separators=(',', ':'))
     assert hashlib.sha256(actual.encode()).hexdigest() == expected['sha256'][scenario]
