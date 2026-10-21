@@ -45,15 +45,27 @@ def check(root, reports, changed, allowlist):
             tree = ET.parse(report).getroot()
             if tree.tag not in {"testsuites", "testsuite"}:
                 raise ValueError("not a JUnit testsuite")
+            parents = {child: parent for parent in tree.iter() for child in parent}
+            if any(parents[case].tag != "testsuite" for case in tree.iter("testcase")):
+                raise ValueError("testcase must be directly under a testsuite")
             ran = 0
             for suite in tree.iter("testsuite"):
                 if suite.get("file"):
                     collected.add(relative(suite.get("file")))
             for case in tree.iter("testcase"):
                 file = case.get("file")
-                if not file:
-                    raise ValueError("testcase missing file attribute (requires xunit1)")
-                path = relative(file)
+                path = relative(file) if file else None
+                if path is None or path == ".." or path.startswith("../"):
+                    # Generated tests can point into a dependency; pytest's classname
+                    # still identifies the collecting module, followed by any classes.
+                    parts = case.get("classname", "").split(".")
+                    for end in range(len(parts), 0, -1):
+                        module = root / ("/".join(parts[:end]) + ".py")
+                        if module.resolve().is_relative_to(root.resolve()) and module.is_file():
+                            path = relative(module)
+                            break
+                if path is None:
+                    raise ValueError("testcase missing file attribute and matching repository classname")
                 collected.add(path)
                 cases[path] += 1
                 if case.find("skipped") is None:

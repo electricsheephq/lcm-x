@@ -109,6 +109,101 @@ def test_hypothesis_vendor_testcase_does_not_match_repo_file(evidence):
     assert errors == ["tests/test_a.py: not collected by any CI job"]
 
 
+@pytest.mark.parametrize("flags", [[], ["-n", "2"], ["-n", "2", "--import-mode=importlib"]],
+                         ids=["serial", "xdist", "importlib"])
+def test_generated_state_machine_credits_collecting_module(evidence, flags):
+    root, allowlist, _ = evidence
+    module = root / "generated/test_stateful.py"
+    module.parent.mkdir()
+    module.write_text(
+        "from hypothesis import settings\n"
+        "from hypothesis.stateful import RuleBasedStateMachine, rule\n"
+        "class Machine(RuleBasedStateMachine):\n"
+        "    @rule()\n"
+        "    def step(self): assert True\n"
+        "TestMachine = Machine.TestCase\n"
+        "TestMachine.settings = settings(max_examples=2, stateful_step_count=2, database=None)\n"
+    )
+    (root / "pytest.ini").write_text("[pytest]\ntmp_path_retention_policy = failed\n")
+    report = root / "generated.xml"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", str(module), "-q", *flags,
+         "-p", "no:cacheprovider", "-o", "junit_family=xunit1", f"--junitxml={report}",
+         f"--basetemp={root / 'pytest-tmp'}"],
+        cwd=root, capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    case = next(ET.parse(report).iter("testcase"))
+    assert case.get("classname") == "generated.test_stateful.TestMachine"
+    assert "hypothesis/stateful.py" in case.get("file")
+    errors, summary = check(root, [report], ["generated/test_stateful.py"], allowlist)
+    assert errors == []
+    assert "generated/test_stateful.py | 1 | executed" in summary
+
+
+@pytest.mark.parametrize("file", [None, "../../../../../opt/hostedtoolcache/Python/3.12.15/"
+                                "x64/lib/python3.12/site-packages/hypothesis/stateful.py"])
+@pytest.mark.parametrize("skipped", [False, True])
+def test_real_ci_state_machine_shape(evidence, file, skipped):
+    root, allowlist, report = evidence
+    path = "tests/invariants/test_exactly_once_machine.py"
+    module = root / path
+    module.parent.mkdir(parents=True)
+    module.write_text("# collected repository module\n")
+    target = report()
+    tree = ET.parse(target)
+    case = tree.find(".//testcase")
+    case.attrib = {"classname": "tests.invariants.test_exactly_once_machine.TestExactlyOnce",
+                   "name": "runTest", "line": "483", "time": "13.065"}
+    if file is not None:
+        case.set("file", file)
+    if skipped:
+        ET.SubElement(case, "skipped")
+    tree.write(target)
+    errors, summary = check(root, [target], [path], allowlist)
+    if skipped:
+        assert f"{path}: all skipped" in errors
+    else:
+        assert errors == []
+        assert f"{path} | 1 | executed" in summary
+
+
+def test_external_classname_does_not_credit_unrelated_repo_module(evidence):
+    root, allowlist, report = evidence
+    module = root / "tests/test_a.py"
+    module.parent.mkdir()
+    module.write_text("# unrelated\n")
+    target = report(cases=(("../site-packages/hypothesis/stateful.py", "passed"),))
+    tree = ET.parse(target)
+    tree.find(".//testcase").set("classname", "unrelated.test_a.TestMachine")
+    tree.write(target)
+    errors, _ = check(root, [target], ["tests/test_a.py"], allowlist)
+    assert errors == ["tests/test_a.py: not collected by any CI job"]
+
+
+@pytest.mark.parametrize("xml", [
+    '<testsuites><testcase file="tests/test_a.py"/></testsuites>',
+    '<testsuites><wrapper><testcase file="tests/test_a.py"/></wrapper></testsuites>',
+    '<testsuite><wrapper><testcase file="tests/test_a.py"/></wrapper></testsuite>',
+    '<testsuite><testcase file="tests/test_a.py"><testcase file="tests/test_a.py"/></testcase></testsuite>',
+])
+def test_testcase_outside_direct_testsuite_fails_closed(evidence, xml):
+    root, _, report = evidence
+    (root / ".github").mkdir()
+    (root / ".github/tests-ran-allowlist.txt").write_text("")
+    target = root / "bad-structure.xml"
+    target.write_text(xml)
+    script = Path(__file__).resolve().parents[1] / "scripts/ci/check_tests_ran.py"
+    result = subprocess.run(
+        [sys.executable, str(script), "--junit", str(report()), str(target)],
+        cwd=root, capture_output=True, text=True,
+        env={**os.environ, "GITHUB_EVENT_NAME": "push", "GITHUB_EVENT_PATH": "",
+             "GITHUB_STEP_SUMMARY": ""},
+    )
+    assert result.returncode == 1
+    assert "missing or malformed JUnit: testcase must be directly under a testsuite" in result.stdout
+
+
 def test_empty_report_fails_on_push_too(evidence):
     root, allowlist, report = evidence
     errors, _ = check(root, [report(cases=())], [], allowlist)
