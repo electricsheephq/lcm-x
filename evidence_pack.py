@@ -837,8 +837,18 @@ def build_evidence_pack(
     )
     computation: dict[str, Any] | None = None
     computation_reason: str | None = None
+    uncertain_date_refs = {
+        item.public["exact_ref"] for item in resolved
+        if item.public["observation_time"].get("time_uncertain")
+        and item.public["occurrence_time"].get("event_time_source") != "explicit"
+    }
     if as_of is not None and any(
         item.public["observation_time"].get("time_uncertain") for item in resolved
+    ):
+        computation_reason = "uncertain_source_observation_time"
+    elif any(
+        operand.evidence_date is not None and operand.citation in uncertain_date_refs
+        for operand in grounded_operands
     ):
         computation_reason = "uncertain_source_observation_time"
     elif plan is not None and completeness["state"] == "closed":
