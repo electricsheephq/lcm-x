@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from fnmatch import fnmatchcase
 from typing import Any
 
 
@@ -22,8 +23,7 @@ REQUIRED_CI_CHECK_PAIRS = (
     ("tests-ran", 15368),
 )
 # Required on the PR head and merge group. Differential does not run on pushes to main;
-# the merge-group run covers the merged tree. Post-merge verification checks the CI pairs
-# above on the merge commit.
+# the merge-group run covers the merged tree and must be verified on the merge commit.
 REQUIRED_PR_ONLY_CHECK_PAIRS = (("differential", 15368),)
 REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS + REQUIRED_PR_ONLY_CHECK_PAIRS
 # Changed-path risk map for the land-pr review obligation. It is a readiness hint
@@ -158,6 +158,7 @@ def _trusted_checks(
     checks: list[dict[str, Any]],
     target_sha: str,
     required_pairs: tuple[tuple[str, int], ...] = REQUIRED_CHECK_PAIRS,
+    allow_multiple: bool = False,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     matched: list[dict[str, Any]] = []
     blockers: list[str] = []
@@ -175,13 +176,25 @@ def _trusted_checks(
             if check.get("status") == "completed"
             and check.get("conclusion") == "success"
         ]
-        if len(exact) > 1:
+        if len(exact) > 1 and not allow_multiple:
             blockers.append(f"TRUSTED_CHECK_DUPLICATE:{context}:{integration_id}")
-        elif len(passing) != 1:
+        elif not passing or len(passing) != len(exact):
             blockers.append(f"TRUSTED_CHECK_UNSATISFIED:{context}:{integration_id}")
         else:
             matched.append({"context": context, "integration_id": integration_id})
     return matched, blockers
+
+
+def _active_main_policy(policy: dict[str, Any]) -> bool:
+    refs = policy.get("conditions", {}).get("ref_name", {})
+    return (
+        policy.get("enforcement") == "active"
+        and bool(set(refs.get("include", [])) & {"~DEFAULT_BRANCH", "refs/heads/main"})
+        and not any(
+            ref in {"~DEFAULT_BRANCH", "~ALL"} or fnmatchcase("refs/heads/main", ref)
+            for ref in refs.get("exclude", [])
+        )
+    )
 
 
 def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str, Any]]]:
@@ -199,8 +212,9 @@ def _base_blockers(data: dict[str, Any]) -> tuple[list[str], str, list[dict[str,
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
+        or not _active_main_policy(policy)
         or policy.get("strict_required_status_checks_policy") is not False
-        or policy.get("merge_queue") != {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN"}
+        or policy.get("merge_queue") != {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN", "max_entries_to_merge": 1}
         or [_pair(item) for item in policy.get("required_checks", [])]
         != list(REQUIRED_CHECK_PAIRS)
     ):
@@ -428,8 +442,9 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         or policy.get("base_ref") != "main"
         or not policy.get("base_sha")
         or policy.get("ruleset_id") != RULESET_ID
+        or not _active_main_policy(policy)
         or policy.get("strict_required_status_checks_policy") is not False
-        or policy.get("merge_queue") != {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN"}
+        or policy.get("merge_queue") != {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN", "max_entries_to_merge": 1}
         or [_pair(item) for item in policy.get("required_checks", [])]
         != list(REQUIRED_CHECK_PAIRS)
     ):
@@ -463,7 +478,7 @@ def _evaluate_post_merge(data: dict[str, Any]) -> dict[str, Any]:
         blockers.append("ISSUE_DISPOSITION_UNVERIFIED")
 
     matched, check_blockers = _trusted_checks(
-        data.get("checks", []), merge_commit, REQUIRED_CI_CHECK_PAIRS
+        data.get("checks", []), merge_commit, allow_multiple=True
     )
     blockers.extend(check_blockers)
     decision = _decision_for(blockers, "post_merge")

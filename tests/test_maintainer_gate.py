@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shlex
+import shutil
 import subprocess
 import sys
 from copy import deepcopy
@@ -26,8 +28,6 @@ REQUIRED = [
     {"context": "tests-ran", "integration_id": 15368},
     {"context": "differential", "integration_id": 15368},
 ]
-# Checked on the merge commit after landing; differential covers merge groups instead.
-CI_REQUIRED = REQUIRED[:-1]
 BOTH_LANES = ["acceptance", "adversarial"]
 TURN_PATH_PACKET = [
     "Consumer enumeration: rg call sites for every changed helper and effects on each consumer.",
@@ -71,8 +71,10 @@ def ready_payload(mode: str = "readiness") -> dict[str, object]:
             "base_ref": "main",
             "base_sha": BASE,
             "ruleset_id": 20888757,
+            "enforcement": "active",
+            "conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
             "strict_required_status_checks_policy": False,
-            "merge_queue": {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN"},
+            "merge_queue": {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN", "max_entries_to_merge": 1},
             "required_checks": deepcopy(REQUIRED),
             "bypass_actors": [],
         },
@@ -468,13 +470,18 @@ def test_merge_queue_policy_is_trusted(mode):
 @pytest.mark.parametrize(
     "policy_delta",
     [
+        {"enforcement": "disabled"},
+        {"conditions": {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": ["refs/heads/main"]}}},
+        {"conditions": {}},
+        {"merge_queue": {"merge_method": "MERGE", "grouping_strategy": "ALLGREEN", "max_entries_to_merge": 5}},
         {"strict_required_status_checks_policy": True},
         {"merge_queue": None},
         {"merge_queue": {}},
         {"merge_queue": {"merge_method": "SQUASH", "grouping_strategy": "ALLGREEN"}},
         {"merge_queue": {"merge_method": "MERGE", "grouping_strategy": "HEADGREEN"}},
     ],
-    ids=["strict-true", "missing-queue", "empty-queue", "wrong-method", "wrong-grouping"],
+    ids=["disabled", "excludes-main", "missing-condition", "batch-size-5",
+         "strict-true", "missing-queue", "empty-queue", "wrong-method", "wrong-grouping"],
 )
 def test_untrusted_merge_queue_policy_is_an_owner_gate(mode, policy_delta):
     payload = post_merge_payload() if mode == "post_merge" else ready_payload(mode)
@@ -548,16 +555,17 @@ def test_post_merge_verifies_exact_merge_commit():
     receipt = evaluate(post_merge_payload())
 
     assert receipt["decision"] == "POST_MERGE_VERIFIED"
-    assert len(receipt["matched_trusted_checks"]) == len(CI_REQUIRED)
+    assert len(receipt["matched_trusted_checks"]) == len(REQUIRED)
 
 
-def test_post_merge_does_not_require_differential_on_the_merge_commit():
+def test_post_merge_requires_differential_on_the_merge_commit():
     payload = post_merge_payload()
     payload["checks"] = [c for c in payload["checks"] if c["context"] != "differential"]
 
     receipt = evaluate(payload)
 
-    assert receipt["decision"] == "POST_MERGE_VERIFIED"
+    assert receipt["decision"] == "NOT_READY"
+    assert "TRUSTED_CHECK_UNSATISFIED:differential:15368" in receipt["blocker_codes"]
 
 
 def test_readiness_requires_differential_on_the_pr_head():
@@ -701,3 +709,83 @@ def test_malformed_nested_json_fails_closed_with_a_receipt():
     assert receipt["decision"] == "OWNER_GATE"
     assert receipt["blocker_codes"] == ["INPUT_INVALID"]
     assert receipt["authority_granted"] is False
+
+
+@pytest.mark.parametrize("include", [["~DEFAULT_BRANCH"], ["refs/heads/main"]])
+def test_maintainer_gate_trusts_active_ruleset_targeting_main(include):
+    payload = ready_payload()
+    payload["protected_policy"]["conditions"]["ref_name"]["include"] = include
+    assert evaluate(payload)["decision"] == "READY_FOR_AUTHORIZED_LANDING"
+
+
+@pytest.mark.parametrize("exclude", [["~DEFAULT_BRANCH"], ["~ALL"], ["refs/heads/*"]])
+def test_maintainer_gate_rejects_main_exclusion_patterns(exclude):
+    payload = ready_payload()
+    payload["protected_policy"]["conditions"]["ref_name"]["exclude"] = exclude
+    assert "PROTECTED_POLICY_UNTRUSTED" in evaluate(payload)["blocker_codes"]
+
+
+def test_post_merge_accepts_successful_queue_and_push_pair():
+    payload = post_merge_payload(LATER_MAIN)
+    payload["checks"] += [deepcopy(c) for c in payload["checks"] if c["context"] != "differential"]
+    assert evaluate(payload)["decision"] == "POST_MERGE_VERIFIED"
+
+
+@pytest.mark.parametrize("context", [item["context"] for item in REQUIRED])
+@pytest.mark.parametrize("status,conclusion", [
+    ("completed", "failure"), ("completed", "cancelled"),
+    ("in_progress", None), ("queued", None), ("completed", "skipped"),
+])
+def test_post_merge_blocks_any_unsuccessful_paired_run(context, status, conclusion):
+    payload = post_merge_payload()
+    other = deepcopy(next(c for c in payload["checks"] if c["context"] == context))
+    other.update(status=status, conclusion=conclusion)
+    payload["checks"].append(other)
+    assert evaluate(payload)["decision"] == "NOT_READY"
+
+
+def test_land_pr_rechecks_identity_then_enqueues_pinned_head_only():
+    landing = (SCRIPT.parents[1] / ".agents/skills/land-pr/SKILL.md").read_text()
+    final = landing.split("## 7. Merge Deterministically", 1)[1].split("## 8.", 1)[0]
+    check_command = "--json name,state,bucket,workflow,link,startedAt,completedAt"
+    assert check_command in landing.split("## 3. Verify Exact-Head Checks", 1)[1].split("## 4.", 1)[0]
+    assert check_command in final
+    assert final.index(check_command) < final.index("enqueuePullRequest")
+    assert "expectedHeadOid:$h" in final and '-f h="$head"' in final
+    assert "gh pr merge" not in final
+    assert "workflow_id" in final and "duplicate" in final
+
+
+def test_land_pr_verifies_own_merge_commit_ancestry_and_all_checks():
+    landing = (SCRIPT.parents[1] / ".agents/skills/land-pr/SKILL.md").read_text()
+    closeout = landing.split("## 8. Verify And Close Out", 1)[1]
+    assert 'git merge-base --is-ancestor "$merge_commit" origin/main' in closeout
+    assert 'commits/$merge_commit/check-runs' in closeout
+    assert 'test "$(gh api repos/electricsheephq/lcm-x/commits/main' not in closeout
+    assert "max_entries_to_merge" in landing
+    assert "all(.status ==" in closeout
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="landing command requires jq")
+@pytest.mark.parametrize("bad", [None, "failure", "cancelled", "in_progress", "missing-differential"])
+def test_land_pr_post_merge_jq_checks_every_queue_and_push_run(bad):
+    landing = (SCRIPT.parents[1] / ".agents/skills/land-pr/SKILL.md").read_text()
+    closeout = landing.split("## 8. Verify And Close Out", 1)[1]
+    command = next(line for line in closeout.splitlines() if line.startswith('required="'))
+    program = shlex.split(command)[-1]
+    required = [{"name": c["context"], "app_id": c["integration_id"]} for c in REQUIRED]
+    checks = [dict(name=c["context"], app={"id": c["integration_id"]},
+                   head_sha=MERGE, status="completed", conclusion="success") for c in REQUIRED]
+    checks += deepcopy(checks[:-1])
+    if bad == "missing-differential":
+        checks = [c for c in checks if c["name"] != "differential"]
+    elif bad:
+        checks[-1].update(status="in_progress" if bad == "in_progress" else "completed",
+                          conclusion=None if bad == "in_progress" else bad)
+    result = subprocess.run(
+        ["jq", "-e", "--arg", "sha", MERGE, "--argjson", "required", json.dumps(required),
+         "--argjson", "expected", json.dumps([c["context"] for c in REQUIRED]), program],
+        input=json.dumps([{"check_runs": checks[:5]}, {"check_runs": checks[5:]}]),
+        capture_output=True, text=True,
+    )
+    assert result.returncode == (0 if bad is None else 1), result.stderr
