@@ -716,7 +716,7 @@ def _media_payload_preview_content(content: str) -> str:
         value = json.loads(content)
     except json.JSONDecodeError:
         value = content
-        if re.match(r"\s*(?:\[\s*(?:[\{\('\"\]]|b['\"])|\{\s*(?:['\"}]|b['\"]))", content):
+        if re.match(r"\s*(?:\[\s*(?:[\{\('\"]|b['\"])|\{\s*(?:['\"}]|b['\"]))", content):
             # Normalization may have used repr for non-JSON media parts. Never preview that repr.
             # Bound both repr shapes before allocating an AST; the full source stays expandable.
             if len(content) > 1_048_576:
@@ -724,10 +724,7 @@ def _media_payload_preview_content(content: str) -> str:
             try:
                 value = ast.literal_eval(content)
             except (ValueError, SyntaxError, RecursionError):
-                if content.lstrip().startswith("{"):
-                    return ""
-                # A list-looking caption may be ordinary prose. Sanitize the original below.
-                value = content
+                return ""
     if isinstance(value, dict):
         value = [value]
     if isinstance(value, list):

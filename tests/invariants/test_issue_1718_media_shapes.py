@@ -70,13 +70,17 @@ def test_free_text_leaves_still_count(key):
 
 
 @pytest.mark.parametrize("prefix", ["[] ", "[  {'broken' ", "[('broken' ", "[b'broken ", "['broken ", '["broken '])
-def test_list_like_plain_text_parse_failure_keeps_sanitized_original(prefix):
+def test_list_like_caption_gate_preserves_truncated_repr_fallback(prefix):
     encoded = base64.b64encode(bytes(range(256)) * 20).decode("ascii")
     wrapped = "\n".join(encoded[i:i + 76] for i in range(0, len(encoded), 76))
     content = prefix + CAPTION + "\ndata:image/png;base64,QUJD\n" + "QUJD" * 100 + "\n" + wrapped
-    assert _media_payload_preview_content(content) == prefix + CAPTION
+    expected = prefix + CAPTION if prefix == "[] " else ""
+    assert _media_payload_preview_content(content) == expected
     stub = _build_externalized_placeholder(SUMMARY, content=content)
-    assert CAPTION in stub
+    if expected:
+        assert CAPTION in stub
+    else:
+        assert stub == _build_externalized_placeholder(SUMMARY)
     assert "data:" not in stub and "QUJD" not in stub
     assert len(stub) < 512 and stub.endswith("; ref=fixture.json]")
 
