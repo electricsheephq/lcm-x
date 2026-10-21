@@ -319,7 +319,7 @@ e.shutdown()
         def summarize(**kwargs):
             seen.append(kwargs["text"])
             return "Bounded summary preserving raw-source admission", 1
-        monkeypatch.setattr("hermes_lcm.engine.summarize_with_escalation", summarize)
+        _stub_summary(monkeypatch, summarize)
         authored._config.fresh_tail_count, authored._config.fresh_tail_max_tokens = 2, 0
         authored._config.leaf_chunk_tokens = count_messages_tokens([*original, message])
         authored.compress([*original, message, {"role": "assistant", "content": "Quoted packet reply"},
@@ -369,7 +369,6 @@ def test_carry_scaffold_and_scope_filter(factory):
 
 @pytest.mark.parametrize("window", [32000, 128000])
 def test_carry_prefix_budget_and_loop_accounting(factory, monkeypatch, window):
-    import hermes_lcm.engine as module
     engine = factory()
     engine._config.fresh_tail_count, engine._config.fresh_tail_max_tokens = 4, 0
     engine._config.leaf_chunk_tokens = 300
@@ -378,7 +377,7 @@ def test_carry_prefix_budget_and_loop_accounting(factory, monkeypatch, window):
     def summarize(**kwargs):
         inputs.append(kwargs["text"])
         return "Bounded summary with omitted user words. Expand for details: work", 1
-    monkeypatch.setattr(module, "summarize_with_escalation", summarize)
+    _stub_summary(monkeypatch, summarize)
     rows = _seed(engine, tuple(f"User {i}: " + "work item " * 150 for i in range(8)))
     emitted = engine.compress(rows, current_tokens=count_messages_tokens(rows), force=True)
     _packet(emitted)
