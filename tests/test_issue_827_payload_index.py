@@ -48,9 +48,10 @@ def count_listings(monkeypatch, config):
     original_scandir, original_glob = os.scandir, Path.glob
     in_glob = []
 
-    def scandir(path):
+    def scandir(path="."):
         # Path.glob's own scandir calls vary with the Python version.
-        if Path(path) == storage and not in_glob:
+        # tmp_path cleanup lists directories by integer descriptor; pass those through.
+        if not isinstance(path, int) and Path(path) == storage and not in_glob:
             counts["scandir"] += 1
         return original_scandir(path)
 

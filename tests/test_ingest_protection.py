@@ -532,7 +532,9 @@ def test_fsync_directory_still_fsyncs_on_posix(tmp_path, monkeypatch):
     real_open = os.open
 
     def recording_open(path, flags, *args, **kwargs):
-        opened_flags.append(flags)
+        # tmp_path cleanup opens entries with dir_fd; forward it and skip recording.
+        if kwargs.get("dir_fd") is None:
+            opened_flags.append(flags)
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", recording_open)
