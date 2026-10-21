@@ -349,7 +349,7 @@ def test_no_leaf_budget_stop_holds_the_threshold_answer_only(tmp_path, summaries
 def test_empty_anchor_slice_is_not_mapped_and_the_pass_result_is_the_same(tmp_path, summaries, monkeypatch):
     """No system prompt: the anchor slice is empty. Skipping its map uses the value the map returns for
     an empty slice, so the pass publishes the same leaf and returns the same list as without the skip."""
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path, summary_prefix_target_tokens=400)  # Keep this leaf-only mapping case's original target.
     view = _view()[1:]
     mapped = []
     original = engine._get_store_ids_for_messages

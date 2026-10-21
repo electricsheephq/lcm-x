@@ -498,3 +498,56 @@ def test_a_final_assembly_that_misses_the_target_takes_the_normal_path(make_engi
     assert engine._last_stub_first_exit is None and summaries
     assert "the final assembly missed the target" in caplog.text
     assert count_messages_tokens(result) <= engine.context_length
+
+
+# -- a first-sight stub is not host overhead (#930 site; #1012 F4 keeps the peak for the conversation) --------------
+
+HOST = 1_000  # system prompt and tool schemas the host adds on top of the list
+
+
+def crossing_turn(make_engine, summaries, caplog, tool_tokens):
+    engine = exit_engine(
+        make_engine, threshold_full_sweep_enabled=False, large_output_active_replay_stub_threshold_tokens=2_000
+    )
+    first = run(engine, text_view(), caplog)
+    assert engine.last_compression_status == "compacted"  # a summary prefix: the #930 block runs
+    calls = len(summaries)
+    view = first + [
+        {"role": "user", "content": "read the big file"},
+        *tool_pair("big", payload_of(tool_tokens, "zq")),
+        {"role": "user", "content": "latest ask"},
+        {"role": "assistant", "content": "latest answer"},
+    ]
+    current = count_messages_tokens(view) + HOST
+    engine.should_compress(current)
+    run(engine, view, caplog, current_tokens=current)
+    return engine, current, len(summaries) - calls
+
+
+def test_a_first_sight_stub_is_not_recorded_as_host_overhead(make_engine, summaries, caplog):
+    engine, _, _ = crossing_turn(make_engine, summaries, caplog, tool_tokens=5_000)
+
+    key, peak = engine._survival_overhead_observation
+    assert key == engine._conversation_id
+    assert peak <= HOST + 100, peak  # the host's own overhead, not the stubbed tool output
+
+
+def test_the_exit_takes_a_crossing_turn_with_a_large_new_tool_output(make_engine, summaries, caplog):
+    engine, current, new_calls = crossing_turn(make_engine, summaries, caplog, tool_tokens=9_000)
+    assert current >= THRESHOLD  # an automatic threshold pass
+
+    assert engine._last_stub_first_exit is not None and new_calls == 0  # the stubbed list fits: no model call
+    assert engine._survival_overhead_observation[1] <= HOST + 100
+
+
+@pytest.mark.parametrize("unknown", [{}, {"current_tokens": 0}])  # no figure, or 0 meaning unknown
+def test_a_host_without_token_counts_still_records_its_overhead(make_engine, summaries, caplog, unknown):
+    engine = exit_engine(make_engine, threshold_full_sweep_enabled=False)
+    first = engine.compress(text_view(), force=True, **unknown)
+    assert engine.last_compression_status == "compacted"
+    view = first + [{"role": "user", "content": "next ask"}, {"role": "assistant", "content": "next answer"}]
+    engine.last_prompt_tokens = count_messages_tokens(view) + 3 * HOST  # the provider counted the host's overhead
+
+    engine.compress(view, force=True, **unknown)
+
+    assert engine._survival_overhead_observation[1] >= 3 * HOST - 300  # the assembly measured it, as before

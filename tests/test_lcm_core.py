@@ -740,7 +740,7 @@ class TestProviderPrefixedAuxiliaryCalls:
         assert seen["model"] == "gpt-oss-120b"
 
     def test_expansion_call_passes_provider_and_stripped_model(self, monkeypatch):
-        from hermes_lcm.tools import _synthesize_expansion_answer
+        from hermes_lcm.expand_query_tools import _synthesize_expansion_answer
 
         seen = {}
 
@@ -769,7 +769,7 @@ class TestConfig:
         c = LCMConfig()
         assert c.fresh_tail_count == 24
         assert c.fresh_tail_max_tokens == 24_000
-        assert c.leaf_chunk_tokens == 8_000
+        assert c.leaf_chunk_tokens == 24_000
         assert c.context_threshold == 0.75
         assert c.incremental_max_depth == 3
         assert c.condensation_fanin == 4
@@ -809,7 +809,7 @@ class TestConfig:
         assert c.summary_circuit_breaker_cooldown_seconds == 300
         assert c.expansion_model == ""
         assert c.expansion_context_tokens == 32_000
-        assert c.summary_timeout_ms == 60_000
+        assert c.summary_timeout_ms == 120_000
         assert c.expansion_timeout_ms == 120_000
 
     def test_from_env(self, monkeypatch):
@@ -906,7 +906,7 @@ class TestConfig:
 
         assert c.fresh_tail_count == 24
         assert c.fresh_tail_max_tokens == 24_000
-        assert c.leaf_chunk_tokens == 8_000
+        assert c.leaf_chunk_tokens == 24_000
         assert c.context_threshold == 0.75
         assert c.max_assembly_tokens == 0
         assert c.reserve_tokens_floor == 0
@@ -999,7 +999,7 @@ class TestConfig:
 
         c = LCMConfig.from_env()
 
-        assert c.summary_timeout_ms == 60_000
+        assert c.summary_timeout_ms == 120_000
 
     def test_from_env_lcm_threshold_env_overrides_hermes_config(self, monkeypatch, tmp_path):
         hermes_home = tmp_path / "hermes"
@@ -2437,6 +2437,45 @@ class TestMessageStore:
     def test_store_waits_out_long_write_lock_with_extended_busy_timeout(self, tmp_path):
         db_path = tmp_path / "busy-timeout.db"
         store = MessageStore(db_path)
+        lock_conn = sqlite3.connect(db_path, timeout=1.0, check_same_thread=False)
+        lock_conn.execute("BEGIN IMMEDIATE")
+        attempted = threading.Event()
+        errors = []
+        # append() opens its write with BEGIN IMMEDIATE; that statement is the one that waits on the lock.
+        store._conn.set_trace_callback(
+            lambda sql: attempted.set() if sql.lstrip().upper().startswith("BEGIN") else None)
+
+        def append():
+            try:
+                store.append("sess1", {"role": "user", "content": "writer survives lock"})
+            except BaseException as exc:
+                errors.append(exc)
+
+        writer = threading.Thread(target=append, daemon=True)
+        try:
+            # SQLite's native busy handler has no Python clock seam. Its configured
+            # 30 s budget guards the old 5 s regression without a 6.2 s real sleep.
+            assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 30000
+            writer.start()
+            assert attempted.wait(timeout=10)
+        finally:
+            lock_conn.rollback()
+            lock_conn.close()
+            if writer.ident is not None:  # an assertion before start() must not be masked by join()
+                writer.join(timeout=10)
+            store._conn.set_trace_callback(None)
+        try:
+            assert not writer.is_alive()
+            assert errors == []
+            assert store.get_session_count("sess1") == 1
+        finally:
+            store.close()
+
+
+    @pytest.mark.latency
+    def test_store_waits_out_long_write_lock_with_extended_busy_timeout_latency(self, tmp_path):
+        db_path = tmp_path / "busy-timeout.db"
+        store = MessageStore(db_path)
 
         lock_conn = sqlite3.connect(db_path, timeout=1.0, check_same_thread=False)
         lock_conn.execute("PRAGMA journal_mode=WAL")
@@ -2464,6 +2503,7 @@ class TestMessageStore:
         assert store._conn.execute("PRAGMA busy_timeout").fetchone()[0] >= 30000
 
         store.close()
+
 
     def test_search_sort_modes_apply_before_limit(self, store):
         older_strong = store.append(

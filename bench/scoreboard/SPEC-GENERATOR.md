@@ -25,10 +25,10 @@ Requirements:
 5. Do NOT modify results.jsonl / RESULTS-SCHEMA.md. No git commands. Write only
    generate.py, test_generate.py, and the generated SCOREBOARD.md.
 
-Acceptance (from repo root /Volumes/LEXAR/hermes-work/wt-ci-fix):
+Acceptance (from the repository root):
 ```
 uv run --with pytest python3 -m pytest bench/scoreboard/test_generate.py -q -p no:xdist
 python3 bench/scoreboard/generate.py --check && python3 bench/scoreboard/generate.py
 ```
 Bounded report: files + LOC, tests green, one rendered-row excerpt.
-Scratch → /Volumes/LEXAR/Codex/session-notes/2026-07-30/hermes-scoreboard/artifacts/ (create), never /tmp.
+Scratch → local run `2026-07-30/hermes-scoreboard` (raw data kept locally; not published).

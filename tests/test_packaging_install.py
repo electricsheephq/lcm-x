@@ -13,6 +13,8 @@ import types
 
 import pytest
 
+from tests.timing_helpers import ContentionProbe
+
 
 @pytest.fixture(autouse=True)
 def _isolate_plugin_registration_storage(tmp_path, monkeypatch):
@@ -640,7 +642,7 @@ def test_plugin_entrypoint_registers_lcm_context_engine(_isolate_plugin_registra
     identity = engine.get_status()["runtime_identity"]
     repo_root = Path(__file__).resolve().parent.parent
     assert identity["plugin_name"] == "hermes-lcm-x"
-    assert identity["plugin_version"] == "0.26.0"
+    assert identity["plugin_version"] == "0.28.1"
     assert Path(identity["plugin_path"]) == repo_root
     assert identity["database_path_source"] == "hermes_home"
     assert Path(identity["database_path"]) == _isolate_plugin_registration_storage / "lcm.db"
@@ -1695,6 +1697,8 @@ def test_post_llm_hook_keeps_ingest_binding_stable_during_concurrent_rebind(
         platform="discord",
         conversation_id="conversation-a",
     )
+    probe = ContentionProbe(active_clone._stable_use_lock)
+    active_clone._stable_use_lock = probe
     original_ingest = active_clone.ingest
     ingest_started = threading.Event()
     release_ingest = threading.Event()
@@ -1737,7 +1741,8 @@ def test_post_llm_hook_keeps_ingest_binding_stable_during_concurrent_rebind(
         hook_thread.start()
         assert ingest_started.wait(timeout=2)
         rebind_thread.start()
-        assert not rebind_finished.wait(timeout=0.05)
+        assert probe.contended.wait(timeout=10), "competing lifecycle call never attempted the held lock"
+        assert not rebind_finished.is_set()
         release_ingest.set()
         hook_thread.join(timeout=2)
         rebind_thread.join(timeout=2)

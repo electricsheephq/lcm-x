@@ -20,7 +20,7 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from . import chronology, drain, externalized, host_parity, multiset, summary, tool_calls, tool_groups, host_rewrite
+from . import chronology, continuity, drain, externalized, host_parity, multiset, summary, tool_calls, tool_groups, host_rewrite
 
 ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 
@@ -165,6 +165,9 @@ def expected_items(atts: list[dict], notices=()) -> list[tuple[str, str]]:
     items = []
     for i, a in enumerate(atts):
         text = a["held"] if a["held"] is not None else a["persist"]
+        # reconcile.py's generated objective carrier is a projection, never a stored user row.
+        if text.startswith("[Current user objective preserved from compacted history]\n"):
+            text = a["persist"]
         nxt = next((b for b in atts[i + 1:] if b["prefix"] == a["prefix"]), None)
         cand = multiset.norm(text)
         folded = (nxt is not None and not a["reply"] and nxt["held"] is not None and cand
@@ -358,6 +361,11 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         if not applicable:  # a B9-only cell (the P8 controls) proves nothing without the audit: never PASS
             return {"verdict": "UNSUPPORTED", "reason": "B9: " + numbers["B9"]["reason"], "applicable_bars": [],
                     "failed_bars": {}, "inconclusive_bars": {}, "numbers": numbers}
+    if set(applicable) & {"C1", "F4"}:
+        window_failed, window_incomplete, window_numbers = continuity.score_window(events)
+        failed.update(window_failed)
+        inconclusive.update(window_incomplete)
+        numbers.update({b: v for b, v in window_numbers.items() if b in applicable})
     failed = {b: v for b, v in failed.items() if b in applicable}
     numbers["diagnostic"] = {
         "log_counts": {k: sum(p.get("log_counts", {}).get(k, 0) for p in phases)

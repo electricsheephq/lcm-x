@@ -188,6 +188,31 @@ usable result before the deadline, the semantic arm is not started and an
 explicit timeout is returned. Fusion expiry also returns an explicit timeout.
 No external reranker is called.
 
+### Exact duplicate message delivery (`lcm_recall` / `lcm_grep`)
+
+Exact stored copies of a message count once against delivery limits, per-session
+quotas, expansion quotas and response budgets. The key is the session and
+conversation identity, source, role, tool-call id (empty when absent), assistant
+tool calls, and SHA-256 of the
+**full stored content**. Summaries are never grouped; chunks of the same message
+still fuse by `store_id` first.
+Only stamped rows with the same recorded occurrence time can collapse. Unstamped
+rows remain separate, including a stamped original's unstamped replay copies:
+content equality alone cannot distinguish a copy from a real repeated turn.
+Groups with multiple recorded occurrence times remain separate in full.
+
+The representative is the best-ranked member. The group keeps its best-ranked position. Recall keeps the
+maximum fused score and union of retrieval arms. Only grouped hits carry
+`duplicate_store_ids`: sorted other store ids, excluding the representative.
+For example, `{"store_id": 12, "duplicate_store_ids": [19, 27]}` identifies
+three stored copies through one delivered hit. This is on by default with no
+config key. Duplicate-free responses retain their existing bytes.
+
+Grouping affects delivery only: raw reads and `lcm_expand(store_id=...)` still
+return each row independently. It neither changes the store nor repairs the
+writers that produced duplicates. A failed or expired identity read leaves
+recall candidates ungrouped rather than hiding potentially distinct evidence.
+
 ### Weighted RRF fusion (lcm_recall)
 
 `lcm_recall` fuses three arms — full-text raw messages, summary-vector KNN, and
@@ -217,6 +242,25 @@ erroring the tool. `lcm_grep`'s hybrid RRF is unaffected: it keeps implicit
 `1.0` weights (byte-identical to the unweighted formula above). The weights
 actually applied to the arms that ran are echoed back under
 `provenance.arm_weights`.
+
+#### Opt-in session packs (`LCM_RECALL_DELIVERY_UNIT`)
+
+The default `hits` preserves the ranked-hit response. Set
+`LCM_RECALL_DELIVERY_UNIT=session` to deliver full source messages around the
+best-ranked seeds, with unchanged ranking. Invalid environment values warn and
+fall back to `hits`. `limit` bounds ranked seeds (maximum 25), so `total_results`
+can exceed it. `include` selects seed arms; summary seeds can return raw messages.
+Both `detail` values use session delivery; `seen_refs` and occurrence-time
+options retain their `answer_ready` validation and exact-span semantics.
+
+The whole JSON response fits 16,000 estimated tokens and 64,000 characters,
+including metadata and escaping. It can contain partial sessions; inspect
+`provenance.delivery` for seed IDs, source-order ranges, completion, omissions,
+estimator and measured size. Tool-call/result groups are atomic. Oversized or
+unreadable groups carry bounded expansion hints; stored content is never changed.
+Event time comes from host observation, never the storage timestamp. Externalized
+markers remain markers. Proactive injection keeps its independent hits budget.
+This setting makes no answer-quality or host-context-fit guarantee.
 
 #### FTS anchor slot (`LCM_RECALL_FTS_ANCHOR`)
 
@@ -268,6 +312,16 @@ the caveat — the same disclosure mechanism as `lcm_grep`'s `degraded_reason` �
 so a caller never mistakes a truncated or approximate arm's contribution to the
 fused ranking for an exhaustive exact one.
 
+A backlog recorded by the last embedding backfill pass also sets `degraded: true`
+with a `summary semantic index catching up` or `chunk semantic index catching up`
+reason (and remaining rows when known). The record is per corpus and embedding
+identity; completing catch-up clears it. Non-FastEmbed uncertain rows instead report
+`<corpus> semantic index has N rows awaiting /lcm embed backfill --apply --retry-uncertain --corpus <summary|chunks>`.
+Ingest marks an existing chunk record when automatic chunk passes cannot run;
+a manual backfill clears it. Ordinary automatic ingest lag and no recorded pass
+add no reason. Recall uses a keyed metadata
+lookup, without counting corpus rows; coverage enums still describe the kNN scan.
+
 ### Privacy-policy errors are not a degrade
 
 A missing active cloud profile or an older registered privacy revision degrades
@@ -275,8 +329,13 @@ A missing active cloud profile or an older registered privacy revision degrades
 `embedding_identity_stale:` reason. No query is sent to the stale arm's provider and
 its stored vectors are not read. `lcm_grep` semantic mode uses the same reason, and
 `lcm_doctor` warns with the remedy: `/lcm embed warmup`, then
-`/lcm embed backfill --apply`. Proactive recall can use these full-text hits without
-counting a privacy-policy error.
+`/lcm embed backfill --apply`, with `--corpus chunks` (or `--corpus both`) when the stale
+corpus includes chunk vectors. Cloud providers also require `--confirm-raw-text` on
+every chunk or combined apply. Inspect the doctor's complete `remedy` and consent warning.
+Repeat the backfill apply only while `remaining` is above 0 and each run lowers it.
+Stop on `status: partial`, `status: error`, or `status: failed`, or if `remaining`
+stops falling, and inspect the warnings, errors, and detail output.
+Proactive recall can use these full-text hits without counting a privacy-policy error.
 
 An embedding-privacy policy error (empty/unknown catalog, dispatch-time policy drift, residual
 detector match) is a deterministic configuration fault. `lcm_recall` raises it from every
@@ -448,8 +507,9 @@ Version 1 is deliberately narrow:
   per file, and caps externalized result material at 64,000 response characters
 - a result includes the ref, tool-call id, bounded snippet, line and byte
   position, original content byte/character sizes, and `scan_truncated`
-- `externalized_refs` is optional; explicit invalid, missing, symlinked, or
-  foreign-session refs are rejected rather than silently widened
+- `externalized_refs` is optional, and an empty list is the same as omitting it;
+  explicit invalid, missing, symlinked, or foreign-session refs are rejected
+  rather than silently widened
 
 Cross-session externalized search remains unsupported. Search the historical
 row first, load the intended session, or recover a known current-session ref

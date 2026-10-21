@@ -1,4 +1,4 @@
-"""#1013: the product defaults are the deployed configuration.
+"""#1013: product defaults track the deployed configuration, with phase-0 leaf changes.
 
 The threshold full sweep, which the new defaults turn on, must run on a default
 install with no extra setup.
@@ -21,7 +21,10 @@ def test_defaults_match_the_deployed_configuration():
     assert config.context_threshold == 0.75
     assert config.fresh_tail_count == 24
     assert config.fresh_tail_max_tokens == 24_000
-    assert config.leaf_chunk_tokens == 8_000
+    # v0.27.0 phase 0: leaf chunk 24,000 and target cap 2,000;
+    # the fleet's managed config follows at the v0.27.0 pin.
+    assert config.leaf_chunk_tokens == 24_000
+    assert config.leaf_target_max_tokens == 2_000
     assert config.threshold_full_sweep_enabled is True
     # #1013 parts B and C: rollups, externalization and active-replay stubbing match the deployed defaults.
     assert config.temporal_rollups_enabled is True
@@ -52,9 +55,10 @@ def test_part_b_env_false_overrides_the_deployed_defaults(tmp_path, monkeypatch)
 def test_threshold_full_sweep_is_active_by_default(tmp_path, monkeypatch):
     engine, _hermes_home = _default_engine(tmp_path)
     engine._session_id = "defaults-sweep"
-    engine.threshold_tokens = 1
+    engine.threshold_tokens = 24_000  # A realistic threshold keeps the default prefix target above the fake leaves.
     messages = [{"role": "system", "content": "system"}]
-    for index in range(60):
+    # Keep multiple sweep passes with the larger default leaf chunk.
+    for index in range(100):
         messages.append({
             "role": "user" if index % 2 == 0 else "assistant",
             "content": f"FACT-{index} " + (f"dense-{index} " * 150),
@@ -75,7 +79,7 @@ def test_threshold_full_sweep_is_active_by_default(tmp_path, monkeypatch):
         engine.shutdown()
 
     assert len(calls) > 1
-    assert all(tokens <= 8_000 for tokens in calls)
+    assert all(tokens <= 24_000 for tokens in calls)
     assert telemetry["status"] == "completed"
     assert telemetry["leaf_passes"] == len(calls)
     assert telemetry["budget_exhausted"] is False

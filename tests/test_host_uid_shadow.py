@@ -22,6 +22,7 @@ from hermes_lcm.db_bootstrap import SCHEMA_VERSION, get_schema_version, run_vers
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.host_uid import HOST_UID_COUNTER_KEY
 from hermes_lcm.store import MessageStore
+from tests.harness import make_engine
 
 PAD = " alpha beta gamma delta" * 4
 
@@ -47,8 +48,10 @@ def _state_db(tmp_path, sessions) -> None:
 
 
 def _engine(tmp_path, session: str = "S", conversation: str = "conv") -> LCMEngine:
-    config = LCMConfig(fresh_tail_count=2, leaf_chunk_tokens=1, database_path=str(tmp_path / "lcm.db"))
-    engine = LCMEngine(config=config)
+    engine = make_engine(tmp_path, fresh_tail_count=2, leaf_chunk_tokens=1)
+    # This fixture places the host state.db beside lcm.db, not in home/.
+    engine._hermes_home = str(tmp_path)
+    engine._store._hermes_home = str(tmp_path)
     engine.on_session_start(session, platform="cli", context_length=200_000, conversation_id=conversation)
     return engine
 
@@ -704,7 +707,7 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 assert store_mod.__file__.startswith(old)
 # v0.26 readers already ship host_uid; retain the pre-uid premise for older releases.
-if sys.argv[4] != "v0.26.2":
+if sys.argv[4] in ("v0.25.0-rc1", "v0.25.1"):
     assert importlib.util.find_spec("hermes_lcm.host_uid") is None
 engine = LCMEngine(config=LCMConfig(database_path=db))
 engine.on_session_start("S", platform="cli", context_length=200_000, conversation_id="conv")
@@ -723,7 +726,12 @@ ROLLBACK_READERS = {
     "v0.25.0-rc1": "c36b46e3a7b1bff23cfa45fa117565ab8624441d",
     "v0.25.1": "f47b55e031b507b424ff5f480d8f2a80d358f1f0",
     "v0.26.2": "6800cf45ad05280e6cf6fa9e1ad96c62b7132646",
+    "v0.27.0": "c67d7633d963a2ffd24cf90995189ee58e2f88c7",
+    "v0.28.0": "709099b3a397a7893a7abae8802ebe7bf605f79e",
 }
+
+PRE_V026_READERS = frozenset({"v0.25.0-rc1", "v0.25.1"})
+assert PRE_V026_READERS <= set(ROLLBACK_READERS)
 
 
 def _skip_or_fail_in_ci(reason):

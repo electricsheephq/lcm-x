@@ -1,8 +1,7 @@
-"""#614: the leaf summary target is configuration (ratio / min / max); unset, every number equals the base.
+"""#614: the leaf summary target is configuration (ratio / min / max).
 
 The target is min(max, max(min, int(source_tokens * ratio))) and the L1 call receives twice the target as
-max_tokens. T5 replays a compaction fixture whose (source_tokens, target) pairs and max_tokens values were
-captured on the base (v0.24.6, ae0e996de2) before the knobs existed."""
+max_tokens. The v0.27.0 phase-0 defaults hold the target at 2,000 tokens for every source size."""
 
 from __future__ import annotations
 
@@ -21,12 +20,11 @@ from hermes_lcm.engine import LCMEngine
 PAD = " alpha beta gamma delta"
 ACCEPTED = "Earlier turns.\nExpand for details about: turns"
 
-# Captured at the base with the fixture in _compaction_fixture (one leaf per regime: floor, ratio, cap; the
-# 7-token replies fall through to L2 and L3).
-BASE_LEAF_BUDGETS = [[8633, 2000], [7, 2000], [28758, 5751], [7, 2000], [92008, 12000], [7, 2000]]
+# The fixture source sizes stay the same; phase 0 holds every target at 2,000 tokens.
+DEFAULT_LEAF_BUDGETS = [[8633, 2000], [7, 2000], [28758, 2000], [7, 2000], [92008, 2000], [7, 2000]]
 # #605 F2: the three 7-token leaves are written verbatim with no call (at the base each made a level 1 call of
 # 4000 and a level 2 call of 2000 max tokens, both rejected as not shorter, then took that same level 3).
-BASE_MAX_TOKENS = [4000, 11502, 24000]
+DEFAULT_MAX_TOKENS = [4000, 4000, 4000]
 BASE_LEAF_NODES = [(7, 7), (7, 7), (7, 7), (8633, 12), (28758, 12), (92008, 12)]
 
 
@@ -49,12 +47,19 @@ def _target(source_tokens: int, **config) -> int:
     return LCMEngine._leaf_target_tokens(SimpleNamespace(_config=LCMConfig(**config)), source_tokens)
 
 
-# -- T1: the defaults reproduce today's target -----------------------------------------------------------------
+# -- T1: the defaults give a fixed 2,000-token target -----------------------------------------------------------------
 
-@pytest.mark.parametrize("source_tokens, expected", [(8_000, 2_000), (20_000, 4_000), (100_000, 12_000)])
-def test_t1_default_target_matches_the_historical_constants(source_tokens, expected):
+@pytest.mark.parametrize("source_tokens, expected", [(8_000, 2_000), (20_000, 2_000), (100_000, 2_000)])
+def test_t1_default_target_is_fixed_at_2000_tokens(source_tokens, expected):
     assert _target(source_tokens) == expected
-    assert expected == min(12000, max(2000, int(source_tokens * 0.20)))
+    assert expected == min(2000, max(2000, int(source_tokens * 0.20)))
+
+
+@pytest.mark.parametrize("source_tokens", [8_000, 20_000, 100_000])
+def test_t1_explicit_env_cap_restores_the_ratio_target(monkeypatch, source_tokens):
+    monkeypatch.setenv("LCM_LEAF_TARGET_MAX_TOKENS", "12000")
+    engine = SimpleNamespace(_config=LCMConfig.from_env())
+    assert LCMEngine._leaf_target_tokens(engine, source_tokens) == min(12000, max(2000, int(source_tokens * 0.20)))
 
 
 # -- T2: the knobs move the target -----------------------------------------------------------------------------
@@ -69,7 +74,7 @@ def test_t2_knobs_change_the_target():
 
 def test_t3_env_defaults_and_parsing(monkeypatch):
     c = LCMConfig.from_env()
-    assert (c.leaf_target_ratio, c.leaf_target_min_tokens, c.leaf_target_max_tokens) == (0.20, 2000, 12_000)
+    assert (c.leaf_target_ratio, c.leaf_target_min_tokens, c.leaf_target_max_tokens) == (0.20, 2000, 2_000)
     assert c.config_sources["leaf_target_ratio"] == "default"
     monkeypatch.setenv("LCM_LEAF_TARGET_RATIO", "0.12")
     monkeypatch.setenv("LCM_LEAF_TARGET_MIN_TOKENS", "2400")
@@ -86,7 +91,7 @@ def test_t3_env_defaults_and_parsing(monkeypatch):
     ({"LCM_LEAF_TARGET_RATIO": "nan"}, "leaf_target_ratio", 0.20),
     ({"LCM_LEAF_TARGET_RATIO": "abc"}, "leaf_target_ratio", 0.20),
     ({"LCM_LEAF_TARGET_MIN_TOKENS": "0"}, "leaf_target_min_tokens", 2000),
-    ({"LCM_LEAF_TARGET_MIN_TOKENS": "3000", "LCM_LEAF_TARGET_MAX_TOKENS": "2500"}, "leaf_target_max_tokens", 12_000),
+    ({"LCM_LEAF_TARGET_MIN_TOKENS": "3000", "LCM_LEAF_TARGET_MAX_TOKENS": "2500"}, "leaf_target_max_tokens", 2_000),
     ({"LCM_LEAF_TARGET_MIN_TOKENS": "20000"}, "leaf_target_min_tokens", 2000),
 ])
 def test_t3_invalid_values_fall_back_to_the_default_with_a_warning(monkeypatch, env, field, default):
@@ -99,11 +104,36 @@ def test_t3_invalid_values_fall_back_to_the_default_with_a_warning(monkeypatch, 
     assert c.leaf_target_min_tokens <= c.leaf_target_max_tokens
 
 
-def test_t3_min_above_max_keeps_a_valid_env_min(monkeypatch):
+def test_t3_min_above_max_resets_min_above_the_default_cap(monkeypatch):
     monkeypatch.setenv("LCM_LEAF_TARGET_MIN_TOKENS", "3000")
     monkeypatch.setenv("LCM_LEAF_TARGET_MAX_TOKENS", "2500")
     c = LCMConfig.from_env()
-    assert (c.leaf_target_min_tokens, c.leaf_target_max_tokens) == (3000, 12_000)
+    assert (c.leaf_target_min_tokens, c.leaf_target_max_tokens) == (2000, 2000)
+
+
+def test_control_defaults_and_ratio_with_max_do_not_warn(monkeypatch):
+    assert LCMConfig.from_env().config_source_warnings == []
+    monkeypatch.setenv("LCM_LEAF_TARGET_RATIO", "0.3")
+    monkeypatch.setenv("LCM_LEAF_TARGET_MAX_TOKENS", "12000")
+    assert LCMConfig.from_env().config_source_warnings == []
+
+
+def test_ratio_only_warns_about_the_pinned_maximum(monkeypatch):
+    monkeypatch.setenv("LCM_LEAF_TARGET_RATIO", "0.3")
+    config = LCMConfig.from_env()
+    assert config.leaf_target_ratio == 0.3
+    assert config.config_sources["leaf_target_ratio"] == "env:LCM_LEAF_TARGET_RATIO"
+    assert LCMEngine._leaf_target_tokens(SimpleNamespace(_config=config), 20_000) == 2000
+    assert any("LCM_LEAF_TARGET_RATIO" in warning and "LCM_LEAF_TARGET_MAX_TOKENS" in warning
+               for warning in config.config_source_warnings)
+
+
+def test_min_only_warning_names_the_maximum_to_set(monkeypatch):
+    monkeypatch.setenv("LCM_LEAF_TARGET_MIN_TOKENS", "3000")
+    config = LCMConfig.from_env()
+    assert config.leaf_target_min_tokens == 2000
+    assert any("LCM_LEAF_TARGET_MIN_TOKENS" in warning and "LCM_LEAF_TARGET_MAX_TOKENS" in warning
+               for warning in config.config_source_warnings)
 
 
 # -- T4: max_tokens follows the target -------------------------------------------------------------------------
@@ -127,7 +157,7 @@ def test_t4_l1_max_tokens_is_twice_the_configured_target(tmp_path, monkeypatch):
         engine.shutdown()
 
 
-# -- T5: a default compaction produces the base numbers --------------------------------------------------------
+# -- T5: a default compaction uses the fixed target --------------------------------------------------------
 
 def _compaction_fixture(tmp_path: Path, monkeypatch) -> dict:
     budgets: list[list[int]] = []
@@ -173,10 +203,10 @@ def _compaction_fixture(tmp_path: Path, monkeypatch) -> dict:
     return {"budgets": budgets, "l1_max_tokens": max_tokens_seen, "leaf_nodes": leaves}
 
 
-def test_t5_default_compaction_reproduces_the_base_targets(tmp_path, monkeypatch):
+def test_t5_default_compaction_uses_fixed_targets(tmp_path, monkeypatch):
     got = _compaction_fixture(tmp_path, monkeypatch)
-    assert got["budgets"] == BASE_LEAF_BUDGETS
-    assert got["l1_max_tokens"] == BASE_MAX_TOKENS
+    assert got["budgets"] == DEFAULT_LEAF_BUDGETS
+    assert got["l1_max_tokens"] == DEFAULT_MAX_TOKENS
     assert got["leaf_nodes"] == BASE_LEAF_NODES
 
 
@@ -187,12 +217,12 @@ def test_t5_default_env_config_equals_the_constructor_defaults():
         d.leaf_target_ratio, d.leaf_target_min_tokens, d.leaf_target_max_tokens)
 
 
-def test_t6_config_without_the_614_fields_keeps_the_historical_targets():
-    """A config object built before the knobs existed (no leaf_target_* attributes) must not raise."""
+def test_t6_config_without_the_614_fields_uses_class_defaults():
+    """A config object without leaf_target_* attributes uses the current class defaults without raising."""
     current = LCMConfig()
     old = SimpleNamespace(**{
         name: getattr(current, name) for name in vars(current) if not name.startswith("leaf_target_")})
     assert not hasattr(old, "leaf_target_ratio")
     engine = SimpleNamespace(_config=old)
     assert [LCMEngine._leaf_target_tokens(engine, n) for n in (8_000, 20_000, 100_000)] == [
-        2_000, 4_000, 12_000]
+        2_000, 2_000, 2_000]

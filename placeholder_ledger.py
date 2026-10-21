@@ -73,7 +73,7 @@ class PlaceholderLedgerMixin:
             )
         if not match:
             return False
-        if self._current_compress_store_ids_by_message_id.get(id(msg)) is not None:
+        if self._compress_run.store_ids_by_message_id.get(id(msg)) is not None:
             return False
         digest = match.group(1)
         hashes = getattr(self, "_generated_ignored_active_replay_placeholder_hashes", set())
@@ -426,7 +426,7 @@ class PlaceholderLedgerMixin:
         # an older ignored-dependent row.
         store_id = msg.get("store_id")
         if store_id is None:
-            store_id = self._current_compress_store_ids_by_message_id.get(id(msg))
+            store_id = self._compress_run.store_ids_by_message_id.get(id(msg))
         if store_id is None:
             return None
         identity = f"{self._session_id}\0{store_id}"
@@ -597,9 +597,9 @@ class PlaceholderLedgerMixin:
     ) -> List[Dict[str, Any]]:
         if not records or not messages:
             return messages
-        previous_store_id_map = self._current_compress_store_ids_by_message_id
-        self._current_compress_store_ids_by_message_id = self._get_store_id_map_for_messages(messages)
-        try:
+        store_id_scope = self._compress_run.preserve_store_ids()
+        self._compress_run.store_ids_by_message_id = self._get_store_id_map_for_messages(messages)
+        with store_id_scope:
             drop_from = len(messages)
             idx = len(messages) - 1
             while idx >= 0:
@@ -619,8 +619,6 @@ class PlaceholderLedgerMixin:
             if drop_from == len(messages):
                 return messages
             return messages[:drop_from]
-        finally:
-            self._current_compress_store_ids_by_message_id = previous_store_id_map
 
     def _remember_generated_ignored_dependent_reply(self, msg: Dict[str, Any], text: str) -> None:
         store_digest = self._ignored_dependent_reply_store_fingerprint(msg)

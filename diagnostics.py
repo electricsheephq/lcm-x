@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
-import os
+from contextlib import closing
+from sqlite3 import connect
 from pathlib import Path
 from typing import Any
+
+from .config import containment_base_dir
 
 
 DOCTOR_ACTION_SAFE_IGNORE = "safe/ignore"
@@ -12,9 +15,29 @@ DOCTOR_ACTION_INSPECT = "inspect"
 DOCTOR_ACTION_BACKUP_FIRST_CLEANUP = "backup-first cleanup"
 
 
+def fresh_sqlite_check(engine: Any, pragma: str) -> tuple[bool, str]:
+    """Avoid stale FTS state; label fallback results before giving restore advice."""
+    try:
+        timeout = engine._store.connection.execute("PRAGMA busy_timeout").fetchone()[0] / 1000
+        uri = Path(engine._store.db_path).resolve().as_uri() + "?mode=ro"
+        with closing(connect(uri, uri=True, timeout=timeout)) as conn:
+            row = conn.execute(f"PRAGMA {pragma}").fetchone()
+        return bool(row and row[0] == "ok"), str(row[0]) if row else "no response"
+    except Exception as exc:
+        name = getattr(exc, "sqlite_errorname", "")
+        if name.startswith("SQLITE_CORRUPT") or name == "SQLITE_NOTADB":
+            return False, f"error: {exc}"
+        try:
+            row = engine._store.connection.execute(f"PRAGMA {pragma}").fetchone()
+            detail = str(row[0]) if row else "no response"
+        except Exception as exc:
+            detail = f"error: {exc}"
+        return detail == "ok", detail + " (long-lived connection; unconfirmed)"
+
+
 def _enforce_state_db_containment(path: Path, *, description: str) -> Path:
     resolved = path.expanduser().resolve()
-    env_base = os.environ.get("LCM_HERMES_BASE_DIR")
+    env_base = containment_base_dir()
     if env_base:
         allowed_base = Path(env_base).expanduser().resolve()
         try:
@@ -72,6 +95,19 @@ def survival_fit_projection_floor_applies(record: Any) -> bool:
     return bool(record.get("count_lost")) or not (type(projected) is int and projected == 0)
 
 
+def survival_fit_count(record: Any) -> int | None:
+    """Shared doctor predicate: zero means no fit; None means an unreadable/unknown count."""
+    record = record if isinstance(record, dict) else {}
+    try:
+        count = int(record.get("count") or 0)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    projected = record.get("projected_count", 0)
+    if count == 0 and (record.get("count_lost") or not (type(projected) is int and projected == 0)):
+        return None
+    return count
+
+
 def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
     """Return operator triage guidance for one lcm_doctor check.
 
@@ -100,7 +136,9 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         warning_only = True
         rationale = "an inactive process is a configuration/load warning; no stored data is at risk"
     elif name == "database_integrity":
-        command = "stop and inspect the SQLite database path; restore from backup if integrity_check is not ok"
+        command = ("rerun on a fresh connection or after a restart; restore only if that check also fails"
+                   if "long-lived connection; unconfirmed" in str(detail) else
+                   "stop and inspect the SQLite database path; restore from backup if integrity_check is not ok")
     elif name == "schema_core_tables":
         command = "verify HERMES_HOME/LCM_DATABASE_PATH points at the intended LCM database before repair or restore"
     elif name in {"messages_fts_integrity", "nodes_fts_integrity", "fts_index_sync"}:
@@ -114,7 +152,9 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
             command = "run `/lcm doctor repair` first; if it still recommends repair, run `/lcm backup` before `/lcm doctor repair apply`"
             rationale = "FTS repair is rebuildable, but it still mutates SQLite indexes"
     elif name == "sqlite_storage":
-        command = "inspect journal/quick_check output and database/WAL size; restore from backup if SQLite reports corruption"
+        command = ("rerun on a fresh connection or after a restart; restore only if that check also fails"
+                   if "long-lived connection; unconfirmed" in str(detail) else
+                   "inspect journal/quick_check output and database/WAL size; restore from backup if SQLite reports corruption")
     elif name == "payload_storage":
         missing_refs = 0
         heartbeat_rows = 0
@@ -205,6 +245,13 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
         command = "safe to ignore if compaction proceeds normally; inspect lcm_status only if pressure stays high or compaction loops"
         warning_only = True
         rationale = "context pressure is an operating state, not persisted-state corruption"
+    elif name == "compaction_progress":
+        command = ("inspect lcm_status zero_leaf_streak and the 'LCM compaction stop' lines: reason= names what stops "
+                   "the leaf, and for a retained occurrence blocked= gives its store_id, role and kind; stored rows stay intact and "
+                   "reachable (lcm_grep / lcm_expand); a new session clears a stop that persists")
+        warning_only = True
+        rationale = ("over-threshold passes that store no leaf leave the session over its threshold, so every turn pays "
+                     "for the whole prompt; this is an operating state, not persisted-state corruption")
     elif name == "survival_fit":
         detail = detail if isinstance(detail, dict) else {}
         within = ("to a 0.24.x version older than v0.24.5, that plugin cannot compact stored rows that a survival fit "
@@ -237,12 +284,15 @@ def doctor_guidance_for_check(check: dict[str, Any]) -> dict[str, Any] | None:
                      if detail.get("last_shortened") is False else
                      "an exit fit tried to leave threshold headroom; uncovered_rows names unsummarised stored rows"
                      if str(detail.get("last_reason") or "").startswith("exit_fit:") else
-                     "a survival fit kept an over-window session alive; it points at a compaction that could not publish")
+                     "a survival fit kept an over-window session alive; last compaction reason "
+                     f"{detail.get('last_reason') or '(unknown)'}")
         rationale += ("; uncovered rows are counted for every survival fit; last_uncovered_rows reports the last "
                       "count (unknown if it could not be read); uncovered_fit_count counts shortened fits with "
                       "unsummarised stored rows removed from live context; unknown_coverage_fit_count counts "
                       "shortened fits whose coverage could not be read, so while it is above 0 uncovered_fit_count "
                       "is a lower bound")
+        if detail.get("last_cause"):
+            rationale += f"; last cause {detail['last_cause']}"
     elif name == "cleanup_candidates":
         action = DOCTOR_ACTION_BACKUP_FIRST_CLEANUP
         command = "run `/lcm doctor clean` first; if candidates are expected junk/noise, run `/lcm backup` before `/lcm doctor clean apply`"

@@ -77,7 +77,9 @@ def _engine(tmp_path, context_length: int = 200_000, **config) -> LCMEngine:
                 "large_output_active_replay_stubbing_enabled": False, "temporal_rollups_enabled": False,
                 "fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": False, "max_assembly_tokens": 100_000, "l3_truncate_tokens": 2,
-                "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"), **config}
+                "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"),
+                # #1119: these cells' arithmetic uses a 60 s configured call timeout; the product default is 120 s.
+                "summary_timeout_ms": 60_000, **config}
     engine = LCMEngine(config=LCMConfig(**settings))
     engine.on_session_start("S", platform="telegram", context_length=context_length, conversation_id="conv")
     return engine

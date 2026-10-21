@@ -211,16 +211,20 @@ is refused until the pass ends, as with two manual runs. There is no new setting
 - **Summaries** are embedded with any provider. With a cloud provider this means new summaries
   are sent to it automatically, one bounded batch per pass, without a manual backfill.
 - **Message chunks** are embedded automatically only with fastembed, or with Ollama whose
-  `LCM_OLLAMA_BASE_URL` host is loopback (`localhost`, `127.0.0.0/8`, `::1`). The pass resumes after
-  the newest message whose chunks are embedded, so its cost follows new messages, not the store;
-  older backlog stays with `/lcm embed backfill`. On a cloud provider or a remote Ollama the chunk
-  corpus stays operator-initiated: `--confirm-raw-text` authorizes one invocation and is never
+  `LCM_OLLAMA_BASE_URL` host is loopback (`localhost`, `127.0.0.0/8`, `::1`). Each pass takes new
+  messages first, then older history newest first, one bounded batch at a time, so its cost follows
+  new messages, not the store, and an existing store's recent messages are covered before its old
+  history; `/lcm embed backfill` embeds the whole backlog in one go. On a cloud provider or a
+  remote Ollama the chunk corpus stays operator-initiated: `--confirm-raw-text` authorizes one invocation and is never
   stored, so run `/lcm embed backfill --corpus chunks --apply --confirm-raw-text` yourself when you
   want chunk recall.
 - If the provider is unavailable (for example fastembed is not installed), the pass is skipped and
   counted; the first skip in a process logs a `WARNING`, later ones log at `DEBUG`.
 
-`/lcm status` shows `embedding_backlog_summaries`, `embedding_backlog_chunks` (with any rows left
+`/lcm status` shows `embedding_backlog_summaries`, `embedding_backlog_chunks` (what the automatic passes
+still have ahead of them, counted over at most 2,000 messages and shown as `N+` beyond that; a chunk the
+passes skipped inside the embedded range is not counted, and a dry run of
+`/lcm embed backfill --corpus chunks` gives the exact total; with any rows left
 `uncertain` by a failure after dispatch, which only `--retry-uncertain` resends), the time and outcome
 of the last incremental pass (`embedding_incremental_last_pass`) and the process's skipped-pass
 count (`embedding_incremental_failures`). `/lcm embed backfill --apply` is still the way to embed
@@ -289,6 +293,8 @@ FTS-only instantly.
 - `summary` (default) — embeds the generated **summaries** of your history.
 - `chunks` — embeds provider input derived from **raw, verbatim message text**, chunked by `--policy`
   (`conversational` | `heads` | `full`), for verbatim/chunk-KNN recall.
+  `conversational` (the default) embeds every non-empty user and assistant turn, however short; `heads` adds the
+  head and error chunks of tool results; `full` embeds every role.
 - `both` — runs the summary backfill, then the chunk backfill, in one command.
 
 The distinction matters for privacy. The summary corpus starts from model-generated summaries; the

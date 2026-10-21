@@ -2126,7 +2126,7 @@ def test_per_question_privacy_and_corpus_counts_resume_without_header_change(tmp
         "queries_changed": 0,
         "queries_blocked": 0,
     }
-    assert row["corpus_counts"] == {"messages": 2, "summary_nodes": 1, "chunks": 0}
+    assert row["corpus_counts"] == {"messages": 2, "summary_nodes": 1, "chunks": 2}
     assert row["embed_cache"] == {"hits": 0, "misses": 0}
     assert "corpus_counts" not in row["arms"]
     assert "embed_cache" not in row["arms"]
@@ -2290,7 +2290,7 @@ def test_resume_validates_restored_corpus_counts(tmp_path):
     assert json.loads(row_line)["corpus_counts"] == {
         "messages": 2,
         "summary_nodes": 1,
-        "chunks": 0,
+        "chunks": 2,
     }
 
     def _write(row):
@@ -2719,7 +2719,8 @@ def test_production_recall_accounts_separate_summary_and_chunk_queries(
         "production_lcm_recall_queries",
     )
 
-    def fake_recall(args, *, engine):
+    def fake_recall(args, *, engine, delivery_unit):
+        assert delivery_unit == "hits"
         engine._lcm_embedding_provider_cache[1].embed_query(args["query"])
         engine._lcm_chunk_provider_cache[1].embed_query(args["query"])
         return json.dumps({"hits": [], "degraded": False})

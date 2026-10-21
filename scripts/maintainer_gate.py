@@ -19,7 +19,11 @@ REQUIRED_CI_CHECK_PAIRS = (
     ("test (3.13)", 15368),
     ("test (3.14)", 15368),
 )
-REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS
+# Required on the PR head only. The Differential workflow runs on pull requests (plus nightly and on dispatch),
+# not on pushes to main. Strict mode makes the PR's merge-ref run cover the merged tree, so post-merge
+# verification checks the CI pairs above on the merge commit.
+REQUIRED_PR_ONLY_CHECK_PAIRS = (("differential", 15368),)
+REQUIRED_CHECK_PAIRS = REQUIRED_CI_CHECK_PAIRS + REQUIRED_PR_ONLY_CHECK_PAIRS
 # Changed-path risk map for the land-pr review obligation. It is a readiness hint
 # only: it names the review lanes land-pr requires and never fails readiness.
 REVIEW_POLICY_FILES = {
@@ -30,6 +34,93 @@ REVIEW_POLICY_FILES = {
 MEMORY_MIGRATION_FILES = {
     "scripts/backfill_externalized_tool_outputs.py",
     "scripts/import_lossless_claw.py",
+}
+# Modules that directly shape main-model context, summary requests, stored turn
+# content/identity/ownership, compaction selection/commit/progress, or host
+# compress/rebind (docs/process/turn-path-probe-packet.md). Reachability alone
+# does not qualify: explicit tools/commands and default-off features stay out.
+# Default model-facing tool schemas count as context; persistence plumbing alone
+# does not qualify, but row-content policy and compaction commit ownership do.
+TURN_PATH_FILES = {
+    "__init__.py", "assembly_plan.py", "aux_session.py", "bypass.py", "codex_routing.py", "compaction.py",
+    "compaction_policy.py", "compaction_request.py", "compress_run.py",
+    "dag.py", "engine.py", "escalation.py", "externalize.py", "extraction.py", "fresh_tail.py",
+    "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
+    "leaf_prep.py", "lifecycle_state.py", "message_analysis.py", "message_content.py", "placeholder_ledger.py",
+    "prefix_matching.py", "reconcile.py", "sanitize.py", "store_complete.py",
+    "summary_attempt.py", "summary_input_clip.py", "summary_outcome.py", "survival_codec.py",
+    "survival_fit.py", "tokens.py", "tool_pairs.py",
+    "config.py",  # Defaults and loaders set fresh-tail cuts, filters and summary requests.
+    "db_bootstrap.py",  # Conversation-range selection shapes compaction inputs and ownership.
+    "diagnostics.py",  # State-db path resolution decides foreground branch restoration/rebind.
+    "engine_registry.py",  # Post-turn hooks select the clone that ingests each session turn.
+    "message_patterns.py",  # Pattern matches omit rows from ingest, replay and compaction.
+    "model_routing.py",  # Sets provider, model and effort on the summary request.
+    "plugin_identity.py",  # Engine-name matching gates post-turn ingest and clone resolution.
+    "rollup_builder.py",  # Default-on maintenance builds and sends rollup summary requests.
+    "rollup_periods.py",  # Default-on rollups select period boundaries and summary source rows.
+    "rollup_store.py",  # Default-on rollups select sources and publish derived summaries.
+    "schemas.py",  # Default model-facing tool descriptions are part of the model context.
+    "session_patterns.py",  # Session matches choose LCM management versus host fallback.
+    "sqlite_util.py",  # Owns the transaction/retry that commits a leaf and its frontier.
+    "store.py",  # Ingest protection and row normalization decide what a turn stores.
+    "tool_registry.py",  # Selects model-facing schemas exposed on the default turn.
+    "reset_state.py",  # resets the ingest cursor and compaction progress on rotation
+    "frontier_state.py",  # Holds the ingest cursor and compaction frontier each turn reads and writes.
+    "emission_projection.py", "recognition_matching.py",  # Split out of engine paths by #1294.
+    # Split out of ingest_protection.py: what one ingested turn stores and how it is checked.
+    "ingest_content.py", "ingest_integrity.py", "ingest_pem_model.py",
+    "ingest_pem_scan.py", "ingest_persisted.py", "ingest_policy.py",
+}
+# Explicit exclusions: classify every top-level Python module, not just reachable dependencies.
+NON_TURN_PATH_FILES = {
+    "adaptive_retrieval.py",  # Default-off adaptive retrieval controller.
+    "answer_contract.py",  # Default-off pre-answer requirements.
+    "assertion_extraction.py",  # Default-off structured extraction.
+    "assertion_rebuild.py",  # Explicit opt-in assertion rebuild.
+    "assertion_state.py",  # Default-off assertion query state.
+    "assertion_store.py",  # Default-off assertion persistence.
+    "chunking.py",  # Explicit chunk backfill or default-off embeddings.
+    "command.py",  # Explicit commands or default-off embedding backfill.
+    "command_auth.py",  # Explicit slash-command authorization only.
+    "command_doctor.py",  # Read-only /lcm doctor text diagnostics only.
+    "command_router.py",  # Explicit slash-command grammar only.
+    "command_status.py",  # Operator status rendering only.
+    "embedding_maintenance.py",  # Default-off embedding maintenance.
+    "embedding_provider.py",  # Default-off embedding provider path.
+    "evidence_compiler.py",  # Default-off hook or explicit evidence tool.
+    "evidence_pack.py",  # Explicit evidence tool or default-off compiler.
+    "evidence_tools.py",  # Explicit evidence tool handlers only.
+    "expand_query_tools.py",  # Explicit lcm_expand_query tool handler only.
+    "expand_tools.py",  # Explicit lcm_describe/lcm_expand tool handlers only.
+    "expansion_evidence.py",  # Explicit expansion context/provenance only.
+    "guidance.py",  # Exported policy loader unused by default prompt.
+    "host_evidence.py",  # Unwired opt-in host evidence helper.
+    "inactive_record.py",  # Inactive-plugin diagnostic receipts only.
+    "inspect_tools.py",  # Explicit lcm_inspect tool handler; read-only metadata.
+    "level3_repair.py",  # Explicit repair or read-only doctor scan.
+    "maintenance.py",  # Explicit backup, repair or rotation only.
+    "occurrence_time.py",  # Retrieval metadata; never durable turn occurrence.
+    "preanswer_evidence.py",  # Unwired opt-in pre-answer helper.
+    "presets.py",  # Status/dry-run suggestions; no live config mutation.
+    "query_view_store.py",  # Default-off query views; optional-schema verification.
+    "reasoning.py",  # Explicit computation or default-off pre-answer hook.
+    "recall_delivery.py",  # Explicit recall; proactive assembly defaults off.
+    "recall_session.py",  # Default-off session delivery for explicit recall only.
+    "recent.py",  # Explicit recent-history tool response only.
+    "requirements_compiler.py",  # Default-off pre-answer compilation.
+    "retrieval_context.py",  # Retrieval-reader connection bindings only.
+    "retrieval_core.py",  # Explicit retrieval; proactive assembly defaults off.
+    "runtime_identity.py",  # Status/doctor provenance fields only.
+    "schema_families.py",  # Verifier finding types/compatibility metadata only.
+    "scope_storage.py",  # Explicit Teams scope setup/backfill; not wired to default turn.
+    "search_query.py",  # Retrieval query parsing/ranking; no ingest caller.
+    "selective_compiler.py",  # Two default-off pre-answer compiler gates.
+    "selective_recall.py",  # Default-off pre-answer session bundle.
+    "sqlite_session.py",  # Connection/transaction plumbing; caller owns rows and compaction policy.
+    "tools.py",  # Explicit tool handlers; proactive assembly defaults off.
+    "trajectory_store.py",  # Independent trajectory corpus; optional-schema verification only.
+    "vector_store.py",  # Default-off vector persistence/retrieval.
 }
 FINDING_GATE_CLASSES = {"MERGE_BLOCKING", "RELEASE_BLOCKING", "NON_BLOCKING"}
 TERMINAL_FINDING_DISPOSITIONS = {
@@ -180,6 +271,8 @@ def _named_risks(paths: list[str]) -> list[str]:
         for path in paths
     ):
         risks.append("lcm-memory-preservation")
+    if any(path in TURN_PATH_FILES for path in paths):
+        risks.append("turn-path")
     return risks
 
 
@@ -193,13 +286,20 @@ def review_lanes_hint(changed_files: Any) -> dict[str, Any]:
             "required_review_lanes": ["acceptance", "adversarial"],
         }
     risks = _named_risks(paths)
-    return {
+    hint = {
         "changed_files": "supplied",
         "named_risks": risks,
         "required_review_lanes": (
             ["acceptance", "adversarial"] if risks else ["acceptance"]
         ),
     }
+    if "turn-path" in risks:
+        hint["turn_path_probe_packet"] = [
+            "Consumer enumeration: rg call sites for every changed helper and effects on each consumer.",
+            "Previous-GA differential row: tests/differential (opt-in).",
+            "Sibling shapes: neighbouring windows, row roles, and recovery paths.",
+        ]
+    return hint
 
 
 def _landing_authorization_gate(data: dict[str, Any], head_sha: str) -> list[str]:

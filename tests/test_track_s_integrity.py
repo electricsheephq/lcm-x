@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import runpy
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -156,7 +157,9 @@ def test_paired_admission_loss_outranks_truncation(tmp_path):
 def test_loss_class_admission_loss_outranks_truncation(tmp_path):
     (tmp_path / "facts.json").write_text(json.dumps([
         {"id": f, "placement": "head", "class": "name", "value": f"value-{f}"} for f in ("a", "b")]))
-    ns = functions("decision/loss_class.py", "classify_loss", "load", "ro", json=json, normalize=str.casefold)
+    scorer = functions("scorer/score_s.py", "checkpoint_facts", "jload", json=json)
+    ns = functions("decision/loss_class.py", "classify_loss", "load", "ro", json=json, normalize=str.casefold,
+                   checkpoint_facts=scorer["checkpoint_facts"])
     out = ns["classify_loss"]({"run_dir": str(tmp_path / "run"), "material": str(tmp_path), "arm": "x", "seed": "seed-1",
         "run": "r1", "checkpoint_row": 304, "probes": {"a": {"class": "READER_TRUNCATED"}, "b": {"class": "CORRECT"}},
         "metrics": {"facts_kept": {"lost_before_compaction": {"ids": ["a"]}}}})
@@ -232,7 +235,9 @@ def test_skipped_scores_removed(tmp_path, monkeypatch, receipt):
         "--material", str(tmp_path), "--logs", str(logs), "--out", str(out),
         "--arms", "LCMX-fleet", "--seeds", "1", "--checkpoints", "304"])
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: None)
-    runpy.run_path(str(TRACK / "decision/score_decision.py"), run_name="__main__")
+    with pytest.raises(SystemExit) as stopped:
+        runpy.run_path(str(TRACK / "decision/score_decision.py"), run_name="__main__")
+    assert stopped.value.code is None
     assert not list(out.glob("*/cp-304/*.json"))
 
 
@@ -346,7 +351,10 @@ def test_decision_timeout_kills_group(tmp_path):
         "p=subprocess.Popen([sys.executable,'-c','import signal,time;signal.signal(signal.SIGTERM,signal.SIG_IGN);time.sleep(120)'])\n"
         f"Path({str(pidfile)!r}).write_text(str(p.pid))\ntime.sleep(120)\n")
     prefix = (TRACK / "decision/run_decision.sh").read_text().split("PY=${PYTHON", 1)[0]
-    prefix = prefix.replace("sleep 10", "sleep 0.1")
+    # #1091: each poll first waits (at most 10 s) for the descendant's pid, so the group
+    # is never killed before the child has started its descendant and recorded it.
+    wait = f"for _ in $(seq 200); do [ -s {shlex.quote(str(pidfile))} ] && break; sleep 0.05; done; sleep 0.1"
+    prefix = prefix.replace("sleep 10", wait)
     command = prefix + '\nrun timeout 0 "$1" "$2"\n'
     try:
         result = subprocess.run(["bash", "-c", command, "test", sys.executable, str(child)],
@@ -356,7 +364,7 @@ def test_decision_timeout_kills_group(tmp_path):
         state = subprocess.run(["ps", "-o", "stat=", "-p", pidfile.read_text()], capture_output=True, text=True)
         assert not state.stdout.strip() or state.stdout.strip().startswith("Z")
     finally:
-        if pidfile.exists():
+        if pidfile.exists() and pidfile.read_text().strip():
             try:
                 os.kill(int(pidfile.read_text()), 9)
             except ProcessLookupError:
@@ -422,7 +430,7 @@ def s2_receipt_phase(tmp_path, *, snapshots=True, changed=False, reader=None):
     cp = {"dir": cpdir, "db": cpdir / "db", "view": [], "row": 304,
           "receipts": [], "n_events": 0, "admission": {}}
     run = SimpleNamespace(snaps=[cp] if snapshots else [], receipts_out=[], reader_calls=[],
-                          events=[], sysmsg={}, system="", db=tmp_path / "db", ntok=lambda view: 0)
+                          events=[], sysmsg={}, system="", db=tmp_path / "db", ntok=lambda view: 0, sid="synthetic")
     reader = reader or SimpleNamespace(readback={"model": "glm-5.3"})
     hashes = iter((["before"] if snapshots else []) + ["after" if changed else "before"])
     main = main_phase("s2/run_s_lcmx.py", "reader =", run=run, run_dir=tmp_path,
@@ -430,7 +438,7 @@ def s2_receipt_phase(tmp_path, *, snapshots=True, changed=False, reader=None):
         is_store=True, probe=lambda *a: [], sha=lambda db: next(hashes), view=[], man={},
         summary={}, isolation={"db_sha256_before_probes": "before"}, json=json,
         time=__import__("time"), shutil=__import__("shutil"), continuity=lambda *a: [],
-        db_ro=lambda db: SimpleNamespace(execute=lambda q: SimpleNamespace(fetchone=lambda: [0])))
+        db_ro=lambda db: SimpleNamespace(execute=lambda q, *params: SimpleNamespace(fetchone=lambda: [0])))
     rc = main()
     return rc, json.loads((tmp_path / "summary.json").read_text()), cpdir
 

@@ -1617,3 +1617,182 @@ def test_backfill_apply_honors_env_batch_size(monkeypatch, tmp_path):
     assert "embedded: 5" in result
     assert "remaining: 0" in result
     assert [len(batch) for batch in provider.calls] == [2, 2, 1]
+
+
+def _summary_dispatch_rows(engine):
+    with sqlite3.connect(engine._store.db_path) as conn:
+        return [row[0] for row in conn.execute(
+            "SELECT embedded_id FROM dispatch_trace ORDER BY rowid"
+        )]
+
+
+def _trace_summary_dispatch(engine):
+    with sqlite3.connect(engine._store.db_path) as conn:
+        command_mod._ensure_inflight_table(conn)
+        conn.executescript(
+            "CREATE TABLE dispatch_trace(embedded_id TEXT);"
+            "CREATE TRIGGER trace_dispatch AFTER UPDATE OF state "
+            "ON lcm_embedding_backfill_inflight WHEN NEW.state='dispatched' "
+            "BEGIN INSERT INTO dispatch_trace VALUES(NEW.embedded_id); END;"
+        )
+
+
+@pytest.mark.parametrize("count", [2, 3], ids=["limit", "limit-plus-one"])
+@pytest.mark.parametrize("retry", [False, True], ids=["ordinary", "uncertain"])
+@pytest.mark.parametrize("apply", [False, True], ids=["preview", "apply"])
+def test_summary_dispatch_page_boundary_and_resume(monkeypatch, tmp_path, count, retry, apply):
+    engine = _engine(tmp_path)
+    node_ids = _seed(engine, count)
+    if retry:
+        _mark_uncertain(engine, node_ids)
+    _trace_summary_dispatch(engine)
+    provider = FakeProvider()
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: provider)
+    monkeypatch.setattr(command_mod, "time", SimpleNamespace(
+        monotonic=lambda: 10.0, time=time.time,
+    ))
+    monkeypatch.setenv("LCM_EMBEDDING_BACKFILL_BATCH_SIZE", "2")
+
+    result = command_mod._embedding_backfill_summary_run(
+        engine._config, engine._store.db_path, apply=apply, limit=2,
+        retry_uncertain=retry, include_next_hint=False, expected_dtype="float32",
+    )
+    # Preview never authorizes uncertain rows; apply's cursor is the durable
+    # pending/uncertain set, not a separate page token.
+    pending = 0 if retry and not apply else count
+    selected = min(pending, 2)
+    expected = dict(
+        mode="apply" if apply else "dry-run",
+        status=("partial" if retry and count > 2 else "complete") if apply else "dry-run",
+        provider="ollama", model="model-a", pending=pending, selected=selected,
+        estimated_tokens=9 * selected, estimated_cost_tokens=9 * selected,
+        estimated_batches=1 if selected else 0, embedded=selected if apply else 0,
+        skipped=[], failed=[], remaining=(0 if retry else count - selected) if apply else pending,
+        duration=0.0, consumed_tokens=9 * selected if apply else 0, error=None,
+        privacy_revision=None, privacy_transformed=0, privacy_blocked=0, privacy_withheld=0,
+    )
+    if apply:
+        expected.update(
+            in_flight=count - selected if retry else 0,
+            uncertain=count - selected if retry else 0, stop_reason=None,
+        )
+    else:
+        expected["include_next_hint"] = False
+    assert json.dumps(result, sort_keys=True) == json.dumps(expected, sort_keys=True)
+    order = list(range(count)) if retry else list(reversed(range(count)))
+    first = order[:selected] if apply else []
+    assert provider.calls == ([[f"summary-{index}" for index in first]] if first else [])
+    assert _summary_dispatch_rows(engine) == [str(node_ids[index]) for index in first]
+    assert _meta_ids(engine) == [str(node_ids[index]) for index in sorted(first)]
+    if apply:
+        resumed = command_mod._embedding_backfill_summary_run(
+            engine._config, engine._store.db_path, apply=True, limit=2, retry_uncertain=retry,
+        )
+        tail = order[selected:]
+        assert resumed["embedded"] == len(tail)
+        assert resumed["remaining"] == resumed["uncertain"] == 0
+        assert provider.calls == [
+            [f"summary-{index}" for index in part] for part in (first, tail) if part
+        ]
+        assert _summary_dispatch_rows(engine) == [str(node_ids[index]) for index in order]
+        assert _meta_ids(engine) == [str(node_id) for node_id in node_ids]
+        assert _inflight_rows(engine) == []
+
+
+@pytest.mark.parametrize("indexes", [(), (0, 0), (-1,), (2,)])
+def test_summary_dispatch_invalid_page_refuses_before_transport(monkeypatch, tmp_path, indexes):
+    engine = _engine(tmp_path)
+    _seed(engine, 2)
+    _trace_summary_dispatch(engine)
+
+    refusals = []
+
+    class InvalidPageProvider(FakeProvider):
+        def embed_document_batches(self, texts, *, before_dispatch):
+            try:
+                before_dispatch(indexes)
+            except command_mod.EmbeddingProviderError as exc:
+                refusals.append(str(exc))
+                raise
+            self.calls.append([texts[index] for index in indexes])
+            yield EmbeddedDocumentBatch(indexes, tuple((1.0, 1.0) for _ in indexes))
+
+    provider = InvalidPageProvider()
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: provider)
+    result = command_mod._embedding_backfill_summary_run(
+        engine._config, engine._store.db_path, apply=True, limit=2, retry_uncertain=False,
+    )
+    assert {key: result[key] for key in (
+        "status", "embedded", "remaining", "failed", "in_flight", "uncertain",
+    )} == dict(status="partial", embedded=0, remaining=2, failed=[], in_flight=0, uncertain=0)
+    assert refusals == ["provider dispatched invalid or duplicate document indexes"]
+    assert provider.calls == []
+    assert _summary_dispatch_rows(engine) == _meta_ids(engine) == _inflight_rows(engine) == []
+
+
+def test_summary_dispatch_failure_mid_page_keeps_accepted_prefix(monkeypatch, tmp_path):
+    engine = _engine(tmp_path)
+    node_ids = _seed(engine, 3)
+    _trace_summary_dispatch(engine)
+
+    class FailingPageProvider(FakeProvider):
+        def embed_document_batches(self, texts, *, before_dispatch):
+            before_dispatch((0,))
+            self.calls.append([texts[0]])
+            yield EmbeddedDocumentBatch((0,), ((1.0, 1.0),))
+            before_dispatch((1,))
+            self.calls.append([texts[1]])
+            raise RuntimeError("synthetic mid-page failure")
+
+    provider = FailingPageProvider()
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: provider)
+    result = command_mod._embedding_backfill_summary_run(
+        engine._config, engine._store.db_path, apply=True, limit=2, retry_uncertain=False,
+    )
+    assert {key: result[key] for key in (
+        "status", "embedded", "remaining", "failed", "in_flight", "uncertain",
+    )} == dict(
+        status="partial", embedded=1, remaining=1,
+        failed=[(str(node_ids[1]), "provider_error:synthetic mid-page failure")],
+        in_flight=1, uncertain=1,
+    )
+    assert provider.calls == [["summary-2"], ["summary-1"]]
+    assert _summary_dispatch_rows(engine) == [str(node_ids[2]), str(node_ids[1])]
+    assert _meta_ids(engine) == [str(node_ids[2])]
+    assert _inflight_rows(engine) == [(str(node_ids[1]), "uncertain")]
+    healthy = FakeProvider()
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: healthy)
+    resumed = command_mod._embedding_backfill_summary_run(
+        engine._config, engine._store.db_path, apply=True, limit=2, retry_uncertain=False,
+    )
+    assert resumed["embedded"] == 1
+    assert resumed["uncertain"] == 1
+    assert healthy.calls == [["summary-0"]]
+    assert _meta_ids(engine) == [str(node_ids[0]), str(node_ids[2])]
+
+
+def test_summary_dispatch_repeated_request_uses_prior_index_map(monkeypatch, tmp_path):
+    engine = _engine(tmp_path)
+    node_ids = _seed(engine, 2)
+    _trace_summary_dispatch(engine)
+
+    class RepeatedPageProvider(FakeProvider):
+        def embed_document_batches(self, texts, *, before_dispatch):
+            before_dispatch((0,))
+            self.calls.append([texts[0]])
+            yield EmbeddedDocumentBatch((0,), ((1.0, 1.0),))
+            before_dispatch((0,))
+            self.calls.append([texts[0]])
+            yield EmbeddedDocumentBatch((0,), ((1.0, 1.0),))
+
+    provider = RepeatedPageProvider()
+    monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: provider)
+    result = command_mod._embedding_backfill_summary_run(
+        engine._config, engine._store.db_path, apply=True, limit=2, retry_uncertain=False,
+    )
+    assert {key: result[key] for key in (
+        "status", "embedded", "remaining", "failed", "in_flight", "uncertain",
+    )} == dict(status="partial", embedded=1, remaining=1, failed=[], in_flight=0, uncertain=0)
+    assert provider.calls == [["summary-1"]]
+    assert _summary_dispatch_rows(engine) == _meta_ids(engine) == [str(node_ids[1])]
+    assert _inflight_rows(engine) == []

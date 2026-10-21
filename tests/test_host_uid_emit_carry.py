@@ -215,20 +215,25 @@ def test_site8_pending_downgrade(off, build, monkeypatch):
 
 @pytest.mark.parametrize("appended", [False, True])
 @pytest.mark.parametrize("off", [False, True])
-def test_site17_cache_refresh_and_removal(appended, off, build, monkeypatch):
+@pytest.mark.parametrize("new_occurrence", [False, True])
+def test_site17_cache_refresh_and_removal(appended, off, new_occurrence, build, monkeypatch):
     engine = build()
     initial = [_m("user", "ask", **_metadata("old-user")), _m("assistant", "reply", **_metadata("old-reply"))]
     engine._ingest_messages(initial)
-    host = [_m("user", "ask", **_metadata("new-user")), _m("assistant", "reply")]
+    host = [_m("user", "ask", **_metadata("new-user" if new_occurrence else "old-user")),
+            _m("assistant", "reply")]
     host[0].update(_row_id=20, _db_row_snapshot="new-snapshot", _canonical_row=False)
     if appended:
         host += [_m("user", "next", uid="next")]
     if off:
         monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off")
     out = engine._ingest_messages(host)
-    expected = [*initial, *host[2:]] if off else host
+    # #1179: a different known uid is fresh even when uid emission is off.
+    # Only a true replay retains the old cache's metadata in that mode.
+    expected = [*initial, *host[2:]] if off and not new_occurrence else host
     assert out == expected
     assert len(out) == len(host)
+    assert len(_rows(engine)) == len(host) + (len(initial) if new_occurrence else 0)
     if off:
         _off_receipt("cache-" + str(appended), out)
     else:
@@ -288,6 +293,24 @@ def test_site17_ignored_call_uid_never_leaks_into_repeated_call_compress(build):
         assert merged["_tool_call_uids"] == {"c": "new-call"}
         result = next(row for row in out if row.get("message_uid") == "t2")
         assert result["_tool_call_uid"] == merged["_tool_call_uids"]["c"]
+
+
+@pytest.mark.parametrize("anchor", [False, True])
+def test_retry_rewind_filters_ignored_prefix_1179(anchor, build, monkeypatch):
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", str(int(anchor)))
+    engine = build(ignore_message_patterns=["skip-me"])
+    original = [_m("user", "keep", 1.0, "keep"), _m("assistant", "reply", 2.0, "reply"),
+                _m("user", "skip-me", 3.0, "ignored"), _m("assistant", "old answer", 4.0, "answer")]
+    engine._ingest_messages(original)
+    stored = _rows(engine)
+    assert all(row[2] != "skip-me" for row in stored)
+    retry = original[:2] + [_m("user", "skip-me", 5.0, "retry")]
+    out = engine._ingest_messages(retry)
+    assert _rows(engine) == stored
+    assert out[-1]["content"] == engine._ignored_active_replay_placeholder("skip-me")
+    assert id(out[-1]) in engine._generated_ignored_active_replay_placeholder_message_ids
+    engine._ingest_messages(copy.deepcopy(retry))
+    assert _rows(engine) == stored
 
 
 def test_site17_misaligned_cache_is_not_synced(build):

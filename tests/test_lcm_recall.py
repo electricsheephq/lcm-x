@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from hermes_lcm import recall_delivery
 import hermes_lcm.tools as lcm_tools
 import hermes_lcm.vector_store as vector_store_module
 from hermes_lcm.config import LCMConfig
@@ -2322,18 +2323,29 @@ def test_recall_event_time_read_is_skipped_once_the_deadline_is_spent(
     assert payload == expected
 
 
-def test_recall_event_time_read_cannot_outlive_the_deadline(recall_engine, monkeypatch):
+def test_recall_event_time_read_cannot_outlive_the_deadline(recall_engine, monkeypatch, latency_check):
     _seed_event_time_rows(recall_engine)
     recall_engine._config.recall_query_timeout_s = 1.0
     connect_timeouts = []
+    read_errors = []
+    now = [0.0]
+    if not latency_check:
+        monkeypatch.setattr(time, "monotonic", lambda: now[0])
 
     def blocked_read(conn):
-        # A read that would never finish on its own: only the request deadline
-        # (the private connection's progress handler) can end it.
-        conn.execute(
-            "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n) "
-            "SELECT count(*) FROM n"
-        ).fetchall()
+        # Only the private connection's progress handler can end the timed read.
+        # The logical-clock case has a cap as a hang guard for a missing handler.
+        if not latency_check:
+            now[0] += 2.0
+        guard = " WHERE x < 10000000" if not latency_check else ""
+        try:
+            conn.execute(
+                "WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM n" + guard + ") "
+                "SELECT count(*) FROM n"
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            read_errors.append(str(exc))
+            raise
 
     def recorded_connect(*args, **kwargs):
         connect_timeouts.append(kwargs.get("timeout"))
@@ -2342,14 +2354,16 @@ def test_recall_event_time_read_cannot_outlive_the_deadline(recall_engine, monke
         )
 
     _patched_event_time_rows(monkeypatch, connect=recorded_connect)
-    started = time.monotonic()
+    started = time.monotonic() if latency_check else None
     payload = json.loads(
         lcm_tools.lcm_recall(
             {"query": "kanban dashboard sprint", "limit": 25}, engine=recall_engine
         )
     )
-    elapsed = time.monotonic() - started
-    assert elapsed < 1.0 + 0.5
+    if latency_check:
+        assert time.monotonic() - started < 1.0 + 0.5
+    else:
+        assert len(read_errors) == 1 and "interrupt" in read_errors[0].lower()
     assert payload["hits"]
     assert not any("event_time" in hit for hit in payload["hits"])
     assert payload["event_time_unavailable"] is True
@@ -2728,7 +2742,7 @@ def test_answer_ready_keeps_missing_session_refs_independently_eligible():
         for index in range(7)
     ]
 
-    selected, dropped = lcm_tools._lcm_recall_diverse_entries(
+    selected, dropped = recall_delivery._diverse_entries(
         entries,
         limit=7,
         per_session_limit=5,
@@ -2779,6 +2793,79 @@ def test_answer_ready_centers_message_content_on_exact_chunk_span(
         "char_start": match_start,
         "char_end": match_end,
     }
+
+
+def test_answer_ready_far_apart_chunk_and_fts_keep_their_windows(
+    recall_engine, monkeypatch
+):
+    semantic = "visual workspace status panel"
+    content = ("a" * 497 + " dashboard " + "b" * 8002 + " "
+               + semantic + " " + "z" * 2000)
+    start = content.index(semantic)
+    end = start + len(semantic)
+    store_id = recall_engine._store.append(
+        "session-a", {"role": "user", "content": content}, source="chat",
+    )
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, start, end, [1.0, 0.0])])
+    args = dict(query="dashboard", include="verbatim", detail="answer_ready",
+                scope_bias=0.0, limit=1)
+    fused = _recall(recall_engine, monkeypatch, **args)["hits"][0]
+    assert set(fused["arms"]) == {"fts", "chunk"}
+
+    # Controls run before the regression assertion: chunk-only keeps its span,
+    # and embeddings-off still uses B2's FTS span when there is no chunk.
+    with monkeypatch.context() as patch:
+        patch.setattr(lcm_tools, "_lcm_recall_fts_arm", lambda *a, **k: ([], None))
+        chunk_only = _recall(recall_engine, monkeypatch, **args)["hits"][0]
+    assert chunk_only["arms"] == ["chunk"]
+    assert chunk_only["evidence_span"] == {"char_start": start, "char_end": end}
+    assert semantic in chunk_only["content"]
+    recall_engine._config.embeddings_enabled = False
+    fts_only = _recall(recall_engine, monkeypatch, **args)["hits"][0]
+    assert fts_only["arms"] == ["fts"]
+    assert "chunk_span" not in fts_only
+    assert fts_only["evidence_span"] == {"char_start": 498, "char_end": 507}
+    assert fts_only["content_offset"] == 0
+
+    assert fused["chunk_span"] == chunk_only["chunk_span"]
+    assert fused["evidence_span"] == chunk_only["evidence_span"]
+    assert fused["content_offset"] == chunk_only["content_offset"]
+    assert fused["content"] == chunk_only["content"]
+
+
+@pytest.mark.parametrize("content", ["a>>b c d", "x>b and stuff"])
+def test_fts_match_span_excludes_adjacent_marker_characters(content):
+    with sqlite3.connect(":memory:") as connection:
+        connection.execute("CREATE VIRTUAL TABLE docs USING fts5(content)")
+        connection.execute("INSERT INTO docs VALUES (?)", (content,))
+        snippet, = connection.execute(
+            "SELECT snippet(docs, 0, '>>>', '<<<', '...', 16) "
+            "FROM docs WHERE docs MATCH 'b'",
+        ).fetchone()
+    start = content.index("b")
+    assert lcm_tools._lcm_recall_fts_match_span(snippet, content) == (start, start + 1)
+
+
+def test_strict_fts_fallback_drops_stale_fused_chunk_span(recall_engine, monkeypatch):
+    content = "The dashboard is ready."
+    store_id = recall_engine._store.append("session-a", {"role": "user", "content": content})
+    chunk_hit = {
+        "kind": "message_excerpt", "store_id": store_id, "session_id": "session-a",
+        "snippet": "obsolete vector passage", "content_offset": 120,
+        "chunk_span": {"char_start": 120, "char_end": 143},
+        "_fts_snippet": "The >>>dashboard<<< is ready.",
+    }
+    monkeypatch.setattr(lcm_tools, "_LCM_RECALL_ANSWER_READY_EXPANDED_HIT_LIMIT", 0)
+    monkeypatch.setattr(lcm_tools, "_lcm_recall_chunk_arm",
+                        lambda *a, **k: ([dict(chunk_hit)], "full", 1, 1))
+    # Supply the corpus metadata needed to run the mock vector arm.
+    _seed_chunk_vectors(recall_engine, [(store_id, 0, 0, len(content), [1.0, 0.0])])
+    hit = _recall(recall_engine, monkeypatch, query="dashboard", include="verbatim",
+                  detail="answer_ready", limit=1)["hits"][0]
+    assert set(hit["arms"]) == {"chunk", "fts"}
+    assert hit["snippet"] == content
+    assert hit["content_offset"] == 0
+    assert "chunk_span" not in hit
 
 
 def test_answer_ready_expands_summary_ref_with_2400_char_bound(

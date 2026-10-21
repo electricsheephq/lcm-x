@@ -85,7 +85,9 @@ def _engine(tmp_path, **config) -> LCMEngine:
                 "large_output_active_replay_stubbing_enabled": False, "temporal_rollups_enabled": False,
                 "fresh_tail_count": 2, "leaf_chunk_tokens": 400, "context_threshold": 0.001,
                 "threshold_full_sweep_enabled": True, "max_assembly_tokens": 100_000, "l3_truncate_tokens": 2,
-                "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"), **config}
+                "condensation_fanin": 2, "database_path": str(tmp_path / "lcm.db"),
+                # #1119: these cells' arithmetic uses a 60 s configured call timeout; the product default is 120 s.
+                "summary_timeout_ms": 60_000, **config}
     engine = LCMEngine(config=LCMConfig(**settings))
     engine.on_session_start("S", platform="telegram", context_length=200_000, conversation_id="conv")
     return engine
@@ -152,6 +154,24 @@ def test_soft_target_stops_after_the_stored_leaf_whose_successor_would_end_past_
         assert telemetry["stop_reason"] == "soft_target_reached" and telemetry["status"] == "partial"
         assert telemetry["budget_exhausted"] is False
         assert not any("deterministic truncation" in node.summary for node in _leaves(engine))
+    finally:
+        engine.shutdown()
+
+
+def test_default_call_timeout_is_cut_to_the_hard_bound_and_leaves_no_fallback_room(
+        tmp_path, monkeypatch, clock, caplog):
+    # #1119: at the 120 s default one primary call may use the whole foreground budget (hard bound minus the
+    # finalize reserve), so a timed-out primary leaves no room for a fallback inside the same compaction.
+    engine = _engine(tmp_path, summary_model="primary", summary_fallback_models=["fallback"],
+                     summary_timeout_ms=LCMConfig().summary_timeout_ms)
+    provider = _provider(monkeypatch, clock, primary=None, fallback=20.0)
+    try:
+        _compress(engine, _view(), caplog)
+        assert LCMConfig().summary_timeout_ms == 120_000
+        assert [(model, round(timeout), round(started)) for model, timeout, started in provider.calls] == [
+            ("primary", 115, 0)]
+        assert _leaves(engine) == []
+        assert engine.get_status()["threshold_full_sweep"]["stop_reason"] == "time_budget_exhausted"
     finally:
         engine.shutdown()
 
@@ -265,6 +285,7 @@ def test_r21_b_15s_estimates_condense_then_store_a_leaf_by_60(tmp_path, monkeypa
 
 def test_r21_c_a_frontier_under_its_target_keeps_r2(tmp_path, monkeypatch, clock, caplog):
     engine = _engine(tmp_path,
+        summary_prefix_target_tokens=400,  # This timing case deliberately keeps its 390-token frontier below target.
         # #1013 part B: foreground timing excludes background rollup calls
         large_output_externalization_enabled=False,
         large_output_active_replay_stubbing_enabled=False,
@@ -454,7 +475,7 @@ def test_c_a_call_that_outlives_its_configured_timeout_to_the_usable_deadline_is
     assert breaker._failures == {} and len(guard._calls) == 1
 
 
-def test_c_a_two_calls_cut_at_the_usable_deadline_leave_the_route_allowed(monkeypatch, clock):
+def test_c_a_full_window_deadline_hangs_open_each_route_before_the_next_compaction(monkeypatch, clock):
     provider = _provider_cut_at_stream_deadline(monkeypatch, clock)
     breaker = escalation.SummaryCircuitBreaker()
     for _ in range(2):
@@ -466,9 +487,10 @@ def test_c_a_two_calls_cut_at_the_usable_deadline_leave_the_route_allowed(monkey
                 "source text " * 400, source_tokens=4000, token_budget=50, model="m1", fallback_models=["m2"],
                 timeout=60.0, circuit_breaker=breaker, budget=budget)
         assert raised.value.reason == "time_budget_exhausted"
-    assert [model for model, _timeout, _started in provider.calls] == ["m1", "m1"]
-    assert breaker.allows("m1")
-    assert breaker._failures == {} and breaker._open_until == {}
+    assert [model for model, _timeout, _started in provider.calls] == ["m1", "m2"]
+    assert not breaker.allows("m1") and not breaker.allows("m2")
+    assert breaker._failures == {}
+    assert all(breaker.route_status([model])["last_error_class"] == "hung" for model in ("m1", "m2"))
 
 
 def test_c_a_call_past_its_timeout_on_a_host_without_the_deadline_seam_stays_a_route_failure(monkeypatch, clock):

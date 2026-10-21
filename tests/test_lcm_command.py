@@ -273,7 +273,7 @@ def test_lcm_status_does_not_report_invalid_env_as_effective_source(tmp_path, mo
 
     payload = json.loads(lcm_tools.lcm_status({}, engine=engine))
 
-    assert payload["config"]["leaf_chunk_tokens"] == 8000
+    assert payload["config"]["leaf_chunk_tokens"] == 24000
     assert payload["config_sources"]["leaf_chunk_tokens"] == "default"
     assert any("LCM_LEAF_CHUNK_TOKENS" in warning for warning in payload["config_source_warnings"])
 
@@ -490,7 +490,7 @@ def test_lcm_status_reports_runtime_identity(engine):
     repo_root = Path(__file__).resolve().parent.parent
 
     assert "plugin_name: hermes-lcm-x" in result
-    assert "plugin_version: 0.26.0" in result
+    assert "plugin_version: 0.28.1" in result
     assert f"plugin_path: {repo_root}" in result
     assert "module_path:" in result
     assert "database_path_source: config.database_path" in result
@@ -530,7 +530,7 @@ def test_lcm_doctor_reports_health_checks(engine):
     assert "messages_fts: ok" in result
     assert "nodes_fts: ok" in result
     assert "plugin_name: hermes-lcm-x" in result
-    assert "plugin_version: 0.26.0" in result
+    assert "plugin_version: 0.28.1" in result
     assert f"plugin_path: {repo_root}" in result
     assert "plugin_git_commit:" in result
     assert "triage_guidance:\n- none" in result
@@ -651,6 +651,22 @@ def test_lcm_doctor_context_pressure_uses_runtime_threshold(tmp_path):
 
         assert pressure["status"] == "pass"
         assert pressure["detail"] == "82.7% used, compaction triggers at 85.0%"
+    finally:
+        engine.shutdown()
+
+
+def test_issue_1175_lcm_doctor_context_pressure_uses_gate_tokens(tmp_path):
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "doctor-gate-pressure.db")))
+    try:
+        engine.context_length = 400_000
+        engine.last_prompt_tokens = 100_000
+        engine._last_gate_tokens = 380_000
+
+        doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+        pressure = next(check for check in doctor["checks"] if check["check"] == "context_pressure")
+
+        assert pressure["status"] == "warn"
+        assert pressure["detail"].startswith("95.0% used")
     finally:
         engine.shutdown()
 

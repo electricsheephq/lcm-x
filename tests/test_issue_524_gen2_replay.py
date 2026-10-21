@@ -41,7 +41,10 @@ class _Provider:
 
 def _engine(tmp_path, session_id=SID, **overrides):
     # #1013: these replay cells were sized for the pre-#1013 32-message fresh tail.
-    config = LCMConfig(database_path=str(tmp_path / "l.db"), fresh_tail_count=32)
+    config = LCMConfig(
+        database_path=str(tmp_path / "l.db"), fresh_tail_count=32,
+        leaf_chunk_tokens=8_000,  # v0.27.0 phase 0: sized for the pre-v0.27.0 8k leaf chunk
+    )
     for key, value in overrides.items():
         setattr(config, key, value)
     engine = LCMEngine(config=config, hermes_home=str(tmp_path / "h"))
@@ -363,7 +366,10 @@ def test_rows_after_the_replayed_run_are_stored(tmp_path, provider, case):
 def test_interleaved_rows_of_another_conversation(tmp_path, provider):
     """Store ids of this session are not contiguous: identity is per own-session row."""
     engine = _engine(tmp_path)
-    other = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "l.db")), hermes_home=str(tmp_path / "h"))
+    other = LCMEngine(config=LCMConfig(
+        database_path=str(tmp_path / "l.db"),
+        leaf_chunk_tokens=8_000,  # v0.27.0 phase 0: sized for the pre-v0.27.0 8k leaf chunk
+    ), hermes_home=str(tmp_path / "h"))
     other.on_session_start("other", platform="cli", conversation_id="other-conv", context_length=200_000)
     try:
         first = _transcript()
@@ -437,7 +443,10 @@ def _child_gen2(tmp_path, head="carrier", interleave=False, exclude=None):
     engine = _engine(tmp_path)
     other = None
     if interleave:
-        other = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "l.db")), hermes_home=str(tmp_path / "h"))
+        other = LCMEngine(config=LCMConfig(
+            database_path=str(tmp_path / "l.db"),
+            leaf_chunk_tokens=8_000,  # v0.27.0 phase 0: sized for the pre-v0.27.0 8k leaf chunk
+        ), hermes_home=str(tmp_path / "h"))
         other.on_session_start("other", platform="cli", conversation_id="other-conv", context_length=200_000)
     first = _transcript()
     if head == "pure-summary":
@@ -806,7 +815,10 @@ def hermes_after_commit(out):
     host_cc._fold_todo_snapshot(agent, host)
     return host, repair_message_sequence(None, host)
 
-cfg = LCMConfig(database_path=str(work / "l.db"))
+cfg = LCMConfig(
+    database_path=str(work / "l.db"),
+    leaf_chunk_tokens=8_000,  # v0.27.0 phase 0: sized for the pre-v0.27.0 8k leaf chunk
+)
 cfg.large_output_externalization_enabled = True
 cfg.large_output_externalization_path = str(work / "externalized")
 engine = LCMEngine(config=cfg, hermes_home=str(work / "h"))

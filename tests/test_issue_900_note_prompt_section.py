@@ -89,6 +89,24 @@ def test_u1_registers_one_callable_section(plugin):
     assert "Earlier turns have been compacted into hierarchical summaries below." not in text
 
 
+def test_prompt_callback_survives_package_eviction(plugin, monkeypatch):
+    from pathlib import Path
+    import sys
+
+    module, register = plugin
+    ctx = register(SectionContext())
+    ctx.engine.on_session_start("bound", platform="cli")
+    content = ctx.sections[0][1]
+    root = Path(module.__file__).resolve().parent
+    monkeypatch.setattr(sys, "path", [p for p in sys.path if Path(p).resolve() != root])
+    for name in list(sys.modules):
+        if name == module.__name__ or name.startswith(module.__name__ + "."):
+            monkeypatch.delitem(sys.modules, name)
+    monkeypatch.delitem(sys.modules, "config", raising=False)
+    monkeypatch.setenv("LCM_DISABLED_TOOLS", "lcm_recall")
+    assert content({"session_id": "bound"}) == module.lcm_system_prompt_note({"lcm_recall"})
+
+
 def test_u2_resolves_only_lcm_sessions_and_fails_empty(plugin, monkeypatch):
     module, register = plugin
     ctx = register(SectionContext())

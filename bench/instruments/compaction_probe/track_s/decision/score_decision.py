@@ -33,6 +33,15 @@ CPS = (176, 304)
 def runs(n: int, args):
     """(arm, run label, run dir, checkpoint -> probe dir or None)"""
     s = f"seed-{n}"
+    if (args.material / s / "deep_metadata.json").exists():
+        last = len([x for x in (args.material / s / "transcript.jsonl").read_text().splitlines() if x.strip()]) - 1
+        declared = sorted(jload(args.material / s / "deep_metadata.json")["checkpoint_answers"], key=int)
+        cps = {last if str(c) == "last" else int(c): f"cp-{last if str(c) == 'last' else int(c)}"
+               for c in (args.checkpoints or declared)}
+        for arm in args.arms or ("LCMX-fleet-rc3", "H"):
+            label = f"d{n}-r1"
+            yield arm, label, args.run_root / arm / s / label, cps
+        return
     if (args.material / s / "lifecycle_probes.jsonl").exists():
         cps = {c["id"]: f"cp-{c['id']}" for c in CP.select(args.material / s, ",".join(args.checkpoints) if args.checkpoints else "lifecycle")}
         for arm in args.arms or ("L0", "L1", "L1-H", "L1-noptr", "H", "codex-native"):
@@ -65,11 +74,18 @@ def main():
     ap.add_argument("--arms", nargs="+", help="score only these arms")
     ap.add_argument("--seeds", type=int, nargs="+", default=None)
     ap.add_argument("--checkpoints", nargs="+", default=None, help="v3 rows or v4 ids/lifecycle")
+    ap.add_argument("--expected-product-sha", help="expected LCM-X code pin for deep scoring")
+    ap.add_argument("--expected-host-sha", help="expected Hermes code pin for deep scoring")
     args = ap.parse_args()
     if args.material is None or args.out is None:
         ap.error("provide --material/--out or TRACK_S_MATERIAL/TRACK_S_OUT")
     args.external_root = args.external_root or args.run_root.parent
     args.logs = args.logs or args.run_root.parent / "decision" / "logs"
+    if (args.material / f"seed-{args.seeds[0] if args.seeds else 1}" / "deep_metadata.json").exists():
+        from score_deep import write_deep, exit_status
+        args.seeds = args.seeds or [1, 2, 3]
+        args.arms = args.arms or ["LCMX-fleet-rc3", "H"]
+        return exit_status(write_deep(args))
     v4 = (args.material / f"seed-{args.seeds[0] if args.seeds else 1}" / "lifecycle_probes.jsonl").exists()
     args.seeds = args.seeds or list(range(1, 9) if v4 else range(1, 4))
     if not v4:
@@ -122,10 +138,12 @@ def main():
                 if arm.startswith("LCMX"):
                     events = json.loads((rdir / sub / "summary.json").read_text())["events"]
                     recorded = {nd["node_id"]: nd for e in events for nd in e.get("nodes", [])}
+                    sid = jload(rdir / "summary.json").get("session_id")  # D5-A: a seeded store holds other sessions
                     with sqlite3.connect(f"file:{rdir / sub / 'store' / 'lcm.db'}?mode=ro", uri=True) as db:
                         tables = {t[0] for t in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
                         nodes = list(db.execute("SELECT n.node_id, n.depth, p.escalation_level FROM summary_nodes n LEFT JOIN "
-                                                "summary_node_provenance p USING(node_id)")) if "summary_node_provenance" in tables else [
+                                                "summary_node_provenance p USING(node_id) WHERE ? IS NULL OR n.session_id = ?",
+                                                (sid, sid))) if "summary_node_provenance" in tables else [
                             (nd["node_id"], nd["depth"], nd.get("level")) for nd in recorded.values()]
                     l3 = [nid for nid, depth, level in nodes if level == 3]
                     verbatim = sum(recorded[nid].get("l3_kind") == "verbatim" for nid in l3)
@@ -159,4 +177,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

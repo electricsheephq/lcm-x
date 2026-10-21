@@ -26,6 +26,15 @@ Keep one independently reproducible problem per issue. Search open and closed is
 before filing, and retain upstream links and contributor credit. A label, bot assessment,
 unmerged upstream PR, or reviewer severity is evidence—not proof.
 
+### Reporting with your agent
+
+- From the next release, ask your Hermes agent to "report a problem with LCM-X".
+  It shows you the draft first and files nothing without your explicit yes.
+- Use the [bug report form](https://github.com/electricsheephq/lcm-x/issues/new?template=bug_report.yml),
+  including the plugin version and source from `hermes plugins list --json` and `hermes --version`.
+- Report security problems privately; see [SECURITY.md](SECURITY.md).
+- Problems in Hermes itself belong in [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent/issues).
+
 ### Branch And Commit
 
 Create a focused branch from current `main` in your clone of
@@ -35,6 +44,9 @@ Create a focused branch from current `main` in your clone of
 Use focused commits with clear subjects such as `fix: ...`, `docs: ...`, or `test: ...`. Do not
 mix unrelated cleanup, generated secrets, customer data, live Hermes configuration, or local
 authentication state into a change.
+
+- Please don't change version numbers, create tags, or add release headings to
+  `CHANGELOG.md`. Maintainers cut releases; notes under `## Unreleased` are welcome.
 
 ### Pull Requests
 
@@ -96,7 +108,7 @@ why in the PR.
 
 Maintainers use the protected-main `.agents/skills/land-pr/SKILL.md`:
 
-- enforcement is strict exact-head CI: the six required checks must pass on the pinned
+- enforcement is strict exact-head CI: the seven required checks (the six `CI` checks plus `differential`) must pass on the pinned
   `headRefOid` with trusted workflow identities;
 - AI review is recorded evidence, not enforcement: every PR needs at least one independent
   review of the exact head, and review-provenance-policy or LCM memory-preservation risk (the
@@ -133,3 +145,14 @@ assignees, and milestones still need one exact maintainer authorization and live
 public sensitive disclosure and close/reopen actions retain stronger owner and lifecycle gates.
 Open executable upstream work remains an active continuation instead of silently becoming an
 archive-only or closed record.
+
+## AI-assisted contributions
+
+AI tools are welcome here. We ask that you:
+
+- say in the issue or PR when an agent drafted it;
+- review it yourself, and stay accountable for it, including answering review questions;
+- open issues and PRs only when a person has decided to. Agents filing on their own are not welcome.
+
+PRs that appear to be generated without a person involved (no linked issue, no test evidence)
+may be closed with a link to this section.

@@ -25,11 +25,10 @@ through the host's automatic-compaction status hook. LCM_SURVIVAL_FIT=false turn
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import re
 import time
-from itertools import islice
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from .host_uid import _valid_uid
@@ -38,6 +37,13 @@ from .message_analysis import _is_codex_interim
 from .message_content import normalize_content_value
 from .reconcile import _emission_identity
 from .store import _normalize_observed_at
+from .survival_codec import (
+    _HEAD, _TAIL,
+    _PROJECTED as _PROJECTED,
+    _PROJECTED_RE as _PROJECTED_RE,
+    _PROJECTED_PREFIX as _PROJECTED_PREFIX,
+    bounded_call, projected_fields, project_message, project_message_legacy, projection_mark_candidates,
+)
 from .tokens import count_message_tokens, count_messages_tokens
 
 logger = logging.getLogger(__name__)
@@ -45,17 +51,15 @@ logger = logging.getLogger(__name__)
 SURVIVAL_FIT_COUNTER_KEY = "survival_fit:counter"
 _NOTICE = ("[LCM survival fit: {n} earlier messages (store ids {first}..{last}) are stored verbatim but not in "
            "live context; lcm_grep / lcm_load_session reach them.]")
-_WARNING = ("LCM could not summarise part of this conversation in time. To keep the session alive, {n} older "
-            "messages left live context; they stay stored verbatim and searchable (lcm_grep, lcm_load_session). "
-            "/lcm doctor reports it.")
+_WARNING_SUMMARY_FAILED = ("LCM could not summarise part of this conversation in time. To keep the session alive, {n} older "
+                           "messages left live context; they stay stored verbatim and searchable (lcm_grep, lcm_load_session). "
+                           "/lcm doctor reports it.")
+_WARNING = _WARNING_SUMMARY_FAILED
+_WARNING_FITTED = ("To keep this conversation within the model's context window, {n} older messages left live context "
+                   "during LCM context fitting; they stay stored verbatim and searchable (lcm_grep, lcm_load_session). "
+                   "/lcm doctor reports why.")
 _NOTICE_RE = re.compile(r"(?:\n\n)?\[LCM survival fit: \d+ earlier messages \(store ids [^()\]]*\) are stored verbatim "
                         r"but not in live context; lcm_grep / lcm_load_session reach them\.\]")
-_PROJECTED = ("[LCM survival fit: this {role} message ({tokens} tokens) is stored verbatim as store id {store_id}; "
-              "lcm_expand / lcm_grep reach the full text. (projection {head}/{tail})]")
-_PROJECTED_RE = re.compile(r"\[LCM survival fit: this ([a-z_]+) message \((\d+) tokens\) is stored verbatim as store id "
-                           r"(\d+); lcm_expand / lcm_grep reach the full text\. \(projection (\d+)/(\d+)\)\]")
-_PROJECTED_PREFIX = "[LCM survival fit: this "
-_HEAD, _TAIL = 1200, 600  # a projected text keeps its first _HEAD and last _TAIL characters
 _RECOVERY_THRESHOLD_SHARE = 0.95  # #608: a recovery attempt's request fits under this share of the threshold
 
 
@@ -85,6 +89,24 @@ def _host_estimate(messages) -> Optional[int]:
         return None
 
 
+@dataclass(frozen=True)
+class FitPlan:
+    """A selected fit and the original prefix rows needed by its caller's apply step."""
+
+    fitted: List[Dict[str, Any]]
+    count: int
+    ids: List[int]
+    projected: bool
+    notice: str
+    emergency: bool
+    emergency_span: List[Dict[str, Any]]
+
+
+def survival_reserve_fraction(config: Any) -> float:
+    """Resolve the survival reserve with the existing default, coercion and clamp."""
+    return min(0.9, max(0.0, float(getattr(config, "survival_reserve", 0.15) or 0.0)))
+
+
 class SurvivalFitMixin:
     """Mixed into LCMEngine; reads ``self._store``, ``self._config`` and ``self.context_length``."""
 
@@ -100,7 +122,7 @@ class SurvivalFitMixin:
             return None
         if _positive_int(window_cap):  # #608: the size of a request the provider rejected
             window = min(window, window_cap)
-        reserve = min(0.9, max(0.0, float(getattr(self._config, "survival_reserve", 0.15) or 0.0)))
+        reserve = survival_reserve_fraction(self._config)
         # system prompt + tools the host adds; more than half the window is a stale or synthetic observation
         overhead = min(window // 2, self._survival_host_overhead(messages, observed_tokens))
         ceiling = int(window * (1 - reserve))
@@ -120,6 +142,17 @@ class SurvivalFitMixin:
             self._survival_overhead_observation = (key, overhead)
         window = int(getattr(self, "context_length", 0) or 0)
         return min(window // 2, overhead) if window > 0 else overhead
+
+    def _survival_assembly_overhead(self, messages, observed_tokens) -> int:
+        """The binding's peak when this pass recorded the host's figure for its own list; otherwise measure
+        ``messages`` and record it, as before. Assembly sees the ingest view, where a first-sight stub is far
+        smaller than the row the host counted (#1107)."""
+        key = str(getattr(self, "_conversation_id", "") or getattr(self, "_session_id", "") or "")
+        previous = getattr(self, "_survival_overhead_observation", None)
+        if not (getattr(self, "_survival_pass_observed", False) and key and previous and previous[0] == key):
+            return self._survival_host_overhead(messages, observed_tokens)
+        window = int(getattr(self, "context_length", 0) or 0)
+        return min(window // 2, previous[1]) if window > 0 else previous[1]
 
     def _survival_fit_args(self, messages, observed_tokens, reason: str, recovery: bool, *,
                            automatic: bool = False) -> Dict[str, Any]:
@@ -151,7 +184,8 @@ class SurvivalFitMixin:
                 and not self._survival_generated(message))
 
     def _survival_fit(self, messages, result, observed_tokens, reason: str, *, after_exception: bool = False,
-                      window_cap: Optional[int] = None, request_cap: Optional[int] = None):
+                      window_cap: Optional[int] = None, request_cap: Optional[int] = None,
+                      summary_failure: str = "", fit_cause: str = ""):
         """``result``, or the fitted list when ``result`` is over the survival budget."""
         if not self._session_id or self._bypasses_lcm_context_management():
             return result
@@ -166,7 +200,28 @@ class SurvivalFitMixin:
             return result
         if exit_fit and window_budget is not None and before > window_budget:
             return self._survival_fit(messages, result, observed_tokens, reason[len("exit_fit:"):],
-                                      after_exception=after_exception)
+                                      after_exception=after_exception, summary_failure=summary_failure, fit_cause=fit_cause)
+        plan, persisted = self._plan_survival_fit(
+            messages, result, observed_tokens, before, budget, reason, exit_fit=exit_fit,
+            after_exception=after_exception, window_cap=window_cap, request_cap=request_cap)
+        if plan is None:
+            return result
+        fitted = self._apply_survival_fit(result, plan, before, budget, reason,
+                                          after_exception=after_exception, persisted=persisted, exit_fit=exit_fit,
+                                          summary_failure=summary_failure, fit_cause=fit_cause)
+        if fitted is not result:
+            from .engine import _stamp_generated_model_only
+            # Pure DAG-verified scaffold only: carriers include human text. Keep
+            # row/list identities unless this view needs different display metadata.
+            generated_rows = [row for row in fitted if row.get("role") != "system"
+                              and self._is_verified_replay_scaffold_message(row)]
+            _stamp_generated_model_only(fitted, generated_rows, copy_rows=True)
+        return fitted
+
+    def _plan_survival_fit(self, messages, result, observed_tokens, before: int, budget: int, reason: str, *,
+                           exit_fit: bool, after_exception: bool = False, window_cap: Optional[int] = None,
+                           request_cap: Optional[int] = None) -> tuple[Optional[FitPlan], bool]:
+        """Select a fit and preserve the pre-cut durability proof for the caller's apply step."""
         system = 0
         while system < len(result) and isinstance(result[system], dict) and result[system].get("role") == "system":
             system += 1
@@ -196,37 +251,21 @@ class SurvivalFitMixin:
             if cut is None:
                 logger.info("LCM exit fit skipped: no whole-turn cut between the summary prefix and the fresh tail "
                             "reaches the exit cap (tokens=%d, budget=%d)", before, budget)
-                return result
+                return None, persisted
             emergency = False
         else:
             cut = self._survival_cut(result, prefix, budget, persisted, reason, store_ids, True) if prefix > system else None
             emergency = prefix > system and cut is None
-            cut = cut or self._survival_cut(result, system, budget, persisted, reason, store_ids, False)
+            # #1281: preserve user text when marks cannot fit and the list already fits the window.
+            # Recovery caps keep the existing last-resort marks unconditionally (#608).
+            hard_cap = (int(self.context_length) - self._survival_host_overhead(messages, observed_tokens)
+                        if window_cap is None and request_cap is None else None)
+            cut = cut or self._survival_cut(result, system, budget, persisted, reason, store_ids, False,
+                                            hard_cap=hard_cap)
         if cut is None:
-            return result
+            return None, persisted
         fitted, count, ids, projected, notice = cut
-        after = self._survival_measure(fitted)
-        if after >= before:  # nothing stored could leave: the list is already as small as it gets
-            logger.warning("LCM survival fit could not shorten the list (before=%d, budget=%d, reason=%s)",
-                           before, budget, reason)
-            self._survival_record(reason, 0, [], before, before, budget, False, "", shortened=False)
-            return result
-        if emergency and any(all(m is not row for m in fitted) for row in result[system:prefix]):
-            logger.warning("LCM survival fit dropped the summary prefix (emergency: prefix=%d tokens, budget=%d)",
-                           self._survival_measure(result[system:prefix]), budget)
-        if after_exception or not persisted:
-            self._ingest_cursor, self._ingest_cursor_needs_reconcile = 0, True
-        else:
-            self._ingest_cursor = len(fitted)
-        if after > budget:  # still the best list available: returned, but never reported as within budget
-            logger.warning("LCM survival fit could not reach budget (after=%d, budget=%d, reason=%s)", after, budget, reason)
-        self._survival_record(reason, count, ids, before, after, budget, projected, notice, warn_user=not exit_fit)
-        formed = getattr(self, "_survival_cut_carrier", None)
-        if formed is not None:  # #1000: the re-formed carrier is LCM's emission, as assembly registers its own;
-            merged, span, store_id = formed  # the proof finalizes it apart from the pending candidates (output order)
-            self._survival_fit_emission = {"kind": "carrier", "span": span, "retained_source": {"store_id": store_id},
-                                           "full_identity": _emission_identity(merged), "row": merged}
-        return fitted
+        return FitPlan(fitted, count, ids, projected, notice, emergency, result[system:prefix]), persisted
 
     def _survival_summary_identity(self, row: dict, summary: str, uid, proof_kind: str, absorbed_from=None, taken=()) -> dict:
         """The survival summary part (B1's gate): the carrier's engine uid, else a minted ``survival_summary``
@@ -243,7 +282,7 @@ class SurvivalFitMixin:
         return row
 
     def _survival_cut(self, result, lead: int, budget: int, persisted: bool, reason: str, store_ids,
-                      whole_turns: bool, keep_from: Optional[int] = None):
+                      whole_turns: bool, keep_from: Optional[int] = None, hard_cap: Optional[int] = None):
         """``(fitted, count, ids, projected, notice)`` with ``result[:lead]`` kept, else None. The cut is the
         oldest whole-turn one whose FINAL list (notice included) fits; with ``whole_turns`` there is no
         projection. A carrier ending the kept prefix is split: its user row leaves with its turn, and the
@@ -365,7 +404,9 @@ class SurvivalFitMixin:
             logger.warning("LCM survival fit skipped: an over-budget list holds rows not yet stored (reason=%s)", reason)
             return None
         noticed = build(cut, body[cut:])[0][:len(head)]  # the head as returned: its notice counts too
-        kept = self._survival_projection(body[cut:], store_ids, budget - self._survival_measure(noticed))
+        head_tokens = self._survival_measure(noticed)
+        kept = self._survival_projection(body[cut:], store_ids, budget - head_tokens,
+                                         hard_cap=None if hard_cap is None else hard_cap - head_tokens)
         kept, reply = keep_reply(cut, kept)
         fitted, count, ids, notice = build(cut, kept, reply)
         return accepted(fitted, count, ids, kept, notice)
@@ -381,11 +422,16 @@ class SurvivalFitMixin:
             if content is not None else ""
         return f"{text}\n\n{notice}"
 
-    def _survival_projection(self, turn: List[Dict[str, Any]], store_ids, limit: int) -> List[Dict[str, Any]]:
-        """The newest turn, its largest stored rows projected until it fits (tool outputs first, then
-        others); never a row that is not stored, never an empty list. A projection is a pure function of
-        the stored row and the parameters its mark carries (store id, token count, head/tail), so a
-        re-ingest recognises it by recomputing it from that row (``_survival_projection_source``)."""
+    def _survival_projection(self, turn: List[Dict[str, Any]], store_ids, limit: int,
+                             hard_cap: Optional[int] = None) -> List[Dict[str, Any]]:
+        """The newest turn, its largest stored rows projected until it fits (tool outputs
+        first, then others; user rows last, and only to fit); never an unstored row,
+        never an empty list. A projection is a pure function of the stored row and
+        its mark's parameters (store id, tokens, head/tail), so a re-ingest recognises
+        it by recomputing it from that row (``_survival_projection_source``).
+        With a hard cap, discard unsuccessful user marks if the pre-user list
+        already fits it; no hard cap retains the legacy/recovery behaviour.
+        """
         out = list(turn)
         order = sorted(range(len(out)), key=lambda i: (out[i].get("role") != "tool", -count_message_tokens(out[i])))
         for index in order:
@@ -398,63 +444,37 @@ class SurvivalFitMixin:
             row = self._store.get(store_ids[id(source)])
             if not row or str(row.get("role") or "") != str(message.get("role") or ""):
                 continue
-            fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL)
-            marked = _PROJECTED_PREFIX in (normalize_content_value(message.get("content")) or "")
-            if fields["tool_calls"] != (message.get("tool_calls") or None) or (fields["tool_calls"] and marked):
-                # A storage-only call projection keeps a mark when it is projected again.
-                fields = self._survival_projected_fields(row, tokens, _HEAD, _TAIL, mark_calls=True)
-            stored_text = normalize_content_value(row.get("content")) or ""
-            if (fields["content"] == stored_text and len(stored_text) <= _HEAD
-                    and normalize_content_value(message.get("content")) == stored_text):
-                fields["content"] = message.get("content")  # the same content, kept in its structured form
-            projected = {key: value for key, value in {**message, **fields}.items()
-                         if key != "tool_calls" or value}
+            projected = project_message(message, row, tokens)
             if count_message_tokens(projected) < tokens:
                 out[index] = projected
+        for roles in (("tool", "assistant"), ("user",)):
+            if self._survival_measure(out) <= limit:
+                break
+            before_user = (list(out) if roles == ("user",) and hard_cap is not None
+                           and self._survival_measure(out) <= hard_cap else None)
+            # #1220: exhaust head forms before short-row marks; user rows last, and only to fit.
+            for index in order:
+                source = turn[index]
+                if source.get("role") not in roles:  # skip before measuring: the user pass passes every other row
+                    continue
+                if self._survival_measure(out) <= limit:
+                    break
+                tokens = count_message_tokens(source)
+                if id(source) not in store_ids or tokens < 256:
+                    continue
+                row = self._store.get(store_ids[id(source)])
+                if (not row or row.get("role") != source.get("role")
+                        or len(normalize_content_value(row.get("content")) or "") > 2 * _HEAD):
+                    continue
+                projected = project_message_legacy(out[index], row, tokens)
+                if count_message_tokens(projected) < count_message_tokens(out[index]):
+                    out[index] = projected
+            if before_user is not None and self._survival_measure(out) > limit:
+                out = before_user
         return out
 
-    @staticmethod
-    def _survival_projected_fields(row: Dict[str, Any], tokens: int, head: int, tail: int,
-                                  *, legacy: bool = False, mark_calls: bool = False) -> Dict[str, Any]:
-        """The projection of a stored row: its content as head/tail around the mark, head plus mark when
-        shorter, or whole when at most ``head``; tool-call arguments over ``head`` replaced by the mark, and
-        stored tool linkage. ``legacy`` recomputes old mark-only text for recognition, never emission.
-        ``mark_calls`` marks short content when unbounded stored calls replace the live calls.
-        Deterministic in (row bytes, tokens, head, tail) for each form."""
-        store_id = int(row["store_id"])
-        marker = _PROJECTED.format(role=row.get("role"), tokens=tokens, store_id=store_id, head=head, tail=tail)
-        text = normalize_content_value(row.get("content")) or ""
-        if len(text) > 2 * head:
-            text = f"{text[:head]}\n...\n{marker}\n...\n{text[-tail:]}"
-        elif legacy and text:
-            text = marker
-        elif len(text) > head:
-            text = f"{text[:head]}\n...\n{marker}"
-        calls = row.get("tool_calls")
-        if isinstance(calls, str):
-            try:
-                calls = json.loads(calls)
-            except ValueError:
-                calls = None
-        fields: Dict[str, Any] = {"content": text,
-                                  "tool_calls": [SurvivalFitMixin._survival_bounded_call(call, marker, head)
-                                                 for call in calls] if isinstance(calls, list) and calls else None}
-        if mark_calls and not legacy and len(text) <= head and fields["tool_calls"] == (calls or None):
-            fields["content"] = f"{text}\n...\n{marker}" if text else marker
-        if row.get("tool_call_id"):
-            fields["tool_call_id"] = row["tool_call_id"]
-        return fields
-
-    @staticmethod
-    def _survival_bounded_call(call: Any, marker: str, head: int = _HEAD) -> Any:
-        """A view copy of a tool call whose arguments are over ``head`` characters: valid JSON carrying the
-        provenance notice. The stored row keeps the verbatim arguments; the call stays data."""
-        function = call.get("function") if isinstance(call, dict) else None
-        arguments = function.get("arguments") if isinstance(function, dict) else None
-        if not isinstance(arguments, str) or len(arguments) <= head:
-            return call
-        notice = f"{marker} Its tool-call arguments ({len(arguments)} characters) are not in live context."
-        return {**call, "function": {**function, "arguments": json.dumps({"lcm_survival_fit": notice})}}
+    _survival_projected_fields = staticmethod(projected_fields)
+    _survival_bounded_call = staticmethod(bounded_call)
 
     def _survival_projection_source(self, message: Dict[str, Any], role: str, content: str) -> Optional[Dict[str, Any]]:
         """The stored row ``message`` is a projection of, else None. Self-verifying: each mark names a store
@@ -469,43 +489,10 @@ class SurvivalFitMixin:
         A genuinely new message can match only by being byte-identical to a projection of a stored row
         under that row's own stamp."""
         calls = message.get("tool_calls")
-        haystack = content if _PROJECTED_PREFIX in content else ""
-        call_text = ""
-        emitted_matches, emitted_keys = [], set()
-        if isinstance(calls, list):
-            arguments = [str((call.get("function") or {}).get("arguments") or "") for call in calls
-                         if isinstance(call, dict) and isinstance(call.get("function"), dict)
-                         and "lcm_survival_fit" in str(call["function"].get("arguments") or "")]
-            call_text = "".join(arguments)
-            for argument in arguments:
-                if len(argument) > 1024 or not argument.startswith('{"lcm_survival_fit": "'):
-                    # Only the emitted bounded form is parsed; it is a short notice.
-                    continue
-                try:
-                    bounded = json.loads(argument)
-                except (ValueError, RecursionError):
-                    continue
-                if (isinstance(bounded, dict) and set(bounded) == {"lcm_survival_fit"}
-                        and isinstance(bounded["lcm_survival_fit"], str)):
-                    match = _PROJECTED_RE.match(bounded["lcm_survival_fit"])
-                    if match is not None and match.groups() not in emitted_keys:
-                        emitted_keys.add(match.groups())
-                        emitted_matches.append(match)
-                        if len(emitted_matches) == 4:  # the same candidate bound as the scans below
-                            break
+        matches = projection_mark_candidates(content, calls)
         store = getattr(self, "_store", None)
-        if _PROJECTED_PREFIX not in haystack + call_text or store is None:
+        if store is None:
             return None
-        # Emitted positions precede the capped scans of pasted content and arguments.
-        matches = emitted_matches + list(islice(_PROJECTED_RE.finditer(haystack), 4)) + list(
-            islice(_PROJECTED_RE.finditer(call_text), 4))
-        emitted = _PROJECTED_RE.match(content, _HEAD + len("\n...\n"))
-        if emitted is not None:
-            matches.insert(0, emitted)
-        separator = content.rfind("\n...\n")
-        ending = _PROJECTED_RE.fullmatch(content, separator + len("\n...\n") if separator >= 0 else 0)
-        if ending is not None:
-            matches.insert(0, ending)
         for match in matches:
             mark_role, tokens, store_id, head, tail = match.groups()
             if mark_role != role:
@@ -571,8 +558,11 @@ class SurvivalFitMixin:
         return any(_normalize_observed_at(rel.get("observed_at")) == stamp for rel in aliases)
 
     def _survival_record(self, reason, count, ids, before, after, budget, projected, notice, *, shortened=True,
-                         warn_user=True) -> None:
+                         warn_user=True, summary_failure: str = "", fit_cause: str = "") -> None:
         """Log the fit, update the doctor counter and warn the user once per conversation."""
+        # Evidence travels with this pass, independent of its final status or the engine-wide budget.
+        summary_failed = bool(summary_failure)
+        cause = summary_failure or fit_cause
         uncovered = 0
         if shortened:
             try:  # a diagnostic: its failure never fails the fit
@@ -589,6 +579,7 @@ class SurvivalFitMixin:
                 "unknown" if uncovered is None else uncovered, projected, before, after, budget,
             )
         self._last_survival_fit = {"reason": reason, "dropped_rows": count, "notice": notice, "at": time.time(),
+                                   **({"cause": cause} if cause else {}),
                                    "uncovered_rows": uncovered, "reached_budget": after <= budget}
 
         def counted(record):  # runs inside the store's write transaction: concurrent engines add, never overwrite
@@ -598,6 +589,7 @@ class SurvivalFitMixin:
             except (TypeError, ValueError, OverflowError):  # #618 item 14: a damaged count restarts the record
                 return {**counted({}), "count_lost": True}
             return {"count": count + 1, "last_reason": reason, "last_at": time.time(),
+                    **({"last_cause": cause} if cause else {}),
                     "last_conversation": str(self._conversation_id or self._session_id or ""),
                     "last_reached_budget": after <= budget,
                     "last_uncovered_rows": uncovered,
@@ -624,7 +616,8 @@ class SurvivalFitMixin:
         key = str(self._conversation_id or self._session_id or "")
         if shortened and warn_user and key not in self._survival_fit_warned:
             self._survival_fit_warned.add(key)
-            self._survival_fit_pending_warning = (key, _WARNING.format(n=count))  # R6-4: owned by its conversation
+            warning = _WARNING_SUMMARY_FAILED if summary_failed else _WARNING_FITTED
+            self._survival_fit_pending_warning = (key, warning.format(n=count))  # R6-4: owned by its conversation
             self.emit_automatic_compaction_status = True  # the host asks the hook below once more
 
     def get_automatic_compaction_status_message(self, *, phase: str, default_message: str, **context: Any):
@@ -635,3 +628,33 @@ class SurvivalFitMixin:
         if not pending or pending[0] != str(self._conversation_id or self._session_id or ""):
             return None  # R6-4: another conversation's warning is never delivered here
         return pending[1]
+
+    def _apply_survival_fit(self, result, plan: FitPlan, before: int, budget: int, reason: str, *,
+                            after_exception: bool, persisted: bool, exit_fit: bool,
+                            summary_failure: str = "", fit_cause: str = ""):
+        """Apply the selected fit's diagnostics, cursor updates and carrier registration."""
+        fitted, count, ids, projected, notice = plan.fitted, plan.count, plan.ids, plan.projected, plan.notice
+        emergency = plan.emergency
+        evidence = {"summary_failure": summary_failure, "fit_cause": fit_cause} if summary_failure or fit_cause else {}
+        after = self._survival_measure(fitted)
+        if after >= before:  # nothing stored could leave: the list is already as small as it gets
+            logger.warning("LCM survival fit could not shorten the list (before=%d, budget=%d, reason=%s)",
+                           before, budget, reason)
+            self._survival_record(reason, 0, [], before, before, budget, False, "", shortened=False, **evidence)
+            return result
+        if emergency and any(all(m is not row for m in fitted) for row in plan.emergency_span):
+            logger.warning("LCM survival fit dropped the summary prefix (emergency: prefix=%d tokens, budget=%d)",
+                           self._survival_measure(plan.emergency_span), budget)
+        if after_exception or not persisted:
+            self._frontier_holder().invalidate()
+        else:
+            self._frontier_holder().adopt(len(fitted))
+        if after > budget:  # still the best list available: returned, but never reported as within budget
+            logger.warning("LCM survival fit could not reach budget (after=%d, budget=%d, reason=%s)", after, budget, reason)
+        self._survival_record(reason, count, ids, before, after, budget, projected, notice, warn_user=not exit_fit, **evidence)
+        formed = getattr(self, "_survival_cut_carrier", None)
+        if formed is not None:  # #1000: the re-formed carrier is LCM's emission, as assembly registers its own;
+            merged, span, store_id = formed  # the proof finalizes it apart from the pending candidates (output order)
+            self._survival_fit_emission = {"kind": "carrier", "span": span, "retained_source": {"store_id": store_id},
+                                           "full_identity": _emission_identity(merged), "row": merged}
+        return fitted
