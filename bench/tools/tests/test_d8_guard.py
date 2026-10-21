@@ -89,9 +89,12 @@ def test_failed_overlay_overrides_correct_score(tmp_path):
     baseline = write_run(tmp_path / "b", [row("a_abs"), row("b")])
     candidate = write_run(tmp_path / "c", [row("a_abs"), row("b")])
     (candidate / "per_question.jsonl").write_text(json.dumps({"question_id": "a_abs", "status": "failed"}) + "\n")
-    result = compare_runs(candidate, baseline, subset=True)["categories"]["abstention"]
-    assert result["lower_bound_points"] == -100
-    assert result["candidate"]["degraded"] == 1
+    result = compare_runs(candidate, baseline, subset=True)
+    assert not result["INCOMPLETE"]
+    assert not result["pass"]
+    assert result["categories"]["abstention"]["lower_bound_points"] == -100
+    assert result["categories"]["abstention"]["candidate"]["degraded"] == 1
+    assert not result["categories"]["abstention"]["candidate"]["INCOMPLETE"]
 
 
 def test_checkpoint_retains_unevaluated_questions(tmp_path):
@@ -343,3 +346,5 @@ def test_error_overlay_overrides_stale_evaluation(tmp_path):
     assert result["categories"]["abstention"]["lower_bound_points"] == -100
     assert result["runs"]["candidate"]["degraded"] == 1
     assert not result["pass"]
+    assert not result["INCOMPLETE"]
+    assert not result["runs"]["candidate"]["INCOMPLETE"]

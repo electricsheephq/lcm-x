@@ -6,10 +6,9 @@ import json
 import math
 import random
 import re
-from numbers import Real
 from pathlib import Path
 
-from bench.tools.failclose import _correct, _qid, fail_close_signature, load_rows
+from bench.tools.failclose import _correct, _failed, _qid, load_rows
 
 
 # Memorybench report/checkpoint identities, plus optional dataset/scorer pins.
@@ -59,13 +58,6 @@ def classify_recall_health(health, config):
     return "healthy"
 
 
-def _failed(row):
-    # memorybench phases use completed for success; evaluations omit status.
-    return (row.get("_failed", False) or ("status" in row and row["status"] != "completed")
-            or bool(row.get("error")) or row.get("judge_fallback") is True
-            or bool(fail_close_signature(row)))
-
-
 def _is_correct(row):
     if _failed(row):
         return False
@@ -78,15 +70,11 @@ def _is_correct(row):
 def _unscorable(row):
     if _failed(row):
         return False
-    # Follow _correct's key-presence precedence, but require typed outcomes
-    # rather than accepting its permissive bool()/str() coercions.
-    if "correct" in row:
-        return not isinstance(row["correct"], bool)
-    if "score" in row:
-        score = row["score"]
-        return not (isinstance(score, Real) and not isinstance(score, bool) and score == score)
-    label = row.get("label")
-    return not (isinstance(label, bool) or isinstance(label, str) and bool(label.strip()))
+    try:
+        _correct(row)
+    except ValueError:
+        return True
+    return False
 
 
 def degraded_rate(rows, config):
@@ -151,7 +139,10 @@ def _check_rows(values, source, identities, issues):
     for row in values:
         if not isinstance(row, dict):
             raise ValueError(f"{source} row is not a JSON object")
-        qid = _qid(row)
+        try:
+            qid = _qid(row)
+        except ValueError as error:
+            raise ValueError(f"{source}: {error}") from error
         if qid in seen:
             duplicates.append(qid)
         seen.add(qid)
@@ -160,7 +151,7 @@ def _check_rows(values, source, identities, issues):
         issues.append(f"duplicate question ids: {len(duplicates)}; first id: {duplicates[0]} ({source})")
 
 
-def _load_run(root):
+def _load_run(root, *, baseline=False):
     root = Path(root)
     report = json.loads((root / "report.json").read_text())
     identities = {field: [] for field in IDENTITY_FIELDS}
@@ -171,29 +162,43 @@ def _load_run(root):
     # overlaying a report row is legitimate; repeated IDs within a file are not.
     detail = next((path for path in (root / "per_question.jsonl", root / "results/per_question.jsonl")
                    if path.is_file()), None)
+    detail_rows = []
     if detail:
-        _check_rows([json.loads(line) for line in detail.read_text().splitlines() if line.strip()],
-                    detail.name, identities, issues)
+        detail_rows = [json.loads(line) for line in detail.read_text().splitlines() if line.strip()]
+        _check_rows(detail_rows, detail.name, identities, issues)
     has_rows = (report.get("evaluations") or (root / "per_question.jsonl").exists()
                 or (root / "results/per_question.jsonl").exists())
     rows = {_qid(row): row for row in load_rows(root)} if has_rows else {}
+    if baseline:
+        report_rows = {_qid(row): row for row in report.get("evaluations", [])}
+        contradictions = []
+        for qid, detail_row in {_qid(row): row for row in detail_rows}.items():
+            if _failed(report_rows.get(qid, {})) and not _failed(detail_row):
+                try:
+                    _correct(rows[qid])  # An annotation may retain the report verdict.
+                except ValueError:
+                    continue
+                contradictions.append(qid)
+        if contradictions:
+            issues.append("failure contradicted by detail: " + ", ".join(sorted(contradictions)))
     checkpoint_path = root / "checkpoint.json"
     if checkpoint_path.exists():
         checkpoint = json.loads(checkpoint_path.read_text())
         _record_identities(checkpoint, identities, issues)
         questions = checkpoint.get("questions", {})
-        targets = [_qid({"questionId": qid}) for qid in checkpoint.get("targetQuestionIds") or questions]
-        _check_rows([{"questionId": qid} for qid in targets],
-                    "checkpoint.json targetQuestionIds", identities, issues)
-        for qid in targets:
+        targets = [{"questionId": qid} for qid in checkpoint.get("targetQuestionIds") or questions]
+        _check_rows(targets, "checkpoint.json targetQuestionIds", identities, issues)
+        for target in targets:
+            qid = _qid(target)
             question = questions.get(qid, {})
             phases = question.get("phases", {})
             row = rows.setdefault(qid, {"questionId": qid,
                                        "questionType": question.get("questionType")})
             if "recallHealth" not in row:
                 row["recallHealth"] = phases.get("search", {}).get("recallHealth")
-            row["_failed"] = any(phases.get(p, {}).get("status") != "completed"
-                                 for p in ("search", "answer", "evaluate"))
+            row["_failed"] = row.get("_failed", False) or any(
+                phases.get(p, {}).get("status") != "completed"
+                for p in ("search", "answer", "evaluate"))
     issues += [f"identity mixed within run: {field}" for field, values in identities.items()
                if len(values) > 1]
     return report, rows, identities, issues
@@ -223,9 +228,10 @@ def _category(row, name):
 
 def compare_runs(candidate_run, baseline_run, *, subset=False, placebo=False):
     candidate_report, candidate, candidate_ids, candidate_issues = _load_run(candidate_run)
-    baseline_report, baseline, baseline_ids, baseline_issues = _load_run(baseline_run)
+    baseline_report, baseline, baseline_ids, baseline_issues = _load_run(baseline_run, baseline=True)
     issues, missing_both = _compare_identities(candidate_ids, baseline_ids, placebo=placebo)
-    issues += [f"{side}: {issue}" for side, values in
+    issues += [f"{side} {issue}" if issue.startswith("failure contradicted by detail:")
+               else f"{side}: {issue}" for side, values in
                (("candidate", candidate_issues), ("baseline", baseline_issues)) for issue in values]
     benchmark = baseline_report.get("benchmark", "")
     if benchmark != candidate_report.get("benchmark") or benchmark not in {"locomo", "longmemeval"}:
