@@ -267,15 +267,20 @@ def test_fix1_parse_retry(tmp_path):
 
 @pytest.mark.parametrize('null_cache',[True,False])
 def test_fix1_live_binding(tmp_path,monkeypatch,null_cache):
-    b=bundle() | dict(synthetic=False,w1_cache=None if null_cache else str(tmp_path),repeat_ids=list(range(44)),w1_receipt={})
+    repeats=['q1','q2']+[f'r{i}' for i in range(42)]
+    b=bundle() | dict(synthetic=False,w1_cache=None if null_cache else str(tmp_path),repeat_ids=repeats,w1_receipt={},
+        controls={i:dict(identity={},response={},response_sha256='fixture',status='ok') for i in repeats},
+        w1_sources={i:{} for i in repeats},w1_endpoint={},w1_renderer={})
     b['panel']*=443
+    b['panel'][:44]=[b['panel'][0] | dict(id=i) for i in repeats]
+    b['baselines'].update({i:b['baselines']['q1'] for i in repeats[2:]})
     b['w1_panel']=dict(items=[dict(id='q1')])
     (tmp_path/'retrieval').mkdir()
     (tmp_path/'retrieval/k.json').write_text(json.dumps(dict(value=dict(evidence='WRONG'),identity=dict(
         query_sha256=sha(b'Which drink?'),date='2024-03-01'))))
     monkeypatch.setattr(panel,'local25',lambda *a,**kw:[dict(id='q1',delivered_sha256=sha(b'WRONG'),sources={},cache_key='k')])
     with pytest.raises(Incomplete,match='cache required|A0 bytes'):
-        run.bind(b)
+        run.freeze(tmp_path,b)
 
 def test_fix1_empty_control(tmp_path,monkeypatch):
     b=bundle()

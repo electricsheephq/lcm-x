@@ -312,7 +312,8 @@ Exhausted questions are excluded from both arms and judges; more than 3% is INCO
 Each exclusion budget counts only IDs in its population, including targets-only interim.
 Valid extraction siblings survive rejection; more than 5% rejected items is INCOMPLETE.
 Failed semantic admission (including missing approval or empty extraction) settles before
-drift or main-panel sends. Invalid extraction JSON after its repair retry is terminal:
+drift or main-panel sends. Invalid extraction JSON (including non-string content),
+envelope identities or array types receive one repair attempt. A failed repair is terminal:
 the saved disposition settles PARK-INCOMPLETE; resume neither retries nor sends again.
 Invalid judge replies in the main panel and drift retry once unchanged; persistent
 invalids are reported per arm/judge. Main-panel invalids above 2% are INCOMPLETE;

@@ -149,14 +149,18 @@ def execute(views, cache, spec, root):
                         output = json.loads(response['content'])
                         if not isinstance(output, list) or len(output) != len(batch):
                             raise ValueError('batch shape')
+                        admitted, batch_items = [], {}
+                        for w, raw in zip(batch, output, strict=True):
+                            got = validate(raw, w, [*all_items.values(), *batch_items.values()])
+                            admitted.append(got)
+                            batch_items.update({i['id']:i for i in got['items']})
                         break
-                    except ValueError:
+                    except (Incomplete, ValueError, TypeError):
                         if attempt:
                             terminal_reason='extraction invalid after retry'
                             raise Incomplete('invalid extraction JSON') from None
                         msgs = request(batch, list(all_items.values())) + [dict(role='user', content='Repair invalid JSON; same schema and sources. Return the array only.')]
-                for w, raw in zip(batch, output, strict=True):
-                    got = validate(raw, w, list(all_items.values()))
+                for w, raw, got in zip(batch, output, admitted, strict=True):
                     all_items.update({i['id']:i for i in got['items']})
                     all_relations.update({sha(encoded(r)):r for r in got['relations']})
                     ledger.append(dict(window=w['window_id'], source=view['haystack_hash'], state=got['state'],
