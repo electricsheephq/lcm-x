@@ -215,6 +215,35 @@ def test_real_size_histogram_repr_has_bounded_peak_memory():
     assert stub == _build_externalized_placeholder(SUMMARY)
 
 
+@pytest.mark.parametrize("filler", [b"," * 30_000 + b":" * 30_000, "," * 30_000 + ":" * 30_000],
+                         ids=["bytes", "str"])
+def test_separators_inside_literals_are_not_elements(filler):
+    # ~8 MiB of image bytes repr to ~65k "," and ":" characters; main kept this caption as text.
+    # A str filler sits in a key: keys are never previewed, so the preview is the caption alone.
+    value = {"image": filler, "caption": CAPTION} if isinstance(filler, bytes) else {
+        "image": b"\x89PNG", "caption": CAPTION, filler: 0}
+    content = str(value)
+    assert content.count(",") + content.count(":") > 50_000
+    assert_caption_preview(content)
+
+
+def test_triple_quoted_strings_do_not_hide_elements(monkeypatch):
+    import hermes_lcm.externalize as externalize
+
+    monkeypatch.setattr(externalize, "_MEDIA_REPR_ELEMENT_LIMIT", 4, raising=False)
+    # Pairing single quotes would read "', 0,0,...,0, '" as one string; the tokenizer does not.
+    content = "[''' ''', " + "0," * 8 + " '']"
+    assert _media_payload_preview_content(content) == ""
+
+
+def test_untokenizable_repr_falls_back_to_counting_every_separator(monkeypatch):
+    import hermes_lcm.externalize as externalize
+
+    monkeypatch.setattr(externalize, "_MEDIA_REPR_ELEMENT_LIMIT", 4, raising=False)
+    content = "{'image': b'opaque', 'caption': '" + CAPTION + "', 'n': [0,0,0,0,0], 'open': '"
+    assert _media_payload_preview_content(content) == ""
+
+
 @pytest.mark.parametrize("as_repr", [False, True])
 @pytest.mark.parametrize("shape, expected", [
     ({"error": {"detail": CAPTION}, "image": "URI"}, CAPTION),

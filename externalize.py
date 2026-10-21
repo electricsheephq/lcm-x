@@ -704,7 +704,30 @@ def _media_payload_text_part(part: Dict[str, Any]) -> str | None:
 # A media repr above this is never parsed or previewed (it only bounds a pathological AST); a few MiB
 # of media bytes in a repr parse in milliseconds.
 _MEDIA_REPR_PARSE_LIMIT = 64 * 1_048_576
+# Parse memory grows with the number of literal elements, not bytes: bound the structural "," and ":"
+# tokens. Separators inside string or bytes literals (a few MiB of image bytes hold tens of thousands)
+# are not elements.
 _MEDIA_REPR_ELEMENT_LIMIT = 50_000
+
+
+def _media_repr_exceeds_element_limit(content: str) -> bool:
+    import io
+    import tokenize
+
+    # Every structural separator is also a raw one, so most content never needs the tokenizer.
+    if content.count(",") + content.count(":") <= _MEDIA_REPR_ELEMENT_LIMIT:
+        return False
+    count = 0
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(content).readline):
+            if token.type == tokenize.OP and token.string in (",", ":"):
+                count += 1
+                if count > _MEDIA_REPR_ELEMENT_LIMIT:
+                    return True
+    except (tokenize.TokenError, SyntaxError):
+        # Untokenizable: the raw count, which can only over-count, already exceeds the bound.
+        return True
+    return False
 
 
 def _media_payload_preview_content(content: str) -> str:
@@ -737,7 +760,7 @@ def _media_payload_preview_content(content: str) -> str:
             # never preview an oversized candidate unparsed: it may be a repr with a non-string first key.
             if len(content) > _MEDIA_REPR_PARSE_LIMIT:
                 return ""
-            if content.count(",") + content.count(":") > _MEDIA_REPR_ELEMENT_LIMIT:
+            if _media_repr_exceeds_element_limit(content):
                 return ""
             parsed, ok = None, False
             try:
