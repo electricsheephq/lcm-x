@@ -45,6 +45,7 @@ from .engine_registry import (
     ActiveEngineUseResult,
     ActiveEngineUseStatus,
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
+    use_lcm_engine,
 )
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
@@ -2822,6 +2823,30 @@ class LCMEngine(
             session_id,
         )
         return True
+
+    def on_turn_complete(self, messages: List[Dict[str, Any]], usage=None, **meta) -> None:
+        """Persist stopped turns on the already-bound engine (#1623)."""
+        try:
+            base = getattr(super(), "on_turn_complete", None)
+            if callable(base):
+                base(messages, usage=usage, **meta)
+            # The pinned hosts skip post_llm_call when interrupted. Failed-only
+            # turns may still fire it; meta has no final-response/hook-fired bit.
+            if not meta.get("interrupted"):
+                return
+
+            def ingest_stopped(active_engine):
+                if (not active_engine._session_id or active_engine._session_ignored
+                        or active_engine._session_stateless or active_engine._thread_context_stateless()):
+                    return
+                try:
+                    active_engine.ingest(messages)
+                finally:
+                    active_engine.note_turn_complete()
+
+            use_lcm_engine(self, ingest_stopped, timeout=None)
+        except Exception as exc:
+            logger.debug("LCM on_turn_complete error: %s", type(exc).__name__)
 
     def ingest(self, messages: List[Dict[str, Any]]) -> None:
         """Persist messages to the durable store every turn.

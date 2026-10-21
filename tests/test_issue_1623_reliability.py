@@ -18,6 +18,13 @@ def test_stop_cell_is_nightly_non_gate_and_process_only():
     assert cell["turns"] == 2 and not cell["final_compaction_check"]
 
 
+def test_missing_sandbox_exec_uses_existing_process_fallback(tmp_path, monkeypatch):
+    monkeypatch.setattr(PC, "SANDBOX_EXEC", str(tmp_path / "absent-sandbox-exec"))
+    run = SimpleNamespace(cell={"stop_after_tool": True}, host={"python": str(tmp_path / "venv/bin/python")},
+                          scratch=tmp_path / "scratch", d=tmp_path / "out")
+    assert PC.ProcessCell.argv(run) == [str(tmp_path / "venv/bin/hermes"), "acp"]
+
+
 @pytest.fixture
 def measured(tmp_path):
     rows = ST.shape([{"role": "user", "content": "synthetic"},

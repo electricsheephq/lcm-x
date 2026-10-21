@@ -253,8 +253,9 @@ def patch_engine(agent):
     etype._rel_patched = True
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     cell_path = DIR / "cell.json"
-    in_place = json.loads(cell_path.read_text()).get("in_place") if cell_path.exists() else None
-    cur["stop_after_tool"] = json.loads(cell_path.read_text()).get("stop_after_tool", False)
+    cell = json.loads(cell_path.read_text()) if cell_path.exists() else {}
+    in_place = cell.get("in_place")
+    cur["stop_after_tool"] = cell.get("stop_after_tool", False)
 
     def observer_failed(where, exc):
         try:  # an observer failure is evidence (the cell ERRORs on it), never a change to the engine call

@@ -316,7 +316,7 @@ class ProcessCell:
 
     def argv(self) -> list[str]:
         base = [str(Path(self.host["python"]).parent / "hermes"), "acp"]
-        if self.cell.get("stop_after_tool"):
+        if self.cell.get("stop_after_tool") and os.path.exists(SANDBOX_EXEC):
             from .hosts import real_hermes_dir
             policy = (SANDBOX + '(deny file-write*)' + ''.join(
                 f'(allow file-write* (subpath "{p}"))' for p in (self.scratch, self.d))
