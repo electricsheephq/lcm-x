@@ -282,7 +282,10 @@ class Run:
                            reason=None if len(after) >= need else f"{len(after)} event(s) after supersession < {need}")
             self.receipts_out.append(rec)
         blob = "\n".join(x[2] or "" for x in msgs) + "\n".join(p.get("content") or "" for _n, p in payloads)
-        planted = [f for f in jload(self.sdir / "facts.json") if f["row_id"] in fed]
+        checkpoint = len(rows) - 1
+        facts = deep.facts_at(self.sdir, checkpoint) if checkpoint >= 0 else None
+        planted = [f for f in (facts if facts is not None else jload(self.sdir / "facts.json"))
+                   if f["row_id"] in fed]
         fed_rows = [r for r in rows if r["role"] != "system"]
         by_role = lambda seq: {k: sum(1 for x in seq if x == k) for k in ("user", "assistant", "tool")}  # noqa: E731
         return {"rows_fed_by_role": by_role([r["role"] for r in fed_rows]),
