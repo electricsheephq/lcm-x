@@ -119,7 +119,27 @@ def test_retirement_transfers_chain_to_live_peer(local_store, monkeypatch, posit
                 engine._schedule_embedding_maintenance()
                 peer._schedule_embedding_maintenance()
                 engine._retire_embedding_maintenance(wait=True)
-        assert peer.drain_embedding_maintenance(10)
+        # A slow SQLite pass also earns 1.5x its wall time as a LOCAL idle delay.
+        # Keep this a handoff/coverage check rather than a shared-runner speed bar.
+        if not peer.drain_embedding_maintenance(60):
+            with scheduler._condition:
+                state = dict(
+                    queued_keys=set(scheduler._queued_keys),
+                    deferred_jobs=list(scheduler._deferred_jobs),
+                    active_keys=set(scheduler._active_keys),
+                    follow_up_key=scheduler._follow_up_key,
+                    handoff_jobs={key: [id(owner) for owner in owners]
+                                  for key, owners in scheduler._handoff_jobs.items()},
+                    owned_keys={id(owner): set(keys)
+                                for owner, keys in scheduler._owned_keys.items()},
+                    not_before=dict(scheduler._not_before),
+                    worker_alive=scheduler._worker is not None and scheduler._worker.is_alive(),
+                    retired_owner=id(engine._embedding_maintenance_owner),
+                    peer_owner=id(peer._embedding_maintenance_owner),
+                    retired=engine._embedding_maintenance_retired,
+                    peer_retired=peer._embedding_maintenance_retired,
+                )
+            pytest.fail(f"peer maintenance did not drain in 60s: {state!r}; calls={calls!r}")
         with sqlite3.connect(engine._store.db_path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_meta").fetchone()[0] == 200
         assert calls and all(size == 32 for size, retired in calls if retired)
