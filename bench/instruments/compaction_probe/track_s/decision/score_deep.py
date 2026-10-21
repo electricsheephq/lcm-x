@@ -35,15 +35,15 @@ def continuity_events(summary):
             found = [p for p in probes if p.get("kind") == kind]
             flags = {field: found[0].get(field) if len(found) == 1 else None
                      for field in ("passed", "present_verbatim", "reader_pass")}
-            value = None if None in flags.values() else False if False in flags.values() else True if all(v is True for v in flags.values()) else None
+            value = False if False in flags.values() else True if all(v is True for v in flags.values()) else None
             evidence[kind] = flags
             kinds[kind] = value
             failed |= value is False
             missing |= value is None
         events.append({"event": event.get("event"), "row_index": event.get("row_index"),
-                       "kinds": kinds, "evidence": evidence, "result": "INCOMPLETE" if None in kinds.values() else
-                       "FAIL" if False in kinds.values() else "PASS"})
-    return {"result": "INCOMPLETE" if missing or not events else "FAIL" if failed else "PASS", "events": events}
+                       "kinds": kinds, "evidence": evidence, "result": "FAIL" if False in kinds.values() else
+                       "INCOMPLETE" if None in kinds.values() else "PASS"})
+    return {"result": "FAIL" if failed else "INCOMPLETE" if missing or not events else "PASS", "events": events}
 
 
 def total_present(records, field):
@@ -106,15 +106,13 @@ def aggregate(args):
                 result["result"] = "INCOMPLETE"
             if any(v is None for k, v in result["summary_tokens"].items() if k != "estimated_calls"):
                 result["result"] = "INCOMPLETE"
-            if result["continuity"]["result"] != "INCOMPLETE" and (
-                    result["continuity"]["result"] == "FAIL" or result["dag"]["generation_gate"] == "FAIL"):
+            if result["continuity"]["result"] == "FAIL" or result["dag"]["generation_gate"] == "FAIL":
                 result["result"] = "FAIL"
             per_run[key] = result
     for arm in args.arms:
         records = [r for r in per_run.values() if r["arm"] == arm]
         complete = len(records) == len(args.seeds) and all(r["result"] == "COMPLETE" for r in records)
-        pooled = {"result": "INCOMPLETE" if len(records) != len(args.seeds) or any(r["result"] == "INCOMPLETE" for r in records) else
-                  "FAIL" if any(r["result"] == "FAIL" for r in records) else "COMPLETE" if complete else "INCOMPLETE", "checkpoints": {}}
+        pooled = {"result": "FAIL" if any(r["result"] == "FAIL" for r in records) else "COMPLETE" if complete else "INCOMPLETE", "checkpoints": {}}
         checkpoint_ids = sorted({cp for r in records for cp in r.get("checkpoints", {})}, key=int)
         for cp in checkpoint_ids:
             cells = [r.get("checkpoints", {}).get(cp) for r in records]
@@ -147,8 +145,7 @@ def aggregate(args):
         tokens = [r.get("summary_tokens", {}) for r in records]
         pooled["summary_tokens"] = {k: total_present(tokens, k) for k in ("input", "output", "estimated_calls")}
         pooled["dag_per_run"] = [r.get("dag") for r in records]
-        pooled["continuity"] = "INCOMPLETE" if any(r.get("continuity", {}).get("result") == "INCOMPLETE" for r in records) else "FAIL" if any(
-            r.get("continuity", {}).get("result") == "FAIL" for r in records) else "PASS" if len(records) == len(args.seeds) and all(
+        pooled["continuity"] = "FAIL" if any(r.get("continuity", {}).get("result") == "FAIL" for r in records) else "PASS" if len(records) == len(args.seeds) and all(
             r.get("continuity", {}).get("result") == "PASS" for r in records) else "INCOMPLETE"
         per_arm[arm] = pooled
     return {"schema": "c1-deep-score-v1", "proof_boundary": "engine-direct synthetic replay; one reader; not host latency or customer proof",
@@ -164,8 +161,8 @@ def write_deep(args):
 
 
 def exit_status(result):
-    return 2 if any(a["result"] not in ("COMPLETE", "FAIL") for a in result["per_arm"].values()) else 1 if any(
-        a["result"] == "FAIL" for a in result["per_arm"].values()) else 0
+    return 1 if any(a["result"] == "FAIL" for a in result["per_arm"].values()) else 2 if any(
+        a["result"] != "COMPLETE" for a in result["per_arm"].values()) else 0
 
 
 def main(argv=None):

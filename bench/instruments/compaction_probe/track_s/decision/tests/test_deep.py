@@ -147,13 +147,22 @@ def test_round2_missing_event_answer_is_incomplete(tmp_path, monkeypatch, answer
                           system="", m=SimpleNamespace(tokens=SimpleNamespace(count_tokens=len)))
     monkeypatch.setattr(deep.R, "SolLowReader", lambda _: SimpleNamespace(readback={}))
     monkeypatch.setattr(deep.R, "answer", lambda *a, **k: (answer, {}))
+    monkeypatch.setattr(deep.R, "flatten", lambda system, view: "earlier: keep request")
     ev = event()
     deep.event_probes(run, ev, [])
-    assert ev["deep_probes"][0]["reader_pass"] is None
-    # Even absent context or another known miss cannot turn missing evidence into FAIL.
-    result = continuity_events(dict(events=[ev, event(False)]))
+    assert ev["deep_probes"][0]["reader_pass"] is None and ev["deep_probes"][0]["passed"] is None
+    # A missing read of a value that is in context is incomplete evidence, not a miss.
+    result = continuity_events(dict(events=[ev]))
     assert result["result"] == "INCOMPLETE"
-    assert exit_status(dict(per_arm={"H": result, "L": dict(result="FAIL")})) == 2
+    assert exit_status(dict(per_arm={"H": result})) == 2
+    # A definite miss elsewhere is still a definite FAIL: the gate is a conjunction.
+    assert continuity_events(dict(events=[ev, event(False)]))["result"] == "FAIL"
+    assert exit_status(dict(per_arm={"H": result, "L": dict(result="FAIL")})) == 1
+    # A value absent from context fails whatever the reader returned.
+    monkeypatch.setattr(deep.R, "flatten", lambda system, view: "")
+    absent = event()
+    deep.event_probes(run, absent, [])
+    assert absent["deep_probes"][0]["passed"] is False
 
 
 @pytest.mark.parametrize("arm,field", [("H", "host_sha"), ("LCMX-fleet-rc3", "worktree_head")])
