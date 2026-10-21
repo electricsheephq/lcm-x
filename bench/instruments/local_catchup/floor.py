@@ -146,6 +146,7 @@ def main():
 
 
 def limited(a):
+    a.user_home = str(Path.home())
     dump(a.out/"limits.json", measured_limits(a.cgroup))
     (a.out/"lscpu.txt").write_text(subprocess.check_output(["lscpu"], text=True))
     calibrated = standalone(a)
@@ -157,7 +158,7 @@ def limited(a):
             "--lcmx-repo", str(a.lcmx_repo), "--hermes-source", str(a.hermes_source),
             "--scratch", str(a.scratch/"recall"), "--out", str(a.out/"recall"), "--rows", str(a.rows),
             "--model-cache", str(a.model_cache), "--shape", a.shape, "--baseline", a.baseline,
-            "--block", str(a.block),
+            "--block", str(a.block), "--user-home", a.user_home,
             "--standalone-calibration-s", str(calibrated["standalone_calibration_s"]),
             "--label", LABEL, *(["--covered-store", str(a.covered_store)] if a.covered_store else [])], check=True, timeout=a.max_minutes*60)
         summary = __import__("json").loads((a.out/"recall/summary.json").read_text())

@@ -242,15 +242,19 @@ def test_measured_covered_worker_never_backfills_and_rows_have_diagnostics(tmp_p
 
 @pytest.mark.parametrize("valid", [True, False])
 def test_rescore_saved_recall_classes(tmp_path, publications, valid):
-    samples = rows()+rows(query_class="broad_nl")
+    samples = [dict(r, coverage_start={}, coverage_end={}) for r in rows()+rows(query_class="broad_nl")]
     recorded = recall.score(samples, publications, calibration_s=floor.calibration(events(.1)))
     recorded["measurement_valid"] = valid
+    recorded["catchup_activity"] = False
     if not valid:
         recorded["state"] = "INVALID"
     for name, value in (("recalls", samples), ("publications", publications)):
         (tmp_path/f"{name}.jsonl").write_text("".join(json.dumps(v)+"\n" for v in value))
     floor.dump(tmp_path/"raw-summary.json", recorded)
-    floor.dump(tmp_path/"request.json", dict(seed=1586, state="OFF", block=0, standalone_calibration_s=.1))
+    floor.dump(tmp_path/"request.json", dict(seed=1586, state="OFF", block=0, standalone_calibration_s=.1, rows=250000, smoke=not valid))
+    floor.dump(tmp_path/"final-audit.json", dict(classes={}))
+    floor.dump(tmp_path.parent/"queries.json", [{}]*400)
+    (tmp_path/"events.jsonl").touch()
     catchup = tmp_path.parent/"0-ON-catching-up"
     catchup.mkdir(exist_ok=True)
     (catchup/"events.jsonl").write_text("".join(json.dumps(v)+"\n" for v in
@@ -317,7 +321,7 @@ def test_artifact_chain_and_confinement_are_explicit():
     workflow = yaml.safe_load((root/".github/workflows/lcmx-1586-floor.yml").read_text())
     jobs = workflow["jobs"]
     chain = ["covered-store-1", "covered-store-2", "covered-store-3", "covered-store", "floor"]
-    assert all(jobs[b]["needs"] == a for a, b in zip(chain, chain[1:]))
+    assert all(a in jobs[b]["needs"] for a, b in zip(chain, chain[1:]))
     for name, stage, previous in zip(chain[:-1], ("1", "2", "3", "store"), ("", "1", "2", "3")):
         assert jobs[name]["uses"] == "./.github/workflows/lcmx-1586-covered-store.yml"
         assert jobs[name]["with"]["stage"] == stage

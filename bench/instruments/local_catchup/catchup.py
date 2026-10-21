@@ -126,7 +126,8 @@ def run(a):
                 break
             if now >= next_progress:
                 result = progress(a.db, manifest)
-                if foreign := foreign_files(p.pid, a.home/str(generation), a.db, a.model_cache, out=a.out, scratch=final_copy(a, generation)):
+                if foreign := foreign_files(p.pid, a.home/str(generation), a.db, a.model_cache, out=a.out, scratch=final_copy(a, generation),
+                        user_home=Path(a.user_home) if getattr(a, "user_home", None) else None):
                     dump(a.out/"cross-profile.json", {"paths": foreign})
                     final, reason = "ABORTED", "cross_profile_access"
                     break
