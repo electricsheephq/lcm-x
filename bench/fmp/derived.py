@@ -12,7 +12,7 @@ from . import derived_panel as panel
 from . import derived_score as scoring
 from .closeout import card_tool
 from .common import digest_file, load_lcm, sha
-from .derived_cache import Cache, Excluded, Paused, immutable, snapshot
+from .derived_cache import Cache, Deadline, Excluded, Paused, immutable, snapshot
 from .dev import judge_messages
 from .dev_cache import Incomplete, endpoint, request_identity, source_identity
 from .dev_panel import encoded
@@ -118,10 +118,13 @@ def execute(root, backend, stage='all'):
     semantic=b.get('semantic_valid',False) and bool(extracted['items']) and bool(extracted['ledger']) and rejected/max(1,total)<=.05 and not extracted.get('terminal_reason')
     evaluation=dict(complete=True,semantic_valid=semantic,drift_valid=b.get('drift_valid',False) if b.get('synthetic') else False)
     evaluation.update(rejection_rate=rejected/max(1,total),rejected_items=rejected,extracted_items=total,exclusions=[])
+    excluded_sources={w['source'] for w in extracted['ledger'] if w['state']=='excluded'}
+    evaluation['exclusions']=[dict(id=q['qid'],reason='extraction transient retries exhausted') for q in b['questions']
+        if extraction.source_view(q)['haystack_hash'] in excluded_sources and q['qid'] in {e['id'] for e in b['panel']}]
     if extracted.get('terminal_reason'):
         evaluation['incomplete_reason']=extracted['terminal_reason']
     ordered = sorted(b['panel'],key=lambda e:(not e['target'],e['id']))
-    if not semantic:
+    if not semantic or len(evaluation['exclusions'])>len(ordered)*.03:
         report=scoring.evaluate(ordered,rows,**evaluation)
         snapshot(root/'evaluation-inputs.json',dict(entries=ordered,parameters=evaluation))
         snapshot(root/'rows.json',rows)
@@ -140,8 +143,6 @@ def execute(root, backend, stage='all'):
             q=qs[e['id']]
             view=extraction.source_view(asdict(q))
             h=view['haystack_hash']
-            if h in {w['source'] for w in extracted['ledger'] if w['state']=='excluded'} and e['id'] not in {x['id'] for x in evaluation['exclusions']}:
-                evaluation['exclusions'].append(dict(id=e['id'],reason='extraction transient retries exhausted'))
             group=[i for i in extracted['items'] if i['haystack_hash']==h]
             rel=[r for r in extracted['relations'] if r['from_id'] in {i['id'] for i in group}]
             block,omitted=memory.render(group,rel,q.question)
@@ -186,6 +187,9 @@ def execute(root, backend, stage='all'):
         report=scoring.evaluate(ordered,rows,**evaluation)
     except Paused:
         return dict(status='PAUSED',reason='paused: quota')
+    except Deadline:
+        evaluation.update(complete=False,drift_valid=False,incomplete_reason='deadline expired')
+        report=scoring.evaluate(ordered,rows,**evaluation)
     except (Incomplete,ValueError,KeyError,TypeError):
         return dict(verdict='PARK-INCOMPLETE',reasons=['unsettled call; resume same run'])
     snapshot(root/'evaluation-inputs.json',dict(entries=ordered,parameters=evaluation))
@@ -223,7 +227,8 @@ def drift(b,cache,root,exclusions=None):
                 for response in (old,fresh):
                     jm,ds=judge_messages(q,response['content'])
                     pair.append(verdict(cache,judge,jm,ds,calls,dict(repeat=ident)))
-                rows.append(dict(id=ident,judge=judge,pair=pair,flip=None if None in pair else pair[0]!=pair[1],calls=list(calls)))
+                rows.append(dict(id=ident,judge=judge,pair=pair,flip=None if None in pair else pair[0]!=pair[1],
+                    calls=[{k:v for k,v in c.items() if k!='cache'} for c in calls]))
         except Excluded:
             exclusions.append(dict(id=ident,reason='drift transient retries exhausted'))
     excluded={e['id'] for e in exclusions}
@@ -231,7 +236,7 @@ def drift(b,cache,root,exclusions=None):
     snapshot(root/'drift.json',rows)
     repeat_ids=set(b['repeat_ids'])
     n=len(repeat_ids-excluded)
-    valid=n>0 and len(excluded & {e['id'] for e in b['panel']})<=len(b['panel'])*.03 and all(
+    valid=n>0 and len(excluded & repeat_ids)<=len(repeat_ids)*.03 and all(
         any(r['flip'] is not None for r in rows if r['judge']==j) and
         all(sum(r['pair'][a] is None for r in rows if r['judge']==j)<=max(1,math.ceil(n*.02)) for a in range(2)) and
         sum(r['flip'] is True for r in rows if r['judge']==j)/max(1,sum(r['flip'] is not None for r in rows if r['judge']==j))<=.05
@@ -251,10 +256,12 @@ def card(root):
            '--command','python -m bench.fmp.derived score --product PRODUCT --source INPUT --run RUN','--claim-class','advisory','--local-raw','false')
     (root/'RESULT.md').write_text('# DM0 instrument\n\n| Result | Receipt |\n|---|---|\n| '+report['verdict']+
         ' | report.json |\n\nAdmission: '+json.dumps({k:report.get(k) for k in ('rejection_rate','rejected_items','extracted_items','exclusions','invalid_verdicts')})+
+        '\n\nPanel length: '+str(len(inputs(root)['panel']))+'; evaluated prefix length: '+str(len(snapshot(root/'evaluation-inputs.json')['entries']))+
         '\n\nRe-score: python -m bench.fmp.derived score --product PRODUCT --source inputs.json --run RUN\n\n'
         'Not proven: extraction quality, benchmark gain, issue acceptance, release/runtime/customer readiness.\nT1: unpublished. T2: unpublished.\n')
-    invoke('headline','--benchmark','DM0/synthetic' if inputs(root).get('synthetic') else 'DM0-886-v1','--metric','go_to_stage1',
-           '--value',str(int(report['verdict']=='GO')),'--n',str(len(inputs(root)['panel'])),'--source','report.json')
+    for judge in JUDGES:
+        invoke('headline','--benchmark',('DM0/synthetic' if inputs(root).get('synthetic') else 'DM0-886-v1')+'/'+judge,'--metric','go_to_stage1',
+               '--value',str(int(report['verdict']=='GO')),'--n',str(report['judges'].get(judge,{}).get('overall',{}).get('n',0)),'--source','report.json')
     invoke('add','inputs.json','run-manifest.json','responses','extraction.json','evaluation-inputs.json','rows.json','report.json','RESULT.md','--role','per-item')
     for name in ('deliveries.json','interim.json','drift.json','drift-admission.json'):
         if (root/name).exists():

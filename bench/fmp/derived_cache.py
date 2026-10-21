@@ -16,6 +16,8 @@ class Paused(Incomplete):
     pass
 class Excluded(Incomplete):
     pass
+class Deadline(Incomplete):
+    pass
 def immutable(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -102,11 +104,11 @@ class Cache:
             if failure.exists():
                 continue
             if time.time()+delay >= self.deadline:
-                raise Incomplete('deadline')
+                raise Deadline('deadline expired')
             if delay:
                 time.sleep(delay)
             if time.time() >= self.deadline:
-                raise Incomplete('deadline')
+                raise Deadline('deadline expired')
             current=[]
             generation=0
             while prefix.with_suffix(f'.paused-{attempt}-{generation}.json').exists():
@@ -155,7 +157,7 @@ class Cache:
                 if not any(prefix.parent.glob(prefix.name+'.retry-*.json')) and not any(prefix.parent.glob(prefix.name+'.paused-*.json')):
                     raise Incomplete('uncertain/error send; explicit disposition required')
             if time.time() >= self.deadline:
-                raise Incomplete('deadline')
+                raise Deadline('deadline expired')
             if shutil.disk_usage(self.root).free < 60*1024**3:
                 raise Incomplete('disk floor')
             if self.backend is None:
@@ -176,7 +178,7 @@ class Cache:
                     'output_tokens', 'latency_s', 'retries', 'identity_source')} for r in calls]
                 immutable(done, dict(identity=identity, response=response, response_sha256=sha(encoded(response)), attempts=attempts))
             except Exception as exc:
-                if isinstance(exc,Paused):
+                if isinstance(exc,(Paused,Deadline)):
                     raise
                 if isinstance(exc,Excluded):
                     immutable(prefix.with_suffix('.excluded.json'),dict(reason='transient retries exhausted'))
