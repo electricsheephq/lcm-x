@@ -1299,3 +1299,14 @@ def compile_preanswer_evidence(*args, **kwargs):
     from .requirements_compiler import compile_preanswer_evidence as _compile
 
     return _compile(*args, **kwargs)
+
+
+def uncertain_observation_operands(operands, store) -> bool:
+    """Check validated date operands with one batched carried-stamp lookup."""
+    from .occurrence_time import resolve_occurrence_time
+
+    dated = [operand for operand in operands if operand.evidence_date is not None]
+    carried = store.get_carried_stamp_ids([operand.store_id for operand in dated])
+    return any(operand.store_id in carried and resolve_occurrence_time(
+        operand.quote, observed_at=0.0,
+    ).get("event_time_source") != "explicit" for operand in dated)

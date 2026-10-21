@@ -335,7 +335,13 @@ def lcm_compute(args: Dict[str, Any], **kwargs: Any) -> str:
                 )
             },
         })
-    alignment_error = validate_selector_alignment(question, plan, grounding.operands)
+    from .evidence_compiler import uncertain_observation_operands
+
+    alignment_error = (
+        "uncertain_source_observation_time"
+        if uncertain_observation_operands(grounding.operands, engine._store)
+        else validate_selector_alignment(question, plan, grounding.operands)
+    )
     if alignment_error:
         stages["selector"] = _compute_stage(
             "host_tool_arguments",
