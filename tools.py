@@ -3110,7 +3110,11 @@ def _lcm_recall_answer_ready_content(
             # Emoji has no lexical hydration terms; use LIKE's verified span.
             for candidate in [hit, *entry.get("_alternates", [])]:
                 excerpt = candidate.get("_like_excerpt")
-                like_span = _lcm_recall_verified_span({**candidate, **excerpt}, stored) if excerpt else None
+                if not excerpt:
+                    continue
+                probe = {**candidate, **excerpt}
+                probe["snippet"] = probe["snippet"][:_LCM_RECALL_SNIPPET_CHARS]
+                like_span = _lcm_recall_verified_span(probe, stored)
                 if like_span is not None:
                     span = {"char_start": like_span[0], "char_end": sum(like_span)}
                     break

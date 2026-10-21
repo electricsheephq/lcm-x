@@ -477,8 +477,20 @@ def build_snippet_with_span(text: str, terms: List[str], width: int = 80) -> tup
             continue
         idx = lowered.find(term.lower())
         if idx >= 0:
-            start = max(0, idx - width // 2)
-            end = min(len(content), idx + len(term) + width // 2)
+            match_start, match_end = idx, idx + len(term)
+            if len(lowered) != len(content):
+                lowered_end = idx + len(term.lower())
+                lowered_pos = 0
+                for source_pos, ch in enumerate(content):
+                    next_pos = lowered_pos + len(ch.lower())
+                    if lowered_pos <= idx < next_pos:
+                        match_start = source_pos
+                    if next_pos >= lowered_end:
+                        match_end = source_pos + 1
+                        break
+                    lowered_pos = next_pos
+            start = max(0, match_start - width // 2)
+            end = min(len(content), match_end + width // 2)
             snippet = content[start:end]
             if start > 0:
                 snippet = "..." + snippet

@@ -67,3 +67,46 @@ def test_like_span_tracks_undecorated_source(text):
     snippet, start, end = build_snippet_with_span(text, ["🦄"])
     assert snippet == build_snippet(text, ["🦄"])
     assert snippet == ("..." if start else "") + text[start:end] + ("..." if end < len(text) else "")
+
+
+@pytest.mark.parametrize(("text", "terms", "matched"), [
+    ("İ" * 100 + "🦄", ["🦄"], "🦄"),
+    ("x" * 100 + "İ" + "y" * 100, ["i\u0307y"], "İy"),
+    ("x" * 100 + "İ" + "y" * 100, ["\u0307"], "İ"),
+    ("İ" * 100 + "first second first", ["second", "first"], "second"),
+], ids=["late-emoji", "expanded-term", "inside-expansion", "term-order"])
+def test_like_span_maps_lowercase_expansion(text, terms, matched):
+    snippet, start, end = build_snippet_with_span(text, terms, width=0)
+    assert 0 <= start < end <= len(text)
+    assert text[start:end] == matched
+    assert snippet == ("..." if start else "") + matched + ("..." if end < len(text) else "")
+
+
+def test_25_late_like_rows_after_lowercase_expansion(recall_engine):
+    seed(recall_engine, [
+        "padding " * 400 + "İ" * 60 + f"row {i} 🦄 exact detail " + "tail " * 20
+        for i in range(25)
+    ])
+    payload = check_spans(recall_engine, recall(recall_engine, "🦄"))
+    assert len(payload["hits"]) == 25
+    assert sum("content" in hit for hit in payload["hits"]) == 8
+    for hit in payload["hits"]:
+        text = hit.get("content", hit["snippet"])
+        row = recall_engine._store.get(hit["store_id"])["content"]
+        assert "🦄" in text
+        assert 0 <= hit["content_offset"] < len(row)
+        assert hit["content_offset"] + len(text) <= len(row)
+
+
+def test_oversized_like_query_keeps_start_and_snippet_in_hydration(recall_engine):
+    query = "🦄" + "x" * 2599
+    seed(recall_engine, ["padding " * 400 + query + " tail" * 400])
+    payload = check_spans(recall_engine, recall(recall_engine, query))
+    assert len(payload["hits"]) == 1
+    hit = payload["hits"][0]
+    assert query[:100] in hit["content"]
+    # The public preview keeps presentation ellipses; compare its source text.
+    assert hit["snippet"].removeprefix("...").removesuffix("...") in hit["content"]
+    span = hit["evidence_span"]
+    assert hit["content_offset"] <= span["char_start"] < span["char_end"]
+    assert span["char_end"] <= hit["content_offset"] + len(hit["content"])
