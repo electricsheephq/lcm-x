@@ -100,6 +100,7 @@ def _coverage(connection, rows, session_id, session_rows, conversation_id):
         source, start, end = span
         _require(isinstance(source, str) and source and source != session_id
                  and type(start) is int and type(end) is int and 0 <= start < end, "unverified_ancestry")
+        _require(end <= 2**63 - 1, "invalid_input")
         parent = connection.execute("SELECT store_id,conversation_id FROM messages "
                                     "WHERE session_id=? AND store_id>? AND store_id<=? ORDER BY store_id",
                                     (source, start, end)).fetchall()
@@ -367,6 +368,11 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
              and set(LCMConfig.__dataclass_fields__) == config["lcm_config"].keys()
              and config["lcm_config"].get("leaf_chunk_tokens")
              == config["leaf_chunk_tokens"], "config_incomplete")
+    # An armed limit cannot coexist with either production opt-out. This is
+    # contradictory captured config, rather than missing leaf-admission state.
+    _require(not config["pressure_yield_limit"]
+             or (config["lcm_config"]["fresh_tail_pressure_yield_enabled"] is True
+                 and config["fresh_tail_count"] > 0), "config_incomplete")
     # Use the captured fallback counter only; never start a tokenizer download or change global state.
     _require(config.get("token_counter") == "fallback-v1" and tokens._encoder_ready
              and tokens._get_encoder() is None, "token_counter_unavailable")
@@ -535,7 +541,12 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     first_group_exception = len(first_group) == len(prefix_messages)
     empty = "none" if noop else _empty_input_kind(actual, actual_blocker, reason, chunk, mapping)
     missing = sorted({r["store_id"] for r in rows} - covered - visible)
-    complete = len(visible) == len(snapshot["messages"])
+    shown_positions = set(shown.values())
+    # Ingest deliberately leaves ignored messages without durable rows. Reuse
+    # the imported production pattern predicate through the probe's filter.
+    complete = all(id(message) in mapping or i in shown_positions
+                   or probe._matches_ignore_message_patterns(message)
+                   for i, message in enumerate(snapshot["messages"]))
     return dict(view_state="complete" if complete else "unknown", empty_input_kind=empty,
                 prefix_over_leaf_budget=bool(blocker and cost > config["leaf_chunk_tokens"] and not first_group_exception),
                 blocker_in_fresh_tail=bool(blocker and any(i >= tail.start for i in positions)),
