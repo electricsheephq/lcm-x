@@ -95,8 +95,15 @@ def reached(case: h.Scenario, payloads: list[str]) -> None:
         assert values(payloads, "reopen")
         assert dict(reports[1])["embedded"] > 0
         if shape == "incremental-revision-gap-checkpoint":
-            state = values(payloads, "discovery state")[0]
-            assert any(key.startswith("chunk_gapfill_scan:") for key, _ in state["tables"]["metadata"])
+            states = values(payloads, "discovery state")
+            # Lazy discovery stopped before draining the range: no coverage
+            # certificate may escape, even though selected intent is durable.
+            assert not any(key.startswith(("chunk_gapfill_scan:", "chunk_policy_revision_through:"))
+                           for key, _ in states[0]["tables"]["metadata"])
+            final = states[-1]["tables"]
+            assert len(final["lcm_chunk_meta"]) == 4
+            assert any(key.startswith("chunk_policy_revision_through:") and value == "4"
+                       for key, value in final["metadata"])
     if shape == "contextual-model-cap-and-estimates":
         preview, applied = (dict(report) for report in reports)
         assert preview["estimated_batches"] == len(values(payloads, "provider dispatch"))

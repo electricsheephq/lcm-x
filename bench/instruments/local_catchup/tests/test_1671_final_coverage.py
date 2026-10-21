@@ -15,7 +15,7 @@ pytest_plugins = ["bench.instruments.local_catchup.tests.test_corpus_audit"]
 def test_final_expected_coverage_after_trace_ingestion(corpus, tmp_path, monkeypatch, missing):
     db, manifest, mod = corpus
     common.dump(tmp_path/"manifest.json", manifest)
-    common.dump(tmp_path/"queries.json", [dict(id=f"q{i}", canary=0) for i in range(200)])
+    common.dump(tmp_path/"queries.json", [dict(id=f"q{i}", canary=0, query_class="canary" if i % 2 == 0 else "broad_nl", text="What turn was acknowledged") for i in range(400)])
     # Satisfy sample gates independently; this is a policy test on an eight-row corpus.
     a = NS(out=tmp_path, root=tmp_path, db=db, home=tmp_path/"trace-home",
            state="ON-catching-up", smoke=False, rows=250000, queries=200, seed=1, block=0)
@@ -25,6 +25,9 @@ def test_final_expected_coverage_after_trace_ingestion(corpus, tmp_path, monkeyp
     engine.on_session_start("i2-trace", platform="eval", conversation_id="i2-trace", context_length=6000)
     payload = dict(hits=[dict(arms=["fts"])], provenance=dict(arms_run=["chunk", "summary"],
         coverage=dict(chunk="full", summary="full")))
+    # Declaration item 6: isolate the existing health probe from the new FTS observer.
+    monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
+    monkeypatch.setattr(recall, "calibration_window", lambda *a: None)  # Separate raw-window regressions in fix2.
     monkeypatch.setattr(recall, "runtime", lambda _: (a, lambda _: NS(
         lcm_recall=lambda *a, **kw: json.dumps(payload)), engine, 0))
     store = NS(close=lambda: None)
@@ -32,6 +35,9 @@ def test_final_expected_coverage_after_trace_ingestion(corpus, tmp_path, monkeyp
     monkeypatch.setattr(recall, "safety", lambda *a: {})
     monkeypatch.setattr(recall, "overlapping", lambda rows, _: rows)
     monkeypatch.setattr(recall, "overlapping_publications", lambda *a: 10)
+    monkeypatch.setattr(recall, "OverlapCounter", lambda _: NS(add=lambda *a: None,
+        counted={c: set(range(200)) for c in ("canary", "broad_nl")},
+        publications={c: set(range(10)) for c in ("canary", "broad_nl")}))
     monkeypatch.setattr(recall, "catchup_activity", lambda *a: dict(catchup_activity=True))
     monkeypatch.setattr(recall, "score", lambda *a: dict(state="PASS"))
     class Thread:
@@ -58,5 +64,5 @@ def test_final_expected_coverage_after_trace_ingestion(corpus, tmp_path, monkeyp
     with sqlite3.connect(db) as c:
         assert c.execute("SELECT count(*) FROM messages").fetchone()[0] > manifest["rows"]
     rows = [json.loads(line) for line in (tmp_path/"recalls.jsonl").read_text().splitlines()]
-    assert len(rows) == 200 and all(r["incomplete"] for r in rows)
+    assert len(rows) == 400 and all(r["incomplete"] for r in rows)
     assert common.load(tmp_path/"raw-summary.json")["state"] == ("INVALID" if missing is None else "PASS")

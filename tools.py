@@ -95,7 +95,7 @@ from .search_query import (
     requires_like_fallback, sanitize_fts5_query,
 )
 from .store import _normalize_observed_at, build_message_fts_spec
-from .vector_store import VectorStore
+from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import LCMConfig, embedding_provider_id, profile_bound
 
 if TYPE_CHECKING:
@@ -356,16 +356,8 @@ def _retrieval_candidate_session_ids(
     if deadline is not None and time.monotonic() >= deadline:
         return [], True
     sessions: set[str] = set()
-    # A progress handler is CONNECTION-GLOBAL, and ``MessageStore._conn`` is
-    # explicitly shared across threads (opened ``check_same_thread=False``).
-    # Installing this request's deadline there would let it interrupt a
-    # concurrent read/ingest on the same connection, and the `finally` teardown
-    # would clear a concurrent request's handler -- silently disabling ITS
-    # timeout. So the enumeration gets a private read-only connection and owns
-    # its handler alone: the same idiom every other deadline-guarded read path
-    # here uses (``_lcm_recall_summary_sources``, the chunk/summary hydrators in
-    # ``retrieval_core``). Python's sqlite3 exposes no getter for the installed
-    # handler, so save/restore on the shared connection is not expressible.
+    # Deadline ownership stays on a private connection; the shared store may
+    # already carry another operation's connection-global progress handler.
     connection: sqlite3.Connection | None = None
     try:
         db_path = Path(engine._store.db_path).resolve()
@@ -379,15 +371,23 @@ def _retrieval_candidate_session_ids(
             ),
         )
         connection.execute("PRAGMA query_only=ON")
-        if deadline is not None:
-            connection.set_progress_handler(
-                lambda: 1 if time.monotonic() >= deadline else 0, 1000
-            )
-        for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
-            rows = connection.execute(
-                _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
-            ).fetchall()
-            sessions.update(str(row[0]) for row in rows if row[0] is not None)
+        with _interrupt_read_on_deadline(connection, deadline):
+            for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
+                sql = _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
+                try:
+                    row = connection.execute(
+                        f"SELECT json_group_array(session_id) FROM ({sql})"
+                    ).fetchone()
+                    sessions.update(json.loads(row[0]))
+                except (sqlite3.Error, MemoryError) as exc:
+                    if not isinstance(exc, MemoryError) and getattr(exc, "sqlite_errorcode", None) not in (
+                        sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM,
+                    ):
+                        raise
+                    rows = connection.execute(sql).fetchall()
+                    sessions.update(str(row[0]) for row in rows if row[0] is not None)
+            if deadline is not None and time.monotonic() >= deadline:
+                return [], True
     except sqlite3.OperationalError:
         if deadline is not None and time.monotonic() >= deadline:
             return [], True
@@ -1578,7 +1578,9 @@ def _lcm_grep_full_text_with_deadline(
     def invoke() -> dict[str, Any]:
         message_conn: sqlite3.Connection | None = None
         dag_conn: sqlite3.Connection | None = None
-        expired = [False]
+        stop = threading.Event()
+        close_lock = threading.Lock()
+        watchdog: threading.Thread | None = None
 
         def require_remaining(stage: str) -> float:
             stage_remaining = deadline - time.monotonic()
@@ -1586,11 +1588,21 @@ def _lcm_grep_full_text_with_deadline(
                 raise TimeoutError(f"lcm full-text deadline exhausted before {stage}")
             return stage_remaining
 
-        def interrupt_if_expired() -> int:
-            if time.monotonic() >= deadline:
-                expired[0] = True
-                return 1
-            return 0
+        def interrupt_when_expired() -> None:
+            if stop.wait(max(0.0, deadline - time.monotonic())):
+                return
+            while not stop.is_set():
+                with close_lock:
+                    if stop.is_set():
+                        return
+                    for conn in (message_conn, dag_conn):
+                        if conn is not None:
+                            try:
+                                conn.interrupt()
+                            except sqlite3.ProgrammingError:
+                                pass
+                # Sticky cancellation also covers statements begun after an interrupt.
+                stop.wait(0.01)
 
         try:
             require_remaining("database path resolution")
@@ -1616,8 +1628,10 @@ def _lcm_grep_full_text_with_deadline(
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA query_only=ON")
                 require_remaining("connection setup")
-                conn.set_progress_handler(interrupt_if_expired, 1000)
-                require_remaining("connection setup")
+            watchdog = threading.Thread(
+                target=interrupt_when_expired, name="full-text-deadline", daemon=True,
+            )
+            watchdog.start()
             read_engine = copy.copy(engine)
             read_io = RetrievalContext(engine._store, engine._dag).bind(
                 message_conn, dag_conn,
@@ -1632,16 +1646,20 @@ def _lcm_grep_full_text_with_deadline(
                     _limit_cap=limit_cap,
                 )
             )
-            if expired[0] or time.monotonic() >= deadline:
+            if time.monotonic() >= deadline:
                 return _lcm_grep_deadline_error(
                     str(args.get("mode") or "semantic").lower(), "full_text"
                 )
             return payload
         finally:
-            if message_conn is not None:
-                message_conn.close()
-            if dag_conn is not None:
-                dag_conn.close()
+            stop.set()
+            with close_lock:
+                if message_conn is not None:
+                    message_conn.close()
+                if dag_conn is not None:
+                    dag_conn.close()
+            if watchdog is not None:
+                watchdog.join()
 
     try:
         return _run_within_deadline(

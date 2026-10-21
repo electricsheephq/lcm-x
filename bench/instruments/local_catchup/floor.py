@@ -4,13 +4,15 @@ import json
 import os
 from pathlib import Path
 import signal
+from statistics import median
 import subprocess
 import sys
 import time
 
 from .catchup import run, wall
-from .common import dump, isolated, parser
+from .common import REFERENCE_CALIBRATION_S, dump, isolated, parser, rollup
 from .corpus import build
+from .calibration import standalone
 
 LABEL = "floor surrogate"
 
@@ -38,13 +40,24 @@ def measured_limits(cgroup):
     return verify_limits((effective/"memory.max").read_text(), cpus, (effective/"memory.swap.max").read_text())
 
 
-def rate(summary, seconds, rows):
+def calibration(events):
+    batches = [e["end"]-e["at"] for e in events if e.get("event") == "_embedding_backfill_summary_run"
+               and e.get("embedded") == 32 and "end" in e and e["end"] > e["at"]]
+    return median(batches) if len(batches) >= 5 else None
+
+
+def rate(summary, seconds, rows, events=()):
     speed = summary.get("rows_s", 0)
     hours = rows/speed/3600 if speed > 0 else None
+    calibrated = calibration(events)
+    normalized = hours*REFERENCE_CALIBRATION_S/calibrated if hours is not None and calibrated else None
+    gated = max(hours, normalized) if normalized is not None else None
     valid = (seconds >= 7200 and summary.get("state") == "INCOMPLETE" and rows >= 250000
              and summary.get("audit", {}).get("complete") is False)
-    return dict(label=LABEL, state="INVALID" if not valid else "PASS" if hours is not None and hours <= 72 else "FAIL",
+    return dict(label=LABEL, state="INVALID" if not valid or calibrated is None else "PASS" if gated is not None and gated <= 72 else "FAIL",
                 sustained_rows_s=speed, implied_hours=hours, measured_seconds=seconds, bar_hours=72,
+                calibration_s=calibrated, reference_calibration_s=REFERENCE_CALIBRATION_S, implied_hours_normalized=normalized,
+                implied_hours_gated=gated, reason="no_calibration" if calibrated is None else None,
                 validity="at least two hours, backlog present throughout, declared corpus size")
 
 
@@ -63,7 +76,9 @@ def main():
     p = parser(__doc__)
     for name in ("scratch", "out", "model-cache", "cgroup"):
         p.add_argument("--"+name, type=Path, required=True)
-    p.add_argument("--cell", choices=("coverage-rate", "recall"), required=True)
+    p.add_argument("--cell", choices=("coverage-rate", "coverage-pair", "recall", "calibration"), required=True)
+    p.add_argument("--block", type=int, choices=(0, 1, 2), default=0)
+    p.add_argument("--covered-store", type=Path)
     p.add_argument("--rows", type=int, default=250000)
     p.add_argument("--shape", choices=("short", "mixed"), default="short")
     p.add_argument("--baseline", choices=("empty", "upgrade"), default="empty")
@@ -74,6 +89,10 @@ def main():
         raise ValueError("Linux and max minutes in [121,330] required")
     if a.cell == "coverage-rate" and a.max_minutes < 150:
         raise ValueError("coverage-rate requires at least 150 minutes: build + 2h window + final audit")
+    if a.cell == "coverage-pair" and a.max_minutes < 300:
+        raise ValueError("coverage-pair requires at least 300 minutes")
+    if a.cell == "recall" and a.max_minutes < 330:
+        raise ValueError("recall requires at least 330 minutes: fixed setup and state caps")
     if not a.limited:
         proc = subprocess.Popen(command(sys.argv[1:]), start_new_session=True)
         timed_out = False
@@ -128,27 +147,52 @@ def main():
 
 def limited(a):
     dump(a.out/"limits.json", measured_limits(a.cgroup))
+    (a.out/"lscpu.txt").write_text(subprocess.check_output(["lscpu"], text=True))
+    calibrated = standalone(a)
+    if a.cell == "calibration":
+        dump(a.out/"summary.json", dict(state="PASS", **calibrated))
+        return
     if a.cell == "recall":
         subprocess.run([sys.executable, "-B", "-m", "bench.instruments.local_catchup.recall",
             "--lcmx-repo", str(a.lcmx_repo), "--hermes-source", str(a.hermes_source),
-            "--scratch", str(a.scratch), "--out", str(a.out/"recall"), "--rows", str(a.rows),
+            "--scratch", str(a.scratch/"recall"), "--out", str(a.out/"recall"), "--rows", str(a.rows),
             "--model-cache", str(a.model_cache), "--shape", a.shape, "--baseline", a.baseline,
-            "--label", LABEL], check=True, timeout=a.max_minutes*60)
+            "--block", str(a.block),
+            "--standalone-calibration-s", str(calibrated["standalone_calibration_s"]),
+            "--label", LABEL, *(["--covered-store", str(a.covered_store)] if a.covered_store else [])], check=True, timeout=a.max_minutes*60)
         summary = __import__("json").loads((a.out/"recall/summary.json").read_text())
+    elif a.cell == "coverage-pair":
+        cells = []
+        for baseline in (("empty", "upgrade") if a.shape == "short" else ("upgrade", "empty")):
+            out = a.out/baseline
+            out.mkdir()
+            coverage(Namespace(**{**vars(a), "out": out, "scratch": a.scratch/baseline, "baseline": baseline}))
+            cells.append(json.loads((out/"summary.json").read_text()))
+        summary = dict(state=rollup(c["state"] for c in cells), cells=cells)
     else:
-        a.scratch.mkdir(parents=True, exist_ok=False)
-        isolated(a.scratch/"builder-home", a.model_cache)
-        os.environ["HOME"] = str(a.scratch/"builder-home")
-        db = a.scratch/"store.db"
-        manifest = build(a.lcmx_repo, a.hermes_source, db, a.rows, a.shape, a.baseline)
-        dump(a.out/"manifest.json", manifest)
-        start = time.monotonic()
-        measured = run(Namespace(**{**vars(a), "db": db, "manifest": a.out/"manifest.json",
-            "home": a.scratch/"homes", "out": a.out/"catchup", "max_wall": wall("2h"),
-            "restart_fraction": 2., "restart_after": float("inf"), "progress_interval": 30,
-            "cpu_cap": 1.5, "cpu_sustained": 10, "per_mean": .6, "per_p95": .75,
-            "aggregate_mean": 7., "aggregate_p95": 8.75}))
-        summary = rate(measured, time.monotonic()-start, a.rows)
+        return coverage(Namespace(**{**vars(a), "scratch": a.scratch/a.baseline}))
+    dump(a.out/"summary.json", dict(summary, label=LABEL, shape=a.shape, baseline=a.baseline))
+
+
+def coverage(a):
+    a.scratch.mkdir(parents=True, exist_ok=False)
+    isolated(a.scratch/"builder-home", a.model_cache)
+    os.environ["HOME"] = str(a.scratch/"builder-home")
+    db = a.scratch/"store.db"
+    built = time.monotonic()
+    manifest = build(a.lcmx_repo, a.hermes_source, db, a.rows, a.shape, a.baseline)
+    build_s = time.monotonic()-built
+    dump(a.out/"build.json", dict(build_seconds=build_s))
+    if a.cell == "coverage-pair" and 2*(build_s+7200+build_s) > a.max_minutes*60:
+        raise RuntimeError("coverage pair cannot fit build, two full windows and audit reserve")
+    dump(a.out/"manifest.json", manifest)
+    measured = run(Namespace(**{**vars(a), "db": db, "manifest": a.out/"manifest.json",
+        "home": a.scratch/"homes", "out": a.out/"catchup", "max_wall": wall("2h"),
+        "restart_fraction": 2., "restart_after": float("inf"), "progress_interval": 30,
+        "cpu_cap": 1.5, "cpu_sustained": 10, "per_mean": .6, "per_p95": .75,
+        "aggregate_mean": 7., "aggregate_p95": 8.75}))
+    events = [json.loads(s) for s in (a.out/"catchup/events.jsonl").read_text().splitlines()]
+    summary = rate(measured, measured["end_to_end_s"], a.rows, events)
     dump(a.out/"summary.json", dict(summary, label=LABEL, shape=a.shape, baseline=a.baseline))
 
 

@@ -80,6 +80,8 @@ def test_floor_shape_baseline_and_summary(tmp_path, monkeypatch, shape, baseline
     monkeypatch.setattr(sys, "argv", ["floor", "--lcmx-repo", str(tmp_path), "--hermes-source", str(tmp_path),
         "--scratch", str(scratch), "--out", str(out), "--model-cache", str(tmp_path),
         "--cgroup", str(tmp_path), "--limited", "--cell", "coverage-rate", "--shape", shape, "--baseline", baseline])
+    monkeypatch.setattr(floor.subprocess, "check_output", lambda *a, **kw: "CPU fixture\n")
+    monkeypatch.setattr(floor, "standalone", lambda *a: {"standalone_calibration_s": .572})
     monkeypatch.setattr(floor, "measured_limits", lambda *args: {"verified": True})
     monkeypatch.setattr(floor, "isolated", lambda *args: None)
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -89,7 +91,13 @@ def test_floor_shape_baseline_and_summary(tmp_path, monkeypatch, shape, baseline
         return {"shape": args[4], "baseline": args[5]}
     monkeypatch.setattr(floor, "build", build)
     monkeypatch.setattr(floor, "run", lambda a: dict(state="INCOMPLETE", rows_s=10, audit=dict(complete=False)))
-    clock = iter([0, 7200])
+    def run(a):
+        a.out.mkdir()
+        events = [dict(event="_embedding_backfill_summary_run", embedded=32, at=i, end=i+.572) for i in range(5)]
+        (a.out/"events.jsonl").write_text("".join(json.dumps(e)+"\n" for e in events))
+        return dict(state="INCOMPLETE", rows_s=10, audit=dict(complete=False), end_to_end_s=7200)
+    monkeypatch.setattr(floor, "run", run)
+    clock = iter([0, 1, 1, 7201])
     monkeypatch.setattr(floor.time, "monotonic", lambda: next(clock))
     floor.main()
     summary = common.load(out/"summary.json")
@@ -138,6 +146,9 @@ def test_recall_loop_uses_cheap_counts_and_boundary_audits(tmp_path, monkeypatch
         return {"store": SimpleNamespace(MessageStore=lambda *args: store),
             "dag": SimpleNamespace(SummaryDAG=lambda *args: dag),
             "tools": SimpleNamespace(lcm_recall=lambda *args, **kw: json.dumps({"hits": []}))}[name]
+    # Declaration item 6: isolate the existing health probe from the new FTS observer.
+    monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
+    monkeypatch.setattr(recall, "calibration_window", lambda *a: None)  # Separate raw-window regressions in fix2.
     monkeypatch.setattr(recall, "runtime", lambda request: (a, mod, engine, 1))
     audits, counts = [], []
     monkeypatch.setattr(recall, "audit", lambda *args: audits.append(1) or {"complete": False})
