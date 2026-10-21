@@ -167,3 +167,19 @@ def test_oversized_brace_span_is_never_previewed_unparsed(monkeypatch, content):
     assert len(content) > 128
     assert _media_payload_preview_content(content) == ""
     assert _build_externalized_placeholder(SUMMARY, content=content) == _build_externalized_placeholder(SUMMARY)
+
+
+def test_typed_generic_dict_repr_keeps_its_caption():
+    value = {"type": "deployment_error", "image": b"opaque media bytes", "caption": CAPTION}
+    content = normalize_content_value(value)
+    assert content == str(value)
+    preview = _media_payload_preview_content(content)
+    assert CAPTION in preview and "opaque" not in preview
+
+
+@pytest.mark.parametrize("wrap", [tuple, set])
+def test_tuple_and_set_captions_in_dict_repr(wrap):
+    value = {"image": b"opaque media bytes", "caption": wrap([CAPTION])}
+    content = normalize_content_value(value)
+    assert content == str(value)
+    assert_caption_preview(content)

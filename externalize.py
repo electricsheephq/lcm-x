@@ -718,6 +718,9 @@ def _media_payload_preview_content(content: str) -> str:
         "data", "mime_type", "mimetype", "mime", "content_type", "content-type", "contenttype",
         "media_type", "media-type", "mediatype", "format", "encoding", "detail",
     }
+    text_types = {"text", "input_text", "output_text"}
+    containers = (dict, list, tuple, set, frozenset)
+    generic_repr = False
 
     try:
         value = json.loads(content)
@@ -742,6 +745,9 @@ def _media_payload_preview_content(content: str) -> str:
             # A brace-spanned string is a repr only when it parses to a dict; otherwise it is prose.
             if repr_like or isinstance(parsed, dict):
                 value = parsed
+                # A parsed repr dict is a generic mapping unless it is a text part: walk it untyped so a
+                # caption beside a non-text "type" field survives, as the unparsed repr text did on main.
+                generic_repr = isinstance(parsed, dict) and parsed.get("type") not in text_types
     if isinstance(value, dict):
         value = [value]
     if isinstance(value, list):
@@ -750,8 +756,8 @@ def _media_payload_preview_content(content: str) -> str:
             if isinstance(part, str):
                 parts.append(part)
             elif isinstance(part, dict):
-                if "type" in part:
-                    if part.get("type") in {"text", "input_text", "output_text"}:
+                if "type" in part and not generic_repr:
+                    if part.get("type") in text_types:
                         text = _media_payload_text_part(part)
                         if text:
                             parts.append(text)
@@ -766,9 +772,12 @@ def _media_payload_preview_content(content: str) -> str:
                         elif isinstance(leaf, dict):
                             stack.extend((v, depth + 1) for k, v in reversed(list(leaf.items()))
                                          if (key := str(k).lower()) not in media_keys
-                                         and (key not in descriptor_keys or isinstance(v, (dict, list))))
-                        elif isinstance(leaf, list):
+                                         and (key not in descriptor_keys or isinstance(v, containers)))
+                        elif isinstance(leaf, (list, tuple)):
                             stack.extend((v, depth + 1) for v in reversed(leaf))
+                        elif isinstance(leaf, (set, frozenset)):
+                            # Parsed reprs can hold sets; sort them so the preview is deterministic.
+                            stack.extend((v, depth + 1) for v in sorted(leaf, key=repr, reverse=True))
         text = "\n".join(parts)
     else:
         text = value if isinstance(value, str) else ""
