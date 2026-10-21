@@ -211,9 +211,12 @@ def _pollution(connection, rows):
             "session_id", "conversation_id", "source", "role", "content", "tool_call_id", "tool_calls", "tool_name"))
         groups.setdefault(key, []).append(row["store_id"])
         if row["role"] == "tool" and row["content"] == _HERMES_PRUNED_TOOL_PLACEHOLDER:
-            suspects.update(r["store_id"] for r in rows if r["role"] == "tool"
-                            and r["tool_call_id"] and r["tool_call_id"] == row["tool_call_id"]
-                            and r["tool_name"] == row["tool_name"] and r["store_id"] <= row["store_id"])
+            originals = {r["store_id"] for r in rows if r["role"] == "tool"
+                         and r["tool_call_id"] and r["tool_call_id"] == row["tool_call_id"]
+                         and r["tool_name"] == row["tool_name"] and r["store_id"] < row["store_id"]
+                         and r["content"] != row["content"]}
+            if originals:
+                suspects.update(originals | {row["store_id"]})
     for ids in groups.values():
         if len(ids) > 1:
             suspects.update(ids)
@@ -253,15 +256,18 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     _require(config["leaf_chunk_tokens"] > 0 and config["selection_budget"] > 0
              and config["effective_trigger"] > 0 and config["context_window"] > 0, "config_incomplete")
     _require(isinstance(config.get("lcm_config"), dict)
-             and set(LCMConfig.__dataclass_fields__) <= config["lcm_config"].keys()
+             and set(LCMConfig.__dataclass_fields__) == config["lcm_config"].keys()
              and config["lcm_config"].get("leaf_chunk_tokens")
              == config["leaf_chunk_tokens"], "config_incomplete")
     # Use the captured fallback counter only; never start a tokenizer download or change global state.
     _require(config.get("token_counter") == "fallback-v1" and tokens._encoder_ready
              and tokens._get_encoder() is None, "token_counter_unavailable")
-    view = snapshot["messages"]
+    view = snapshot.get("messages")
     _require(isinstance(view, list) and all(isinstance(m, dict) for m in view), "snapshot_invalid")
-    probe = _Probe(connection, rows, session_id, frontier, config["lcm_config"], covered)
+    try:
+        probe = _Probe(connection, rows, session_id, frontier, config["lcm_config"], covered)
+    except Exception:
+        raise InspectionRefused("config_incomplete") from None
     # Check every row before entering helpers that could otherwise resolve an external payload.
     for message in [*rows, *view]:
         probe._message_replay_identity(message, stored_row=True)
@@ -282,17 +288,23 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     top = max((mapping[id(m)] for m in chunk if id(m) in mapping), default=0)
     end = top - 1 if top > frontier else min((sid - 1 for sid in mapping.values() if sid > frontier), default=None)
     scanned = ([r for r in rows if r["store_id"] > frontier and (end is None or r["store_id"] <= end)], False)
+    # CompactionMixin._select_leaf_candidate stops before attribution when there
+    # is no candidate_raw and no hidden backlog (StoreCompleteMixin._store_complete_backlog).
+    hidden = [r for r in scanned[0] if r["store_id"] not in visible | covered
+              and r["role"] != "system" and not probe._matches_ignore_message_patterns(r)]
+    noop = not raw and not hidden
 
     def attribute(budget):
         return probe._store_complete_input(chunk, {}, mapping, view, chunk, frontier, [], budget, scanned=scanned)
 
-    actual = attribute(config["leaf_chunk_tokens"])
-    reason, actual_blocker = probe._store_complete_empty_reason, probe._store_complete_blocked
+    actual = None if noop else attribute(config["leaf_chunk_tokens"])
+    reason = "" if noop else probe._store_complete_empty_reason
+    actual_blocker = None if noop else probe._store_complete_blocked
     # A budget cut can hide the later retained row. Probe the same selection without that cut
     # to name it; this does not relabel the actual attribution branch.
     all_cost = tokens.count_messages_tokens(probe._store_complete_messages(rows)) + tokens.count_messages_tokens(view)
-    unlimited = attribute(max(all_cost + 1, config["leaf_chunk_tokens"]))
-    blocker = actual_blocker or probe._store_complete_blocked
+    unlimited = None if noop else attribute(max(all_cost + 1, config["leaf_chunk_tokens"]))
+    blocker = None if noop else actual_blocker or probe._store_complete_blocked
     blocker_id = blocker[0] if blocker else None
     positions = [i for i, m in enumerate(view) if blocker_id is not None and mapping.get(id(m)) == blocker_id]
     positions += [i for sid, i in shown.items() if sid == blocker_id]
@@ -305,7 +317,7 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     cost = tokens.count_messages_tokens(prefix_messages)
     first_group = select_oldest_leaf_chunk(prefix_messages, 1)
     first_group_exception = len(first_group) == len(prefix_messages)
-    empty = _empty_input_kind(actual, actual_blocker, reason, chunk, mapping)
+    empty = "none" if noop else _empty_input_kind(actual, actual_blocker, reason, chunk, mapping)
     missing = sorted({r["store_id"] for r in rows} - covered - visible)
     # Unmatched view occurrences and special host identity metadata cannot establish health.
     complete = len(visible) == len(view) and not any(
@@ -316,7 +328,7 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
                 blocker_source_ids=[blocker_id] if blocker else [], prefix_tokens=cost,
                 prefix_rows=len(prefix_messages), leaf_budget=config["leaf_chunk_tokens"],
                 selection_budget=config["selection_budget"], unreachable_source_ids=missing,
-                selection_failed=bool(empty != "none" or tail.tokens >= config["effective_trigger"]))
+                selection_failed=bool(not noop and (empty != "none" or tail.tokens >= config["effective_trigger"])))
 
 
 def inspect_store(copy, *, session_id, conversation_id, view_snapshot=None, effective_config=None):
@@ -341,6 +353,7 @@ def inspect_store(copy, *, session_id, conversation_id, view_snapshot=None, effe
             state = connection.execute("SELECT current_session_id,current_frontier_store_id FROM lcm_lifecycle_state "
                                        "WHERE conversation_id=?", (conversation_id,)).fetchone()
             _require(state is not None and state[0] == session_id, "scope_mismatch")
+            _require(type(state[1]) is int, "invalid_store")
             rows = [dict(r) for r in connection.execute(
                 "SELECT * FROM messages WHERE session_id=? AND TRIM(COALESCE(conversation_id,'')) IN ('',?) "
                 "ORDER BY store_id", (session_id, conversation_id))]
@@ -352,17 +365,21 @@ def inspect_store(copy, *, session_id, conversation_id, view_snapshot=None, effe
             for row in rows:
                 if row.get("tool_calls"):
                     row["tool_calls"] = json.loads(row["tool_calls"])
-            if view_snapshot is not None and effective_config is not None:
-                snapshot, config = view_snapshot, effective_config
-                matching = (snapshot.get("source_sha256") == before and snapshot.get("session_id") == session_id
-                            and snapshot.get("conversation_id") == conversation_id and bool(snapshot.get("capture_id"))
-                            and snapshot.get("effective_config") == config)
-                if matching:
-                    try:
-                        with _quiet_helpers():
-                            result.update(_view_probe(connection, rows, covered, int(state[1]), session_id, config, snapshot))
-                    except InspectionRefused as error:
-                        result["evidence_code"] = str(error)
+            if view_snapshot is not None or effective_config is not None:
+                try:
+                    snapshot, config = view_snapshot, effective_config
+                    _require(isinstance(snapshot, dict), "snapshot_invalid")
+                    _require(isinstance(config, dict), "config_incomplete")
+                    _require(snapshot.get("source_sha256") == before and snapshot.get("session_id") == session_id
+                             and snapshot.get("conversation_id") == conversation_id and bool(snapshot.get("capture_id"))
+                             and snapshot.get("effective_config") == config, "snapshot_invalid")
+                    with _quiet_helpers():
+                        findings = _view_probe(connection, rows, covered, state[1], session_id, config, snapshot)
+                    result.update(findings)
+                except InspectionRefused as error:
+                    result["evidence_code"] = str(error)
+                except Exception:
+                    result["evidence_code"] = "snapshot_invalid"
             result["healthy"] = (result["view_state"] == "complete" and not suspects
                                  and not result["unreachable_source_ids"] and not result["selection_failed"]
                                  and not result["prefix_over_leaf_budget"] and not result["blocker_in_fresh_tail"])
@@ -388,18 +405,28 @@ def main(argv=None):
     parser.add_argument("--json", action="store_true", help="JSON is the only output format")
     args = parser.parse_args(argv)
     try:
-        snapshot = json.loads(args.view_snapshot.read_text()) if args.view_snapshot else None
-        config = json.loads(args.effective_config.read_text()) if args.effective_config else None
+        def load_evidence(path):
+            if path is None:
+                return None
+            try:
+                return json.loads(path.read_text())
+            except (OSError, ValueError):
+                return {}  # Invalid optional evidence must not discard database findings.
+
+        snapshot, config = load_evidence(args.view_snapshot), load_evidence(args.effective_config)
         # Pin the fallback estimator without starting a background download.
-        if config and config.get("token_counter") == "fallback-v1":
+        if isinstance(config, dict) and config.get("token_counter") == "fallback-v1":
             tokens._encoder_ready, tokens._encoder = True, None
-        result = inspect_store(args.copy, session_id=args.session_id, conversation_id=args.conversation_id,
-                               view_snapshot=snapshot, effective_config=config)
-    except InspectionRefused as error:
-        result = {"error": str(error)}
-    except (OSError, sqlite3.Error, ValueError, TypeError, KeyError, RecursionError):
+        try:
+            result = inspect_store(args.copy, session_id=args.session_id, conversation_id=args.conversation_id,
+                                   view_snapshot=snapshot, effective_config=config)
+        except InspectionRefused as error:
+            result = {"error": str(error)}
+        output = json.dumps(result, sort_keys=True)
+    except Exception:
         result = {"error": "invalid_input"}
-    print(json.dumps(result, sort_keys=True))
+        output = '{"error": "invalid_input"}'
+    print(output)
     return 2 if "error" in result else 0
 
 

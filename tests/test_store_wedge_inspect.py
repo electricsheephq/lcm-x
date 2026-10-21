@@ -4,6 +4,7 @@ import copy
 import hashlib
 import importlib.util
 import json
+import re
 import sqlite3
 from contextlib import closing
 from dataclasses import asdict
@@ -63,13 +64,137 @@ def _inputs(path, messages, **overrides):
 
 def _inspect(path, **kwargs):
     before = path.read_bytes()
-    files = set(path.parent.rglob("*"))
+    files = _copy_files(path)
     result = inspector.inspect_store(path, session_id="S", conversation_id="conv", **kwargs)
     assert hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256(before).digest()
-    assert set(path.parent.rglob("*")) <= files
+    assert _copy_files(path) == files
     output = json.dumps(result)
     assert "private payload" not in output and "synthetic-capture" not in output and "conv" not in output
     return result
+
+
+def _copy_files(path):
+    # The CLI can create siblings of the copy, never files under the fixture's
+    # engine. Its background shutdown can still remove its own WAL/SHM files.
+    return {p for p in path.parent.iterdir() if p.name != "fixture"}
+
+
+@pytest.mark.parametrize("frontier", ["private frontier marker", 2.5, b"private frontier marker"])
+def test_noninteger_frontier_refused_without_echo(tmp_path, capsys, frontier):
+    path = _copy(tmp_path, _messages(), frontier=frontier)
+    code = inspector.main(["inspect", "--copy", str(path), "--session-id", "S",
+                           "--conversation-id", "conv"])
+    captured = capsys.readouterr()
+    assert code == 2 and captured.out == '{"error": "invalid_store"}\n'
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("stage", ["inspect", "serialize"])
+def test_cli_guards_unexpected_exceptions_and_serialization(tmp_path, monkeypatch, capsys, stage):
+    path = _copy(tmp_path, _messages())
+
+    def fail(*_args, **_kwargs):
+        raise AttributeError("private payload and path")
+
+    if stage == "inspect":
+        monkeypatch.setattr(inspector, "inspect_store", fail)
+    else:
+        monkeypatch.setattr(inspector, "inspect_store", lambda *_a, **_k: {"healthy": False})
+        monkeypatch.setattr(inspector.json, "dumps", fail)
+    code = inspector.main(["inspect", "--copy", str(path), "--session-id", "S",
+                           "--conversation-id", "conv"])
+    captured = capsys.readouterr()
+    assert code == 2 and captured.out == '{"error": "invalid_input"}\n'
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("count", [0, 1, 4])
+def test_entire_view_in_fresh_tail_matches_product_noop(tmp_path, count):
+    messages = _messages(count)
+    engine = make_engine(tmp_path / "product", window=10000, session_id="S",
+                         conversation_id="conv", fresh_tail_count=4)
+    try:
+        engine.ingest(copy.deepcopy(messages))
+        engine.compress(copy.deepcopy(messages), force=True)
+        expected = "no eligible raw backlog outside fresh tail" if count else "empty message list"
+        assert engine._last_compression_noop_reason == expected
+    finally:
+        engine.shutdown()
+    path = _copy(tmp_path, messages)
+    result = _inspect(path, **_inputs(path, messages, fresh_tail_count=4))
+    assert result["empty_input_kind"] == "none"
+    assert not result["selection_failed"] and result["healthy"]
+
+
+def test_empty_raw_view_with_hidden_backlog_is_not_a_noop(tmp_path):
+    messages = _messages()
+    path = _copy(tmp_path, messages)
+    result = _inspect(path, **_inputs(path, messages[1:], fresh_tail_count=4))
+    assert not result["healthy"] and result["unreachable_source_ids"] == [1]
+
+
+def test_first_tool_content_is_pruned_placeholder_not_pollution(tmp_path):
+    messages = [{"role": "user", "content": "private payload"},
+                {"role": "assistant", "content": "", "tool_calls": [
+                    {"id": "call", "type": "function", "function": {"name": "terminal", "arguments": "{}"}}]},
+                {"role": "tool", "tool_call_id": "call", "name": "terminal",
+                 "content": inspector._HERMES_PRUNED_TOOL_PLACEHOLDER},
+                {"role": "assistant", "content": "done"}]
+    result = _inspect(_copy(tmp_path, messages))
+    assert result["polluted_copies"] == "none" and result["polluted_source_ids"] == []
+
+
+@pytest.mark.parametrize("case", ["missing_messages", "bad_messages", "config_extra", "config_type"])
+def test_malformed_view_evidence_keeps_database_findings(tmp_path, case):
+    messages = _messages()
+    path = _copy(tmp_path, messages)
+    inputs = _inputs(path, messages)
+    if case == "missing_messages":
+        inputs["view_snapshot"].pop("messages")
+    elif case == "bad_messages":
+        inputs["view_snapshot"]["messages"] = [{"role": "assistant", "tool_calls": [{"function": "bad"}]}]
+    elif case == "config_extra":
+        inputs["effective_config"]["lcm_config"]["unexpected"] = True
+    else:
+        inputs["effective_config"]["lcm_config"]["ignore_message_patterns"] = 42
+    inputs["view_snapshot"]["effective_config"] = copy.deepcopy(inputs["effective_config"])
+    result = _inspect(path, **inputs)
+    assert result["view_state"] == "unknown" and not result["healthy"]
+    assert result["source_rows"] == 4 and result["polluted_copies"] == "none"
+    assert result["evidence_code"] in {"snapshot_invalid", "config_incomplete"}
+
+
+@pytest.mark.parametrize("option", ["--view-snapshot", "--effective-config"])
+def test_malformed_evidence_file_keeps_database_findings(tmp_path, capsys, option):
+    path = _copy(tmp_path, _messages())
+    bad = tmp_path / "evidence.json"
+    bad.write_text('{"private payload":')
+    code = inspector.main(["inspect", "--copy", str(path), "--session-id", "S",
+                           "--conversation-id", "conv", option, str(bad)])
+    captured = capsys.readouterr()
+    result = json.loads(captured.out)
+    assert code == 0 and captured.err == ""
+    assert result["view_state"] == "unknown" and result["source_rows"] == 4
+    assert result["polluted_copies"] == "none" and not result["healthy"]
+
+
+def test_documented_backup_conversion_is_accepted(tmp_path, monkeypatch):
+    messages = _messages()
+    _copy(tmp_path, messages)
+    # Execute the operator procedure verbatim on a synthetic WAL-mode source.
+    with closing(sqlite3.connect(tmp_path / "fixture/lcm.db")) as source:
+        assert source.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+        with closing(sqlite3.connect(tmp_path / "SOURCE.db")) as destination:
+            source.backup(destination)
+    doc = (Path(__file__).resolve().parents[1] / "docs/operations/store-wedge-inspect.md").read_text()
+    blocks = re.findall(r"```python\n(.*?)```", doc, re.DOTALL)
+    assert len(blocks) == 1, "document the executable backup and journal-mode conversion"
+    monkeypatch.chdir(tmp_path)
+    exec(compile(blocks[0], "documented-copy-procedure", "exec"), {"__name__": "__main__"})
+    path = tmp_path / "COPY.db"
+    assert path.read_bytes()[18:20] == b"\x01\x01"
+    assert not any(Path(str(path) + suffix).exists() for suffix in ("-wal", "-shm", "-journal"))
+    assert _inspect(path)["source_rows"] == len(messages)
 
 
 def test_healthy_matching_view_and_input_unchanged(tmp_path):
@@ -176,7 +301,7 @@ def test_no_source_branch(tmp_path):
 def test_contiguity_branch_uses_real_attribution_and_never_invents_blocker(tmp_path):
     messages = _messages(3)
     path = _copy(tmp_path, messages)
-    before, files = path.read_bytes(), set(tmp_path.rglob("*"))
+    before, files = path.read_bytes(), _copy_files(path)
     with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA query_only=ON")
@@ -189,18 +314,18 @@ def test_contiguity_branch_uses_real_attribution_and_never_invents_blocker(tmp_p
         assert result == [] and probe._store_complete_blocked is None
         assert probe._store_complete_empty_reason == "leaf input cannot form a contiguous stored prefix"
         assert inspector._empty_input_kind(result, None, probe._store_complete_empty_reason, chunk, {}) == "contiguity"
-    assert path.read_bytes() == before and set(tmp_path.rglob("*")) == files
+    assert path.read_bytes() == before and _copy_files(path) == files
 
 
 @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
 def test_sidecars_refused_before_open(tmp_path, monkeypatch, suffix):
     path = _copy(tmp_path, _messages())
     Path(str(path) + suffix).write_bytes(b"private payload")
-    before, files = path.read_bytes(), set(tmp_path.rglob("*"))
+    before, files = path.read_bytes(), _copy_files(path)
     monkeypatch.setattr(inspector.sqlite3, "connect", lambda *_a, **_k: pytest.fail("opened sidecar store"))
     with pytest.raises(inspector.InspectionRefused, match="^sidecar_present$"):
         inspector.inspect_store(path, session_id="S", conversation_id="conv")
-    assert path.read_bytes() == before and set(tmp_path.rglob("*")) == files
+    assert path.read_bytes() == before and _copy_files(path) == files
 
 
 @pytest.mark.parametrize("case", ["schema", "wal_header", "cycle", "foreign_source"])
@@ -215,10 +340,10 @@ def test_schema_wal_header_and_dag_refusals_preserve_input(tmp_path, case):
             connection.execute("INSERT INTO summary_nodes(node_id,session_id,summary,source_ids,source_type,created_at) "
                                "VALUES (1,'S','private summary',?,?,0)",
                                ("[1]" if case == "cycle" else "[999]", "nodes" if case == "cycle" else "messages"))
-    before, files = path.read_bytes(), set(tmp_path.rglob("*"))
+    before, files = path.read_bytes(), _copy_files(path)
     with pytest.raises(inspector.InspectionRefused):
         inspector.inspect_store(path, session_id="S", conversation_id="conv")
-    assert path.read_bytes() == before and set(tmp_path.rglob("*")) == files
+    assert path.read_bytes() == before and _copy_files(path) == files
 
 
 def test_cli_emits_fixed_errors_without_payload_or_paths(tmp_path, capsys):
