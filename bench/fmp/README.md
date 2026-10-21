@@ -267,3 +267,68 @@ Reports also retain per-ID caps/tokens, call-cache counts and timing; result
 cards name the guard margin and measured MDE. A warm cached A/A is an identity
 control (`INCOMPLETE/no-op-arm`), never an independent placebo sample. Result cards cover advisory timing;
 publication and the full acceptance pilot remain separate owner actions.
+
+### DM0 derived-memory instrument (#1191)
+
+`python -m bench.fmp.derived [inventory|freeze|extract|answer|score] --product PRODUCT
+--source INPUT.json --run RUN [--cache W1_CACHE]` defaults to read-only inventory.
+It is bench-only and leaves product flags, V4 publication and existing FMP defaults alone.
+`freeze` requires complete LOCAL/25 retrieval/store identities, rebuilds DM0-886 from
+hash-pinned datasets, and snapshots a create-only manifest before any model call.
+Incomplete LOCAL/25 receipts refuse admission; OFF/25 cannot substitute.
+Freeze binds panel IDs and A0 bytes to verified retrievals; live `w1_cache` cannot be null.
+Added questions need `added_receipt` in the same verified LOCAL/25 cache. Imported
+controls must match their original response records and verified source identities.
+Freeze requires 44 unique repeat IDs in the panel, each with its control record and
+baseline/source/renderer/endpoint identity; missing repeat admission refuses before calls.
+The manifest pins renderer/endpoints and byte digests of every `bench/fmp` Python module.
+Resume refuses changed modules by name; a fresh run directory freezes the new identity.
+
+INPUT is a private JSON export: schema `dm0-v1`, pinned `product` source hash and
+`product_commit`, `source_files`/`dataset_sha256`, `normalizer_sha256`, `dev_ids`,
+`w1_panel`, `w1_receipt`, `w1_cache`, exact `baselines` messages by canonical ID,
+original `controls` response records, `w1_endpoint`/`w1_renderer`/`w1_sources`,
+versioned Codex/GLM `endpoints`, `renderer`, frozen `repeat_ids` (44), and an absolute
+Unix `deadline`. Missing added-question baselines require pinned-product preparation
+before freeze; this command never builds W1 stores or substitutes retrievals.
+Synthetic fixtures instead provide `questions` and `panel` and set `synthetic=true`.
+Semantic-screen evidence remains a separate prerequisite (`semantic_valid`); fabricated
+hard cases and the conservative `v4_row_candidate` diagnostic cannot certify X05 quality.
+
+Only separately authorized live runs use `extract`/`answer --activate`: subscription
+Sol/medium extraction/readers and Sol/low plus GLM 5.3 judgments, both on every answer.
+The launcher supplies GLM credentials; the instrument never reads credential files.
+Resume uses immutable inputs and successful calls; uncertain sends require disposition.
+Completed turns remain successful despite non-fatal reconnects. Failed calls use only
+the fatal outcome (last error if no turn failure) and stderr tail for classification.
+Timeouts, HTTP 5xx/unmarked 429 outside backend usage-limit predicates, resets/refusals
+and stream/protocol failures retry unchanged after 60, 180 and 600 seconds.
+Every retry rechecks the frozen deadline after sleeping, before recording or sending.
+Usage limits match each backend, including GLM error-result 429 and rate-limit markers.
+Quota/usage stops return `PAUSED` without exclusions or a settled report. Rerun the
+same directory after reset to retry the paused call and reuse saved calls; paused
+wall time does not consume the frozen deadline.
+Exhausted questions are excluded from both arms and judges; more than 3% is INCOMPLETE.
+Each exclusion budget counts only IDs in its population, including targets-only interim.
+Valid extraction siblings survive rejection; more than 5% rejected items is INCOMPLETE.
+Failed semantic admission (including missing approval or empty extraction) settles before
+drift or main-panel sends. Invalid extraction JSON (including non-string content),
+envelope identities or array types receive one repair attempt. A failed repair is terminal:
+the saved disposition settles PARK-INCOMPLETE; resume neither retries nor sends again.
+Invalid judge replies in the main panel and drift retry once unchanged; persistent
+invalids are reported per arm/judge. Main-panel invalids above 2% are INCOMPLETE;
+drift allows `max(1, ceil(0.02 * n))` invalids per judge/arm (one at 44 repeats).
+Invalid drift settles PARK-INCOMPLETE before any main-panel send; drift quota pauses.
+Drift exhaustion excludes the question from all main-panel arms and judges.
+Unsettled calls remain resumable.
+When memory is empty, controls reuse the A0 answer. Cards include rejection counts/rates.
+Source-only 16k-token windows plus at most 2k context are batched three per call.
+Whole source-linked groups, including quotes/references/header, fit an 8,192-token cap.
+A0 hit/question bytes stay fixed; only the declared memory insertion changes M8192.
+
+The fixed target runs first; conservative paired and clustered bounds may stop futility.
+GO requires both judges' +5/+2-point, Holm, positive cluster-lower, category and strict
+combined-guard gates. Every original frozen category needs evaluable items after exclusions;
+an empty category is INCOMPLETE. PARK variants distinguish futility, uncertainty, no-go
+and incomplete coverage/transport/identity. GO funds Stage 1 only. `score` replays frozen scoring inputs
+and writes a result card; T1/T2 publication, live quality and product benefit remain unproven.
