@@ -10,6 +10,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import patch
@@ -58,7 +59,8 @@ def recorded_command(args):
             continue
         command.append("--" + name.replace("_", "-"))
         if value is not True:
-            command.append(value.name if isinstance(value, Path) else str(value))
+            # Paths become role labels: basenames can name private repos or local sessions.
+            command.append("<" + name.replace("_", "-") + ">" if isinstance(value, Path) else str(value))
     return shlex.join(command)
 
 
@@ -131,11 +133,48 @@ def retrieve(q, store, overrides):
         delivered_tokens_estimated=delivery.tokens(evidence), delivered_sha256=sha(evidence.encode())))
 
 
+def quarantine(cache, written):
+    """Move this worker's fresh stores/retrievals aside so no later run can consume them."""
+    target = Path(cache) / "quarantine" / uuid.uuid4().hex
+    for path in written:
+        if path.exists():
+            dest = target / path.relative_to(cache)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            path.rename(dest)
+    return target
+
+
 def worker(spec):
     validate_overrides(spec["overrides"])
+    product = source_identity(spec["repo"])
+    if product != spec["expected_product"]:
+        write_json(Path(spec["receipt"]), dict(product=product, expected_product=spec["expected_product"],
+            rows=[], prepare=spec["prepare"], status="INCOMPLETE", reason="checkout-changed"))
+        raise Incomplete("checkout-changed")
+    written = []
+    try:
+        receipt = _worker_rows(spec, product, written)
+    except BaseException as exc:
+        # A drifted checkout can surface as any failure; never leave this worker's writes reusable.
+        if source_identity(spec["repo"]) == product:
+            raise
+        quarantine(Path(spec["cache"]), written)
+        write_json(Path(spec["receipt"]), dict(product=product, rows=[], prepare=spec["prepare"],
+            status="INCOMPLETE", reason="checkout-changed", quarantined=len(written)))
+        raise Incomplete("checkout-changed") from exc
+    product_after = source_identity(spec["repo"])
+    changed = product_after != product
+    held = quarantine(Path(spec["cache"]), written) if changed else None
+    write_json(Path(spec["receipt"]), dict(product=product, product_after=product_after,
+        rows=receipt, prepare=spec["prepare"], status="INCOMPLETE" if changed else "COMPLETE",
+        reason="checkout-changed" if changed else None, quarantined=len(written) if held else 0))
+    if changed:
+        raise Incomplete("checkout-changed")
+
+
+def _worker_rows(spec, product, written):
     lme = load_lcm(spec["repo"])
     questions, panel, guard = load(spec["panel"], spec["guard"], spec["lme"], spec["locomo"], lme)
-    product = source_identity(spec["repo"])
     renderer = renderer_identity()
     receipt = []
     for dataset in ("lme-s", "locomo"):
@@ -155,6 +194,8 @@ def worker(spec):
                         json.loads((directory / "build-manifest.json").read_bytes()) != store.expected(q)):
                     raise Incomplete("incomplete store generation; retain and use new cache root")
                 state = store.build(q)
+                if state != "reused":
+                    written.append(directory)
                 receipt.append(dict(id=q.qid, state=state, generation=store.generation))
                 continue
             manifest = directory / "build-manifest.json"
@@ -177,9 +218,10 @@ def worker(spec):
                 if digest_file(directory / "lcm.db") != store_id["database_sha256"]:
                     raise Incomplete("frozen store changed")
                 write_json(cache, dict(identity=identity, value=value, value_sha256=sha(encoded(value))))
+                written.append(cache)
             receipt.append(dict(id=q.qid, cache_key=key, cache="cached" if hit else "fresh",
                                 sources=store_id, retrieval_sha256=value["source_sha256"], **value["metadata"]))
-    write_json(Path(spec["receipt"]), dict(product=product, rows=receipt, prepare=spec["prepare"]))
+    return receipt
 
 
 def judge_messages(q, hypothesis):
@@ -284,6 +326,9 @@ def execute(args):
         return 0
     if not args.baseline or not args.lme_data or not args.locomo_data:
         raise ValueError("baseline and both data paths are required")
+    # Pin every product checkout before the parent loads code; workers and the final check compare to this.
+    pinned = {str(repo.resolve()): source_identity(str(repo.resolve()))
+              for repo in (args.baseline, args.candidate or args.baseline)}
     lme = load_lcm(args.baseline)
     if args.freeze_panels:
         freeze(args.lme_data, args.locomo_data, lme, args.split_file)
@@ -319,17 +364,28 @@ def execute(args):
             spec = dict(repo=str(repo.resolve()), config=args.config, overrides=overrides,
                 cache=str(args.cache_root.resolve()), prepare=args.prepare, lme=str(args.lme_data.resolve()),
                 locomo=str(args.locomo_data.resolve()), panel=str(args.panel.resolve()), guard=str(args.guard.resolve()),
-                receipt=str(receipt.resolve()))
-            spec_path = inputs / (arm + "-spec.json")
+                receipt=str(receipt.resolve()), expected_product=pinned[str(repo.resolve())])
+            # Operational paths stay local; only identity copies enter the card.
+            spec_path = args.output / "local" / (arm + "-spec.json")
             write_json(spec_path, spec)
+            write_json(inputs / spec_path.name, dict(spec_sha256=digest_file(spec_path),
+                config=spec["config"], overrides=overrides, prepare=spec["prepare"],
+                product_sha256=spec["expected_product"], receipt=Path(spec["receipt"]).name,
+                files={key: dict(sha256=digest_file(spec[key]))
+                       for key in ("lme", "locomo", "panel", "guard")}))
             timeout = None if args.prepare else max(.001, deadline - time.monotonic())
             proc = subprocess.run([sys.executable, "-m", "bench.fmp.dev", "--worker", str(spec_path)],
                                   capture_output=True, timeout=timeout)
             if proc.returncode:
+                if receipt.exists() and json.loads(receipt.read_bytes()).get("reason") == "checkout-changed":
+                    report["reason"] = "checkout-changed"
                 raise Incomplete("retrieval worker failed")
             data = json.loads(receipt.read_bytes())
             retrievals[arm] = {r["id"]: r for r in data["rows"]}
             report["arms"][arm] = dict(product_sha256=data["product"], overrides=overrides)
+        if any(source_identity(repo) != identity for repo, identity in pinned.items()):
+            report["reason"] = "checkout-changed"
+            raise Incomplete("checkout-changed")
         if args.prepare:
             write_json(args.output / "prepare.json", dict(status="COMPLETE", label="cold preparation; outside timed loop"))
             return 0
@@ -415,9 +471,13 @@ def main():
         if args.worker:
             spec = json.loads(args.worker.read_bytes())
             import traceback
-            write_json(Path(spec["receipt"]), dict(status="INCOMPLETE", error=type(exc).__name__,
+            receipt = Path(spec["receipt"])
+            state = json.loads(receipt.read_bytes()) if receipt.exists() else {}
+            state.update(status="INCOMPLETE", error=type(exc).__name__,
+                reason="checkout-changed" if isinstance(exc, Incomplete) and str(exc) == "checkout-changed" else None,
                 frames=[dict(file=Path(f.filename).name, line=f.lineno, function=f.name)
-                        for f in traceback.extract_tb(exc.__traceback__)]))
+                        for f in traceback.extract_tb(exc.__traceback__)])
+            write_json(receipt, state)
         reason = str(exc) if isinstance(exc, ValueError) and str(exc).startswith("unsupported recall-time override") else None
         print(json.dumps(dict(status="INCOMPLETE", error=type(exc).__name__, reason=reason)), file=sys.stderr)
         return 2

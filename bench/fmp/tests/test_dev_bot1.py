@@ -41,6 +41,7 @@ def test_source_identity_hashes_tracked_deletion(tmp_path, monkeypatch):
 def screen(tmp_path, monkeypatch):
     questions = [SimpleNamespace(qid=f"q{i}", question_date="", question=f"question {i}") for i in range(4)]
     monkeypatch.setattr(dev, "load_lcm", lambda repo: None)
+    monkeypatch.setattr(dev, "source_identity", lambda repo: "fixture")
     monkeypatch.setattr(dev, "load", lambda *a: (questions, {"items": []}, {"items": []}))
     monkeypatch.setattr(dev.shutil, "disk_usage", lambda p: SimpleNamespace(free=200 * 1024 ** 3))
     panel = tmp_path / "panel.json"
@@ -106,7 +107,8 @@ def test_recorded_command_tracks_parsed_invocation(screen):
                  "config", "candidate_config"):
         assert tokens[tokens.index("--" + name.replace("_", "-")) + 1] == str(getattr(first, name))
     for name in ("panel", "guard", "cache_root", "baseline", "output", "lme_data", "locomo_data"):
-        assert tokens[tokens.index("--" + name.replace("_", "-")) + 1] == getattr(first, name).name
+        flag = "--" + name.replace("_", "-")
+        assert tokens[tokens.index(flag) + 1] == "<" + flag[2:] + ">"
     assert str(first.output.parent) not in commands[0]
 
 
