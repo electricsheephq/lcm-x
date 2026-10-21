@@ -236,6 +236,61 @@ def test_failed_probe_then_failed_ingest_recovers_without_loss_or_duplicates(
     assert engine._ingest_cursor == len(history)
 
 
+@pytest.mark.parametrize("append_unavailable", [True, False], ids=["count-and-append-outage", "count-only-outage"])
+def test_failed_probe_then_failed_count_preserves_reconciliation(
+    engine: Any, monkeypatch: pytest.MonkeyPatch, append_unavailable: bool,
+) -> None:
+    """An unavailable count is not evidence that replay starts at cursor zero."""
+    engine.on_session_start("session", platform="acp")
+    messages = [
+        {"role": "user", "content": "Durable question."},
+        {"role": "assistant", "content": "Durable answer."},
+    ]
+    engine.ingest(messages)
+    _start_with_failed_probe(engine, monkeypatch, "has_session_messages", "session")
+    assert engine._ingest_cursor_needs_reconcile
+    history = [*messages, {"role": "user", "content": "Keep the pending question."}]
+    counts = []
+    appends = []
+    append_batch = engine._store._append_protected_batch
+    failures_before = engine._ingest_failure_count
+
+    def fail_count(*args: Any, **kwargs: Any) -> Any:
+        counts.append(True)
+        raise RuntimeError("synthetic count-read outage")
+
+    def observe_append(*args: Any, **kwargs: Any) -> Any:
+        appends.append(True)
+        if append_unavailable:
+            raise RuntimeError("synthetic append outage")
+        return append_batch(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_session_count", fail_count)
+        patch.setattr(engine._store, "_append_protected_batch", observe_append)
+        engine.ingest(history)  # Public ingest records an unavailable-store error.
+    outage_contents = [row["content"] for row in engine._store.get_session_messages("session")]
+    pending_after_outage = engine._ingest_cursor_needs_reconcile
+    failures_after_outage = engine._ingest_failure_count
+    engine.ingest(history)
+    recovered_contents = [row["content"] for row in engine._store.get_session_messages("session")]
+    engine.ingest(history)
+    repeated_contents = [row["content"] for row in engine._store.get_session_messages("session")]
+
+    assert counts, "the unavailable reconciliation count must actually be attempted"
+    expected = [message["content"] for message in history]
+    # Check recovery first so the unfixed persistent-outage case exposes five
+    # durable rows, while retaining the outage flag and no-write invariants.
+    assert recovered_contents == expected
+    assert repeated_contents == expected
+    assert outage_contents == [message["content"] for message in messages]
+    assert pending_after_outage
+    assert failures_after_outage == failures_before + 1
+    assert not appends, "a failed count must stop ingestion before any append"
+    assert not engine._ingest_cursor_needs_reconcile
+    assert engine._ingest_cursor == len(history)
+
+
 @pytest.mark.parametrize("probe", [
     "has_session_messages", "_durable_commit_proof_payload", "_load_native_recovery_replay_snapshot_digests",
 ])
