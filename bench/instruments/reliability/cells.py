@@ -17,6 +17,7 @@ FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "cras
           "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
+    1623: (("B1", "B2"), "acp-process stopped-turn immediate persistence"),
     7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
     # B5/B8 are downstream of #553 duplication in acp-history rotation (ref-0.21.5 vs customer-0.21.2,
     # nightly aa84e61d); re-check when #553 is fixed.

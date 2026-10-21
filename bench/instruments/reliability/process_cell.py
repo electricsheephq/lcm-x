@@ -24,7 +24,7 @@ import time
 from pathlib import Path
 
 from bench.instruments.reliability import acp_driver as AD, cells as C, fake_provider as FP, plugin_tree, probe as P1
-from bench.instruments.reliability import run_matrix as RM
+from bench.instruments.reliability import run_matrix as RM, stop_turn
 from bench.instruments.reliability.scorers import continuity
 
 OBSERVER = Path(__file__).with_name("observer")
@@ -37,7 +37,12 @@ PROCESS_FAULTS = {"acp-process": {"crash_after_compaction_before_reply", "cancel
                                    "forced_compaction_then_turn"}}
 # R2-only: the main route over the Anthropic Messages API (a ``/anthropic`` base path selects the anthropic_messages
 # transport, hermes_cli/runtime_provider.py _detect_api_mode_for_url); the #550 class.
-R2_CELLS = [{**C.cell("anthropic-route/acp-process", [], in_place=True,
+R2_CELLS = [C.cell("stop-after-tool/no-retry/in-place", [1623], in_place=True, turns=2, repeat=1,
+                   min_compactions=0, stop_after_tool=True, final_compaction_check=False,
+                   tool_plan=[{"turns": [1], "calls": [{"name": "read_file", "args": {"path": "{files}/small.txt"},
+                                                      "expect": {"min_chars": 10}}]}],
+                   lcm_env={"LCM_CONTEXT_THRESHOLD": "0.95", "LCM_EMBEDDING_RETRIEVAL_ENABLED": "false"}),
+            {**C.cell("anthropic-route/acp-process", [], in_place=True,
                       doc="baseline/in-place/acp with the main model on the Anthropic Messages API (fake provider)"),
              "api": "anthropic"}] + C.continuity_cells()
 # #659 probes: selected by an explicit --cells pattern only (cells.select opt_in), so --cells all, the nightly matrix and
@@ -194,7 +199,7 @@ class Scenario:
         if run.crash_due(t):
             return {"hold_until_killed": True, "on_hold": lambda: run.crash(t), "log": log}
         groups = self.plan(t)
-        cancel = st["kind"] == "cancel" and step == 0
+        cancel = st["kind"] == "cancel" and step == 0 and not self.cell.get("stop_after_tool")
         extra = {"hold": float(self.cell.get("cancel_wait", 5.0)), "on_hold": run.cancel} if cancel else {}
         if step < len(groups):
             calls = []
@@ -311,6 +316,13 @@ class ProcessCell:
 
     def argv(self) -> list[str]:
         base = [str(Path(self.host["python"]).parent / "hermes"), "acp"]
+        if self.cell.get("stop_after_tool"):
+            from .hosts import real_hermes_dir
+            policy = (SANDBOX + '(deny file-write*)' + ''.join(
+                f'(allow file-write* (subpath "{p}"))' for p in (self.scratch, self.d))
+                + '(allow file-write* (literal "/dev/null"))'
+                + f'(deny file-read* (subpath "{real_hermes_dir()}"))')
+            return [SANDBOX_EXEC, "-p", policy, *base]
         return [SANDBOX_EXEC, "-p", SANDBOX, *base] if os.path.exists(SANDBOX_EXEC) else base
 
     def turn(self, t: int, kind: str = "normal") -> str | None:
@@ -366,6 +378,8 @@ class ProcessCell:
     def run_phase(self, first: int) -> dict:
         self.first = first
         self.deadline = time.monotonic() + self.phase_timeout if self.phase_timeout else None
+        if self.cell.get("stop_after_tool"):
+            return stop_turn.phase(self, first)
         self.proc = AD.AcpProcess(self.argv(), self.env(), self.work, self.d / f"host-{self.phase}.stderr")
         closed = False
         try:
@@ -629,6 +643,8 @@ def run_cell_process(cell: dict, host_name: str, host: dict, plugin: dict, out: 
             return done(verdict="ERROR", reason=f"unexpected main-model requests: {run.scenario.unexpected[:3]}")
         if last.get("exit") == "done" and not acct["ok"]:
             return done(verdict="ERROR", reason=f"provider request log does not account for the transcript: {acct}")
+        if cell.get("stop_after_tool"):
+            return done(**stop_turn.score(run, last))
         run.fired.update(n["kind"] for n in read_jsonl(d / "faults-fired.jsonl"))
         rec.update(RM.verdict_fields({**cell, "chat_root": run.sid, "transport": transport}, d, last, run.fired, rec["citations"], backup_errors,
                                      s / "db"))
