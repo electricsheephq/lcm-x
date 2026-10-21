@@ -35,7 +35,8 @@ def v2(root, *, _entry=True):
     if not (root/"summary.json").is_file() and not (root/"raw-summary.json").is_file():
         raise ValueError(f"missing root summary.json: {root}")
     recorded = load(root/"summary.json" if (root/"summary.json").exists() else root/"raw-summary.json")
-    if recorded.get("state") == "ABORTED":
+    aborted = recorded if recorded.get("state") == "ABORTED" else None
+    if aborted is not None:
         assert _entry, "ABORTED is only valid at the entry root"
         complete = []
         for path in root.rglob("raw-summary.json"):
@@ -47,13 +48,24 @@ def v2(root, *, _entry=True):
                     complete.append(guarded if cell == root else v2(cell, _entry=False))
                     continue
             if all((cell/name).is_file() for name in (
-                    "request.json", "recalls.jsonl", "final-audit.json")):
+                    "request.json", "recalls.jsonl", "final-audit.json")) and cell != root:
                 complete.append(v2(cell, _entry=False))
         for path in root.rglob("catchup/summary.json"):
             cell = path.parent.parent
-            if (cell/"summary.json").is_file() and (cell/"manifest.json").is_file() and (cell/"catchup/events.jsonl").is_file():
-                complete.append(coverage(cell) if cell == root else v2(cell, _entry=False))
-        return dict(recorded, state="FAIL") if any(c["state"] == "FAIL" for c in complete) else recorded
+            if (cell/"manifest.json").is_file() and (cell/"catchup/events.jsonl").is_file():
+                if cell == root or not (cell/"summary.json").is_file():
+                    try:
+                        complete.append(coverage(cell))
+                    except (ValueError, KeyError):
+                        continue  # Interrupted raw evidence cannot prove FAIL.
+                else:
+                    complete.append(v2(cell, _entry=False))
+        if any(c["state"] == "FAIL" for c in complete):
+            return dict(recorded, state="FAIL")
+        if not all((root/name).is_file() for name in (
+                "raw-summary.json", "request.json", "recalls.jsonl", "final-audit.json")):
+            return recorded
+        # A direct recall entry falls through to its own raw receipt scoring.
     raw_summary = load(root/"raw-summary.json") if (root/"raw-summary.json").exists() else {}
     events = lines(root/"events.jsonl") if (root/"events.jsonl").is_file() else []
     if raw_summary.get("state", recorded.get("state")) == recorded.get("state") in ("INVALID", "FAIL"):
@@ -126,7 +138,7 @@ def v2(root, *, _entry=True):
         if calibrated is None and valid:
             computed["reason"] = "calibration_window_short"
         assert all(recorded[k] == v for k, v in computed.items())
-    return computed
+    return dict(aborted, state="FAIL") if aborted is not None and computed["state"] == "FAIL" else aborted or computed
 
 
 if __name__ == "__main__":

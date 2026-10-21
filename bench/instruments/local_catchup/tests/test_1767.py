@@ -441,6 +441,58 @@ def test_aborted_coverage_rate_entry_scores_directly(tmp_path, baseline, expecte
 
 
 @pytest.mark.parametrize("state", ["OFF", "ON-catching-up", "ON-covered"])
+@pytest.mark.parametrize("kinds,expected", [(("timeout", "pass"), "FAIL"), (("pass", "pass"), "ABORTED")])
+def test_aborted_recall_entry_scores_directly(tmp_path, state, kinds, expected):
+    entries = receipts(tmp_path, kinds=kinds)
+    cell = tmp_path/f"0-{state}"
+    # receipts() finalizes the raw scores before the entry is interrupted.
+    assert rescore.v2(cell)["state"] == next(e["result"]["state"] for e in entries if e["state"] == state)
+    common.dump(cell/"summary.json", dict(state="ABORTED", reason="floor_deadline"))
+    assert rescore.v2(cell)["state"] == expected
+
+
+def test_aborted_guarded_recall_entry_scores_directly(tmp_path):
+    test_guard_preserves_preceding_failure(tmp_path, "OFF", "timeout", True, True)
+    cell = tmp_path/"0-OFF"
+    common.dump(cell/"summary.json", dict(state="ABORTED", reason="floor_deadline"))
+    assert rescore.v2(cell)["state"] == "FAIL"
+    with pytest.raises(AssertionError, match="ABORTED is only valid at the entry root"):
+        rescore.v2(tmp_path)
+
+
+@pytest.mark.parametrize("speed,expected", [(.1, "FAIL"), (10., "ABORTED")])
+def test_aborted_pair_scores_coverage_without_cell_summary(tmp_path, speed, expected):
+    coverage_pair(tmp_path)
+    cell = tmp_path/"upgrade"
+    raw = common.load(cell/"catchup/summary.json")
+    raw["rows_s"] = speed
+    common.dump(cell/"catchup/summary.json", raw)
+    # This is the same rate rule used by floor.coverage before its final write.
+    assert floor.rate(raw, raw["end_to_end_s"], 250000, events(.572))["state"] == (
+        "FAIL" if expected == "FAIL" else "PASS")
+    (cell/"summary.json").unlink()
+    common.dump(tmp_path/"summary.json", dict(state="ABORTED", reason="floor_deadline"))
+    assert rescore.v2(tmp_path)["state"] == expected
+
+
+@pytest.mark.parametrize("missing", ["manifest", "events", "truncated", "partial-json", "catchup-summary"])
+def test_aborted_pair_incomplete_coverage_stays_aborted(tmp_path, missing):
+    coverage_pair(tmp_path)
+    cell = tmp_path/"upgrade"
+    (cell/"summary.json").unlink()
+    if missing == "truncated":
+        write(cell/"catchup/events.jsonl", events(.572)[:4])
+    elif missing == "partial-json":
+        (cell/"catchup/events.jsonl").write_text('{"event":')
+    else:
+        (cell/{"manifest": "manifest.json", "events": "catchup/events.jsonl",
+               "catchup-summary": "catchup/summary.json"}[missing]).unlink()
+    summary = dict(state="ABORTED", reason="floor_deadline")
+    common.dump(tmp_path/"summary.json", summary)
+    assert rescore.v2(tmp_path) == summary
+
+
+@pytest.mark.parametrize("state", ["OFF", "ON-catching-up", "ON-covered"])
 @pytest.mark.parametrize("partial", [0, 5])
 @pytest.mark.parametrize("message,event,reason", GUARDS)
 def test_event_backed_guard_receipts(tmp_path, state, partial, message, event, reason):
