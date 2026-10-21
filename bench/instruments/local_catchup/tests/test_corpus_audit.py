@@ -14,6 +14,7 @@ REPO = Path(__file__).resolve().parents[4]
 def corpus(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path/"home"))
     monkeypatch.setenv("HF_HUB_OFFLINE", "1")
+    monkeypatch.setenv("FASTEMBED_CACHE_PATH", str(tmp_path/"model-cache"))  # isolate provider readiness per fixture
     host = Path(__import__("os").environ.get("INSTRUMENT_HERMES_SOURCE", REPO))
     db = tmp_path/"corpus.db"
     manifest = build(REPO, host, db, 8)

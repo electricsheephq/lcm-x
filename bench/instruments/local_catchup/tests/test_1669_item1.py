@@ -22,6 +22,6 @@ def test_item1_full_audit_only_at_covered_setup_boundaries(tmp_path, monkeypatch
     monkeypatch.setattr(measurement.time, "sleep", lambda *_: None)
     command = NS(_embedding_backfill_summary_run=lambda *a, **k: batches.append(1),
                  _chunk_backfill_run=lambda *a, **k: batches.append(1))
-    measurement.wait_covered(NS(db=tmp_path/"db", root=tmp_path, max_seconds=3),
+    measurement.fill_covered(NS(db=tmp_path/"db", root=tmp_path, max_seconds=3),
                              lambda _: command, NS(_config=None), manifest)
     assert audits == [0, 6]

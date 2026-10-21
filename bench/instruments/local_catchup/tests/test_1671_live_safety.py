@@ -44,6 +44,8 @@ def test_worker_snapshots_handles_before_shutdown(tmp_path, monkeypatch, module,
     monkeypatch.setattr(module, "trace", lambda *a: a[4](dict(
         ingest_preflight_ms=1, dispatch_ms=1, compression_due=True)))
     if module is recall:
+        # Declaration item 6: this fixture tests teardown, not the FTS observer.
+        monkeypatch.setattr(recall, "diagnostics", lambda *a: ({}, None))
         store = NS(close=lambda: None)
         monkeypatch.setattr(recall, "recall_reader", lambda *a: NS(_dag=store, _store=store))
         monkeypatch.setattr(recall, "audit", lambda *a: {})

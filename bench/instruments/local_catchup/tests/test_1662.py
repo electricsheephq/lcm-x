@@ -104,7 +104,7 @@ def test_synchronous_provider_bind_is_invalid_and_experiment_continues(tmp_path,
     monkeypatch.setattr(experiment, "runtime", bind)
     monkeypatch.setattr(experiment, "cell", cell)
     monkeypatch.setattr(experiment, "prepare", lambda a: dict(canaries=[{}]))
-    experiment.main(NS(out=tmp_path, seed=1586, blocks=2, queries=1, smoke=True,
+    experiment.main(NS(out=tmp_path, seed=1586, blocks=2, queries=1, smoke=True, standalone_calibration_s=.5,
                        shape="short", baseline="empty"))
     assert len(results) == (4 if experiment is turns else 6)
     assert all(r == dict(state="INVALID", reason="foreground_preparation_forbidden") for r in results)

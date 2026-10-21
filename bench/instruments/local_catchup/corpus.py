@@ -64,8 +64,9 @@ def build(repo, host, db, rows=250000, shape="short", baseline="empty", seed=158
         values = asdict(c)
         values.pop("text")
         values.pop("store_id")
-        vs.record_chunk_embedding(c.chunk_id, MODEL, [1.0]+[0.0]*383,
-            store_id=c.store_id, identity=identity, **values)
+        with patch.object(vs, "_now", return_value="2023-11-14T22:13:20+00:00"):
+            vs.record_chunk_embedding(c.chunk_id, MODEL, [1.0]+[0.0]*383,
+                store_id=c.store_id, identity=identity, **values)
     if baseline == "upgrade" and long_count <= 32:
         raise RuntimeError("upgrade fixture must have more than 32 chunks")
     store.close()

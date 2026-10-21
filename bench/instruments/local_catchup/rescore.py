@@ -2,7 +2,7 @@
 import json
 from pathlib import Path
 from .catchup import state
-from .common import load
+from .common import REFERENCE_CALIBRATION_S, load, rollup
 
 
 def verdict(path, max_wall):
@@ -20,10 +20,61 @@ def verdict(path, max_wall):
     return final
 
 
+def v2(root):
+    from .floor import rate
+    from .recall import score, window_calibration
+    def lines(path):
+        return [json.loads(s) for s in path.read_text().splitlines()]
+    for name in ("raw-summary.json", "summary.json"):
+        if (root/name).exists():
+            early = load(root/name)
+            if early.get("state") == "INVALID" and "classes" not in early and early.get("reason") in (
+                    "covered_store_incomplete", "foreground_preparation_backfill_join_or_network",
+                    "offline_subprocess_launch", "foreground_preparation_forbidden", "foreground_backfill_forbidden",
+                    "foreground_embedding_join_forbidden", "offline_network_forbidden"):
+                return early
+    if (root/"summary.json").exists() and "cells" in load(root/"summary.json"):
+        recorded = load(root/"summary.json")
+        cells = [v2(root/c["baseline"]) for c in recorded["cells"]]
+        assert recorded["state"] == rollup(c["state"] for c in cells)
+        return dict(state=recorded["state"], cells=cells)
+    if (root/"summary.json").exists() and "blocks" in load(root/"summary.json"):
+        recorded = load(root/"summary.json")
+        cells = [v2(root/f"{c['block']}-{c['state']}") for c in recorded["blocks"]]
+        assert all(c["result"]["state"] == v["state"] for c, v in zip(recorded["blocks"], cells))
+        assert recorded["state"] == rollup(c["state"] for c in cells)
+        return dict(state=recorded["state"], blocks=cells)
+    if (root/"catchup").is_dir():
+        recorded = load(root/"summary.json")
+        raw = load(root/"catchup/summary.json")
+        seconds = raw.get("end_to_end_s")
+        if seconds is None:
+            seconds = max(r["elapsed_s"] for r in lines(root/"catchup/progress.jsonl"))
+        computed = rate(raw, seconds,
+            load(root/"manifest.json")["rows"], lines(root/"catchup/events.jsonl"))
+        assert all(recorded[k] == v for k, v in computed.items())
+    else:
+        recorded = load(root/"raw-summary.json")
+        request = load(root/"request.json")
+        calibrated = window_calibration(lines(root.parent/f"{request['block']}-ON-catching-up/events.jsonl"))
+        computed = score(lines(root/"recalls.jsonl"), lines(root/"publications.jsonl"),
+            request["seed"], request["state"], recorded, calibrated, REFERENCE_CALIBRATION_S)
+        if recorded.get("measurement_valid") is False:
+            computed["state"] = rollup([computed["state"], "INVALID"])
+        if calibrated is None and recorded.get("measurement_valid") is not False:
+            computed["reason"] = "calibration_window_short"
+        assert all(recorded[k] == v for k, v in computed.items())
+    return computed
+
+
 if __name__ == "__main__":
     import sys
     for name in sys.argv[1:]:
         root = Path(name)
+        if (root/"catchup").is_dir() or (root/"raw-summary.json").exists() or any(
+                k in load(root/"summary.json") for k in ("cells", "blocks")) or load(root/"summary.json").get("state") == "INVALID":
+            print(json.dumps(v2(root)))
+            continue
         summary, audit = load(root/"summary.json"), load(root/"final-audit.json")
         final = verdict(root/"progress.jsonl", summary["max_wall"])
         coverage = sum(v["covered"] for v in audit["classes"].values())/sum(v["expected"] for v in audit["classes"].values())
