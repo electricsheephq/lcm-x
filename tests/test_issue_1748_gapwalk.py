@@ -1,5 +1,6 @@
 """#1748: filled history must not amplify discovery, or weaken gap repair."""
 import json
+import itertools
 import random
 import sqlite3
 import time
@@ -112,11 +113,12 @@ def active_identity(engine):
 def missing(engine, policy="conversational"):
     with sqlite3.connect(engine._store.db_path) as conn:
         return {r[0] for r in conn.execute(
-            "SELECT store_id FROM messages m WHERE "
+            "SELECT store_id, role, content FROM messages m WHERE "
             "(role IN ('user','assistant') OR (?='heads' AND role='tool')) "
             "AND trim(COALESCE(content,''))!='' AND NOT EXISTS "
             "(SELECT 1 FROM lcm_chunk_meta c WHERE c.store_id=m.store_id AND c.identity_hash=?)",
-            (policy, active_identity(engine)))}
+            (policy, active_identity(engine)))
+                if any(c.char_end > c.char_start for c in command.chunk_message(*r, policy=policy))}
 
 
 def drain(engine, expected, policy="conversational"):
@@ -300,10 +302,13 @@ def test_tool_content_rewrite_keeps_proof(local_store):
         conn.execute("UPDATE messages SET role='tool' WHERE store_id=90")
     run(engine)
     with sqlite3.connect(engine._store.db_path) as conn:
-        before = get(conn, identity, "chunk_gapfill_scan")
+        before = conn.execute("SELECT value FROM metadata WHERE key=?",
+                              (f"chunk_gapfill_scan:{identity}",)).fetchone()[0]
         assert before
-        conn.execute("UPDATE messages SET content='Externalized tool result.' WHERE store_id=90")
-        assert get(conn, identity, "chunk_gapfill_scan") == before
+    assert engine._store.gc_externalized_tool_result(90, "[Externalized tool output: ref=synthetic]")
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert conn.execute("SELECT value FROM metadata WHERE key=?",
+                            (f"chunk_gapfill_scan:{identity}",)).fetchone()[0] == before
 
 
 def test_raw_chunk_tables_create_metadata():
@@ -372,14 +377,171 @@ def test_live_arrival_cost(tmp_path):
         assert all(m["sqlite_steps"] <= 2 * steady["sqlite_steps"] for m in measurements), measurements
 
 
+@pytest.mark.parametrize("blank,dense", [("\n", False), ("\n\n", False), ("\t", False), ("\n", True)])
+def test_nonchunkable_prefix_keeps_live_walk(tmp_path, blank, dense):
+    """Catch-up through a SQL-eligible, non-chunkable prefix stays bounded."""
+    with sqlite3.connect(tmp_path / "blank.db", factory=VisitedConnection) as conn:
+        conn.execute("CREATE TABLE messages(store_id INTEGER PRIMARY KEY, role TEXT, content TEXT)")
+        ensure_chunk_tables(conn)
+        conn.executemany("INSERT INTO messages VALUES(?,'user',?)",
+                         ((i, blank if (i % 50 == 0 if dense else i == 90_000) else "Synthetic fact.")
+                          for i in range(1, 100_001)))
+
+        def publish_rows(rows):
+            conn.executemany("INSERT OR IGNORE INTO lcm_chunk_meta(chunk_id,identity_hash,store_id) "
+                             "VALUES(?,'synthetic',?)", ((f"{r[0]}:0", r[0]) for r in rows))
+
+        if dense:
+            filled = 0
+            while filled < 60_000:
+                rows = discover(conn, "synthetic", 100_000)[:60_000 - filled]
+                assert rows
+                publish_rows(rows)
+                filled += len(rows)
+        steady = cost(conn, "synthetic", 100_000)
+        measurements, walks = [], []
+        for high in range(100_001, 100_021 if dense else 100_031):
+            conn.execute("INSERT INTO messages VALUES(?,'user','Arriving synthetic fact.')", (high,))
+            publish_rows([(high,)])
+            measured = cost(conn, "synthetic", high)
+            measurements.append(measured)
+            saved = get(conn, "synthetic", "chunk_gapfill_scan")
+            walks.append(bool(saved and "walk" in saved))
+            publish_rows(discover(conn, "synthetic", high))
+        print("GAPWALK_BLANK_COST " + json.dumps(dict(blank=blank, dense=dense, steady=steady,
+                                                      arrivals=measurements, walks=walks), sort_keys=True))
+        assert all(m["sqlite_steps"] <= 2 * steady["sqlite_steps"] for m in measurements), measurements
+        # Dense history can naturally finish on the final passes.
+        assert all(walks if not dense else walks[:-2]), walks
+
+
+def test_appended_newline_keeps_product_walk(local_store, monkeypatch):
+    engine, _ = local_store
+    identity = seed(engine, 27_999)
+    engine._store.append("seed", {"role": "assistant", "content": "\n"})
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert conn.execute("SELECT role,content FROM messages WHERE store_id=28000").fetchone() == ("assistant", "\n")
+        conn.executemany("INSERT INTO messages(store_id,session_id,role,content,timestamp) "
+                         "VALUES(?,'seed','user','Synthetic fact.',0)", [(i,) for i in range(28_001, 30_001)])
+    publish(engine, identity, [30_000])
+    real = command._chunk_pending_rows
+    counts = []
+
+    def counted(conn, *args, **kwargs):
+        steps = 0
+
+        def step():
+            nonlocal steps
+            steps += 1
+            return 0
+
+        conn.set_progress_handler(step, 1)
+        try:
+            return real(conn, *args, **kwargs)
+        finally:
+            conn.set_progress_handler(None, 0)
+            counts.append(steps)
+
+    monkeypatch.setattr(command, "_chunk_pending_rows", counted)
+    walks = []
+    for turn in range(14):
+        engine._store.append("live", {"role": "user", "content": f"Arriving synthetic fact {turn}."})
+        run(engine, limit=2000)
+        with sqlite3.connect(engine._store.db_path) as conn:
+            saved = get(conn, identity, "chunk_gapfill_scan")
+            walks.append(bool(saved and "walk" in saved))
+    print("GAPWALK_BLANK_PRODUCT " + json.dumps(dict(steps=counts, walks=walks)))
+    assert max(counts) <= 2 * max(counts[:3]), counts
+    assert all(walks), walks
+
+
+@pytest.mark.parametrize("mutation", ["delete", "message_update"])
+@pytest.mark.parametrize("second_publishes", [False, True])
+def test_initial_selection_cas_rejects_aba(local_store, mutation, second_publishes):
+    """A new first-selection epoch cannot revive a stale writer's walk."""
+    engine, _ = local_store
+    identity = seed(engine, 200)
+    publish(engine, identity, list(range(150, 191)))
+    db = engine._store.db_path
+    if mutation == "message_update":
+        with sqlite3.connect(db) as conn:
+            conn.execute("UPDATE messages SET role='tool' WHERE store_id=175")
+            conn.execute("DELETE FROM lcm_chunk_meta WHERE store_id=175")
+            conn.execute("DELETE FROM lcm_chunk_vectors WHERE chunk_id='175:0'")
+    with sqlite3.connect(db) as conn:
+        conn.execute("DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%' "
+                     "OR key LIKE 'chunk_policy_revision_through:%'")
+    victim = 170 if mutation == "delete" else 175
+    with sqlite3.connect(db) as a, sqlite3.connect(db) as b:
+        state_a, state_b = {}, {}
+        first = command._chunk_gapfill_rows(a, identity, (1, 200), "conversational", 32,
+                                           record_progress=True, gap_page_size=32, gap_scan_state=state_a)
+        list(itertools.islice(first, 32))
+        a.commit()
+        assert state_a["walk_progress"]["walk"]["below"] < victim
+        assert victim not in state_a["walk_progress"]["walk"]["pending"]
+        with sqlite3.connect(db) as other:
+            if mutation == "delete":
+                other.execute("DELETE FROM lcm_chunk_meta WHERE store_id=170")
+                other.execute("DELETE FROM lcm_chunk_vectors WHERE chunk_id='170:0'")
+            else:
+                other.execute("UPDATE messages SET role='user' WHERE store_id=175")
+        second = command._chunk_gapfill_rows(b, identity, (1, 200), "conversational", 8,
+                                            record_progress=True, gap_page_size=32, gap_scan_state=state_b)
+        rows_b = list(itertools.islice(second, 8 if second_publishes else 1))
+        b.commit()
+        token_b = state_b["scan_value"]
+        record_walk(a, identity, state_a)
+        a.commit()
+        after_stale = a.execute("SELECT value FROM metadata WHERE key=?",
+                                (f"chunk_gapfill_scan:{identity}",)).fetchone()[0]
+        if second_publishes:
+            record_walk(b, identity, state_b)
+            b.commit()
+        first.close()
+        second.close()
+    if second_publishes:
+        publish(engine, identity, [r[0] for r in rows_b])
+    for _ in range(40):
+        if not missing(engine):
+            break
+        run(engine)
+    remaining = command._chunk_backfill_remaining(db, identity, "conversational", 0, 0, incremental=True)[0]
+    assert not missing(engine), (sorted(missing(engine)), remaining, state_a["walk_progress"]["walk"]["below"])
+    assert after_stale == token_b
+    assert token_b != state_a["scan_value"]
+
+
+@pytest.mark.parametrize("empty", [None, "", "   ", "\t\n\r\v\f"])
+def test_heads_tool_empty_to_text_is_filled(local_store, empty):
+    engine, _ = local_store
+    identity = seed(engine, 200)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("UPDATE messages SET role='tool',content=? WHERE store_id=150", (empty,))
+    for _ in range(8):
+        run(engine, policy="heads")
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert get(conn, identity, "chunk_gapfill_scan")["walk"]["below"] < 150
+        conn.execute("UPDATE messages SET content='Tool output fact.' WHERE store_id=150")
+    drain(engine, missing(engine, "heads"), policy="heads")
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert conn.execute("SELECT 1 FROM lcm_chunk_meta WHERE store_id=150 AND identity_hash=?",
+                            (identity,)).fetchone()
+        # The reverse empty/nonempty transition must invalidate too.
+        conn.execute("INSERT OR REPLACE INTO metadata VALUES(?, 'proof')", (f"chunk_gapfill_scan:{identity}",))
+        conn.execute("UPDATE messages SET content=? WHERE store_id=150", (empty,))
+        assert get(conn, identity, "chunk_gapfill_scan") is None
+
+
 @pytest.mark.parametrize("random_seed", range(200))
 def test_randomized_arrivals_converge(local_store, random_seed):
     engine, _ = local_store
     rng = random.Random(random_seed)
     identity = seed(engine, 150)
     with sqlite3.connect(engine._store.db_path) as conn:
-        conn.executemany("UPDATE messages SET content='   ' WHERE store_id=?",
-                         [(i,) for i in rng.sample(range(2, 150), 30)])
+        conn.executemany("UPDATE messages SET content=? WHERE store_id=?",
+                         [(rng.choice(["   ", "\n", "\n\n", "\t", " \t\r\n "]), i)
+                          for i in rng.sample(range(2, 150), 30)])
         conn.executemany("UPDATE messages SET role='tool' WHERE store_id=?",
                          [(i,) for i in rng.sample(range(2, 150), 15)])
     publish(engine, identity, rng.sample(sorted(missing(engine)), 40))
@@ -393,8 +555,9 @@ def test_randomized_arrivals_converge(local_store, random_seed):
             top = ids[-1]
             with sqlite3.connect(engine._store.db_path) as conn:
                 conn.executemany("INSERT INTO messages(store_id,session_id,role,content,timestamp) "
-                                 "VALUES(?,'seed','user','New synthetic fact.',0)", [(i,) for i in ids])
-            if rng.random() < 0.6:
+                                 "VALUES(?,'seed','user',?,0)",
+                                 [(i, rng.choice(["New synthetic fact.", "\n", "\t"])) for i in ids])
+            if rng.random() < 0.6 and top in missing(engine):
                 publish(engine, identity, [top])
         else:
             with sqlite3.connect(engine._store.db_path) as conn:

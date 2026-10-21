@@ -1797,6 +1797,9 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
           OR lower(trim(NEW.role)) IN ('user', 'assistant')
           OR (OLD.role IS NOT NEW.role AND
               (lower(trim(OLD.role)) = 'tool' OR lower(trim(NEW.role)) = 'tool'))
+          OR (lower(trim(OLD.role)) = 'tool' AND lower(trim(NEW.role)) = 'tool'
+              AND (trim(COALESCE(OLD.content, ''), char(9,10,11,12,13,32)) = '')
+                  != (trim(COALESCE(NEW.content, ''), char(9,10,11,12,13,32)) = ''))
         BEGIN
             DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%'
                 OR key LIKE 'chunk_policy_revision_through:%';

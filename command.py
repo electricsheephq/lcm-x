@@ -4574,7 +4574,7 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
         # Give first selection an observable token too: deletion must not turn
         # absence into absence and let a stale first walk pass its CAS.
         initial = {"scan_value": None}
-        _record_chunk_gapfill_progress(conn, identity_hash, initial, {})
+        _record_chunk_gapfill_progress(conn, identity_hash, initial, {"epoch": uuid.uuid4().hex})
         saved = ((initial["scan_value"],) if initial["scan_value"] is not None else
                  conn.execute("SELECT value FROM metadata WHERE key = ?", (scan_key,)).fetchone())
     gap_scan_state = gap_scan_state if gap_scan_state is not None else {}
@@ -4625,7 +4625,6 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             record({"revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high, "ceiling": ceiling})
 
     reached = 0
-    initial_ceiling = ceiling
     walk = scan.get("walk", {}) if scan.get("high", high) <= high and "pending" not in scan else {}
     page_ceiling = walk.get("below", ceiling)
     replay = sorted({i for i in walk.get("pending", []) if i >= low}, reverse=True)
@@ -4686,7 +4685,7 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             if any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
                 if not candidates:
                     record_ceiling()  # Deterministic, before the first candidate escapes.
-                if gap_scan_state is not None and "pending" not in scan and ceiling == initial_ceiling:
+                if gap_scan_state is not None and "pending" not in scan:
                     # A walk position is not coverage: retain the WHOLE fetched
                     # page, including rows the consumer has not requested yet.
                     gap_scan_state["walk_progress"] = {
@@ -4696,8 +4695,10 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
                     }
                 candidates.append(row[0])
                 yield row
-            elif not candidates:
-                ceiling = min(ceiling, row[0])
+            else:
+                unpublished.remove(row[0])  # Message edits invalidate the proof if this becomes chunkable.
+                if not candidates:
+                    ceiling = min(ceiling, row[0])
     # A saved pending range is older than the new range; replay it newest first.
     for start in range(0, len(pending_ids), min(500, page_size)):
         batch = pending_ids[start:start + min(500, page_size)]

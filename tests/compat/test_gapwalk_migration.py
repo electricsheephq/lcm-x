@@ -1,8 +1,10 @@
 """Gap proofs upgrade once; the pinned pre-walk reader keeps writing safely (I5)."""
 import sqlite3
 
+import pytest
+
 from hermes_lcm.db_bootstrap import ensure_chunk_tables
-from tests.compat.helpers import run_old
+from tests.compat.helpers import PREVIOUS_GA, READERS, run_old
 
 BASE = "f3cc8de918ba14c21ae246099652762a26255554"
 OLD_CHUNKS = r'''
@@ -10,18 +12,34 @@ sys.path.insert(0, old)
 from hermes_lcm import command
 from hermes_lcm.vector_store import VectorStore
 from tests.test_issue_1014_incremental_embedding import FakeProvider
-from tests.test_issue_1586_gap_discovery import seed, publish
 assert Path(command.__file__).resolve().parent == Path(old).resolve()
 config = LCMConfig(database_path=db, embeddings_enabled=True, embedding_provider="fastembed",
                    embedding_model="fixture-local", temporal_rollups_enabled=False)
 command.resolve_provider = lambda c, **kw: FakeProvider(c.embedding_provider, c.embedding_model)
 engine = LCMEngine(config=config, hermes_home=home)
+def chunk_identity():
+    return command.EmbeddingIdentity.canonical(config.embedding_provider, config.embedding_model, "", 2,
+                                               "float32", "little", "chunk")
+def publish(engine, identity, ids):
+    vectors = VectorStore(db, config=config)
+    try:
+        for i in ids:
+            row = vectors.connection.execute("SELECT store_id,role,content FROM messages WHERE store_id=?", (i,)).fetchone()
+            for chunk in command.chunk_message(*row, policy="conversational"):
+                vectors.record_chunk_embedding(chunk.chunk_id, config.embedding_model, [1.0, 0.0], store_id=i,
+                    chunk_index=chunk.chunk_index, char_start=chunk.char_start, char_end=chunk.char_end,
+                    token_estimate=chunk.token_estimate, identity=chunk_identity())
+    finally:
+        vectors.close()
 try:
     vectors = VectorStore(db, config=config)
     vectors.register_profile(config.embedding_model, "fastembed", 2, task="chunk")
     vectors.close()
     if mode == "write":
-        identity = seed(engine, 80)
+        for i in range(80):
+            engine._store.append("seed", {"role": "user", "content": f"Synthetic rollback fact {i}."})
+        identity = chunk_identity().identity_hash
+        publish(engine, identity, [1, 80])
         c = engine._store.connection
         c.execute("INSERT INTO metadata VALUES(?, 'legacy')", (f"chunk_gapfill_scan:{identity}",))
         c.execute("INSERT INTO metadata VALUES(?, '40')", (f"chunk_policy_revision_through:{identity}",))
@@ -75,8 +93,10 @@ def test_gapwalk_forward(tmp_path, old_tree, host_root):
     upgrade(tmp_path / "lcm.db", report["identity"])
 
 
-def test_gapwalk_rollback(tmp_path, old_tree, host_root):
-    old = old_tree("gapwalk-base", {"gapwalk-base": BASE})
+@pytest.mark.parametrize("reader", ["gapwalk-base", "v0.28.1", PREVIOUS_GA])
+def test_gapwalk_rollback(tmp_path, old_tree, host_root, reader):
+    old = old_tree(reader, {**READERS, "gapwalk-base": BASE,
+                            "v0.28.1": "77b2b4f795fb6a4f84c55abf6d0441da4469971e"})
     original = run_old(old, tmp_path, host_root, OLD_CHUNKS, mode="write")
     upgrade(tmp_path / "lcm.db", original["identity"])
     assert run_old(old, tmp_path, host_root, OLD_CHUNKS) == original
