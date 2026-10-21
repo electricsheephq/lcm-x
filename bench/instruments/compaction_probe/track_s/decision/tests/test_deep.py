@@ -216,3 +216,18 @@ def test_round2_checkpoint_pin_must_match_run_pin(cell, tmp_path):
     run_result = result["per_run"]["H|d1-r1"]
     assert run_result["result"] == "INCOMPLETE" and "1" not in run_result["checkpoints"]
     assert any("cp-1" in r and "pin" in r for r in run_result["reasons"])
+
+
+def test_round2_stale_rate_counts_stale_history(cell):
+    mat, directory = cell
+    metadata = json.loads((mat / "deep_metadata.json").read_text())
+    fact = metadata["checkpoint_answers"]["1"][0]
+    fact["stale_history"] = [dict(value="obsolete-origin")]
+    fact["stale"] = "intermediate-value"
+    write(mat / "deep_metadata.json", metadata)
+    rows = [json.loads(r) for r in (directory / "results.jsonl").read_text().splitlines()]
+    rows[0]["answer"] = "obsolete-origin"
+    (directory / "results.jsonl").write_text(json.dumps(rows[0]) + "\n")
+    metrics = score(mat, directory, "H")["metrics"]
+    assert metrics["stale_rate"]["stale_ids"] == ["F1"]
+    assert metrics["deep_corrected"]["stale_ids"] == ["F1"]
