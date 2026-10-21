@@ -3694,8 +3694,10 @@ class LCMEngine(
                             for sid in self._user_carry_lineage():
                                 prior = self._durable_commit_proof_payload(sid) or {}
                                 if prior.get("carry_anchor_store_id") is not None:
-                                    anchor_id = prior["carry_anchor_store_id"]
-                                    break
+                                    row = self._store.get(prior["carry_anchor_store_id"])
+                                    if row and self._build_preserved_objective_summary_part(row) == anchor_part:
+                                        anchor_id = prior["carry_anchor_store_id"]
+                                        break
                 if anchor_id is None:
                     # An earlier leaf pass may have retired both in-memory maps.
                     # Text is a last resort, scoped to real rows in this lineage;
