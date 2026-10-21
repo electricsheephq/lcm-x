@@ -236,12 +236,53 @@ def test_triple_quoted_strings_do_not_hide_elements(monkeypatch):
     assert _media_payload_preview_content(content) == ""
 
 
-def test_untokenizable_repr_falls_back_to_counting_every_separator(monkeypatch):
+def test_untokenizable_repr_fails_closed_at_the_parser(monkeypatch):
     import hermes_lcm.externalize as externalize
 
-    monkeypatch.setattr(externalize, "_MEDIA_REPR_ELEMENT_LIMIT", 4, raising=False)
-    content = "{'image': b'opaque', 'caption': '" + CAPTION + "', 'n': [0,0,0,0,0], 'open': '"
+    # Longer than the bound, so the tokenizer runs and stops at the unterminated string before reaching it.
+    monkeypatch.setattr(externalize, "_MEDIA_REPR_ELEMENT_LIMIT", 40, raising=False)
+    content = "{'caption': '" + CAPTION + "', 'image': b'opaque', 'open': 'unterminated}"
+    assert len(content) > 40
     assert _media_payload_preview_content(content) == ""
+    assert _build_externalized_placeholder(SUMMARY, content=content) == _build_externalized_placeholder(SUMMARY)
+
+
+def test_adjacent_string_literals_count_toward_the_bound(monkeypatch):
+    import hermes_lcm.externalize as externalize
+
+    monkeypatch.setattr(externalize, "_MEDIA_REPR_ELEMENT_LIMIT", 8, raising=False)
+    # Two separators, but implicit concatenation makes many parser tokens.
+    content = "{'caption': " + "'x' " * 20 + ", 'image': b'opaque'}"
+    assert content.count(",") + content.count(":") <= 8
+    assert _media_payload_preview_content(content) == ""
+
+
+def test_real_size_operator_chain_has_bounded_peak_memory():
+    content = "{'caption': '" + CAPTION + "', 'image': b'\\x89PNG', 'n': " + "1+" * 3_000_000 + "1}"
+    tracemalloc.start()
+    try:
+        preview = _media_payload_preview_content(content)
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 200 * 1_048_576
+    assert preview == ""
+
+
+@pytest.mark.parametrize("kind", [[], {}], ids=["list", "dict"])
+def test_unhashable_type_value_is_a_generic_mapping(kind):
+    value = {"type": kind, "image": b"opaque media bytes", "caption": CAPTION}
+    assert_caption_preview(str(value))
+
+
+def test_unhashable_type_in_json_part_fails_closed_without_raising():
+    content = json.dumps({"type": [], "image": "data:image/png;base64," + "QUJD" * 200, "caption": CAPTION})
+    assert _media_payload_preview_content(content) == ""
+
+
+def test_top_level_set_repr_keeps_its_text():
+    # A set repr starts like a dict repr; the parsed set is walked like a list.
+    assert_caption_preview(repr({CAPTION}))
 
 
 @pytest.mark.parametrize("as_repr", [False, True])
