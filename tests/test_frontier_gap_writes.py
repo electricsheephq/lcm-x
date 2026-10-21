@@ -1,7 +1,6 @@
 """Cover the four C4 frontier writes, including the known replay bug (#1317).
 
-The failed reconciliation probe uses a strict xfail for duplicate replay rows;
-its plain preconditions must still fail normally when the setup changes.
+Failed reconciliation probes must defer cursor trust until the next ingest.
 
 The inspected host starts engines in agent/agent_init.py:2106 and notifies
 compression children in agent/conversation_compression.py:2555, 3445. That
@@ -144,20 +143,13 @@ def test_bypassed_source_boundary_restarts_the_cursor(
     # There is no intervening reader: skipping it has no durable consequence.
 
 
-@pytest.mark.xfail(
-    strict=True,
-    raises=ReplayStoredTwice,
-    reason="#1317: a failed reconcile probe trusts cursor 0 and re-stores the replay",
-)
 def test_reconcile_probe_failure_trusts_zero_cursor(
     engine: Any, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """5278: inject only the store probe failure, then let ingest use the store.
 
     A normal rebind is host-shaped; the store failure is a defensive fault.
-    Only duplicate replay rows are an expected failure under #1317. A corrected
-    write must reconcile the replay and produce a strict XPASS; setup failures
-    remain ordinary assertion failures.
+    The probe must be reached, and the replay must retain exactly one copy.
     """
     engine.on_session_start("session", platform="acp")
     messages = [
@@ -187,3 +179,99 @@ def test_reconcile_probe_failure_trusts_zero_cursor(
         raise ReplayStoredTwice(f"Expected reconciled replay, stored {contents!r}")
     # Any other shape (a lost or reordered row) is a new failure, not #1317.
     assert contents == ["Durable question.", "Durable answer.", "New question."]
+
+
+def _start_with_failed_probe(engine: Any, monkeypatch: pytest.MonkeyPatch, probe: str, session: str) -> None:
+    """Fault only the scheduled probe, not unrelated lifecycle reads."""
+    schedule = engine._schedule_ingest_cursor_reconciliation
+    reached = []
+
+    def fail(*args: Any, **kwargs: Any) -> Any:
+        reached.append(probe)
+        raise RuntimeError("injected session-start probe failure")
+
+    def schedule_with_fault() -> None:
+        target = engine._store if probe == "has_session_messages" else engine
+        with monkeypatch.context() as patch:
+            patch.setattr(target, probe, fail)
+            schedule()
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_schedule_ingest_cursor_reconciliation", schedule_with_fault)
+        engine.on_session_start(session, platform="acp")
+    assert reached == [probe], "the selected scheduled probe must actually raise"
+
+
+def test_failed_probe_then_failed_ingest_recovers_without_loss_or_duplicates(
+    engine: Any, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine.on_session_start("session", platform="acp")
+    messages = [
+        {"role": "user", "content": "Durable question."},
+        {"role": "assistant", "content": "Durable answer."},
+    ]
+    engine.ingest(messages)
+    _start_with_failed_probe(engine, monkeypatch, "has_session_messages", "session")
+    history = [*messages, {"role": "user", "content": "Keep the pending question."}]
+    reads = []
+
+    def fail_tail(*args: Any, **kwargs: Any) -> Any:
+        reads.append(True)
+        raise RuntimeError("store is still unavailable at next ingest")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "get_session_tail", fail_tail)
+        engine.ingest(history)  # Public ingest records the error rather than raising.
+    assert [row["content"] for row in engine._store.get_session_messages("session")] == [
+        message["content"] for message in messages
+    ]
+    assert reads, "the unavailable reconciliation read must be attempted"
+    assert engine._ingest_cursor_needs_reconcile
+    engine.ingest(history)
+    engine.ingest(history)  # A successful retry must also leave the cursor usable.
+    assert [row["content"] for row in engine._store.get_session_messages("session")] == [
+        message["content"] for message in history
+    ]
+    assert not engine._ingest_cursor_needs_reconcile
+    assert engine._ingest_cursor == len(history)
+
+
+@pytest.mark.parametrize("probe", [
+    "has_session_messages", "_durable_commit_proof_payload", "_load_native_recovery_replay_snapshot_digests",
+])
+def test_new_session_failed_probe_stores_once(
+    engine: Any, monkeypatch: pytest.MonkeyPatch, probe: str,
+) -> None:
+    _start_with_failed_probe(engine, monkeypatch, probe, "new-session")
+    pending_reconciliation = engine._ingest_cursor_needs_reconcile
+    messages = [{"role": "user", "content": "First question."}]
+    engine.ingest(messages)
+    engine.ingest(messages)
+    assert [row["content"] for row in engine._store.get_session_messages("new-session")] == ["First question."]
+    # Empty-store row parity alone passes the base: the safety invariant is
+    # still to defer trust when any of the three reads cannot prove emptiness.
+    assert pending_reconciliation
+    assert not engine._ingest_cursor_needs_reconcile
+
+
+@pytest.mark.parametrize("fail_probe", [False, True], ids=["working-probe", "failed-probe"])
+@pytest.mark.parametrize("probe", ["has_session_messages", "_durable_commit_proof_payload"])
+def test_empty_rotation_child_probe_matches_committed_outcome(
+    engine: Any, monkeypatch: pytest.MonkeyPatch, fail_probe: bool, probe: str,
+) -> None:
+    engine.on_session_start("parent", platform="acp")
+    messages, output = _compact(engine, monkeypatch)
+    engine.on_session_end("parent", messages)
+    engine.on_session_start("child", boundary_reason="compression", old_session_id="parent", platform="acp")
+    assert engine._store.get_session_count("child") == 0
+    assert engine._durable_commit_proof_payload() is not None
+    if fail_probe:
+        _start_with_failed_probe(engine, monkeypatch, probe, "child")
+    else:
+        engine.on_session_start("child", platform="acp")
+    before = engine._store._conn.execute("SELECT session_id, role, content FROM messages ORDER BY store_id").fetchall()
+    new_turn = {"role": "user", "content": "Question after rotation."}
+    engine.ingest([*output, new_turn])
+    engine.ingest([*output, new_turn])
+    after = engine._store._conn.execute("SELECT session_id, role, content FROM messages ORDER BY store_id").fetchall()
+    assert after == [*before, ("child", "user", new_turn["content"])]
