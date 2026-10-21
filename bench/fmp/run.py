@@ -278,7 +278,7 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
             raise ValueError("output already contains a run; use a new directory")
         with store.engine(questions[0]) as (engine, _):
             if getattr(args, "delivery_unit", "hits") == "session":
-                engine._config.recall_delivery_unit = "session"
+                delivery.session_mode(engine)
             toolset = [s["function"]["name"] for s in delivery.schemas(engine)]
         manifest = {"harness_commit": commit(Path(__file__).resolve().parents[2]),
             "harness_tree_sha256": sha(b"".join(p.read_bytes() for p in sorted(Path(__file__).parent.glob("*.py")))),
@@ -333,7 +333,7 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
                 else:
                     with store.engine(q) as (engine, _):
                         if getattr(args, "delivery_unit", "hits") == "session":
-                            engine._config.recall_delivery_unit = "session"
+                            delivery.session_mode(engine)
                         speakers = json.loads((store.directory(q) / "speakers.json").read_text()) if args.hit_label == "speaker" else None
                         row.update(delivery.answer(q, args.delivery, client, args.reader, engine, speakers,
                                                    records=calls, hit_label=args.hit_label, store_text=args.store_text))

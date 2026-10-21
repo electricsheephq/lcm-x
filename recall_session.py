@@ -8,6 +8,7 @@ import sqlite3
 import time
 
 from . import tokens
+from .message_analysis import _tool_call_id
 from .reasoning import resolve_occurrence_time
 from .retrieval_context import RetrievalContext
 
@@ -70,21 +71,28 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                     ranges.append([sid, sid])
             meta["returned_id_ranges"] = ranges
         if delta_requested:
-            refs = [h["exact_ref"] for h in hits]
+            refs = [h["exact_ref"] for h in hits if h.get("exact_ref")]
             response["delta"] = dict(protocol="exact-ref-delta-v1", seen_ref_count=len(seen_refs),
                 novel_ref_count=len(refs), novel_refs=refs, progress=bool(refs),
                 termination_reason=None if refs else "no_novel_exact_ref")
+        anchor = response["provenance"].get("fts_anchor")
+        if anchor is not None:
+            anchored_id = ordered[anchor["position"] - 1]["hit"].get("store_id") if anchor["fired"] else None
+            anchor["delivered"] = any(h["store_id"] == anchored_id for h in hits) if anchor["fired"] else None
         for _ in range(10):
             raw = json.dumps(response, ensure_ascii=False)
             size = (count(raw), len(raw))
             if size == (delivery["response_tokens"], delivery["response_chars"]):
                 return raw
             delivery["response_tokens"], delivery["response_chars"] = size
-        raise ValueError("session size metadata did not converge")
+        # The fallback estimator has discontinuities. Reject this payload;
+        # fitting only removes whole groups, never retries an oscillating one.
+        delivery.update(stop_reason="size_nonconvergence", truncated=True)
+        return None
 
     def fits():
         raw = encode()
-        return len(raw) <= CHAR_BUDGET and count(raw) <= TOKEN_BUDGET
+        return raw is not None and len(raw) <= CHAR_BUDGET and count(raw) <= TOKEN_BUDGET
 
     def window(sid, anchor):
         check()
@@ -121,9 +129,12 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         else:
             return [], None, None
         result = [row]
-        calls = row.get("tool_calls") or []
-        expected = [c.get("id") for c in calls]
-        if calls and (row["role"] != "assistant" or None in expected or len(set(expected)) != len(expected)):
+        calls = row.get("tool_calls", [])
+        calls = [] if calls is None else calls
+        if not isinstance(calls, list):
+            return [], None, None
+        expected = [_tool_call_id(c) for c in calls]
+        if calls and (row["role"] != "assistant" or "" in expected or len(set(expected)) != len(expected)):
             return [], None, None
         if not calls and anchor != row["store_id"]:
             return [], None, None
@@ -135,7 +146,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 if next_row is None or next_row["role"] != "tool":
                     break
                 result.append(next_row)
-                observed.append(next_row.get("tool_call_id"))
+                observed.append(str(next_row.get("tool_call_id") or "").strip())
             else:
                 return [], None, None
             if sorted(observed, key=str) != sorted(expected, key=str):
@@ -150,11 +161,13 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
             role=row["role"], source=row.get("source") or "", timestamp=row.get("timestamp") or 0,
             content=text, snippet=text[:300], content_offset=0, content_returned_chars=len(text),
             content_chars=len(text), content_truncated=False, evidence_span=dict(char_start=0, char_end=len(text)),
-            exact_ref=f"lcm:{sid}:0-{len(text)}", expand_hint=f"lcm_expand(store_id={sid})",
+            expand_hint=f"lcm_expand(store_id={sid})",
             from_current_session=row["session_id"] == engine.current_session_id,
             score=round(float(seed["_final_score"]), 6) if seed else 0,
             arms=sorted(response["provenance"]["arms_run"][i] for i in seed["ranks"]) if seed else [],
             delivery_origin="ranked_seed" if seed else "session_neighbor", **event_time_fields(row))
+        if text:
+            hit["exact_ref"] = f"lcm:{sid}:0-{len(text)}"
         for key in ("tool_calls", "tool_call_id", "tool_name"):
             if row.get(key):
                 hit[key] = row[key]
@@ -197,16 +210,18 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                         expand_hint=f"lcm_expand(node_id={hit['node_id']}, session_id={json.dumps(sid)})"))
             else:
                 row = store.get(int(hit["store_id"])) if hit.get("store_id") is not None else None
-            check()
             if row is None or row["session_id"] != sid or row["store_id"] in matched:
                 continue
             matched[row["store_id"]] = entry
-            sessions.setdefault(sid, dict(session_id=sid, best_rank=rank, seed_ids=[],
-                returned_id_ranges=[], complete=False, omission_reason=None))["seed_ids"].append(row["store_id"])
+            if sid not in sessions:
+                sessions[sid] = dict(session_id=sid, best_rank=rank, seed_ids=[],
+                    returned_id_ranges=[], complete=False, omission_reason=None)
+                delivery["sessions"].append(sessions[sid])
+            sessions[sid]["seed_ids"].append(row["store_id"])
+            check()
             eligible += 1
             if eligible >= response["limit"]:
                 break
-        delivery["sessions"] = list(sessions.values())
         for sid, meta in sessions.items():
             queue = deque(meta["seed_ids"])
             visited, emitted = set(), set()
@@ -222,7 +237,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                     continue
                 visited.update(r["store_id"] for r in batch)
                 pending = [item(r) for r in batch if r["store_id"] not in emitted]
-                if delta_requested and any(h["exact_ref"] in seen_refs for h in pending):
+                if delta_requested and any(h.get("exact_ref") in seen_refs for h in pending):
                     meta["omission_reason"] = "no_novel_exact_ref"
                 elif pending:
                     admitted.append(pending)
@@ -244,9 +259,15 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
             reason = "deadline"
         if reason == "deadline":
             response["timeout"] = True
+            delivery["seed_leads"] = [dict(session_id=e["hit"]["session_id"],
+                seed_ids=[e["hit"]["store_id"]], expand_hint=f"lcm_expand(store_id={e['hit']['store_id']})")
+                for e in ordered[:response["limit"]] if e["hit"].get("store_id") is not None
+                and e["hit"].get("session_id") not in excluded
+                and (allowed is None or e["hit"].get("session_id") in allowed)]
         for meta in delivery["sessions"]:
-            if not meta["complete"]:
+            if not meta["complete"] and meta["omission_reason"] is None:
                 meta["omission_reason"] = reason
+                meta["expand_hint"] = f"lcm_expand(store_id={meta['seed_ids'][0]})"
         delivery["stop_reason"] = reason
     finally:
         if conn is not None:
@@ -265,7 +286,9 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         # groups. Keep a bounded honest envelope rather than a first-item escape.
         delivery["truncated"] = True
         delivery["stop_reason"] = "budget"
-        if delivery["summary_leads"]:
+        if delivery.get("seed_leads"):
+            delivery["seed_leads"].pop()
+        elif delivery["summary_leads"]:
             delivery["summary_leads"].pop()
         elif delivery["sessions"]:
             delivery["sessions"].pop()
@@ -273,8 +296,4 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
             response["query"] = response["query"][:len(response["query"]) // 2]
         else:
             break
-    anchor = response["provenance"].get("fts_anchor")
-    if anchor is not None:
-        anchored_id = ordered[anchor["position"] - 1]["hit"].get("store_id") if anchor["fired"] else None
-        anchor["delivered"] = any(h["store_id"] == anchored_id for h in response["hits"]) if anchor["fired"] else None
     return encode()

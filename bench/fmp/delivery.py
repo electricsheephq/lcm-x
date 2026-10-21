@@ -87,6 +87,19 @@ def question_clock(date):
         CLOCK.local.now = None
 
 
+class DeliveryMismatch(RuntimeError):
+    pass
+
+
+def session_mode(engine):
+    if not hasattr(engine._config, "recall_delivery_unit"):
+        raise DeliveryMismatch("session delivery unavailable in selected checkout")
+    engine._config.recall_delivery_unit = "session"
+    raw = dispatch("lcm_recall", {"query": "FMP delivery verification", "limit": 1}, engine)
+    if json.loads(raw).get("provenance", {}).get("delivery", {}).get("unit") != "session":
+        raise DeliveryMismatch("session delivery verification failed")
+
+
 def dispatch(name, arguments, engine, offered=None):
     # D5: as the Hermes host does, failures become the tool result and the question continues.
     from hermes_lcm import tools as production
@@ -99,9 +112,13 @@ def dispatch(name, arguments, engine, offered=None):
     except ValueError as exc:
         return json.dumps({"error": f"Invalid JSON arguments for {name}: {exc}"}, ensure_ascii=False)
     try:
-        return getattr(production, name)(args, engine=engine)
+        raw = getattr(production, name)(args, engine=engine)
     except Exception as exc:
         return json.dumps({"error": f"Error executing {name}: {exc}"}, ensure_ascii=False)
+    if name == "lcm_recall" and getattr(getattr(engine, "_config", None), "recall_delivery_unit", "hits") == "session":
+        if json.loads(raw).get("provenance", {}).get("delivery", {}).get("unit") != "session":
+            raise DeliveryMismatch("product response lacks session delivery provenance")
+    return raw
 
 
 def single(q, engine, speakers=None, hit_label="speaker", store_text="speaker-prefix"):
@@ -120,7 +137,7 @@ def single(q, engine, speakers=None, hit_label="speaker", store_text="speaker-pr
             stamp = row.get("observed_at")
             date = datetime.fromtimestamp(stamp, timezone.utc).isoformat() if stamp else "unknown"
             if session:
-                date = row.get("event_time", "unknown")
+                date = datetime.fromisoformat(row["event_time"]).isoformat() if row.get("event_time") else "unknown"
             speaker = (speakers or {}).get(str(row["store_id"])) if hit_label == "speaker" else None
             role = speaker or row["role"]
             content = row["content"]
@@ -176,6 +193,8 @@ def harness_agentic(q, client, reader, server, records):
             result["trace"] = [json.loads(line) for line in logs[-1].read_text().splitlines()]
         result["tool_calls"] = sum(bool(t.get("counted")) for t in result["trace"])
         result["forced_final"] = "tool_calls" if any(t.get("counted") is False for t in result["trace"]) else None
+    if any(t.get("fatal") == "DeliveryMismatch" for t in result["trace"]):
+        raise DeliveryMismatch("MCP session delivery verification failed")
     result["finish_reason"] = records[-1].get("finish_reason") if records else None
     result["hypothesis"] = message["content"]
     return result

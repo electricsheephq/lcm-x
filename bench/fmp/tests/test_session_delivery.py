@@ -85,15 +85,15 @@ def test_mcp_spec_and_reopen(monkeypatch, tmp_path, recall_engine):
     monkeypatch.setattr(stores.Stores, "engine", opened)
     monkeypatch.setattr(mcp_reader, "load_lcm", lambda *a: None)
     monkeypatch.setattr(delivery, "schemas", lambda e: [])
-    def dispatch(name, arguments, engine, offered):
+    def dispatch(name, arguments, engine, offered=None):
         assert engine._config.recall_delivery_unit == "session"
-        return '{"hits":[]}'
+        return '{"provenance":{"delivery":{"unit":"session"}},"hits":[]}'
     monkeypatch.setattr(delivery, "dispatch", dispatch)
     spec["log"] = str(tmp_path / "metadata.jsonl")
     stdin = StringIO(json.dumps(dict(id=1, method="tools/call", params=dict(name="lcm_recall", arguments={}))) + "\n")
     stdout = StringIO()
     mcp_reader.serve(spec, stdin, stdout)
-    assert json.loads(stdout.getvalue())["result"]["content"][0]["text"] == '{"hits":[]}'
+    assert json.loads(stdout.getvalue())["result"]["content"][0]["text"] == '{"provenance":{"delivery":{"unit":"session"}},"hits":[]}'
 
 
 def test_agentic_reserve_and_raw_forwarding(monkeypatch, tmp_path):
@@ -155,3 +155,50 @@ def test_judge_default_hits_rejects_session_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(run, "specs", admitted)
     with pytest.raises(ValueError, match="identity mismatch"):
         next(run.run(args, None, [SimpleNamespace(qid="0")], "d", "i", {}, None))
+
+
+
+def test_fix1_date_parity(recall_engine):
+    e = recall_engine
+    e._config.embeddings_enabled = False
+    e._store.append("one", dict(role="user", content="needle", timestamp=1684540800))
+    q = SimpleNamespace(question="needle")
+    hits = delivery.single(q, e)[0]
+    e._config.recall_delivery_unit = "session"
+    assert delivery.single(q, e)[0] == hits
+
+
+def test_fix1_effective_delivery(recall_engine, monkeypatch):
+    from hermes_lcm import tools
+    recall_engine._config.recall_delivery_unit = "session"
+    monkeypatch.setattr(tools, "lcm_recall", lambda *a, **kw: '{"hits":[]}')
+    with pytest.raises(RuntimeError, match="delivery"):
+        delivery.dispatch("lcm_recall", {"query": "needle"}, recall_engine)
+
+
+def test_fix1_old_checkout_manifest(recall_engine, tmp_path, monkeypatch):
+    args = run.parser().parse_args(["answer", "--split-label", "fixture", "--store-root", str(tmp_path),
+        "--output", str(tmp_path), "--delivery-unit", "session"])
+    recall_engine._config = SimpleNamespace(**{k: v for k, v in vars(recall_engine._config).items()
+                                              if k != "recall_delivery_unit"})
+    monkeypatch.setattr(run, "specs", lambda _: [])
+    client = SimpleNamespace(openrouter=SimpleNamespace(metadata={m: {} for m in run.READERS}))
+    @contextmanager
+    def opened(q):
+        yield recall_engine, None
+    with pytest.raises((ValueError, RuntimeError), match="delivery"):
+        next(run.run(args, client, [SimpleNamespace(qid="q")], "d", "i", {}, SimpleNamespace(engine=opened, generation="fixture")))
+    assert not (tmp_path / "run-manifest.json").exists()
+
+
+
+def test_fix1_mcp_mismatch_invalidates_row(tmp_path):
+    log = tmp_path / "mcp.jsonl"
+    log.write_text('{"fatal":"DeliveryMismatch"}\n')
+    class Client:
+        def agentic(self, reader, messages, records, server):
+            records.append({"mcp_log": str(log)})
+            return {"content": "unsupported evidence must not be scored"}
+    q = SimpleNamespace(qid="q", qtype="x", question="needle", question_date="")
+    with pytest.raises(RuntimeError, match="delivery"):
+        delivery.harness_agentic(q, Client(), "fixture", {}, [])

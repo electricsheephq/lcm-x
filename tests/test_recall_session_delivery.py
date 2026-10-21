@@ -265,3 +265,92 @@ def test_bounded_read_stop(session_engine, monkeypatch, failure):
     assert result["provenance"]["delivery"]["stop_reason"] == ("deadline" if failure == "clock" else "read_error")
     assert len(calls) == 2
     assert [h["content"] for h in result["hits"]] == ["needle"]
+
+
+@pytest.mark.parametrize("calls", [["bad"], {"id": "x"}, "bad", [{"id": []}]])
+def test_fix1_malformed_group(session_engine, calls):
+    add(session_engine, "needle")
+    add(session_engine, "answer", role="assistant", tool_calls=calls)
+    result = recall(session_engine)
+    meta = result["provenance"]["delivery"]["sessions"][0]
+    assert meta["omission_reason"] == "unreadable_group" and meta["expand_hint"]
+
+
+@pytest.mark.parametrize("key", ["id", "tool_call_id"])
+def test_fix1_ids_and_empty_refs(session_engine, key):
+    a = add(session_engine, "", role="assistant", tool_calls=[{key: " 7 "}])
+    b = add(session_engine, "needle", role="tool", tool_call_id=" 7 ")
+    result = recall(session_engine, detail="answer_ready", seen_refs=[])
+    assert [h["store_id"] for h in result["hits"]] == [a, b]
+    assert "exact_ref" not in result["hits"][0]
+    assert result["delta"]["novel_refs"] == [f"lcm:{b}:0-6"]
+
+
+@pytest.mark.parametrize("failure", ["deadline", "read_error"])
+def test_fix1_preserve_omission(session_engine, monkeypatch, failure):
+    add(session_engine, "needle orphan", role="tool", tool_call_id="orphan")
+    add(session_engine, "needle two", sid="two")
+    original = session_engine._store.load_session_window
+    rank = tools._lcm_recall_rerank
+    def ranked(*a, **kw):
+        ordered, status, scores = rank(*a, **kw)
+        return sorted(ordered, key=lambda e: e["hit"]["store_id"]), status, scores
+    monkeypatch.setattr(tools, "_lcm_recall_rerank", ranked)
+    def read(sid, **kw):
+        if sid == "two":
+            raise TimeoutError if failure == "deadline" else OSError
+        return original(sid, **kw)
+    monkeypatch.setattr(session_engine._store, "load_session_window", read)
+    result = recall(session_engine, limit=2)
+    metas = {s["session_id"]: s for s in result["provenance"]["delivery"]["sessions"]}
+    assert metas["one"]["omission_reason"] == "unreadable_group"
+    assert metas["two"]["omission_reason"] == failure
+
+
+@pytest.mark.parametrize("entry", [False, True])
+def test_fix1_deadline_seeds(session_engine, monkeypatch, entry):
+    from hermes_lcm import recall_session
+    seed = add(session_engine, "needle")
+    original, get = recall_session.deliver_session, session_engine._store.get
+    clock, expired = tools.time.monotonic, [False]
+    def read(*a, **kw):
+        row = get(*a, **kw)
+        expired[0] = True
+        return row
+    def deliver(*a, **kw):
+        expired[0] = entry
+        monkeypatch.setattr(session_engine._store, "get", read)
+        return original(*a, **kw)
+    monkeypatch.setattr(recall_session, "deliver_session", deliver)
+    monkeypatch.setattr(tools.time, "monotonic", lambda: clock() + (100 if expired[0] else 0))
+    result = recall(session_engine)
+    meta = result["provenance"]["delivery"]
+    leads = meta["sessions"] + meta.get("seed_leads", [])
+    assert result["timeout"] and any(seed in s.get("seed_ids", []) and s.get("expand_hint") for s in leads)
+
+
+@pytest.mark.parametrize("nonascii,anchor", [(5000, False), (8000, True)])
+def test_fix1_fallback_final_bytes(session_engine, monkeypatch, nonascii, anchor):
+    from hermes_lcm import recall_session
+    monkeypatch.setattr(tokens, "_get_encoder", lambda: None)
+    monkeypatch.setattr(tools.time, "time", lambda: 1700000000)
+    session_engine._config.large_output_externalization_enabled = False
+    original = recall_session.deliver_session
+    def deliver(ordered, response, **kw):
+        if anchor:
+            response["provenance"]["fts_anchor"] = dict(position=1, fired=True, delivered=False)
+        return original(ordered, response, **kw)
+    monkeypatch.setattr(recall_session, "deliver_session", deliver)
+    sid = add(session_engine, "needle " + "a" * 400 + "界" * nonascii)
+    raw = tools.lcm_recall({"query": "needle", "limit": 1}, engine=session_engine)
+    pad = 400 + nonascii * 5 - len(raw)
+    for delta in range(-20, 21):
+        with session_engine._store._write_lock:
+            session_engine._store._conn.execute("UPDATE messages SET content=? WHERE store_id=?",
+                ("needle " + "a" * (pad + delta) + "界" * nonascii, sid))
+            session_engine._store._conn.commit()
+        raw = tools.lcm_recall({"query": "needle", "limit": 1}, engine=session_engine)
+        d = json.loads(raw)["provenance"]["delivery"]
+        assert d.get("stop_reason") != "read_error"
+        assert tokens._fallback_token_estimate(raw) == d["response_tokens"] <= 16000
+        assert len(raw) == d["response_chars"] <= 64000
