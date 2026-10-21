@@ -129,10 +129,13 @@ def test_ranked_windows_match_frozen_stock_payload_with_filters(store, monkeypat
         expected = stock(store, "needle", **kwargs)
         conn = store.connection
         conn.statements.clear()
+        conn.materialized = {"content": 0, "snippet": 0}
+        conn.count_materialization = True
         actual = store._search_fts("needle", **kwargs)
         assert json.dumps(actual, sort_keys=True) == json.dumps(expected, sort_keys=True)
         page_counts.append(len(conn.statements))
-        assert all("ranked_keys AS MATERIALIZED" in sql for sql, _ in conn.statements)
+        assert all(0 < count <= sm.compute_search_candidate_cap(2)
+                   for count in conn.materialized.values())
     if sort == "relevance":
         assert max(page_counts) > 1
 
