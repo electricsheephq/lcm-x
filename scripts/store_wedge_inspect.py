@@ -122,8 +122,8 @@ def _coverage(connection, rows, session_id, session_rows, conversation_id):
                  "unverified_ancestry")
         parent = connection.execute("SELECT store_id,conversation_id FROM messages WHERE session_id=?",
                                     (predecessor,)).fetchall()
-        _require(bool(parent) and all(str(r[1] or "").strip() in owners for r in parent)
-                 and any(str(r[1] or "").strip() == str(conversation_id or "").strip() for r in parent),
+        _require(not parent or (all(str(r[1] or "").strip() in owners for r in parent)
+                 and any(str(r[1] or "").strip() == str(conversation_id or "").strip() for r in parent)),
                  "unverified_ancestry")
         parent_ids = {r[0] for r in parent}
         session_owned.update(parent_ids)
@@ -181,6 +181,15 @@ class _ReadStore:
 
     def get_session_messages_after(self, session_id, after_store_id):
         return [r for r in self.rows if r["session_id"] == session_id and r["store_id"] > after_store_id]
+
+    def get_range(self, session_id, start_id=0, end_id=None, limit=1000,
+                  conversation_id=None, include_blank_conversation=False):
+        owners = {str(conversation_id or "").strip()}
+        if include_blank_conversation:
+            owners.add("")
+        return [r for r in self.rows if r["session_id"] == session_id and r["store_id"] >= start_id
+                and (end_id is None or r["store_id"] <= end_id)
+                and (conversation_id is None or str(r.get("conversation_id") or "").strip() in owners)][:limit]
 
     @staticmethod
     def to_openai_msg(row):
@@ -441,21 +450,33 @@ def _view_probe(connection, rows, covered, frontier, session_id, config, snapsho
     top = max((mapping[id(m)] for m in chunk if id(m) in mapping), default=0)
     end = top - 1 if top > frontier else min(
         (sid - 1 for sid in mapping.values() if sid > frontier and sid not in excluded), default=None)
-    scanned = ([r for r in rows if r["store_id"] > frontier and (end is None or r["store_id"] <= end)], False)
+    scanned = probe._store_complete_owned_rows(frontier, end, [], excluded_ids=excluded) if (
+        end is None or end > frontier) else ([], False)
     # CompactionMixin._select_leaf_candidate stops before attribution when there
     # is no candidate_raw and no hidden backlog (StoreCompleteMixin._store_complete_backlog).
-    twins, twin_covered = probe._store_complete_copy_twins(scanned[0], [])
-    copies = {sid for sid, matches in twins.items() if sid not in visible and any(t in twin_covered for t in matches)}
-    hidden = [r for r in scanned[0] if r["store_id"] not in visible | covered | copies
-              and r["role"] != "system" and not probe._matches_ignore_message_patterns(r)]
-    noop = not raw and not hidden
+    noop = False
+    if not raw:
+        mapped = set(mapping.values())
+        backlog_end = min((sid - 1 for sid in mapped if sid > frontier), default=None)
+        backlog_rows, truncated = probe._store_complete_owned_rows(frontier, backlog_end, []) if (
+            backlog_end is None or backlog_end > frontier) else ([], False)
+        loose = [r for r in backlog_rows if r["store_id"] not in mapped and r["role"] != "system"
+                 and not probe._matches_ignore_message_patterns(r, stored_row=True)]
+        twins, twin_covered = probe._store_complete_copy_twins(backlog_rows, []) if loose else ({}, set())
+        blocked = set(_match_occurrences(loose, probe._stored_row_forms,
+                      [(i, probe._message_replay_identity(m, strip_carrier=False))
+                       for i, m in enumerate(view) if id(m) not in mapping]))
+        copies = {sid for sid, matches in twins.items() if not truncated and sid not in blocked
+                  and any(t in twin_covered for t in matches)}
+        noop = not ({r["store_id"] for r in loose} - covered - copies)
 
     def attribute(budget):
         selected = [m for m in chunk if id(m) not in dependent_ids]
         if chunk and not selected:
             probe._store_complete_empty_reason, probe._store_complete_blocked = "", None
             return None  # IdentityAnchorMixin._identity_anchor_summary_input guard.
-        return probe._store_complete_input(selected, {}, mapping, view, chunk, frontier, [], budget,
+        return probe._store_complete_input(selected, {}, mapping, view, chunk, frontier, [],
+                                           max(1, budget, tokens.count_messages_tokens(selected)),
                                            accounted_ids=excluded, scanned=scanned)
 
     actual = None if noop else attribute(config["leaf_chunk_tokens"])

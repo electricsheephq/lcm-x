@@ -125,7 +125,8 @@ sources must be nonempty and follow creation time. Empty message-source leaves
 are valid (filtered dependent replies) and contribute no coverage. Parent message sources inside a
 persisted carry range are accepted after validating the range and conversation;
 view ancestry remains unassessed without host evidence. Rotation-predecessor
-chains are followed only when each hop has consistent conversation ownership;
+chains allow empty hops (which contribute no rows), and every hop with rows
+must have consistent conversation ownership;
 missing or contradictory evidence and cycles refuse with `unverified_ancestry`.
 Validated predecessor message sources contribute to coverage even though raw
 rows remain in their original session.
@@ -133,6 +134,11 @@ Configured ignored active or mapped stored messages are removed before selecting
 the probe leaf. Dependent replies remain in selection and are omitted only from
 summarizer input. Persisted dependent-reply records, active replay placeholders,
 and special identity metadata leave view findings unassessed before attribution.
+The no-op check keeps shown-but-unmapped retained occurrences in the backlog,
+so they can produce a named stop. It uses production's bounded, extendable scan
+and subtracts node-covered copies only when that scan is not truncated.
+Attribution uses the larger of the leaf budget and the selected input's token
+cost, matching production's budget floor.
 
 **Does NOT repair:** no reconstruction, frontier rewind, replay manifest,
 ingest, compression, schema migration or live host adoption is performed.
