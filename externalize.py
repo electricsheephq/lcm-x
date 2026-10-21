@@ -688,13 +688,21 @@ def _raw_payload_preview(content: str, room: int) -> str:
 
 def _media_payload_preview_content(content: str) -> str:
     """Extract text only; remove opaque media before the bounded preview slices it."""
-    from .ingest_content import _BASE64_RUN_RE, _JSON_ESCAPED_SLASH_RE, _replace_wrapped_base64_blocks
+    import ast
+
+    from .ingest_content import _JSON_ESCAPED_SLASH_RE, _replace_wrapped_base64_blocks
     from .message_content import _extract_text_part_value
 
     try:
         value = json.loads(content)
-    except (ValueError, TypeError):
+    except json.JSONDecodeError:
         value = content
+        if content.lstrip().startswith("["):
+            # Normalization may have used repr for non-JSON media parts. Never preview that repr.
+            try:
+                value = ast.literal_eval(content)
+            except (ValueError, SyntaxError):
+                return ""
     if isinstance(value, list):
         parts = []
         for part in value:
@@ -717,14 +725,24 @@ def _media_payload_preview_content(content: str) -> str:
         rf";base64,(?:[A-Za-z0-9+=]|{_JSON_ESCAPED_SLASH_RE})*",
         "", text or "", flags=re.IGNORECASE,
     )
-    text = _BASE64_RUN_RE.sub("", text)
-    return _replace_wrapped_base64_blocks(text, lambda _: "").strip()
+    # One linear run scan, including short bodies and both base64 alphabets. Preview only:
+    # long alphanumeric words also disappear here, but remain in the expandable payload.
+    text = re.sub(r"[A-Za-z0-9+/_-]{40,}={0,2}", "", text)
+    text = _replace_wrapped_base64_blocks(text, lambda _: "").strip()
+    text = re.sub(r"<img\s+src\s*=\s*(['\"])\s*\1\s*/?>|background\s*:\s*url\(\s*\)",
+                  "", text, flags=re.IGNORECASE)
+    return text if any(ch.isalnum() for ch in text) else ""
 
 
 def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | None = None) -> str:
     kind = _placeholder_metadata(summary.get("kind", "tool_result") or "tool_result")
     if kind == "media_payload" and content:
-        content = _media_payload_preview_content(content)
+        try:
+            content = _media_payload_preview_content(content)
+        except MemoryError:
+            raise
+        except Exception:
+            return _build_externalized_placeholder(summary)
     if kind in {"raw_payload", "media_payload"} and content:
         # #1016: say what the payload holds and how to read it, within the 512 rule; ``ref=`` stays last.
         ref = summary.get("ref", "")
@@ -736,7 +754,14 @@ def _build_externalized_placeholder(summary: Dict[str, Any], *, content: str | N
         # Strictly under the 512 rule, as raw_payload stubs always were.
         room = _PLACEHOLDER_MAX_CHARS - 1 - len(head) - len(rest) - len('preview=""; ')
         if room >= _RAW_PAYLOAD_PREVIEW_MIN_CHARS:
-            return f'{head}preview="{_raw_payload_preview(content, room)}"; {rest}'
+            try:
+                return f'{head}preview="{_raw_payload_preview(content, room)}"; {rest}'
+            except MemoryError:
+                raise
+            except Exception:
+                if kind != "media_payload":
+                    raise
+                return _build_externalized_placeholder(summary)
         if len(head) + len(rest) < _PLACEHOLDER_MAX_CHARS:
             return f"{head}{rest}"
     if kind != "tool_result":

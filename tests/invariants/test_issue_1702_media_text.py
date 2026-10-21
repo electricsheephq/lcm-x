@@ -118,3 +118,71 @@ def test_textless_media_keeps_base_placeholder(shape, empty):
     expected = (f"[Externalized payload: kind=media_payload; role=user; chars={len(content)}; "
                 f"bytes={len(content.encode())}; ref=fixture.json]")
     assert _build_externalized_placeholder(summary, content=content) == expected
+
+
+@pytest.mark.parametrize("case", ["deep", "bytes", "mixed-bytes"])
+def test_preview_failure_never_blocks_ingest(tmp_path, case):
+    content = ("[" * 100_000 + " see screenshot data:image/png;base64," + "QUJD" * 5000
+               if case == "deep" else [{"type": "input_audio", "input_audio": {
+                   "data": random.Random(1702).randbytes(16_000), "format": "wav"}}])
+    if case == "mixed-bytes":
+        content.insert(0, {"type": "text", "text": "zebracluster"})
+    with engine_context(tmp_path, window=200_000, embeddings_enabled=False) as engine:
+        messages = [dict(role="user", content=content, message_uid="2" * 32)]
+        engine.ingest(messages)
+        rows = engine._store.get_session_messages("S")
+        assert len(rows) == 1
+        stub = rows[0]["content"]
+        ref = extract_externalized_ref(stub)
+        normalized = normalize_content_value(content)
+        expanded = json.loads(engine.handle_tool_call(
+            "lcm_expand", dict(externalized_ref=ref, max_tokens=200_000)))
+        assert expanded["content"].encode() == normalized.encode()
+        if case == "mixed-bytes":
+            assert "zebracluster" in stub and "input_audio" not in stub
+        else:
+            assert stub == _build_externalized_placeholder(dict(
+                kind="media_payload", role="user", content_chars=len(normalized),
+                content_bytes=len(normalized.encode()), ref=ref))
+        engine.ingest(messages + [dict(role="assistant", content="following turn", message_uid="3" * 32)])
+        assert len(engine._store.get_session_messages("S")) == 2
+
+
+@pytest.mark.parametrize("prefix", ['data:image/png;name="shot.png";base64,',
+                                  "data:image/x_png;base64,", "data:image/png;name=a b;base64,", ""])
+@pytest.mark.parametrize("run", ["A" * 39, "A" * 40, "Ab9+/-_" * 400 + "=="], ids=["39", "40", "url-safe"])
+def test_preview_drops_short_and_urlsafe_opaque_runs(prefix, run):
+    content = normalize_content_value(media_content("parts", f"zebracluster {prefix}{run} tailneedle"))
+    stub = _build_externalized_placeholder(dict(kind="media_payload", ref="f.json"), content=content)
+    preview = stub.split('preview="')[1].split('"')[0]
+    assert re.search(r"[A-Za-z0-9+/_-]{40,}={0,2}", preview) is None
+    assert "zebracluster" in preview and "tailneedle" in preview
+
+
+@pytest.mark.parametrize("text", ["![]({})", '<img src="{}">', "background:url({})", "{}.",
+                                 "\u200b{}", "\ufeff{}"])
+@pytest.mark.parametrize("shape", ["inline", "parts"])
+def test_markup_only_preview_keeps_base_placeholder(text, shape):
+    content = text.format(media_content("parts")[-1]["image_url"]["url"])
+    if shape == "parts":
+        content = normalize_content_value(media_content("parts", content))
+    summary = dict(kind="media_payload", role="user", ref="f.json")
+    assert _build_externalized_placeholder(summary, content=content) == _build_externalized_placeholder(summary)
+
+
+@pytest.mark.parametrize("helper", ["_media_payload_preview_content", "_raw_payload_preview"])
+@pytest.mark.parametrize("error", [RecursionError, ValueError, TypeError, RuntimeError, MemoryError])
+def test_preview_exceptions_use_base_placeholder(monkeypatch, helper, error):
+    from hermes_lcm import externalize
+
+    def fail(*args):
+        raise error("synthetic preview failure")
+
+    monkeypatch.setattr(externalize, helper, fail)
+    summary = dict(kind="media_payload", ref="f.json")
+    content = normalize_content_value(media_content("parts"))
+    if error is MemoryError:
+        with pytest.raises(MemoryError):
+            _build_externalized_placeholder(summary, content=content)
+    else:
+        assert _build_externalized_placeholder(summary, content=content) == _build_externalized_placeholder(summary)
