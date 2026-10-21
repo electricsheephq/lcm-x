@@ -53,6 +53,7 @@ GOLDEN = ROOT / "tests" / "fixtures" / "ingest_trace.json"
 TRACE_GUIDANCE = "Regenerate deliberately: python -m tests.behaviour.ingest_trace_harness --repo . --regenerate"
 # FROZEN inventory, never generated from _ingest_messages at observation time.
 OBSERVED_ATTRIBUTES = frozenset({
+    "_ORIGIN_REFERENCE_HEADER",
     "_session_id", "_session_ignored", "_session_stateless", "_session_platform", "_conversation_id",
     "_ingest_cursor", "_ingest_cursor_needs_reconcile", "_last_compacted_store_id",
     "_compress_commit_proof", "_last_emission_descriptors", "_compress_occurrences", "_compress_run",

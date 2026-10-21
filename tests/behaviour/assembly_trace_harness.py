@@ -59,6 +59,7 @@ OBJECTIVE = "[Current user objective preserved from compacted history]"
 PAD = " alpha beta gamma delta epsilon" * 40
 # Independent frozen data inventory, including external reconciliation side effects.
 OBSERVED_ATTRIBUTES = frozenset({
+    '_ORIGIN_REFERENCE_HEADER', '_lifecycle',
     '_LCM_SUMMARY_PART_HEADER_RE', '_compiled_ignore_message_patterns', '_compress_run',
     '_config', '_conversation_id', '_current_compress_placeholder_identity_counts',
     '_dag', '_hermes_home', '_kept_reply_mark', '_last_compacted_store_id', '_last_gate_tokens',
@@ -428,6 +429,8 @@ def snapshot(engine: Any, canonical: Canonical, result: Any = None) -> dict[str,
                      for table in ('messages', 'metadata')}
         elif name == '_dag':
             value = engine._dag.get_session_nodes('S', limit=10000)
+        elif name == '_lifecycle':
+            value = engine._lifecycle.get_by_conversation(engine._conversation_id)
         elif name == '_host_rewrite_store':
             value = {'present': value is not None}
         elif name == '_kept_reply_mark' and value is not None:

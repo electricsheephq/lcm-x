@@ -61,6 +61,7 @@ from .escalation import (
     verbatim_source,
 )
 from .externalize import (
+    ingest_payload_writes,
     _build_externalized_placeholder,
     build_transcript_gc_placeholder,
     extract_externalized_ref,
@@ -3634,16 +3635,19 @@ class LCMEngine(
         *,
         stop_after: int = 2,
         after_store_id: int = 0,
+        session_id: Optional[str] = None,
+        strict: bool = False,
     ) -> List[Dict[str, Any]]:
         """Return up to ``stop_after`` durable prompt-bearing user occurrences."""
-        if not self._session_id or stop_after <= 0:
+        session_id = self._session_id if session_id is None else session_id
+        if not session_id or stop_after <= 0:
             return []
         durable_users: List[Dict[str, Any]] = []
         cursor_store_id = max(0, int(after_store_id))
         try:
             while len(durable_users) < stop_after:
                 rows = self._store.load_session_page(
-                    self._session_id,
+                    session_id,
                     after_store_id=cursor_store_id,
                     limit=1000,
                     roles=["user"],
@@ -3670,9 +3674,80 @@ class LCMEngine(
                 if len(rows) < 1000:
                     break
         except Exception:
+            if strict:
+                raise
             logger.debug("LCM durable real-user lookup failed", exc_info=True)
             return []
         return durable_users
+
+    _ORIGIN_REFERENCE_HEADER = (
+        "[Session-start user request (historical reference). Later user messages take "
+        "precedence; do not resume cancelled or replaced work.]"
+    )
+
+    def _origin_reference_part(self, visible_messages, anchor_source) -> Optional[str]:
+        """Read the first real occurrence in a complete, scoped rotation chain.
+
+        No task pointer is persisted. An absent/incomplete proof omits the
+        historical reference; equal text is never an occurrence witness.
+        """
+        if not self._session_id or not self._conversation_id:
+            return None
+        try:
+            sessions = [self._session_id]
+            for _ in range(32):
+                predecessor = self._store.read_metadata_json(
+                    self._rotation_predecessor_metadata_key(sessions[-1]))
+                if predecessor is None:
+                    break
+                if (not isinstance(predecessor, str) or not predecessor or predecessor in sessions
+                        or self._durable_commit_proof_payload(predecessor) is None):
+                    logger.debug("LCM origin reference omitted: incomplete lineage")
+                    return None
+                sessions.append(predecessor)
+            else:
+                logger.debug("LCM origin reference omitted: lineage limit")
+                return None
+            state = self._lifecycle.get_by_conversation(self._conversation_id)
+            if len(sessions) == 1 and state is not None and state.last_rollover_at is not None:
+                logger.debug("LCM origin reference omitted: missing predecessor")
+                return None
+            ranges = self._load_compression_carry_ranges()
+            if any(source not in sessions for source, _start, _end in ranges):
+                logger.debug("LCM origin reference omitted: incomplete lineage")
+                return None
+            users = []
+            for session in reversed(sessions):
+                users.extend(self._durable_real_user_messages(stop_after=2, session_id=session, strict=True))
+                if len(users) >= 2:
+                    break
+            if len(users) < 2:  # the existing latest-objective path already protects O
+                return None
+            origin = users[0]
+            store_id = int(origin.get("store_id") or 0)
+            if store_id in self._get_store_ids_for_messages(visible_messages):
+                return None
+            # A generated origin-bearing input may only be reused with exact
+            # scoped occurrence proof, never by recognising its header alone.
+            projection, _ = self._occurrence_replay_identities(anchor_source, self._active_emission_proof())
+            if any(self._ORIGIN_REFERENCE_HEADER in str(m.get("content", ""))
+                   and entry.generated_span is None and self._is_scaffold_shaped_user_message(m)
+                   for m, entry in zip(anchor_source, projection.entries)):
+                logger.debug("LCM origin reference omitted: missing emission proof")
+                return None
+            content = origin.get("content")
+            no_write = ingest_payload_writes.set(False)
+            try:
+                safe = isinstance(content, str) and self._sanitize_preserved_objective_content(content) == content
+            finally:
+                ingest_payload_writes.reset(no_write)
+            if not safe:
+                logger.debug("LCM origin reference omitted: projected source")
+                return None
+            return self._ORIGIN_REFERENCE_HEADER + "\n" + content
+        except Exception:
+            logger.debug("LCM origin reference omitted: unavailable proof", exc_info=True)
+            return None
 
     def _retained_user_anchor_metadata_key(self) -> str:
         return self._replay_snapshot_metadata_key("retained_user_anchor")
@@ -7188,6 +7263,10 @@ class LCMEngine(
     ) -> tuple[list[tuple[int, Dict[str, Any]]], List[Dict[str, Any]]]:
         if messages_to_store_with_index:
             kept: list[tuple[int, Dict[str, Any]]] = []
+            origin_projection = origin_identities = None
+            if any(self._ORIGIN_REFERENCE_HEADER in str(m.get("content", "")) for m in replay_messages):
+                origin_projection, origin_identities = self._occurrence_replay_identities(
+                    replay_messages, self._active_emission_proof())
             boundary_placeholder_seen: dict[str, int] = {}
             boundary_seen_synthetic_summary_before = False
             empty_session_placeholder_seen: dict[str, int] = {}
@@ -7386,6 +7465,14 @@ class LCMEngine(
                 if absolute_idx in anchored_replay_indexes:
                     continue  # #436 R1/R2: a replay of a stored occurrence
                 store_msg = replay_msg
+                if origin_projection is not None:
+                    entry = origin_projection.entries[absolute_idx]
+                    if entry.generated_span and self._ORIGIN_REFERENCE_HEADER in entry.generated_span:
+                        if origin_identities[absolute_idx] is None:
+                            continue
+                        if entry.output_index is not None and absolute_idx <= entry.output_index:
+                            suffix = entry.effective_identity[1]
+                            store_msg = {**replay_msg, "content": suffix[2:] if suffix.startswith("\n\n") else suffix}
                 remainder = (anchor_plan or {}).get("remainders", {}).get(absolute_idx)
                 raw_remainder = _raw_remainder(replay_msg, remainder) if remainder is not None else None
                 if raw_remainder is not None:  # #436 R3: only the new row of a partially-held survivor
@@ -8602,7 +8689,21 @@ class LCMEngine(
         gets smaller fallback candidates after the unchanged whole-row choice.
         """
         selected_tail_messages = [msg for msg in selected_tail if isinstance(msg, dict)]
-        for message in reversed(messages):
+        origin_projection = None
+        if any(self._ORIGIN_REFERENCE_HEADER in str(m.get("content", "")) for m in messages if isinstance(m, dict)):
+            origin_projection, _ = self._occurrence_replay_identities(messages, self._active_emission_proof())
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if origin_projection is not None:
+                entry = origin_projection.entries[index]
+                if entry.generated_span and self._ORIGIN_REFERENCE_HEADER in entry.generated_span:
+                    suffix = entry.effective_identity[1]
+                    if suffix.strip():
+                        message = {**message, "content": suffix[2:] if suffix.startswith("\n\n") else suffix}
+                    elif entry.generated_span.startswith(_PRESERVED_OBJECTIVE_CONTEXT_PREFIX):
+                        return [entry.generated_span.split("\n\n---\n\n" + self._ORIGIN_REFERENCE_HEADER, 1)[0]]
+                    else:
+                        continue
             if not isinstance(message, dict):
                 continue
             content_text = text_content_for_pattern_matching(message.get("content")) or ""
@@ -8977,6 +9078,11 @@ class LCMEngine(
                 part_keys.append((-1, None))
                 break
 
+        origin_part = self._origin_reference_part([*result, *tail_selected], anchor_source)
+        if origin_part is not None:
+            summary_parts.append(origin_part)
+            part_keys.append((0, None))
+
         # Node ids placed in the summary prefix — used to dedupe proactive-recall
         # injection against summaries already visible in the active context.
         active_summary_node_ids: set = set()
@@ -8989,7 +9095,7 @@ class LCMEngine(
             for group, d in enumerate(depths):
                 uncondensed = self._dag.get_uncondensed_at_depth(self._session_id, d, newest=True)
                 for node in uncondensed:
-                    part_keys.append((group, node.node_id))
+                    part_keys.append((group + (1 if origin_part is not None else 0), node.node_id))
                     summary_parts.append(_summary_part_text(node))
 
         retained_generated_context_parts: list[str] = []
@@ -9004,6 +9110,8 @@ class LCMEngine(
                 count_message_tokens=count_message_tokens,
             ))
             kept_indexes, selected_parts = selection.kept_indexes, selection.selected_parts
+            if origin_part is not None and origin_part not in selected_parts:
+                logger.debug("LCM origin reference omitted: prefix budget")
             active_summary_node_ids.update(
                 part_keys[i][1] for i in kept_indexes if part_keys[i][1] is not None)
             if selected_parts:
@@ -9294,8 +9402,9 @@ class LCMEngine(
                 "role": "user",
                 "content": f"{summary_message['content']}\n\n{tail_selected[0]['content']}",
             }
-            if self._generated_context_carrier_remainder(carrier) == tail_selected[0]["content"]:
-                source_ids = self._get_store_ids_for_messages([tail_selected[0]])
+            source_ids = self._get_store_ids_for_messages([tail_selected[0]])
+            if (self._generated_context_carrier_remainder(carrier) == tail_selected[0]["content"]
+                    or source_ids and self._ORIGIN_REFERENCE_HEADER in summary_message["content"]):
                 result[-1], carried_tail = carrier, tail_selected[0]
                 if summary_candidate is not None:
                     summary_candidate.update({
