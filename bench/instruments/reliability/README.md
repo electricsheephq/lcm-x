@@ -347,6 +347,11 @@ plugin sha) against that transport's `--cells all` list. Linux has no `sandbox-e
 A FAIL with empty or missing `failed_bars` always gates; an open target absent from `ISSUES` declares no bars, and a
 target listed in `cells.ISSUE_HOSTS` declares its bars only on hosts whose name starts with one of its prefixes.
 G-REL-1 diagnostics list uncovered bars, targets and open targets.
+The exact-cell additions in `ci.CELL_GATE` are: R2 `continuity/forced-compaction-then-turn/{in-place,rotation}`
+on every pinned host at B1/B2/B3/B4/B8/F4, plus B9 on `upstream-uid`; R1 `native-on-off/{v0.23.3,v0.24.3}/in-place`
+at B3/B4/B8; and R1 `overflow-recovery-restart/{in-place,rotation}` and `upgrade-crash-after-rotation/rotation`
+at B1/B2. The last three gate on UID-capable hosts; stamp-only failures remain excused by open #534/#1508
+and #1501/#1506 targets via `ISSUE_HOSTS`. Other continuity cells remain outside the gate.
 
 ### Claim boundary
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route

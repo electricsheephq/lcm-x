@@ -17,6 +17,11 @@ FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "cras
           "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
+    1588: (("B8",), "native rotation expected-negative: #592 not-planned ruling; #1588 receipt audit"),
+    1797: (("B1", "B2"), "exact-content preservation under permanent child-publication failure; never require publication success"),
+    926: (("B5",), "sole-user tool loop makes no publication progress"),
+    1798: (("B2",), "same tool id has a different durable result hash"),
+    1799: (("B2",), "survival-fit exact-content deficits on floor-0.21.3"),
     7: (("B1", "B2"), ""),  # #493 (positional cursor misses an in-process rewrite of the last row) folded into #7
     # B5/B8 are downstream of #553 duplication in acp-history rotation (ref-0.21.5 vs customer-0.21.2,
     # nightly aa84e61d); re-check when #553 is fixed.
@@ -48,10 +53,11 @@ ISSUES = {
     1506: (("B1", "B2"), "previous-GA composite of T12+T13 kept next to the replayed parts after the restart"),
 }
 # issue -> host-name prefixes on which its bars are declared (absent: every host); ci.gate reads it
-ISSUE_HOSTS = {821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "r34.10-", "r34.15-", "upstream-uid"),
+ISSUE_HOSTS = {534: ("ref-", "floor-", "upstream-main"), 1501: ("ref-", "floor-", "upstream-main"),
+               1797: ("r34.4-", "r34.10-", "r34.15-"), 1799: ("floor-",), 821: ("r34.4-", "upstream-uid"), 861: ("ref-", "customer-", "r34.4-", "r34.10-", "r34.15-", "upstream-uid"),
                871: ("r34.4-", "r34.10-", "r34.15-"), 1506: ("ref-", "floor-", "upstream-main"), 1508: ("ref-", "floor-", "upstream-main")}
 # issue -> transports on which its bars are declared (absent: every transport); ci.gate reads it
-ISSUE_TRANSPORTS = {861: ("acp-process",)}
+ISSUE_TRANSPORTS = {1797: ("in-process",), 1798: ("acp-process",), 1799: ("acp-process",), 861: ("acp-process",)}
 
 
 # #1013 changed the product defaults; a cell sized for the earlier trigger pins the old values here.
@@ -88,7 +94,7 @@ def continuity_cells() -> list[dict]:
     """R2-only diagnostics: ordinary turns and the existing multi-round tool plan."""
     out = []
     for m, ip in modes():
-        out.append(cell(f"continuity/sole-user-tool-loop/{m}", [], in_place=ip, turns=1, min_compactions=2,
+        out.append(cell(f"continuity/sole-user-tool-loop/{m}", [926, 1798], in_place=ip, turns=1, min_compactions=2,
                         lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_FRESH_TAIL_COUNT": "4",
                                  "LCM_FRESH_TAIL_MAX_TOKENS": "2000", "LCM_LEAF_CHUNK_TOKENS": "1000"},
                         tool_plan=[{"turns": [1], "calls": [{"name": "read_file", "args": {
@@ -96,7 +102,7 @@ def continuity_cells() -> list[dict]:
                         big_files=12, continuity={"sole_user": True}, final_compaction_check=False,
                         doc="Diagnostic #900: one prompt, 12 distinct files/rounds because the host deduplicates identical reads; "
                             "15,360-token trigger, require two commits."))
-        out.append(cell(f"continuity/survival-fit/{m}", [916], in_place=ip, turns=12, repeat=1600,
+        out.append(cell(f"continuity/survival-fit/{m}", [916, 1799], in_place=ip, turns=12, repeat=1600,
                         user={"repeat_from": {"9": 100}}, min_compactions=0,
                         lcm_env={**tight(128000), "LCM_CONTEXT_THRESHOLD": "0.12", "LCM_SURVIVAL_FIT": "true",
                                  "LCM_SURVIVAL_RESERVE": "0.9", "LCM_FRESH_TAIL_COUNT": "24"},
@@ -194,7 +200,7 @@ def registry() -> list[dict]:
     cells = []
     for m, ip in modes():
         cells += [
-            cell(f"overflow-recovery-restart/{m}", [534, 1505, 1508], in_place=ip, turns=36,
+            cell(f"overflow-recovery-restart/{m}", [534, 1508], in_place=ip, turns=36,
                  user={"repeat_from": {"31": 1, "32": 1600, "33": 800}}, bars=["B1", "B2"], min_compactions=1,
                  summary_repeat=200,
                  tool_plan=[{"turns": [32], "calls": [{"name": "write_file", "args": {
@@ -234,7 +240,7 @@ def registry() -> list[dict]:
                      "(cron/scheduler.py); cron turns are tagged K."),
         ]
         for ref in ("v0.23.3", "v0.24.3"):  # #581/#582: a native-ON store handed to the candidate with native OFF
-            cells.append(cell(f"native-on-off/{ref}/{m}", [581, 582], in_place=ip, native=True, from_ref=ref,
+            cells.append(cell(f"native-on-off/{ref}/{m}", ([581, 582] if ip else [581, 582, 1588]), in_place=ip, native=True, from_ref=ref,
                               faults=[{"kind": "plugin_switch", "turn": 31}], bars=["B3", "B4", "B8"],
                               doc=f"Turns 1-30 run lcm-x {ref} with native recovery ON; the candidate then takes over the "
                                   "same HERMES_HOME and store with native OFF. B3/B8 count every candidate-phase "
@@ -277,7 +283,7 @@ def registry() -> list[dict]:
              doc="#541's bar: the FIRST rotation-child publication raises LifecyclePublicationConflictError "
                  "(generalises PROBE_CHILD_CONFLICT); the next child compaction must commit, with 0 parent copies. "
                  "B3/B5 do not apply to an injected conflict."),
-        cell("publication-failure/rotation-child-persistent", [], in_place=False, turns=80, repeat=1000, lcm_env={},
+        cell("publication-failure/rotation-child-persistent", [1797], in_place=False, turns=80, repeat=1000, lcm_env={},
              assistant={"real_usage": True}, bars=["B1", "B2", "B4"], min_compactions=0,
              faults=[{"kind": "publication_failure", "where": "rotation_child", "persistent": True}],
              doc="Data, not G-REL-1 (ci.NON_GATE): EVERY rotation-child publication raises, so no child compaction "
