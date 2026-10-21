@@ -105,6 +105,8 @@ class Cache:
                 raise Incomplete('deadline')
             if delay:
                 time.sleep(delay)
+            if time.time() >= self.deadline:
+                raise Incomplete('deadline')
             current=[]
             generation=0
             while prefix.with_suffix(f'.paused-{attempt}-{generation}.json').exists():

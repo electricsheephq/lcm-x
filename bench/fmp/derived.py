@@ -62,6 +62,17 @@ def freeze(root, bundle):
     if bundle.get('schema') != 'dm0-v1' or not bundle.get('product') or not bundle.get('questions'):
         raise Incomplete('unresolved input identities')
     if not bundle.get('synthetic'):
+        repeats=bundle.get('repeat_ids',[])
+        if len(repeats)!=44 or len(set(repeats))!=44:
+            raise Incomplete('repeat freeze requires 44 unique IDs')
+        if not set(repeats)<={e['id'] for e in bundle['panel']}:
+            raise Incomplete('repeat ID outside panel')
+        for ident in repeats:
+            if not {'identity','response','response_sha256','status'}<=bundle.get('controls',{}).get(ident,{}).keys():
+                raise Incomplete('missing repeat control: '+ident)
+            if (ident not in bundle.get('baselines',{}) or ident not in bundle.get('w1_sources',{}) or
+                    not {'w1_endpoint','w1_renderer'}<=bundle.keys()):
+                raise Incomplete('missing repeat baseline identity: '+ident)
         bind(bundle)
         if len(bundle['panel']) != 886 or len(bundle.get('repeat_ids',[])) != 44:
             raise Incomplete('DM0 panel/repeat freeze incomplete')
@@ -99,17 +110,26 @@ def execute(root, backend, stage='all'):
                      extraction.execute(list(views.values()),cache,READER,root))
     except Paused:
         return dict(status='PAUSED',reason='paused: quota')
-    if any(w['state']=='failed' for w in extracted['ledger']):
+    if any(w['state']=='failed' for w in extracted['ledger']) and not extracted.get('terminal_reason'):
         return dict(verdict='PARK-INCOMPLETE',reasons=['unsettled extraction; resume same run'])
-    if stage=='extract':
-        return dict(status='COMPLETE',windows=len(extracted['ledger']))
     rows, deliveries = [], []
     rejected=sum(w.get('rejected_count',0) for w in extracted['ledger'])
     total=sum(w.get('extracted_count',0) for w in extracted['ledger'])
-    semantic=b.get('semantic_valid',False) and bool(extracted['items']) and bool(extracted['ledger']) and rejected/max(1,total)<=.05
+    semantic=b.get('semantic_valid',False) and bool(extracted['items']) and bool(extracted['ledger']) and rejected/max(1,total)<=.05 and not extracted.get('terminal_reason')
     evaluation=dict(complete=True,semantic_valid=semantic,drift_valid=b.get('drift_valid',False) if b.get('synthetic') else False)
     evaluation.update(rejection_rate=rejected/max(1,total),rejected_items=rejected,extracted_items=total,exclusions=[])
+    if extracted.get('terminal_reason'):
+        evaluation['incomplete_reason']=extracted['terminal_reason']
     ordered = sorted(b['panel'],key=lambda e:(not e['target'],e['id']))
+    if not semantic:
+        report=scoring.evaluate(ordered,rows,**evaluation)
+        snapshot(root/'evaluation-inputs.json',dict(entries=ordered,parameters=evaluation))
+        snapshot(root/'rows.json',rows)
+        snapshot(root/'deliveries.json',deliveries)
+        snapshot(root/'report.json',report)
+        return report
+    if stage=='extract':
+        return dict(status='COMPLETE',windows=len(extracted['ledger']))
     try:
         if not b.get('synthetic'):
             evaluation['drift_valid']=drift(b,cache,root,evaluation['exclusions'])
@@ -314,7 +334,7 @@ def main():
         print(json.dumps(dict(verdict=result.get('verdict'),status=result.get('status'))))
         return 0
     except (Incomplete,KeyError,ValueError) as exc:
-        reason=str(exc) if str(exc).startswith('implementation changed: ') else 'input, identity or activation preflight'
+        reason=str(exc) if str(exc).startswith(('implementation changed: ','repeat freeze','repeat ID','missing repeat')) else 'input, identity or activation preflight'
         print(json.dumps(dict(status='INCOMPLETE',reason=reason)))
         return 2
 if __name__=='__main__':

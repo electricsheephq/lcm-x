@@ -279,6 +279,8 @@ Incomplete LOCAL/25 receipts refuse admission; OFF/25 cannot substitute.
 Freeze binds panel IDs and A0 bytes to verified retrievals; live `w1_cache` cannot be null.
 Added questions need `added_receipt` in the same verified LOCAL/25 cache. Imported
 controls must match their original response records and verified source identities.
+Freeze requires 44 unique repeat IDs in the panel, each with its control record and
+baseline/source/renderer/endpoint identity; missing repeat admission refuses before calls.
 The manifest pins renderer/endpoints and byte digests of every `bench/fmp` Python module.
 Resume refuses changed modules by name; a fresh run directory freezes the new identity.
 
@@ -301,6 +303,7 @@ Completed turns remain successful despite non-fatal reconnects. Failed calls use
 the fatal outcome (last error if no turn failure) and stderr tail for classification.
 Timeouts, HTTP 5xx/unmarked 429 outside backend usage-limit predicates, resets/refusals
 and stream/protocol failures retry unchanged after 60, 180 and 600 seconds.
+Every retry rechecks the frozen deadline after sleeping, before recording or sending.
 Usage limits match each backend, including GLM error-result 429 and rate-limit markers.
 Quota/usage stops return `PAUSED` without exclusions or a settled report. Rerun the
 same directory after reset to retry the paused call and reuse saved calls; paused
@@ -308,6 +311,9 @@ wall time does not consume the frozen deadline.
 Exhausted questions are excluded from both arms and judges; more than 3% is INCOMPLETE.
 Each exclusion budget counts only IDs in its population, including targets-only interim.
 Valid extraction siblings survive rejection; more than 5% rejected items is INCOMPLETE.
+Failed semantic admission (including missing approval or empty extraction) settles before
+drift or main-panel sends. Invalid extraction JSON after its repair retry is terminal:
+the saved disposition settles PARK-INCOMPLETE; resume neither retries nor sends again.
 Invalid judge replies in the main panel and drift retry once unchanged; persistent
 invalids are reported per arm/judge. Main-panel invalids above 2% are INCOMPLETE;
 drift allows `max(1, ceil(0.02 * n))` invalids per judge/arm (one at 44 repeats).
@@ -321,6 +327,7 @@ A0 hit/question bytes stay fixed; only the declared memory insertion changes M81
 
 The fixed target runs first; conservative paired and clustered bounds may stop futility.
 GO requires both judges' +5/+2-point, Holm, positive cluster-lower, category and strict
-combined-guard gates. PARK variants distinguish futility, uncertainty, no-go and incomplete
-coverage/transport/identity. GO funds Stage 1 only. `score` replays frozen scoring inputs
+combined-guard gates. Every original frozen category needs evaluable items after exclusions;
+an empty category is INCOMPLETE. PARK variants distinguish futility, uncertainty, no-go
+and incomplete coverage/transport/identity. GO funds Stage 1 only. `score` replays frozen scoring inputs
 and writes a result card; T1/T2 publication, live quality and product benefit remain unproven.

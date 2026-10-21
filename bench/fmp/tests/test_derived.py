@@ -275,9 +275,9 @@ def test_fix1_live_binding(tmp_path,monkeypatch,null_cache):
         query_sha256=sha(b'Which drink?'),date='2024-03-01'))))
     monkeypatch.setattr(panel,'local25',lambda *a,**kw:[dict(id='q1',delivered_sha256=sha(b'WRONG'),sources={},cache_key='k')])
     with pytest.raises(Incomplete,match='cache required|A0 bytes'):
-        run.freeze(tmp_path/'run',b)
+        run.bind(b)
 
-def test_fix1_empty_control(tmp_path):
+def test_fix1_empty_control(tmp_path,monkeypatch):
     b=bundle()
     a=b['baselines']['q1']
     b.update(w1_endpoint={'v':'w1'},w1_renderer={'r':'w1'},w1_sources={'q1':{'s':'w1'}})
@@ -285,16 +285,9 @@ def test_fix1_empty_control(tmp_path):
         tools=None,tool_choice='none',rubric='fmp-single',renderer=b['w1_renderer'],sources=b['w1_sources']['q1'])
     response=dict(content='historical')
     b['controls']={'q1':dict(identity=ident,status='ok',response=response,response_sha256=sha(encoded(response)))}
-    class Empty(Fake):
-        def call(self,*args,**kw):
-            response=super().call(*args,**kw)
-            if kw['max_tokens']==16384:
-                data=json.loads(response['content'])
-                data[0]['items']=[]
-                response['content']=json.dumps(data)
-            return response
+    monkeypatch.setattr(delivery,'render',lambda *a:('',[]))
     run.freeze(tmp_path,b)
-    run.execute(tmp_path,Empty())
+    run.execute(tmp_path,Fake())
     rows=cache.snapshot(tmp_path/'rows.json')
     assert len({r['answer_sha256'] for r in rows if r['id']=='q1'})==1
 
@@ -465,7 +458,10 @@ def test_fix2_extraction_exclusion_interim(tmp_path):
     b['questions'][1]['sessions'][0]['turns'][0]['content']='I prefer coffee'
     run.freeze(tmp_path,b)
     h=extract.source_view(b['questions'][1])['haystack_hash']
-    cache.snapshot(tmp_path/'extraction.json',dict(items=[],relations=[],ledger=[dict(source=h,state='excluded')]))
+    w=extract.windows(extract.source_view(b['questions'][0]))[0]
+    got=extract.validate(wire(w,[item()]),w)
+    cache.snapshot(tmp_path/'extraction.json',dict(items=got['items'],relations=[],ledger=[
+        dict(source=w['haystack_hash'],state='succeeded',extracted_count=1),dict(source=h,state='excluded')]))
     run.execute(tmp_path,Fake())
     assert (tmp_path/'interim.json').exists()
 

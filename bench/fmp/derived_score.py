@@ -49,6 +49,7 @@ def passes(tables):
 def evaluate(entries, rows, *, complete=True, semantic_valid=True, drift_valid=True, exclusions=(),**admission):
     from .derived import ARMS, JUDGES
     population=len(entries)
+    category_names=sorted({e['category'] for e in entries})
     excluded={r['id'] if isinstance(r,dict) else r for r in exclusions} & {e['id'] for e in entries}
     entries=[e for e in entries if e['id'] not in excluded]
     rows=[r for r in rows if r['id'] not in excluded]
@@ -61,13 +62,16 @@ def evaluate(entries, rows, *, complete=True, semantic_valid=True, drift_valid=T
     result.update(admission,exclusion_details=list(exclusions),invalid_verdicts=invalid)
     if missing or len(keys)!=len(rows) or keys-expected or not semantic_valid or not drift_valid or len(excluded)>population*.03 or any(
             n>len(entries)*.02 for counts in invalid.values() for n in counts.values()):
-        result['reasons']=['missing/duplicate judge pairs, semantic/coverage, drift, >3% exclusions or >2% invalid verdicts']
+        result['reasons']=[admission.get('incomplete_reason') or 'missing/duplicate judge pairs, semantic/coverage, drift, >3% exclusions or >2% invalid verdicts']
         return result
     for judge in JUDGES:
         invalid_ids={r['id'] for r in rows if r['judge']==judge and r['correct'] is None}
         valid=[e for e in entries if e['id'] not in invalid_ids]
         target_entries = [e for e in valid if e['target']]
-        categories = {c:table([e for e in valid if e['category']==c],rows,judge) for c in sorted({e['category'] for e in entries})}
+        categories = {c:table([e for e in valid if e['category']==c],rows,judge) for c in category_names}
+        if any(t['n']==0 for t in categories.values()):
+            result['reasons']=['declared category has no evaluable items: '+judge]
+            return result
         tables = {name:table(group,rows,judge) for name,group in (
             ('target',target_entries),('overall',valid),('guard',[e for e in valid if e['guard']]))}
         tables['categories'] = categories

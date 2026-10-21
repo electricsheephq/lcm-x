@@ -139,6 +139,7 @@ def execute(views, cache, spec, root):
             batch = ws[start:start+3]
             calls = []
             key = sha(encoded(batch))
+            terminal_reason=None
             try:
                 msgs = request(batch, list(all_items.values()))
                 for attempt in range(2):
@@ -151,6 +152,7 @@ def execute(views, cache, spec, root):
                         break
                     except ValueError:
                         if attempt:
+                            terminal_reason='extraction invalid after retry'
                             raise Incomplete('invalid extraction JSON') from None
                         msgs = request(batch, list(all_items.values())) + [dict(role='user', content='Repair invalid JSON; same schema and sources. Return the array only.')]
                 for w, raw in zip(batch, output, strict=True):
@@ -166,7 +168,11 @@ def execute(views, cache, spec, root):
                 ledger.extend(dict(window=w['window_id'],source=view['haystack_hash'],state='excluded',reason='transient retries exhausted',calls=calls) for w in batch)
             except (Incomplete, ValueError, TypeError, KeyError):
                 ledger.extend(dict(window=w['window_id'], source=view['haystack_hash'], state='failed', calls=calls) for w in batch)
-                return dict(items=list(all_items.values()),relations=list(all_relations.values()),ledger=ledger)
+                result=dict(items=list(all_items.values()),relations=list(all_relations.values()),ledger=ledger)
+                if terminal_reason:
+                    result['terminal_reason']=terminal_reason
+                    snapshot(root/'extraction.json',result)
+                return result
     result = dict(items=list(all_items.values()), relations=list(all_relations.values()), ledger=ledger)
     if not any(w['state']=='failed' for w in ledger):
         snapshot(root / 'extraction.json', result)
