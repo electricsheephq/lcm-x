@@ -195,6 +195,7 @@ def test_synthetic_end_to_end_cache_and_deadline_receipt(tmp_path, monkeypatch, 
     q = Question("fixture-id", "lme-s", "single-session-user", "synthetic question", "synthetic gold", "", False, [])
     item = dict(id=q.qid, cluster="fixture-cluster")
     monkeypatch.setattr(dev, "load_lcm", lambda repo: None)
+    monkeypatch.setattr(dev, "source_identity", lambda repo: "fixture")
     monkeypatch.setattr(dev, "load", lambda *a: ([q], {"items": [item]}, {"items": []}))
     monkeypatch.setattr(dev.shutil, "disk_usage", lambda p: SimpleNamespace(free=200 * 1024 ** 3))
     cache_root = tmp_path / "cache"
