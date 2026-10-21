@@ -704,6 +704,7 @@ def build_evidence_pack(
     *,
     engine: Any,
     retrieve: Callable[[dict[str, Any]], Any] | None = None,
+    carried_ids: set[int] | None = None,
 ) -> str:
     started = time.perf_counter()
     question = str(args.get("question") or "").strip()
@@ -734,9 +735,10 @@ def build_evidence_pack(
         )
     input_count = len(raw_refs)
     processed_refs = raw_refs[: budgets.max_refs]
-    carried_ids = engine._store.get_carried_stamp_ids([
-        parsed[0] for raw in processed_refs if isinstance(raw, Mapping)
-        and (parsed := _parse_exact_ref(raw)) is not None])
+    if carried_ids is None:
+        carried_ids = engine._store.get_carried_stamp_ids([
+            parsed[0] for raw in processed_refs if isinstance(raw, Mapping)
+            and (parsed := _parse_exact_ref(raw)) is not None])
 
     resolved: list[ResolvedCandidate] = []
     rejections: list[dict[str, Any]] = []
@@ -837,10 +839,12 @@ def build_evidence_pack(
     )
     computation: dict[str, Any] | None = None
     computation_reason: str | None = None
+    from .evidence_compiler import observation_independent
+
     uncertain_date_refs = {
         item.public["exact_ref"] for item in resolved
         if item.public["observation_time"].get("time_uncertain")
-        and item.public["occurrence_time"].get("event_time_source") != "explicit"
+        and not any(o.citation == item.public["exact_ref"] and observation_independent(o) for o in grounded_operands)
     }
     if as_of is not None and any(
         item.public["observation_time"].get("time_uncertain") for item in resolved

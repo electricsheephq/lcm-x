@@ -579,6 +579,8 @@ def _validate_claim(
     engine: Any,
     allowed_refs: set[str],
     limits: CompilerBudgets,
+    carried_ids: set[int],
+    exclusions: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[str]]:
     errors: list[str] = []
     exact_ref = str(selection["exact_ref"])
@@ -626,8 +628,12 @@ def _validate_claim(
             },
         },
         engine=engine,
+        carried_ids=carried_ids,
     )
     payload = json.loads(raw)
+    claim_exclusions = [item for item in payload.get("exclusions", []) if item.get("time_uncertain")]
+    exclusions.extend(claim_exclusions)
+    errors.extend(str(item["reason_code"]) for item in claim_exclusions)
     evidence = payload.get("evidence") if isinstance(payload, Mapping) else None
     if not isinstance(evidence, list) or not evidence:
         reasons = payload.get("rejections") if isinstance(payload, Mapping) else None
@@ -1142,6 +1148,10 @@ def compile_evidence(
     request["facet_source"] = proposal["facet_source"]
 
     allowed_refs = set(exact_refs)
+    carried_ids = engine._store.get_carried_stamp_ids([
+        int(_EXACT_REF_RE.fullmatch(item["exact_ref"])["store_id"])
+        for item in proposal["selections"]])
+    exclusions: list[dict[str, Any]] = []
     validated: list[dict[str, Any]] = []
     rejections: list[dict[str, Any]] = []
     candidates: list[dict[str, Any]] = []
@@ -1153,6 +1163,8 @@ def compile_evidence(
             engine=engine,
             allowed_refs=allowed_refs,
             limits=limits,
+            carried_ids=carried_ids,
+            exclusions=exclusions,
         )
         if errors:
             rejections.extend(
@@ -1173,6 +1185,8 @@ def compile_evidence(
         validated.append(item)  # type: ignore[arg-type]
         candidates.append(_candidate(selection))
     result["rejections"] = rejections
+    if exclusions:
+        result["exclusions"] = exclusions
     result["metrics"].update(
         {
             "selected_claims": len(validated),
@@ -1215,6 +1229,7 @@ def compile_evidence(
                     },
                 },
                 engine=engine,
+                carried_ids=carried_ids,
             )
         )
         computation = packed.get("computation")
@@ -1299,3 +1314,23 @@ def compile_preanswer_evidence(*args, **kwargs):
     from .requirements_compiler import compile_preanswer_evidence as _compile
 
     return _compile(*args, **kwargs)
+
+
+def observation_independent(operand) -> bool:
+    """Use the grounded parser's absolute-date grammar, not observation time."""
+    from .reasoning import _quote_supports_day
+
+    return operand.evidence_date is not None and _quote_supports_day(operand.quote, operand.evidence_date, "")
+
+
+def uncertain_observation_operands(operands, store, as_of=None) -> bool:
+    """Fail closed on unavailable provenance, with one batched lookup."""
+    import sqlite3
+
+    dated = list(operands) if as_of is not None else [o for o in operands if o.evidence_date is not None]
+    try:
+        carried = store.get_carried_stamp_ids([operand.store_id for operand in dated])
+    except sqlite3.Error:
+        return True
+    return any(operand.store_id in carried and (as_of is not None or not observation_independent(operand))
+               for operand in dated)
