@@ -16,6 +16,12 @@ FAIL_CLOSE_MARKERS = (
     "failed closed",
     "no validated exact source reference",
 )
+FAILURE_FLAGS = ("fail_closed", "failClosed", "failed_closed")
+FAILURE_TEXT_FIELDS = (
+    "fail_close_signature", "failClosedReason", "fail_closed_reason",
+    "error", "exception", "message", "explanation", "hypothesis", "answer",
+    "response", "status", "label",
+)
 
 
 def _qid(row: dict[str, Any]) -> str:
@@ -36,20 +42,7 @@ def _normalise(text: Any) -> str:
 
 
 def _failure_texts(row: dict[str, Any]) -> Iterable[str]:
-    for key in (
-        "fail_close_signature",
-        "failClosedReason",
-        "fail_closed_reason",
-        "error",
-        "exception",
-        "message",
-        "explanation",
-        "hypothesis",
-        "answer",
-        "response",
-        "status",
-        "label",
-    ):
+    for key in FAILURE_TEXT_FIELDS:
         value = row.get(key)
         if value not in (None, ""):
             yield _normalise(value)
@@ -59,7 +52,7 @@ def fail_close_signature(row: dict[str, Any]) -> str | None:
     """Return the row's fail-close signature, or None for an ordinary row."""
     explicit = any(
         row.get(key) is True
-        for key in ("fail_closed", "failClosed", "failed_closed")
+        for key in FAILURE_FLAGS
     )
     texts = list(_failure_texts(row))
     for text in texts:
@@ -69,6 +62,35 @@ def fail_close_signature(row: dict[str, Any]) -> str | None:
     if explicit:
         return texts[0] if texts else "fail_closed"
     return None
+
+
+def _failed(row):
+    # memorybench phases use completed for success; evaluations omit status.
+    return (row.get("_failed", False) or ("status" in row and row["status"] != "completed")
+            or bool(row.get("error")) or row.get("judge_fallback") is True
+            or bool(fail_close_signature(row)))
+
+
+def _overlay_row(report, detail):
+    merged = dict(report)
+    verdict_fields = ("correct", "score", "label")
+    if any(key in detail for key in verdict_fields):
+        for key in verdict_fields:
+            merged.pop(key, None)
+    merged.update(detail)
+    # A success annotation cannot erase either source's failure evidence.
+    for key in ("_failed", "judge_fallback", *FAILURE_FLAGS, *FAILURE_TEXT_FIELDS):
+        if key == "label":  # Verdicts stay atomic; retain its failure signature below.
+            continue
+        if (key in report and _failed({key: report[key]})
+                and not (key in detail and _failed({key: detail[key]}))):
+            merged[key] = report[key]
+    signature = fail_close_signature(detail) or fail_close_signature(report)
+    if signature:
+        merged["fail_close_signature"] = signature
+    if _failed(report) or _failed(detail):
+        merged["_failed"] = True
+    return merged
 
 
 def _correct(row: dict[str, Any]) -> bool:
@@ -132,7 +154,7 @@ def load_rows(run_dir: str | Path) -> list[dict[str, Any]]:
     if detail_path:
         for detail in _read_jsonl(detail_path):
             qid = _qid(detail)
-            by_qid[qid] = {**by_qid.get(qid, {}), **detail}
+            by_qid[qid] = _overlay_row(by_qid.get(qid, {}), detail)
 
     if not by_qid:
         raise ValueError("run has no per-question results")

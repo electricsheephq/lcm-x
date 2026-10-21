@@ -9,7 +9,7 @@ import re
 from numbers import Real
 from pathlib import Path
 
-from bench.tools.failclose import _correct, _qid, fail_close_signature, load_rows
+from bench.tools.failclose import _correct, _failed, _qid, load_rows
 
 
 # Memorybench report/checkpoint identities, plus optional dataset/scorer pins.
@@ -56,13 +56,6 @@ def classify_recall_health(health, config):
     ) for arm in arms):
         return "unhealthy"
     return "healthy"
-
-
-def _failed(row):
-    # memorybench phases use completed for success; evaluations omit status.
-    return (row.get("_failed", False) or ("status" in row and row["status"] != "completed")
-            or bool(row.get("error")) or row.get("judge_fallback") is True
-            or bool(fail_close_signature(row)))
 
 
 def _is_correct(row):
@@ -183,8 +176,6 @@ def _load_run(root):
     has_rows = (report.get("evaluations") or (root / "per_question.jsonl").exists()
                 or (root / "results/per_question.jsonl").exists())
     rows = {_qid(row): row for row in load_rows(root)} if has_rows else {}
-    # A selected detail row replaces the report row; verdict fields must not leak across sources.
-    rows.update({_qid(row): row for row in detail_rows})
     checkpoint_path = root / "checkpoint.json"
     if checkpoint_path.exists():
         checkpoint = json.loads(checkpoint_path.read_text())
@@ -200,8 +191,9 @@ def _load_run(root):
                                        "questionType": question.get("questionType")})
             if "recallHealth" not in row:
                 row["recallHealth"] = phases.get("search", {}).get("recallHealth")
-            row["_failed"] = any(phases.get(p, {}).get("status") != "completed"
-                                 for p in ("search", "answer", "evaluate"))
+            row["_failed"] = row.get("_failed", False) or any(
+                phases.get(p, {}).get("status") != "completed"
+                for p in ("search", "answer", "evaluate"))
     issues += [f"identity mixed within run: {field}" for field, values in identities.items()
                if len(values) > 1]
     return report, rows, identities, issues
