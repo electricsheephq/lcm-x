@@ -113,6 +113,8 @@ def test_aggregate_fails_entire_arm_on_one_compaction_miss(cell, tmp_path, passe
                            arms=["H"], seeds=[1], checkpoints=["1"], expected_host_sha="host")
     result = aggregate(args)
     assert result["per_arm"]["H"]["result"] == expected
+    for population in ("scores", "loss"):
+        assert bool(list((args.out / population).glob("cp-*/*.json"))) == (expected == "COMPLETE")
     from score_deep import exit_status
     assert exit_status(result) == {"FAIL": 1, "INCOMPLETE": 2, "COMPLETE": 0}[expected]
     assert result["per_arm"]["H"]["summary_tokens"] == dict(input=100, output=20, estimated_calls=0)
@@ -296,3 +298,47 @@ def test_rejected_rerun_removes_only_its_prior_scores(cell, tmp_path, arm, field
     for population in ("scores", "loss"):
         assert not list((args.out / population).glob(f"cp-*/{name}"))
     assert {path: path.read_bytes() for path in preserved} == before
+
+
+@pytest.mark.parametrize("arm,field", [("H", "host_sha"), ("LCMX-fleet-rc3", "worktree_head")])
+@pytest.mark.parametrize("rejection", ["missing", "pin", "facts"])
+def test_later_checkpoint_rejection_publishes_no_run_files(cell, tmp_path, arm, field, rejection):
+    import hashlib
+    from score_deep import exit_status, write_deep
+
+    mat, directory = cell
+    run = tmp_path / "runs" / arm / "seed-1/d1-r1"
+    summary = json.loads((directory / "summary.json").read_text())
+    summary.update(material_sha256=hashlib.sha256((mat / "material.manifest.json").read_bytes()).hexdigest(),
+                   events=[event()], **{field: "pinned"})
+    write(run / "summary.json", summary)
+    write(run / "cp-1/summary.json", summary)
+    rows = [dict(json.loads(line), arm=arm) for line in (directory / "results.jsonl").read_text().splitlines()]
+    (run / "cp-1/results.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    if rejection != "missing":
+        later = dict(summary, checkpoint=3, stop_row_index=3)
+        if rejection == "pin":
+            later[field] = "other"
+        write(run / "cp-3/summary.json", later)
+        # F2 is absent, so the later checkpoint has incomplete facts.
+        (run / "cp-3/results.jsonl").write_text(json.dumps(dict(rows[0], answer="new-value")) + "\n")
+    wall = tmp_path / "logs" / f"s2-{arm}-d1-r1.log.wall"
+    wall.parent.mkdir()
+    wall.write_text("exit 0 end now\n")
+    args = SimpleNamespace(material=mat.parent, run_root=tmp_path / "runs", logs=wall.parent,
+                           out=tmp_path / "out", arms=[arm], seeds=[1], checkpoints=["1", "3"],
+                           expected_host_sha="pinned", expected_product_sha="pinned")
+    name = f"{arm}.seed-1.d1-r1.json"
+    for population in ("scores", "loss"):
+        for cp in (1, 3, 999):
+            write(args.out / population / f"cp-{cp}" / name, {"old": True})
+
+    result = write_deep(args)
+    run_result = result["per_run"][f"{arm}|d1-r1"]
+    assert run_result["checkpoints"]["1"]["facts"]["complete"]
+    if rejection == "facts":
+        assert not run_result["checkpoints"]["3"]["facts"]["complete"]
+    assert run_result["result"] == "INCOMPLETE" and exit_status(result) == 2
+    assert json.loads((args.out / "score-deep.json").read_text()) == result
+    for population in ("scores", "loss"):
+        assert not list((args.out / population).glob(f"cp-*/{name}"))

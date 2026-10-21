@@ -80,6 +80,7 @@ def aggregate(args):
                                 "reason": f"missing or mismatched code pin: {field}; expected pin required"}
                 continue
             result = {"arm": arm, "result": "COMPLETE" if summary.get("status") == "DONE" else "INCOMPLETE", "checkpoints": {}}
+            pending = []
             for checkpoint, sub in checkpoints.items():
                 if not (directory / sub / "summary.json").exists():
                     result["result"] = "INCOMPLETE"
@@ -97,8 +98,7 @@ def aggregate(args):
                 result["checkpoints"][str(checkpoint)] = {"facts": fk, "corrected": corrected, "loss_counts": loss["counts"]}
                 for population, payload in (("scores", scored), ("loss", loss)):
                     target = args.out / population / f"cp-{checkpoint}" / f"{arm}.seed-{seed}.{label}.json"
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(json.dumps(payload, indent=1) + "\n")
+                    pending.append((target, payload))
                 if not fk["complete"] or not corrected["complete"]:
                     result["result"] = "INCOMPLETE"
             result["continuity"] = continuity_events(summary)
@@ -117,6 +117,11 @@ def aggregate(args):
                 result["result"] = "INCOMPLETE"
             if result["continuity"]["result"] == "FAIL" or result["dag"]["generation_gate"] == "FAIL":
                 result["result"] = "FAIL"
+            # Publish only after every checkpoint and final run gate accepts the run.
+            if result["result"] == "COMPLETE":
+                for target, payload in pending:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    target.write_text(json.dumps(payload, indent=1) + "\n")
             per_run[key] = result
     for arm in args.arms:
         records = [r for r in per_run.values() if r["arm"] == arm]
