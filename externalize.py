@@ -686,23 +686,48 @@ def _raw_payload_preview(content: str, room: int) -> str:
     return f"{text[:head]}{_RAW_PAYLOAD_PREVIEW_JOINER}{text[len(text) - (keep - head):]}"
 
 
+def _media_payload_text_part(part: Dict[str, Any]) -> str | None:
+    """Match the text field shapes accepted by assistant structured-part cleanup."""
+    from .message_content import _extract_text_part_value
+
+    for key in ("text", "content", "value"):
+        value = part.get(key)
+        text = _extract_text_part_value(value)
+        if text is None and isinstance(value, dict):
+            nested = value.get("text")
+            text = nested if isinstance(nested, str) else None
+        if text is not None:
+            return text
+    return None
+
+
 def _media_payload_preview_content(content: str) -> str:
     """Extract text only; remove opaque media before the bounded preview slices it."""
     import ast
 
     from .ingest_content import _MEDIA_VALUE_KEYS, _replace_wrapped_base64_blocks
-    from .message_content import _extract_text_part_value
+
+    non_text_keys = set(_MEDIA_VALUE_KEYS) | {
+        "data", "mime_type", "mimetype", "mime", "content_type", "content-type", "contenttype",
+        "media_type", "media-type", "mediatype", "format", "encoding", "detail",
+    }
 
     try:
         value = json.loads(content)
     except json.JSONDecodeError:
         value = content
-        if re.match(r"\s*\[\s*(?:[\{\('\"\]]|b['\"])", content):
+        if re.match(r"\s*(?:\[\s*(?:[\{\('\"\]]|b['\"])|\{\s*(?:['\"}]|b['\"]))", content):
             # Normalization may have used repr for non-JSON media parts. Never preview that repr.
+            # Bound both repr shapes before allocating an AST; the full source stays expandable.
+            if len(content) > 1_048_576:
+                return ""
             try:
                 value = ast.literal_eval(content)
-            except (ValueError, SyntaxError):
-                return ""
+            except (ValueError, SyntaxError, RecursionError):
+                if content.lstrip().startswith("{"):
+                    return ""
+                # A list-looking caption may be ordinary prose. Sanitize the original below.
+                value = content
     if isinstance(value, dict):
         value = [value]
     if isinstance(value, list):
@@ -713,9 +738,7 @@ def _media_payload_preview_content(content: str) -> str:
             elif isinstance(part, dict):
                 if "type" in part:
                     if part.get("type") in {"text", "input_text", "output_text"}:
-                        text = _extract_text_part_value(part.get("text"))
-                        if text is None:
-                            text = _extract_text_part_value(part.get("content"))
+                        text = _media_payload_text_part(part)
                         if text:
                             parts.append(text)
                 else:
@@ -728,7 +751,7 @@ def _media_payload_preview_content(content: str) -> str:
                             parts.append(leaf)
                         elif isinstance(leaf, dict):
                             stack.extend((v, depth + 1) for k, v in reversed(list(leaf.items()))
-                                         if str(k).lower() not in _MEDIA_VALUE_KEYS)
+                                         if str(k).lower() not in non_text_keys)
                         elif isinstance(leaf, list):
                             stack.extend((v, depth + 1) for v in reversed(leaf))
         text = "\n".join(parts)
