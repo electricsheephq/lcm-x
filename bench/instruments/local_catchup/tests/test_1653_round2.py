@@ -43,7 +43,7 @@ def test_14_mixed_prepare_pilot_covers_every_shard(tmp_path, monkeypatch):
     repo = Path(__file__).resolve().parents[4]
     a = Namespace(scratch=tmp_path/"scratch", out=tmp_path/"out", model_cache=tmp_path,
                   rows=2000, blocks=1, samples=1, queries=1, shape="mixed", baseline="empty",
-                  lcmx_repo=repo, hermes_source=Path(os.environ["INSTRUMENT_HERMES_SOURCE"]))
+                  lcmx_repo=repo, hermes_source=Path(os.environ.get("INSTRUMENT_HERMES_SOURCE", repo)))
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("HERMES_HOME", str(tmp_path/"home"))
     monkeypatch.setattr(measurement, "isolated", lambda *args: None)
