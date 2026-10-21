@@ -94,8 +94,10 @@ def v2(root, *, _entry=True):
         recorded = load(root/"summary.json")
         base = root if (root/"0-OFF").exists() else root/"recall" if (root/"recall").is_dir() else root
         present = {p.name for p in base.iterdir() if p.is_dir() and any(p.name.endswith("-"+s) for s in ("OFF", "ON-catching-up", "ON-covered"))}
-        assert all(not (base/name/"request.json").exists() or load(base/name/"request.json")["block"] == int(name.split("-", 1)[0])
-                   for name in present)
+        for name in present:
+            if (base/name/"request.json").is_file():
+                request = load(base/name/"request.json")
+                assert (request["block"], request["state"]) == (int(name.split("-", 1)[0]), name.split("-", 1)[1]), "request identity mismatch"
         cells = {name: v2(base/name, _entry=False) for name in sorted(present)}
         names = [f"{c['block']}-{c['state']}" for c in recorded["blocks"]]
         assert names and len(names) == len(set(names)) and set(names) == present

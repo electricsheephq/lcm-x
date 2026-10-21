@@ -132,6 +132,8 @@ def test_zero_recall_rows_capped_is_invalid(tmp_path, monkeypatch, state):
         cell = out/f"0-{name}"
         if name != state:
             shutil.copytree(tmp_path, cell)
+            request = common.load(cell/"request.json")
+            common.dump(cell/"request.json", dict(request, state=name))
         common.dump(cell/"summary.json", raw)
         entries.append(dict(state=name, block=0, result=dict(raw)))
     recall.finalize_block(NS(out=out, seed=1586, standalone_calibration_s=.572), 0, entries)
@@ -301,6 +303,41 @@ def test_coverage_pair_requires_both_baselines(tmp_path):
     common.dump(target/"summary.json", dict(state="PASS", cells=[summary["cells"][0]]))
     with pytest.raises(AssertionError):
         rescore.v2(target)
+
+
+@pytest.mark.parametrize("auditor", ["rescore", "finalize"])
+@pytest.mark.parametrize("source,target,block", [
+    ("OFF", "ON-covered", 0), ("ON-covered", "OFF", 0), ("OFF", "OFF", 1),
+])
+def test_recall_aggregate_rejects_request_identity(tmp_path, auditor, source, target, block):
+    entries = receipts(tmp_path)
+    assert rescore.v2(tmp_path)["state"] == "PASS"
+    cell = tmp_path/f"0-{target}"
+    if source != target:
+        shutil.copytree(tmp_path/f"0-{source}", cell, dirs_exist_ok=True)
+    request = common.load(cell/"request.json")
+    common.dump(cell/"request.json", dict(request, block=block))
+    with pytest.raises(AssertionError, match="request identity"):
+        if auditor == "rescore":
+            rescore.v2(tmp_path)
+        else:
+            recall.finalize_block(NS(out=tmp_path, seed=1586, standalone_calibration_s=.572), 0, entries)
+
+
+def test_off_receipts_cannot_pass_as_on_covered(tmp_path):
+    entries = receipts(tmp_path)
+    cell = tmp_path/"0-OFF"
+    rows = [dict(json.loads(s), semantic_healthy=False) for s in (cell/"recalls.jsonl").read_text().splitlines()]
+    write(cell/"recalls.jsonl", rows)
+    pubs = list(map(json.loads, (cell/"publications.jsonl").read_text().splitlines()))
+    assert recall.score_class(rows, pubs, state="ON-covered")["state"] == "FAIL"
+    recall.finalize_block(NS(out=tmp_path, seed=1586, standalone_calibration_s=.572), 0, entries)
+    assert entries[0]["result"]["state"] == "PASS"
+    shutil.copytree(cell, tmp_path/"0-ON-covered", dirs_exist_ok=True)
+    entries[2]["result"] = dict(entries[0]["result"])
+    common.dump(tmp_path/"summary.json", dict(state="PASS", blocks=entries))
+    with pytest.raises(AssertionError, match="request identity"):
+        rescore.v2(tmp_path)
 
 
 @pytest.mark.parametrize("block", [1, 2])

@@ -357,6 +357,9 @@ def finalize_block(a, block, results):
     for entry in results:
         result = entry["result"]
         root = a.out/f"{block}-{entry['state']}"
+        if (root/"request.json").is_file():
+            request = load(root/"request.json")
+            assert entry["block"] == block and (request["block"], request["state"]) == (block, entry["state"]), "request identity mismatch"
         if "classes" not in result:
             guarded = guarded_result(root, result)
             if guarded is not None:
