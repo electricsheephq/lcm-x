@@ -1,6 +1,7 @@
 """I1/I2/I8: stamped retry turns survive warm ingest and cold replay once (#1540)."""
 
 from copy import deepcopy
+import json
 from typing import Any
 
 import pytest
@@ -9,6 +10,38 @@ from tests.invariants.test_issue_1529_warm_proof_salvage import (
     Build, CLEARED, LONG, Row, build as build, compact, fixture, stored, assert_retry,
 )
 from tests.test_issue_671_stub_first_exit import tool_pair
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("following", [2, 4])
+@pytest.mark.parametrize("uid_change", ["all", "user-only"])
+def test_same_stamp_known_uid_retry(build: Build, mode: str, following: int, uid_change: str) -> None:
+    """A positive UID conflict vetoes replay even when the user stamp is equal."""
+    engine, host = compact(build, mode=mode, uids=True)
+    before = stored(engine)
+    previous = deepcopy(host[-3:])
+    for index, row in enumerate(host[-3:] if uid_change == "all" else host[-3:-2]):
+        row["message_uid"] = f"{100 + index:032x}"
+    assert host[-3]["timestamp"] == previous[0]["timestamp"]
+    assert engine._host_occurrence_changed(host[-3], previous[0])
+    if uid_change == "user-only":
+        assert [row["message_uid"] for row in host[-2:]] == [row["message_uid"] for row in previous[1:]]
+    host[-1]["content"] = CLEARED
+    for index in range(following):
+        host.extend(tool_pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    counts = (sum(row["role"] == "user" and row["content"] == "repeat" for row in added),
+              sum(any(call["id"] == "c" for call in row.get("tool_calls") or []) for row in added),
+              sum(row.get("tool_call_id") == "c" and row["content"] == CLEARED for row in added))
+    engine.ingest(deepcopy(host))
+    repeated = stored(engine)
+    print("\nUID_CASE " + json.dumps(dict(mode=mode, following=following, uid_change=uid_change,
+                                          counts=counts, repeat_added=len(repeated) - len(after))))
+    assert counts == (1, 1, 1)
+    assert repeated == after
 
 
 @pytest.mark.parametrize("mode", ["warm", "cold"])
