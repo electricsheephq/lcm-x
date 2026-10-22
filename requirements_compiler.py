@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -374,17 +375,21 @@ def _carried_absolute_day(source):
     """Share the compiler date parser; a year is required for independence."""
     if not source.get("time_uncertain") or _carried_mixed_dates(source):
         return None
-    quote = _carried_date_text(source["quote"])
-    days = [(day, match.group(0)) for match in _DATE_TEXT_RE.finditer(quote)
-            if (day := _date_value(match.group(0))) is not None]
-    return days[0][0] if days and len({d for d, _ in days}) == 1 else None
+    return _quote_date_info(source["quote"])[0]
+
+
+@lru_cache(maxsize=4096)
+def _quote_date_info(quote: str):
+    """Reuse pure date parsing across candidates from the same quote."""
+    days = {_date_value(match.group(0)) for match in _DATE_TEXT_RE.finditer(_carried_date_text(quote))} - {None}
+    mixed = bool(days) and (len(days) > 1 or bool(_RELATIVE_MENTION.search(quote)))
+    return (next(iter(days)) if len(days) == 1 else None), mixed
 
 
 def _carried_mixed_dates(source):
     # Shared by ordinary and carried rows, including base-unknown named dates.
     quote = source.get("content", source["quote"])
-    days = {_date_value(match.group(0)) for match in _DATE_TEXT_RE.finditer(_carried_date_text(quote))} - {None}
-    return bool(days) and (len(days) > 1 or _RELATIVE_MENTION.search(quote))
+    return _quote_date_info(quote)[1]
 
 
 def _carried_known_day(source):
