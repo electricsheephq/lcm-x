@@ -111,3 +111,135 @@ def test_resolver_month_name_conflict_and_support():
     result = resolve_occurrence_time("2023-01-01 and January 1, 2023", observed_at=123)
     assert result["event_date"] == "2023-01-01"
     assert result["support"] == dict(quote="2023-01-01", char_start=0, char_end=10)
+
+
+NOISE_ROWS = [
+    "I reviewed the plan on 2023-01-10 and took a vacation yesterday.",
+    "I reviewed the plan on 2023-01-10 and again on 2023-01-12.",
+    "We met on January 3, 2023 and again last week.",
+]
+NON_DATE_CASES = [
+    ("What is the project status?", "My project status is green."),
+    ("What is my current project status?", "My project status is green."),
+    ("What is my favorite color?", "My favorite color is blue."),
+    ("How many engineers do I directly lead on the platform team?", "I directly lead 7 engineers on the platform team."),
+    ("How much did I spend in total on lunch and dinner?", "I spent $12 on lunch and $18 on dinner."),
+]
+
+
+def non_date_matrix_result(tmp_path, monkeypatch, carried, noise_index, case_index, partial):
+    from hermes_lcm import requirements_compiler
+
+    monkeypatch.setattr(requirements_compiler.time, "perf_counter", lambda: 1.0)
+    question, fact = NON_DATE_CASES[case_index]
+    noise = NOISE_ROWS[noise_index]
+    with engine_context(tmp_path, embeddings_enabled=False) as engine:
+        if partial:
+            row = noise + " " + fact
+            refs = plant(engine, [row, "Unrelated synthetic row."], carried_index=0 if carried else 1)[:1]
+            start = len(noise) + 1
+            refs = [f"lcm:1:{start}-{len(row)}"]
+        else:
+            refs = plant(engine, [fact, noise, "Unrelated synthetic row."], carried_index=1 if carried else 2)[:2]
+        before = engine._store.connection.total_changes
+        raw = tools.lcm_compile_evidence(args(refs, question), engine=engine)
+        assert engine._store.connection.total_changes == before
+        result = json.loads(raw)
+        assert result["contract"]["temporal_window"] is None
+        assert result["contract"]["operation"] not in {"date_filter", "order", "date_interval"}
+        return raw
+
+
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("case_index", range(5))
+@pytest.mark.parametrize("noise_index", range(3))
+@pytest.mark.parametrize("carried", [False, True])
+def test_non_date_contract_base_identity(tmp_path, monkeypatch, carried, noise_index, case_index, partial):
+    import hashlib
+
+    expected = json.loads(Path(__file__).with_name("issue_1811_non_date_base_hashes.json").read_text())
+    key = f"{int(carried)}-{noise_index}-{case_index}-{int(partial)}"
+    raw = non_date_matrix_result(tmp_path, monkeypatch, carried, noise_index, case_index, partial)
+    assert hashlib.sha256(raw.encode()).hexdigest() == expected[key]
+
+
+@pytest.mark.parametrize("carried", [False, True])
+def test_ordinary_partial_date_filter_matches_own_row(tmp_path, monkeypatch, carried):
+    from hermes_lcm import requirements_compiler
+
+    monkeypatch.setattr(requirements_compiler.time, "perf_counter", lambda: 1.0)
+    results = []
+    fact = "I took a vacation to Bali yesterday."
+    for partial in [False, True]:
+        noise = "I reviewed the plan on 2023-01-10. " if partial else ""
+        row = noise + fact
+        with engine_context(tmp_path / str(partial), embeddings_enabled=False) as engine:
+            plant(engine, [row, "Unrelated synthetic row."], carried_index=0 if carried else 1)
+            engine._session_occurrence_dates = {"0": "2023-01-12"}
+            ref = f"lcm:1:{len(noise)}-{len(row)}"
+            result = json.loads(tools.lcm_compile_evidence(args([ref], QUESTIONS[0], "2023-03-22"), engine=engine))
+            results.append(result)
+    own, partial = results
+    if carried:
+        assert partial["state"] == "unknown"
+        assert partial["reason_code"] == "uncertain_source_observation_time"
+    else:
+        assert partial["state"] == own["state"] == "answer_sufficient"
+        assert partial["reason_code"] == own["reason_code"]
+        assert partial["direct_fact"]["value"] == own["direct_fact"]["value"]
+        assert partial.get("exclusions", []) == own.get("exclusions", [])
+
+
+@pytest.mark.parametrize("form", [f"{day}{dot}, Feb 10, 2023" for day in
+    ["Mon", "Tue", "Tues", "Wed", "Thu", "Thur", "Thurs", "Fri", "Sat", "Sun"] for dot in ["", "."]])
+@pytest.mark.parametrize("question_date", [None, "2023-03-22"])
+@pytest.mark.parametrize("carried", [False, True])
+def test_abbreviated_weekday_order_label(tmp_path, form, question_date, carried):
+    from hermes_lcm.answer_contract import compile_answer_contract
+    from hermes_lcm.requirements_compiler import _normalize_ref, _ordered_event_candidate
+
+    candidates = []
+    for i, spelling in enumerate(["2023-02-10", form]):
+        with engine_context(tmp_path / str(i), embeddings_enabled=False) as engine:
+            refs = plant(engine, [f"The Kyoto Festival happened on {spelling}.", "Unrelated synthetic row."],
+                         carried_index=0 if carried else 1)
+            source = _normalize_ref(refs[0], engine=engine, origin="baseline")
+            if carried:
+                source["time_uncertain"] = "carried"
+            contract = compile_answer_contract("What is the order of events?", question_as_of=question_date).contract
+            candidates.append(_ordered_event_candidate(source, contract))
+    assert candidates[0]["label"] == candidates[1]["label"]
+    assert candidates[0]["date"] == candidates[1]["date"] == "2023-02-10"
+
+
+@pytest.mark.parametrize("carried", [False, True])
+def test_large_quote_cache_retains_results_only(carried):
+    import gc
+    import tracemalloc
+    from hermes_lcm.requirements_compiler import _carried_mixed_dates
+
+    gc.collect()
+    tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    for i in range(64):
+        quote = f"Synthetic carried={carried} {i}: 2023-01-10 and yesterday. " + "x" * (256 * 1024)
+        source = {"quote": quote, "content": quote}
+        if carried:
+            source["time_uncertain"] = "carried"
+        assert _carried_mixed_dates(source)
+    del quote, source
+    gc.collect()
+    retained = tracemalloc.get_traced_memory()[0] - before
+    tracemalloc.stop()
+    assert retained < 2 * 1024 * 1024, retained
+
+
+def test_cached_date_info_equals_uncached():
+    from hermes_lcm import occurrence_time
+
+    for i in range(3000):
+        quote = f"Synthetic {i}: " + ["2023-01-10", "January 3, 2023 and last week",
+            "2023-01-10 and 2023-01-12", "yesterday", "no date"][i % 5]
+        if i % 7 == 0:
+            quote += "x" * 1300
+        assert occurrence_time._quote_date_info(quote) == occurrence_time._parse_quote_date_info(quote)
