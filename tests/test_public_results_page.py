@@ -109,22 +109,9 @@ def test_readme_results_only_quote_sourced_claims(data):
     status = readme.split("## Project status\n", 1)[1].split("\n## ", 1)[0]
     subsection = "### Results\n" + status.split("### Results\n", 1)[1]
     assert subsection.rstrip() == renderer.render_readme_results(data).rstrip()
-    assert 3 <= len(subsection.strip().splitlines()) <= 6
-    lines = subsection.strip().splitlines()
-    first = data["entries"][0]
-    assert lines[2] == f'[{data["board"]}]({first["source_url"]}): {first["claim_class"]}.'
-    entries = [entry for entry in data["entries"] if entry["status"] == "reported"]
-    strongest = sorted(entries, key=lambda entry: ranked_scores(data, entry["benchmark"]).index(entry["value"]))[:2]
-    claims = []
-    for entry in strongest:
-        scores = ranked_scores(data, entry["benchmark"])
-        rank = scores.index(entry["value"]) + 1
-        suffix = {1: "st", 2: "nd"}[rank]
-        claims.append(
-            f'[{entry["benchmark"]} {entry["value"]:.2f}: {rank}{suffix} of {len(scores)} scored backends]({entry["source_url"]}#result-summary)'
-        )
-    assert lines[3] == "; ".join(claims) + "."
-    assert lines[4] == "[Results, configuration, evidence and disclosures](benchmarks/RESULTS.md)."
+    assert "[benchmark highlights](#benchmark-highlights)" in subsection
+    assert "(benchmarks/RESULTS.md)" in subsection
+    assert not re.search(r"\d", subsection)
 
 
 def test_divergent_entry_metadata_is_refused(data):
@@ -146,3 +133,113 @@ def test_not_run_line_renders_only_when_an_entry_is_not_run(data):
     page = renderer.render_results(changed)
     assert "Not yet run: BEAM 10M." in page
     assert "Submitted upstream, pending review" not in page
+
+
+def highlight_block():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    return re.search(
+        r"<!-- results-highlights:start -->.*?<!-- results-highlights:end -->",
+        readme, re.DOTALL,
+    ).group()
+
+
+def table_rows(text):
+    return [line for line in text.splitlines() if line.startswith("| ")]
+
+
+def test_highlights_are_fresh(data):
+    assert highlight_block() == renderer.render_highlights(data)
+
+
+def test_highlights_follow_tagline_before_contents():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    tagline = "> Bounded context, unbounded memory. Nothing is ever lost."
+    block = highlight_block()
+    assert readme.index(tagline) < readme.index(block) < readme.index("LCM-X replaces")
+    assert readme.index(block) < readme.index("## Table of contents")
+    assert readme.split(tagline, 1)[1].startswith("\n\n" + block + "\n\nLCM-X replaces")
+
+
+def test_highlights_order_by_placement_with_stable_ties(data):
+    rows = table_rows(renderer.render_highlights(data))[2:]
+    entries = renderer.reported_entries(data)
+    expected = sorted(
+        entries,
+        key=lambda entry: ranked_scores(data, entry["benchmark"]).index(entry["value"]),
+    )
+    assert [row.split("|")[1].strip() for row in rows[:len(entries)]] == [
+        entry["benchmark"] for entry in expected
+    ]
+    for row, entry in zip(rows, expected):
+        assert f'| {entry["value"]:.2f} |' in row
+        assert f'[{renderer.placement(data, entry["benchmark"])}]({entry["source_url"]}#result-summary)' in row
+
+
+def test_plugin_description_placements_match_strongest_entries(data):
+    line = next(line for line in (ROOT / "plugin.yaml").read_text().splitlines()
+                if line.startswith("description:"))
+    expected = ", ".join(
+        f'{entry["benchmark"]} {renderer.placement(data, entry["benchmark"])}'
+        for entry in renderer.strongest_entries(data)
+    )
+    assert json.loads(line.partition(":")[2].strip()) == (
+        "LCM-X — Lossless Context Memory eXtension for Hermes, with a recoverable DAG-based context engine"
+        f" OmniMemEval: {expected}."
+    )
+
+
+def test_release_notes_match_readme_table():
+    import subprocess
+    import sys
+    output = subprocess.run(
+        [sys.executable, str(RENDER_PATH), "--release-notes"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+    assert "<!--" not in output
+    assert table_rows(output) == table_rows(highlight_block())
+    data = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+    assert output.strip() == renderer.render_highlights(data, release_notes=True).split("\n", 1)[1].rsplit("\n", 1)[0]
+    links = re.findall(r"\]\(([^)]+)\)", output)
+    assert links and all(link.startswith("https://github.com/") for link in links)
+    assert "https://github.com/electricsheephq/lcm-x/blob/main/benchmarks/RESULTS.md" in links
+
+
+def test_submitted_highlight_has_review_link_without_placement(data):
+    submitted = next(entry for entry in data["entries"] if entry["status"] == "submitted")
+    row = next(row for row in table_rows(renderer.render_highlights(data))
+               if row.startswith(f'| {submitted["benchmark"]} |'))
+    assert row == (
+        f'| {submitted["benchmark"]} | {submitted["value"]:.2f} | '
+        f'[in upstream review]({submitted["source_url"]}) |'
+    )
+    assert not re.search(r"\d+(?:st|nd|rd|th) of", row)
+
+
+def test_refresh_command_updates_every_readme_results_surface(data, tmp_path):
+    import shutil
+    import subprocess
+    import sys
+
+    root = tmp_path / "repo"
+    results = root / "benchmarks/results"
+    results.mkdir(parents=True)
+    for name in ("README.md", "plugin.yaml"):
+        shutil.copyfile(ROOT / name, root / name)
+    shutil.copyfile(RENDER_PATH, results / RENDER_PATH.name)
+    # Change both a score and its placement; old numeric README claims must go.
+    entry = next(entry for entry in data["entries"] if entry["benchmark"] == "BEAM 100K")
+    entry["value"] = 1.23
+    next(row for row in data["snapshot"]["rows"] if row["backend"] == "LCM-X")["scores"]["BEAM 100K"] = 1.23
+    (results / DATA_PATH.name).write_text(json.dumps(data), encoding="utf-8")
+    readme = (root / "README.md").read_text()
+    assert renderer.render_highlights(data) not in readme
+    subprocess.run([sys.executable, str(results / RENDER_PATH.name)], check=True)
+    refreshed = (root / "README.md").read_text()
+    assert renderer.render_highlights(data) in refreshed
+    subsection = refreshed.split("### Results\n", 1)[1].split("\n## ", 1)[0]
+    assert "### Results\n" + subsection == renderer.render_readme_results(data)
+    assert "71.84" not in refreshed
+    assert refreshed.count("1.23") == 1
+    assert "[benchmark highlights](#benchmark-highlights)" in subsection
+    subprocess.run([sys.executable, str(results / RENDER_PATH.name)], check=True)
+    assert (root / "README.md").read_text() == refreshed
