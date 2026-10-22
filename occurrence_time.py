@@ -42,6 +42,11 @@ _DATE_TEXT_RE = re.compile(
     r"Dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?)\b",
     re.IGNORECASE,
 )
+_WEEKDAY_PREFIX_RE = re.compile(
+    r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
+    r"Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\.?,?\s+", re.IGNORECASE,
+)
+_WEEKDAY_DATE_RE = re.compile(_WEEKDAY_PREFIX_RE.pattern + r"(?=" + _DATE_TEXT_RE.pattern + ")", re.IGNORECASE)
 _DATE_FORMATS = (
     "%Y-%m-%d",
     "%Y/%m/%d",
@@ -74,11 +79,20 @@ def _carried_date_text(quote):
     return re.sub(r"(\b[A-Za-z]{3,9}\s+\d{1,2})\s+(\d{4})\b", r"\1, \2", quote)
 
 
+def _strip_order_dates(normalized):
+    if _WEEKDAY_PREFIX_RE.search(normalized):
+        normalized = _WEEKDAY_DATE_RE.sub("", normalized)
+    return _DATE_TEXT_RE.sub(" ", normalized)
+
+
 def _parse_quote_date_info(content):
-    days = {_date_value(m.group(0)) for m in _DATE_TEXT_RE.finditer(_carried_date_text(content))} - {None}
+    normalized = _carried_date_text(content)
+    days = {_date_value(m.group(0)) for m in _DATE_TEXT_RE.finditer(normalized)} - {None}
     reason = ("ambiguous_multiple_explicit_dates" if len(days) > 1 else
               "mixed_absolute_and_relative_dates" if days and _RELATIVE_MENTION.search(content) else None)
-    return (next(iter(days)) if len(days) == 1 else None), reason
+    # Reuse this bounded parse for labels; large rows never retain source text.
+    label_text = _strip_order_dates(normalized) if len(content) <= 1200 else None
+    return (next(iter(days)) if len(days) == 1 else None), reason, label_text
 
 
 _small_quote_date_info = lru_cache(maxsize=4096)(_parse_quote_date_info)
@@ -90,12 +104,20 @@ def _quote_date_info(content):
     if len(content) <= 1200:
         return _small_quote_date_info(content)
     key = hashlib.sha256(content.encode("utf-8", "surrogatepass")).digest()
-    if key not in _large_quote_date_info:
+    try:
+        return _large_quote_date_info[key]
+    except KeyError:
         value = _parse_quote_date_info(content)
         if len(_large_quote_date_info) >= 4096:
             _large_quote_date_info.clear()
         _large_quote_date_info[key] = value
-    return _large_quote_date_info[key]
+        return value
+
+
+def _order_label_text(content):
+    if len(content) <= 1200:
+        return _quote_date_info(content)[2]
+    return _strip_order_dates(_carried_date_text(content))
 
 
 def _withhold_reason(content):
@@ -154,6 +176,7 @@ def resolve_occurrence_time(
     *,
     observed_at: Any,
     session_date: Any = None,
+    withhold_mixed: bool = True,
 ) -> dict[str, Any]:
     """Resolve one unambiguous day from exact evidence and source metadata."""
     content = str(text or "")
@@ -180,7 +203,7 @@ def resolve_occurrence_time(
             reason="ambiguous_multiple_explicit_dates",
         )
     if explicit:
-        if reason := _withhold_reason(content):
+        if withhold_mixed and (reason := _withhold_reason(content)):
             return _unknown(observed_at, session_date=session_date, reason=reason)
         day, match = explicit[0]
         anchor = _parse_anchor(session_date)
@@ -216,9 +239,9 @@ def resolve_occurrence_time(
         )
 
     # Only base day-objects may change; unknown reasons and bytes stay intact.
-    if reason := _withhold_reason(content):
+    if withhold_mixed and (reason := _withhold_reason(content)):
         return _unknown(observed_at, session_date=session_date, reason=reason)
-    if len(list(_RELATIVE_MENTION.finditer(content))) > 1:
+    if withhold_mixed and len(list(_RELATIVE_MENTION.finditer(content))) > 1:
         return _unknown(observed_at, session_date=session_date, reason="ambiguous_relative_expression")
 
     match = matches[0]

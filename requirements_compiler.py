@@ -23,7 +23,7 @@ from .answer_contract import (
 )
 from .evidence_compiler import observation_independent
 from .occurrence_time import (
-    _DATE_TEXT_RE, _ISO_DATE, _carried_date_text, _date_value, _quote_date_info, _RELATIVE,
+    _DATE_TEXT_RE, _carried_date_text, _date_value, _order_label_text, _quote_date_info, _RELATIVE,
     resolve_occurrence_time,
 )
 from .reasoning import (
@@ -285,7 +285,7 @@ def _source_session_date(
         return None, "unknown"
 
 
-def _normalize_ref(raw: Any, *, engine: Any, origin: str) -> dict[str, Any] | None:
+def _normalize_ref(raw: Any, *, engine: Any, origin: str, contract: AnswerContract | None = None) -> dict[str, Any] | None:
     if isinstance(raw, str):
         candidate = {"exact_ref": raw}
     elif isinstance(raw, Mapping):
@@ -338,6 +338,7 @@ def _normalize_ref(raw: Any, *, engine: Any, origin: str) -> dict[str, Any] | No
         quote,
         observed_at=observed_epoch or 0.0,
         session_date=session_date,
+        withhold_mixed=contract is None or _date_dependent(contract),
     )
     return {
         "exact_ref": f"lcm:{store_id}:{start}-{end}",
@@ -370,9 +371,9 @@ def _number_value(raw: str) -> int | float | None:
     return int(value) if value.is_integer() else value
 
 
-def _carried_absolute_day(source):
+def _carried_absolute_day(source, *, date_dependent=True):
     """Share the compiler date parser; a year is required for independence."""
-    if not source.get("time_uncertain") or _carried_mixed_dates(source):
+    if not source.get("time_uncertain") or _carried_mixed_dates(source, date_dependent=date_dependent):
         return None
     return _quote_date_info(source["quote"])[0]
 
@@ -382,14 +383,14 @@ def _carried_mixed_dates(source, *, date_dependent=True):
     quote = source.get("content", source["quote"]) if source.get("time_uncertain") else source["quote"]
     if source.get("time_uncertain") and not date_dependent:
         days = {_date_value(m.group(0)) for m in _DATE_TEXT_RE.finditer(_carried_date_text(quote))} - {None}
-        # Preserve the base predicate on contracts without a date requirement.
-        explicit = {_date_value(m.group(0)) for m in _ISO_DATE.finditer(quote)} - {None}
-        return bool(days) and bool(_RELATIVE.search(quote) or (len(days) > 1 and len(explicit) != 1))
+        # Use the base resolver itself, including mixed-separator ISO matches.
+        return bool(days) and bool(_RELATIVE.search(quote) or (len(days) > 1 and
+            resolve_occurrence_time(quote, observed_at=0, withhold_mixed=False).get("event_time_source") != "explicit"))
     return bool(_quote_date_info(quote)[1])
 
 
-def _carried_known_day(source):
-    return not _carried_mixed_dates(source) and ((source.get("occurrence_time") or {}).get("event_time_source") == "explicit" or _carried_absolute_day(source) is not None)
+def _carried_known_day(source, *, date_dependent=True):
+    return not _carried_mixed_dates(source, date_dependent=date_dependent) and ((source.get("occurrence_time") or {}).get("event_time_source") == "explicit" or _carried_absolute_day(source, date_dependent=date_dependent) is not None)
 
 
 def _clause_bounds(text: str, start: int, end: int) -> tuple[int, int]:
@@ -673,6 +674,7 @@ def _date_candidates(
             match.group(0),
             observed_at=source.get("observed_at") or 0.0,
             session_date=source.get("session_date"),
+            withhold_mixed=_date_dependent(contract),
         )
         output.append(
             {
@@ -704,7 +706,7 @@ def _ordered_event_candidate(
         if isinstance(occurrence, Mapping)
         else ""
     )
-    absolute_day = _carried_absolute_day(source)
+    absolute_day = _carried_absolute_day(source, date_dependent=_date_dependent(contract))
     if absolute_day is not None:
         event_date = absolute_day.isoformat()
     if not event_date:
@@ -726,11 +728,7 @@ def _ordered_event_candidate(
         )
         if place is not None:
             label = place.group(1).strip()
-    quote_without_dates = re.sub(
-        r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\.?,?\s+(?=" + _DATE_TEXT_RE.pattern + ")",
-        "", _carried_date_text(quote), flags=re.IGNORECASE,
-    )
-    quote_without_dates = _DATE_TEXT_RE.sub(" ", quote_without_dates)
+    quote_without_dates = _order_label_text(quote)
     names = [
         name
         for name in re.findall(
@@ -948,7 +946,7 @@ def _select_temporal_event(
         for item in eligible
         if int(item.get("anchor_score") or 0) == best_score
     )
-    if not _carried_known_day(chosen) and _candidate_time(chosen)[1] == "uncertain_source_observation_time":
+    if not _carried_known_day(chosen, date_dependent=_date_dependent(contract)) and _candidate_time(chosen)[1] == "uncertain_source_observation_time":
         _record_exclusion(result, chosen, "uncertain_source_observation_time")
         return None, "uncertain_source_observation_time"
     return dict(chosen), "best_supported_event_in_window"
@@ -984,8 +982,8 @@ def _candidate_time(candidate: Mapping[str, Any]) -> tuple[float | None, str]:
     return None, "unknown"
 
 
-def _candidate_event_day(candidate: Mapping[str, Any]) -> tuple[date | None, str]:
-    absolute_day = _carried_absolute_day(candidate)
+def _candidate_event_day(candidate: Mapping[str, Any], *, date_dependent=True) -> tuple[date | None, str]:
+    absolute_day = _carried_absolute_day(candidate, date_dependent=date_dependent)
     if absolute_day is not None:
         return absolute_day, "occurred_at"
     occurrence = candidate.get("occurrence_time")
@@ -1028,7 +1026,7 @@ def _available_as_of(candidate: Mapping[str, Any], contract: AnswerContract) -> 
             return False
         if not math.isfinite(available):
             return False
-    event_day, _ = _candidate_event_day(candidate)
+    event_day, _ = _candidate_event_day(candidate, date_dependent=_date_dependent(contract))
     if event_day is not None and event_day > date.fromisoformat(contract.question_as_of):
         return False
     return available <= boundary
@@ -1047,7 +1045,7 @@ def _temporally_eligible_candidates(
                 _record_exclusion(result, candidate, "source_observed_after_question_as_of")
             continue
         if contract.temporal_window is not None:
-            event_day, basis = _candidate_event_day(candidate)
+            event_day, basis = _candidate_event_day(candidate, date_dependent=_date_dependent(contract))
             if event_day is None:
                 if candidate.get("time_uncertain"):
                     _record_exclusion(result, candidate, "event_outside_temporal_window")
@@ -1057,7 +1055,7 @@ def _temporally_eligible_candidates(
                 <= event_day
                 < contract.temporal_window.end
             ):
-                if candidate.get("time_uncertain") and not _carried_known_day(candidate):
+                if candidate.get("time_uncertain") and not _carried_known_day(candidate, date_dependent=_date_dependent(contract)):
                     _record_exclusion(result, candidate, "event_outside_temporal_window")
                 continue
             candidate = {**candidate, "temporal_match_basis": basis}
@@ -1272,6 +1270,7 @@ def _compute(
         assertions=getattr(engine, "_assertions", None),
         as_of=question_date_as_of_epoch(contract.question_as_of),
         session_dates=getattr(engine, "_session_occurrence_dates", None),
+        withhold_mixed=_date_dependent(contract),
     )
     if grounding.status != "grounded":
         return None, operands, f"grounding_failed:{grounding.reason}"
@@ -1508,7 +1507,7 @@ def _adjacent_sources(
                 "exact_ref": f"lcm:{store_id}:0-{len(content)}",
                 "quote": content,
             }
-            hydrated = _normalize_ref(raw, engine=engine, origin="adjacent_role_partner")
+            hydrated = _normalize_ref(raw, engine=engine, origin="adjacent_role_partner", contract=contract)
             if hydrated and hydrated["exact_ref"] not in seen:
                 hydrated["paired_anchor_score"] = anchor_score + 8
                 marginal = _candidate_inventory([hydrated], contract, limit=limits.max_candidates)
@@ -1653,7 +1652,7 @@ def _retrieve_sources(
             continue
         _merge_usage(result["retrieval"], payload)
         hits = payload.get("hits")
-        hydrated_hits = [_normalize_ref(hit, engine=engine, origin="targeted_retrieval")
+        hydrated_hits = [_normalize_ref(hit, engine=engine, origin="targeted_retrieval", contract=contract)
                          for hit in hits if isinstance(hit, Mapping)] if isinstance(hits, list) else []
         carried = engine._store.get_carried_stamp_ids([h["store_id"] for h in hydrated_hits if h])
         for hydrated in hydrated_hits:
@@ -1869,6 +1868,7 @@ def _finite_enumeration(
                 },
                 engine=engine,
                 origin="finite_corpus_scan",
+                contract=contract,
             )
             if hydrated is None:
                 certificate["ungrounded_key_clauses"] += 1
@@ -1879,7 +1879,7 @@ def _finite_enumeration(
             if _carried_mixed_dates(hydrated):
                 _record_exclusion(result, hydrated, "uncertain_source_observation_time", count=True)
                 continue
-            event_day, basis = _candidate_event_day(hydrated)
+            event_day, basis = _candidate_event_day(hydrated, date_dependent=_date_dependent(contract))
             if event_day is None:
                 certificate["unknown_time_clauses"] += 1
                 continue
@@ -1894,7 +1894,7 @@ def _finite_enumeration(
                 <= event_day
                 < contract.temporal_window.end
             ):
-                if hydrated.get("time_uncertain") and not _carried_known_day(hydrated):
+                if hydrated.get("time_uncertain") and not _carried_known_day(hydrated, date_dependent=_date_dependent(contract)):
                     uncertain_window_exclusion = True
                     if result is not None:
                         _record_exclusion(result, hydrated, "event_outside_temporal_window", count=True)
@@ -1959,6 +1959,7 @@ def _finite_enumeration(
         assertions=getattr(engine, "_assertions", None),
         as_of=question_date_as_of_epoch(contract.question_as_of),
         session_dates=getattr(engine, "_session_occurrence_dates", None),
+        withhold_mixed=_date_dependent(contract),
     )
     if grounding.status != "grounded":
         return None, operands, certificate, f"finite_grounding_failed:{grounding.reason}"
@@ -2131,7 +2132,7 @@ def compile_preanswer_evidence(
     baseline: list[dict[str, Any]] = []
     seen: set[str] = set()
     for raw in ranked_baseline_input[: limits.max_candidates]:
-        hydrated = _normalize_ref(raw, engine=engine, origin="baseline")
+        hydrated = _normalize_ref(raw, engine=engine, origin="baseline", contract=contract)
         if hydrated is not None and hydrated["exact_ref"] not in seen:
             seen.add(hydrated["exact_ref"])
             baseline.append(hydrated)
