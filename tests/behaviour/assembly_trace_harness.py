@@ -440,6 +440,7 @@ def snapshot(engine: Any, canonical: Canonical, result: Any = None) -> dict[str,
 
 
 def observe(case: Scenario, root: Path) -> Trace:
+    root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     canonical, events = Canonical(root), []
     active = False
@@ -651,7 +652,7 @@ def main() -> None:
         for key in product_env_keys(ROOT) | product_env_keys(args.repo.resolve()):
             os.environ.pop(key, None)
         with tempfile.TemporaryDirectory(prefix='assembly-trace-') as directory:
-            result = {case.name: observe(case, Path(directory).resolve() / case.name) for case in SCENARIOS}
+            result = {case.name: observe(case, Path(directory) / case.name) for case in SCENARIOS}
         args.out.write_text(json.dumps(result, sort_keys=True, indent=0) + '\n')
         print(f'Wrote {len(result)} assembly scenarios')
     finally:

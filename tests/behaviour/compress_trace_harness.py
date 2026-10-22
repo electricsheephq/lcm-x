@@ -955,6 +955,7 @@ def leaf_selection_probe(engine: Any, case: Scenario, provider: Any, events: Tra
 
 
 def observe(case: Scenario, root: Path) -> Trace:
+    root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     events: Trace = []
     clock, canonical = Clock(expiry_checkpoint=case.expiry_checkpoint), Canonical(root)
