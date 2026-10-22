@@ -268,6 +268,7 @@
     "rerank_model": "rerank-2.5-lite",
     "rerank_window_limit": 0,
     "reserve_tokens_floor": 0,
+    "retraction_delivery": "off",
     "rollup_aggregate_max_tokens": 20000,
     "rollup_builds_per_pass": 2,
     "rollup_daily_max_tokens": 15000,

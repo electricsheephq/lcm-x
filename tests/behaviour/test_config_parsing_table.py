@@ -36,6 +36,7 @@ STRING = (D, *VALUES[1:])
 # Frozen ENV_FIELD_SPECS rows: field, environment key, parser, default.
 CONFIG_ROWS = (
     ('recall_delivery_unit', 'LCM_RECALL_DELIVERY_UNIT', 'str', 'hits'),
+    ('retraction_delivery', 'LCM_RETRACTION_DELIVERY', 'str', 'off'),
     # config._parse_bool_env -> LCMConfig.from_env (construction time).
     ('fresh_tail_pressure_yield_enabled', 'LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED', 'bool', True),
     ('dynamic_leaf_chunk_enabled', 'LCM_DYNAMIC_LEAF_CHUNK_ENABLED', 'bool', False),
@@ -172,6 +173,7 @@ EXTRA_CONFIG_ROWS = (
 # from_env has validation after the primitive reader for these fields.
 SPECIAL = {
     "recall_delivery_unit": ("hits",) * 16,
+    "retraction_delivery": ("off",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),
     "leaf_target_min_tokens": (D, D, D, D, 1, D, D, D, D, D, D, D, D, D, D, D),
@@ -406,6 +408,7 @@ def test_key_inventory_is_complete():
     ("LCM_EMBEDDING_PROVIDER", "garbage", "embedding_provider", "garbage", True),
     ("LCM_PREANSWER_EVIDENCE_MODE", "garbage", "preanswer_evidence_mode", "garbage", True),
     ("LCM_EMBEDDING_STORAGE_DTYPE", "garbage", "embedding_storage_dtype", "garbage", True),
+    ("LCM_RETRACTION_DELIVERY", "garbage", "retraction_delivery", "off", True),
 ))
 def test_config_warning_presence(monkeypatch, caplog, key, raw, field, expected, warns):
     set_value(monkeypatch, key, raw)

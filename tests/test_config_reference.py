@@ -26,6 +26,7 @@ def test_reference_diagnostic_ranges():
 def test_reference_diagnostic_choices():
     assert {name: row[0] for name, row in config._ENV_CHOICES.items()} == {
         "recall_delivery_unit": ("hits", "session"),
+        "retraction_delivery": ("off", "codeliver", "suppress"),
         "embedding_provider": (
             "voyage", "voyageai", "ollama", "fastembed", "fast-embed",
             "openai-compatible", "openai", "siliconflow",
@@ -231,6 +232,7 @@ def test_choice_constants_feed_reference():
     )
     assert config._ENV_CHOICES["preanswer_evidence_mode"][0] == config.PREANSWER_EVIDENCE_MODES
     assert config._ENV_CHOICES["embedding_storage_dtype"][0] == config.EMBEDDING_STORAGE_DTYPES
+    assert config._ENV_CHOICES["retraction_delivery"][0] == config.RETRACTION_DELIVERY_MODES
 
 
 @pytest.mark.parametrize("provider", ("voyage", "ollama", "fastembed", "openai-compatible"))

@@ -73,6 +73,19 @@
     }
   },
   {
+    "id": "retrieval-lcm-recall-retraction-lookup",
+    "category": "retrieval",
+    "module": "retraction.py",
+    "entry_point": "find_retractions",
+    "authority_requirement": "read_scoped",
+    "discloses": ["existence", "content"],
+    "notes": "Default-off retraction lookup honours recall's excluded-session corpus; AccessContextV1 remains dormant.",
+    "hook": {
+      "required": true,
+      "sites": ["retraction.py:find_retractions"]
+    }
+  },
+  {
     "id": "sessions-lcm-recent",
     "category": "sessions",
     "module": "tools.py",
