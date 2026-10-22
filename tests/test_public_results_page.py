@@ -46,15 +46,22 @@ def test_entries_have_provenance_and_match_snapshot(data):
             "claim_class", "disclosures",
         ):
             assert entry[field], (entry["benchmark"], field)
-        assert entry["source_url"] == snapshot["source_url"]
-        assert "/blob/f7476c55/" in entry["source_url"]
         assert entry["evidence_url"].startswith("https://github.com/")
-        assert entry["claim_class"] == "contributor-run, accepted upstream"
-        assert entry["value"] == lcmx[entry["benchmark"]]
         assert (entry["status"] == "not_run") == (entry["value"] is None)
         assert entry["config"]["embeddings"] and entry["config"]["top_k"] > 0
+        if entry["status"] == "submitted":
+            # Pending upstream review: never in the pinned snapshot, never ranked.
+            assert entry["source_url"].startswith("https://github.com/MemTensor/OmniMemEval/pull/")
+            assert entry["claim_class"] == "contributor-run, submitted upstream"
+            assert lcmx[entry["benchmark"]] is None and entry["value"] is not None
+            continue
+        assert entry["source_url"] == snapshot["source_url"]
+        assert "/blob/f7476c55/" in entry["source_url"]
+        assert entry["claim_class"] == "contributor-run, accepted upstream"
+        assert entry["value"] == lcmx[entry["benchmark"]]
+    assert [entry["benchmark"] for entry in data["entries"] if entry["status"] == "not_run"] == []
     assert [(entry["benchmark"], entry["value"]) for entry in data["entries"]
-            if entry["status"] == "not_run"] == [("BEAM 10M", None)]
+            if entry["status"] == "submitted"] == [("BEAM 10M", 63.32)]
 
 
 def test_page_values_and_placements_match_snapshot(data):
@@ -79,7 +86,17 @@ def test_page_values_and_placements_match_snapshot(data):
         }.get(expected_rank % 10, "th")
         assert suffix == expected_suffix
         assert entry["source_url"] in links and entry["evidence_url"] in links
-    assert "Not yet run: BEAM 10M." in page
+    assert "Not yet run" not in page
+    submitted = next(entry for entry in data["entries"] if entry["status"] == "submitted")
+    line = next(line for line in page.splitlines() if line.startswith("Submitted upstream, pending review: "))
+    assert "BEAM 10M nugget score 63.32 " in line and submitted["source_url"] in line
+    assert submitted["evidence_url"] in line and submitted["disclosures"] in page
+    # A resumed run names every harness commit with its role, ending at the one that scored it.
+    assert [c["sha"][:8] for c in submitted["harness_commits"]] == ["cd955c46", "282be0b8"]
+    assert submitted["harness_commits"][-1]["sha"] == submitted["harness_commit"]
+    for commit in submitted["harness_commits"]:
+        assert f'`{commit["sha"][:8]}` ({commit["role"]})' in line
+    assert "| BEAM 10M |" not in page
     expected_review = "our Agent Memory Leaderboard Cycle 2 entry; the board publishes its own results."
     assert f"In review: {expected_review}" in page
     assert page.split("In review:")[1].strip() == expected_review
@@ -119,3 +136,13 @@ def test_divergent_entry_metadata_is_refused(data):
         renderer.render_results(changed)
     with pytest.raises(ValueError, match="run_date"):
         renderer.render_readme_results(changed)
+
+
+def test_not_run_line_renders_only_when_an_entry_is_not_run(data):
+    import copy
+    changed = copy.deepcopy(data)
+    entry = next(entry for entry in changed["entries"] if entry["status"] == "submitted")
+    entry.update(status="not_run", value=None)
+    page = renderer.render_results(changed)
+    assert "Not yet run: BEAM 10M." in page
+    assert "Submitted upstream, pending review" not in page

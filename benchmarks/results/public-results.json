@@ -241,20 +241,30 @@
       "board": "OmniMemEval",
       "benchmark": "BEAM 10M",
       "metric": "nugget score",
-      "value": null,
-      "status": "not_run",
-      "lcmx_version": "v0.28.0-rc1",
-      "executable_identity": "executable code identical to v0.28.0",
+      "value": 63.32,
+      "status": "submitted",
+      "lcmx_version": "v0.28.0",
+      "executable_identity": "v0.28.0 release",
       "config": {
         "embeddings": "local fastembed BAAI/bge-small-en-v1.5",
         "top_k": 20
       },
-      "run_date": "2026-10-18",
-      "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
-      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
-      "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
-      "claim_class": "contributor-run, accepted upstream",
-      "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
+      "run_date": "2026-10-22",
+      "harness_commit": "282be0b82281d41eb6684b38e93b9bac544fb20b",
+      "harness_commits": [
+        {
+          "sha": "cd955c46a40a5d7f386cdfaec711ef8c966ff97d",
+          "role": "90 ingest sessions"
+        },
+        {
+          "sha": "282be0b82281d41eb6684b38e93b9bac544fb20b",
+          "role": "conversation 7's 10 ingest sessions, search, answer and evaluation"
+        }
+      ],
+      "source_url": "https://github.com/MemTensor/OmniMemEval/pull/18",
+      "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-beam10m-results-20261022",
+      "claim_class": "contributor-run, submitted upstream",
+      "disclosures": "BEAM 10M (submitted, not yet accepted): one run of 200 questions, so no run-to-run variance. Ingestion of 90 sessions ran at harness `cd955c46`; conversation 7's 10 sessions and every later stage ran at `282be0b8`, which adds the null-time-anchor fix. Answer and judge calls went through OpenRouter, with the same model-receipt limitation as above."
     },
     {
       "board": "OmniMemEval",

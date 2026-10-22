@@ -2,13 +2,14 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `87c35bd1e3253f6903e40de811e2006eb65563244168d720bdc34d06c8a9d325`, rows: 57)
+Generated from `results.jsonl` (sha256: `d0feaa4e738f1d788ab962d03c06db210aacf5acb8fe4c1bcf4ea94b8a0dd977`, rows: 58)
 
 ## Summary
 
 | Benchmark | Metric | Result | Tier | Date | Details |
 |---|---|---|---|---|---|
 | AMA-Bench (open-ended, 208 episodes) | strict judged accuracy, fail-closed denominator | 1180/2496 = 47.3% (scored-only 1180/2460 = 48.0%) | F | 2026-08-02 | [details](#ama208-full-2026-08-02) |
+| BEAM-10M (200q) | nugget_score | 0.6332 ± 0.4002 (200 questions) | F | 2026-10-22 | [details](#beam-10m-v0280-20261022) |
 | D5-A (engine-direct latency proxy) | max_lcm_owned_s | 49.1 s | P | 2026-10-16 | [details](#d5a-max-v0270-2026-10-16) |
 | D5-A (engine-direct latency proxy) | mean_wait_s_per_message | 7.9 s | P | 2026-10-16 | [details](#d5a-mean-wait-v0270-2026-10-16) |
 | D5-A (engine-direct latency proxy) | compaction_p90_s | 44.5 s | P | 2026-10-16 | [details](#d5a-p90-v0270-2026-10-16) |
@@ -129,6 +130,66 @@ A/A' 30-episode fixed-seed subset (seed 20260802) EXECUTED: 27/30 pairs compared
 - First full-208 disclosed number; GOALS target >=72.26% NOT met (gap -24.9pt); funnel decomposition queued
 - Accuracy RISES with episode size (large>800k tier 55.6% vs small 47.2%) — no context-scale degradation
 - Reader effort = model default (AMA custom-provider path exposes no effort surface)
+
+### <a id="beam-10m-v0280-20261022"></a>beam-10m-v0280-20261022
+
+**id:**
+beam-10m-v0280-20261022
+
+**benchmark:**
+BEAM-10M (200q)
+
+**metric:**
+nugget_score
+
+**value:**
+0.6331645923520923
+
+**display:**
+0.6332 ± 0.4002 (200 questions)
+
+**tier:**
+F
+
+**date:**
+2026-10-22
+
+**system_commit:**
+709099b3a397a7893a7abae8802ebe7bf605f79e (v0.28.0)
+
+**harness_commit:**
+cd955c46a40a5d7f386cdfaec711ef8c966ff97d (90 ingest sessions); 282be0b82281d41eb6684b38e93b9bac544fb20b (10 user-7 sessions and remaining stages)
+
+**judge:**
+Configured gpt-4o-mini-2024-07-18 via OpenRouter; receipt openai/gpt-4o-mini-2024-07-18; full prompts in scripts/utils/prompts.py (BEAM_RUBRIC_ITEM_JUDGE_PROMPT and BEAM_EVENT_ORDERING_JUDGE_PROMPT), called by scripts/beam/beam_eval.py at 282be0b82281d41eb6684b38e93b9bac544fb20b
+
+**reader:**
+Configured gpt-4.1-mini-2025-04-14 via OpenRouter; receipt openai/gpt-4.1-mini; per-question model fields absent
+
+**retrieval_config:**
+Released reference fleet config: LCMX_CONFIG=fleet, full chunk policy and delivery, local fastembed BAAI/bge-small-en-v1.5, top-k 20; workers 2, LLM workers 10; ALLOW_EMPTY_SEARCH=1; all skip-failed flags 0
+
+**dataset_exposure:**
+BEAM-10M hash 77532f4ec545f5b30ff39c235dc1829ead4ae628e6e14b1cb91f1f4dfe11f99f; null time anchor in user-7 session 0 fixed as disclosed; earlier conflated-store attempt excluded
+
+**breakdown:**
+abstention: mean 0.9250, population SD 0.1785, n=20; contradiction_resolution: mean 0.5875, population SD 0.1431, n=20; event_ordering: mean 0.1698, population SD 0.2026, n=20; information_extraction: mean 0.8000, population SD 0.4000, n=20; instruction_following: mean 0.7250, population SD 0.3945, n=20; knowledge_update: mean 0.6750, population SD 0.4548, n=20; multi_session_reasoning: mean 0.3750, population SD 0.4278, n=20; preference_following: mean 0.8750, population SD 0.3010, n=20; summarization: mean 0.7493, population SD 0.2156, n=20; temporal_reasoning: mean 0.4500, population SD 0.3921, n=20
+
+**variance:**
+NUM_RUNS=1; ± is per-question population SD, not run-to-run variance
+
+**failclose:**
+100 sessions/208696 messages; search, answer, eval each 200 success, zero final failed or skipped. Empty-search rows remain in denominator. One degraded chunk-arm warning; no successful arm retry established.
+
+**evidence:**
+- https://github.com/electricsheephq/OmniMemEval/releases/download/lcmx-v0.28.0-beam10m-results-20261022/lcmx-omnimemeval-beam10m-results-20261022.tar.gz
+
+**caveats:**
+- Two-SHA ingestion and sampler-v2 transition disclosed; no campaign latency claim from overwritten resumed ingestion statistics.
+- Per-question models and USD spend are absent from receipts; no direct-provider equivalence proven.
+- One public-text scanner match inside third-party benchmark output was reviewed by the release manager and kept unchanged.
+- Public evidence archive SHA-256: 653690d99ec53416f8ccce2a204ed33b0c25baaf96e2577f07acd5aa17c4318f. One run; no upstream acceptance or listing, multi-run variance, or customer value proven.
+- Tier F: one run with no A/A' noise floor or pre-registered gate. Reader and judge are both OpenAI models because OmniMemEval fixes that pair for every backend; the score is comparable across that board, not a cross-family score.
 
 ### <a id="d5a-max-v0270-2026-10-16"></a>d5a-max-v0270-2026-10-16
 
