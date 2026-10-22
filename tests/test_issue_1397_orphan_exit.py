@@ -13,6 +13,7 @@ def test_1397_exit_waits_for_real_fastembed_orphan_with_shared_budget(tmp_path, 
     marker = tmp_path / "encoder-finished"
     script = r"""
 import atexit
+import faulthandler
 import importlib.util
 import json
 import sys
@@ -21,6 +22,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+faulthandler.dump_traceback_later(8)  # Diagnostic only; the parent owns the hang watchdog.
+print("stage: imports", file=sys.stderr, flush=True)
 repo, marker, mode = sys.argv[1:]
 sys.path.insert(0, repo)
 spec = importlib.util.spec_from_file_location("hermes_lcm", Path(repo) / "__init__.py", submodule_search_locations=[repo])
@@ -64,6 +67,7 @@ def provider_now():
 
 embedding_provider.time = SimpleNamespace(monotonic=provider_now)
 config = _seed_batches(Path(marker).parent / "orphan.db", "summaries")
+print("stage: seeded", file=sys.stderr, flush=True)
 provider = embedding_provider.FastembedProvider("test-model", timeout=10 if mode == "none" else 0.01)
 provider._model = Model()
 command.resolve_provider = lambda *_a, **_k: provider
@@ -81,6 +85,7 @@ scheduler = engine._EMBEDDING_MAINTENANCE_SCHEDULER
 assert scheduler.schedule(("orphan-exit", "embeddings"), job)
 assert started.wait(10)
 assert pass_done.wait(10)
+print("stage: orphan ready", file=sys.stderr, flush=True)
 if mode != "budget":
     assert scheduler.drain({("orphan-exit", "embeddings")}, timeout=10)
 
@@ -124,10 +129,13 @@ def observed_quiesce(timeout):
 scheduler.quiesce = observed_quiesce
 embedding_provider._drain_local_embedding_workers = observed_drain
 """
-    result = subprocess.run(
-        [sys.executable, "-c", script, str(Path(__file__).resolve().parents[1]), str(marker), mode],
-        capture_output=True, text=True, timeout=10,
-    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(Path(__file__).resolve().parents[1]), str(marker), mode],
+            capture_output=True, text=True, timeout=10,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"exit subprocess hang watchdog: {exc.stderr}", pytrace=False)
     assert result.returncode == 0, result.stdout + result.stderr
     state = json.loads(result.stdout.splitlines()[-1])
     deadline = state["quiesce_start"] + state["timeout"]
