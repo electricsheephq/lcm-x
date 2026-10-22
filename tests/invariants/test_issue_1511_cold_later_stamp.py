@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from copy import deepcopy
+from datetime import datetime, timezone
 import hashlib
 import json
 import logging
@@ -72,6 +73,12 @@ class Capture(logging.Handler):
 
 
 COLD = tuple(f"target-cold-s{s}-a{a}-r{r}" for s in (0, 1) for a in (0, 1) for r in (0, 1))
+NARROW_CONTROLS = (
+    "users-restamp-0.5", "users-restamp-5", "users-restamp-3600", "all-restamp",
+    "tools-restamp", "per-row-offsets", "iso-submicro-drift", "earlier-and-later",
+    "null-steer-suffix", "null-tool-suffix", "unknown-incoming-suffix",
+    "proofed-later-binding", "proofed-later-alt_stamp", "proofed-later-carried_stamp",
+)
 CASES = (*COLD,
          *(name.replace("cold", "warm") for name in COLD),
          *("plain-" + kind for kind in ("unchanged", "earlier", "different", "assistant")),
@@ -82,7 +89,7 @@ CASES = (*COLD,
          "proof-whitespace", "proof-carried-stamp", "proof-live-recovery", "proof-current-turn-alias",
          "proof-null-canonical-binding", "proof-emitted-carrier",
          "retry-r3-000", "retry-r3-100", "retry-r3-110", "retry-r3-101", "proof-stub-first-adopted-child",
-         "relation-undo-resend", "relation-alt-stamp")
+         "relation-undo-resend", "relation-alt-stamp", *NARROW_CONTROLS)
 REFERENCE = Path(__file__).with_name("issue_1511_control_hashes.json")
 
 
@@ -399,6 +406,83 @@ def run_case(root, selected):
         case("relation-" + kind, lambda r,s,k=kind: relation_control(r,s,k),
              "proof", "durable stamp-explaining relation")
 
+    def narrow_control(root, snap, kind):
+        initial = [message("Synthetic A", 995.), message("Synthetic reply A", 996., "assistant"),
+                   message("Synthetic B", 1000.), message("Synthetic reply B", 1001., "assistant")]
+        if kind in ("tools-restamp", "null-tool-suffix"):
+            initial = [message("Synthetic A", 995.),
+                       message("", 996., "assistant", tool_calls=[dict(id="synthetic-call", type="function",
+                               function=dict(name="read_file", arguments="{}"))]),
+                       message("Synthetic tool result", 997., "tool", tool_call_id="synthetic-call", tool_name="read_file"),
+                       message("Synthetic done", 998., "assistant")]
+            if kind == "null-tool-suffix":
+                for row in initial[1:]:
+                    row["timestamp"] = None
+        if kind == "null-steer-suffix":
+            initial = [message("Synthetic A", 995.), message("Synthetic B", 1000.),
+                       message("Synthetic /steer", None), message("Synthetic steer reply", None, "assistant")]
+        if kind.startswith("proofed-later-"):
+            initial = [message("Synthetic A", 995.), message("Synthetic B", 1000.), message("Synthetic C", 1001.)]
+            if kind.endswith("binding"):
+                initial[-1]["message_uid"] = "synthetic-canonical-c"
+        if kind == "iso-submicro-drift":
+            for i, row in enumerate(initial):
+                row["timestamp"] = 1730000000.1234567 + i
+        replay = deepcopy(initial)
+        if kind.startswith("users-restamp-"):
+            for row in replay:
+                if row["role"] == "user":
+                    row["timestamp"] += float(kind.rsplit("-", 1)[1])
+        elif kind in ("all-restamp", "tools-restamp", "per-row-offsets"):
+            for i, row in enumerate(replay):
+                row["timestamp"] += 5. if kind != "per-row-offsets" else (i + 1) * .25
+        elif kind == "iso-submicro-drift":
+            for row in replay:
+                row["timestamp"] = datetime.fromtimestamp(row["timestamp"], timezone.utc).isoformat(timespec="microseconds")
+        elif kind == "earlier-and-later":
+            replay[0]["timestamp"] -= 1.
+            replay[2]["timestamp"] += 10.
+        elif kind == "null-steer-suffix":
+            replay[1]["timestamp"] += 10.
+            replay[2]["timestamp"], replay[3]["timestamp"] = 1002., 1003.
+        elif kind == "null-tool-suffix":
+            for i, row in enumerate(replay):
+                row["timestamp"] = 1010. + i
+        elif kind == "unknown-incoming-suffix":
+            replay[2]["timestamp"] += 10.
+            replay[3]["timestamp"] = None
+        else:
+            replay[1]["timestamp"] += 10.
+            replay[2]["timestamp"] += 10.
+            replay[2].pop("message_uid", None)
+        with context(root) as engine:
+            engine.ingest(deepcopy(initial))
+            if kind in ("proofed-later-alt_stamp", "proofed-later-carried_stamp"):
+                sid = engine._store.get_session_messages("parent")[-1]["store_id"]
+                engine._store.add_message_relations([[(sid, kind.removeprefix("proofed-later-"), None, 0, 1005.)]])
+            snap(engine, "prepared")
+        with context(root) as engine:
+            before = snapshot(engine)
+            engine.ingest(deepcopy(replay))
+            snap(engine, "replay")
+            after = snapshot(engine)
+            assert len(after["rows"]) == len(before["rows"])
+            if kind not in ("null-steer-suffix", "null-tool-suffix"):
+                assert after == before
+            engine.ingest(deepcopy(replay))
+            snap(engine, "repeat")
+            assert snapshot(engine) == after
+            continued = [*replay, message("Synthetic follow-up", 1100.), message("Synthetic follow-up reply", 1101., "assistant")]
+            engine.ingest(deepcopy(continued))
+            snap(engine, "warm")
+            assert snapshot(engine)["rows"][:len(after["rows"])] == after["rows"]
+            assert len(snapshot(engine)["rows"]) == len(after["rows"]) + 2
+            engine.ingest(deepcopy(continued))
+            snap(engine, "warm-repeat")
+            assert snapshot(engine) == {k: v for k, v in events[-2].items() if k != "phase"}
+    for kind in NARROW_CONTROLS:
+        case(kind, lambda r,s,k=kind: narrow_control(r,s,k), "control", "exactly one difference and clean suffix")
+
     assert events, selected
     return events
 
@@ -492,3 +576,62 @@ def test_same_stamp_full_replay_keeps_cursor(tmp_path):
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
         assert engine._reconcile_ingest_cursor_from_store(deepcopy(view)) == len(view)
         assert snapshot(engine) == before
+
+
+def test_uid_off_ignores_existing_binding(tmp_path, monkeypatch, record_property):
+    """Bindings captured earlier cannot suppress a UID-less resend in off mode."""
+    lineage(tmp_path)
+    initial = [message("Synthetic A", 995.), message("Synthetic B", 1000., message_uid="synthetic-bound-b")]
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        engine.ingest(deepcopy(initial))
+        before = snapshot(engine)
+        assert before["bindings"]
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off")
+    replay = [initial[0], message("Synthetic B", 1010.)]
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        reads = []
+        engine._store._conn.set_trace_callback(lambda sql: reads.append(sql) if "host_uid_bindings" in sql.lower() else None)
+        cursor = engine._reconcile_ingest_cursor_from_store(deepcopy(replay))
+        record_property("off_binding_reads", len(reads))
+        assert not reads
+        assert cursor == 1
+        engine.ingest(deepcopy(replay))
+        assert not reads
+        engine._store._conn.set_trace_callback(None)
+        after = snapshot(engine)
+        assert len(after["rows"]) == 3
+        assert after["rows"][:2] == before["rows"]
+        assert after["rows"][-1]["observed_at"] == 1010.
+        assert after["bindings"] == before["bindings"]
+        engine.ingest(deepcopy(replay))
+        assert snapshot(engine) == after
+
+
+@pytest.mark.parametrize("prefix", ["none", "clean", "unknown-stored", "unknown-incoming"])
+def test_later_occurrence_reason_and_clean_suffix(tmp_path, prefix):
+    lineage(tmp_path)
+    initial = ([] if prefix == "none" else [message("Synthetic prefix", None if prefix == "unknown-stored" else 995.)])
+    index = len(initial)
+    initial += [message("Synthetic resend", 1000.), message("Synthetic reply", 1001., "assistant")]
+    replay = deepcopy(initial)
+    replay[index]["timestamp"] = 1010.
+    if prefix == "unknown-stored":
+        replay[0]["timestamp"] = 995.
+    if prefix == "unknown-incoming":
+        replay[0]["timestamp"] = None
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        engine.ingest(deepcopy(initial))
+        before = snapshot(engine)
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as engine:
+        assert engine._reconcile_ingest_cursor_from_store(deepcopy(replay)) == index
+        assert engine._last_ingest_reconciliation["reason"] == "replayed durable tail before a later user occurrence"
+        engine.ingest(deepcopy(replay))
+        after = snapshot(engine)
+        expected = deepcopy(before["rows"])
+        if prefix == "unknown-stored":
+            expected[0].update(observed_at=995., observed_at_source="host_message_timestamp")
+        assert after["rows"][:len(expected)] == expected
+        assert len(after["rows"]) == len(before["rows"]) + 1
+        assert after["rows"][-1]["observed_at"] == 1010.
+        engine.ingest(deepcopy(replay))
+        assert snapshot(engine) == after
