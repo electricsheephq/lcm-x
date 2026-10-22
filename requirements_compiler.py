@@ -375,14 +375,23 @@ def _carried_absolute_day(source, *, date_dependent=True):
     """Share the compiler date parser; a year is required for independence."""
     if not source.get("time_uncertain") or _carried_mixed_dates(source, date_dependent=date_dependent):
         return None
+    if not date_dependent:
+        days = _carried_legacy_days(source["quote"])
+        return next(iter(days)) if len(days) == 1 else None
     return _quote_date_info(source["quote"])[0]
+
+
+def _carried_legacy_days(quote):
+    # Non-date contracts retain the pre-#1851 parse mode of the shared grammar.
+    return {_date_value(m.group(0), allow_mixed=False)
+            for m in _DATE_TEXT_RE.finditer(_carried_date_text(quote))} - {None}
 
 
 def _carried_mixed_dates(source, *, date_dependent=True):
     # Shared by ordinary and carried rows, including base-unknown named dates.
     quote = source.get("content", source["quote"]) if source.get("time_uncertain") else source["quote"]
     if source.get("time_uncertain") and not date_dependent:
-        days = {_date_value(m.group(0)) for m in _DATE_TEXT_RE.finditer(_carried_date_text(quote))} - {None}
+        days = _carried_legacy_days(quote)
         # Use the base resolver itself, including mixed-separator ISO matches.
         return bool(days) and bool(_RELATIVE.search(quote) or (len(days) > 1 and
             resolve_occurrence_time(quote, observed_at=0, withhold_mixed=False).get("event_time_source") != "explicit"))

@@ -65,9 +65,11 @@ _WEEKDAYS = {
 }
 
 
-def _date_value(raw: str) -> date | None:
+def _date_value(raw: str, *, allow_mixed: bool = True) -> date | None:
     normalized = " ".join(str(raw or "").strip().split())
     for pattern in _DATE_FORMATS:
+        if not allow_mixed and pattern in ("%Y-%m/%d", "%Y/%m-%d"):
+            continue
         try:
             return datetime.strptime(normalized, pattern).date()
         except ValueError:

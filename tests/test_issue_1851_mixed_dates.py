@@ -112,3 +112,18 @@ def test_issue_cells_fixture_only(tmp_path, pair, carried):
         refs = plant(engine, [text, "Unrelated synthetic row."], carried_index=0 if carried else 1)[:1]
         assert_withheld(engine, refs, "order", QUESTIONS[0][1])
         assert occurrence_time._quote_date_info(text)[1] == REASON
+
+
+@pytest.mark.parametrize("mixed", ["2023-01/10", "2023/01-10"])
+@pytest.mark.parametrize("other", ["2023-01-12", "January 12, 2023"])
+def test_non_date_carried_fact_keeps_base_parse_mode(tmp_path, mixed, other):
+    text = f"Batch dates: {mixed} and {other}. My project status is green."
+    with engine_context(tmp_path, embeddings_enabled=False) as engine:
+        refs = plant(engine, [text])
+        before = engine._store.connection.total_changes
+        result = json.loads(tools.lcm_compile_evidence(args(refs), engine=engine))
+        assert result["state"] == "answer_sufficient"
+        assert result["direct_fact"]["value"] == "green"
+        assert _carried_absolute_day(dict(time_uncertain="carried", quote=text),
+                                     date_dependent=False) == date(2023, 1, 12)
+        assert engine._store.connection.total_changes == before
