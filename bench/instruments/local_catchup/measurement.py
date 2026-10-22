@@ -155,7 +155,12 @@ def cell(a, state, block, kind):
             stopped = stop(proc)
             meter.close()
     reason = meter.breach or reason
-    result = load(root/"raw-summary.json") if (root/"raw-summary.json").exists() else {}
+    try:
+        result = load(root/"raw-summary.json") if (root/"raw-summary.json").exists() else {}
+    except (OSError, ValueError):
+        if not stopped["stop_killed"]:
+            raise
+        result = dict(worker_receipts_truncated=["raw-summary.json"])
     if reason or proc.returncode:
         result.update(state="ABORTED", reason=reason or f"worker_exit:{proc.returncode}")
     result.update(stopped)
@@ -163,12 +168,20 @@ def cell(a, state, block, kind):
         result.update(state="INVALID", reason="forced_stop_after_grace")
         if reason:
             result["breach_reason"] = reason
-    if (root/"progress.jsonl").exists():
-        last = json.loads((root/"progress.jsonl").read_text().splitlines()[-1])
-        result.update({k: last[k] for k in ("fixed_corpus_frozen_s", "global_live_commits_during_freeze") if k in last})
     for path in root.glob("*.jsonl"):
-        labelled = [dict(json.loads(line), label=SMOKE if a.smoke else a.label) for line in path.read_text().splitlines()]
-        path.write_text("".join(json.dumps(row, sort_keys=True)+"\n" for row in labelled))
+        lines, tail = path.read_bytes().splitlines(keepends=True), b""
+        try:
+            labelled = [dict(json.loads(line), label=SMOKE if a.smoke else a.label) for line in lines]
+        except ValueError:
+            if not stopped["stop_killed"]:
+                raise
+            tail = lines.pop()
+            labelled = [dict(json.loads(line), label=SMOKE if a.smoke else a.label) for line in lines]
+        if path.name == "progress.jsonl":
+            result.update({k: labelled[-1][k] for k in ("fixed_corpus_frozen_s", "global_live_commits_during_freeze") if labelled and k in labelled[-1]})
+        if stopped["stop_killed"] and (tail or not lines and path.name == "progress.jsonl"):
+            result.setdefault("worker_receipts_truncated", []).append(path.name)
+        path.write_bytes("".join(json.dumps(row, sort_keys=True)+"\n" for row in labelled).encode()+tail)
     result.update(label=SMOKE if a.smoke else a.label, cpu=meter.summary("NOT_JUDGED" if a.smoke else "INCOMPLETE"), exit=proc.returncode)
     dump(root/"summary.json", result)
     if reason or result.get("state") == "ABORTED":
