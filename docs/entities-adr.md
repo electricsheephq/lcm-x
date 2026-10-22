@@ -92,7 +92,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
   - (a) when the key has exactly one candidate, to all of the key's source rows it cites (a global override); or
   - (b) scoped to the assertion or source rows it disambiguates.
 
-  A global override is refused while the key is ambiguous.
+  A global override is refused while the key is ambiguous. This check counts every candidate in the scope, independent of the requester, and the requester gets a generic refusal with no ambiguity flag or candidate count, so it never reveals an entity they cannot see (D8).
 - **Resolution:**
   - Take the `value` part of `namespace:value`, normalise it as in D3, and look it up among aliases.
   - Exactly one candidate of a compatible kind gives a resolved key. Zero or several candidates leave it unresolved; nothing guesses.
@@ -125,7 +125,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 
 ### D7. Tenancy
 - Every entity, alias, note, link, key and event row carries `scope_key`.
-- In v1, `scope_key` is the bound profile identity (the same identity D10 records on file revisions), set on every insert. Normally each profile has its own store. When a configured `database_path` makes one database serve several profile homes, rows from different profiles still never share a `scope_key`. So D3's hard identity, D5(a) attach, D6 keys and every read are per profile, and no read crosses `scope_key`.
+- In v1, `scope_key` is the bound profile identity (the same identity D10 records on file revisions), set on every insert. Normally each profile has its own store. When a configured `database_path` makes one database serve several profile homes, rows from different profiles still never share a `scope_key`. So D3's hard identity, D5(a) attach, D6 keys and every read are per profile, and no read crosses `scope_key`. Every mutation target lookup (D4 merge, split and undo, D5(a) attach) and every canonical traversal is scoped to the bound `scope_key`: an id from another scope is "not found".
 - A future Teams scope is an additive value with an explicit share. It is not a migration.
 
 ### D8. Labels are not permissions (invariant 6)
@@ -134,7 +134,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
   - Uncited records are hidden unless an explicit grant exists.
   - An alias with no source rows is visible to the profile owner only.
   - **Citation kinds.** A citation is either a store row (`store_id`) or a host memory-file revision (`lcm_memory_host_file_revisions.revision_id`, see D10). A file-revision citation counts toward the non-empty cited set. A record citing any file revision is visible to the profile owner only, and every other citation it carries must also be visible.
-  - **Forget hiding is a delivery filter, not a visibility change (D11).** Hidden rows still count as visible when D8 evaluates the citations of the retraction note that hides them, so the note and its withdrawal marker stay visible to the forgetting principal.
+  - **Forget hiding is a delivery filter, not a visibility change (D11).** Hidden rows still count as visible when D8 evaluates the citations of the retraction note that hides them, so the note and its withdrawal marker stay visible to the forgetting principal. Derived records (alias, key, link, card) whose ONLY supporting provenance is hidden for the forgetter are filtered for that forgetter by the same per-principal delivery rule; the retraction note is the one exception.
   - **Entity visibility.** Entity rows carry no citations of their own. An entity (its canonical-map entry, card and candidate slot) is visible to a principal only when at least one of its own aliases or notes, or those of an entity merged into it, is visible.
 - **Ambiguity is counted after visibility.** Under AccessContextV1, alias and key candidates are filtered by visibility **before** ambiguity is counted. Stored key rows (D6) are the principal-independent derivation. Resolution and ambiguity for a reader are evaluated at read time over that reader's visible candidates. Candidate sets and ambiguity flags therefore never reveal an entity that the principal cannot see.
 - Entity cards apply the same filters.
@@ -164,7 +164,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 - **Why.** Hermes injects both files into every system prompt. LCM-X reads them for history, removals and entity-card coverage, not for current facts.
 - **Capture.** At session start, and at idle where the engine has an idle point, LCM-X reads the bound profile home's `memories/MEMORY.md` and `memories/USER.md`.
   - Entries are split the way Hermes's own memory store parses them. The entry, not the line, is the unit.
-  - Each content change becomes one `lcm_memory_host_file_revisions` row: `revision_id`, absolute `path`, `revision_sha`, `content_hash`, `captured_at`, and the bound profile identity the engine already uses for ownership.
+  - Each content change observed at a snapshot point (session start, idle) becomes one `lcm_memory_host_file_revisions` row. Changes made and replaced between two snapshot points are not seen; capturing at Hermes' write boundary is a later host-hook option. Each such row has `revision_id`, absolute `path`, `revision_sha`, `content_hash`, `captured_at`, and the bound profile identity the engine already uses for ownership.
   - A file-revision citation is visible only to the owner of that same profile. When one database serves several profile homes (a configured `database_path`), each profile's files are captured under its own identity, and one profile never sees notes from another profile's files. The entry text itself is kept in the note it creates.
   - No message rows are written (invariant 5). The files are never written.
 - **Unreadable file.** An unreadable or undecodable file records no revision and changes no notes, so an uncertain read is never treated as an empty file. Capture never blocks or fails session start; the failure is logged and counted in `lcm_status`.
