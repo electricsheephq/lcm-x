@@ -6949,6 +6949,7 @@ class LCMEngine(
             )
         unchanged_prefix_occurrences -= new_prefix_occurrences
         anchor_plan = None
+        unaudited_from = None
         if identity_anchor_enabled():
             # A steady-state cursor proves the prefix only while the host keeps that prefix; where it
             # changed, the pre-match audits it (a row the host moved before the cursor was never stored).
@@ -6974,6 +6975,9 @@ class LCMEngine(
             except Exception as exc:
                 logger.warning("LCM identity-anchor pre-match failed (%s); ordered-prefix path only", type(exc).__name__)
                 anchor_plan = None
+                if audit_from is not None:
+                    unaudited_from = audit_from
+                    self._record_ingest_failure("identity-anchor pre-match", exc)
             if anchor_plan and anchor_plan["cursor"] < cursor:
                 cursor = anchor_plan["cursor"]
                 self._ingest_cursor = cursor
@@ -7018,6 +7022,15 @@ class LCMEngine(
         new_messages = replay_messages[cursor:] if cursor < n else []
         original_new_messages = messages[cursor:] if cursor < n else []
 
+        def remember(active):
+            result = self._remember_active_replay_messages(messages, active)
+            # #1353: retain the old identity so the next ingest retries the failed prefix audit.
+            if unaudited_from is not None and unaudited_from < min(
+                len(self._last_active_replay_source_identities), len(cached_source_identities)
+            ):
+                self._last_active_replay_source_identities[unaudited_from] = cached_source_identities[unaudited_from]
+            return result
+
         if not new_messages:
             cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
             self._compression_boundary_ingest_pending = False
@@ -7028,7 +7041,7 @@ class LCMEngine(
             self._host_uid_shadow(host_uids)
             if cached_replay is not None:
                 return cached_replay
-            return self._remember_active_replay_messages(messages, replay_messages)
+            return remember(replay_messages)
 
         active_replay_messages = replay_messages
         compression_boundary_ingest_pending = self._compression_boundary_ingest_pending
@@ -7073,7 +7086,7 @@ class LCMEngine(
             self._compression_boundary_stored_placeholder_digest_counts = {}
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
             self._host_uid_shadow(host_uids)
-            return self._remember_active_replay_messages(messages, active_replay_messages)
+            return remember(active_replay_messages)
 
         protected_messages, active_replay_messages = self._protect_ingest_rows(
             messages=messages,
@@ -7123,7 +7136,7 @@ class LCMEngine(
         # data/base64 substrings stay provider-usable in active replay. The
         # exceptions are whole-message ``raw_payload`` externalization and the
         # separately opt-in textual tool-result interceptor above.
-        return self._remember_active_replay_messages(messages, active_replay_messages)
+        return remember(active_replay_messages)
 
     def _build_ingest_replay(
         self,
