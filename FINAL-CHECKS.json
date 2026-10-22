@@ -1,0 +1,96 @@
+{
+  "timestamp_utc": "2026-10-22T12:15:12.751748+00:00",
+  "HEAD": "c0b1f17e86868c5312e9752ac1d0594412856997",
+  "branch": {
+    "argv": [
+      "git",
+      "branch",
+      "--show-current"
+    ],
+    "exit_code": 0,
+    "stdout": "fix/1624-cloud-coverage-stream\n",
+    "stderr": ""
+  },
+  "ruff": {
+    "argv": [
+      "uv",
+      "tool",
+      "run",
+      "--from",
+      "ruff==0.15.13",
+      "ruff",
+      "check",
+      "command.py",
+      "embedding_maintenance.py",
+      "tests/test_issue_1586_gap_discovery.py",
+      "tests/test_issue_1624_cloud_stream_liveness.py"
+    ],
+    "exit_code": 0,
+    "stdout": "All checks passed!\n",
+    "stderr": ""
+  },
+  "working_diff_check": {
+    "argv": [
+      "git",
+      "diff",
+      "--check"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "base_diff_check": {
+    "argv": [
+      "git",
+      "diff",
+      "91a039891afd969f9569897115990fe0c419e034",
+      "c0b1f17e86868c5312e9752ac1d0594412856997",
+      "--check"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "status": {
+    "argv": [
+      "git",
+      "status",
+      "--porcelain"
+    ],
+    "exit_code": 0,
+    "stdout": "",
+    "stderr": ""
+  },
+  "numstat": {
+    "argv": [
+      "git",
+      "diff",
+      "--numstat",
+      "91a039891afd969f9569897115990fe0c419e034",
+      "c0b1f17e86868c5312e9752ac1d0594412856997"
+    ],
+    "exit_code": 0,
+    "stdout": "115\t19\tcommand.py\n2\t0\tembedding_maintenance.py\n92\t80\ttests/fixtures/backfill_trace.json\n4\t1\ttests/test_issue_1586_gap_discovery.py\n147\t0\ttests/test_issue_1624_cloud_stream_liveness.py\n",
+    "stderr": ""
+  },
+  "commits": {
+    "argv": [
+      "git",
+      "log",
+      "--reverse",
+      "--format=%H %s",
+      "91a039891afd969f9569897115990fe0c419e034..c0b1f17e86868c5312e9752ac1d0594412856997"
+    ],
+    "exit_code": 0,
+    "stdout": "c27bded9fc30f6a1e46c3ce3c90d1d58a522e2a6 test: capture cloud coverage cancellation and low-band regressions\n111397b32433ee923298f3cb44da70a419a69f9b fix: validate cloud coverage and alternate independent bounded gap walks\ncef344e54167848829c22752c6a431191a763985 fix: preserve first-band priority and terminate rejected parent proof\n7852ad7dba8281777f6d8d46ba3a5359e21b7bc9 test: explain bounded discovery and coverage trace updates\nc0b1f17e86868c5312e9752ac1d0594412856997 fix: keep metadata coverage separate from revision repair completion\n",
+    "stderr": ""
+  },
+  "source_sha256": {
+    "command.py": "34beeb7b7de6cc5d3fc67566050ce96f9f5038a2c0ba0c4581dd93f297cbbf3a",
+    "embedding_maintenance.py": "048f63107c1c1b8730363887a54ce06c43ba3fa05097ff8cd69d4f7dae5526a4",
+    "tests/test_issue_1586_gap_discovery.py": "45b94a841f2f30324db9bd90b449d1e03c5e848d5e769ea1e56d7764ea0f3e81",
+    "tests/test_issue_1624_cloud_stream_liveness.py": "374174ea490e9ea6d700aa3d5e859083515a40c66874fa205856b865da38fe6c",
+    "tests/fixtures/backfill_trace.json": "77d52d47ab741236db07824684d0874ba533a7d7f208e04ab295555a383d9695"
+  },
+  "production_LOC": 136
+}

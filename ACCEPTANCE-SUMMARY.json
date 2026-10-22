@@ -1,0 +1,760 @@
+{
+  "base": "91a039891afd969f9569897115990fe0c419e034",
+  "source": "cef344e54167848829c22752c6a431191a763985",
+  "head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+  "ga": "709099b3a397a7893a7abae8802ebe7bf605f79e",
+  "pre_marker": "20891a980cae075cad177da7c19c549bac05e63c",
+  "production_sha256": {
+    "command.py": "34beeb7b7de6cc5d3fc67566050ce96f9f5038a2c0ba0c4581dd93f297cbbf3a",
+    "embedding_maintenance.py": "048f63107c1c1b8730363887a54ce06c43ba3fa05097ff8cd69d4f7dae5526a4"
+  },
+  "production_changed_loc": 136,
+  "oracle": {
+    "nolegacy": {
+      "n": 600,
+      "new_step_mismatches": 0,
+      "false_certificate_seeds": [],
+      "false_certificate_seeds_outside_tradeoff": [],
+      "pass": true
+    },
+    "legacy": {
+      "n": 600,
+      "new_step_mismatches": 0,
+      "false_certificate_seeds": [
+        150,
+        212,
+        422,
+        491
+      ],
+      "false_certificate_seeds_outside_tradeoff": [],
+      "pass": true
+    }
+  },
+  "bounds": [
+    {
+      "name": "head-bigpage-5000.json",
+      "converged_pass": 7,
+      "max_scans": 3,
+      "width_violations": 0,
+      "steady_scans": 0,
+      "steady_pairs": 60,
+      "missing": 0
+    },
+    {
+      "name": "head-fresh-2400.json",
+      "converged_pass": 35,
+      "max_scans": 3,
+      "width_violations": 0,
+      "steady_scans": 0,
+      "steady_pairs": 60,
+      "missing": 0
+    },
+    {
+      "name": "head-legacy-int-2400.json",
+      "converged_pass": 29,
+      "max_scans": 3,
+      "width_violations": 0,
+      "steady_scans": 0,
+      "steady_pairs": 60,
+      "missing": 0
+    },
+    {
+      "name": "head-limit-resume-2400.json",
+      "converged_pass": 22,
+      "max_scans": 3,
+      "width_violations": 0,
+      "steady_scans": 0,
+      "steady_pairs": 60,
+      "missing": 0
+    }
+  ],
+  "liveness": {
+    "natural-1543": {
+      "tree": "head",
+      "scenario": "natural-1543",
+      "period": 1,
+      "calls": 200,
+      "holes_filled_at_call": 0,
+      "marker_equals_cursor_first_at_call": 2,
+      "writable_low_scans_total": 2,
+      "max_scans_per_call": 3,
+      "max_examined_per_scan": 5,
+      "width_violations": 0,
+      "ro_violations": 0,
+      "final_marker": {
+        "from": 1,
+        "through": 407,
+        "policy": "conversational"
+      },
+      "final_cursor": [
+        1,
+        407
+      ],
+      "final_oracle_missing": 0,
+      "calls_remaining_positive_last50": 0,
+      "calls_holes_missing_but_remaining_zero": 0,
+      "calls_holes_missing_but_status_zero": 0,
+      "last_ro_remaining": [
+        0,
+        0,
+        0
+      ],
+      "last_status": "embedding_backlog_chunks: 0"
+    },
+    "natural-1543-upper-pending": {
+      "tree": "head",
+      "scenario": "natural-1543-upper-pending",
+      "period": 1,
+      "calls": 200,
+      "holes_filled_at_call": 0,
+      "marker_equals_cursor_first_at_call": 2,
+      "writable_low_scans_total": 2,
+      "max_scans_per_call": 3,
+      "max_examined_per_scan": 4,
+      "width_violations": 0,
+      "ro_violations": 0,
+      "final_marker": {
+        "from": 1,
+        "through": 409,
+        "policy": "conversational"
+      },
+      "final_cursor": [
+        1,
+        409
+      ],
+      "final_oracle_missing": 0,
+      "calls_remaining_positive_last50": 0,
+      "calls_holes_missing_but_remaining_zero": 0,
+      "calls_holes_missing_but_status_zero": 0,
+      "last_ro_remaining": [
+        0,
+        0,
+        0
+      ],
+      "last_status": "embedding_backlog_chunks: 0"
+    },
+    "own-walk-600": {
+      "tree": "head",
+      "scenario": "own-walk-600",
+      "period": 1,
+      "calls": 200,
+      "holes_filled_at_call": null,
+      "marker_equals_cursor_first_at_call": 19,
+      "writable_low_scans_total": 9,
+      "max_scans_per_call": 3,
+      "max_examined_per_scan": 515,
+      "width_violations": 0,
+      "ro_violations": 0,
+      "final_marker": {
+        "from": 1,
+        "through": 1000,
+        "policy": "conversational"
+      },
+      "final_cursor": [
+        1,
+        1000
+      ],
+      "final_oracle_missing": 0,
+      "calls_remaining_positive_last50": 0,
+      "calls_holes_missing_but_remaining_zero": 0,
+      "calls_holes_missing_but_status_zero": 0,
+      "last_ro_remaining": [
+        0,
+        0,
+        0
+      ],
+      "last_status": "embedding_backlog_chunks: 0"
+    }
+  },
+  "liveness_cost": {
+    "base": {
+      "tree": "base",
+      "walk_passes": 18,
+      "pass_ms_median": 11.969145998591557,
+      "status_ms_median": 9.980437505873851,
+      "last_pass_scans": [
+        {
+          "w": true,
+          "band": [
+            20095,
+            20096
+          ],
+          "examined": 2,
+          "width": 2,
+          "outside": 0
+        },
+        {
+          "w": false,
+          "band": [
+            20097,
+            20098
+          ],
+          "examined": 2,
+          "width": 2,
+          "outside": 0
+        },
+        {
+          "w": false,
+          "band": [
+            1,
+            18864
+          ],
+          "examined": 16450,
+          "width": 18864,
+          "outside": 0
+        }
+      ],
+      "marker": {
+        "from": 18865,
+        "through": 20096,
+        "policy": "conversational"
+      },
+      "cursor": [
+        1,
+        20098
+      ],
+      "n": 30
+    },
+    "prebase": {
+      "tree": "prebase",
+      "walk_passes": 18,
+      "pass_ms_median": 4.81975001457613,
+      "status_ms_median": 0.4617289960151538,
+      "last_pass_scans": [
+        {
+          "w": true,
+          "band": [
+            20095,
+            20096
+          ],
+          "examined": 2,
+          "width": 2,
+          "outside": 0
+        },
+        {
+          "w": false,
+          "band": [
+            20097,
+            20098
+          ],
+          "examined": 2,
+          "width": 2,
+          "outside": 0
+        }
+      ],
+      "marker": {
+        "legacy": 20096
+      },
+      "cursor": [
+        1,
+        20098
+      ],
+      "n": 30
+    },
+    "head": {
+      "tree": "head-delta2",
+      "walk_passes": 18,
+      "pass_ms_median": 3.114937004284002,
+      "status_ms_median": 0.29589601035695523,
+      "last_pass_scans": [
+        {
+          "w": true,
+          "band": [
+            20097,
+            20098
+          ],
+          "examined": 2,
+          "width": 2,
+          "outside": 0
+        }
+      ],
+      "marker": {
+        "from": 1,
+        "through": 20098,
+        "policy": "conversational"
+      },
+      "cursor": [
+        1,
+        20098
+      ],
+      "pass_samples_ms": [
+        3.436375001911074,
+        3.6602920154109597,
+        3.357167006470263,
+        3.120166016742587,
+        3.3336670021526515,
+        3.1097079918254167,
+        3.454457997577265,
+        3.047292004339397,
+        3.3178750018123537,
+        2.770374994724989,
+        2.96958300168626,
+        3.082167007960379,
+        3.0684579978697,
+        2.89424997754395,
+        3.1774590024724603,
+        2.819166984409094,
+        3.277582989539951,
+        2.6247079949826,
+        3.193000011378899,
+        2.829375007422641,
+        3.2971669861581177,
+        3.243832994485274,
+        2.706750005017966,
+        3.333917004056275,
+        2.807958982884884,
+        3.101999987848103,
+        3.2814999867696315,
+        3.008958010468632,
+        3.757917002076283,
+        2.60529198567383
+      ],
+      "status_samples_ms": [
+        0.757541973143816,
+        0.33433298813179135,
+        0.27266700635664165,
+        0.3009999927598983,
+        0.2952080103568733,
+        0.29525000718422234,
+        0.28445900534279644,
+        0.31495801522396505,
+        0.3498750156722963,
+        0.2916670055128634,
+        0.29024999821558595,
+        0.29937500949017704,
+        0.31529099214822054,
+        0.3141670022159815,
+        0.299000006634742,
+        0.27829199098050594,
+        0.2806670090649277,
+        0.2868749725166708,
+        0.30262500513345003,
+        0.3006249899044633,
+        0.3121249901596457,
+        0.28791598742827773,
+        0.2822499955072999,
+        0.28708300669677556,
+        0.3025420010089874,
+        0.2965420135296881,
+        0.2667499938979745,
+        0.28708402533084154,
+        0.26804200024344027,
+        0.2996250113938004
+      ],
+      "n": 30
+    },
+    "within_pre_marker_bound": {
+      "pass_ms_median": true,
+      "status_ms_median": true
+    }
+  },
+  "steady_cost": {
+    "specified-base": {
+      "pass": {
+        "base_p50_ms": 2.5475,
+        "head_p50_ms": 2.5433,
+        "delta_ms": -0.0042,
+        "delta_pct": -0.17,
+        "bound_ms": 2.8023,
+        "within": true,
+        "base_p90": 2.9068,
+        "head_p90": 2.8854,
+        "outputs": {
+          "base": [
+            "(0, None)"
+          ],
+          "head": [
+            "(0, None)"
+          ]
+        },
+        "n": 200
+      },
+      "status": {
+        "base_p50_ms": 0.298,
+        "head_p50_ms": 0.2949,
+        "delta_ms": -0.0031,
+        "delta_pct": -1.04,
+        "bound_ms": 0.348,
+        "within": true,
+        "base_p90": 0.3585,
+        "head_p90": 0.3513,
+        "outputs": {
+          "base": [
+            "(None, '0')"
+          ],
+          "head": [
+            "(None, '0')"
+          ]
+        },
+        "n": 200
+      },
+      "fresh-pass": {
+        "base_p50_ms": 2.6436,
+        "head_p50_ms": 2.6324,
+        "delta_ms": -0.0112,
+        "delta_pct": -0.42,
+        "bound_ms": 2.908,
+        "within": true,
+        "base_p90": 3.005,
+        "head_p90": 3.0679,
+        "outputs": {
+          "base": [
+            "(0, None)"
+          ],
+          "head": [
+            "(0, None)"
+          ]
+        },
+        "n": 200
+      },
+      "fresh-status": {
+        "base_p50_ms": 0.2583,
+        "head_p50_ms": 0.2659,
+        "delta_ms": 0.0076,
+        "delta_pct": 2.96,
+        "bound_ms": 0.3083,
+        "within": true,
+        "base_p90": 0.3337,
+        "head_p90": 0.3331,
+        "outputs": {
+          "base": [
+            "(None, '0')"
+          ],
+          "head": [
+            "(None, '0')"
+          ]
+        },
+        "n": 200
+      }
+    },
+    "pre-marker": {
+      "pass": {
+        "base_p50_ms": 2.6372,
+        "head_p50_ms": 2.7535,
+        "delta_ms": 0.1162,
+        "delta_pct": 4.41,
+        "bound_ms": 2.901,
+        "within": true,
+        "base_p90": 6.1839,
+        "head_p90": 5.4691,
+        "outputs": {
+          "base": [
+            "(0, None)"
+          ],
+          "head": [
+            "(0, None)"
+          ]
+        },
+        "n": 200
+      },
+      "status": {
+        "base_p50_ms": 0.2062,
+        "head_p50_ms": 0.2128,
+        "delta_ms": 0.0066,
+        "delta_pct": 3.22,
+        "bound_ms": 0.2562,
+        "within": true,
+        "base_p90": 0.2337,
+        "head_p90": 0.2443,
+        "outputs": {
+          "base": [
+            "(None, '0')"
+          ],
+          "head": [
+            "(None, '0')"
+          ]
+        },
+        "n": 200
+      },
+      "fresh-pass": {
+        "base_p50_ms": 2.0463,
+        "head_p50_ms": 2.1089,
+        "delta_ms": 0.0626,
+        "delta_pct": 3.06,
+        "bound_ms": 2.251,
+        "within": true,
+        "base_p90": 2.2913,
+        "head_p90": 2.3836,
+        "outputs": {
+          "base": [
+            "(0, None)"
+          ],
+          "head": [
+            "(0, None)"
+          ]
+        },
+        "n": 200
+      },
+      "fresh-status": {
+        "base_p50_ms": 0.2329,
+        "head_p50_ms": 0.2423,
+        "delta_ms": 0.0094,
+        "delta_pct": 4.03,
+        "bound_ms": 0.2829,
+        "within": true,
+        "base_p90": 0.2918,
+        "head_p90": 0.3213,
+        "outputs": {
+          "base": [
+            "(None, '0')"
+          ],
+          "head": [
+            "(None, '0')"
+          ]
+        },
+        "n": 200
+      }
+    }
+  },
+  "stream": {
+    "selected_ids_identical": true,
+    "selected_count": 32,
+    "within_2x_ga": {
+      "first": true,
+      "cancel": true
+    },
+    "timings": {
+      "first": {
+        "ga": {
+          "p50_ms": 2.2433125,
+          "q1_ms": 2.1951452499999995,
+          "q3_ms": 2.2929169999999996,
+          "iqr_ms": 0.09777175000000016,
+          "n": 40
+        },
+        "base": {
+          "p50_ms": 2.2946255,
+          "q1_ms": 2.210937,
+          "q3_ms": 2.36223975,
+          "iqr_ms": 0.15130275000000015,
+          "n": 40
+        },
+        "head": {
+          "p50_ms": 2.2527295,
+          "q1_ms": 2.1966877499999997,
+          "q3_ms": 2.3193747499999997,
+          "iqr_ms": 0.12268699999999999,
+          "n": 40
+        }
+      },
+      "cancel": {
+        "ga": {
+          "p50_ms": 14.461041999999999,
+          "q1_ms": 14.321,
+          "q3_ms": 14.803396249999999,
+          "iqr_ms": 0.48239624999999897,
+          "n": 40
+        },
+        "base": {
+          "p50_ms": 9.1290835,
+          "q1_ms": 8.98078125,
+          "q3_ms": 9.30628175,
+          "iqr_ms": 0.3255005000000004,
+          "n": 40
+        },
+        "head": {
+          "p50_ms": 2.9112085,
+          "q1_ms": 2.8140420000000006,
+          "q3_ms": 3.04090625,
+          "iqr_ms": 0.22686424999999932,
+          "n": 40
+        }
+      }
+    }
+  },
+  "cloud": {
+    "before": {
+      "ga": {
+        "p50_ms": 0.558146,
+        "q1_ms": 0.497333,
+        "q3_ms": 0.629427,
+        "iqr_ms": 0.13209399999999993,
+        "n": 60
+      },
+      "base": {
+        "p50_ms": 12.705625,
+        "q1_ms": 12.54797925,
+        "q3_ms": 12.912125,
+        "iqr_ms": 0.3641457500000005,
+        "n": 60
+      },
+      "head": {
+        "p50_ms": 12.578187499999999,
+        "q1_ms": 12.363135250000001,
+        "q3_ms": 12.885051749999999,
+        "iqr_ms": 0.5219164999999979,
+        "n": 60
+      }
+    },
+    "maintenance": {
+      "ga": {
+        "ns": 331125,
+        "result": "summaries=complete:0",
+        "marker": null
+      },
+      "base": {
+        "ns": 418458,
+        "result": "summaries=complete:0",
+        "marker": null
+      },
+      "head": {
+        "ns": 20400375,
+        "result": "summaries=complete:0",
+        "marker": "{\"from\":1,\"through\":20000,\"policy\":\"conversational\"}"
+      }
+    },
+    "after": {
+      "ga": {
+        "p50_ms": 0.5050835,
+        "q1_ms": 0.467156,
+        "q3_ms": 0.5748755,
+        "iqr_ms": 0.10771949999999997,
+        "n": 60
+      },
+      "base": {
+        "p50_ms": 12.660979000000001,
+        "q1_ms": 12.482947750000001,
+        "q3_ms": 13.8917185,
+        "iqr_ms": 1.4087707499999986,
+        "n": 60
+      },
+      "head": {
+        "p50_ms": 0.585375,
+        "q1_ms": 0.554979,
+        "q3_ms": 0.6428119999999999,
+        "iqr_ms": 0.08783299999999994,
+        "n": 60
+      }
+    },
+    "within_2x_ga": true
+  },
+  "goldens": {
+    "scenarios": 80,
+    "changed": [
+      "chunks/stop-before-dispatch",
+      "chunks/incremental-boundary-resume",
+      "chunks/incremental-revision-gap-checkpoint"
+    ],
+    "first_differences": {
+      "chunks/stop-before-dispatch": {
+        "base_length": 169,
+        "head_length": 165,
+        "first_index": 127
+      },
+      "chunks/incremental-boundary-resume": {
+        "base_length": 590,
+        "head_length": 593,
+        "first_index": 382
+      },
+      "chunks/incremental-revision-gap-checkpoint": {
+        "base_length": 686,
+        "head_length": 694,
+        "first_index": 134
+      }
+    }
+  },
+  "budgets": {
+    "initial_implementation_cycles": 1,
+    "oracle_source_corrections_used": 1,
+    "recovery_attempts_used": 0,
+    "review_driven_head_changes": 1,
+    "review_initial_passes": 1,
+    "review_targeted_delta_passes": 1
+  },
+  "measurement_identities": {
+    "final_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+    "base": "91a039891afd969f9569897115990fe0c419e034",
+    "final_production_sha256": {
+      "command.py": "34beeb7b7de6cc5d3fc67566050ce96f9f5038a2c0ba0c4581dd93f297cbbf3a",
+      "embedding_maintenance.py": "048f63107c1c1b8730363887a54ce06c43ba3fa05097ff8cd69d4f7dae5526a4"
+    },
+    "measurements": {
+      "stream": {
+        "measured_head": "cef344e54167848829c22752c6a431191a763985",
+        "raw": "timing-stream.json",
+        "retained_proof": "Final guard is in metadata_only revision-promotion handling. Normal first selection uses metadata_only=False; cancellation exits before post-publication metadata-only validation. Original same32, first-yield and cancellation path unchanged."
+      },
+      "certified_steady_cost": {
+        "measured_head": "cef344e54167848829c22752c6a431191a763985",
+        "raw": [
+          "steady-cost-specified-base.json",
+          "steady-cost-pre-marker.json"
+        ],
+        "comparators": {
+          "specified-base": "91a039891afd969f9569897115990fe0c419e034",
+          "pre-marker": "20891a980cae075cad177da7c19c549bac05e63c"
+        },
+        "retained_proof": "Certified steady path performs zero gap scans; final guard is inside a metadata-only scan completion write. Neither certified steady nor instrument fresh trusted legacy marker path reaches that changed write."
+      },
+      "cloud": {
+        "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "raw": "timing-cloud-delta2.json",
+        "ga": "709099b3a397a7893a7abae8802ebe7bf605f79e",
+        "base": "91a039891afd969f9569897115990fe0c419e034"
+      },
+      "arrival_cost": {
+        "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "raw": "cost20k-1call-head-delta2.json",
+        "base_raw": "cost20k-1call-base.json",
+        "pre_marker_raw": "cost20k-1call-prebase.json",
+        "base": "91a039891afd969f9569897115990fe0c419e034",
+        "pre-marker": "20891a980cae075cad177da7c19c549bac05e63c"
+      },
+      "oracle": {
+        "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "raw": [
+          "oracle-head-nolegacy-delta2.jsonl",
+          "oracle-head-legacy-delta2.jsonl"
+        ],
+        "base": "91a039891afd969f9569897115990fe0c419e034",
+        "base_raw": [
+          "oracle-base-nolegacy.jsonl",
+          "oracle-base-legacy.jsonl"
+        ]
+      },
+      "bounds": {
+        "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "raw": "bounds-r2-delta2/"
+      },
+      "arrival_functional": {
+        "measured_head": "cef344e54167848829c22752c6a431191a763985",
+        "raw": "p1-head-*-p1.json",
+        "retained_proof": "Final guard removes only revision promotion; fresh c0 arrival cost reaches full marker==cursor and c0 strict bounds verify coverage/liveness without changing chunk selection."
+      },
+      "full_suite": {
+        "invocation_head": "7852ad7dba8281777f6d8d46ba3a5359e21b7bc9",
+        "source_production_head": "cef344e54167848829c22752c6a431191a763985",
+        "raw": [
+          "full.txt",
+          "full-command.json",
+          "full-result.json"
+        ],
+        "result": "1 failed, 17460 passed, 141 skipped, 64 xfailed, 29 warnings in 1319.85s",
+        "final_full_suite_rerun": false,
+        "proof_boundary": "One verified revision-promotion failure corrected by c0. Full suite was not rerun at final head."
+      },
+      "affected_focused": {
+        "invocation_head": "7852ad7dba8281777f6d8d46ba3a5359e21b7bc9",
+        "tested_content_committed_as": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "result": "94 passed in 8.33s",
+        "raw": "delta2-focused.txt"
+      },
+      "affected_goldens": {
+        "invocation_head": "7852ad7dba8281777f6d8d46ba3a5359e21b7bc9",
+        "tested_content_committed_as": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "result": "90 passed in 4.56s",
+        "raw": "golden-delta2-tests.txt"
+      },
+      "final_lint_identity": {
+        "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "raw": "DELTA2-FINAL-CHECKS.json"
+      }
+    },
+    "preservation": "Original cef/7852 observations remain intact; none are relabelled as freshly measured final-head data."
+  },
+  "full_suite_boundary": "One full run at 7852ad7d: 1 failed, 17460 passed, 141 skipped, 64 xfailed. Verified regression fixed; affected focused94 and golden90 passed on content committed c0b1f17e (invocation HEAD7852). No final full-suite rerun.",
+  "review_passes": {
+    "initial": 1,
+    "targeted": 3
+  }
+}

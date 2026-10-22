@@ -1,0 +1,91 @@
+{
+  "final_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+  "base": "91a039891afd969f9569897115990fe0c419e034",
+  "final_production_sha256": {
+    "command.py": "34beeb7b7de6cc5d3fc67566050ce96f9f5038a2c0ba0c4581dd93f297cbbf3a",
+    "embedding_maintenance.py": "048f63107c1c1b8730363887a54ce06c43ba3fa05097ff8cd69d4f7dae5526a4"
+  },
+  "measurements": {
+    "stream": {
+      "measured_head": "cef344e54167848829c22752c6a431191a763985",
+      "raw": "timing-stream.json",
+      "retained_proof": "Final guard is in metadata_only revision-promotion handling. Normal first selection uses metadata_only=False; cancellation exits before post-publication metadata-only validation. Original same32, first-yield and cancellation path unchanged."
+    },
+    "certified_steady_cost": {
+      "measured_head": "cef344e54167848829c22752c6a431191a763985",
+      "raw": [
+        "steady-cost-specified-base.json",
+        "steady-cost-pre-marker.json"
+      ],
+      "comparators": {
+        "specified-base": "91a039891afd969f9569897115990fe0c419e034",
+        "pre-marker": "20891a980cae075cad177da7c19c549bac05e63c"
+      },
+      "retained_proof": "Certified steady path performs zero gap scans; final guard is inside a metadata-only scan completion write. Neither certified steady nor instrument fresh trusted legacy marker path reaches that changed write."
+    },
+    "cloud": {
+      "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+      "raw": "timing-cloud-delta2.json",
+      "ga": "709099b3a397a7893a7abae8802ebe7bf605f79e",
+      "base": "91a039891afd969f9569897115990fe0c419e034"
+    },
+    "arrival_cost": {
+      "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+      "raw": "cost20k-1call-head-delta2.json",
+      "base_raw": "cost20k-1call-base.json",
+      "pre_marker_raw": "cost20k-1call-prebase.json",
+      "base": "91a039891afd969f9569897115990fe0c419e034",
+      "pre-marker": "20891a980cae075cad177da7c19c549bac05e63c"
+    },
+    "oracle": {
+      "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+      "raw": [
+        "oracle-head-nolegacy-delta2.jsonl",
+        "oracle-head-legacy-delta2.jsonl"
+      ],
+      "base": "91a039891afd969f9569897115990fe0c419e034",
+      "base_raw": [
+        "oracle-base-nolegacy.jsonl",
+        "oracle-base-legacy.jsonl"
+      ]
+    },
+    "bounds": {
+      "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+      "raw": "bounds-r2-delta2/"
+    },
+    "arrival_functional": {
+      "measured_head": "cef344e54167848829c22752c6a431191a763985",
+      "raw": "p1-head-*-p1.json",
+      "retained_proof": "Final guard removes only revision promotion; fresh c0 arrival cost reaches full marker==cursor and c0 strict bounds verify coverage/liveness without changing chunk selection."
+    },
+    "full_suite": {
+      "invocation_head": "7852ad7dba8281777f6d8d46ba3a5359e21b7bc9",
+      "source_production_head": "cef344e54167848829c22752c6a431191a763985",
+      "raw": [
+        "full.txt",
+        "full-command.json",
+        "full-result.json"
+      ],
+      "result": "1 failed, 17460 passed, 141 skipped, 64 xfailed, 29 warnings in 1319.85s",
+      "final_full_suite_rerun": false,
+      "proof_boundary": "One verified revision-promotion failure corrected by c0. Full suite was not rerun at final head."
+    },
+    "affected_focused": {
+      "invocation_head": "7852ad7dba8281777f6d8d46ba3a5359e21b7bc9",
+      "tested_content_committed_as": "c0b1f17e86868c5312e9752ac1d0594412856997",
+      "result": "94 passed in 8.33s",
+      "raw": "delta2-focused.txt"
+    },
+    "affected_goldens": {
+      "invocation_head": "7852ad7dba8281777f6d8d46ba3a5359e21b7bc9",
+      "tested_content_committed_as": "c0b1f17e86868c5312e9752ac1d0594412856997",
+      "result": "90 passed in 4.56s",
+      "raw": "golden-delta2-tests.txt"
+    },
+    "final_lint_identity": {
+      "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+      "raw": "DELTA2-FINAL-CHECKS.json"
+    }
+  },
+  "preservation": "Original cef/7852 observations remain intact; none are relabelled as freshly measured final-head data."
+}

@@ -1,0 +1,20 @@
+{
+  "verdict": "PASS",
+  "prior_head": "111397b32433ee923298f3cb44da70a419a69f9b",
+  "head": "cef344e54167848829c22752c6a431191a763985",
+  "scope": [
+    "complete correction delta and relevant caller/CAS context",
+    "added race and first-disjoint-band regressions"
+  ],
+  "findings": [],
+  "prior_findings": [
+    {
+      "id": "R1",
+      "gate": "MERGE_BLOCKING",
+      "disposition": "fixed now",
+      "evidence": "command.py4663 exits rejected low initialization with unproven=True and retained parent fence"
+    }
+  ],
+  "schedule_evidence": "command.py4983 requires actual deferred_low before band reversal; epoch/turn retains alternation.",
+  "proof_boundary": "Source semantic PASS only; pending oracle, bounds, paired performance and full-suite evidence separate."
+}

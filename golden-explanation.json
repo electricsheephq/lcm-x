@@ -1,0 +1,63 @@
+{
+  "chunks/stop-before-dispatch": {
+    "final_changed_tables": [
+      "metadata"
+    ],
+    "messages_equal": true,
+    "report_field_deltas": [
+      {
+        "status": {
+          "base": "partial",
+          "head": "complete"
+        },
+        "pending": {
+          "base": 3,
+          "head": 0
+        },
+        "selected": {
+          "base": 3,
+          "head": 0
+        },
+        "estimated_tokens": {
+          "base": 255,
+          "head": 0
+        },
+        "estimated_cost_tokens": {
+          "base": 255,
+          "head": 0
+        },
+        "estimated_batches": {
+          "base": 2,
+          "head": 0
+        }
+      }
+    ],
+    "provider_dispatch_count_base": 0,
+    "provider_dispatch_count_head": 0
+  },
+  "chunks/incremental-boundary-resume": {
+    "final_changed_tables": [
+      "metadata"
+    ],
+    "messages_equal": true,
+    "report_field_deltas": [
+      {},
+      {}
+    ],
+    "provider_dispatch_count_base": 3,
+    "provider_dispatch_count_head": 3
+  },
+  "chunks/incremental-revision-gap-checkpoint": {
+    "final_changed_tables": [
+      "metadata"
+    ],
+    "messages_equal": true,
+    "report_field_deltas": [
+      {},
+      {},
+      {}
+    ],
+    "provider_dispatch_count_base": 2,
+    "provider_dispatch_count_head": 2
+  }
+}

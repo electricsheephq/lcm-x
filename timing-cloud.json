@@ -1,0 +1,1902 @@
+{
+  "before": {
+    "summary": {
+      "ga": {
+        "p50_ms": 0.558146,
+        "q1_ms": 0.497333,
+        "q3_ms": 0.629427,
+        "iqr_ms": 0.13209399999999993,
+        "n": 60
+      },
+      "base": {
+        "p50_ms": 12.705625,
+        "q1_ms": 12.54797925,
+        "q3_ms": 12.912125,
+        "iqr_ms": 0.3641457500000005,
+        "n": 60
+      },
+      "head": {
+        "p50_ms": 12.578187499999999,
+        "q1_ms": 12.363135250000001,
+        "q3_ms": 12.885051749999999,
+        "iqr_ms": 0.5219164999999979,
+        "n": 60
+      }
+    },
+    "samples_ms": {
+      "ga": [
+        0.498833,
+        0.294666,
+        0.615625,
+        0.496167,
+        0.765292,
+        0.650791,
+        0.651042,
+        0.524708,
+        0.613042,
+        0.61625,
+        0.516,
+        0.533208,
+        0.578917,
+        1.266833,
+        0.452167,
+        0.773042,
+        0.629625,
+        0.384917,
+        0.65175,
+        0.72275,
+        0.459042,
+        0.566833,
+        0.483875,
+        0.611375,
+        0.501375,
+        0.653292,
+        0.55975,
+        0.503417,
+        0.468166,
+        0.541666,
+        0.541166,
+        0.628833,
+        0.535834,
+        0.55925,
+        0.557042,
+        1.322167,
+        0.715166,
+        0.710042,
+        0.556375,
+        0.4795,
+        0.635416,
+        0.718916,
+        0.374291,
+        0.484542,
+        0.496583,
+        0.617208,
+        0.508917,
+        1.15675,
+        0.611167,
+        0.421625,
+        0.496833,
+        0.575,
+        0.533083,
+        0.479917,
+        0.53025,
+        0.612667,
+        0.610667,
+        0.55675,
+        0.560959,
+        0.495625
+      ],
+      "base": [
+        13.150125,
+        12.956,
+        12.556334,
+        12.305708,
+        12.658541,
+        12.871166,
+        12.867334,
+        12.748167,
+        12.980208,
+        12.796709,
+        12.635417,
+        12.426958,
+        12.831291,
+        14.129125,
+        12.224625,
+        13.264667,
+        12.774833,
+        13.312625,
+        12.377375,
+        12.609792,
+        12.193959,
+        12.623375,
+        13.063166,
+        12.703,
+        12.674875,
+        12.460542,
+        12.553542,
+        12.666459,
+        12.723125,
+        12.89225,
+        12.645708,
+        12.413958,
+        12.486208,
+        12.886833,
+        12.189,
+        13.028416,
+        13.058458,
+        12.70825,
+        12.478958,
+        13.500583,
+        15.087,
+        12.91875,
+        12.940875,
+        12.726,
+        12.849,
+        12.754,
+        14.458084,
+        12.599833,
+        16.501042,
+        12.532375,
+        12.791791,
+        12.597625,
+        12.603209,
+        12.372791,
+        12.387708,
+        12.464958,
+        12.577667,
+        12.738209,
+        12.546125,
+        12.607333
+      ],
+      "head": [
+        12.850208,
+        12.98175,
+        12.587917,
+        12.300417,
+        12.668708,
+        13.474791,
+        12.333416,
+        13.104667,
+        12.431875,
+        12.766042,
+        12.451458,
+        11.568209,
+        12.495292,
+        12.637375,
+        12.091709,
+        12.556292,
+        12.653375,
+        12.7515,
+        11.812125,
+        12.692583,
+        12.636042,
+        12.490667,
+        12.766,
+        12.669042,
+        12.497125,
+        12.007625,
+        12.517667,
+        12.568458,
+        12.340709,
+        13.350125,
+        12.522792,
+        11.983125,
+        12.388792,
+        13.157667,
+        12.424291,
+        13.163,
+        23.578208,
+        12.874083,
+        12.888708,
+        13.166458,
+        13.388333,
+        13.109042,
+        12.73275,
+        12.354583,
+        12.956875,
+        13.071792,
+        13.123958,
+        16.087583,
+        12.641208,
+        12.510083,
+        12.215542,
+        12.019125,
+        12.680833,
+        12.464,
+        12.2145,
+        12.499625,
+        12.554625,
+        12.215209,
+        12.268958,
+        12.144584
+      ]
+    },
+    "raw": {
+      "ga": [
+        {
+          "ns": 498833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 294666,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 615625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 496167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 765292,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 650791,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 651042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 524708,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 613042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 616250,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 516000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 533208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 578917,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 1266833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 452167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 773042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 629625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 384917,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 651750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 722750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 459042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 566833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 483875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 611375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 501375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 653292,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 559750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 503417,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 468166,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 541666,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 541166,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 628833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 535834,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 559250,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 557042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 1322167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 715166,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 710042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 556375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 479500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 635416,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 718916,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 374291,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 484542,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 496583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 617208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 508917,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 1156750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 611167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 421625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 496833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 575000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 533083,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 479917,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 530250,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 612667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 610667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 556750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 560959,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 495625,
+          "status": "embedding_backlog_chunks: 0"
+        }
+      ],
+      "base": [
+        {
+          "ns": 13150125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12956000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12556334,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12305708,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12658541,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12871166,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12867334,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12748167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12980208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12796709,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12635417,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12426958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12831291,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 14129125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12224625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13264667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12774833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13312625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12377375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12609792,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12193959,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12623375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13063166,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12703000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12674875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12460542,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12553542,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12666459,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12723125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12892250,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12645708,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12413958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12486208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12886833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12189000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13028416,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13058458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12708250,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12478958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13500583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 15087000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12918750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12940875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12726000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12849000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12754000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 14458084,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12599833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 16501042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12532375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12791791,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12597625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12603209,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12372791,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12387708,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12464958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12577667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12738209,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12546125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12607333,
+          "status": "embedding_backlog_chunks: 0"
+        }
+      ],
+      "head": [
+        {
+          "ns": 12850208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12981750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12587917,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12300417,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12668708,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13474791,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12333416,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13104667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12431875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12766042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12451458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 11568209,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12495292,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12637375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12091709,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12556292,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12653375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12751500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 11812125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12692583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12636042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12490667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12766000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12669042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12497125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12007625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12517667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12568458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12340709,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13350125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12522792,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 11983125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12388792,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13157667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12424291,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13163000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 23578208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12874083,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12888708,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13166458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13388333,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13109042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12732750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12354583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12956875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13071792,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13123958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 16087583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12641208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12510083,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12215542,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12019125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12680833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12464000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12214500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12499625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12554625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12215209,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12268958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12144584,
+          "status": "embedding_backlog_chunks: 0"
+        }
+      ]
+    }
+  },
+  "maintenance": {
+    "ga": {
+      "ns": 331125,
+      "result": "summaries=complete:0",
+      "marker": null
+    },
+    "base": {
+      "ns": 418458,
+      "result": "summaries=complete:0",
+      "marker": null
+    },
+    "head": {
+      "ns": 20400375,
+      "result": "summaries=complete:0",
+      "marker": "{\"from\":1,\"through\":20000,\"policy\":\"conversational\"}"
+    }
+  },
+  "after": {
+    "summary": {
+      "ga": {
+        "p50_ms": 0.5050835,
+        "q1_ms": 0.467156,
+        "q3_ms": 0.5748755,
+        "iqr_ms": 0.10771949999999997,
+        "n": 60
+      },
+      "base": {
+        "p50_ms": 12.660979000000001,
+        "q1_ms": 12.482947750000001,
+        "q3_ms": 13.8917185,
+        "iqr_ms": 1.4087707499999986,
+        "n": 60
+      },
+      "head": {
+        "p50_ms": 0.585375,
+        "q1_ms": 0.554979,
+        "q3_ms": 0.6428119999999999,
+        "iqr_ms": 0.08783299999999994,
+        "n": 60
+      }
+    },
+    "samples_ms": {
+      "ga": [
+        0.508792,
+        0.351125,
+        0.678458,
+        0.46775,
+        0.52275,
+        0.487583,
+        0.466958,
+        0.487208,
+        0.305375,
+        0.40475,
+        0.563792,
+        0.617,
+        0.4005,
+        0.606209,
+        0.405417,
+        0.5155,
+        0.499333,
+        0.373125,
+        0.38225,
+        0.470417,
+        0.534,
+        0.562791,
+        0.431958,
+        0.491084,
+        0.475917,
+        0.56975,
+        0.485375,
+        0.428375,
+        0.51875,
+        0.501375,
+        0.477417,
+        0.382958,
+        0.511625,
+        0.396375,
+        0.513458,
+        0.897666,
+        0.682541,
+        0.435875,
+        0.501,
+        0.484333,
+        0.564833,
+        0.760667,
+        1.042167,
+        1.488375,
+        0.802334,
+        0.48475,
+        0.90325,
+        0.576584,
+        0.486541,
+        0.36875,
+        0.809667,
+        0.748833,
+        0.833208,
+        0.691959,
+        0.394792,
+        0.559,
+        0.510375,
+        0.530042,
+        0.471417,
+        0.528542
+      ],
+      "base": [
+        12.494458,
+        12.689375,
+        12.411458,
+        12.555459,
+        11.886292,
+        12.522208,
+        12.493959,
+        12.481875,
+        12.146917,
+        12.181167,
+        12.3855,
+        12.197167,
+        12.491709,
+        12.704583,
+        12.594458,
+        12.72025,
+        12.2955,
+        12.256083,
+        12.612542,
+        12.183208,
+        12.498042,
+        12.594167,
+        12.7465,
+        12.632583,
+        12.62375,
+        12.549833,
+        12.38725,
+        13.274375,
+        12.233125,
+        12.829291,
+        12.8555,
+        12.486166,
+        12.377958,
+        13.539416,
+        12.329708,
+        13.074625,
+        16.6495,
+        14.092166,
+        12.506166,
+        12.863792,
+        16.069166,
+        14.738375,
+        17.053667,
+        17.307583,
+        19.899458,
+        13.254458,
+        13.682125,
+        13.961583,
+        11.878,
+        12.894041,
+        14.259583,
+        17.046583,
+        14.944875,
+        14.114125,
+        18.037875,
+        14.550542,
+        14.199709,
+        12.926667,
+        12.865833,
+        12.494792
+      ],
+      "head": [
+        0.583084,
+        0.607125,
+        0.573708,
+        0.598959,
+        0.4645,
+        0.647542,
+        0.509083,
+        0.630625,
+        0.511041,
+        0.572875,
+        0.567333,
+        0.469375,
+        0.587209,
+        0.589459,
+        0.604042,
+        0.703167,
+        0.646291,
+        0.601792,
+        0.529,
+        0.5085,
+        0.492875,
+        0.583875,
+        0.62975,
+        0.531958,
+        0.649584,
+        0.561541,
+        0.544542,
+        0.535084,
+        0.563167,
+        0.571542,
+        0.546583,
+        0.569459,
+        0.595541,
+        0.569542,
+        0.620666,
+        0.569083,
+        0.7865,
+        0.46725,
+        0.554375,
+        0.558584,
+        0.586875,
+        0.772417,
+        1.6625,
+        1.516375,
+        1.336833,
+        0.6145,
+        0.5765,
+        0.556791,
+        0.632375,
+        0.649333,
+        0.618125,
+        1.113,
+        0.836584,
+        0.883875,
+        0.493209,
+        0.879875,
+        0.707208,
+        0.552042,
+        0.59,
+        0.561542
+      ]
+    },
+    "raw": {
+      "ga": [
+        {
+          "ns": 508792,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 351125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 678458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 467750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 522750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 487583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 466958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 487208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 305375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 404750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 563792,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 617000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 400500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 606209,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 405417,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 515500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 499333,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 373125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 382250,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 470417,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 534000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 562791,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 431958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 491084,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 475917,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 569750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 485375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 428375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 518750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 501375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 477417,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 382958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 511625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 396375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 513458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 897666,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 682541,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 435875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 501000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 484333,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 564833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 760667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 1042167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 1488375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 802334,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 484750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 903250,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 576584,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 486541,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 368750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 809667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 748833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 833208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 691959,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 394792,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 559000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 510375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 530042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 471417,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 528542,
+          "status": "embedding_backlog_chunks: 0"
+        }
+      ],
+      "base": [
+        {
+          "ns": 12494458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12689375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12411458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12555459,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 11886292,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12522208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12493959,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12481875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12146917,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12181167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12385500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12197167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12491709,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12704583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12594458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12720250,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12295500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12256083,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12612542,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12183208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12498042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12594167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12746500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12632583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12623750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12549833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12387250,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13274375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12233125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12829291,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12855500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12486166,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12377958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13539416,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12329708,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13074625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 16649500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 14092166,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12506166,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12863792,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 16069166,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 14738375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 17053667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 17307583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 19899458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13254458,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13682125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 13961583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 11878000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12894041,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 14259583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 17046583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 14944875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 14114125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 18037875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 14550542,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 14199709,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12926667,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12865833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 12494792,
+          "status": "embedding_backlog_chunks: 0"
+        }
+      ],
+      "head": [
+        {
+          "ns": 583084,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 607125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 573708,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 598959,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 464500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 647542,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 509083,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 630625,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 511041,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 572875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 567333,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 469375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 587209,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 589459,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 604042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 703167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 646291,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 601792,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 529000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 508500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 492875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 583875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 629750,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 531958,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 649584,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 561541,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 544542,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 535084,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 563167,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 571542,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 546583,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 569459,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 595541,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 569542,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 620666,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 569083,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 786500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 467250,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 554375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 558584,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 586875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 772417,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 1662500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 1516375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 1336833,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 614500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 576500,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 556791,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 632375,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 649333,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 618125,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 1113000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 836584,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 883875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 493209,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 879875,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 707208,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 552042,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 590000,
+          "status": "embedding_backlog_chunks: 0"
+        },
+        {
+          "ns": 561542,
+          "status": "embedding_backlog_chunks: 0"
+        }
+      ]
+    }
+  },
+  "within_2x_ga": true
+}

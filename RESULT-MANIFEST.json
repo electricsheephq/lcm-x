@@ -1,0 +1,237 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1624-r3-20261022",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "coverage-marker-round3",
+  "claim_class": "advisory",
+  "created": "2026-10-22T11:44:27Z",
+  "settled": "2026-10-22T12:18:58Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "c0b1f17e86868c5312e9752ac1d0594412856997",
+    "dirty": false,
+    "diff_sha256": null,
+    "measurement_identities": {
+      "stream": {
+        "measured_head": "cef344e54167848829c22752c6a431191a763985",
+        "raw": "timing-stream.json",
+        "retained_proof": "Final guard is in metadata_only revision-promotion handling. Normal first selection uses metadata_only=False; cancellation exits before post-publication metadata-only validation. Original same32, first-yield and cancellation path unchanged."
+      },
+      "certified_steady_cost": {
+        "measured_head": "cef344e54167848829c22752c6a431191a763985",
+        "raw": [
+          "steady-cost-specified-base.json",
+          "steady-cost-pre-marker.json"
+        ],
+        "comparators": {
+          "specified-base": "91a039891afd969f9569897115990fe0c419e034",
+          "pre-marker": "20891a980cae075cad177da7c19c549bac05e63c"
+        },
+        "retained_proof": "Certified steady path performs zero gap scans; final guard is inside a metadata-only scan completion write. Neither certified steady nor instrument fresh trusted legacy marker path reaches that changed write."
+      },
+      "cloud": {
+        "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "raw": "timing-cloud-delta2.json",
+        "ga": "709099b3a397a7893a7abae8802ebe7bf605f79e",
+        "base": "91a039891afd969f9569897115990fe0c419e034"
+      },
+      "arrival_cost": {
+        "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "raw": "cost20k-1call-head-delta2.json",
+        "base_raw": "cost20k-1call-base.json",
+        "pre_marker_raw": "cost20k-1call-prebase.json",
+        "base": "91a039891afd969f9569897115990fe0c419e034",
+        "pre-marker": "20891a980cae075cad177da7c19c549bac05e63c"
+      },
+      "oracle": {
+        "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "raw": [
+          "oracle-head-nolegacy-delta2.jsonl",
+          "oracle-head-legacy-delta2.jsonl"
+        ],
+        "base": "91a039891afd969f9569897115990fe0c419e034",
+        "base_raw": [
+          "oracle-base-nolegacy.jsonl",
+          "oracle-base-legacy.jsonl"
+        ]
+      },
+      "bounds": {
+        "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "raw": "bounds-r2-delta2/"
+      },
+      "arrival_functional": {
+        "measured_head": "cef344e54167848829c22752c6a431191a763985",
+        "raw": "p1-head-*-p1.json",
+        "retained_proof": "Final guard removes only revision promotion; fresh c0 arrival cost reaches full marker==cursor and c0 strict bounds verify coverage/liveness without changing chunk selection."
+      },
+      "full_suite": {
+        "invocation_head": "7852ad7dba8281777f6d8d46ba3a5359e21b7bc9",
+        "source_production_head": "cef344e54167848829c22752c6a431191a763985",
+        "raw": [
+          "full.txt",
+          "full-command.json",
+          "full-result.json"
+        ],
+        "result": "1 failed, 17460 passed, 141 skipped, 64 xfailed, 29 warnings in 1319.85s",
+        "final_full_suite_rerun": false,
+        "proof_boundary": "One verified revision-promotion failure corrected by c0. Full suite was not rerun at final head."
+      },
+      "affected_focused": {
+        "invocation_head": "7852ad7dba8281777f6d8d46ba3a5359e21b7bc9",
+        "tested_content_committed_as": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "result": "94 passed in 8.33s",
+        "raw": "delta2-focused.txt"
+      },
+      "affected_goldens": {
+        "invocation_head": "7852ad7dba8281777f6d8d46ba3a5359e21b7bc9",
+        "tested_content_committed_as": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "result": "90 passed in 4.56s",
+        "raw": "golden-delta2-tests.txt"
+      },
+      "final_lint_identity": {
+        "measured_head": "c0b1f17e86868c5312e9752ac1d0594412856997",
+        "raw": "DELTA2-FINAL-CHECKS.json"
+      }
+    }
+  },
+  "env": {
+    "command": "python rescore.py",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "stream-first-yield",
+      "metric": "p50_ms",
+      "value": 2.2527295,
+      "n": 40,
+      "baseline_run": "709099b3a397a7893a7abae8802ebe7bf605f79e",
+      "source": "timing-stream.json",
+      "code_sha": "cef344e54167848829c22752c6a431191a763985"
+    },
+    {
+      "benchmark": "stream-cancellation",
+      "metric": "p50_ms",
+      "value": 2.9112085,
+      "n": 40,
+      "baseline_run": "709099b3a397a7893a7abae8802ebe7bf605f79e",
+      "source": "timing-stream.json",
+      "code_sha": "cef344e54167848829c22752c6a431191a763985"
+    },
+    {
+      "benchmark": "cloud-status-after-one-pass",
+      "metric": "p50_ms",
+      "value": 0.585375,
+      "n": 60,
+      "baseline_run": "709099b3a397a7893a7abae8802ebe7bf605f79e",
+      "source": "timing-cloud.json",
+      "code_sha": "c0b1f17e86868c5312e9752ac1d0594412856997"
+    }
+  ],
+  "results": [
+    {
+      "path": "timing-stream.json",
+      "role": "per-item",
+      "sha256": "3061ee9840ab0001cf0040d17c80e26abe8dfac3e429dcdbcc9e1ad1b3014ffb",
+      "bytes": 32292
+    },
+    {
+      "path": "timing-cloud.json",
+      "role": "per-item",
+      "sha256": "be961e53f03d684fa54baa9b5b4974fcac6ce1d616077c5ae67205ab73f8edec",
+      "bytes": 43007
+    },
+    {
+      "path": "steady-cost-specified-base.json",
+      "role": "per-item",
+      "sha256": "2af04ca318fa56c75b565863d9947000dc94ce09fd5df528ab1d0ca7aaa6f683",
+      "bytes": 23372
+    },
+    {
+      "path": "steady-cost-pre-marker.json",
+      "role": "per-item",
+      "sha256": "15d7e50374338a2caaff49008e8299edbc634f0f3f5c6f8be5ffec8d85e67bde",
+      "bytes": 23404
+    },
+    {
+      "path": "ACCEPTANCE-SUMMARY.json",
+      "role": "receipt",
+      "sha256": "cc1aa45d1f6d9eb1e751f04614cce97199adc789261f671244f9b2f1a927dc96",
+      "bytes": 20170
+    },
+    {
+      "path": "golden-explanation.json",
+      "role": "receipt",
+      "sha256": "49160c165b640659f42c814999e1c53f90c13fc9449064026fbc8564ad25c0cb",
+      "bytes": 1284
+    },
+    {
+      "path": "SEMANTIC-REVIEW-DELTA-1.json",
+      "role": "receipt",
+      "sha256": "f6f761bf4c689bc8986abd96b1bb5b74bca72ce624dcc7ce84ae18f259cd8cbf",
+      "bytes": 780
+    },
+    {
+      "path": "SEMANTIC-REVIEW-GOLDEN-1.json",
+      "role": "receipt",
+      "sha256": "99c4dda1aafa422d262032dcd8761d5299c8919b1fdb9e4230fd5e103e9fd655",
+      "bytes": 1011
+    },
+    {
+      "path": "rescore.py",
+      "role": "config",
+      "sha256": "5a1bda92be91e3c4d651b27e9713c4c8e297cde0c2795eba85ab120647182b67",
+      "bytes": 1679
+    },
+    {
+      "path": "FINAL-CHECKS.json",
+      "role": "receipt",
+      "sha256": "733502692a325b80e74be07cf54a5b2b88e2e9cbeb0089d2c4e13500a9786b7c",
+      "bytes": 3035
+    },
+    {
+      "path": "MEASUREMENT-IDENTITIES.json",
+      "role": "receipt",
+      "sha256": "33f763c687d3c8088f3f40a59f1e5fadf9c1a6e98a8b4b8d8b62028743075fcc",
+      "bytes": 4100
+    },
+    {
+      "path": "SEMANTIC-REVIEW-DELTA-2.json",
+      "role": "receipt",
+      "sha256": "623cb089eb934dbe12be182499562755aac0dfae17e50fd4ed8eddc523d26b24",
+      "bytes": 952
+    }
+  ],
+  "rescore": {
+    "command": "python rescore.py",
+    "inputs": [
+      "timing-stream.json",
+      "timing-cloud.json",
+      "steady-cost-specified-base.json",
+      "steady-cost-pre-marker.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "ACCEPTANCE-SUMMARY.json",
+    "FINAL-CHECKS.json",
+    "MEASUREMENT-IDENTITIES.json",
+    "RESULT.md",
+    "SEMANTIC-REVIEW-DELTA-1.json",
+    "SEMANTIC-REVIEW-DELTA-2.json",
+    "SEMANTIC-REVIEW-GOLDEN-1.json",
+    "golden-explanation.json",
+    "rescore.py",
+    "steady-cost-pre-marker.json",
+    "steady-cost-specified-base.json",
+    "timing-cloud.json",
+    "timing-stream.json"
+  ],
+  "owner_verdict": "Public-safe synthetic evidence, exact measurement identities and final full-suite limitation disclosed; no merge/release/runtime claim."
+}

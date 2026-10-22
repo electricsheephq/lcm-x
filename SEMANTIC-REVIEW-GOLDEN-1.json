@@ -1,0 +1,19 @@
+{
+  "verdict": "PASS",
+  "prior_head": "cef344e54167848829c22752c6a431191a763985",
+  "head": "7852ad7dba8281777f6d8d46ba3a5359e21b7bc9",
+  "production_bytes_unchanged": true,
+  "scope": [
+    "exact golden-only delta and preserved baseline/candidate expanded payloads"
+  ],
+  "changed_traces": 3,
+  "unchanged_traces": 77,
+  "payload_proof": "messages, chunk metadata, vectors, provider inputs and dispatch sequences unchanged",
+  "golden_dispositions": {
+    "chunks/incremental-boundary-resume": "same reports plus approved epoch/turn metadata",
+    "chunks/incremental-revision-gap-checkpoint": "same reports; approved postpublication certificate recorded one pass earlier",
+    "chunks/stop-before-dispatch": "early preselection stop, zero selection/estimates/dispatch; remaining=3 and process_exit unchanged; complete rather than partial is explicit accepted classifier tradeoff"
+  },
+  "findings": [],
+  "proof_boundary": "Golden-only semantic PASS; no tests executed or overall readiness established."
+}
