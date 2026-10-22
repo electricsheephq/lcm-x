@@ -1,5 +1,6 @@
 """The same reader instructions across three evidence delivery modes."""
 import json
+import re
 import threading
 import time
 from contextlib import contextmanager
@@ -7,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
+from .common import sha
 from .models import READER_MAX_TOKENS, harness, input_bound
 
 # Never offered: lcm_expand_query calls another model; the rest are operator tools.
@@ -210,6 +212,10 @@ def _answer(q, mode, client, reader, engine, speakers, tool_budget, input_budget
     user = "Question: " + q.question
     if mode == "single":
         evidence, raw = single(q, engine, speakers, hit_label, store_text)
+        labels = re.findall(r"^\[[^\]\n]+\] ([^:\n]+): ", evidence, re.MULTILINE)
+        result.update(evidence_labels={"role": sum(x in ("user", "assistant") for x in labels),
+            "speaker": sum(x not in ("user", "assistant", "summary") for x in labels), "summary": labels.count("summary")},
+            evidence_sha256=sha(evidence.encode()))
         trace.append({"tool": "lcm_recall", "result": raw})
         user = "History evidence:\n" + evidence + "\n" + user
     elif mode == "full_context":

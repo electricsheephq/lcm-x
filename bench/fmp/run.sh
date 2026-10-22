@@ -17,6 +17,9 @@ REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$REPO"
 export HERMES_DISABLE_LAZY_INSTALLS=1
 unset OPENROUTER_API_KEY
+if [[ "${1:-}" == check-arms ]]; then
+  exec "$PYTHON" -m bench.fmp "$@"
+fi
 for ARG in "$@"; do
   # OpenRouter is an explicit opt-in backend: its key is loaded only for an openrouter spec.
   if [[ "$ARG" == openrouter:* || "$ARG" == openai/* || "$ARG" == anthropic/* ]]; then

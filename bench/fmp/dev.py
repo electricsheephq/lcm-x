@@ -238,14 +238,7 @@ def _worker_rows(spec, product, written):
     return receipt
 
 
-def judge_messages(q, hypothesis):
-    if q.dataset == "locomo" and q.is_abstention:
-        # Existing FMP/LME abstention rubric; cat5's adversarial_answer is never a gold answer.
-        import copy
-        abstention = copy.copy(q)
-        abstention.dataset, abstention.qtype, abstention.gold = "lme-s", "single-session-user", ""
-        return judges.messages(abstention, hypothesis), "lme-s"
-    return judges.messages(q, hypothesis), q.dataset
+judge_messages = judges.judge_messages
 
 
 def compare(items, rows):

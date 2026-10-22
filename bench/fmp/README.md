@@ -116,11 +116,57 @@ A2 = `--store-text name-date --hit-label speaker`. The agentic check compares
 `plain` with `name-date` under `--delivery agentic` (hit label recorded as `n/a`).
 Image captions, when supplied by the dataset, remain in the evidence.
 
+For the #995 A0/A1/A2 measurement, include category 5 explicitly and check retrieval
+and rendered labels before judging. Defaults are **agentic delivery** and a **Claude
+agreement judge**; override both. With `DATA`, `IDS`, `STORES`, and `OUTPUT` set to
+the local dataset, frozen all-category IDs file, store root, and a new output root:
+
+```bash
+common=(--dataset locomo --data "$DATA" --question-ids "$IDS" --split-label 995
+        --include-adversarial --delivery single --summaries none
+        --judge codex:gpt-6.1-sol@low glm:glm-5.3 --agreement-judge none
+        --store-root "$STORES")
+for step in build-stores answer; do
+  for arm in A0 A1 A2; do
+    text=plain; label=speaker
+    if [[ "$arm" == A0 ]]; then label=role; fi
+    if [[ "$arm" == A2 ]]; then text=name-date; fi
+    bash bench/fmp/run.sh "$step" "${common[@]}" --store-text "$text" \
+      --hit-label "$label" --output "$OUTPUT/$arm" || exit 1
+  done
+done
+bash bench/fmp/run.sh check-arms --runs "$OUTPUT/A0" "$OUTPUT/A1" || exit 1
+for arm in A0 A1 A2; do
+  text=plain; label=speaker
+  if [[ "$arm" == A0 ]]; then label=role; fi
+  if [[ "$arm" == A2 ]]; then text=name-date; fi
+  bash bench/fmp/run.sh judge "${common[@]}" --store-text "$text" \
+    --hit-label "$label" --output "$OUTPUT/$arm" || exit 1
+done
+bash bench/fmp/run.sh score "${common[@]}" --runs "$OUTPUT/A0" "$OUTPUT/A1" \
+  "$OUTPUT/A2" --output "$OUTPUT/score"
+```
+
+`check-arms` makes no model calls and leaves run files untouched. It compares ordered
+recall-hit store IDs per call, question-ID sets, IDs-file and dataset hashes, and
+role/speaker counts from answer-row `evidence_labels` and `evidence_sha256` receipts.
+It requires exactly one plain/role A0 (role lines only) and one plain/speaker A1
+(speaker lines only), with positive message-line counts in both. Legacy rows without
+receipts fail closed with “label check unavailable”; prompts are deleted by the harness.
+It reports median/p90 estimated prompt tokens, prints counts/hashes only, and creates
+`check-arms-<unique-id>.json` beside the runs (`--output <path>` overrides it).
+Any mismatch exits nonzero. A2 changes ingestion, so A0/A1 are the retrieval-identity control.
+Score reports all-category and cats-1–4 totals separately; #995 headlines use cats 1–4.
+
 Every session id (LME and LoCoMo) is replaced at normalisation by an opaque
 `s0001`, `s0002`, … in session-date order; readers never see dataset ids (LME
 evidence ids start `answer_`). The mapping lives only in each store's
-`build-manifest.json`, for scoring. LoCoMo category 5 (adversarial) is excluded,
+`build-manifest.json`, for scoring. LoCoMo category 5 (adversarial) is excluded by default,
 as Mem0 and OmniMemEval do; the run manifest records the count under `excluded`.
+`--include-adversarial` loads it with the shared dev/run abstention rubric, records
+`include_adversarial: true` and `excluded: {}`, and binds scoring/judging identity.
+The decoy `adversarial_answer` is never gold. Without the flag, the manifest field
+stays absent and the default question selection and exclusion receipt stay unchanged.
 
 Ingestion manifests bind commit, dataset bytes, id, session map, model, summary
 mode and explicit raw-public-benchmark embedding posture. The store directory is

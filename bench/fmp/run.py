@@ -12,6 +12,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from statistics import median
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -22,7 +23,7 @@ from .common import commit, digest_file, load_lcm, quiet, sha, utc, write_json
 from .models import (AGENTIC_TOOL_CAP, CLAUDE_AGREEMENT_JUDGE, CODEX_DEFAULT_JUDGE, CODEX_DEFAULT_READER,
                      CODEX_DISABLED, GLM_HOST, JUDGE_MAX_TOKENS, READER_MAX_TOKENS, READERS, REASONING, Backends, BudgetStopped,
                      OpenRouter, Quota, Spend, ToolViolation, glm_key, harness, parse_spec)
-from .score import delivery_identity, score
+from .score import delivery_identity, percentile, score
 from .stores import Stores
 
 
@@ -34,6 +35,7 @@ def parser():
     p.add_argument("--data", type=Path, default=os.environ.get("FMP_LME_DATA") or None,
                    help="dataset file (default: $FMP_LME_DATA)")
     p.add_argument("--question-ids", type=Path)
+    p.add_argument("--include-adversarial", action="store_true", help="include LoCoMo category 5 abstention questions")
     p.add_argument("--split-label", required=True)
     p.add_argument("--config", default="off")
     p.add_argument("--paired-config", help="interleave this config with --config; output is a parent directory")
@@ -108,7 +110,8 @@ def estimate(args, n):
 
 
 def switches(args):
-    return {**({"delivery_unit": "session", "delivery_budget": 16000}
+    return {**({"include_adversarial": True} if getattr(args, "include_adversarial", False) else {}),
+            **({"delivery_unit": "session", "delivery_budget": 16000}
                if getattr(args, "delivery_unit", "hits") == "session" else {}),
             "store_text": getattr(args, "store_text", "speaker-prefix"),
             "hit_label": getattr(args, "hit_label", "speaker") if getattr(args, "delivery", "agentic") == "single" else "n/a"}
@@ -201,7 +204,8 @@ def execute(args):
     if commit(args.lcmx_repo).endswith("-dirty") and not args.allow_dirty:
         raise ValueError("LCM-X checkout has uncommitted changes")
     lme = load_lcm(args.lcmx_repo)
-    questions, dataset_sha, ids_sha, excluded = datasets.load(args.data, args.dataset, lme, args.question_ids)
+    questions, dataset_sha, ids_sha, excluded = datasets.load(
+        args.data, args.dataset, lme, args.question_ids, args.include_adversarial)
     ids_sha = ids_sha or sha(json.dumps([q.qid for q in questions]).encode())
     args.output.mkdir(parents=True, exist_ok=True)
     store = None
@@ -308,6 +312,8 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
         write_json(manifest_path, manifest)
     else:
         manifest = json.loads(manifest_path.read_text())
+        if manifest.get("include_adversarial", False) != getattr(args, "include_adversarial", False):
+            raise ValueError("judging run identity mismatch: include_adversarial")
         if delivery_identity(manifest) != delivery_identity(switches(args)):
             raise ValueError("judging run identity mismatch: delivery_unit/delivery_budget")
         for key, value in (*switches(args).items(), ("dataset_sha256", dataset_sha), ("id_list_sha256", ids_sha),
@@ -381,7 +387,85 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
     write_json(manifest_path, manifest)
 
 
+def check_arms(runs, output=None):
+    """Audit frozen single-delivery answer receipts, without clients."""
+    if len(runs) != 2:
+        raise ValueError("check-arms requires two runs")
+    indexed, arms = [], []
+    for directory in map(Path, runs):
+        manifest = json.loads((directory / "run-manifest.json").read_text())
+        if manifest.get("delivery") != "single":
+            raise ValueError("check-arms requires single delivery")
+        rows = [json.loads(line) for line in (directory / "answers.jsonl").read_text().splitlines() if line.strip()]
+        by_id, hits, estimates = {r["qid"]: r for r in rows}, {}, []
+        counts = dict(role_lines=0, speaker_lines=0, summary_lines=0, missing_labels=0, missing_recall=0)
+        for qid, row in by_id.items():
+            recalls = [t["result"] for t in row.get("trace", []) if t.get("tool") == "lcm_recall" and "result" in t]
+            counts["missing_recall"] += not recalls
+            hits[qid] = []
+            for raw in recalls:
+                payload = json.loads(raw) if isinstance(raw, str) else raw
+                if "error" in payload or "hits" not in payload:
+                    counts["missing_recall"] += 1
+                hits[qid].append([h["store_id"] for h in payload.get("hits", [])])
+            labels, digest = row.get("evidence_labels"), row.get("evidence_sha256")
+            if (not isinstance(labels, dict) or set(labels) != {"role", "speaker", "summary"} or
+                    any(type(n) is not int or n < 0 for n in labels.values()) or
+                    not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
+                counts["missing_labels"] += 1
+            else:
+                for label, count in labels.items():
+                    counts[label + "_lines"] += count
+            estimates.extend(c["prompt_tokens_estimate"] for c in row.get("calls", []) if c.get("prompt_tokens_estimate") is not None)
+        mode = (manifest.get("store_text"), manifest.get("hit_label"))
+        arm = {("plain", "role"): "A0", ("plain", "speaker"): "A1"}.get(mode)
+        label_ok = (counts["role_lines"] > 0 and counts["speaker_lines"] == 0 if arm == "A0" else
+                    counts["speaker_lines"] > 0 and counts["role_lines"] == 0 if arm == "A1" else False)
+        arms.append({**counts, "arm": arm, "store_text": mode[0], "hit_label": mode[1],
+            "label_check": "unavailable" if counts["missing_labels"] else "pass" if label_ok else "fail",
+            "reason": "label check unavailable: answer rows lack valid evidence_labels/evidence_sha256" if counts["missing_labels"] else None,
+            "qid_count": len(by_id), "duplicate_qids": len(rows) - len(by_id),
+            "manifest_qids_match": set(by_id) == set(manifest.get("question_ids", [])),
+            "qid_set_sha256": sha(json.dumps(sorted(by_id)).encode()),
+            "id_list_sha256": manifest.get("id_list_sha256"), "dataset_sha256": manifest.get("dataset_sha256"),
+            "answers_sha256": digest_file(directory / "answers.jsonl"),
+            "speaker_label_failure": arm == "A1" and counts["role_lines"] > 0,
+            "prompt_tokens_estimate": {"median": median(estimates) if estimates else None, "p90": percentile(estimates, .9)}})
+        indexed.append(hits)
+    report = {"arms": arms, "qid_sets_equal": set(indexed[0]) == set(indexed[1]),
+        "id_list_hash_equal": bool(arms[0]["id_list_sha256"]) and arms[0]["id_list_sha256"] == arms[1]["id_list_sha256"],
+        "retrieval_differing_qids": sum(indexed[0][q] != indexed[1][q] for q in indexed[0].keys() & indexed[1].keys())}
+    report["declared_modes_valid"] = sorted(a["arm"] or "invalid" for a in arms) == ["A0", "A1"]
+    report["dataset_hash_equal"] = bool(arms[0]["dataset_sha256"]) and arms[0]["dataset_sha256"] == arms[1]["dataset_sha256"]
+    report["passed"] = report["declared_modes_valid"] and report["dataset_hash_equal"] and report["qid_sets_equal"] and report["id_list_hash_equal"] and not report["retrieval_differing_qids"] and all(
+        a["manifest_qids_match"] and a["label_check"] == "pass" and not any(a[k] for k in ("duplicate_qids", "missing_recall"))
+        for a in arms)
+    output = Path(output) if output else Path(os.path.commonpath([Path(r).resolve().parent for r in runs])) / f"check-arms-{uuid.uuid4().hex}.json"
+    try:
+        with output.open("x") as stream:
+            json.dump(report, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+    except OSError:
+        print("FMP check-arms report write failed: " + str(output), file=sys.stderr)
+        raise
+    return report
+
+
 def main():
+    if sys.argv[1:2] == ["check-arms"]:
+        p = argparse.ArgumentParser(description="Read-only pre-judge arm integrity audit; counts and hashes only")
+        p.add_argument("command", choices=("check-arms",))
+        p.add_argument("--runs", nargs=2, required=True, type=Path)
+        p.add_argument("--output", type=Path)
+        args = p.parse_args()
+        os.umask(0o077)
+        try:
+            report = check_arms(args.runs, args.output)
+        except Exception as exc:
+            print("FMP check-arms failed: " + type(exc).__name__, file=sys.stderr)
+            return 1
+        print(json.dumps(report, sort_keys=True))
+        return int(not report["passed"])
     args = parser().parse_args()
     quiet()
     os.umask(0o077)
