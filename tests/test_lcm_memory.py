@@ -96,9 +96,16 @@ def test_question_is_ranked_only_within_matching_rows(seeded):
     card = call(engine, name='Alex', aliases=['Lex'], question='budget')
     assert [m['store_id'] for m in card['mentions']] == [ids[0]]
     assert all(m['store_id'] != ids[3] for m in card['mentions'])
-    expected = engine._store.search('release', sort='relevance', store_ids=ids[:3], limit=5)
+    expected = engine._store.search('release', sort='relevance', matching_names=['Alex'], limit=5)
     assert [m['store_id'] for m in call(engine, name='Alex', question='release')['mentions']] == [
         r['store_id'] for r in expected]
+    # The question's best hit must survive a card limit that omitted its row.
+    for name in ('Zephyr', '東京'):
+        engine._store.append('one', {'role': 'user', 'content': name})
+        target = engine._store.append('two', {'role': 'user', 'content': name + ' approved Ganymede.'})
+        answer = call(engine, name=name, question='Ganymede', limit=1)
+        assert answer['truncated'] is True
+        assert [m['store_id'] for m in answer['mentions']] == [target]
 
 
 def test_list_and_database_are_read_only(seeded):

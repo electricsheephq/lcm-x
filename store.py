@@ -95,6 +95,26 @@ class _ObservedAtRows(list):
         return deepcopy(list(self), memo)
 
 
+def _matching_names_filter(names: Collection[str] | None, prefix: str) -> tuple[str, list[Any]]:
+    """Restrict question ranking using the same literal FTS/LIKE name matching."""
+    if names is None:
+        return "", []
+    clauses, args, fts = [], [], []
+    for name in names:
+        query = '"' + name.replace('"', '""') + '"'
+        safe = sanitize_fts5_query(query)
+        if requires_like_fallback(query, safe):
+            for term in extract_search_terms(sanitize_like_query(query)):
+                clauses.append(f"{prefix}content LIKE ? ESCAPE '\\'")
+                args.append(f"%{escape_like(term)}%")
+        else:
+            fts.append(safe)
+    if fts:
+        clauses.append(f"{prefix}store_id IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
+        args.append(" OR ".join(f"({query})" for query in fts))
+    return "(" + " OR ".join(clauses) + ")" if clauses else "0", args
+
+
 def _fetch_ranked_search_rows(conn: sqlite3.Connection, sql: str, args: list[Any]) -> list[list[Any]]:
     # A single SQLite result avoids reacquiring Python's GIL for every candidate.
     # JSON1 rounds REALs; tagged round-trip decimals preserve the original bits.
@@ -1879,7 +1899,7 @@ class MessageStore:
                     allow_operators: bool = False,
                     agent_operators: bool = False,
                     stemmed: bool = False,
-                    store_ids: Collection[int] | None = None,
+                    matching_names: Collection[str] | None = None,
                     _include_like_excerpt: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
@@ -1919,7 +1939,7 @@ class MessageStore:
                 time_from=time_from,
                 time_to=time_to,
                 exclude_session_ids=exclude_session_ids,
-                store_ids=store_ids,
+                **({"matching_names": matching_names} if matching_names is not None else {}),
                 _include_excerpt=_include_like_excerpt,
             )
 
@@ -1946,9 +1966,10 @@ class MessageStore:
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
-                if store_ids is not None:
-                    where.append("m.store_id IN (SELECT value FROM json_each(?))")
-                    args.append(json.dumps(list(store_ids)))
+                name_clause, name_args = _matching_names_filter(matching_names, "m.")
+                if name_clause:
+                    where.append(name_clause)
+                    args.extend(name_args)
                 if exclude_session_ids:
                     where.append(
                         "m.session_id NOT IN (SELECT value FROM json_each(?))"
@@ -2024,7 +2045,7 @@ class MessageStore:
                     time_from=time_from,
                     time_to=time_to,
                     exclude_session_ids=exclude_session_ids,
-                    store_ids=store_ids,
+                    **({"matching_names": matching_names} if matching_names is not None else {}),
                     _include_excerpt=_include_like_excerpt,
                 )
 
@@ -2068,7 +2089,7 @@ class MessageStore:
                      time_from: float | None = None,
                      time_to: float | None = None,
                      exclude_session_ids: Collection[str] | None = None, *,
-                     store_ids: Collection[int] | None = None,
+                     matching_names: Collection[str] | None = None,
                      _include_excerpt: bool = False) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
@@ -2083,9 +2104,10 @@ class MessageStore:
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
-        if store_ids is not None:
-            where.append("store_id IN (SELECT value FROM json_each(?))")
-            args.append(json.dumps(list(store_ids)))
+        name_clause, name_args = _matching_names_filter(matching_names, "")
+        if name_clause:
+            where.append(name_clause)
+            args.extend(name_args)
         if exclude_session_ids:
             where.append("session_id NOT IN (SELECT value FROM json_each(?))")
             args.append(json.dumps(list(exclude_session_ids)))

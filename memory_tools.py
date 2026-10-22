@@ -127,7 +127,6 @@ def lcm_memory(args, **kwargs):
     if assertions is not None:
         result.update(_assertions(assertions, [_name(n) for n in names], limit))
     if question:
-        mentions = engine._store.search(question, limit=5, sort='relevance',
-                                        store_ids=[row['store_id'] for row in rows]) if rows else []
+        mentions = engine._store.search(question, limit=5, sort='relevance', matching_names=names)
         result['mentions'] = [_mention(row) for row in mentions]
     return json.dumps(result)
