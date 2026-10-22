@@ -41,6 +41,7 @@ _PREPARE_READY: dict[tuple[str, str, int], dict[tuple[str, object], Callable[[],
 _PREPARE_RETRY: dict[tuple[str, str, int], tuple[int, float]] = {}
 # #1586 v1 CPU bars: target at most 40% maintenance duty, without a new setting.
 _LOCAL_IDLE_MULTIPLIER = 1.5
+_SUCCESS_OUTCOMES = frozenset({"complete"})
 
 
 def database_identity(db_path: str | Path) -> str:
@@ -59,8 +60,12 @@ def _record(db_path: str | Path, outcome: str, failure: str | None) -> None:
         identity = database_identity(db_path)
         _LAST_PASS[identity] = (time.time(), outcome)
         if failure is None:
-            _FAILURES.pop(identity, None)
-            _FAILURE_WARNED.pop(identity, None)
+            parts = [part.split("=", 1)[-1].split(":") for part in outcome.split()]
+            wrote = any(len(part) == 2 and part[1].isdigit() and int(part[1]) > 0 for part in parts)
+            completed = parts and all(part[0] in _SUCCESS_OUTCOMES for part in parts)
+            if wrote or completed:
+                _FAILURES.pop(identity, None)
+                _FAILURE_WARNED.pop(identity, None)
             return
         _FAILURES[identity] = _FAILURES.get(identity, 0) + 1
         first = not _FAILURE_WARNED.get(identity, False)
