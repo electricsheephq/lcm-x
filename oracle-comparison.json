@@ -1,0 +1,59 @@
+{
+  "legacy": {
+    "seeds": 600,
+    "events": {
+      "remaining_count": 4721,
+      "false_coverage": 103,
+      "frontier_omits": 319,
+      "status_count": 355,
+      "terminal_missing": 60
+    },
+    "new_undercounts": [],
+    "new_false_coverage": [],
+    "new_false_certificates": [],
+    "invariant_failures": [],
+    "final_work_state_differences": [],
+    "counts": {
+      "new_undercounts": 0,
+      "new_false_coverage": 0,
+      "new_false_certificates": 0,
+      "invariant_failures": 0,
+      "final_work_state_differences": 0,
+      "equal_final_work_states": 600
+    },
+    "false_certificate_seeds": [
+      107,
+      150,
+      212,
+      422,
+      450,
+      491
+    ],
+    "pass": true
+  },
+  "nolegacy": {
+    "seeds": 600,
+    "events": {
+      "remaining_count": 4830,
+      "frontier_omits": 376,
+      "status_count": 437,
+      "terminal_missing": 70,
+      "false_coverage": 151
+    },
+    "new_undercounts": [],
+    "new_false_coverage": [],
+    "new_false_certificates": [],
+    "invariant_failures": [],
+    "final_work_state_differences": [],
+    "counts": {
+      "new_undercounts": 0,
+      "new_false_coverage": 0,
+      "new_false_certificates": 0,
+      "invariant_failures": 0,
+      "final_work_state_differences": 0,
+      "equal_final_work_states": 600
+    },
+    "false_certificate_seeds": [],
+    "pass": true
+  }
+}

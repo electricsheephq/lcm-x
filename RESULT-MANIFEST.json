@@ -1,0 +1,105 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1860-fix-r2-20261023-public",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "lcmx-1860-fix-r2",
+  "claim_class": "advisory",
+  "created": "2026-10-22T17:50:24Z",
+  "settled": "2026-10-22T17:50:25Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "59d6118ee2e211a8364ff8e06ee75f29c4d396af",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python3 probe_diff.py.txt --candidate head --output recomputed-probe-diff.json",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "r2 mechanical comparative probes",
+      "metric": "harmful_differences",
+      "value": 0.0,
+      "n": 304,
+      "baseline_run": "91a039891afd969f9569897115990fe0c419e034",
+      "source": "probe-diff.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "SUMMARY.json",
+      "role": "receipt",
+      "sha256": "0d3a9e56539b562a427b02096065a4443b3f775968ce3ed5e60253bebd1f083c",
+      "bytes": 1623
+    },
+    {
+      "path": "PROBE-TABLE.md",
+      "role": "receipt",
+      "sha256": "55328eba7856b9aba024c8a4ab475f97d8f4912b2215943e551fa1ad96a223f5",
+      "bytes": 684
+    },
+    {
+      "path": "parent-probe-outcomes.json",
+      "role": "receipt",
+      "sha256": "b61e903b50dc2d4a2834824714a9855e2073f5d29e43606335b87a8a15ac2f0f",
+      "bytes": 832
+    },
+    {
+      "path": "probe-diff.json",
+      "role": "receipt",
+      "sha256": "cda9109d0c8a6f0567346cf8db2bb204f683d98696edb2260b8ac008adf33d86",
+      "bytes": 176125
+    },
+    {
+      "path": "oracle-comparison.json",
+      "role": "receipt",
+      "sha256": "55f43e52532abc461adc4ab574f568a1ae45ec8240e37595692e83869bb60fa9",
+      "bytes": 1363
+    },
+    {
+      "path": "probe-diff-fixed-selfcheck.json",
+      "role": "receipt",
+      "sha256": "9c44d3e0e5dda8a0676b5b0976bd70cf445d4b11cb28676b8f262d59c4124104",
+      "bytes": 176179
+    },
+    {
+      "path": "probe_diff.py.txt",
+      "role": "receipt",
+      "sha256": "1e6cb4dccc9efdb143d37b8c9b7140d2973e21f30d12c640cbc692cda7d6eb79",
+      "bytes": 6860
+    },
+    {
+      "path": "probe-records.json",
+      "role": "receipt",
+      "sha256": "5b7d50e736a2827d9a831d638c82400fd930d48267b8830657a14cc22191317c",
+      "bytes": 57415
+    }
+  ],
+  "rescore": {
+    "command": "python3 probe_diff.py.txt --candidate head --output recomputed-probe-diff.json",
+    "inputs": [
+      "probe-records.json",
+      "parent-probe-outcomes.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "PROBE-TABLE.md",
+    "RESULT.md",
+    "SUMMARY.json",
+    "oracle-comparison.json",
+    "parent-probe-outcomes.json",
+    "probe-diff-fixed-selfcheck.json",
+    "probe-diff.json",
+    "probe-records.json",
+    "probe_diff.py.txt"
+  ]
+}

@@ -1,0 +1,130 @@
+"""Mechanical, per-probe/per-step comparison of the unchanged r1c instruments.
+
+All four required fields are compared, including equal values. Fixture row IDs
+describe eligible rows present at each step; no future arrival is counted early.
+B1's metadata-only pass cannot change chunk rows: its single chunk-row snapshot
+therefore applies on both sides of that pass. Before-pass marker is pass1's marker
+(the intervening limited manual pass does not stamp coverage). These derivations
+are explicit in normalized records. The parent probe emits no truth at its safe
+early return; preserve that expected negative without inventing state values.
+"""
+import argparse
+from collections import Counter
+import json
+from pathlib import Path
+import re
+
+ROOT = Path(__file__).resolve().parent
+FIELDS = ('status', 'embedded', 'false_rows', 'effective_false')
+
+
+def count(status):
+    return int(re.search(r'\d+', status).group())
+
+
+def normalize(rows):
+    result = {}
+    for row in rows:
+        name = row['probe']
+        states = {}
+        if name.startswith('k-real-manual-'):
+            for step, marker_key in (('before_pass2', 'marker_after_pass1'),
+                                     ('after_pass2', 'marker_after_pass2')):
+                marker = row[marker_key]
+                assert marker is None or isinstance(marker, dict)
+                embedded = row['rows_with_meta']
+                absent = sorted(set(range(1, 13)) - set(embedded))
+                false = [sid for sid in absent if marker and marker['from'] <= sid <= marker['through']]
+                states[step] = dict(status=row[f'status_{step}'].split(': ', 1)[1],
+                                    embedded=embedded, false_rows=false,
+                                    effective_false=bool(false) and row['revision'] >= 2,
+                                    eligible_unembedded=absent,
+                                    derivation='B1 metadata-only pass leaves chunk rows unchanged; limited manual run leaves pass1 marker')
+        else:
+            for key in ('before', 'after_cloud'):
+                if key in row:
+                    states[key] = dict(row[key])
+            for index, state in enumerate(row['steps']):
+                states[f'steps[{index}]'] = dict(state)
+            for step, state in states.items():
+                index = int(step[6:-1]) if step.startswith('steps[') else 0
+                if name.startswith('d1b_'):
+                    high = 10 if name.endswith('_arrival') and not name.endswith('_no_arrival') and index else 9
+                elif name in ('d2_revision_bump_arrival', 'd3_current_control'):
+                    high = 8 if index else 7
+                else:
+                    high = 7
+                state['eligible_unembedded'] = sorted(set(range(1, high + 1)) - set(state['embedded']))
+        assert name not in result
+        result[name] = states
+    assert len(result) == 9
+    return result
+
+
+def compare(candidate, reference):
+    assert candidate.keys() == reference.keys()
+    records = []
+    for probe in candidate:
+        assert candidate[probe].keys() == reference[probe].keys(), probe
+        for step, state in candidate[probe].items():
+            before = reference[probe][step]
+            for field in FIELDS:
+                left, right = before[field], state[field]
+                changed = left != right
+                reasons = []
+                if field == 'status' and count(right) < count(left) and state['eligible_unembedded']:
+                    reasons.append('lower status count while eligible row is unembedded')
+                if field == 'false_rows' and set(right) - set(left):
+                    reasons.append('new false row')
+                if field == 'effective_false' and right:
+                    reasons.append('effective_false true')
+                records.append(dict(probe=probe, step=step, field=field,
+                                    reference=left, candidate=right, changed=changed,
+                                    classification='harmful' if reasons else 'benign',
+                                    reasons=reasons, eligible_unembedded=state['eligible_unembedded']))
+    return records
+
+
+def summary(records):
+    return dict(compared_fields=len(records), differences=sum(r['changed'] for r in records),
+                harmful=sum(r['classification'] == 'harmful' for r in records),
+                benign_differences=sum(r['changed'] and r['classification'] == 'benign' for r in records),
+                unchanged=sum(not r['changed'] for r in records))
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--candidate', choices=('fixed', 'head'), required=True)
+    parser.add_argument('--output', type=Path, required=True)
+    args = parser.parse_args()
+    raw = json.loads((ROOT / 'probe-records.json').read_text())
+    parents = json.loads((ROOT / 'parent-probe-outcomes.json').read_text())
+    normalized = {key: normalize(value) for key, value in raw.items()}
+    comparisons = {key: compare(normalized[args.candidate], normalized[key]) for key in ('base', 'fixed')}
+    totals = {key: summary(rows) for key, rows in comparisons.items()}
+    required_fixed = [r for r in comparisons['fixed'] if r['probe'] != 'd3_current_control']
+    gate = totals['base']['harmful'] == 0 and summary(required_fixed)['harmful'] == 0
+    per_probe = {}
+    for name in normalized[args.candidate]:
+        per_probe[name] = {key: summary([r for r in rows if r['probe'] == name])
+                           for key, rows in comparisons.items()}
+    # No truth snapshot exists for this setup; cover its actual outcome directly.
+    assert all(parents[key]['classification'] == 'EXPECTED_NEGATIVE' for key in ('base', 'fixed', args.candidate))
+    parent = dict(base='SKIPPED: no independent low key', fixed='EXPECTED_NEGATIVE: StopIteration before yield',
+                  candidate=parents[args.candidate], truth_steps_emitted=0,
+                  field_comparisons='N/A: no truth emitted; no fabricated status/embedded/false fields',
+                  classification='benign', harmful=0)
+    result = dict(candidate=args.candidate, gate='PASS' if gate else 'FAIL', counts=totals,
+                  required_fixed_excluding_d3=summary(required_fixed), per_probe=per_probe,
+                  parent_probe=parent, normalized_records=normalized, comparisons=comparisons)
+    args.output.write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps({k: result[k] for k in ('candidate', 'gate', 'counts', 'required_fixed_excluding_d3')}, indent=2))
+    for key, records in comparisons.items():
+        for record in records:
+            if record['classification'] == 'harmful':
+                print(json.dumps(dict(reference=key, finding=record)))
+    return 0 if gate else 1
+
+
+if __name__ == '__main__':
+    raise SystemExit(main())

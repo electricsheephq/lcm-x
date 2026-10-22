@@ -1,0 +1,24 @@
+{
+  "base": {
+    "classification": "EXPECTED_NEGATIVE",
+    "probe": "b_parent_absent_capture",
+    "note": "Base skips: no independent low key.",
+    "receipt": "cert-probes-base.txt"
+  },
+  "fixed": {
+    "classification": "EXPECTED_NEGATIVE",
+    "probe": "b_parent_absent_capture",
+    "node": "test_b_parent_absent_at_capture_then_low_meta_deleted",
+    "exception": "StopIteration",
+    "note": "Original probe stops before emitting truth; no state invented.",
+    "receipt": "cert-probes-fixed.txt"
+  },
+  "head": {
+    "classification": "EXPECTED_NEGATIVE",
+    "probe": "b_parent_absent_capture",
+    "node": "test_b_parent_absent_at_capture_then_low_meta_deleted",
+    "exception": "StopIteration",
+    "note": "Original probe stops before emitting truth; no state invented.",
+    "receipt": "cert-probes-head.txt"
+  }
+}

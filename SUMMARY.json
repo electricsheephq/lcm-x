@@ -1,0 +1,47 @@
+{
+  "measured_head": "59d6118ee2e211a8364ff8e06ee75f29c4d396af",
+  "red_source": "4c54149305d212ed76055c6d5d1ebc5960cf6664",
+  "red_commit": "b3df61c6637311db52700f9a37229871adad4f0a",
+  "red": "1 failed in 0.84s; initial backlog 0",
+  "focused": "11 passed in 1.21s",
+  "full_suite": "19512 passed, 141 skipped, 63 xfailed, 29 warnings in 1400.36s (0:23:20)",
+  "full_suite_exit": 0,
+  "post_summary_diagnostics": "Three synthetic issue1603_profile_0 shutdown import diagnostics, also in predecessor; no pytest node failed.",
+  "ruff": "All checks passed!",
+  "diff_check": "exit 0 (no output)",
+  "probe_counts": {
+    "base": {
+      "compared_fields": 152,
+      "differences": 0,
+      "harmful": 0,
+      "benign_differences": 0,
+      "unchanged": 152
+    },
+    "fixed": {
+      "compared_fields": 152,
+      "differences": 1,
+      "harmful": 0,
+      "benign_differences": 1,
+      "unchanged": 151
+    }
+  },
+  "oracle_counts": {
+    "legacy": {
+      "new_undercounts": 0,
+      "new_false_coverage": 0,
+      "new_false_certificates": 0,
+      "invariant_failures": 0,
+      "final_work_state_differences": 0,
+      "equal_final_work_states": 600
+    },
+    "nolegacy": {
+      "new_undercounts": 0,
+      "new_false_coverage": 0,
+      "new_false_certificates": 0,
+      "invariant_failures": 0,
+      "final_work_state_differences": 0,
+      "equal_final_work_states": 600
+    }
+  },
+  "boundary": "Merge-candidate fix with comparative probes and oracle evidence; does not prove production backlog accuracy beyond these probes, independent final-head review, merge, release, runtime or customer behavior."
+}
