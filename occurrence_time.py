@@ -21,7 +21,18 @@ _RELATIVE = re.compile(
     r"\b(?:(?P<count>\d+)\s+(?P<unit>days?|weeks?|months?)\s+ago|(?P<simple>today|yesterday)|last\s+(?P<weekday>monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
     re.IGNORECASE,
 )
-_RELATIVE_MENTION = _RELATIVE
+_RELATIVE_MENTION = re.compile(
+    # Whole past-day idioms come before yesterday to avoid partial matches.
+    r"\b(?:the\s+day\s+before(?:\s+yesterday)?|the\s+other\s+day|"
+    # Past periods point away from the observation day; no today synonyms.
+    r"last\s+(?:week|month|year|night|weekend)|"
+    # Counts are mentions only; the resolvable numeric grammar stays unchanged.
+    r"(?:\d+|a|an|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"a\s+few|a\s+couple\s+of)\s+(?:days?|weeks?|months?|years?)\s+ago|"
+    # Earlier periods, excluding earlier today.
+    r"earlier\s+this\s+(?:week|month|year))\b|" + _RELATIVE.pattern,
+    re.IGNORECASE,
+)
 _DATE_TEXT_RE = re.compile(
     r"\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|"
     r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
