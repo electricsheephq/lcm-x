@@ -3274,7 +3274,14 @@ class ReconcileMixin:
                 borrows = (content == _HERMES_PRUNED_TOOL_PLACEHOLDER
                            and result_identity[1] != _HERMES_PRUNED_TOOL_PLACEHOLDER)
                 if borrows and self._bound_retry_placeholder_replay(messages, index, probe, stored_rows):
-                    bound_replays.update((index, probe))
+                    proof = self._durable_commit_proof_payload()
+                    metadata = self._remapped_output_metadata(messages, proof or {}, len(messages))
+                    # Each row's UID vetoes only its own binding; stamps and
+                    # the preceding user's UID cannot make this row fresh.
+                    bound_replays.update(idx for idx in (index, probe) if not self._host_occurrence_changed(
+                        {"message_uid": messages[idx].get("message_uid")},
+                        {"message_uid": metadata.get(idx, {}).get("message_uid")},
+                    ))
                 if (
                     tool_call_id in call_ids
                     and not _is_hermes_persisted_output_marker(content)
