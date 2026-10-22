@@ -61,7 +61,7 @@ def test_carried_mixed_separator_keeps_base_predicate(tmp_path, monkeypatch):
     "quote,day",
     [
         ("We met on 2023-01-10 and yesterday.", "2023-01-10"),
-        ("We met on 2023-01/10 and January 12, 2023.", "2023-01-10"),
+        ("We met on 2023-01/10, January 12, 2023 and February 3, 2023.", "2023-01-10"),
         ("We met on January 10, 2023 and yesterday.", "2023-03-21"),
         ("We met yesterday and last week.", "2023-03-21"),
     ],
