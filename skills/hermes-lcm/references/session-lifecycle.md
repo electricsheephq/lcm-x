@@ -11,6 +11,8 @@ engine; completed and failed-only callbacks do not ingest. Under the stable-use
 lease, the original session/conversation binding must still match. Ownership also
 requires a positive ingest cursor, no pending reset or cursor reconciliation, and
 a cached replay-identity prefix matching the supplied history.
+Histories ending in a user row also wait for catch-up: retry can still merge
+that open tail with the next prompt, so ownership alone does not prove it stable.
 Unproven, unbound, ignored or stateless histories wait for normal catch-up;
 callback metadata never binds or rebinds a session. Eligible rows are durable and
 searchable before the callback returns, with `note_turn_complete` in `finally`.

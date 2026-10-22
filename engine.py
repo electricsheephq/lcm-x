@@ -2849,6 +2849,11 @@ class LCMEngine(
                     # Check under the lease: a reset/rebind may have won admission.
                     logger.debug("LCM stopped-turn ownership unproven; defer to completed-turn catch-up")
                     return
+                if messages and messages[-1].get("role") == "user":
+                    # Retry can still merge this open tail into its next user
+                    # row. Persisting it now changes the later replay match.
+                    logger.debug("LCM stopped user tail still mutable; defer to completed-turn catch-up")
+                    return
                 try:
                     active_engine.ingest(messages)
                 finally:

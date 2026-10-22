@@ -17,7 +17,8 @@ Raw messages are source truth. Summary nodes, embeddings, temporal rollups, quer
 
 Interrupted `on_turn_complete` callbacks persist rows only when the bound engine
 proves the incoming replay prefix belongs to its session under the stable-use
-lease. Unproven ownership defers to completed-turn catch-up; metadata never
+lease and the history must not end in a still-mutable user row.
+Unproven ownership or an open user tail defers to completed-turn catch-up; metadata never
 rebinds an engine. See `session-lifecycle.md` for eligibility and late host rows.
 
 ## LCM note carrier

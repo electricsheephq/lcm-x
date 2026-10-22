@@ -126,7 +126,8 @@ def test_post_finalize_failed_boundary_is_stored_once(plugin, flush):
     # The pinned host closes a user-only failed turn after finalize_turn.
     boundary = {"role": "assistant", "content": "Operation interrupted.", "timestamp": 1002.0}
     closed = stopped + [boundary]
-    assert engine._store.get_session_count("A") == len(stopped)
+    # A user-only stop remains mutable until the host closes or retries it.
+    assert engine._store.get_session_count("A") == len(warm)
     final = closed + rows("next") if flush == "next-turn" else closed
     if flush == "next-turn":
         completed(ctx, engine, "A", final)

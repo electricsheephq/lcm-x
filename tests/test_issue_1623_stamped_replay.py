@@ -44,7 +44,8 @@ def test_stamped_stopped_rows_survive_repair_cold_replay_and_compaction(tmp_path
         engine.ingest(warm)
         engine.on_turn_complete(deepcopy(history), interrupted=True)
         engine.on_turn_complete(deepcopy(history), interrupted=True)
-        assert_ledger(history)
+        # Only the open user tail is deferred; closed tool-stop shapes persist.
+        assert_ledger(warm if shape == "user-merge" else history)
         next_user = stamp("user", "stopped request" if shape == "retry" else "next request")
         answer = stamp("assistant", "next answer")
         if shape in {"user-merge", "orphan-prune"}:
@@ -57,7 +58,7 @@ def test_stamped_stopped_rows_survive_repair_cold_replay_and_compaction(tmp_path
                 merged["_merged_turn_prefix"] = stopped[0]["content"]
                 merged["_absorbed_message_uids"] = [next_user["message_uid"]]
             current = warm + [merged, answer]
-            expected = history + [next_user, answer]
+            expected = current if shape == "user-merge" else history + [next_user, answer]
         else:
             current = (warm if shape == "retry" else history) + [next_user, answer]
             # /retry is a newly stamped user occurrence, as in completed-turn #1179.
