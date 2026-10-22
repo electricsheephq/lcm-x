@@ -61,7 +61,7 @@ class Producer:
         if row["arm"] == "candidate" and row["k"] in self.failures and attempt == 1:
             return "invalid", "synthetic partial", None
         share = .1 if self.low and row["arm"] == "candidate" else .6
-        return "valid", "complete", {str(cp): {"share": share, "facts": {"f": True}} for cp in (176, 304)}
+        return "valid", "complete", {str(cp): {"share": share if cp == 304 else .6, "facts": {"f": True}} for cp in (176, 304)}
 
 
 def run(tmp_path, producer=None, option="B", aa=False, clock=None, **extra):
@@ -164,9 +164,18 @@ def test_elapsed_includes_setup_and_scoring(tmp_path):
     assert driver.LIMIT_SECONDS == 21600
 
 
+def test_elapsed_setup_exhausts_reservation_before_first_launch(tmp_path):
+    clock = Clock()
+    clock.now = 21600
+    result, data, producer = run(tmp_path, clock=clock, started=0)
+    assert result["raw_verdict"] == "INCONCLUSIVE"
+    assert not producer.started and len(data["rows"]) == 54
+    assert all(r["state"] == "missing" for r in data["rows"])
+
+
 def test_valid_low_score_is_never_rerun(tmp_path):
     result, data, producer = run(tmp_path, Producer(low=True))
-    assert result["raw_verdict"] == "INCONCLUSIVE"  # also trips cp176; never requests a replay
+    assert result["raw_verdict"] == "FAIL"
     assert len(producer.started) == 54
     assert all(len(r["attempts"]) == 1 for r in data["rows"])
 
