@@ -3244,7 +3244,8 @@ class ReconcileMixin:
             if not _has_lossy_redacted_identity(identity)
         )
         replayed: set[int] = set()
-        bound_replays: set[int] = set()
+        metadata = None  # Loaded once, only when a borrowed pair binds.
+        stored_uids: set[str] = set()
         index = max(0, cursor)
         while index < len(messages):
             assistant = messages[index]
@@ -3260,6 +3261,7 @@ class ReconcileMixin:
                 for call in assistant.get("tool_calls") or []
                 if isinstance(call, dict) and str(call.get("id") or "")
             }
+            bound_replays: set[int] = set()
             result_indexes: dict[str, int] = {}
             # What this segment would consume from the durable multiset: its
             # assistant plus one occurrence per matched result.
@@ -3274,20 +3276,20 @@ class ReconcileMixin:
                 borrows = (content == _HERMES_PRUNED_TOOL_PLACEHOLDER
                            and result_identity[1] != _HERMES_PRUNED_TOOL_PLACEHOLDER)
                 if borrows and self._bound_retry_placeholder_replay(messages, index, probe, stored_rows):
-                    proof = self._durable_commit_proof_payload()
-                    metadata = self._remapped_output_metadata(messages, proof or {}, len(messages))
-                    # Each row's UID vetoes only its own binding; stamps and
-                    # the preceding user's UID cannot make this row fresh.
-                    bound_replays.update(idx for idx in (index, probe) if not self._host_occurrence_changed(
-                        {"message_uid": messages[idx].get("message_uid")},
-                        {"message_uid": metadata.get(idx, {}).get("message_uid")},
-                    ))
+                    if metadata is None:
+                        proof = self._durable_commit_proof_payload()
+                        metadata = self._remapped_output_metadata(messages, proof or {}, len(messages))
+                        # A prefix edit can end the forward remap before this
+                        # occurrence. Resolve its UID by membership, not position.
+                        stored_uids = {row["message_uid"] for row in (proof or {}).get("output_metadata", ())
+                                       if row.get("message_uid")}
+                    bound_replays.update((index, probe))
                 if (
                     tool_call_id in call_ids
                     and not _is_hermes_persisted_output_marker(content)
                     and not _has_lossy_redacted_identity(result_identity)
                     and result_identity in stored_identity_counts
-                    and not borrows
+                    and (not borrows or probe in bound_replays)
                 ):
                     result_indexes[tool_call_id] = probe
                     segment_needs[result_identity] += 1
@@ -3295,6 +3297,12 @@ class ReconcileMixin:
             if (
                 call_ids
                 and call_ids.issubset(result_indexes)
+                and (not bound_replays or all(
+                    (uid := self._host_occurrence_metadata(messages[idx])["message_uid"]) is None
+                    or uid == ((metadata or {}).get(idx, {}).get("message_uid")
+                               or (uid if uid in stored_uids else None))
+                    for idx in (index, *result_indexes.values())
+                ))
                 and all(
                     stored_identity_counts[identity] >= needed
                     for identity, needed in segment_needs.items()
@@ -3304,7 +3312,7 @@ class ReconcileMixin:
                 replayed.add(index)
                 replayed.update(result_indexes.values())
             index = max(index + 1, probe)
-        return replayed | bound_replays
+        return replayed
 
     def _bound_retry_placeholder_replay(self, messages, call_index, result_index, stored_rows) -> bool:
         """Bind a borrowed pair to the durable occurrence of its stamped user."""
