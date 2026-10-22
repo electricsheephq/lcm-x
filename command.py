@@ -4830,7 +4830,7 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             values = [(f"chunk_policy_revision_through:{identity_hash}",
                        _chunk_coverage_value(conn, identity_hash, bounds[0],
                                              min(candidates, default=high + 1) - 1, policy))]
-            if not candidates:
+            if not candidates and not metadata_only:
                 values.append((f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)))
             record(progress, values)
     if not range_complete:
