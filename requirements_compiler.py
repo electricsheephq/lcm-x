@@ -707,7 +707,7 @@ def _ordered_event_candidate(
     if absolute_day is not None:
         event_date = absolute_day.isoformat()
     if not event_date:
-        mention = _DATE_TEXT_RE.search(_carried_date_text(quote))
+        mention = _DATE_TEXT_RE.search(_carried_date_text(quote) if source.get("time_uncertain") else quote)
         parsed = _date_value(mention.group(0)) if mention else None
         event_date = parsed.isoformat() if parsed else ""
     if not event_date:
@@ -800,6 +800,9 @@ def _candidate_inventory(
         carried = engine._store.get_carried_stamp_ids([int(s["store_id"]) for s in sources])
         sources = [{**s, **({"time_uncertain": "carried"} if s["store_id"] in carried else {})}
                    for s in sources]
+    for source in sources:
+        if _carried_mixed_dates(source):
+            _record_exclusion(result, source, "uncertain_source_observation_time")
     extracted = _extract_candidates(sources, contract)[:limit]
     for candidate in extracted:
         if not candidate.get("time_uncertain"):

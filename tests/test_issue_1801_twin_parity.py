@@ -126,7 +126,13 @@ def test_explicit_carried_window_keeps_base(tmp_path, text, operation, window):
             outputs.append(run(engine, refs, operation, window))
             assert engine._store.connection.total_changes == before
     carried, ordinary = outputs
-    if window == "outside":
+    if "booked" in text:
+        # #1814 supersedes the former ISO-first exception for distinct days.
+        for output in outputs:
+            assert output["state"] == "unknown"
+            assert output["direct_fact"] is None and output["computation"] is None
+            assert output["exclusions"]
+    elif window == "outside":
         assert normalize(carried, "") == normalize(ordinary, "")
         if operation == "date_filter":
             assert "Kyoto" in carried["direct_fact"]["value"]

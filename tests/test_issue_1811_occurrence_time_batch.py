@@ -72,7 +72,11 @@ def test_order_label_shared_grammar_parity(tmp_path, form, question_date, carrie
             source["time_uncertain"] = "carried"
         contract = compile_answer_contract("What is the order of events?", question_as_of=question_date).contract
         candidate = _ordered_event_candidate(source, contract)
-        assert candidate["label"] == "Bali"
+        if not carried and "th" in form:
+            # Ordinary ordinal-only dates had no day at base; never newly answer.
+            assert candidate is None
+        else:
+            assert candidate["label"] == "Bali"
         result = json.loads(tools.lcm_compile_evidence(args(refs, "What is the order of events?", question_date), engine=engine))
         assert "Feb" not in str(result.get("computation"))
 
