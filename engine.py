@@ -7073,7 +7073,8 @@ class LCMEngine(
             _s, rescan_ignored, rescan_replay = self._build_ingest_replay(
                 messages=messages, n=n, cursor=cursor, only=set(rewound),
                 store_ids=(ignored_original_messages.store_ids if not any(
-                    anchor_plan.get(key) for key in ("ws", "carry", "relations"))
+                    anchor_plan.get(key) for key in ("ws", "relations"))
+                    and all(row.get("session_id") == self._session_id for row in anchor_plan.get("carry", ()))
                     and ignored_original_messages.rewrite_overrides == getattr(self, "_host_rewrite_overrides", {}) else None),
             )
             replay_messages = list(replay_messages)
@@ -7253,7 +7254,7 @@ class LCMEngine(
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
         class IgnoreDecisions(list):
             # Reuse requires unchanged rewrite overrides as well as a plan
-            # without rewrite/carry/relation changes.
+            # without rewrite/ancestor-carry/relation changes.
             store_ids: Optional[dict[int, int]] = None
             rewrite_overrides: Optional[dict[int, Any]] = None
 
