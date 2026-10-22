@@ -50,6 +50,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
     response["query"] = response["query"][:4096]
     admitted, matched, rows, adjacency = [], {}, {}, {}
     resolved_summaries, fit_failure = set(), "budget"
+    skipped, omissions = [], {}
     conn = None
     live_reads = ExitStack()
     last_encoded = ""
@@ -269,6 +270,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         for sid, meta in sessions.items():
             queue = deque(meta["seed_ids"])
             visited, emitted = set(), set()
+            omissions[sid] = []
             while queue:
                 anchor = queue.popleft()
                 if anchor in visited:
@@ -278,11 +280,13 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 if not batch:
                     meta["omission_reason"] = "unreadable_group"
                     meta["expand_hint"] = f"lcm_expand(store_id={anchor})"
+                    omissions[sid].append((meta["omission_reason"], meta["expand_hint"]))
                     continue
                 visited.update(r["store_id"] for r in batch)
                 pending = [item(r) for r in batch if r["store_id"] not in emitted]
                 if delta_requested and any(h.get("exact_ref") in seen_refs for h in pending):
                     meta["omission_reason"] = "no_novel_exact_ref"
+                    omissions[sid].append((meta["omission_reason"], None))
                 elif pending:
                     admitted.append(pending)
                     if evidence_fits():
@@ -292,6 +296,10 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                         meta["omission_reason"] = (fit_failure if fit_failure == "size_nonconvergence"
                                                    else "oversized_group" if not emitted else "budget")
                         meta["expand_hint"] = f"lcm_expand(store_id={anchor})"
+                        omission = (meta["omission_reason"], meta["expand_hint"])
+                        omissions[sid].append(omission)
+                        if fit_failure == "budget":
+                            skipped.append((meta, pending, omission))
                         # Try other ranked anchors/sessions, never repeatedly
                         # walk an over-budget neighborhood.
                         continue
@@ -340,7 +348,29 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         for meta in delivery["sessions"]:
             if meta["session_id"] == removed[0]["session_id"]:
                 meta.update(complete=False, omission_reason=fit_failure)
+                omissions.setdefault(meta["session_id"], []).append((fit_failure, None))
         delivery["truncated"] = True
+    if delivery.get("stop_reason") != "deadline":
+        # Only retry already-read budget skips, once, in admission order.
+        # Refit removals and nonconverging groups never enter this list.
+        for meta, pending, omission in skipped:
+            remaining = omissions[meta["session_id"]]
+            remaining.remove(omission)
+            previous = dict(meta)
+            meta.update(complete=not remaining, omission_reason=remaining[-1][0] if remaining else None)
+            meta.pop("expand_hint", None)
+            if remaining and remaining[-1][1]:
+                meta["expand_hint"] = remaining[-1][1]
+            delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
+                not s["complete"] for s in delivery["sessions"])
+            admitted.append(pending)
+            if not evidence_fits():
+                admitted.pop()
+                remaining.append(omission)
+                meta.clear()
+                meta.update(previous)
+        delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
+            not s["complete"] for s in delivery["sessions"])
     while not fits():
         # Metadata is budgeted too, even for K=100 bench seeds and no citable
         # groups. Keep a bounded honest envelope rather than a first-item escape.
