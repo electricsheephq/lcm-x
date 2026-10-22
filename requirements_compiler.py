@@ -707,7 +707,7 @@ def _ordered_event_candidate(
     if absolute_day is not None:
         event_date = absolute_day.isoformat()
     if not event_date:
-        mention = _DATE_TEXT_RE.search(_carried_date_text(quote) if source.get("time_uncertain") else quote)
+        mention = _DATE_TEXT_RE.search(_carried_date_text(quote))
         parsed = _date_value(mention.group(0)) if mention else None
         event_date = parsed.isoformat() if parsed else ""
     if not event_date:
@@ -725,7 +725,11 @@ def _ordered_event_candidate(
         )
         if place is not None:
             label = place.group(1).strip()
-    quote_without_dates = _DATE_TEXT_RE.sub(" ", quote)
+    quote_without_dates = re.sub(
+        r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+(?=" + _DATE_TEXT_RE.pattern + ")",
+        "", _carried_date_text(quote), flags=re.IGNORECASE,
+    )
+    quote_without_dates = _DATE_TEXT_RE.sub(" ", quote_without_dates)
     names = [
         name
         for name in re.findall(

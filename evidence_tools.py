@@ -511,8 +511,8 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs: Any) -> str:
             )
         except sqlite3.Error:
             result = {"status": "fallback", "state": "unknown",
-                      "reason": "uncertain_source_observation_time",
-                      "reason_code": "uncertain_source_observation_time",
+                      "reason": "store_unavailable",
+                      "reason_code": "store_unavailable",
                       "next_path": "evidence_only", "context": None,
                       "computation": None, "evidence": []}
         return json.dumps(result, ensure_ascii=False)
