@@ -260,7 +260,7 @@ def test_codex_jsonl_lf_framing_preserves_unicode_and_rejects_invalid_json(tmp_p
               {"type": "turn.completed", "usage": {}}]
     output = "\n".join(json.dumps(e, ensure_ascii=False) for e in events) + "\n\n"
     backend = models.Codex(tmp_path / "transport", models.Quota(tmp_path / "quota.json"))
-    monkeypatch.setattr(backend, "run", lambda *a: SimpleNamespace(stdout=output, returncode=0))
+    monkeypatch.setattr(backend, "run", lambda *a: SimpleNamespace(stdout=output, stderr="", returncode=0))
     monkeypatch.setattr(backend, "rollout", lambda thread: rollout)
     records = []
     try:

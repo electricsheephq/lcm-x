@@ -12,6 +12,10 @@ from .audit import audit, baseline, progress
 from .common import append, config, dump, foreign_files, guards, immutable_cache, isolated, load, parser, product, safe_paths
 from .cpu import flags, supervisor
 
+WORKER_POLL_S = 1
+STOP_GRACE_S = 60
+assert STOP_GRACE_S > WORKER_POLL_S+5+2+5+10+15  # poll + session end + retirement + exit session end/publication + margin
+
 
 def state(audit_result, elapsed, idle, ready, max_wall):
     if audit_result["complete"]:
@@ -50,7 +54,7 @@ def worker(a):
         readiness = mod("embedding_provider").probe_provider_availability(cfg)
         last_pass = mod("embedding_maintenance").incremental_embedding_state(a.db)
         dump(a.out/f"status-{a.generation}.json", {"ready": readiness, "last_pass": last_pass})
-        time.sleep(1)
+        time.sleep(WORKER_POLL_S)
     engine.shutdown()
 
 
@@ -69,13 +73,17 @@ def launch(a, generation):
 
 
 def stop(p):
+    result = dict(stop_sigterm_at=None, stop_killed=False)
     if p.poll() is None:
+        result["stop_sigterm_at"] = time.monotonic()
         p.terminate()
         try:
-            p.wait(10)
+            p.wait(STOP_GRACE_S)
         except subprocess.TimeoutExpired:
+            result["stop_killed"] = True
             p.kill()
             p.wait()
+    return dict(result, stop_exit_at=time.monotonic(), stop_returncode=p.returncode)
 
 
 def restart_trigger(a, fraction, elapsed):
@@ -108,7 +116,7 @@ def run(a):
     manifest = load(a.manifest)
     meter = supervisor(a, a.out/"cpu.jsonl")
     started, last_change, next_progress, generation = time.monotonic(), time.monotonic(), 0., 0
-    previous, history, restarted, events = None, [], False, []
+    previous, history, restarted, events, stops = None, [], False, [], []
     meter.start()
     p = launch(a, generation)
     meter.watch(p.pid)
@@ -168,7 +176,9 @@ def run(a):
                     append(a.out/"restarts.jsonl", {"elapsed_s": now-started, "fraction": fraction,
                         "reason": trigger})
                     meter.windows[p.pid][1] = time.monotonic()
-                    stop(p)
+                    stops.append(stop(p))
+                    if stops[-1]["stop_killed"]:
+                        break
                     generation, restarted = 1, not drain96
                     p = launch(a, generation)
                     meter.watch(p.pid)
@@ -180,13 +190,15 @@ def run(a):
         final, reason = "ABORTED", "worker_exit"
     finally:
         loop_end = time.monotonic()
-        stop(p)
+        stops.append(stop(p))
         meter.close()
     if meter.breach:
         final, reason = "ABORTED", meter.breach
     events = [__import__("json").loads(s) for s in (a.out/"events.jsonl").read_text().splitlines()] if (a.out/"events.jsonl").exists() else []
     result = audit(a.db, manifest)
-    if audit_failed(result):
+    if any(s["stop_killed"] for s in stops):
+        final, reason = "INVALID", "forced_stop_after_grace"
+    elif audit_failed(result):
         final, reason = "ABORTED", "final_integrity_or_residue"
     elif final == "COMPLETE" and not result["complete"]:
         final, reason = "ABORTED", "final_coverage_regressed"
@@ -194,9 +206,11 @@ def run(a):
     covered = sum(x["covered"] for x in result["classes"].values())
     initial = sum(initial_audit["classes"][k]["covered"] for k in result["classes"])
     first = initial_audit
-    summary = {"state": final, "reason": reason, "audit": result, "restarted": restarted, "restart": "once" if restarted else "none", "max_wall": a.max_wall,
+    summary = {"state": final, "reason": reason, "stops": stops, "audit": result, "restarted": restarted, "restart": "once" if restarted else "none", "max_wall": a.max_wall,
         "end_to_end_s": elapsed, "coverage_fraction": covered/max(1, sum(x["expected"] for x in result["classes"].values())),
         "new_ids_s": (covered-initial)/elapsed, "cpu": meter.summary(final, 1, end=loop_end), "effective_config": (load(a.out/f"worker-{generation}.json")["effective_config"] if (a.out/f"worker-{generation}.json").exists() else None), "rows": manifest["rows"]}
+    if any(s["stop_killed"] for s in stops) and meter.breach:
+        summary["breach_reason"] = meter.breach
     summary.update(rows_s=(result["covered_rows"]-first["covered_rows"])/elapsed,
         chunks_s=(result["classes"]["chunks"]["covered"]-first["classes"]["chunks"]["covered"])/elapsed,
         tokens_s=sum(v["covered_tokens"]-first["classes"][k]["covered_tokens"] for k, v in result["classes"].items())/elapsed,

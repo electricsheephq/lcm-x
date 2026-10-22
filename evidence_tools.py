@@ -307,6 +307,7 @@ def lcm_compute(args: Dict[str, Any], **kwargs: Any) -> str:
             assertions=getattr(engine, "_assertions", None),
             as_of=as_of,
             session_dates=getattr(engine, "_session_occurrence_dates", None),
+            withhold_mixed=plan.temporal_window is not None or plan.operation in {"date_filter", "order", "date_interval"},
         )
     except (TypeError, ValueError, sqlite3.Error) as exc:
         grounding = None
@@ -511,8 +512,8 @@ def lcm_compile_evidence(args: Dict[str, Any], **kwargs: Any) -> str:
             )
         except sqlite3.Error:
             result = {"status": "fallback", "state": "unknown",
-                      "reason": "uncertain_source_observation_time",
-                      "reason_code": "uncertain_source_observation_time",
+                      "reason": "store_unavailable",
+                      "reason_code": "store_unavailable",
                       "next_path": "evidence_only", "context": None,
                       "computation": None, "evidence": []}
         return json.dumps(result, ensure_ascii=False)

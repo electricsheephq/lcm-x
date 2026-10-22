@@ -60,8 +60,9 @@ def test_early_invalid_cannot_hide_recall_receipts(tmp_path, state):
     forged = dict(state="INVALID", reason="covered_store_incomplete")
     for name in ("summary.json", "raw-summary.json"):
         common.dump(cell/name, forged)
-    with pytest.raises((AssertionError, ValueError)):
-        rescore.v2(cell)
+    result = rescore.v2(cell)
+    assert result["state"] == "FAIL"
+    assert result["rescore_disagreement"]  # Forged early exit cannot hide the check.
 
 
 def test_early_invalid_summary_cannot_hide_raw_classes(tmp_path):
@@ -146,6 +147,7 @@ def test_zero_recall_rows_capped_is_invalid(tmp_path, monkeypatch, state):
 
 
 @pytest.mark.parametrize("problem", ["absent", "empty", "one-pin", "metadata-absent", "metadata-empty", "metadata-one-pin", "integer", "null"])
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_persisted_pins_cannot_be_recreated(corpus, tmp_path, monkeypatch, problem):
     db, fresh, mod = corpus
     source, out = tmp_path/"covered", tmp_path/"out"

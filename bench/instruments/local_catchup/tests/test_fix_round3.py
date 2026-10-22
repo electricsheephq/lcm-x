@@ -99,6 +99,7 @@ def test_catchup_restart_closes_cpu_window_before_stop(fake_catchup, monkeypatch
     def stop(p):
         stops.append((p.pid, clock[0], meter.windows[p.pid][1]))
         clock[0] += 10
+        return dict(stop_killed=False)
     monkeypatch.setattr(catchup, "stop", stop)
     catchup.run(a)
     assert [g for _, g in launched] == [0, 1]

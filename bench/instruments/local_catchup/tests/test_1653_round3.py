@@ -173,7 +173,7 @@ def test_final_sample_failure_stops_workers(fake_rig, monkeypatch, tmp_path, ori
     monkeypatch.setattr(meter, "sample", fail)
     monkeypatch.setattr(rig, "supervisor", lambda *args: meter)
     stops = []
-    monkeypatch.setattr(rig, "stop", lambda proc: stops.append(proc.pid))
+    monkeypatch.setattr(rig, "stop", lambda proc: stops.append(proc.pid) or dict(stop_killed=False))
     if original_error:
         def broken(*args, **kw):
             raise ValueError("original failure")
@@ -273,6 +273,7 @@ def test_final_sample_error_cannot_pass_catchup(fake_catchup, monkeypatch):
     assert (result["state"], result["reason"]) == ("ABORTED", "sampler_error:OSError")
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_final_sample_error_cannot_pass_i2_cell(tmp_path, monkeypatch):
     a = NS(scratch=tmp_path/"scratch", out=tmp_path/"out", model_cache=tmp_path,
            lcmx_repo=tmp_path, hermes_source=tmp_path, smoke=True, label="Mac", max_seconds=1)
@@ -282,7 +283,7 @@ def test_final_sample_error_cannot_pass_i2_cell(tmp_path, monkeypatch):
     meter = NS(breach=None, watch=lambda _: None, start=lambda: None, summary=lambda *args: {})
     meter.close = lambda: setattr(meter, "breach", "sampler_error:OSError")
     monkeypatch.setattr(measurement, "Supervisor", lambda *args: meter)
-    monkeypatch.setattr(measurement, "stop", lambda *args: None)
+    monkeypatch.setattr(measurement, "stop", lambda *args: dict(stop_killed=False))
     def launch(*args, **kw):
         common.dump(a.out/"0-OFF"/"raw-summary.json", dict(state="PASS"))
         return NS(pid=1, returncode=0, poll=lambda: 0)

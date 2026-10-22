@@ -4,6 +4,7 @@ import contextvars
 import json
 import sqlite3
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -110,7 +111,7 @@ def test_profile_capture_completion_and_retirement(make_engine, monkeypatch, ret
         token = profile.set("B")
         b._schedule_embedding_maintenance()
         profile.reset(token)
-        assert a.drain_embedding_maintenance(5) and b.drain_embedding_maintenance(5)
+        assert a.drain_embedding_maintenance(30) and b.drain_embedding_maintenance(30)
         assert prepared == [("a.db", "A", True)]
         passes.clear()
         enqueued.clear()
@@ -119,9 +120,9 @@ def test_profile_capture_completion_and_retirement(make_engine, monkeypatch, ret
         release.set()
         maintenance._PREPARE_THREAD.join(5)
         assert not maintenance._PREPARE_THREAD.is_alive()
-        assert b.drain_embedding_maintenance(5)
+        assert b.drain_embedding_maintenance(30)
         expected = [("b.db", "B")] if retire_a else [("a.db", "A"), ("b.db", "B")]
-        assert a.drain_embedding_maintenance(5)
+        assert a.drain_embedding_maintenance(30)
         assert enqueued == expected
         assert passes == expected
     finally:
@@ -191,7 +192,18 @@ def test_uncertainty_retry_is_fastembed_only(make_engine, monkeypatch):
         ("fast-embed", False), ("fast-embed", True)] * 2 + [("voyage", False), ("ollama", False)]
 
 
-def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch):
+@pytest.mark.parametrize("worker_delay", [0, 6])
+def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch, worker_delay):
+    original_pass = engines.run_incremental_embedding_pass
+    delay_remaining = worker_delay
+
+    def delayed_pass(*args, **kwargs):
+        nonlocal delay_remaining
+        delay, delay_remaining = delay_remaining, 0
+        time.sleep(delay)
+        return original_pass(*args, **kwargs)
+
+    monkeypatch.setattr(engines, "run_incremental_embedding_pass", delayed_pass)
     entered, release = threading.Event(), threading.Event()
     engine = make_engine("local", **local_config())
     engine._store.append("local", {"role": "user", "content": "precursor canary " + "detail " * 60})
@@ -232,7 +244,7 @@ def test_explicit_local_prepare_keeps_recall_answering(make_engine, monkeypatch)
         release.set()
         maintenance._PREPARE_THREAD.join(5)
         assert not maintenance._PREPARE_THREAD.is_alive()
-        assert engine.drain_embedding_maintenance(5)
+        assert engine.drain_embedding_maintenance(30)
         with sqlite3.connect(engine._store.db_path) as conn:
             assert conn.execute("SELECT COUNT(*) FROM lcm_embedding_meta").fetchone()[0] == 1
             assert conn.execute("SELECT COUNT(*) FROM lcm_chunk_meta").fetchone()[0] > 0

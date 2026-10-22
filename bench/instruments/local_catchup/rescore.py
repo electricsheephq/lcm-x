@@ -20,12 +20,22 @@ def verdict(path, max_wall):
     return final
 
 
+def checked(recorded, computed, parent=None):
+    sources = [recorded] if parent is None else [parent, recorded]
+    disagreement = {k: dict(recorded=r.get(k), recomputed=v)
+                    for r in sources for k, v in computed.items() if k not in r or r[k] != v}
+    if disagreement:
+        return dict(recorded | (parent or {}), state=rollup([r.get("state", "INVALID") for r in sources]+[computed["state"], "INVALID"]),
+                    rescore_disagreement=disagreement)
+    return computed
+
+
 def v2(root, *, _entry=True):
     from .floor import rate
     from .recall import score, window_calibration, overlapping, guarded_result
     from .measurement import catchup_activity
     def lines(path):
-        return [json.loads(s) for s in path.read_text().splitlines()]
+        return [json.loads(s) for s in path.read_text().splitlines()] if path.is_file() else []
     def coverage(cell):
         raw = load(cell/"catchup/summary.json")
         seconds = raw.get("end_to_end_s")
@@ -35,6 +45,7 @@ def v2(root, *, _entry=True):
     if not (root/"summary.json").is_file() and not (root/"raw-summary.json").is_file():
         raise ValueError(f"missing root summary.json: {root}")
     recorded = load(root/"summary.json" if (root/"summary.json").exists() else root/"raw-summary.json")
+    parent = recorded
     aborted = recorded if recorded.get("state") == "ABORTED" else None
     if aborted is not None:
         assert _entry, "ABORTED is only valid at the entry root"
@@ -67,6 +78,8 @@ def v2(root, *, _entry=True):
             return recorded
         # A direct recall entry falls through to its own raw receipt scoring.
     raw_summary = load(root/"raw-summary.json") if (root/"raw-summary.json").exists() else {}
+    if recorded == dict(state="PASS") and not raw_summary and not (root/"catchup").is_dir():
+        return checked(recorded, dict(state="INVALID", reason="missing_receipts"))
     events = lines(root/"events.jsonl") if (root/"events.jsonl").is_file() else []
     if raw_summary.get("state", recorded.get("state")) == recorded.get("state") in ("INVALID", "FAIL"):
         reason = raw_summary.get("reason", recorded.get("reason"))
@@ -88,8 +101,7 @@ def v2(root, *, _entry=True):
         names = [c["baseline"] for c in recorded["cells"]]
         assert names and len(names) == len(set(names)) and set(names) == present == {"empty", "upgrade"}
         cells = [v2(root/name, _entry=False) for name in names]
-        assert recorded["state"] == rollup(c["state"] for c in cells)
-        return dict(state=recorded["state"], cells=cells)
+        return dict(checked(dict(state=recorded["state"]), dict(state=rollup(c["state"] for c in cells))), cells=cells)
     if (root/"summary.json").exists() and "blocks" in load(root/"summary.json"):
         recorded = load(root/"summary.json")
         base = root if (root/"0-OFF").exists() else root/"recall" if (root/"recall").is_dir() else root
@@ -104,13 +116,15 @@ def v2(root, *, _entry=True):
         assert all({f"{b}-{s}" for s in ("OFF", "ON-catching-up", "ON-covered")} <= present
                    for b in {name.split("-", 1)[0] for name in present})
         cells = [cells[name] for name in names]
-        assert all(c["result"]["state"] == v["state"] for c, v in zip(recorded["blocks"], cells))
-        assert recorded["state"] == rollup(c["state"] for c in cells)
-        return dict(state=recorded["state"], blocks=cells)
+        for entry, cell in zip(recorded["blocks"], cells):
+            verdict = checked(dict(state=entry["result"]["state"]), dict(state=cell["state"]))
+            if "rescore_disagreement" in verdict:
+                verdict["rescore_disagreement"] = cell.get("rescore_disagreement", {}) | verdict["rescore_disagreement"]
+            cell.update(verdict)
+        return dict(checked(dict(state=recorded["state"]), dict(state=rollup(c["state"] for c in cells))), blocks=cells)
     if (root/"catchup").is_dir():
         recorded = load(root/"summary.json")
         computed = coverage(root)
-        assert all(recorded[k] == v for k, v in computed.items())
     else:
         assert (root/"recalls.jsonl").is_file(), "recall receipts or event-backed early INVALID required"
         recorded = load(root/"raw-summary.json")
@@ -139,7 +153,9 @@ def v2(root, *, _entry=True):
             computed["state"] = rollup([computed["state"], "INVALID"])
         if calibrated is None and valid:
             computed["reason"] = "calibration_window_short"
-        assert all(recorded[k] == v for k, v in computed.items())
+    computed = checked(recorded, computed, parent if aborted is None else None)
+    if "rescore_disagreement" in computed:
+        return computed
     return dict(aborted, state="FAIL") if aborted is not None and computed["state"] == "FAIL" else aborted or computed
 
 

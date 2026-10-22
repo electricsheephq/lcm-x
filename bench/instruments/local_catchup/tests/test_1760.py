@@ -25,6 +25,7 @@ def fast_bootstrap(monkeypatch):
     monkeypatch.setattr(recall, "bootstrap", lambda v, f, seed: [f(v)])
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_floor_real_home_reaches_recall_safety(tmp_path, monkeypatch):
     real = tmp_path/"real"
     real.mkdir()
@@ -74,6 +75,7 @@ def test_floor_real_home_reaches_coverage(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("problem", ["vector", "metadata", "preimage", "expected", "identities", "rows", "shape", "baseline", "seed", "missing", "unparsable", "honest"])
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_persisted_covered_manifest(corpus, tmp_path, monkeypatch, problem):
     db, fresh, mod = corpus
     source, out = tmp_path/"covered", tmp_path/"out"
@@ -190,8 +192,13 @@ def test_summary_only_forgeries_rejected(tmp_path, forgery):
             common.dump(root/"raw-summary.json", raw)
             entry["result"] = raw
         common.dump(tmp_path/"summary.json", dict(state="PASS", blocks=results))
-    with pytest.raises(AssertionError):
-        rescore.v2(tmp_path)
+    if forgery == "dropped_block":
+        with pytest.raises(AssertionError):
+            rescore.v2(tmp_path)
+    else:
+        result = rescore.v2(tmp_path)
+        assert result["state"] != "PASS"
+        assert any(c.get("rescore_disagreement") for c in result["blocks"])
 
 
 def test_rescore_floor_output_root(tmp_path):

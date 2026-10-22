@@ -31,6 +31,7 @@ def track_connections(monkeypatch):
     return opened
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_prepare_closes_pilot_before_safety(tmp_path, monkeypatch):
     a = arguments(tmp_path)
     opened = track_connections(monkeypatch)
@@ -75,6 +76,7 @@ def test_build_closes_resources_on_failure(tmp_path, monkeypatch):
             c.close()
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_prepare_rejects_open_pilot_before_removing_it(tmp_path, monkeypatch):
     a = arguments(tmp_path)
     for name in ("HOME", "CFFIXED_USER_HOME", "HERMES_HOME", "LCM_HERMES_BASE_DIR",
