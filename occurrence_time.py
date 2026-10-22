@@ -120,6 +120,25 @@ def _order_label_text(content):
     return _strip_order_dates(_carried_date_text(content))
 
 
+_large_order_label_names = {}
+
+
+def _order_label_name(content):
+    # Retain only a short final name, never the large stripped source text.
+    key = hashlib.sha256(content.encode("utf-8", "surrogatepass")).digest() if len(content) > 1200 else None
+    if key is not None and key in _large_order_label_names:
+        return _large_order_label_names[key]
+    names = [name for name in re.findall(
+        r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3}\b", _order_label_text(content),
+    ) if name not in {"I", "The", "A", "An", "My", "We", "On", "In"}]
+    name = names[-1] if names else None
+    if key is not None and (name is None or len(name) <= 256):
+        if len(_large_order_label_names) >= 4096:
+            _large_order_label_names.clear()
+        _large_order_label_names[key] = name
+    return name
+
+
 def _withhold_reason(content):
     return _quote_date_info(content)[1]
 

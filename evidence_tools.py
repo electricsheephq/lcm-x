@@ -307,6 +307,7 @@ def lcm_compute(args: Dict[str, Any], **kwargs: Any) -> str:
             assertions=getattr(engine, "_assertions", None),
             as_of=as_of,
             session_dates=getattr(engine, "_session_occurrence_dates", None),
+            withhold_mixed=plan.temporal_window is not None or plan.operation in {"date_filter", "order", "date_interval"},
         )
     except (TypeError, ValueError, sqlite3.Error) as exc:
         grounding = None

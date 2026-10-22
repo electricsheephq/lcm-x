@@ -23,7 +23,7 @@ from .answer_contract import (
 )
 from .evidence_compiler import observation_independent
 from .occurrence_time import (
-    _DATE_TEXT_RE, _carried_date_text, _date_value, _order_label_text, _quote_date_info, _RELATIVE,
+    _DATE_TEXT_RE, _carried_date_text, _date_value, _order_label_name, _quote_date_info, _RELATIVE,
     resolve_occurrence_time,
 )
 from .reasoning import (
@@ -728,16 +728,7 @@ def _ordered_event_candidate(
         )
         if place is not None:
             label = place.group(1).strip()
-    quote_without_dates = _order_label_text(quote)
-    names = [
-        name
-        for name in re.findall(
-            r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3}\b",
-            quote_without_dates,
-        )
-        if name not in {"I", "The", "A", "An", "My", "We", "On", "In"}
-    ]
-    label = label or (names[-1] if names else quote[:300])
+    label = label or _order_label_name(quote) or quote[:300]
     slot_names = []
     for slot in contract.slots:
         if slot.anchor and not _tokens(slot.anchor).issubset(_tokens(quote)):
@@ -805,7 +796,11 @@ def _candidate_inventory(
                    for s in sources]
     if _date_dependent(contract):
         for source in sources:
-            if _carried_mixed_dates(source):
+            occurrence_reason = (source.get("occurrence_time") or {}).get("reason")
+            if _carried_mixed_dates(source) or occurrence_reason in {
+                "ambiguous_relative_expression", "ambiguous_multiple_explicit_dates",
+                "mixed_absolute_and_relative_dates",
+            }:
                 _record_exclusion(result, source, "uncertain_source_observation_time")
     extracted = _extract_candidates(sources, contract)[:limit]
     for candidate in extracted:
