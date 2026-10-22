@@ -220,6 +220,7 @@ def _answer(q, mode, client, reader, engine, speakers, tool_budget, input_budget
     if mode == "single":
         evidence, raw = single(q, engine, speakers, hit_label, store_text)
         labels = re.findall(r"^\[[^\]\n]+\] ([^:\n]+): ", evidence, re.MULTILINE)
+        # evidence_sha256 is an audit receipt of the rendered bytes, not a later verification.
         result.update(evidence_labels={"role": sum(x in ("user", "assistant") for x in labels),
             "speaker": sum(x not in ("user", "assistant", "summary") for x in labels), "summary": labels.count("summary")},
             evidence_sha256=sha(evidence.encode()))

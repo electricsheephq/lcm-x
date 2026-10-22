@@ -81,7 +81,7 @@ LoCoMo conversation (conv-30, excluding category 5). Sol/high answers both sets
 with paired `off` and `local` configurations under `single` and `agentic` deliveries;
 `full_context` is available in the CLI but is not part of this smoke. A separate
 Opus agentic `off` arm uses a seeded 10 of the 30 LME-S ids (`opus-ids.json`).
-Both reader harnesses must pass their leakage canaries before the answer arms run.
+Each reader harness a run uses must pass its leakage canary before that run's answer arms.
 Judging uses the CLI defaults: Sol/medium on every answer and Opus on a seeded
 10% agreement sample, rather than two judges on every answer.
 All commands use four workers and share the subscription quota ledger `quota.json`;
@@ -166,6 +166,12 @@ bash bench/fmp/run.sh score "${common[@]}" --runs "$OUTPUT/A0" "$OUTPUT/A1" \
 `check-arms` makes no model calls and leaves run files untouched. It compares ordered
 recall-hit store IDs per call, question-ID sets, IDs-file and dataset hashes, and
 role/speaker counts from answer-row `evidence_labels` and `evidence_sha256` receipts.
+`evidence_sha256` is an audit receipt, not evidence verification: check-arms checks
+its format without recomputing it (the rendered prompt is not retained).
+It also compares recorded reader specs (harness, model and effort), harness settings,
+config, summary mode and store generation, delivery unit/budget, reasoning, token
+limits and tool budgets. Missing-versus-present fields differ; each mismatch is named.
+The A0/A1 `hit_label` switch is allowed in either arm order.
 It requires exactly one plain/role A0 (role lines only) and one plain/speaker A1
 (speaker lines only), with positive message-line counts in both. Legacy rows without
 receipts fail closed with “label check unavailable”; prompts are deleted by the harness.
