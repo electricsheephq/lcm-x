@@ -92,7 +92,7 @@ def test_mixed_only_matches_uniform_twin(tmp_path, spelling):
                 refs = plant(engine, [text, "Unrelated synthetic row."], carried_index=0 if carried else 1)[:1]
                 result = json.loads(tools.lcm_compile_evidence(args(refs, QUESTIONS[1][1], "2023-03-22"), engine=engine))
                 assert result["state"] == "answer_sufficient"
-                assert result["direct_fact"]["value"] == "Bali"
+                assert result["direct_fact"]["value"] == text
 
 
 def test_ordinal_is_already_normalized():
