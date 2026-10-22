@@ -107,6 +107,7 @@ def test_sender_update_changes_one_cell_pair_without_trigger_effects(tmp_path):
     store = MessageStore(path)
     try:
         prepare_derived(store)
+        db_bootstrap.join_background_integrity_scans()
         conn = store.connection
         before = derived_snapshot(conn)
         changes = conn.total_changes
