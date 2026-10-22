@@ -652,7 +652,9 @@ class Model:
         return [[1.0, 0.0] for _ in texts]
 
 config = _seed_batches(Path(marker).parent / "orphan.db", "summaries")
-provider = embedding_provider.FastembedProvider("test-model", timeout=0.04)
+# Leave room for pre-dispatch SQLite/lease writes under parallel CI load.
+# One second remains tiny against the normal 120s maintenance deadline.
+provider = embedding_provider.FastembedProvider("test-model", timeout=1.0)
 provider._model = Model()
 command.resolve_provider = lambda *_a, **_k: provider
 embedding_provider.probe_provider_availability = lambda _c: {"available": True}
