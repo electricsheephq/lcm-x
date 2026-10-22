@@ -247,7 +247,7 @@ def test_1063_b_uncached_warns_once_retries_and_preserves_ingest(
 ):
     calls, state = local_fastembed
     state["cached"] = False
-    monkeypatch.setattr(maintenance_mod, "_FAILURE_WARNED", False)
+    monkeypatch.setattr(maintenance_mod, "_FAILURE_WARNED", {})
     engine = _local_engine(tmp_path, home)
     try:
         with caplog.at_level(logging.DEBUG, logger=maintenance_mod.__name__):
@@ -577,7 +577,7 @@ def test_c_unavailable_provider_never_raises_counts_and_recovers(
     tmp_path, home, providers, monkeypatch, caplog, failure
 ):
     engine = _make_engine(tmp_path, home)
-    monkeypatch.setattr(maintenance_mod, "_FAILURE_WARNED", False)
+    monkeypatch.setattr(maintenance_mod, "_FAILURE_WARNED", {})
     down = {"value": True}
     real_probe = provider_mod.probe_provider_availability
     real_resolve = command_mod.resolve_provider

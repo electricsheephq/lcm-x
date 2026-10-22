@@ -281,6 +281,21 @@ class EmbeddedDocumentBatch:
     vectors: tuple[tuple[float, ...], ...]
 
 
+def _drain_local_embedding_workers(deadline: float) -> bool:
+    """Wait for occupied encoder slots within the caller's shared exit deadline."""
+    slots = _LOCAL_EMBED_WORKER_SLOTS
+    acquired = 0
+    try:
+        for _ in range(_LOCAL_EMBED_MAX_WORKERS):
+            if not slots.acquire(timeout=max(0.0, deadline - time.monotonic())):
+                return False
+            acquired += 1
+        return True
+    finally:
+        for _ in range(acquired):
+            slots.release()
+
+
 def _run_blocking_with_deadline(
     call: Callable[[], Any], *, timeout: float, provider: str
 ) -> Any:

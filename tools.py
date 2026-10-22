@@ -3461,7 +3461,7 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
         conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=0.05)
         try:
             row = conn.execute(
-                "SELECT value FROM metadata WHERE key = ? || ("
+                "SELECT value, key FROM metadata WHERE key = ? || ("
                 "SELECT identity_hash FROM lcm_embedding_profile "
                 "WHERE model_name=? AND provider=? AND task=? "
                 "ORDER BY (active=1 AND archived_at IS NULL) DESC, "
@@ -3469,9 +3469,14 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
                 (f"embedding_catchup:{task}:", str(provider.model_id).strip(),
                  str(provider.provider_id).strip().lower(), task),
             ).fetchone()
+            record = json.loads(row[0]) if row else {}
+            if record.get("remaining") or record.get("operator_retry"):
+                record["operator_retry"] = 0
+                if embedding_provider_id(provider.provider_id) != "fastembed":
+                    from .command import _embedding_inflight_counts
+                    _, record["operator_retry"] = _embedding_inflight_counts(conn, row[1].split(":", 2)[2])
         finally:
             conn.close()
-        record = json.loads(row[0]) if row else {}
         remaining = record.get("remaining", 0)
         reasons = []
         if remaining > 0:
@@ -4565,6 +4570,7 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
                 "SELECT 1 FROM lcm_embedding_meta AS m WHERE m.embedded_id = CAST(n.node_id AS TEXT) "
                 "AND m.embedded_kind = 'summary' AND m.identity_hash = :identity"
             )
+            counts = command._embedding_inflight_counts(conn, profile["identity_hash"]) if profile is not None else (0, 0)
             eligible, embedded = conn.execute(
                 f"SELECT COUNT(*), COALESCE(SUM(EXISTS ({vectors})), 0) FROM summary_nodes AS n "
                 "WHERE n.depth = 0 AND lcm_summary_has_text(n.summary) = 1",
@@ -4573,6 +4579,7 @@ def _embedding_readiness(engine: "LCMEngine", probe: dict[str, Any]) -> str:
         finally:
             conn.close()
         coverage = f"{embedded}/{eligible} summaries"
+        coverage += "".join(f"; {label} {count}" for label, count in zip(("in flight", "uncertain"), counts) if count)
     except sqlite3.Error as exc:
         coverage = f"unavailable ({exc})"
         if model is None:

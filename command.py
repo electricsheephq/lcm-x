@@ -2816,6 +2816,33 @@ def _acquire_embedding_backfill_lease(
         raise
 
 
+def _embedding_inflight_counts(conn, identity_hash, rows=None, *, eligible="") -> tuple[int, int]:
+    """Count unsent claims as in flight; split dispatches by live lease ownership."""
+    try:
+        raw = conn.execute("SELECT value FROM metadata WHERE key=?", (_EMBEDDING_BACKFILL_CLAIM_KEY,)).fetchone()
+        lease = json.loads(raw[0]) if raw else {}
+        live = time.time() - _embedding_lease_heartbeat(raw[0]) < _embedding_backfill_lease_ttl_s() if raw else False
+        owner = (lease.get("owner"), int(lease.get("generation", 0))) if live else (None, None)
+    except (TypeError, ValueError, AttributeError, sqlite3.OperationalError):
+        owner = (None, None)
+    if rows is None:
+        try:
+            rows = conn.execute(
+                "SELECT state, lease_id, generation, COUNT(*) FROM lcm_embedding_backfill_inflight "
+                "WHERE identity_hash=? AND state IN ('claimed','dispatched','uncertain') " + eligible + " GROUP BY state, lease_id, generation",
+                (identity_hash,),
+            )
+        except sqlite3.OperationalError:
+            return (0, 0)
+    counts = [0, 0]
+    for state, lease_id, generation, count in rows:
+        if state == "claimed":
+            counts[0] += count  # Unsent work is safely retryable even without a live owner.
+        if state in {"dispatched", "uncertain"}:
+            counts[0 if state == "dispatched" and owner[0] is not None and (lease_id, generation) == owner else 1] += count
+    return tuple(counts)
+
+
 def _prepare_inflight_for_lease(
     conn: sqlite3.Connection,
     identity_hash: str,
@@ -4096,7 +4123,7 @@ def _embedding_backfill_summary_run(
         db_path, identity, pending, embedded
     )
     operator_retry = uncertain_count if embedding_provider_id(provider_name) != "fastembed" else 0
-    _record_embedding_catchup(db_path, "summary", identity, remaining + in_flight_count - operator_retry, operator_retry=operator_retry)
+    _record_embedding_catchup(db_path, "summary", identity, remaining + in_flight_count + uncertain_count - operator_retry, operator_retry=operator_retry)
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
         error=error,
@@ -4166,17 +4193,8 @@ def _embedding_backfill_remaining(
         try:
             remaining, _ = _embedding_pending_rows(check_conn, identity_hash, 1)
             try:
-                in_flight = int(check_conn.execute(
-                    "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight WHERE identity_hash = ? "
-                    "AND embedded_id IN (SELECT CAST(node_id AS TEXT) FROM summary_nodes WHERE depth=0 AND lcm_summary_has_text(summary)=1)",
-                    (identity_hash,),
-                ).fetchone()[0])
-                uncertain = int(check_conn.execute(
-                    "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight "
-                    "WHERE identity_hash = ? AND state IN ('dispatched', 'uncertain') "
-                    "AND embedded_id IN (SELECT CAST(node_id AS TEXT) FROM summary_nodes WHERE depth=0 AND lcm_summary_has_text(summary)=1)",
-                    (identity_hash,),
-                ).fetchone()[0])
+                in_flight, uncertain = _embedding_inflight_counts(check_conn, identity_hash, eligible=
+                    "AND embedded_id IN (SELECT CAST(node_id AS TEXT) FROM summary_nodes WHERE depth=0 AND lcm_summary_has_text(summary)=1)")
             except sqlite3.OperationalError:
                 in_flight = 0
                 uncertain = 0
@@ -4993,7 +5011,7 @@ def _chunk_backfill_remaining(
                     chunks_by_source = {}
                     actionable = []
                     for row in check_conn.execute(
-                        "SELECT embedded_id, state FROM lcm_embedding_backfill_inflight "
+                        "SELECT embedded_id, state, lease_id, generation FROM lcm_embedding_backfill_inflight "
                         "WHERE identity_hash = ?",
                         (identity_hash,),
                     ):
@@ -5007,8 +5025,8 @@ def _chunk_backfill_remaining(
                                                          if c.char_end > c.char_start} if source else set()
                         if row[0] in chunks_by_source[store_id]:
                             actionable.append(row)
-                    in_flight = len(actionable)
-                    uncertain = sum(row[1] in ('dispatched', 'uncertain') for row in actionable)
+                    in_flight, uncertain = _embedding_inflight_counts(check_conn, identity_hash,
+                        (tuple(row[1:]) + (1,) for row in actionable))
                 except sqlite3.OperationalError:
                     in_flight = 0
                     uncertain = 0
@@ -5671,7 +5689,7 @@ def _chunk_backfill_run(
         inflight_policy=normalize_content_policy(getattr(config, "embedding_content_policy", "conversational")),
     )
     operator_retry = uncertain_count if embedding_provider_id(provider_name) != "fastembed" else 0
-    backlog = remaining + in_flight_count - operator_retry
+    backlog = remaining + in_flight_count + uncertain_count - operator_retry
     _record_embedding_catchup(db_path, "chunk", identity, bool(backlog) if incremental else backlog, operator_retry=operator_retry)
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(

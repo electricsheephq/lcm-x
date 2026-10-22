@@ -608,3 +608,45 @@ def test_session_end_then_shutdown_waits_before_closing_stores(make_engine, sche
         assert not scheduler._retired_active_keys
     finally:
         release.set()
+
+
+
+def test_1399_retirement_fences_late_insertion_and_rebind_rearms(make_engine, scheduler, monkeypatch):
+    """Pause after the early retired check, before schema preparation/enqueue."""
+    engine = make_engine()
+    engine._config.embedding_provider = "ollama"
+    ran = threading.Event()
+    monkeypatch.setattr(engine_mod, "run_incremental_embedding_pass", lambda *_a, **_k: ran.set())
+    _bind(engine)
+    assert engine.drain_embedding_maintenance(timeout=5)
+    ran.clear()
+    checked, release = threading.Event(), threading.Event()
+    allowed = maintenance_mod._automatic_chunks_allowed
+
+    def pause_after_check(*args):
+        checked.set()
+        assert release.wait(5)
+        return allowed(*args)
+
+    monkeypatch.setattr(maintenance_mod, "_automatic_chunks_allowed", pause_after_check)
+    worker = threading.Thread(target=engine._schedule_embedding_maintenance)
+    worker.start()
+    old_owner = engine._embedding_maintenance_owner
+    try:
+        assert checked.wait(5)
+        engine._retire_embedding_maintenance(wait=False)
+        assert engine._embedding_maintenance_retired
+        release.set()
+        worker.join(5)
+        assert not worker.is_alive()
+        assert old_owner not in scheduler._owned_keys
+        assert engine._rollup_maintenance_key("embeddings") not in scheduler._queued_keys
+        assert not ran.is_set()
+        _bind(engine, "rebound")
+        assert engine._embedding_maintenance_owner is not old_owner
+        assert not engine._embedding_maintenance_retired
+        assert engine.drain_embedding_maintenance(timeout=5)
+        assert ran.is_set()
+    finally:
+        release.set()
+        worker.join(5)

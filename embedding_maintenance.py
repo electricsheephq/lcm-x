@@ -30,8 +30,8 @@ logger = logging.getLogger(__name__)
 
 _STATE_LOCK = threading.Lock()
 _LAST_PASS: dict[str, tuple[float, str]] = {}
-_FAILURES = 0
-_FAILURE_WARNED = False
+_FAILURES: dict[str, int] = {}
+_FAILURE_WARNED: dict[str, bool] = {}
 _STOP_EMBEDDING_MAINTENANCE = threading.Event()
 _PREPARE: dict[tuple[str, str, int], tuple[str, str]] = {}
 _PREPARE_THREAD: threading.Thread | None = None
@@ -41,6 +41,7 @@ _PREPARE_READY: dict[tuple[str, str, int], dict[tuple[str, object], Callable[[],
 _PREPARE_RETRY: dict[tuple[str, str, int], tuple[int, float]] = {}
 # #1586 v1 CPU bars: target at most 40% maintenance duty, without a new setting.
 _LOCAL_IDLE_MULTIPLIER = 1.5
+_SUCCESS_OUTCOMES = frozenset({"complete"})
 
 
 def database_identity(db_path: str | Path) -> str:
@@ -48,20 +49,27 @@ def database_identity(db_path: str | Path) -> str:
 
 
 def incremental_embedding_state(db_path: str | Path) -> tuple[tuple[float, str] | None, int]:
-    """Return this database's last pass ``(time, outcome)`` and the process failure count."""
+    """Return this database's last pass ``(time, outcome)`` and its failure count."""
     with _STATE_LOCK:
-        return _LAST_PASS.get(database_identity(db_path)), _FAILURES
+        identity = database_identity(db_path)
+        return _LAST_PASS.get(identity), _FAILURES.get(identity, 0)
 
 
 def _record(db_path: str | Path, outcome: str, failure: str | None) -> None:
-    global _FAILURES, _FAILURE_WARNED
     with _STATE_LOCK:
-        _LAST_PASS[database_identity(db_path)] = (time.time(), outcome)
+        identity = database_identity(db_path)
+        _LAST_PASS[identity] = (time.time(), outcome)
         if failure is None:
+            parts = [part.split("=", 1)[-1].split(":") for part in outcome.split()]
+            wrote = any(len(part) == 2 and part[1].isdigit() and int(part[1]) > 0 for part in parts)
+            completed = parts and all(part[0] in _SUCCESS_OUTCOMES for part in parts)
+            if wrote or completed:
+                _FAILURES.pop(identity, None)
+                _FAILURE_WARNED.pop(identity, None)
             return
-        _FAILURES += 1
-        first = not _FAILURE_WARNED
-        _FAILURE_WARNED = True
+        _FAILURES[identity] = _FAILURES.get(identity, 0) + 1
+        first = not _FAILURE_WARNED.get(identity, False)
+        _FAILURE_WARNED[identity] = True
     (logger.warning if first else logger.debug)(
         "LCM incremental embedding pass skipped (%s): %s; it retries after the "
         "next summary or session bind",
@@ -134,7 +142,6 @@ def start_local_model_prepare(
 
 
 def _prepare_local_model(key: tuple[str, str, int], db_path: str | Path, config: Any) -> None:
-    global _FAILURE_WARNED
     try:
         from . import command  # lazy: command imports most of the plugin
 
@@ -161,8 +168,9 @@ def _prepare_local_model(key: tuple[str, str, int], db_path: str | Path, config:
         _PREPARE[key] = ("unavailable", reason)
         if _PREPARE_RETRY.get(key, (0, 0.0))[0] >= 6:
             _PREPARE_READY.pop(key, None)
-        first = not _FAILURE_WARNED
-        _FAILURE_WARNED = True
+        identity = database_identity(db_path)
+        first = not _FAILURE_WARNED.get(identity, False)
+        _FAILURE_WARNED[identity] = True
     (logger.warning if first else logger.debug)(
         "LCM local embedding model %s is unavailable (%s); recall uses full text. "
         "Check `/lcm doctor` (embedding_provider_health); retry is bounded to six attempts per model per process",

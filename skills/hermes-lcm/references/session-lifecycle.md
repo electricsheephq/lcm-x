@@ -59,6 +59,18 @@ to its parent session.
 
 Hermes commits a compaction by calling the session-end hook with the list it compressed, then the compression-start hook. LCM-X treats that call as a commit, not a session end. It does not re-store those rows. The session keeps its identity, published frontier and ingest position across the boundary, both when Hermes keeps the session id (in place) and when it rotates to a new one. A genuine session end (exit, `/new`, or an end after a cancelled compaction) still finalizes the session. It also pauses this engine's background embedding maintenance: queued passes are dropped and nothing new is scheduled until the next live bind re-arms it (a compaction commit leaves maintenance running; see `architecture.md` for the shutdown and process-exit waits). A session that resumes later continues from the frontier it finalized itself, never another session's.
 
+At process exit, scheduler work and orphaned local encoder workers share one deadline.
+A timed-out encoder holds its worker slot until it finishes. Exit waits for that slot
+only within the remaining deadline; it does not guarantee that native inference stops.
+The drain does not fence new slot acquisitions after it returns, including a preparing
+model or a late recall query embed (see [#1832](https://github.com/electricsheephq/lcm-x/issues/1832)).
+Embedding failure counts and the first warning belong to each database. Deferred passes
+preserve them. A pass with no failure in any corpus that embedded rows or completed resets
+the count and re-arms the warning; a failure in any corpus counts as a failure, even
+if another corpus wrote rows.
+Status and doctor label unsent claimed rows and dispatches owned by a live lease as `in flight`.
+A dispatch with an expired or missing owner is `uncertain`, as is a recovered uncertain marker.
+
 `LCM_NATIVE_RECOVERY`: removed in v0.25.0; ignored if set. Native adoption proofs and replay-snapshot digests that older versions wrote are still read, so a host replay of an adopted native summary reconciles after a restart or rotation.
 
 ## `/lcm rotate`

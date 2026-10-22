@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import sqlite3
+import time
 from types import SimpleNamespace
 from typing import Any
 
@@ -70,8 +71,11 @@ def test_status_text_bytes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, case
 def test_embedding_status_bytes(monkeypatch: pytest.MonkeyPatch, case: str) -> None:
     conn = sqlite3.connect(":memory:")
     if case == "uncertain":
-        conn.execute("CREATE TABLE lcm_embedding_backfill_inflight (identity_hash TEXT, state TEXT)")
-        conn.executemany("INSERT INTO lcm_embedding_backfill_inflight VALUES (?, ?)", [
+        conn.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT)")
+        conn.execute("INSERT INTO metadata VALUES (?, ?)", (command._EMBEDDING_BACKFILL_CLAIM_KEY,
+                     json.dumps(dict(owner="live", generation=1, heartbeat_at=time.time()))))
+        conn.execute("CREATE TABLE lcm_embedding_backfill_inflight (identity_hash TEXT, state TEXT, lease_id TEXT DEFAULT 'live', generation INTEGER DEFAULT 1)")
+        conn.executemany("INSERT INTO lcm_embedding_backfill_inflight(identity_hash, state) VALUES (?, ?)", [
             ("summary", "dispatched"), ("summary", "uncertain"), ("chunk", "uncertain"),
         ])
     calls: list[str] = []
@@ -98,7 +102,7 @@ def test_embedding_status_bytes(monkeypatch: pytest.MonkeyPatch, case: str) -> N
     expected = {
         "no_profile": ["(no profile)", "(no profile)", "(never)", "0"],
         "pending": ["7", "50+", "(never)", "0"],
-        "uncertain": ["7 (uncertain 2)", "50+ (uncertain 1)", "2023-11-14T22:13:20+00:00 complete", "3"],
+        "uncertain": ["7 (in flight 1, uncertain 1)", "50+ (uncertain 1)", "2023-11-14T22:13:20+00:00 complete", "3"],
         "unavailable": ["(unavailable: offline)", "(unavailable: offline)", "(never)", "0"],
     }[case]
     try:

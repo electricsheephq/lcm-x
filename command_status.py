@@ -216,14 +216,11 @@ def _embedding_maintenance_status_lines(engine: Any) -> list[str]:
         # In-flight rows are not pending; a provider failure after dispatch
         # leaves them uncertain until an operator `--retry-uncertain` run.
         try:
-            uncertain = int(conn.execute(
-                "SELECT COUNT(*) FROM lcm_embedding_backfill_inflight "
-                "WHERE identity_hash = ? AND state IN ('dispatched', 'uncertain')",
-                (identity,),
-            ).fetchone()[0])
+            counts = command._embedding_inflight_counts(conn, identity)
         except sqlite3.OperationalError:
-            uncertain = 0
-        return f"{pending} (uncertain {uncertain})" if uncertain else str(pending)
+            counts = (0, 0)
+        parts = [f"{label} {count}" for label, count in zip(("in flight", "uncertain"), counts) if count]
+        return f"{pending} ({', '.join(parts)})" if parts else str(pending)
 
     try:
         conn = command._embedding_read_connection(db_path)

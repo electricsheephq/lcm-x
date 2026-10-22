@@ -574,7 +574,10 @@ class _RollupMaintenanceScheduler:
                             )
                         return False
                     self._condition.wait(remaining)
-                return True
+            if self is _EMBEDDING_MAINTENANCE_SCHEDULER:
+                from .embedding_provider import _drain_local_embedding_workers
+                return _drain_local_embedding_workers(deadline)
+            return True
         except Exception:
             logger.warning("LCM could not quiesce %s maintenance", self._kind, exc_info=True)
             return False

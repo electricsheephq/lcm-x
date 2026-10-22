@@ -422,7 +422,7 @@ def test_actionable_count_chunks_each_source_once(engine, monkeypatch):
     monkeypatch.setattr(command, "_chunk_pending_rows", lambda *a, **kw: (0, [], {}))
     with sqlite3.connect(engine._store.db_path) as conn:
         identity = conn.execute("SELECT identity_hash FROM lcm_embedding_profile WHERE active=1 AND task='chunk'").fetchone()[0]
-    assert command._chunk_backfill_remaining(engine._store.db_path, identity, "conversational", 0, 0, True) == (0, total, total)
+    assert command._chunk_backfill_remaining(engine._store.db_path, identity, "conversational", 0, 0, True) == (0, 0, total)
     assert len(calls) <= len(sources)
 
 

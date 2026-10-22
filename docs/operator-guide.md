@@ -1302,6 +1302,19 @@ provider-error, and row-write-error exit paths.
 
 ### Corpora: summary vs chunks
 
+Status and doctor show `in flight` for unsent claimed rows and dispatches owned by a live lease.
+Expired or abandoned dispatches and recovered markers show `uncertain`; inspect
+provider records before authorizing `--retry-uncertain`. Zero counts are omitted.
+Failure counts and the first warning belong to each database. Deferred maintenance
+keeps both. A pass with no failure in any corpus that embedded rows or completed resets
+the count and re-arms the warning; a failure in any corpus counts as a failure, even
+if another corpus wrote rows.
+At process exit, scheduler work and orphaned local encoder workers share one deadline.
+Exit waits for occupied worker slots only within its remaining budget. A provider
+timeout does not stop native inference or guarantee that the encoder thread has exited.
+The drain does not fence new slot acquisitions after it returns, including a preparing
+model or a late recall query embed (see [#1832](https://github.com/electricsheephq/lcm-x/issues/1832)).
+
 `--corpus` selects what gets embedded:
 
 - `summary` (default) — the generated leaf-summary embeddings described above.
