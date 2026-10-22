@@ -24,7 +24,9 @@ LIMIT = re.compile(r"HTTP(?: Error)?[ :]+429|usage[- _]limit|rate[- _]limit|too 
 
 
 def dump(path, value):
-    path.write_text(json.dumps(value, indent=2) + "\n")
+    temp = path.with_suffix(path.suffix + ".tmp")
+    temp.write_text(json.dumps(value, indent=2) + "\n")
+    os.replace(temp, path)
 
 
 def digest(path):
@@ -38,6 +40,8 @@ def git(path, *args):
 def prepare(config, option, aa):
     """Resolve content identities before the first replay; never serialize environment."""
     pins = {k: config[k] for k in ("material", "builds", "summary", "reader", "policy")}
+    if option == "A" and aa:
+        raise ValueError("option A cannot be A/A")
     if set(pins["builds"]) != {"candidate", "comparison"}:
         raise ValueError("builds must name candidate and comparison")
     for build in pins["builds"].values():
@@ -73,12 +77,31 @@ def prepare(config, option, aa):
                 raise ValueError("material manifest mismatch")
         facts = json.loads((folder / "facts.json").read_text())
         pins["materials"][str(seed)] = dict(manifest=digest(manifest), facts=digest(folder / "facts.json"),
+                                            shas=json.loads(manifest.read_text())["shas"],
                                             fact_ids=[f["id"] for f in facts])
     pins.update(option=option, aa=aa, instrument=instrument,
                 instrument_hash=hashlib.sha256(json.dumps(instrument, sort_keys=True).encode()).hexdigest(),
                 kit_sha=git(kit, "rev-parse", "HEAD"), funding_refusal=config.get("funding_refusal"),
                 retry="unchanged producer/reader retries pinned by instrument hash; one replacement per slot, two total")
+    pins.update(instrument_root=str(kit), expected_instrument_hash=config.get("expected_instrument_hash"))
+    if not pins["expected_instrument_hash"] or (pins["instrument_hash"] != pins["expected_instrument_hash"] and not pins["comparability_ruling"]):
+        raise ValueError("predeclared instrument hash required; mismatch requires comparability ruling")
     return pins
+
+
+def changed(pins):
+    if "instrument" not in pins:  # injected fixture producers have no prepared filesystem
+        return None
+    for kind, paths in (("instrument", {Path(pins["instrument_root"]) / p: sha for p, sha in pins.get("instrument", {}).items()}),
+                        ("material", {Path(pins["material"]) / f"seed-{s}" / p: sha
+                                      for s, rec in pins.get("materials", {}).items()
+                                      for p, sha in dict(rec.get("shas", {}), **{"material.manifest.json": rec["manifest"], "facts.json": rec["facts"]}).items()})):
+        try:
+            if any(digest(p) != sha for p, sha in paths.items()):
+                return kind + "_changed"
+        except OSError:
+            return kind + "_changed"
+    return None
 
 
 def real_producer(pins):
@@ -88,6 +111,7 @@ def real_producer(pins):
                    KIT_DIR=str(Path(__file__).resolve().parents[1]), MATERIAL=pins["material"],
                    OUT=str(path), ARM=build["arm"], SEEDS=str(row["seed"]), PARALLEL="1", PY=sys.executable,
                    SUMMARY_LANE=pins["summary_lane"])
+        env = {k: v for k, v in env.items() if k != "FAULT" and not k.startswith("S2_")}
         # A child session contains the producer's own replay process group too.
         with (path / "producer.log").open("x") as log:
             return subprocess.Popen(["bash", str(Path(__file__).with_name("run_pmw_cell.sh")), str(row["k"]), str(attempt)],
@@ -109,6 +133,15 @@ def validate_artifacts(pins, row, attempt, path):
             return "invalid", "material pin mismatch", None
         if summ["lane"] != pins["summary_lane"] or summ["reader"] != "glm" or summ["arm"]["env"].get("LCM_SUMMARY_REASONING_EFFORT") != pins["summary"]["effort"]:
             return "invalid", "summary/reader route pin mismatch", None
+        calls = [c for e in summ.get("events", []) for c in e.get("summariser_calls", []) if not c.get("exception")]
+        if not calls or any(c.get("lane_model") != pins["summary"]["model"] or
+                            any(c[key] != pins["summary"][pin] for key, pin in
+                                (("provider", "provider"), ("effort", "effort"), ("lane_effort", "effort"),
+                                 ("tier", "tier"), ("service_tier", "tier")) if key in c) for c in calls):
+            return "invalid", "served summary route pin mismatch", None
+        cell = path / ("cell.json" if row["k"] == attempt == 1 else "cell-" + label.split("-", 1)[1] + ".json")
+        if json.loads(cell.read_text()).get("fault") is not None:
+            return "invalid", "injected fault", None
         receipt = path / "decision/logs" / f"s2-{build['arm']}-{label}.log.wall"
         if re.findall(r"^exit (\d+) end", receipt.read_text(), re.M) != ["0"]:
             return "invalid", "failed replay receipt", None
@@ -150,8 +183,12 @@ def stop_process(process):
 
 
 def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monotonic,
-                   sleep=time.sleep, scorer=d2_score.score, started=None):
+                   sleep=time.sleep, scorer=d2_score.score, started=None, wall_clock=time.time, wall_started=None):
     start = clock() if started is None else started
+    wall_start = wall_clock() if wall_started is None else wall_started
+    def elapsed():
+        return max(clock()-start, wall_clock()-wall_start)
+
     out.mkdir()  # exclusive comparison reservation, never reuse a ledger
     dump(out / "pins.json", pins)
     runs = 9 if pins["option"] == "B" else 4
@@ -161,20 +198,42 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
             rows.append(dict(arm=arm, seed=seed, k=k, slot=slot, attempts=[], state="planned",
                              validity_reason="not started", started=None, finished=None,
                              artifact=str(out / "replays" / f"{arm}-s{seed}-r{k}")))
-    data = dict(option=pins["option"], aa=pins["aa"], pins=pins, rows=rows, elapsed_s=clock()-start, stop_reason=None)
+    data = dict(option=pins["option"], aa=pins["aa"], pins=pins, rows=rows, elapsed_s=elapsed(), stop_reason=None, monitor_errors=[])
     producer = producer or real_producer(pins)
     validate = validate or (lambda r, a, p: validate_artifacts(pins, r, a, p))
     active, replacements = [], 0
+    offsets, marked = {}, set()
 
     def save():
-        data["elapsed_s"] = clock()-start
+        data["elapsed_s"] = elapsed()
         dump(out / "ledger.json", data)
 
     def limited():
-        return [r for r, _, path in active if any(LIMIT.search(p.read_text(errors="replace")) for p in path.rglob("*.log"))]
+        hits = [r for r, _, _ in active if id(r) in marked]
+        for row, _, path in active:
+            for p in path.rglob("*.log"):
+                offset, tail = offsets.get(p, (0, ""))
+                for retry in range(2):
+                    try:
+                        with p.open("rb") as log:
+                            log.seek(offset)
+                            text = tail + log.read().decode(errors="replace")
+                            offsets[p] = (log.tell(), text[-64:])
+                        if LIMIT.search(text):
+                            hits.append(row)
+                            marked.add(id(row))
+                        break
+                    except OSError as exc:
+                        if retry:
+                            data["monitor_errors"].append(dict(path=str(p), error=type(exc).__name__))
+        return hits
 
     def launch(row):
         nonlocal replacements
+        drift = changed(pins)
+        if drift:
+            data["stop_reason"] = drift
+            return
         attempt = len(row["attempts"])+1
         if attempt > 1:
             if attempt > 2 or replacements >= 2:
@@ -184,7 +243,7 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
             row["attempts"][-1]["state"] = "replaced"
         path = Path(row["artifact"]) / f"attempt-{attempt}"
         path.mkdir(parents=True)
-        now = clock()-start
+        now = elapsed()
         row.update(state="running", started=now, finished=None)
         row["attempts"].append(dict(id=attempt, state="running", started=now, finished=None,
                                     validity_reason="running", artifact=str(path)))
@@ -199,31 +258,31 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
                 hits = limited()
                 if hits:
                     data["stop_reason"] = "rate_limited"
-                if clock()-start >= LIMIT_SECONDS:
+                if elapsed() >= LIMIT_SECONDS:
                     data["stop_reason"] = "elapsed stop"
                 if data["stop_reason"]:
                     for row, process, _ in active:
                         stop_process(process)
                         row.update(state="rate_limited" if row in hits or row["state"] == "rate_limited" else "truncated",
-                                   validity_reason=data["stop_reason"], finished=clock()-start)
+                                   validity_reason=data["stop_reason"], finished=elapsed())
                         row["attempts"][-1].update(state=row["state"], validity_reason=row["validity_reason"], finished=row["finished"])
                     active.clear()
                     break
                 for row in pending:
                     launch(row)
-                    if data["stop_reason"] or limited() or clock()-start >= LIMIT_SECONDS:
+                    if data["stop_reason"] or limited() or elapsed() >= LIMIT_SECONDS:
                         break
                 pending = []
                 for row, process, path in list(active):
                     rc = process.poll()
                     if rc is None:
                         continue
-                    if rc == 3 or any(LIMIT.search(p.read_text(errors="replace")) for p in path.rglob("*.log")):
+                    if rc == 3 or row in limited():
                         data["stop_reason"] = "rate_limited"
                         row.update(state="rate_limited", validity_reason="rate_limited")
                         continue
                     state, reason, metrics = validate(row, len(row["attempts"]), path)
-                    row.update(state=state, validity_reason=reason, finished=clock()-start)
+                    row.update(state=state, validity_reason=reason, finished=elapsed())
                     row["attempts"][-1].update(state=state, validity_reason=reason, finished=row["finished"])
                     if metrics is not None:
                         row["metrics"] = metrics
@@ -232,20 +291,30 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
                         pending.append(row)
                 save()
                 if active:
-                    sleep(.1)
+                    sleep(2)
             if data["stop_reason"]:
                 break
-    except Exception:
+    except BaseException as exc:
+        data.update(stop_reason=type(exc).__name__, raw_verdict="INCONCLUSIVE")
         for _, process, _ in active:
             stop_process(process)
-        data["stop_reason"] = "driver exception"
         raise
     finally:
         for row in rows:
             if row["state"] in ("planned", "running"):
-                row.update(state="missing", validity_reason=data["stop_reason"] or "unfinished", finished=clock()-start)
+                row.update(state="missing", validity_reason=data["stop_reason"] or "unfinished", finished=elapsed())
         save()
-    result = scorer(data)
+    data["stop_reason"] = data["stop_reason"] or changed(pins)
+    try:
+        result = scorer(data)
+    except BaseException as exc:
+        data.update(stop_reason=type(exc).__name__, raw_verdict="INCONCLUSIVE")
+        save()
+        raise
+    drift = changed(pins)
+    if drift:
+        data["stop_reason"] = drift
+        result.update(raw_verdict="INCONCLUSIVE", reason=drift)
     save()
     if data["elapsed_s"] >= LIMIT_SECONDS:
         data["stop_reason"] = "elapsed stop"
@@ -257,12 +326,17 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
 
 if __name__ == "__main__":
     started = time.monotonic()  # includes argument/config parsing and pin preparation
+    wall_started = time.time()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--option", choices=("A", "B"), default="B")
     ap.add_argument("--aa", action="store_true")
+    ap.add_argument("--comparability-ruling")
     args = ap.parse_args()
-    result = run_comparison(prepare(json.loads(args.config.read_text()), args.option, args.aa), args.out, started=started)
+    config = json.loads(args.config.read_text())
+    if args.comparability_ruling:
+        config["comparability_ruling"] = args.comparability_ruling
+    result = run_comparison(prepare(config, args.option, args.aa), args.out, started=started, wall_started=wall_started)
     print(result["raw_verdict"])
     raise SystemExit({"PASS": 0, "FAIL": 1, "INCONCLUSIVE": 2}[result["raw_verdict"]])

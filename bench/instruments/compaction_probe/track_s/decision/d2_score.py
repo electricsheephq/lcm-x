@@ -1,11 +1,10 @@
 """Calibrated D2 only; analyze_paired.py retains the independent D7 contract."""
 import argparse
+from functools import lru_cache
 import itertools
 import json
 import math
 from pathlib import Path
-
-import numpy as np
 
 
 def t_cdf(t, df):
@@ -44,17 +43,61 @@ def t_quantile(p, df):
 
 
 def pooled(a, b):
-    a, b = np.asarray(a), np.asarray(b)
-    seeds, runs = a.shape
+    seeds, runs = len(a), len(a[0])
     df = 2 * seeds * (runs-1)
-    sd = math.sqrt(float(((a-a.mean(axis=1, keepdims=True))**2).sum() +
-                         ((b-b.mean(axis=1, keepdims=True))**2).sum()) / df)
+    sd = math.sqrt(sum(sum((v-sum(g)/runs)**2 for v in g) for g in list(a)+list(b)) / df)
     se = sd * math.sqrt(2 / (seeds*runs))
-    d = float((b.mean(axis=1) - a.mean(axis=1)).mean())
+    d = sum(sum(y)/runs - sum(x)/runs for x, y in zip(a, b)) / seeds
     p = 2*(1-t_cdf(abs(d)/se, df)) if se else float(abs(d) < 1e-12)
     radius = t_quantile(.9, df) * se
     return dict(estimate=d, pooled_sd=sd, se=se, df=df, lower90=d-radius,
                 upper90=d+radius, upper_below_zero=d+radius < 0, two_sided_p=p)
+
+
+def uniforms(seed):
+    """Integer-seed SeedSequence + PCG64, retaining the original NumPy stream.
+
+    Algorithm references and MIT notices: D2.md. No runtime dependency.
+    """
+    mask, h = 2**32-1, 0x43b0d7e5
+    if seed < 0:
+        raise ValueError("non-negative integer seed required")
+    words = [(seed >> i) & mask for i in range(0, max(1, seed.bit_length()), 32)]
+
+    def hashed(v):
+        nonlocal h
+        v ^= h
+        h = (h * 0x931e8875) & mask
+        v = (v * h) & mask
+        return v ^ (v >> 16)
+
+    pool = [hashed(words[i] if i < len(words) else 0) for i in range(4)]
+    for src in range(max(4, len(words))):
+        for dst in range(4):
+            if src >= 4 or src != dst:
+                v = (0xca01f9dd * pool[dst] - 0x4973f715 * hashed(words[src] if src >= 4 else pool[src])) & mask
+                pool[dst] = v ^ (v >> 16)
+    h, state_words = 0x8b51f9dd, []
+    for i in range(8):
+        v = pool[i % 4] ^ h
+        h = (h * 0x58f38ded) & mask
+        v = (v * h) & mask
+        state_words.append(v ^ (v >> 16))
+    w = [state_words[i] | (state_words[i+1] << 32) for i in range(0, 8, 2)]
+    mask128, mult = 2**128-1, 47026247687942121848144207491837523525
+    inc = (((w[2] << 64) | w[3]) * 2 + 1) & mask128
+    state = ((inc + (w[0] << 64) + w[1]) * mult + inc) & mask128
+    while True:
+        state = (state * mult + inc) & mask128
+        x, rot = ((state >> 64) ^ state) & (2**64-1), state >> 122
+        yield (((x >> rot) | (x << ((-rot) & 63))) & (2**64-1)) >> 11
+
+
+@lru_cache(maxsize=8)
+def mc_choices(seeds, runs, count, seed):
+    rng = uniforms(seed)
+    return tuple(tuple(tuple(sorted(range(2*runs), key=lambda _: next(rng))[:runs])
+                       for _ in range(count)) for _ in range(seeds))
 
 
 def permutation(a, b, count=20000, seed=1824):
@@ -63,16 +106,17 @@ def permutation(a, b, count=20000, seed=1824):
     observed = abs(sum(sum(y)-sum(x) for x, y in zip(a, b)) / (seeds*runs))
     allocations = math.comb(2*runs, runs)
     exact = allocations**seeds <= 1000000
-    rng, dist = np.random.default_rng(seed), np.zeros(1 if exact else count)
-    for x, y in zip(a, b):
-        v = np.asarray(list(x) + list(y))
+    dist = [0.] * (1 if exact else count)
+    samples = None if exact else mc_choices(seeds, runs, count, seed)
+    for s, (x, y) in enumerate(zip(a, b)):
+        v = list(x) + list(y)
         if exact:
-            choices = np.asarray(list(itertools.combinations(range(2*runs), runs)))
+            choices = itertools.combinations(range(2*runs), runs)
         else:
-            choices = rng.random((count, 2*runs)).argsort(axis=1)[:, :runs]
-        diffs = (2*v[choices].sum(axis=1)-v.sum()) / (runs*seeds)
-        dist = (dist[:, None] + diffs).ravel() if exact else dist + diffs
-    extreme = int(np.count_nonzero(np.abs(dist) >= observed-1e-12))
+            choices = samples[s]
+        diffs = [(2*sum(v[i] for i in chosen)-sum(v)) / (runs*seeds) for chosen in choices]
+        dist = [d+v for d in dist for v in diffs] if exact else [d+v for d, v in zip(dist, diffs)]
+    extreme = sum(abs(v) >= observed-1e-12 for v in dist)
     return dict(p=extreme/len(dist) if exact else (extreme+1)/(len(dist)+1),
                 method="exact" if exact else "seeded Monte Carlo (+1 correction)",
                 count=len(dist), seed=None if exact else seed)
@@ -84,6 +128,9 @@ def score(data):
                   claim="coarse regression screen, never non-inferiority" if runs == 4 else
                   "fixed-material non-inferiority by a 5-point margin at one-sided 90% confidence",
                   cp304=None, cp176=None, permutation=None, mcnemar=None, spreads=None)
+    result["mode"] = "aa" if data.get("aa") else "comparison"
+    if data.get("aa"):
+        result["claim"] = "prospective A/A acceptance: lower90 > -0.05 and point estimate < +0.05"
     rows = data["rows"]
     expected = {(a, s, k) for a in ("comparison", "candidate") for s in (1, 2, 3) for k in range(1, runs+1)}
     index = {(r["arm"], r["seed"], r["k"]): r for r in rows}
@@ -127,8 +174,12 @@ def score(data):
 
 
 def write_result(out, result):
-    (out / "result.json").write_text(json.dumps(result, indent=2) + "\n")
-    (out / "result.md").write_text(f"# D2 raw verdict: {result['raw_verdict']}\n\ndisposition: \n\n"
+    if any((out / name).exists() for name in ("result.json", "result.md")):
+        raise FileExistsError("D2 results already exist")
+    with (out / "result.json").open("x") as file:
+        file.write(json.dumps(result, indent=2) + "\n")
+    with (out / "result.md").open("x") as file:
+        file.write(f"# D2 raw verdict: {result['raw_verdict']}\n\ndisposition: \n\n"
                                    + result["claim"] + "\n\nDiagnostics (never independent gates):\n\n```json\n"
                                    + json.dumps(result, indent=2) + "\n```\n")
 

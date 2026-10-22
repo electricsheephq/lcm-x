@@ -6,7 +6,7 @@ set -euC
 K=${1:-1}
 ATTEMPT=${2:-1}
 case "$K" in [1-9]) ;; *) echo "STOP: replay index must be 1..9" >&2; exit 2;; esac
-case "$ATTEMPT" in ''|*[!0-9]*|0) echo "STOP: attempt must be positive" >&2; exit 2;; esac
+case "$ATTEMPT" in ''|*[!0-9]*|0*) echo "STOP: attempt must be positive without leading zeros" >&2; exit 2;; esac
 [ "$#" -le 2 ] || { echo "STOP: expected replay index and attempt only" >&2; exit 2; }
 R=r$K
 SUMMARY_LANE=${SUMMARY_LANE:-codex-sol}
