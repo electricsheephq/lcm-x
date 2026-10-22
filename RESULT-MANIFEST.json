@@ -1,0 +1,353 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "20261022-occurrence-time-fix-r2-public",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "occurrence-time-fix-r2",
+  "claim_class": "advisory",
+  "created": "2026-10-22T06:34:18Z",
+  "settled": "2026-10-22T06:34:21Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "907043cb7ba9dbe5c5158b801a61acca0f9898c4",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python3 rescore.txt",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "non-date-identity",
+      "metric": "matching_cells",
+      "value": 7656.0,
+      "n": 7656,
+      "source": "nondate-summary.json"
+    },
+    {
+      "benchmark": "date-identity",
+      "metric": "matching_cells",
+      "value": 14552.0,
+      "n": 14552,
+      "source": "date-summary.json"
+    },
+    {
+      "benchmark": "resolver-byte-identity-per-mode",
+      "metric": "matching_comparisons",
+      "value": 292632.0,
+      "n": 292632,
+      "source": "resolver-identity.json"
+    },
+    {
+      "benchmark": "date-2",
+      "metric": "warm_delta_ms",
+      "value": 0.002563,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "date-6",
+      "metric": "warm_delta_ms",
+      "value": 0.006708,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "date-10",
+      "metric": "warm_delta_ms",
+      "value": 0.008458,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "date-12",
+      "metric": "warm_delta_ms",
+      "value": 0.015729,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "date-24",
+      "metric": "warm_delta_ms",
+      "value": 0.007292,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "order-2",
+      "metric": "warm_delta_ms",
+      "value": 0.002437,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "order-6",
+      "metric": "warm_delta_ms",
+      "value": -0.009875,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "order-10",
+      "metric": "warm_delta_ms",
+      "value": -0.012229,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "order-12",
+      "metric": "warm_delta_ms",
+      "value": -0.01552,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "order-24",
+      "metric": "warm_delta_ms",
+      "value": -0.014897,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "interval-2",
+      "metric": "warm_delta_ms",
+      "value": 0.005188,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "interval-6",
+      "metric": "warm_delta_ms",
+      "value": 0.021312,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "interval-10",
+      "metric": "warm_delta_ms",
+      "value": 0.0345,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "interval-12",
+      "metric": "warm_delta_ms",
+      "value": 0.012666,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "interval-24",
+      "metric": "warm_delta_ms",
+      "value": 0.027938,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "finite-2",
+      "metric": "warm_delta_ms",
+      "value": 0.009604,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "finite-6",
+      "metric": "warm_delta_ms",
+      "value": -0.012042,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "finite-10",
+      "metric": "warm_delta_ms",
+      "value": 0.005292,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "finite-12",
+      "metric": "warm_delta_ms",
+      "value": -0.077021,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "finite-24",
+      "metric": "warm_delta_ms",
+      "value": 0.145146,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "nondate-2",
+      "metric": "warm_delta_ms",
+      "value": 0.001542,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "nondate-6",
+      "metric": "warm_delta_ms",
+      "value": 0.007104,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "nondate-10",
+      "metric": "warm_delta_ms",
+      "value": 0.004083,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "nondate-12",
+      "metric": "warm_delta_ms",
+      "value": 0.004479,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    },
+    {
+      "benchmark": "nondate-24",
+      "metric": "warm_delta_ms",
+      "value": 0.00825,
+      "n": 200,
+      "source": "cost-ruling-b-summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "cost-ruling-b-raw.json",
+      "role": "per-item",
+      "sha256": "24fdd052eaf96cb17656a94fd306533d712a3d8e4f5a85d753c79f0118041ccd",
+      "bytes": 164983
+    },
+    {
+      "path": "cost-ruling-b-summary.json",
+      "role": "per-item",
+      "sha256": "1b006024aed5fb68eee602096c3ac9fc1917f6cc42db9bfaab0633e41a5062fc",
+      "bytes": 47247
+    },
+    {
+      "path": "date-cell-hashes.json",
+      "role": "per-item",
+      "sha256": "d436bee7eb28b210da5540bb7e1e51ea7b4434c282a6b860e41c4ba6b394d1b7",
+      "bytes": 3835842
+    },
+    {
+      "path": "date-cells-generator.txt",
+      "role": "config",
+      "sha256": "2a8bf8de64ab8e257b93c9fd5d64a475b5e8d3e0fcfa150a31310ca16a9eafba",
+      "bytes": 3543
+    },
+    {
+      "path": "date-summary.json",
+      "role": "per-item",
+      "sha256": "35ed17c14e6446aae3f9e08e50d4429c259a36852f1154c1c344f63818393181",
+      "bytes": 265
+    },
+    {
+      "path": "full-disposition.json",
+      "role": "per-item",
+      "sha256": "f4d967b42a337542ccd4aa6094210525841a84a342c841be3f1864a8952197af",
+      "bytes": 338
+    },
+    {
+      "path": "golden-pinned-inventory.json",
+      "role": "per-item",
+      "sha256": "4126fd75cfd8335f1ec4f065634265e49e935db136cc4db775faf2f3c210eaec",
+      "bytes": 854
+    },
+    {
+      "path": "matched-disposition.json",
+      "role": "per-item",
+      "sha256": "3f95103df58755bc49a2778e14600a5a3d875815a74ff955145589bfda15039d",
+      "bytes": 1079
+    },
+    {
+      "path": "matched-files.json",
+      "role": "per-item",
+      "sha256": "f6fadefe4fb60974268429a9eb12b507e0190bfa3dd6e6f71d7237b0e381a2c6",
+      "bytes": 1336
+    },
+    {
+      "path": "nondate-cell-hashes.json",
+      "role": "per-item",
+      "sha256": "8cbdfa243afb6885685c58373837e870b1a9f9dd7a7abf67b29192aa45543ac5",
+      "bytes": 1444206
+    },
+    {
+      "path": "nondate-summary.json",
+      "role": "per-item",
+      "sha256": "8dbad66ad392025cc61455e51746b7aa28a60982ae6e5d79c4451714a942a680",
+      "bytes": 67
+    },
+    {
+      "path": "proof-receipt.md",
+      "role": "receipt",
+      "sha256": "4834220a71537be6c53e623355063309aafa9e265a2027c6768ed34ab55402dd",
+      "bytes": 12276
+    },
+    {
+      "path": "rescore.txt",
+      "role": "config",
+      "sha256": "ec5815c542999c09266b8fdf288a2a02cab93457952c1d16b17f3d9b84dd1a4f",
+      "bytes": 746
+    },
+    {
+      "path": "resolver-identity.json",
+      "role": "per-item",
+      "sha256": "6e5c4cd3bb3008bdd15a1e2f950ce83a484ea0bd2ad52425485c34ead7b61327",
+      "bytes": 722
+    },
+    {
+      "path": "source-proof-binding.json",
+      "role": "per-item",
+      "sha256": "4651125a84c1667787465af44b5867b0b4e18544eff71b0df7465e4fbd9bd062",
+      "bytes": 698
+    },
+    {
+      "path": "test-fixture-correction.json",
+      "role": "per-item",
+      "sha256": "5971760d0f633d88fe83695ed495db3184a8151514f5a411637971184adec0dc",
+      "bytes": 212
+    }
+  ],
+  "rescore": {
+    "command": "python3 rescore.txt",
+    "inputs": [
+      "cost-ruling-b-raw.json",
+      "cost-ruling-b-summary.json",
+      "resolver-identity.json",
+      "nondate-cell-hashes.json",
+      "date-cell-hashes.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "cost-ruling-b-raw.json",
+    "cost-ruling-b-summary.json",
+    "date-cell-hashes.json",
+    "date-cells-generator.txt",
+    "date-summary.json",
+    "full-disposition.json",
+    "golden-pinned-inventory.json",
+    "matched-disposition.json",
+    "matched-files.json",
+    "nondate-cell-hashes.json",
+    "nondate-summary.json",
+    "proof-receipt.md",
+    "rescore.txt",
+    "resolver-identity.json",
+    "source-proof-binding.json",
+    "test-fixture-correction.json"
+  ],
+  "local_raw": "."
+}

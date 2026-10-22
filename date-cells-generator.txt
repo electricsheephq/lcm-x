@@ -1,0 +1,57 @@
+import json, sys
+OUT = sys.argv[1]
+FORMS = ["2023-01-10", "January 10, 2023", "Jan 10, 2023", "January 10 2023", "Jan 10th, 2023"]
+PHRASES = ["yesterday", "today", "last monday", "3 days ago", "2 weeks ago", "1 month ago",
+           "last week", "last month", "last year", "last night", "last weekend",
+           "2 years ago", "a day ago", "an year ago", "one week ago", "two days ago",
+           "three weeks ago", "four months ago", "five years ago", "six days ago",
+           "seven days ago", "eight days ago", "nine days ago", "ten days ago",
+           "eleven days ago", "twelve days ago", "a few days ago", "a couple of weeks ago",
+           "the day before", "the day before yesterday", "the other day",
+           "earlier this week", "earlier this month", "earlier this year"]
+QUESTIONS = ["Which vacation did I take in January?", "How many vacations did I take in January?",
+             "What is the order of events in January?", "What is the order of events?",
+             "How many days passed between my vacation to Bali and my vacation to Kyoto?"]
+KY = "I took a vacation to Kyoto on 2023-01-12."
+FILL = "Unrelated synthetic row."
+cells = {}
+for fi, form in enumerate(FORMS):
+  for pi, phrase in enumerate(PHRASES):
+    first = f"I reviewed the plan on {form}."
+    second = f"I took a vacation to Bali {phrase}."
+    row = first + " " + second
+    for variant in ("whole", "bali", "plan"):
+      if variant == "whole": span = [0, len(row)]
+      elif variant == "bali": span = [len(first) + 1, len(row)]
+      else: span = [0, len(first)]
+      for carried in (True, False):
+        for qi, q in enumerate(QUESTIONS):
+          for qd in ([None, "2023-03-22"] if qi >= 3 else ["2023-03-22"]):
+            for sd in (False, True):
+              rows = [row, KY, FILL]
+              cid = f"dd|f{fi}|p{pi}|{variant}|{int(carried)}|q{qi}|{qd}|sd{int(sd)}"
+              cells[cid] = dict(rows=rows, carried_index=0 if carried else 2,
+                                refs=[[0] + span, [1, 0, len(KY)]], question=q, qd=qd,
+                                session_dates={"0": "2023-01-12"} if sd else None)
+# 1814 conflicting ISO/named, 1817/1818 order labels, partial variants
+for form in ["February 10, 2023", "2023-02-10", "Feb 10th, 2023", "Fri, Feb 10, 2023", "Friday, February 10, 2023"]:
+  first = "I booked the trip on 2023-01-01."
+  second = f"The vacation to Bali was on {form}."
+  row = first + " " + second
+  for variant, span in (("whole", [0, len(row)]), ("bali", [len(first) + 1, len(row)])):
+    for carried in (True, False):
+      for qi, q in enumerate(QUESTIONS):
+        for qd in (None, "2023-03-22"):
+          cid = f"c14|{form}|{variant}|{int(carried)}|q{qi}|{qd}"
+          cells[cid] = dict(rows=[row, KY, FILL], carried_index=0 if carried else 2,
+                            refs=[[0] + span, [1, 0, len(KY)]], question=q, qd=qd)
+for form in ["2023-02-10", "Feb 10th, 2023", "February 10th 2023", "Friday, February 10, 2023", "Fri, Feb 10, 2023", "Thurs. Feb 10, 2023"]:
+  row = f"I took a vacation to Bali on {form}."
+  for carried in (True, False):
+    for qd in (None, "2023-03-22"):
+      for q in ("What is the order of events?", "Which vacation did I take in February?", "How many vacations did I take in February?"):
+        cid = f"c17|{form}|{int(carried)}|{qd}|{q}"
+        cells[cid] = dict(rows=[row, KY, FILL], carried_index=0 if carried else 2,
+                          refs=[[0, 0, len(row)], [1, 0, len(KY)]], question=q, qd=qd)
+json.dump(cells, open(OUT, "w"))
+print(len(cells))

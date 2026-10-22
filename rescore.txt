@@ -1,0 +1,14 @@
+import json, statistics
+from pathlib import Path
+p=Path(__file__).parent
+for kind,n in [('nondate',7656),('date',14552)]:
+    rows=json.loads((p/(kind+'-cell-hashes.json')).read_text())
+    assert len(rows)==n
+    assert all(r['head']==r['base' if kind=='nondate' else 'previous'] for r in rows.values())
+s=json.loads((p/'cost-ruling-b-summary.json').read_text());raw=json.loads((p/'cost-ruling-b-raw.json').read_text())
+assert len(s)==25
+for k,r in s.items():
+    v=raw[k+'-warm'];assert len(v['base'])==len(v['head'])==200
+    b,h=(statistics.median(v[a])/1e6 for a in ['base','head'])
+    assert b==r['warm']['base'] and h==r['warm']['head'] and h-b<=max(.05,.1*b)
+print('PASS: 7656 non-date identities; 14552 date identities; 25 cost cells')

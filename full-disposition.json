@@ -1,0 +1,6 @@
+{
+  "result": "COMPLETE",
+  "summary": "19402 passed, 141 skipped, 63 xfailed, 29 warnings in 1460.34s (0:24:20)",
+  "failures": [],
+  "description": "Full suite GREEN at the final commit: 19,402 passed, 141 skipped, 63 xfailed; no full-suite failure. The separate matched-order failures remain disclosed with their base reproduction."
+}

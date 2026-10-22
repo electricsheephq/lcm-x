@@ -1,0 +1,12 @@
+[
+  {
+    "arm": "base",
+    "old_fixture_day": "2023-01-10",
+    "corrected_fixture_day": "2023-01-10"
+  },
+  {
+    "arm": "previous",
+    "old_fixture_day": "2023-01-10",
+    "corrected_fixture_day": null
+  }
+]

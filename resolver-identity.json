@@ -1,0 +1,24 @@
+{
+  "base_mode_base_sha": "9eacedb9a667e517e40b9ed5c1725aa4f44df1cf",
+  "default_mode_previous_sha": "e06cc78879cc345c153a9e6afdc5eb3cde638c2e",
+  "counts": {
+    "generated": {
+      "quotes": 10000,
+      "session_dates": 4,
+      "comparisons_per_mode": 40000,
+      "differences": 0
+    },
+    "lme": {
+      "comparisons_per_mode": 246750,
+      "differences": 0,
+      "input_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442"
+    },
+    "locomo": {
+      "comparisons_per_mode": 5882,
+      "differences": 0,
+      "input_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4"
+    }
+  },
+  "total_comparisons_per_mode": 292632,
+  "base_mode_withhold_reason_calls": 0
+}

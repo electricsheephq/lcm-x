@@ -1,0 +1,16 @@
+{
+  "head_failures": [
+    "tests/test_lcm_recall.py::test_provider_alias_uses_existing_vector_corpus_for_fts_fairness[voyageai-voyage]",
+    "tests/test_lcm_recall.py::test_provider_alias_uses_existing_vector_corpus_for_fts_fairness[fast-embed-fastembed]",
+    "tests/test_lcm_recall.py::test_provider_alias_uses_existing_vector_corpus_for_fts_fairness[openai-openai-compatible]",
+    "tests/test_lcm_recall.py::test_provider_alias_uses_existing_vector_corpus_for_fts_fairness[siliconflow-openai-compatible]",
+    "tests/test_lcm_recall.py::test_preflight_scan_expiry_fails_open_to_full_fts_budget",
+    "tests/test_recall_session_delivery.py::test_bounded_read_stop[clock]",
+    "tests/test_recall_session_delivery.py::test_fix1_deadline_seeds[False]",
+    "tests/test_recall_session_delivery.py::test_fix1_deadline_seeds[True]"
+  ],
+  "base_reproduces_all_head_failures": true,
+  "base_only_new_regression_failures": 411,
+  "source_corrections_after_proof": 0,
+  "disposition": "Pre-existing combined-order failures; no source fix in this lane. Matched suite is not green."
+}

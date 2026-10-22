@@ -1,0 +1,11 @@
+{
+  "head": "907043cb7ba9dbe5c5158b801a61acca0f9898c4",
+  "source_digests": {
+    "occurrence_time.py": "150ce51cddbda09df3371d9f472f5aed2acf1947b4d7cfa4d4f7f2e999c877be",
+    "requirements_compiler.py": "c93da1a02eac7aca7c1b5cc0932f859af34431a79304ff4c0da5bf1004098f14",
+    "reasoning.py": "31549076730177ac8503536d151b616ea43fc69f3b1e912929973bc159803658"
+  },
+  "source_identical_to_all_fixture_and_cost_proofs": true,
+  "round_non_test_changed_lines": 98,
+  "round_numstat": "30\t7\toccurrence_time.py\n6\t2\treasoning.py\n27\t26\trequirements_compiler.py\n2265\t0\ttests/issue_1811_r2_base_hashes.json\n276\t0\ttests/issue_1811_r2_cells.py\n90\t0\ttests/test_issue_1811_contract_mode.py\n"
+}
