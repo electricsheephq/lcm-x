@@ -98,7 +98,7 @@ def test_embedding_status_bytes(monkeypatch: pytest.MonkeyPatch, case: str) -> N
     expected = {
         "no_profile": ["(no profile)", "(no profile)", "(never)", "0"],
         "pending": ["7", "50+", "(never)", "0"],
-        "uncertain": ["7 (uncertain 2)", "50+ (uncertain 1)", "2023-11-14T22:13:20+00:00 complete", "3"],
+        "uncertain": ["7 (in flight 1, uncertain 1)", "50+ (uncertain 1)", "2023-11-14T22:13:20+00:00 complete", "3"],
         "unavailable": ["(unavailable: offline)", "(unavailable: offline)", "(never)", "0"],
     }[case]
     try:
