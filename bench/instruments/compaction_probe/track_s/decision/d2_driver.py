@@ -42,6 +42,8 @@ def git(path, *args):
 
 def prepare(config, option, aa, *, check_hash=True):
     """Resolve content identities before the first replay; never serialize environment."""
+    if check_hash:
+        card_tool()  # refuse a missing card tool before any paid replay
     pins = {k: config[k] for k in ("material", "builds", "summary", "reader", "policy")}
     if option == "A" and aa:
         raise ValueError("option A cannot be A/A")
@@ -195,22 +197,30 @@ class RunSignal(SystemExit):
 
 @contextlib.contextmanager
 def run_signals():
-    previous = {}
+    previous = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
     def interrupt(signum, frame):
+        for other in previous:
+            signal.signal(other, signal.SIG_IGN)  # cleanup must finish before restoration
         raise RunSignal(signal.Signals(signum).name)
     try:
         for signum in (signal.SIGTERM, signal.SIGHUP):
-            previous[signum] = signal.signal(signum, interrupt)
+            if previous[signum] != signal.SIG_IGN:
+                signal.signal(signum, interrupt)
         yield
     finally:
         for signum, handler in previous.items():
             signal.signal(signum, handler)
 
 
-def result_card(out, result):
+def card_tool():
     path = os.environ.get("FMP_RESULT_CARD_TOOL")
     if not path or not Path(path).is_file():
         raise ValueError("set FMP_RESULT_CARD_TOOL to the installed bench-card.py")
+    return path
+
+
+def result_card(out, result):
+    path = card_tool()
     spec = importlib.util.spec_from_file_location("d2_bench_card", path)
     tool = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(tool)
@@ -295,12 +305,20 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
         return hits
 
     def stop_active(hits):
+        error = None
         for row, process, _ in active:
-            stop_process(process)
-            row.update(state="rate_limited" if row in hits or row["state"] == "rate_limited" else "truncated",
-                       validity_reason=data["stop_reason"], finished=elapsed())
-            row["attempts"][-1].update(state=row["state"], validity_reason=row["validity_reason"], finished=row["finished"])
+            try:
+                stop_process(process)
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+            finally:
+                row.update(state="rate_limited" if row in hits or row["state"] == "rate_limited" else "truncated",
+                           validity_reason=data["stop_reason"], finished=elapsed())
+                row["attempts"][-1].update(state=row["state"], validity_reason=row["validity_reason"], finished=row["finished"])
         active.clear()
+        if error is not None:
+            raise error
 
     def launch(row):
         nonlocal replacements
@@ -368,8 +386,7 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
     except BaseException as exc:
         data.update(stop_reason=str(exc) if isinstance(exc, RunSignal) else type(exc).__name__,
                     state="interrupted", raw_verdict="INCONCLUSIVE")
-        for _, process, _ in active:
-            stop_process(process)
+        stop_active([])
         raise
     finally:
         for row in rows:

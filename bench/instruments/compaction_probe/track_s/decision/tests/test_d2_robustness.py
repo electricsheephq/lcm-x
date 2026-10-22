@@ -42,8 +42,9 @@ def test_signal_cleans_real_descendant_groups_and_ledger(tmp_path, signum):
               "Path(sys.argv[1]).write_text(json.dumps([p.pid for p in ps])); time.sleep(60)")
     harness = tmp_path / "driver.py"
     harness.write_text(
-        "import subprocess,sys; from pathlib import Path\n"
+        "import signal,subprocess,sys; from pathlib import Path\n"
         f"sys.path.insert(0,{str(HERE)!r})\nimport d2_driver\n"
+        "signal.signal(signal.SIGHUP, signal.SIG_DFL)\n"
         "def producer(row, attempt, path):\n"
         f"    p = subprocess.Popen([sys.executable,'-c',{parent!r},str(path/'groups.json')],start_new_session=True)\n"
         "    (path / 'producer.pid').write_text(str(p.pid))\n    return p\n"
@@ -93,7 +94,8 @@ def test_signal_handlers_restored(tmp_path):
     driver, clock = load("d2_driver"), Clock()
     driver.run_comparison(dict(option="B", aa=False), tmp_path / "out", producer=producer,
                           validate=fake.validate, clock=clock, sleep=clock.sleep)
-    assert all(seen[0][s] != previous[s] for s in previous)
+    assert all(seen[0][s] == signal.SIG_IGN if previous[s] == signal.SIG_IGN
+               else seen[0][s] != previous[s] for s in previous)
     assert {s: signal.getsignal(s) for s in previous} == previous
 
 

@@ -8,6 +8,8 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def installed_result_card(monkeypatch, request):
+    if request.node.originalname == "test_card_tool_preflight_launches_nothing":
+        return  # this cell must exercise the real preflight with invalid paths
     path = os.environ.get("FMP_RESULT_CARD_TOOL")
     if path and Path(path).is_file():
         return
@@ -20,6 +22,7 @@ def installed_result_card(monkeypatch, request):
         module = original(name)
         if name == "d2_driver":
             module.result_card = lambda *args: None
+            module.card_tool = lambda: None
         return module
 
     # Existing tests import load by value; patch those aliases without editing them.
