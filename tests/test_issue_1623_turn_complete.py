@@ -30,6 +30,7 @@ def stopped_rows():
 
 def test_interrupted_callback_stores_rows_and_catchup_adds_no_duplicates(engine, monkeypatch):
     rows = stopped_rows()
+    engine.ingest(rows[:1])  # Host preflight proves this history belongs to the binding.
     note = Mock(wraps=engine.note_turn_complete)
     monkeypatch.setattr(engine, "note_turn_complete", note)
     monkeypatch.setattr(engine, "_on_session_start_unlocked", Mock(side_effect=AssertionError("must not bind")))
@@ -82,6 +83,7 @@ def test_bypassed_callback_does_nothing(engine, monkeypatch, bypass):
 
 @pytest.mark.parametrize("failure", ["ingest", "note_turn_complete"])
 def test_callback_swallows_failure_and_always_notes_turn(engine, monkeypatch, caplog, failure):
+    engine.ingest(stopped_rows()[:1])
     ingest, note = Mock(), Mock()
     {"ingest": ingest, "note_turn_complete": note}[failure].side_effect = RuntimeError("private detail sentinel")
     monkeypatch.setattr(engine, "ingest", ingest)

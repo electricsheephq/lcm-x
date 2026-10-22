@@ -2839,6 +2839,14 @@ class LCMEngine(
                 if (not active_engine._session_id or active_engine._session_ignored
                         or active_engine._session_stateless or active_engine._thread_context_stateless()):
                     return
+                cached = getattr(active_engine, "_last_active_replay_source_identities", None)
+                if (active_engine._ingest_cursor <= 0 or active_engine._pending_reset_session_id
+                        or active_engine._ingest_cursor_needs_reconcile or cached is None
+                        or cached != [active_engine._message_replay_identity(message, strip_carrier=False)
+                                      for message in messages[:len(cached)]]):
+                    # Check under the lease: a reset/rebind may have won admission.
+                    logger.debug("LCM stopped-turn ownership unproven; defer to completed-turn catch-up")
+                    return
                 try:
                     active_engine.ingest(messages)
                 finally:
