@@ -7026,6 +7026,13 @@ class LCMEngine(
                 logger.info("LCM identity-anchor recognised %d replayed rows: session=%s cursor=%d incoming=%d",
                             len(anchor_plan["replayed"]), self._session_id, cursor, n)
         anchored_replay_indexes = anchor_plan["replayed"] if anchor_plan else set()
+        # #1628: keep this after the last rewind; #1508 must precede it when restored.
+        rewound = [idx for idx in range(cursor, scan_start) if idx not in anchored_replay_indexes]
+        if rewound:
+            _s, rescan_ignored, rescan_replay = self._build_ingest_replay(messages=messages, n=n, cursor=cursor)
+            replay_messages = list(replay_messages)
+            for idx in rewound:
+                ignored_original_messages[idx], replay_messages[idx] = rescan_ignored[idx], rescan_replay[idx]
         anchor_remainders: dict[int, Any] = {}
         fresh_replay_messages = replay_messages  # #772: the host's rows, before any cached copy is spliced in
         if cursor > 0:
