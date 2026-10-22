@@ -407,3 +407,101 @@ def test_missing_uid_compatibility(build, mode, following, shape, clear_earlier)
     print("MISSING_UID", mode, following, shape, clear_earlier, counts)
     engine.ingest(deepcopy(host))
     assert stored(engine) == after
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize(("metadata", "user_change"), [
+    ("call-only-uid", "new-uid"), ("result-only-uid", "new-uid"),
+    ("call-only-uid", "new-stamp"), ("result-only-uid", "new-stamp"),
+    ("call-only-stamp", "new-stamp"), ("result-only-stamp", "new-stamp"),
+])
+def test_mixed_metadata_retry_keeps_segment_atomic(build, monkeypatch, mode, metadata, user_change):
+    """Known segment proof suppresses unknown siblings without splitting (#1830 r9)."""
+    import tests.invariants.test_issue_1529_warm_proof_salvage as shapes
+
+    plain = shapes.fixture
+    is_uid = metadata.endswith("uid")
+    known_index = -2 if metadata.startswith("call-only") else -1
+
+    def mixed_fixture(*, uids=False):
+        rows = plain(uids=uids)
+        if is_uid:
+            rows[-1 if known_index == -2 else -2].pop("message_uid", None)
+        else:
+            rows[known_index]["timestamp"] = 11
+        return rows
+
+    monkeypatch.setattr(shapes, "fixture", mixed_fixture)
+    engine, host = compact(build, mode=mode, uids=is_uid)
+    before = stored(engine)
+    if user_change == "new-uid":
+        host[-3]["message_uid"] = f"{500:032x}"
+    else:
+        host[-3]["timestamp"] = 20
+    host[-1]["content"] = CLEARED
+    for i in range(2):
+        host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    after = stored(engine)  # Full-session no-lone-call/result invariant, warm AND cold.
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    counts = (sum(any(c["id"] == "c" for c in row.get("tool_calls") or []) for row in added),
+              sum(row.get("tool_call_id") == "c" for row in added))
+    if mode == "warm":
+        assert counts == (0, 0)  # Exact base parity in all six warm shapes.
+    else:
+        assert counts[0] == counts[1]  # Base's lone result (0/1) must be fixed.
+    assert sum(row.get("content") == "repeat" for row in added) == 1
+    for i in range(2):
+        assert sum(row.get("tool_call_id") == f"following-{i}" for row in added) == 1
+    print("R9_MIXED", mode, metadata, user_change, counts)
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+
+
+@pytest.mark.parametrize("fault", ["corrupt-proof", "remap-raises"])
+def test_replay_proof_failure_stores_whole_incoming_batch(build, monkeypatch, fault):
+    """A failed optional proof read cannot swallow an ingest's residual batch."""
+    engine, host = compact(build, mode="cold")
+    before = stored(engine)
+    next(row for row in host if row.get("content") == "middle lookup")["timestamp"] = 20
+    host[-1]["content"] = CLEARED
+    for i in range(2):
+        host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+    helper = engine._replayed_tool_segment_indexes_after_cursor
+    read = engine._store.read_metadata_json
+    calls = []
+    faults = []
+
+    def corrupt_read(key):
+        if "compaction_commit_proof" in key:
+            faults.append(key)
+            return json.loads("{invalid JSON")
+        return read(key)
+
+    def broken_remap(*args, **kwargs):
+        faults.append("remap")
+        raise RuntimeError("synthetic remap failure")
+
+    def faulted(messages, cursor):
+        calls.append(cursor)
+        # Fault the helper's own read, after the other readers have reconciled.
+        with monkeypatch.context() as patch:
+            if fault == "corrupt-proof":
+                patch.setattr(engine._store, "read_metadata_json", corrupt_read)
+            else:
+                patch.setattr(engine, "_remapped_output_metadata", broken_remap)
+            replayed = helper(messages, cursor)
+        assert replayed == set()
+        return replayed
+
+    monkeypatch.setattr(engine, "_replayed_tool_segment_indexes_after_cursor", faulted)
+    engine.ingest(deepcopy(host))
+    assert len(calls) == 1 and calls[0] > 0
+    assert faults, "the fault must reach the optional proof reader"
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    def project(row):
+        return {key: row.get(key) for key in ("role", "content", "tool_calls", "tool_call_id")}
+    assert [project(row) for row in after[len(before):]] == [project(row) for row in host[calls[0]:]]
