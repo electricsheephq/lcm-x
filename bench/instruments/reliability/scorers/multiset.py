@@ -87,6 +87,48 @@ def licensed_parts(text: str, licences: dict, times: int) -> dict | None:
     return dict(Counter(parts)) if parts and len(parts) >= 2 else None
 
 
+def embedded_credits(texts, want, stored_rows, stored, paired, host):
+    """Reserve nonoverlapping byte spans proved by the host's actual merge pass, within one lineage.
+
+    Exact rows are reserved first. Host copies do not create unbounded occurrences: candidate rows are
+    capped by that key's host multiplicity. A hash co-presence or substring alone proves no merge.
+    """
+    used, credits, counts = defaultdict(list), [], Counter()
+    direct = Counter()
+    slots = Counter()
+    for sid, _session, role, content in stored_rows:
+        key = (role, h(content))
+        if role != "user" or sid not in stored.get(key, []):
+            continue
+        raw = norm(content).encode()
+        if direct[key] < want[key]:
+            direct[key] += 1
+            used[sid].append((0, len(raw)))
+        held = (host or {}).get(key, {})
+        slots[key] += 1
+        if slots[key] > held.get("n", 0):
+            continue
+        witnesses = held.get("span_witnesses", [])
+        for witness in witnesses:
+            for span in witness.get("spans", []):
+                part = ("user", span.get("sha256"))
+                if part not in want or len(stored.get(part, [])) + paired[part] + counts[part] >= want[part]:
+                    continue
+                offset, size = span.get("byte_offset"), span.get("bytes")
+                if type(offset) is not int or type(size) is not int or offset < 0 or size <= 0:
+                    continue
+                end = offset + size
+                if end > len(raw) or raw[offset:end] != norm(texts[part]).encode() or any(
+                        offset < b and a < end for a, b in used[sid]):
+                    continue
+                used[sid].append((offset, end))
+                counts[part] += 1
+                credits.append({"role": "user", "sha256": part[1], "store_id": sid,
+                                "byte_offset": offset, "bytes": size, "composite_sha256": key[1],
+                                "provenance": "host_merge_span", "witness": witness["witness"]})
+    return counts, credits
+
+
 def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict | None = None,
           *, _key=None) -> dict:
     """``expected``: (role, text) items; ``stored_rows``: (store_id, session_id, role, content); ``host``: the
@@ -122,9 +164,10 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             spent.update(uses)  # the host rows that prove the record license no surplus too
             composites.append({"role": "user", "expected": n, "as_parts": 1, "parts": parts,
                                "provenance": "host_merge_record", "host_row_id": merge["host_row_id"]})
+    embedded, span_credits = embedded_credits(texts, want, stored_rows, stored, paired, host)
     missing, duplicated, split, licensed = [], [], [], []
     for key, n in want.items():
-        n -= paired[key]
+        n -= paired[key] + embedded[key]
         have = len(stored.get(key, []))
         entry = {"role": key[0], "expected": n, "stored": have, "store_ids": stored.get(key, [])[:20],
                  "preview": norm(texts[key])[:80]}
@@ -181,12 +224,13 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
         "surplus_rows": sum(e["stored"] - e["expected"] - e.get("licensed", 0) for e in duplicated) + sum(e["copies"] for e in extra),
         "host_parity_licensed": licensed,
         "held_composites_as_parts": composites,
-        "missing": missing[:40],
-        "duplicated": duplicated[:40],
+        "embedded_span_credits": span_credits,
+        "missing": missing,
+        "duplicated": duplicated,
         "split_assistant_turns": split,
         "split_keys": len(split),
         "stored_rows_not_expected": len(extra),
-        "extra": extra[:20],
+        "extra": extra,
     }
 
 

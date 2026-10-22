@@ -20,7 +20,7 @@ import sqlite3
 from collections import Counter
 from pathlib import Path
 
-from . import chronology, continuity, drain, externalized, host_parity, multiset, summary, tool_calls, tool_groups, host_rewrite
+from . import chronology, continuity, drain, externalized, host_parity, multiset, projections, summary, tool_calls, tool_groups, host_rewrite
 
 ALL_BARS = ("B1", "B2", "B3", "B4", "B5", "B6", "B7", "B8", "B9")
 
@@ -221,6 +221,14 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     host, host_why = host_parity.load(db_dir / "state.db", group, plugin.get("tree"))
     b2_full, ext, ext_ids = externalized.resolve(full, db_dir.parent / "hermes-home")
     b2_stored = [r[:4] for r in b2_full]
+    projection_receipts = projections.verify(atts, b2_full, events, group, plugin.get("tree"))
+    # These are observations of the real host merge, grouped by its owning lineage, never hash co-presence.
+    for index, e in enumerate(events):
+        if e.get("event") == "host_merge" and e.get("session") and host is not None:
+            held = host.get(group(e["session"]), {}).get("keys", {}).get(("user", e.get("sha256")))
+            if held is not None:
+                held.setdefault("span_witnesses", []).append({"witness": {"event_index": index,
+                    "phase": e.get("phase"), "turn": e.get("turn")}, "spans": e.get("spans", [])})
     per = {g: (expected_items([a for a in atts if attempt_group(a, group) == g], notices),
                [r for r in b2_stored if group(r[1]) == g]) for g in groups}
     applicable = [b for b in cell.get("bars") or ALL_BARS
@@ -263,6 +271,9 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     keys = ("expected_items", "missing_keys", "deficit_rows", "duplicated_keys", "surplus_rows",
             "stored_rows_not_expected", "split_keys")
     numbers["B2"] = {k: sum(m[k] for m in b2_parts.values()) for k in keys}
+    numbers["B2"]["verified_survival_projections"] = projection_receipts
+    numbers["B2"]["embedded_span_credits"] = [dict(c, session=g) for g, m in b2_parts.items()
+                                               for c in m["embedded_span_credits"]]
     numbers["B2"]["held_composites_as_parts"] = [dict(c, session=g) for g, m in b2_parts.items()
                                                  for c in m["held_composites_as_parts"]][:10]
     numbers["B2"]["per_session"] = {g: m["verdict"] for g, m in b2_parts.items()}
@@ -281,7 +292,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
                     and d.get("id") in {c["id"] for c in a["tool_issues"]} - {s["id"] for s in a["tool_seen"]}:
                 bound["expected"][(attempt_group(a, group), "tool", d["id"], d["recovery_result_sha256"])] += 1
     tools = tool_calls.compare(bound["expected"], bound["loose"], tool_calls.stored_keys(b2_full, group))
-    externalized.mismatches(ext, b2_full, ext_ids, per, group, bound["expected"], bound["loose"], host)
+    externalized.mismatches(ext, b2_full, ext_ids, per, group, bound["expected"], bound["loose"], host, b2_parts)
     numbers["B2"]["externalized"] = ext
     numbers["B2"].update(tools)
     numbers["B2"]["host_wire_notice_licensed"] = {"rows": len(bound["wire_notices"]), "records": bound["wire_notices"][:10]}
@@ -289,9 +300,9 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
         failed["B2"] = dict(numbers["B2"])
     if any(m["verdict"] != "PASS" for m in b2_parts.values()):
         bad = {g: m for g, m in b2_parts.items() if m["verdict"] != "PASS"}
-        failed["B2"] = {**numbers["B2"], "missing": [dict(e, session=g) for g, m in bad.items() for e in m["missing"]][:5],
-                        "duplicated": [dict(e, session=g) for g, m in bad.items() for e in m["duplicated"]][:5],
-                        "extra": [dict(e, session=g) for g, m in bad.items() for e in m["extra"]][:5]}
+        failed["B2"] = {**numbers["B2"], "missing": [dict(e, session=g) for g, m in bad.items() for e in m["missing"]],
+                        "duplicated": [dict(e, session=g) for g, m in bad.items() for e in m["duplicated"]],
+                        "extra": [dict(e, session=g) for g, m in bad.items() for e in m["extra"]]}
     conflicts = counted(cell, phases, "publication_invariant_conflict")
     numbers["B3"] = {"publication_invariant_conflict": conflicts}
     if conflicts:

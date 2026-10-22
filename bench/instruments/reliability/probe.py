@@ -76,6 +76,65 @@ LOG_COUNTS = {
     "exit_fit": "LCM survival fit applied (reason=exit_fit:",
     "exit_fit_skipped": "LCM exit fit skipped",
 }
+
+
+def occurrence_rows(messages):
+    """Complete, payload-free occurrence hashes at the observed seam (never unique-key counts)."""
+    return [{"index": i, "role": m.get("role"), "sha256": hashlib.sha256(m["content"].encode()).hexdigest(),
+             "bytes": len(m["content"].encode())}
+            for i, m in enumerate(messages) if isinstance(m, dict) and isinstance(m.get("content"), str)]
+
+
+def trace_occurrences(etype, emit, context):
+    """Observe actual engine ingress without changing arguments, return values or exceptions."""
+    for name in ("ingest", "on_turn_complete", "compress"):
+        original = getattr(etype, name, None)
+        if original is None:
+            continue
+
+        def traced(self, messages, *args, _original=original, _name=name, **kwargs):
+            emit(event="engine_ingress", seam=_name, session=getattr(self, "_session_id", None),
+                 **context(), occurrences=occurrence_rows(messages))
+            return _original(self, messages, *args, **kwargs)
+        setattr(etype, name, traced)
+
+
+def trace_user_merges(helpers, emit, context):
+    """Record exact input spans only when the real host merge pass emits their newline join."""
+    original = getattr(helpers, "_merge_consecutive_users", None)
+    passes = getattr(helpers, "_SEQUENCE_REPAIR_PASSES", ())
+    if original is None or original not in passes:
+        return False
+
+    def traced(messages):
+        before = [(m.get("role"), m.get("content")) if isinstance(m, dict) else (None, None) for m in messages]
+        result, count = original(messages)
+        if count:
+            outputs = {m.get("content") for m in result if isinstance(m, dict) and m.get("role") == "user"
+                       and isinstance(m.get("content"), str)}
+            for start in range(len(before)):
+                parts = []
+                for role, text in before[start:start + 64]:
+                    if role != "user" or not isinstance(text, str) or not text:
+                        break
+                    parts.append(text)
+                    joined = "\n\n".join(parts)
+                    if len(parts) < 2 or joined not in outputs:
+                        continue
+                    spans, offset = [], 0
+                    leading = len(joined.encode()) - len(joined.lstrip().encode())
+                    for part in parts:
+                        raw = part.encode()
+                        spans.append({"sha256": hashlib.sha256(part.strip().encode()).hexdigest(),
+                                      "byte_offset": offset + len(raw) - len(part.lstrip().encode()) - leading,
+                                      "bytes": len(part.strip().encode())})
+                        offset += len(raw) + 2
+                    emit(event="host_merge", **context(), sha256=hashlib.sha256(joined.strip().encode()).hexdigest(),
+                         bytes=len(joined.strip().encode()), spans=spans,
+                         occurrences=occurrence_rows([{"role": "user", "content": t} for t in parts]))
+        return result, count
+    helpers._SEQUENCE_REPAIR_PASSES = tuple(traced if p is original else p for p in passes)
+    return True
 UNSHORTENED = "LCM survival fit could not shorten the list"
 FILLER = "alpha beta gamma delta "
 
@@ -583,6 +642,7 @@ def main():
             return None
 
     etype = type(engine)
+    trace_occurrences(etype, event, lambda: {"turn": cur["turn"], "session_prefix": cur["prefix"]})
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     orig_start, orig_end = etype.on_session_start, getattr(etype, "on_session_end", None)
 
@@ -711,6 +771,8 @@ def main():
             return orig_native(self, *args, **kwargs)
         native_cls.compress = counted_native
     import agent.agent_runtime_helpers as helpers
+    out["merge_occurrence_hook"] = trace_user_merges(
+        helpers, event, lambda: {"turn": cur["turn"], "session_prefix": cur["prefix"], "session": cur.get("session")})
     try:  # the host's dangling-tail notices (tool_seen host_wire_notice); absent at a host sha: nothing is licensed
         from agent import replay_cleanup
         wire_notices = tuple(getattr(replay_cleanup, "_DANGLING_NOTICES", ()))
@@ -853,7 +915,8 @@ def main():
             text = _attach_interrupted_prompt(text.strip(), text.strip())
         persist = text.strip() if (persist_strip if persist_strip is not None else cell["transport"] == "acp") else text
         est = sum(len(str(m.get("content") or "")) for m in history) // 4 + len(text) // 4 + 800
-        cur.update(turn=t, prefix=prefix, step=0, native=0, commits0=buf.getvalue().count(COMMITTED), issued=set(), seen=set())
+        cur.update(turn=t, prefix=prefix, session=ag.session_id, step=0, native=0,
+                   commits0=buf.getvalue().count(COMMITTED), issued=set(), seen=set())
         event(turn=t, event="user_sent" if kind != "retry" else "retry", tag=f"{prefix}{t:02d}", role="user",
               session_prefix=prefix, content=text, persist=persist if persist != text else None,
               content_sha256=hashlib.sha256(text.encode()).hexdigest())
