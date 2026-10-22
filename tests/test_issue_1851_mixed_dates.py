@@ -187,6 +187,26 @@ def test_carried_legacy_days_uses_bounded_immutable_cache(quote, expected):
     assert _carried_legacy_days.cache_info().hits == hits + 1
 
 
+# Regression: the non-date carried cache must not retain large rows by value.
+def test_carried_legacy_days_retains_results_only_for_large_rows():
+    import gc
+    import tracemalloc
+    from hermes_lcm.requirements_compiler import _carried_mixed_dates
+
+    gc.collect()
+    tracemalloc.start()
+    before = tracemalloc.get_traced_memory()[0]
+    for i in range(64):
+        quote = f"Synthetic carried {i}: 2023-01-10 and yesterday. " + "x" * (256 * 1024)
+        assert _carried_mixed_dates({"quote": quote, "content": quote, "time_uncertain": "carried"},
+                                    date_dependent=False)
+    del quote
+    gc.collect()
+    retained = tracemalloc.get_traced_memory()[0] - before
+    tracemalloc.stop()
+    assert retained < 2 * 1024 * 1024, retained
+
+
 @pytest.mark.parametrize("first", ["2023-01/10", "2023/01-10", "2023-01-10"])
 @pytest.mark.parametrize("glued", ["X2023-01-12", "build_2023-01-12", "v2023-02-03"])
 @pytest.mark.parametrize("carried", [False, True])
