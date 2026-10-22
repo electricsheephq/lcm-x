@@ -4554,38 +4554,86 @@ def _chunk_policy_revision(conn: sqlite3.Connection, identity_hash: str | None) 
     return 1 if populated else CHUNK_POLICY_REVISION
 
 
-def _record_chunk_policy_revision(conn: sqlite3.Connection, identity_hash: str, through: int) -> None:
+def _chunk_coverage(conn, identity_hash, low):
+    """Legacy integers prove today's cursor range under the original default policy."""
+    row = conn.execute("SELECT value FROM metadata WHERE key = ?",
+                       (f"chunk_policy_revision_through:{identity_hash}",)).fetchone()
+    try:
+        value = json.loads(row[0]) if row else None
+        if type(value) is int:
+            return (_chunk_cursor(conn, identity_hash) or (low, value))[0], value, "conversational", "legacy"
+        if (isinstance(value, dict) and type(value.get("from")) is int
+                and type(value.get("through")) is int and isinstance(value.get("policy"), str)):
+            return value["from"], value["through"], value["policy"]
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _chunk_coverage_value(conn, identity_hash, low, through, policy):
+    previous = _chunk_coverage(conn, identity_hash, low)
+    if previous and previous[2] == policy:
+        first, last, _ = previous[:3]
+        if low <= last + 1 and first <= through + 1:
+            low, through = min(low, first), max(through, last)
+        elif low < first:
+            # A pending low band cannot replace the already-certified upper range.
+            low, through = first, last
+    return json.dumps({"from": low, "through": through, "policy": policy}, separators=(",", ":"))
+
+
+def _record_chunk_policy_revision(conn: sqlite3.Connection, identity_hash: str, bounds, policy) -> None:
+    if policy == "full":
+        conn.execute("INSERT INTO metadata(key,value) VALUES(?,?) "
+                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value WHERE value!=excluded.value",
+                     (f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)))
+        return  # A complete manual full pass proves revision, not policy coverage.
     # Keep the revision an integer for older readers; coverage has its own key.
     conn.executemany(
         "INSERT INTO metadata(key, value) VALUES(?, ?) "
         "ON CONFLICT(key) DO UPDATE SET value = excluded.value WHERE value != excluded.value",
         [(f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)),
-         (f"chunk_policy_revision_through:{identity_hash}", str(through))],
+         (f"chunk_policy_revision_through:{identity_hash}",
+          _chunk_coverage_value(conn, identity_hash, *bounds, policy))],
     )
 
 
-def _chunk_gapfill_bounds(conn, identity_hash, bounds, revision):
-    """A revision proves only its recorded range; legacy markers need one full check."""
+def _chunk_gapfill_bounds(conn, identity_hash, bounds, revision, policy="conversational", *, coverage=...):
+    """Validate a newly exposed low band before extending matching upper coverage."""
     if bounds is None:
         return None
     low, high = bounds
-    if revision >= CHUNK_POLICY_REVISION:
-        through = conn.execute(
-            "SELECT value FROM metadata WHERE key = ?",
-            (f"chunk_policy_revision_through:{identity_hash}",),
-        ).fetchone()
-        if through is not None:
-            try:
-                low = max(low, int(through[0]) + 1)
-            except (TypeError, ValueError):
-                pass  # An unreadable bound proves nothing; revalidate the whole cursor range.
+    if coverage is ...:
+        coverage = _chunk_coverage(conn, identity_hash, low)
+    if revision >= CHUNK_POLICY_REVISION and coverage and coverage[2] == policy:
+        first, through, _ = coverage[:3]
+        if low < first:
+            return low, min(high, first - 1)
+        low = max(low, through + 1)
     return (low, high) if low <= high else None
+
+
+def _chunk_gapfill_ranges(conn, identity_hash, bounds, revision, policy, *, coverage=...):
+    """Upper work stays visible while a disjoint low band is awaiting validation."""
+    if bounds is None or policy == "full":
+        return ()
+    if coverage is ...:
+        coverage = _chunk_coverage(conn, identity_hash, bounds[0])
+    band = _chunk_gapfill_bounds(conn, identity_hash, bounds, revision, policy, coverage=coverage)
+    if band is None:
+        return ()
+    if (revision >= CHUNK_POLICY_REVISION and coverage and coverage[2] == policy
+            and bounds[0] < coverage[0] and coverage[1] < bounds[1]):
+        return ((max(bounds[0], coverage[1] + 1), bounds[1]), band)
+    return (band,)
 
 
 def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_progress=False,
                         gap_page_size=None, gap_scan_state=None):
     """Scan new territory once; revisit unpublished candidates by id until covered."""
     low, high = bounds
+    coverage = (gap_scan_state or {}).get("coverage")
+    low_band = coverage and coverage[2] == policy and low < coverage[0]
     scan_key = f"chunk_gapfill_scan:{identity_hash}"
     saved = conn.execute("SELECT value FROM metadata WHERE key = ?", (scan_key,)).fetchone()
     while record_progress and saved is None:
@@ -4615,11 +4663,12 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             scan = {}
     except Exception:
         scan = {}  # Unusable progress metadata requires the full gap revalidation.
-    if scan.get("revision") != CHUNK_POLICY_REVISION or scan.get("policy") != policy:
-        scan = {}
+    if (scan.get("revision") != CHUNK_POLICY_REVISION or scan.get("policy") != policy
+            or (coverage and len(coverage) > 3 and scan.get("high", coverage[1]) > coverage[1])):
+        scan = {}  # An integer rewrite cannot authenticate a wider saved band scan.
     pending_ids = []
     ceiling = high + 1
-    if "pending" in scan and scan["high"] <= high:
+    if "pending" in scan and scan["high"] <= high and not low_band:
         pending_ids = sorted({i for i in scan["pending"] if i >= low}, reverse=True)
         low = max(low, scan["high"] + 1)
     elif scan.get("high") == high:
@@ -4752,7 +4801,8 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             progress = {"revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
                         "pending": candidates}
             values = [(f"chunk_policy_revision_through:{identity_hash}",
-                       str(min(candidates, default=high + 1) - 1))]
+                       _chunk_coverage_value(conn, identity_hash, bounds[0],
+                                             min(candidates, default=high + 1) - 1, policy))]
             if not candidates:
                 values.append((f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)))
             record(progress, values)
@@ -4827,8 +4877,8 @@ def _chunk_frontier_rows(
         eligible = f" AND lower(trim(role)) IN ({roles}) AND COALESCE(content, '') != ''"
     bounds = _chunk_cursor(conn, identity_hash)
     if bounds is None:
-        if record_progress and identity_hash and revision >= CHUNK_POLICY_REVISION:
-            _record_chunk_policy_revision(conn, identity_hash, 0)
+        if record_progress and identity_hash and revision >= CHUNK_POLICY_REVISION and policy != "full":
+            _record_chunk_policy_revision(conn, identity_hash, (0, 0), policy)
         yield from conn.execute(
             f"SELECT store_id, role, content FROM messages WHERE 1{eligible} ORDER BY store_id DESC LIMIT ?",
             (history_limit,),
@@ -4844,12 +4894,33 @@ def _chunk_frontier_rows(
     yield from conn.execute(
         f"SELECT store_id, role, content FROM messages WHERE store_id > ?{eligible} ORDER BY store_id", (high,)
     )
-    gap_bounds = _chunk_gapfill_bounds(conn, identity_hash, bounds, revision) if policy != "full" else None
-    if gap_bounds is not None:
-        yield from _chunk_gapfill_rows(
-            conn, identity_hash, gap_bounds, policy, min(history_limit, _CHUNK_HISTORY_SCAN_MESSAGES),
+    coverage = _chunk_coverage(conn, identity_hash, low) if policy != "full" else None
+    gap_ranges = _chunk_gapfill_ranges(
+        conn, identity_hash, bounds, revision, policy, coverage=coverage,
+    )
+    if gap_ranges and coverage and len(coverage) > 3 and record_progress and revision >= CHUNK_POLICY_REVISION:
+        # Preserve the trusted integer's range, but discard stale band progress
+        # once before using its new-format certificate on the next call.
+        _record_chunk_policy_revision(conn, identity_hash, coverage[:2], coverage[2])
+    if not gap_ranges and record_progress and revision >= CHUNK_POLICY_REVISION and policy != "full":
+        # Restamp trusted legacy integers without a scan or a status-side write.
+        _record_chunk_policy_revision(conn, identity_hash, bounds, policy)
+    gap_scan_state = gap_scan_state if gap_scan_state is not None else {}
+    unproven = False
+    for band in gap_ranges:
+        gap_scan_state["coverage"] = coverage
+        for row in _chunk_gapfill_rows(
+            conn, identity_hash, band, policy, min(history_limit, _CHUNK_HISTORY_SCAN_MESSAGES),
             record_progress=record_progress, gap_page_size=gap_page_size, gap_scan_state=gap_scan_state,
-        )
+        ):
+            yield row
+        unproven |= gap_scan_state.get("unproven", False)
+        if record_progress and len(gap_ranges) > 1:
+            # Defer writable low work until the next call: publication can grow
+            # high again, leaving both bands for the read-only remaining query.
+            break
+    if unproven:
+        gap_scan_state["unproven"] = True
     if include_boundaries and low != high:
         yield from conn.execute(
             f"SELECT store_id, role, content FROM messages WHERE store_id = ?{eligible}", (low,)
@@ -4867,11 +4938,12 @@ def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None,
     """The automatic pass's pending chunks, read along its frontier and bounded for the status page."""
     ids = _chunk_partial_ids(conn, identity_hash, backlog=True)
     total = len(ids) if ids is not None else 1
-    gap_bounds = _chunk_gapfill_bounds(
+    gap_ranges = _chunk_gapfill_ranges(
         conn, identity_hash, _chunk_cursor(conn, identity_hash), _chunk_policy_revision(conn, identity_hash),
-    ) if normalize_content_policy(policy) != "full" else None
+        normalize_content_policy(policy),
+    )
     suffix = ""
-    inflight = _chunk_inflight_ids(conn, identity_hash) if gap_bounds is not None else set()
+    inflight = _chunk_inflight_ids(conn, identity_hash) if gap_ranges else set()
     rows = _chunk_frontier_rows(
         conn, identity_hash, history_limit=_STATUS_CHUNK_SCAN_MESSAGES + 1, policy=policy
     )
@@ -4893,7 +4965,7 @@ def _chunk_backlog_estimate(conn: sqlite3.Connection, identity_hash: str | None,
             and chunk.chunk_id not in already
         )
         total += pending
-        if pending and gap_bounds is not None and gap_bounds[0] <= row[0] <= gap_bounds[1]:
+        if pending and any(first <= row[0] <= last for first, last in gap_ranges):
             suffix = " (gap-fill)"
     return f"{total}{'+' if partial_ids or ids is None else ''}{suffix}"
 
@@ -5650,7 +5722,7 @@ def _chunk_backfill_run(
             and not error and not failed and not skipped and not stop_reason
             and not _chunk_inflight_ids(conn, identity)
         ):
-            _record_chunk_policy_revision(conn, identity, (_chunk_cursor(conn, identity) or (0, 0))[1])
+            _record_chunk_policy_revision(conn, identity, _chunk_cursor(conn, identity) or (0, 0), policy)
             conn.execute(
                 "UPDATE metadata SET value=json_remove(value, '$.repair_pending') WHERE key=? "
                 "AND json_type(value)='object' AND json_extract(value, '$.repair_pending') IS NOT NULL "

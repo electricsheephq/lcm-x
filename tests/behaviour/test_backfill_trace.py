@@ -106,7 +106,8 @@ def reached(case: h.Scenario, payloads: list[str]) -> None:
             assert "pending" not in scan
             final = states[-1]["tables"]
             assert len(final["lcm_chunk_meta"]) == 4
-            assert any(key.startswith("chunk_policy_revision_through:") and value == "4"
+            assert any(key.startswith("chunk_policy_revision_through:")
+                       and json.loads(value) == {"from": 1, "through": 4, "policy": "conversational"}
                        for key, value in final["metadata"])
     if shape == "contextual-model-cap-and-estimates":
         preview, applied = (dict(report) for report in reports)
