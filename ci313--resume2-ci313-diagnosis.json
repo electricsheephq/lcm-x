@@ -1,0 +1,42 @@
+{
+  "verdict": "EVIDENCE_GAP_EXACT_RUNTIME_CAUSE; VERIFIED_POSITIVE_FIXTURE_ADMISSION_GAP",
+  "rehydration": "PASS",
+  "head": "cd7b57d041aad4d4d598c4c967e3efd4367b0f96",
+  "ci_run": 39863960507,
+  "ci_job": 120121358190,
+  "failure": "tests/test_sender_columns_schema.py::test_sender_update_changes_one_cell_pair_without_trigger_effects",
+  "failure_line": 113,
+  "verified_numeric_assertion": "assert 0 == 1",
+  "ci_summary": "1 failed,19857 passed,146 skipped,66 xfailed,32 warnings in762.62s",
+  "verified_source": [
+    "New schema acceptance test creates populated legacy DB, opens MessageStore, prepares derived schema, snapshots, then requires first sender update=1 with no background-worker join.",
+    "Legacy fixture row id1 is a user and its scope literal equals the nonempty one-element update scope; the new columns begin NULL.",
+    "store.py:723 returns0 if nonblocking Python write-lock admission fails; lines727-731 set SQLite busy_timeout=0 and begin a transaction; lines743-748 catch any exception and return0.",
+    "MessageStore._init_db store.py:448 invokes ensure_message_stem_fts; populated old store has no stem state/index, so db_bootstrap.py:3299-3309 sets backfilling and dispatches existing background worker.",
+    "db_bootstrap.py:3316-3379 background stem worker opens private SQLite connection and takes BEGIN IMMEDIATE at3330,3348,3360; it can contend with sender-only UPDATE.",
+    "db_bootstrap.join_background_integrity_scans at3075-3085 is existing test helper and also joins background stem backfills."
+  ],
+  "causal_boundary": "The existing asynchronous stem writer is a source-proven contention mechanism, and the positive fixture does not establish uncontended admission. CI captured no DEBUG reason code, SQLite exception/error code, or lock observation, so attributing this particular0 definitively to that worker or calling it flakiness would exceed evidence.",
+  "spec_classification": "Inside signed Schema acceptance2; no outside-table consumer and no SPEC STOP triggered. Mandatory product contract remains best-effort nonblocking0 under contention.",
+  "recommended_smallest_disposition": "Root may authorize a fixture-only synchronization in tests/test_sender_columns_schema.py after prepare_derived and before baseline snapshots: call existing db_bootstrap.join_background_integrity_scans(). Preserve product busy_timeout0, nonblocking lock, fail-open0 and dedicated T7 contention assertions. Exact runtime cause remains unproven until appropriately observed validation.",
+  "no_actions": [
+    "No repo edits",
+    "No tests or CI reruns",
+    "No installs",
+    "No external writes",
+    "No raw logs persisted"
+  ],
+  "source_corrections_used": 2,
+  "ci_gate_recovery_consumed_by_observation": 0,
+  "recommended_next_steps": {
+    "owner": "root",
+    "needed_authority": "new bounded child edit/validation handoff or root execution disposition; current handoff grants read-only only",
+    "actions": [
+      "Accept or reject named fixture-only synchronization based on source-proven missing admission precondition",
+      "If admitted, run the affected Python3.13 schema test and existing T7 nonblocking/contention path, then required exact-head CI",
+      "If failure remains, capture payload-free failure reason/SQLite code before further changes"
+    ],
+    "resume_condition": "root dispositions the bounded fixture correction or supplies new causal evidence",
+    "avoid": "Do not retry unchanged CI as proof of flakiness, relax expected1, add waits/retries to production sender capture, or claim this CI0 runtime cause is proven."
+  }
+}

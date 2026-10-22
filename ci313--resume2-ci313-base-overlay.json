@@ -1,0 +1,22 @@
+{
+  "base": "5df5a3c2736c01b46acf26906a510e41e367e73e",
+  "overlay_files": {
+    "tests/test_sender_columns_schema.py": "cc49dca715a7918cc0b6e1aaae52f55d1574fe73cd64ee80cd1841b3f153cdfd",
+    "tests/test_sender_capture.py": "d0f1fdf47d1e5a451ebb93cf12d4198c03f4b74e5b7723a678393dc60d92940f",
+    "tests/test_sender_delivered_identity.py": "d3b066b235f01365d76efa7f75368ebccbab60db2884d157be51b3a6c8581e31",
+    "tests/compat/test_sender_migration.py": "b80a3ba9418bdebf786bdc05e5df71a12316b04dbc457130d496cd1cf37ee2db",
+    "bench/instruments/occurrence_fuzz/tests/test_sender_safety.py": "3d56b4ed9419d8fef52a007931247de45de189dc72695e3c5ce0e1fe7de5fbec",
+    "tests/messages_snapshot.py": "f6d301aafc015ba9ec03458108e95f05e0f30e7605fbc43a72e03317c1619ccd",
+    "tests/test_store_wedge_inspect.py": "d3c19d58b8df8d2085ca830aa3e7a24434ee54b7c35ef7552e1320fb95ec7f8c"
+  },
+  "base_product_bytes_verified": {
+    "__init__.py": true,
+    "db_bootstrap.py": true,
+    "engine.py": true,
+    "store.py": true,
+    "bench/instruments/local_catchup/audit.py": true,
+    "bench/instruments/local_catchup/measurement.py": true
+  },
+  "sender_module_absent": true,
+  "scratch_root": "$SCRATCH/resume2-ci313-base-red"
+}

@@ -1,0 +1,10 @@
+pwd=$CHECKOUT
+HEAD=cd7b57d041aad4d4d598c4c967e3efd4367b0f96
+command=$SCRATCH/resume2-ci313-venv/bin/python -m pytest --assert=plain --tb=no --disable-warnings -q -rA -p resume2_receipts tests/test_sender_columns_schema.py::test_sender_update_changes_one_cell_pair_without_trigger_effects tests/test_sender_capture.py::test_t7_update_contention_is_nonblocking_and_retried_after_ingest --basetemp=$SCRATCH/pt-resume2-ci313-focused
+E1B_COUNTS={"passed": 3}
+PASSED tests/test_sender_columns_schema.py::test_sender_update_changes_one_cell_pair_without_trigger_effects
+PASSED tests/test_sender_capture.py::test_t7_update_contention_is_nonblocking_and_retried_after_ingest[scenario-sha256:25a0e755cf0c]
+PASSED tests/test_sender_capture.py::test_t7_update_contention_is_nonblocking_and_retried_after_ingest[scenario-sha256:0549c5321869]
+3 passed in 0.65s
+exit=0
+diagnostic_policy=raw payload-bearing diagnostics discarded in memory

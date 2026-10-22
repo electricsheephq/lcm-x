@@ -1,0 +1,19 @@
+{
+  "head": "cd7b57d041aad4d4d598c4c967e3efd4367b0f96",
+  "product_hashes": {
+    "__init__.py": "01ac846fae80b0e647d6f61aa5bc471cfa4785c1c2404802ec723aa7130ad8e9",
+    "db_bootstrap.py": "58f1470b5d2b69154ef4ffd0a2f167123707c99279d124138599c1be9b1c3274",
+    "engine.py": "c5b51de877392c683bc07b4c8bdc1f441990a2ad85b1ba7d4b0474132aa44538",
+    "store.py": "9931c663904a4716fda5cad52d4893c0e593575270b1b4f54a3e761a8d7c787d",
+    "sender_capture.py": "d62dc628aa619d4ad69d4ab78f8f05465f660bb87852a55f8d8ab5d288df8808",
+    "bench/instruments/local_catchup/audit.py": "b4ee2634ef3ae3e5a473c9886172da5080814ea92767386cdc099c937c6420f3",
+    "bench/instruments/local_catchup/measurement.py": "5fc5e48a53d5bdbc95b92ebd6b9859a67989d183e757a922b5181eb32dc3c925",
+    "bench/instruments/local_catchup/messages_snapshot.py": "f6d301aafc015ba9ec03458108e95f05e0f30e7605fbc43a72e03317c1619ccd"
+  },
+  "8_product_hashes_exact": true,
+  "7_pin_fixture_hashes_exact": true,
+  "sole_join_removed_reproduces_HEAD_test_bytes": true,
+  "corrected_test_sha256": "cc49dca715a7918cc0b6e1aaae52f55d1574fe73cd64ee80cd1841b3f153cdfd",
+  "source_corrections_used": 3,
+  "generated_worktree_hypothesis_cache": false
+}

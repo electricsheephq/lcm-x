@@ -1,0 +1,166 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "e1b-s0-ci313-fixture-supplement",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "e1b-s0",
+  "claim_class": "advisory",
+  "created": "2026-10-22T22:45:48Z",
+  "settled": "2026-10-22T22:48:55Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "cd7b57d041aad4d4d598c4c967e3efd4367b0f96",
+    "dirty": true,
+    "diff_sha256": "b107391348b0402dd16295f8ef4e23a7cc6f033ba89990c559f68f45bc28a849",
+    "base_sha": "5df5a3c2736c01b46acf26906a510e41e367e73e",
+    "working_file": "tests/test_sender_columns_schema.py",
+    "working_file_sha256": "cc49dca715a7918cc0b6e1aaae52f55d1574fe73cd64ee80cd1841b3f153cdfd",
+    "unchanged_measured_product_commit": "1e506eb7f1454e4ded7b65f9712e59214e003e09"
+  },
+  "env": {
+    "command": "python resume2-ci313-run.py (focused3 and identical62-case BASE/candidate/product-reverse states; exact commands in receipts)",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "E1b-S0-fixture-supplement",
+      "metric": "focused_passed",
+      "value": 3.0,
+      "n": 3,
+      "source": "resume2-ci313-focused.txt"
+    },
+    {
+      "benchmark": "E1b-S0-fixture-supplement",
+      "metric": "base_expected_red",
+      "value": 62.0,
+      "n": 62,
+      "source": "resume2-ci313-red-base.txt"
+    },
+    {
+      "benchmark": "E1b-S0-fixture-supplement",
+      "metric": "candidate_passed",
+      "value": 62.0,
+      "n": 62,
+      "source": "resume2-ci313-green.txt"
+    },
+    {
+      "benchmark": "E1b-S0-fixture-supplement",
+      "metric": "product_reverse_expected_red",
+      "value": 62.0,
+      "n": 62,
+      "source": "resume2-ci313-red-product-revert.txt"
+    }
+  ],
+  "results": [
+    {
+      "path": "resume2-ci313-focused.txt",
+      "role": "receipt",
+      "sha256": "8ab8df08a6e8b86ea2c5069f3ab8054f2e90bf74f0ea511d86d3c89ba857bfbd",
+      "bytes": 924
+    },
+    {
+      "path": "resume2-ci313-red-base.txt",
+      "role": "receipt",
+      "sha256": "0ff6b6f0f73e3511301a18bad794fe5150664b1cabf62b024e825e23b0a6e8f0",
+      "bytes": 7416
+    },
+    {
+      "path": "resume2-ci313-green.txt",
+      "role": "receipt",
+      "sha256": "775120076769aed970ebcd457dec2e8205db3540c14d7fc8b0746e945615ec23",
+      "bytes": 7365
+    },
+    {
+      "path": "resume2-ci313-red-product-revert.txt",
+      "role": "receipt",
+      "sha256": "d15a059b40f366fcd0666eb892cb1d8845566dadd21ad614313b9562f7a995cc",
+      "bytes": 7453
+    },
+    {
+      "path": "resume2-ci313-freeze.json",
+      "role": "receipt",
+      "sha256": "5bbc9233cfc98feb94addbd9a5f74a00773f4f3c99e4845042dae58a82a26790",
+      "bytes": 1441
+    },
+    {
+      "path": "resume2-ci313-base-overlay.json",
+      "role": "receipt",
+      "sha256": "830740661c31226e88f4ca6a29abb16f8bbe1977388412ea474e7d583813e26d",
+      "bytes": 1210
+    },
+    {
+      "path": "resume2-ci313-dependencies.json",
+      "role": "receipt",
+      "sha256": "43174faac31fc1aee93e8ef9f2f065354642e136266c51492fc42cd3bdea315a",
+      "bytes": 559
+    },
+    {
+      "path": "resume2-ci313-test.diff",
+      "role": "receipt",
+      "sha256": "c06083e648f0dd35a6f632454e1982ee05c83a87a8664c18f74171547de1ea5c",
+      "bytes": 547
+    },
+    {
+      "path": "resume2-ci313-diagnosis.json",
+      "role": "receipt",
+      "sha256": "799135e2f8d1ffbbadd365fe589e23c9e97a8b8e1ac537ae8b0ecbe4e03230dc",
+      "bytes": 3602
+    },
+    {
+      "path": "score.py",
+      "role": "receipt",
+      "sha256": "63ea2dcd26a6bb33772d8c3ccfc2fb1ec6156a47ebe3a43eb469e4824561c405",
+      "bytes": 1227
+    },
+    {
+      "path": "resume2-ci313-restoration-verified.json",
+      "role": "receipt",
+      "sha256": "be5a03d73f123c98810497b6dab3ad139b8e7b88b6d9f6d68d031123828a2b44",
+      "bytes": 1192
+    },
+    {
+      "path": "resume2-ci313-ruff.txt",
+      "role": "receipt",
+      "sha256": "920b51fb14d669ffb3808ce90db336885bcfd3159ca4528c71f63b33ed8e8c20",
+      "bytes": 168
+    },
+    {
+      "path": "resume2-ci313-pin-identities.json",
+      "role": "receipt",
+      "sha256": "d688d9f263e4d0753cc849fc22d317a1b6ae35fc1d86e3ed037ce383cce310ac",
+      "bytes": 1325
+    }
+  ],
+  "rescore": {
+    "command": "python score.py .",
+    "inputs": [
+      "resume2-ci313-focused.txt",
+      "resume2-ci313-red-base.txt",
+      "resume2-ci313-green.txt",
+      "resume2-ci313-red-product-revert.txt"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "resume2-ci313-base-overlay.json",
+    "resume2-ci313-dependencies.json",
+    "resume2-ci313-diagnosis.json",
+    "resume2-ci313-focused.txt",
+    "resume2-ci313-freeze.json",
+    "resume2-ci313-green.txt",
+    "resume2-ci313-pin-identities.json",
+    "resume2-ci313-red-base.txt",
+    "resume2-ci313-red-product-revert.txt",
+    "resume2-ci313-restoration-verified.json",
+    "resume2-ci313-ruff.txt",
+    "resume2-ci313-test.diff",
+    "score.py"
+  ]
+}

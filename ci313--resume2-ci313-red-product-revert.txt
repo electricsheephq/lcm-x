@@ -1,0 +1,70 @@
+pwd=$CHECKOUT
+HEAD=cd7b57d041aad4d4d598c4c967e3efd4367b0f96
+checkout_HEAD=cd7b57d041aad4d4d598c4c967e3efd4367b0f96
+command=$SCRATCH/resume2-ci313-venv/bin/python -m pytest --assert=plain --tb=no --disable-warnings -q -rA -p resume2_receipts tests/test_sender_columns_schema.py tests/test_sender_capture.py tests/test_sender_delivered_identity.py tests/compat/test_sender_migration.py bench/instruments/occurrence_fuzz/tests/test_sender_safety.py tests/test_store_wedge_inspect.py::test_pre_s0_sender_columns_are_not_required_by_inspector --basetemp=$SCRATCH/pt-resume2-ci313-red-product-revert -o cache_dir=$SCRATCH/resume2-ci313-pytest-cache
+E1B_COUNTS={"failed": 62, "warnings": 1}
+FAILED tests/test_sender_columns_schema.py::test_migration_shape_and_idempotence[scenario-sha256:eea70aa11dc3]
+FAILED tests/test_sender_columns_schema.py::test_migration_shape_and_idempotence[scenario-sha256:bbabfc9cc2c8]
+FAILED tests/test_sender_columns_schema.py::test_fresh_shape_and_concurrent_ensure
+FAILED tests/test_sender_columns_schema.py::test_sender_update_changes_one_cell_pair_without_trigger_effects
+FAILED tests/test_sender_columns_schema.py::test_trigger_census_and_reader_projection
+FAILED tests/test_sender_columns_schema.py::test_sender_update_joins_enclosing_transaction
+FAILED tests/test_sender_columns_schema.py::test_classifier_tolerates_only_sender_columns
+FAILED tests/test_sender_capture.py::test_t1_preflight_before_hook_updates_only_watched_row
+FAILED tests/test_sender_capture.py::test_t2_skipped_preflight_first_insert_then_post_turn[scenario-sha256:cf8b179d4715]
+FAILED tests/test_sender_capture.py::test_t2_skipped_preflight_first_insert_then_post_turn[scenario-sha256:3d2e413606f0]
+FAILED tests/test_sender_capture.py::test_t2_skipped_preflight_first_insert_then_post_turn[scenario-sha256:5501b529cc33]
+FAILED tests/test_sender_capture.py::test_t3_interrupted_tail_catchup_and_abandoned_worker
+FAILED tests/test_sender_capture.py::test_t5_session_end_retry_freeze_trim_and_alignment
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:5f62dcd42198]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:1d235a1f5356]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:133948a5af51]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:c983dae9ee6f]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:2e8f9d74d691]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:87958544a2f8]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:866f02121e49]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:76ad28eafb64]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:0c489f15e0f7]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:352923134fc6]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:2ea97593a365]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:5d5bfada736f]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:47d9762d5f41]
+FAILED tests/test_sender_capture.py::test_t6_transport_matrix[scenario-sha256:bace93d017f3]
+FAILED tests/test_sender_capture.py::test_t6_record_admitted_shapes[scenario-sha256:b9bd1d172dce]
+FAILED tests/test_sender_capture.py::test_t6_record_admitted_shapes[scenario-sha256:a64d7f101c7d]
+FAILED tests/test_sender_capture.py::test_t6_record_admitted_shapes[scenario-sha256:df28ef5fc0df]
+FAILED tests/test_sender_capture.py::test_t7_engine_busy_hook_has_no_pending
+FAILED tests/test_sender_capture.py::test_t7_registry_bounded_supersession_ttl_and_late_creation
+FAILED tests/test_sender_capture.py::test_t7_update_contention_is_nonblocking_and_retried_after_ingest[scenario-sha256:25a0e755cf0c]
+FAILED tests/test_sender_capture.py::test_t7_update_contention_is_nonblocking_and_retried_after_ingest[scenario-sha256:0549c5321869]
+FAILED tests/test_sender_capture.py::test_t7_hook_thread_and_cold_prototype_share_registry
+FAILED tests/test_sender_capture.py::test_t7_ingest_while_preanswer_hook_thread_is_running
+FAILED tests/test_sender_capture.py::test_interrupted_clone_insert_precedes_retirement
+FAILED tests/test_sender_capture.py::test_retirement_all_lifecycle_boundaries[scenario-sha256:3040508295b4]
+FAILED tests/test_sender_capture.py::test_retirement_all_lifecycle_boundaries[scenario-sha256:69b71ffadb76]
+FAILED tests/test_sender_capture.py::test_retirement_all_lifecycle_boundaries[scenario-sha256:84a1ac8ae4b4]
+FAILED tests/test_sender_capture.py::test_retirement_all_lifecycle_boundaries[scenario-sha256:7c435a7069b3]
+FAILED tests/test_sender_capture.py::test_retirement_all_lifecycle_boundaries[scenario-sha256:ba4879a9bcfa]
+FAILED tests/test_sender_capture.py::test_fail_open_matching_and_creation_errors
+FAILED tests/test_sender_capture.py::test_t10_no_sender_batch_omits_key_and_store_keyword
+FAILED tests/test_sender_delivered_identity.py::test_t9_three_store_delivered_identity[scenario-sha256:982488bae938]
+FAILED tests/test_sender_delivered_identity.py::test_t9_three_store_delivered_identity[scenario-sha256:50a0c5493f4f]
+FAILED tests/test_sender_delivered_identity.py::test_t9_three_store_delivered_identity[scenario-sha256:d17b28f1b9a5]
+FAILED tests/test_sender_delivered_identity.py::test_t9_three_store_delivered_identity[scenario-sha256:511f6265eb17]
+FAILED tests/compat/test_sender_migration.py::test_t8_sender_forward_and_rollback[scenario-sha256:88b6d3fd0b88]
+FAILED tests/compat/test_sender_migration.py::test_t8_sender_forward_and_rollback[scenario-sha256:f25a1dc5030d]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_t4_generated_sender_occurrences[scenario-sha256:4bba3d03f5fd]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_t4_generated_sender_occurrences[scenario-sha256:3655ef4b7418]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_t4_merge_survivors_are_null[scenario-sha256:13621991acdf]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_t4_merge_survivors_are_null[scenario-sha256:5c64edd09139]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_t4_merge_survivors_are_null[scenario-sha256:426d554ffa7b]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_t4_merge_survivors_are_null[scenario-sha256:fe5615600f3a]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_t4_value_match_never_authorizes_old_row_update[scenario-sha256:b32d5cfda5c6]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_t4_value_match_never_authorizes_old_row_update[scenario-sha256:89f7ab270e3a]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_t4_value_match_never_authorizes_old_row_update[scenario-sha256:3c1fb9c06947]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_t4_value_match_never_authorizes_old_row_update[scenario-sha256:3daa3501b17b]
+FAILED bench/instruments/occurrence_fuzz/tests/test_sender_safety.py::test_registered_compress_copy_matches_but_unregistered_copy_does_not
+FAILED tests/test_store_wedge_inspect.py::test_pre_s0_sender_columns_are_not_required_by_inspector
+62 failed, 1 warning in 4.75s
+exit=1
+diagnostic_policy=raw payload-bearing diagnostics discarded in memory

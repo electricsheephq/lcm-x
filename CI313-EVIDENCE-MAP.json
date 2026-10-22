@@ -1,0 +1,99 @@
+{
+  "schema": "e1b-public-evidence-map/1",
+  "final_head": "2f63df8b0671b63279e27a0a113754409e3e504b",
+  "working_candidate_sha256": "855bd70d03deefe1b78fa97810cb74b9254abc7303cd0322ce717c3347a92719",
+  "files": [
+    {
+      "original_path": "RESULT-MANIFEST.json",
+      "published_filename": "ci313--RESULT-MANIFEST.json",
+      "bytes": 4989,
+      "sha256": "df29412aad556fb9fb41cdf2b72480c6e85e8128bfbc19ef988e4017b97e60e1"
+    },
+    {
+      "original_path": "RESULT.md",
+      "published_filename": "ci313--RESULT.md",
+      "bytes": 2081,
+      "sha256": "b8f1397c37c95204e730aeb7c540a6bd1dcd2c400fdeda363b26d4e72e464ed8"
+    },
+    {
+      "original_path": "resume2-ci313-base-overlay.json",
+      "published_filename": "ci313--resume2-ci313-base-overlay.json",
+      "bytes": 1210,
+      "sha256": "830740661c31226e88f4ca6a29abb16f8bbe1977388412ea474e7d583813e26d"
+    },
+    {
+      "original_path": "resume2-ci313-dependencies.json",
+      "published_filename": "ci313--resume2-ci313-dependencies.json",
+      "bytes": 559,
+      "sha256": "43174faac31fc1aee93e8ef9f2f065354642e136266c51492fc42cd3bdea315a"
+    },
+    {
+      "original_path": "resume2-ci313-diagnosis.json",
+      "published_filename": "ci313--resume2-ci313-diagnosis.json",
+      "bytes": 3602,
+      "sha256": "799135e2f8d1ffbbadd365fe589e23c9e97a8b8e1ac537ae8b0ecbe4e03230dc"
+    },
+    {
+      "original_path": "resume2-ci313-focused.txt",
+      "published_filename": "ci313--resume2-ci313-focused.txt",
+      "bytes": 924,
+      "sha256": "8ab8df08a6e8b86ea2c5069f3ab8054f2e90bf74f0ea511d86d3c89ba857bfbd"
+    },
+    {
+      "original_path": "resume2-ci313-freeze.json",
+      "published_filename": "ci313--resume2-ci313-freeze.json",
+      "bytes": 1441,
+      "sha256": "5bbc9233cfc98feb94addbd9a5f74a00773f4f3c99e4845042dae58a82a26790"
+    },
+    {
+      "original_path": "resume2-ci313-green.txt",
+      "published_filename": "ci313--resume2-ci313-green.txt",
+      "bytes": 7365,
+      "sha256": "775120076769aed970ebcd457dec2e8205db3540c14d7fc8b0746e945615ec23"
+    },
+    {
+      "original_path": "resume2-ci313-pin-identities.json",
+      "published_filename": "ci313--resume2-ci313-pin-identities.json",
+      "bytes": 1325,
+      "sha256": "d688d9f263e4d0753cc849fc22d317a1b6ae35fc1d86e3ed037ce383cce310ac"
+    },
+    {
+      "original_path": "resume2-ci313-red-base.txt",
+      "published_filename": "ci313--resume2-ci313-red-base.txt",
+      "bytes": 7416,
+      "sha256": "0ff6b6f0f73e3511301a18bad794fe5150664b1cabf62b024e825e23b0a6e8f0"
+    },
+    {
+      "original_path": "resume2-ci313-red-product-revert.txt",
+      "published_filename": "ci313--resume2-ci313-red-product-revert.txt",
+      "bytes": 7453,
+      "sha256": "d15a059b40f366fcd0666eb892cb1d8845566dadd21ad614313b9562f7a995cc"
+    },
+    {
+      "original_path": "resume2-ci313-restoration-verified.json",
+      "published_filename": "ci313--resume2-ci313-restoration-verified.json",
+      "bytes": 1192,
+      "sha256": "be5a03d73f123c98810497b6dab3ad139b8e7b88b6d9f6d68d031123828a2b44"
+    },
+    {
+      "original_path": "resume2-ci313-ruff.txt",
+      "published_filename": "ci313--resume2-ci313-ruff.txt",
+      "bytes": 168,
+      "sha256": "920b51fb14d669ffb3808ce90db336885bcfd3159ca4528c71f63b33ed8e8c20"
+    },
+    {
+      "original_path": "resume2-ci313-test.diff",
+      "published_filename": "ci313--resume2-ci313-test.diff.txt",
+      "bytes": 547,
+      "sha256": "c06083e648f0dd35a6f632454e1982ee05c83a87a8664c18f74171547de1ea5c"
+    },
+    {
+      "original_path": "score.py",
+      "published_filename": "ci313--score.py.txt",
+      "bytes": 1227,
+      "sha256": "63ea2dcd26a6bb33772d8c3ccfc2fb1ec6156a47ebe3a43eb469e4824561c405"
+    }
+  ],
+  "restore": "Download into one directory, rename published_filename to original_path, run the card rescore command. .txt aliases preserve bytes.",
+  "boundary": "one test-only join; product bytes unchanged. Original CI runtime cause unproven; full final-head CI not yet complete."
+}

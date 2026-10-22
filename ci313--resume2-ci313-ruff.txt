@@ -1,0 +1,5 @@
+command=uv tool run --from ruff==0.15.13 ruff check --no-cache .
+HEAD=cd7b57d041aad4d4d598c4c967e3efd4367b0f96
+All checks passed!
+exit=0
+git_diff_check=exit0,no output

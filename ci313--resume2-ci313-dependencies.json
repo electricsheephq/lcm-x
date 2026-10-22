@@ -1,0 +1,18 @@
+{
+  "python": "3.13.14",
+  "sqlite": "3.53.1",
+  "packages": {
+    "pytest": "9.1.1",
+    "pytest-xdist": "3.8.0",
+    "numpy": "2.5.4",
+    "hypothesis": "6.141.1"
+  },
+  "runner": "resume2-ci313-run.py",
+  "workers": 1,
+  "timeout_seconds_per_command": 300,
+  "host_stub": "existing CI-identical ContextEngine stub",
+  "hypothesis_cache": "scratch/resume2-ci313-hypothesis",
+  "full_local_suite": "not rerun; final full proof is root-triggered exact-head remote CI",
+  "cost": "not rerun; production/bench bytes unchanged",
+  "source_corrections_used": 3
+}
