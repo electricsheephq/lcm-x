@@ -399,9 +399,12 @@ def main(a):
     dump(a.out/"queries.json", pinned)
     results = []
     for b in ([a.block] if getattr(a, "block", None) is not None else range(a.blocks)):
-        block = [dict(block=b, state=s, result=cell(a, s, b, "recall"))
-                 for s in ("OFF", "ON-catching-up", "ON-covered")]
-        finalize_block(a, b, block)
+        block = []
+        try:
+            for s in ("OFF", "ON-catching-up", "ON-covered"):
+                block.append(dict(block=b, state=s, result=cell(a, s, b, "recall")))
+        finally:
+            finalize_block(a, b, block)
         results.extend(block)
     states = [r["result"]["state"] for r in results]
     dump(a.out/"summary.json", dict(state=rollup(states),

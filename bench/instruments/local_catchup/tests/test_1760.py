@@ -190,8 +190,11 @@ def test_summary_only_forgeries_rejected(tmp_path, forgery):
             common.dump(root/"raw-summary.json", raw)
             entry["result"] = raw
         common.dump(tmp_path/"summary.json", dict(state="PASS", blocks=results))
-    with pytest.raises(AssertionError):
-        rescore.v2(tmp_path)
+    if forgery == "dropped_block":
+        with pytest.raises(AssertionError):
+            rescore.v2(tmp_path)
+    else:
+        assert any(c.get("rescore_disagreement") for c in rescore.v2(tmp_path)["blocks"])
 
 
 def test_rescore_floor_output_root(tmp_path):

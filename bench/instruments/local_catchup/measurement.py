@@ -152,12 +152,18 @@ def cell(a, state, block, kind):
                     break
                 time.sleep(.2)
         finally:
-            stop(proc)
+            stopped = stop(proc)
             meter.close()
     reason = meter.breach or reason
     result = load(root/"raw-summary.json") if (root/"raw-summary.json").exists() else {}
     if reason or proc.returncode:
         result.update(state="ABORTED", reason=reason or f"worker_exit:{proc.returncode}")
+    result.update(stopped)
+    if stopped["stop_killed"]:
+        result.update(state="INVALID", reason="forced_stop_after_grace")
+    if (root/"progress.jsonl").exists():
+        last = json.loads((root/"progress.jsonl").read_text().splitlines()[-1])
+        result.update({k: last[k] for k in ("fixed_corpus_frozen_s", "global_live_commits_during_freeze") if k in last})
     for path in root.glob("*.jsonl"):
         labelled = [dict(json.loads(line), label=SMOKE if a.smoke else a.label) for line in path.read_text().splitlines()]
         path.write_text("".join(json.dumps(row, sort_keys=True)+"\n" for row in labelled))
@@ -368,12 +374,21 @@ def safety(a):
             a._manifest = load(a.out/"manifest.json")
         value = progress(a.db, a._manifest, False)
         fingerprint = str((value["classes"], value["scan"]))
+        commits = sum(e.get("embedded", 0) for e in events if "end" in e and
+            e.get("event") in ("_chunk_backfill_run", "_embedding_backfill_summary_run"))
+        if commits != getattr(a, "_commits", None):
+            a._commits, a._live_changed = commits, now
         if fingerprint != getattr(a, "_fingerprint", None):
             a._fingerprint, a._changed = fingerprint, now
-        append(a.root/"progress.jsonl", dict(at=now, progress=value))
-        if not value["complete"] and now-a._changed >= 600 and a._ready():
+            a._freeze_base = commits
+        if now-a._changed >= getattr(a, "_fixed_frozen_s", 0):
+            a._fixed_frozen_s, a._freeze_commits = now-a._changed, commits-a._freeze_base
+        append(a.root/"progress.jsonl", dict(at=now, progress=value,
+            fixed_corpus_frozen_s=a._fixed_frozen_s, global_live_commits_during_freeze=a._freeze_commits))
+        if not value["complete"] and now-max(a._changed, a._live_changed) >= 600 and a._ready():
             raise RuntimeError("zero progress for ten minutes while work remains")
-    return {"events": "events.jsonl", "prepare_and_backfill_wrapped": True,
+    return {"fixed_corpus_frozen_s": getattr(a, "_fixed_frozen_s", 0), "global_live_commits_during_freeze": getattr(a, "_freeze_commits", 0),
+            "events": "events.jsonl", "prepare_and_backfill_wrapped": True,
             "embedding_thread_join_wrapped": True, "python_socket_calls_denied":
             "connect, connect_ex, sendto, sendmsg, getaddrinfo, gethostbyname, gethostbyname_ex, gethostbyaddr, getnameinfo",
             "subprocess_launches_recorded": "subprocess.Popen", "subprocess_launches_denied": "subprocess.Popen",

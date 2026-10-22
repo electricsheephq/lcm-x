@@ -43,6 +43,7 @@ def main():
     if estimate > a.peak_disk_gb*2**30 or shutil.disk_usage(a.scratch).free < max(150, a.peak_disk_gb+20)*2**30:
         raise RuntimeError("rig disk budget stop")
     jobs, manifests, processes = [], [], []
+    stops = [[] for _ in range(n)]
     # Bound verified reads to every five minutes; record their measured CPU cost.
     verify_every_polls, polls, verified_read_cpu_s_total, verified_read_cpu_s_max_per_read = 10, 0, 0., 0.
     def poll_progress(verify):
@@ -140,12 +141,15 @@ def main():
                         break
                     append(j.out/"restarts.jsonl", {"reason": trigger, "elapsed_s": time.monotonic()-started, "fraction": fraction})
                     meter.windows[processes[i].pid][1] = time.monotonic()
-                    stop(processes[i])
+                    stops[i].append(stop(processes[i]))
+                    if stops[i][-1]["stop_killed"]:
+                        reason = "forced_stop_after_grace"
+                        break
                     generations[i] = 1
                     processes[i] = launch(j, 1)
                     meter.watch(processes[i].pid)
                     last_change[i], fingerprints[i] = time.monotonic(), None
-                if reason == "restart_integrity_or_residue":
+                if reason in ("restart_integrity_or_residue", "forced_stop_after_grace"):
                     break
             time.sleep(min(1, max(0, deadline-time.monotonic())))
     except ProcessLookupError:
@@ -155,8 +159,8 @@ def main():
         try:
             meter.close()
         finally:
-            for q in processes:
-                stop(q)
+            for i, q in enumerate(processes):
+                stops[i].append(stop(q))
     reason = meter.breach or reason
     progress = poll_progress(True)
     if any(not r["raw_unchanged"] or r["changed_vectors"] or r.get("changed_metadata") for r in progress):
@@ -174,9 +178,12 @@ def main():
         state, reason = "ABORTED", reason if reason == "row_or_vector_corruption" else "final_integrity_or_residue"
     elif reason == "complete" and not all(r["complete"] for r in progress):
         state, reason = "ABORTED", "final_coverage_regressed"
-    for r in progress:
+    for r, stopped in zip(progress, stops):
         r.update(state="ABORTED" if audit_failed(r) else "COMPLETE" if r["complete"] else state,
-                 reason="final_integrity_or_residue" if audit_failed(r) else "full_expected_id_audit" if r["complete"] else reason)
+                 reason="final_integrity_or_residue" if audit_failed(r) else "full_expected_id_audit" if r["complete"] else reason, stops=stopped)
+        if any(s["stop_killed"] for s in stopped):
+            r.update(state="INVALID", reason="forced_stop_after_grace")
+            state, reason = "INVALID", "forced_stop_after_grace"
     aggregate_end = min((meter.windows[q.pid][1] or loop_end for q in processes), default=loop_end)
     cpu = meter.summary(state, n, aggregate_start if a.screen16 else 0, end=loop_end, aggregate_window=(aggregate_start, aggregate_end))
     worst = {k: max((r[k] for r in cpu["per_process"].values()), default=None)

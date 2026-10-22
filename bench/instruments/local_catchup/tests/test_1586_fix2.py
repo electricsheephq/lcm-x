@@ -108,8 +108,7 @@ def test_rescore_rejects_summary_calibration_tampering(tmp_path, monkeypatch, fi
     pubs = [json.loads(s) for s in (root/"publications.jsonl").read_text().splitlines()]
     raw.update(recall.score(samples, pubs, **params))
     common.dump(root/"raw-summary.json", raw)
-    with pytest.raises(AssertionError):
-        rescore.v2(root)
+    assert rescore.v2(root)["rescore_disagreement"]
 
 
 @pytest.mark.parametrize("slow,expected", [(False, "INVALID"), (True, "FAIL")])

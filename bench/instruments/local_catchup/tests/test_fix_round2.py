@@ -43,7 +43,7 @@ def fake_rig(tmp_path, monkeypatch):
         common.dump(job.out/f"worker-{generation}.json", {"pid": pid})
         return Namespace(pid=pid, poll=lambda: None)
     monkeypatch.setattr(rig, "launch", launch)
-    monkeypatch.setattr(rig, "stop", lambda _: clock.__setitem__(0, clock[0]+10))
+    monkeypatch.setattr(rig, "stop", lambda _: clock.__setitem__(0, clock[0]+10) or dict(stop_killed=False))
     meter.watch = lambda pid: meter.windows.update({pid: [clock[0], None]})
     return a, checked, final, calls, launched, clock
 

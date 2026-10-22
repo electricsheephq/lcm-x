@@ -36,7 +36,7 @@ Its pre-existing vectors are fixture vectors, never counted as measured throughp
 
 Catchup binds once per interpreter lifetime, then only observes. Restart defaults
 to 40% coverage, with a declared 25%-of-max-wall fallback if that fraction is unreachable;
-the small control uses 30 seconds. Shutdown has a 10-second bound, then kill.
+the small control uses 30 seconds. Shutdown has a 60-second grace, then kill (v2.3).
 Restart and interpreter startup count toward elapsed time. Every 30 seconds a
 read-only connection counts expected IDs and digests newly seen vectors only;
 previously seen vector replacements are detected at the next audit. Full raw-row/vector integrity audits
@@ -104,6 +104,24 @@ qualify the 200-query full-size cell. Raw samples and per-block summaries persis
 ON-catching-up requires positive coverage progress or a background backfill that
 embedded rows within the overlapping recall window. Per-recall identity counts
 exclude new trace rows; full expected-ID audits run at block start and end.
+
+## v2.3
+
+Graceful stop allows 60 seconds, exceeding the worker's 1-second poll + up to
+2 seconds retirement + 10 seconds exit publication + 15 seconds margin.
+Every stop records signal/exit monotonic times, forced-kill status and return code.
+A forced stop is INVALID (`forced_stop_after_grace`); residue after graceful exit
+still fails the unchanged final integrity audit. Claims and markers are preserved.
+The recall watchdog aborts only when both the fixed-corpus fingerprint and global
+completed embedding-publication count remain unchanged for 600 seconds with the
+provider ready. Progress and state summaries report the longest fixed-corpus freeze
+and embedded commits during that freeze. Completed states are finalized on abort;
+rescore disagreements preserve the recorded verdict and list differing values.
+Recall declares saturation worst case: one serial unpaced recall thread at about
+2 recalls/s and about 97% active duty, plus the unpaced publication trace at about
+0.7–1.0 turns/s, measured in v2. These cells judge latency and health under load;
+catch-up throughput is judged only by coverage cells. No workload pacing changes:
+fixed-corpus progress during catching-up is reported, not gated.
 
 Dispatch manually with `gh workflow run lcmx-1586-floor.yml --ref <branch or tag whose commit is the product under test>`
 plus `-f cell=<cell> -f rows=<rows> -f shape=<shape> -f baseline=<baseline> -f max_minutes=<minutes> -f block=<0|1|2>` for `cell`, `rows`,

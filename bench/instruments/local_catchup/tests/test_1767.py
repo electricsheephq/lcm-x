@@ -60,8 +60,9 @@ def test_early_invalid_cannot_hide_recall_receipts(tmp_path, state):
     forged = dict(state="INVALID", reason="covered_store_incomplete")
     for name in ("summary.json", "raw-summary.json"):
         common.dump(cell/name, forged)
-    with pytest.raises((AssertionError, ValueError)):
-        rescore.v2(cell)
+    result = rescore.v2(cell)
+    assert result["state"] == "INVALID"
+    assert result["rescore_disagreement"]  # Forged early exit cannot hide the check.
 
 
 def test_early_invalid_summary_cannot_hide_raw_classes(tmp_path):

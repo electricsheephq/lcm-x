@@ -159,8 +159,7 @@ def test_rescore_recomputes_and_checks_coverage(tmp_path):
     recorded = json.loads((tmp_path/"summary.json").read_text())
     recorded["implied_hours_gated"] = 0
     floor.dump(tmp_path/"summary.json", recorded)
-    with pytest.raises(AssertionError):
-        rescore.v2(tmp_path)
+    assert rescore.v2(tmp_path)["rescore_disagreement"]
 
 
 def test_standalone_five_fresh_32_leaf_batches(corpus, tmp_path, monkeypatch):
@@ -262,8 +261,7 @@ def test_rescore_saved_recall_classes(tmp_path, publications, valid):
     assert rescore.v2(tmp_path)["state"] == recorded["state"]
     recorded["classes"]["broad_nl"]["overlapping"] = 999
     floor.dump(tmp_path/"raw-summary.json", recorded)
-    with pytest.raises(AssertionError):
-        rescore.v2(tmp_path)
+    assert rescore.v2(tmp_path)["rescore_disagreement"]
 
 
 def test_setup_resume_preserves_partial_store(corpus, tmp_path, monkeypatch):

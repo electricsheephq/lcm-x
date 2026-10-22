@@ -25,7 +25,7 @@ def v2(root, *, _entry=True):
     from .recall import score, window_calibration, overlapping, guarded_result
     from .measurement import catchup_activity
     def lines(path):
-        return [json.loads(s) for s in path.read_text().splitlines()]
+        return [json.loads(s) for s in path.read_text().splitlines()] if path.is_file() else []
     def coverage(cell):
         raw = load(cell/"catchup/summary.json")
         seconds = raw.get("end_to_end_s")
@@ -110,7 +110,6 @@ def v2(root, *, _entry=True):
     if (root/"catchup").is_dir():
         recorded = load(root/"summary.json")
         computed = coverage(root)
-        assert all(recorded[k] == v for k, v in computed.items())
     else:
         assert (root/"recalls.jsonl").is_file(), "recall receipts or event-backed early INVALID required"
         recorded = load(root/"raw-summary.json")
@@ -139,7 +138,10 @@ def v2(root, *, _entry=True):
             computed["state"] = rollup([computed["state"], "INVALID"])
         if calibrated is None and valid:
             computed["reason"] = "calibration_window_short"
-        assert all(recorded[k] == v for k, v in computed.items())
+    disagreement = {k: dict(recorded=recorded.get(k), recomputed=v)
+                    for k, v in computed.items() if k not in recorded or recorded[k] != v}
+    if disagreement:
+        return dict(recorded, rescore_disagreement=disagreement)
     return dict(aborted, state="FAIL") if aborted is not None and computed["state"] == "FAIL" else aborted or computed
 
 

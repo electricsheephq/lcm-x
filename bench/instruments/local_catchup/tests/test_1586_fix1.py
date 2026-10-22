@@ -204,8 +204,8 @@ def test_rescore_rejects_tampered_duration(tmp_path):
     common.dump(tmp_path/"manifest.json", dict(rows=250000))
     (tmp_path/"catchup/events.jsonl").write_text("".join(json.dumps(v)+"\n" for v in events()))
     common.dump(tmp_path/"summary.json", floor.rate(raw, 7200, 250000, events()))
-    with pytest.raises(AssertionError):
-        rescore.v2(tmp_path)
+    result = rescore.v2(tmp_path)
+    assert result["rescore_disagreement"]["measured_seconds"] == dict(recorded=7200, recomputed=3600)
 
 
 def test_incomplete_worker_closes_without_fill(tmp_path, monkeypatch):

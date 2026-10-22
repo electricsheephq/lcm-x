@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from bench.instruments.local_catchup import catchup, common, measurement, recall, rescore
+from bench.instruments.local_catchup import catchup, common, measurement, recall, rescore, rig
 from bench.instruments.local_catchup.tests.test_1586_v2 import rows
 
 pytest_plugins = ["bench.instruments.local_catchup.tests.test_fix_round3"]
@@ -64,11 +64,17 @@ class IgnoresTerm:
 
 @pytest.mark.parametrize("restart", [False, True])
 def test_forced_stop_is_invalid_not_integrity_failure(fake_catchup, monkeypatch, restart):
-    a, checked, final, _, _, _ = fake_catchup
+    a, checked, final, _, clock, _ = fake_catchup
     launch = catchup.launch
     def child(job, generation):
         launch(job, generation)
-        return IgnoresTerm()
+        proc = IgnoresTerm()
+        wait = proc.wait
+        def waited(timeout=None):
+            clock[0] += timeout or 0
+            return wait(timeout)
+        proc.wait = waited
+        return proc
     monkeypatch.setattr(catchup, "launch", child)
     monkeypatch.setattr(catchup, "stop", STOP)
     monkeypatch.setattr(catchup, "progress", lambda *a: dict(checked, complete=not restart))
@@ -153,3 +159,46 @@ def test_aborted_block_keeps_completed_state_summaries(tmp_path, monkeypatch):
     assert result["rescore_disagreement"] == {
         "reason": dict(recorded="recorded_before_abort", recomputed="calibration_window_short"),
         "host_check": dict(recorded="recorded_unknown", recomputed="UNCALIBRATED")}
+
+
+def test_rig_records_every_stop_and_forced_stop_class(fake_rig, monkeypatch):
+    a, _, final, _, _, clock = fake_rig
+    final["residue"] = {"dispatched": 32}
+    def stop(proc):
+        clock[0] += 60
+        return dict(stop_sigterm_at=clock[0]-60, stop_exit_at=clock[0],
+                    stop_killed=True, stop_returncode=-9)
+    monkeypatch.setattr(rig, "stop", stop)
+    rig.main()
+    result = common.load(a.out/"summary.json")
+    assert (result["state"], result["reason"]) == ("INVALID", "forced_stop_after_grace")
+    for progress in result["per_process_progress"]:
+        assert progress["reason"] == "forced_stop_after_grace"
+        assert all(s["stop_killed"] and s["stop_returncode"] == -9 for s in progress["stops"])
+
+
+@pytest.mark.parametrize("killed", [True, False])
+def test_measurement_records_stop_and_freeze_summary(tmp_path, monkeypatch, killed):
+    import sqlite3
+    a = NS(scratch=tmp_path, out=tmp_path/"out", model_cache=tmp_path,
+           lcmx_repo=tmp_path, hermes_source=tmp_path, smoke=True, label="fake", max_seconds=1)
+    a.out.mkdir()
+    sqlite3.connect(tmp_path/"baseline.db").close()
+    stopped = dict(stop_sigterm_at=1, stop_exit_at=61 if killed else 13,
+                   stop_killed=killed, stop_returncode=-9 if killed else 0)
+    monkeypatch.setattr(measurement, "stop", lambda _: stopped)
+    monkeypatch.setattr(measurement, "Supervisor", lambda _: NS(
+        breach=None, watch=lambda _: None, start=lambda: None, close=lambda: None, summary=lambda *a: {}))
+    def launch(*args, **kw):
+        root = a.out/"0-OFF"
+        common.dump(root/"raw-summary.json", dict(state="UNCALIBRATED"))
+        common.append(root/"progress.jsonl", dict(fixed_corpus_frozen_s=630, global_live_commits_during_freeze=672))
+        return NS(pid=1, returncode=0, poll=lambda: 0)
+    monkeypatch.setattr(measurement.subprocess, "Popen", launch)
+    result = measurement.cell(a, "OFF", 0, "recall")
+    assert all(result[k] == v for k, v in stopped.items())
+    assert result["fixed_corpus_frozen_s"] == 630
+    assert result["global_live_commits_during_freeze"] == 672
+    assert result["state"] == ("INVALID" if killed else "UNCALIBRATED")
+    if killed:
+        assert result["reason"] == "forced_stop_after_grace"
