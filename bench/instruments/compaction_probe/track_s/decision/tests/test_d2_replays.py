@@ -110,6 +110,14 @@ def test_existing_paths_refused_before_any_overwrite(producer_env):
     assert before == {str(p): p.read_bytes() for p in root.rglob("*") if p.is_file()}
 
 
+def test_explicit_d2_summary_route_uses_existing_glm_lane(producer_env):
+    env = dict(producer_env, SUMMARY_LANE="glm")
+    result = produce(env, 2)
+    assert result.returncode == 0, result.stderr
+    log = Path(env["OUT"]) / f"replay-r2/decision/logs/s2-{env['ARM']}-d1-r2.log"
+    assert json.loads(log.read_text())["argv"][7] == "glm"
+
+
 @pytest.mark.parametrize("args", [(0,), (10,), ("x",), (1, 0), (1, "x"), (1, 1, 1)])
 def test_invalid_replay_arguments_refused(producer_env, args):
     assert produce(producer_env, *args).returncode == 2

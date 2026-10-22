@@ -20,7 +20,7 @@ def pins():
     return dict(option="B", aa=True, builds={a: dict(sha="a"*40, arm="LCMX-fleet-rc3")
                                            for a in ("candidate", "comparison")},
                 materials={str(s): dict(manifest="b"*64, fact_ids=["f"]) for s in (1, 2, 3)},
-                summary=dict(provider="codex", model="gpt-6.1-sol", effort="low", tier="default"),
+                summary=dict(provider="glm", model="glm-5.3", effort="low", tier="default"), summary_lane="glm",
                 reader="glm-5.3", policy=dict(arm="LCMX-fleet-rc3"))
 
 
@@ -31,7 +31,7 @@ def artifacts(row, attempt, path, pin):
         path = path / ("replay-" + label.split("-", 1)[1])
     run = path / f"lcmx-runs/LCMX-fleet-rc3/seed-{seed}/{label}"
     write(run / "summary.json", dict(status="DONE", worktree_head="a"*40, stop_row_index=304,
-                                      material_sha256="b"*64, lane="codex-sol", reader="glm",
+                                      material_sha256="b"*64, lane="glm", reader="glm",
                                       arm=dict(env={"LCM_SUMMARY_REASONING_EFFORT": "low"})))
     receipt = path / f"decision/logs/s2-LCMX-fleet-rc3-{label}.log.wall"
     receipt.parent.mkdir(parents=True, exist_ok=True)
