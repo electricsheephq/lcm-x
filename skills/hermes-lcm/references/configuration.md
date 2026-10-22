@@ -67,6 +67,12 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 
 Optional slash commands are disabled by default with `LCM_ENABLE_SLASH_COMMAND=false`. Destructive cleanup apply is separately guarded. Do not enable mutation surfaces merely to diagnose a problem.
 
+`LCM_SENDER_CAPTURE` is a non-field, profile-aware boolean toggle (default
+`true`). Set `LCM_SENDER_CAPTURE=0` to disable pending sender associations;
+the nullable sender columns are still added and historical rows are never
+backfilled. Capture stores an unverified gateway session principal without
+changing stored or delivered text.
+
 `LCM_SQLITE_MMAP_SIZE` sets SQLite mapped-read bytes (default `268435456`,
 unchanged). Set `LCM_SQLITE_MMAP_SIZE=0` on SD-card or single-board hosts: a
 storage read error on a mapped page kills the process with SIGBUS, while `0`

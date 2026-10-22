@@ -19,14 +19,15 @@ OLD_COMMIT = "6800cf45ad05280e6cf6fa9e1ad96c62b7132646"  # v0.26.2
 SHAPES = ("no-origin", "no-source", "column", "nullable", "indexed")
 # Hashes cover every sqlite_master SQL definition, including unrelated schema objects.
 # Captured on the pre-refactor tree, with the same assertions and fixtures below.
+# S0 DECLARE: regenerated for two nullable sender TEXT columns, schema_version still 5.
 SCHEMA_HASHES = {
-    "no-origin": "43f997c202813c5c7ad7b6f7a6bd3077fc3d603ca78bb93bb189fec0d82ccd66",
-    "no-source": "2ee8ac6a9b8bb9900a3b3cab47c0a77afd191e0b6a311efa1a512107eed0049e",
-    "column": "c3d10cdcb479ba4676152e8a286313c814b0d1b69a7f68fa03ea59c4a07125b1",
-    "nullable": "0145b7b759f67ea7aeef994bae5f8bda8f46d20da378429ab86adf05cc97d759",
-    "indexed": "c3d10cdcb479ba4676152e8a286313c814b0d1b69a7f68fa03ea59c4a07125b1",
-    "fresh": "3ea7b060f641d1caf585b14adff328a62009d8b07c0250cde4b464c851c19e2a",
-    "v0.26.2": "3ea7b060f641d1caf585b14adff328a62009d8b07c0250cde4b464c851c19e2a",
+    "no-origin": "7c713ed3172754452fea7db661980ecf2ae50d7ed74f44ec7277ecc3dcf3fa36",
+    "no-source": "b404228fe3f62e0041044f5f86a95a5755164859f28fa1760ccc5c6d0d77a038",
+    "column": "3f636eca7f43e14dbf1f02448cc1235b8baf1ca02c45fcbdc2697ed120982501",
+    "nullable": "201149f63107323c870dbb84e0e548b24a5c7b198896d2ebea7b25d1cce5de28",
+    "indexed": "3f636eca7f43e14dbf1f02448cc1235b8baf1ca02c45fcbdc2697ed120982501",
+    "fresh": "60f0c61283050a49c4e26b5729dc6618dcaa72e461337a20d73a75f74977d4da",
+    "v0.26.2": "8b774fdbd65aa2fcaf3420f2b54c4eb5480d0ff3d38269d329fbb6a8f095c74f",
 }
 
 

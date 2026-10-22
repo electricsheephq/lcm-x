@@ -322,6 +322,7 @@ _V5_CORE_TABLE_COLUMNS: dict[str, frozenset[str]] = {
 # the v5 core-shape classifier because a legitimate pre-V4.2 database will not
 # have them until MessageStore opens it. Their presence is recognised, but an
 # unrelated extra core column still fails closed as a genuinely newer shape.
+_V5_CORE_TOLERATED_COLUMNS = {"messages": frozenset({"sender_id", "sender_source"})}
 _V5_CORE_OPTIONAL_COLUMNS: dict[str, frozenset[str]] = {
     "messages": frozenset({"ingested_at", "observed_at", "observed_at_source"}),
 }
@@ -491,7 +492,7 @@ def classify_version_mismatch(conn: sqlite3.Connection) -> str:
             }
         except sqlite3.DatabaseError:
             return VERSION_MISMATCH_GENUINELY_NEWER
-        optional = set(_V5_CORE_OPTIONAL_COLUMNS.get(table, ()))
+        optional = set(_V5_CORE_OPTIONAL_COLUMNS.get(table, ())) | set(_V5_CORE_TOLERATED_COLUMNS.get(table, ()))
         if not set(expected).issubset(actual) or not actual.issubset(set(expected) | optional):
             return VERSION_MISMATCH_GENUINELY_NEWER
 

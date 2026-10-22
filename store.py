@@ -421,7 +421,9 @@ class MessageStore:
                 pinned INTEGER DEFAULT 0,
                 ingested_at REAL,
                 observed_at REAL,
-                observed_at_source TEXT
+                observed_at_source TEXT,
+                sender_id TEXT,
+                sender_source TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_msg_session
                 ON messages(session_id, store_id);
@@ -485,6 +487,8 @@ class MessageStore:
             "observed_at_source",
             "ALTER TABLE messages ADD COLUMN observed_at_source TEXT",
         )
+        for name in ("sender_id", "sender_source"):
+            add_column_if_missing(self._conn, columns, name, f"ALTER TABLE messages ADD COLUMN {name} TEXT")
         # The NULL probe has no index and scans the whole table, so run it once
         # per store and remember that it ran; register() opens the store under
         # Hermes' plugin load deadline (#622).
@@ -619,7 +623,8 @@ class MessageStore:
                                 ] = None,
                                 metadata_messages: Optional[
                                     List[Dict[str, Any]]
-                                ] = None) -> List[int]:
+                                ] = None,
+                                senders: Optional[List[Optional[tuple[str, str]]]] = None) -> List[int]:
         """Persist messages that already passed ingest protection.
 
         This is an internal fast path for callers that need the protected form
@@ -633,6 +638,8 @@ class MessageStore:
             raise ValueError(
                 "metadata_messages must align one-to-one with protected messages"
             )
+        if senders is not None and len(senders) != len(messages):
+            raise ValueError("senders must align one-to-one with protected messages")
 
         conn = self._conn
         if conn is None:
@@ -645,12 +652,18 @@ class MessageStore:
                 tc_json = json.dumps(tc) if tc else None
                 ts = time.time()
                 observed_at = _normalize_observed_at(msg.get("timestamp"))
+                sender = senders[index] if senders is not None else None
                 cur = conn.execute(
                     """INSERT INTO messages
                        (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
                         tool_name, timestamp, token_estimate, pinned, ingested_at,
                         observed_at, observed_at_source)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""" if sender is None else
+                    """INSERT INTO messages
+                       (session_id, source, conversation_id, role, content, tool_call_id, tool_calls,
+                        tool_name, timestamp, token_estimate, pinned, ingested_at,
+                        observed_at, observed_at_source, sender_id, sender_source)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     (
                         session_id,
                         _normalize_source_value(source),
@@ -666,7 +679,7 @@ class MessageStore:
                         ts,
                         observed_at,
                         "host_message_timestamp" if observed_at is not None else None,
-                    ),
+                    ) + (sender or ()),
                 )
                 if cur.lastrowid is None:
                     raise RuntimeError("SQLite did not return a message id")
@@ -698,6 +711,46 @@ class MessageStore:
             if ids:
                 self._mark_manual_chunk_backlog()
             return ids
+
+    def get_message_senders(self, store_ids) -> dict[int, tuple[str | None, str | None]]:
+        if not store_ids:
+            return {}
+        marks = ",".join("?" for _ in store_ids)
+        return {int(sid): (sender, source) for sid, sender, source in self._conn.execute(
+            f"SELECT store_id, sender_id, sender_source FROM messages WHERE store_id IN ({marks})", list(store_ids))}
+
+    def set_sender_if_null(self, store_id, sender_id, sender_source, session_ids) -> int:
+        if not session_ids or not self._write_lock.acquire(blocking=False):
+            return 0
+        conn, opened, timeout = self._conn, False, None
+        try:
+            timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            conn.execute("PRAGMA busy_timeout=0")
+            if not conn.in_transaction:
+                conn.execute("BEGIN")
+                opened = True
+            marks = ",".join("?" for _ in session_ids)
+            count = conn.execute(
+                "UPDATE messages SET sender_id = ?, sender_source = ?"
+                " WHERE store_id = ? AND role = 'user' AND sender_id IS NULL AND sender_source IS NULL"
+                f" AND session_id IN ({marks})", (sender_id, sender_source, store_id, *session_ids)).rowcount
+            assert count in (0, 1)
+            if not count:
+                existing = self.get_message_senders([store_id]).get(store_id)
+                if existing not in (None, (None, None), (sender_id, sender_source)):
+                    logger.debug("sender_capture:conflict")
+            if opened:
+                conn.commit()
+            return count
+        except Exception:
+            if opened:
+                conn.rollback()
+            logger.debug("sender_capture:write_unavailable")
+            return 0
+        finally:
+            if timeout is not None:
+                conn.execute(f"PRAGMA busy_timeout={int(timeout)}")
+            self._write_lock.release()
 
     def reassign_session_messages(self, old_session_id: str, new_session_id: str) -> int:
         """Move all persisted messages from one session_id to another."""

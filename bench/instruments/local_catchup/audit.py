@@ -5,6 +5,7 @@ import json
 import sqlite3
 
 from .common import dump, load, parser
+from .messages_snapshot import messages_snapshot_columns
 
 
 def digest(rows):
@@ -22,7 +23,7 @@ def connect(db):
 
 
 def preimage(c, node_bound=None):
-    raw = digest(c.execute("SELECT * FROM messages ORDER BY store_id"))
+    raw = digest(c.execute(f"SELECT {messages_snapshot_columns(c)} FROM messages ORDER BY store_id"))
     provenance = {table: digest(c.execute(f"SELECT * FROM {table}" + (f" WHERE node_id<={int(node_bound)}" if node_bound is not None else "") + f" ORDER BY {order}")
                                if c.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone() else [])
                   for table, order in (("summary_nodes", "node_id"), ("summary_node_provenance", "node_id"),
