@@ -127,3 +127,27 @@ def test_non_date_carried_fact_keeps_base_parse_mode(tmp_path, mixed, other):
         assert _carried_absolute_day(dict(time_uncertain="carried", quote=text),
                                      date_dependent=False) == date(2023, 1, 12)
         assert engine._store.connection.total_changes == before
+
+
+@pytest.mark.parametrize("mixed", ["2023-01/10", "2023/01-10"])
+@pytest.mark.parametrize("carried", [False, True])
+def test_single_mixed_day_keeps_relative_verdict(tmp_path, mixed, carried):
+    text = f"I took a vacation to Bali on {mixed}; I jogged yesterday and today."
+    with engine_context(tmp_path, embeddings_enabled=False) as engine:
+        refs = plant(engine, [text, "Unrelated synthetic row."], carried_index=0 if carried else 1)[:1]
+        result = json.loads(tools.lcm_compile_evidence(args(refs, QUESTIONS[1][1], "2023-03-22"), engine=engine))
+        assert result["state"] == "answer_sufficient"
+        assert occurrence_time._quote_date_info(text)[1] is None
+        assert occurrence_time.resolve_occurrence_time(text, observed_at=0)["event_date"] == "2023-01-10"
+
+
+@pytest.mark.parametrize("mixed", ["2023-01/10", "2023/01-10"])
+def test_mixed_day_does_not_add_unanchored_interval_operand(tmp_path, mixed):
+    with engine_context(tmp_path, embeddings_enabled=False) as engine:
+        refs = plant(engine, ["I visited the Louvre on 2023-01-12.",
+                             "I visited the Prado on 2023-01-20.",
+                             f"I visited the Uffizi on {mixed}.", "Unrelated synthetic row."],
+                     carried_index=3)[:3]
+        result = json.loads(tools.lcm_compile_evidence(args(refs,
+            "How many days passed between my visit to the Louvre and my visit to the Prado?"), engine=engine))
+        assert result["state"] == "computation_sufficient"

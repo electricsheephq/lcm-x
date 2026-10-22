@@ -674,7 +674,8 @@ def _date_candidates(
     quote = str(source["quote"])
     output: list[dict[str, Any]] = []
     for match in _DATE_TEXT_RE.finditer(quote):
-        parsed = _date_value(match.group(0))
+        # Conflict detection expands; the existing operand inventory stays fixed.
+        parsed = _date_value(match.group(0), allow_mixed=False)
         if parsed is None:
             continue
         start = int(source["span_start"]) + match.start()

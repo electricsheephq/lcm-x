@@ -91,9 +91,11 @@ def _strip_order_dates(normalized):
 
 def _parse_quote_date_info(content):
     normalized = _carried_date_text(content)
-    days = {_date_value(m.group(0)) for m in _DATE_TEXT_RE.finditer(normalized)} - {None}
+    tokens = [m.group(0) for m in _DATE_TEXT_RE.finditer(normalized)]
+    days = {_date_value(token) for token in tokens} - {None}
     reason = ("ambiguous_multiple_explicit_dates" if len(days) > 1 else
-              "mixed_absolute_and_relative_dates" if days and _RELATIVE_MENTION.search(content) else None)
+              "mixed_absolute_and_relative_dates" if days and _RELATIVE_MENTION.search(content)
+              and any(_date_value(token, allow_mixed=False) for token in tokens) else None)
     # Reuse this bounded parse for labels; large rows never retain source text.
     label_text = _strip_order_dates(normalized) if len(content) <= 1200 else None
     return (next(iter(days)) if len(days) == 1 else None), reason, label_text
