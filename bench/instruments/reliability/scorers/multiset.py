@@ -123,7 +123,8 @@ def merge_witnesses(host, events, group):
 
 def merged_boundaries(raw, witness, history):
     """Expand only earlier observed input joins, checking every nested slice hash before using its boundaries."""
-    pending, boundaries = [(0, witness)], []
+    pending, boundaries = [(0, witness)], set()
+    scheduled = {(0, witness["witness"]["event_index"])}
     steps = 0
     while pending and steps < COVER_STEPS:
         base, current = pending.pop()
@@ -135,14 +136,18 @@ def merged_boundaries(raw, witness, history):
             start, end = base + offset, base + offset + size
             if end > len(raw) or hashlib.sha256(raw[start:end]).hexdigest() != span.get("sha256"):
                 continue
-            boundaries.append((start, end))
+            boundaries.add((start, end))
             if len(boundaries) > COVER_PARTS:
                 return []  # fail closed on oversized or ambiguous evidence
             for child in history.get(span["sha256"], []):
-                if child["witness"]["event_index"] < current["witness"]["event_index"]:
+                child_index = child["witness"]["event_index"]
+                state = (start, child_index)
+                if child_index < current["witness"]["event_index"] and state not in scheduled:
+                    if len(scheduled) >= COVER_STEPS:
+                        return []
+                    scheduled.add(state)
                     pending.append((start, child))
-                    break
-    return boundaries if not pending else []
+    return sorted(boundaries) if not pending else []
 
 
 def embedded_credits(texts, want, stored_rows, stored, paired, host):

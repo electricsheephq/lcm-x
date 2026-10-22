@@ -107,6 +107,22 @@ def test_nested_observed_join_credits_only_witnessed_boundaries():
     assert out["deficit_rows"] == 1
 
 
+@pytest.mark.parametrize("reverse", [False, True])
+def test_nested_alternate_partitions_do_not_depend_on_event_order(reverse):
+    a, b, c, d = "alpha", "bravo", "charlie", "delta"
+    x = "\n\n".join((a, b, c))
+    partitions = [(a + "\n\n" + b, c), (a, b + "\n\n" + c)]
+    if reverse:
+        partitions.reverse()
+    events = [event for parts in partitions for event in merge_events(parts)] + merge_events((x, d))
+    text = x + "\n\n" + d
+    host = {"chat": {"keys": {("user", multiset.h(text)): {"n": 1, "ids": [1]}}, "tags": {}}}
+    multiset.merge_witnesses(host, events, lambda _s: "chat")
+    result = multiset.score([("user", b + "\n\n" + c)], [(93, "S0", "user", text)], host["chat"]["keys"])
+    assert result["deficit_rows"] == 0
+    assert result["embedded_span_credits"][0]["byte_offset"] == len((a + "\n\n").encode())
+
+
 def test_observed_double_join_pairs_two_original_rows_once():
     host = {"chat": {"keys": {}, "tags": {}}}
     multiset.merge_witnesses(host, merge_events((ORIGINAL, ORIGINAL)) * 2, lambda _s: "chat")

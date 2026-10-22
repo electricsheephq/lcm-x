@@ -609,7 +609,7 @@ def main():
                 + ".\nExpand for details about: stub" + FILLER * cell.get("summary_repeat", 0)), 1
 
     window = int(cell["window"])
-    cur = {"turn": 0, "step": 0, "native": 0, "sess": "S0", "ended": None, "final": False, "commits0": 0,
+    cur = {"turn": 0, "prefix": "T", "step": 0, "native": 0, "sess": "S0", "ended": None, "final": False, "commits0": 0,
            "issued": set(), "seen": set()}
 
     # A real gateway builds its agent with the chat's stable session key (gateway/run_turn_runner.py
