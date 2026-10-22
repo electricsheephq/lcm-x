@@ -91,7 +91,7 @@ def test_records_retry_and_unused(tmp_path, states):
         assert records[0]["error"] == "mcp_unavailable" and last["retries"] == 1
 
 
-def test_backend_failure_kept_behind_readiness_label(tmp_path):
+def test_backend_failure_preserves_transport_class(tmp_path):
     backend = object.__new__(models.Harness)
     def call(spec, messages, records, **kwargs):
         log = tmp_path / str(len(records))
@@ -100,10 +100,9 @@ def test_backend_failure_kept_behind_readiness_label(tmp_path):
         raise RuntimeError("timeout")
     backend.call = call
     records = []
-    with pytest.raises(RuntimeError, match="mcp_unavailable") as raised:
+    with pytest.raises(RuntimeError, match="timeout"):
         backend.agentic("spec", [], records, {})
-    assert str(raised.value.__cause__) == "timeout"
-    assert [(r["error"], r["backend_error"]) for r in records] == [("mcp_unavailable", "timeout")] * 2
+    assert [r["error"] for r in records] == ["timeout"]
 
 
 def test_missing_initialize(tmp_path):
