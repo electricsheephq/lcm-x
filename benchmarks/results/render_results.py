@@ -51,22 +51,16 @@ def shared_metadata(entries):
 
 
 def render_readme_results(data):
-    """The short README subsection shares the page's data and ranking logic."""
-    entries = strongest_entries(data)
-    placements = "; ".join(
-        f'[{entry["benchmark"]} {entry["value"]:.2f}: {placement(data, entry["benchmark"])} scored backends]({entry["source_url"]}#result-summary)'
-        for entry in entries
-    )
-    first = shared_metadata(reported_entries(data))
+    """Keep numbers in one generated README table; this subsection points to it."""
+    shared_metadata(reported_entries(data))
     return (
         "### Results\n\n"
-        f'[{data["board"]}]({first["source_url"]}): {first["claim_class"]}.\n'
-        f"{placements}.\n"
-        "[Results, configuration, evidence and disclosures](benchmarks/RESULTS.md).\n"
+        "See the [benchmark highlights](#benchmark-highlights) above and "
+        "[results, configuration, evidence and disclosures](benchmarks/RESULTS.md).\n"
     )
 
 
-def render_highlights(data):
+def render_highlights(data, *, release_notes=False):
     """Render the README and release-note showcase from the public snapshot."""
     first = shared_metadata(reported_entries(data))
     entries = sorted(
@@ -75,7 +69,7 @@ def render_highlights(data):
     )
     lines = [
         "<!-- results-highlights:start -->",
-        f'**Benchmark highlights** ([OmniMemEval]({first["source_url"]}), {first["claim_class"]})',
+        f'<a id="benchmark-highlights"></a>\n**Benchmark highlights** ([OmniMemEval]({first["source_url"]}), {first["claim_class"]})',
         "",
         "| Benchmark | LCM-X | Placement |",
         "| --- | ---: | --- |",
@@ -91,9 +85,13 @@ def render_highlights(data):
                 f'| {entry["benchmark"]} | {entry["value"]:.2f} | '
                 f'[in upstream review]({entry["source_url"]}) |'
             )
+    results_url = (
+        "https://github.com/electricsheephq/lcm-x/blob/main/benchmarks/RESULTS.md"
+        if release_notes else "benchmarks/RESULTS.md"
+    )
     lines += [
         "",
-        "Configuration, evidence and disclosures: [benchmarks/RESULTS.md](benchmarks/RESULTS.md).",
+        f"Configuration, evidence and disclosures: [benchmarks/RESULTS.md]({results_url}).",
         "<!-- results-highlights:end -->",
     ]
     return "\n".join(lines)
@@ -155,7 +153,7 @@ if __name__ == "__main__":
     parser.add_argument("--release-notes", action="store_true")
     args = parser.parse_args()
     data = json.loads(DATA_PATH.read_text(encoding="utf-8"))
-    block = render_highlights(data)
+    block = render_highlights(data, release_notes=args.release_notes)
     if args.release_notes:
         print("\n".join(block.splitlines()[1:-1]))
     else:
@@ -171,6 +169,10 @@ if __name__ == "__main__":
         else:
             tagline = "> Bounded context, unbounded memory. Nothing is ever lost."
             readme = readme.replace(tagline + "\n", tagline + "\n\n" + block + "\n", 1)
+        readme = re.sub(
+            r"### Results\n.*?(?=\n## |\Z)",
+            lambda match: render_readme_results(data), readme, count=1, flags=re.DOTALL,
+        )
         readme_path.write_text(readme, encoding="utf-8")
         plugin_path = root / "plugin.yaml"
         plugin = plugin_path.read_text(encoding="utf-8")

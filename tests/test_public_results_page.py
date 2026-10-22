@@ -109,22 +109,9 @@ def test_readme_results_only_quote_sourced_claims(data):
     status = readme.split("## Project status\n", 1)[1].split("\n## ", 1)[0]
     subsection = "### Results\n" + status.split("### Results\n", 1)[1]
     assert subsection.rstrip() == renderer.render_readme_results(data).rstrip()
-    assert 3 <= len(subsection.strip().splitlines()) <= 6
-    lines = subsection.strip().splitlines()
-    first = data["entries"][0]
-    assert lines[2] == f'[{data["board"]}]({first["source_url"]}): {first["claim_class"]}.'
-    entries = [entry for entry in data["entries"] if entry["status"] == "reported"]
-    strongest = sorted(entries, key=lambda entry: ranked_scores(data, entry["benchmark"]).index(entry["value"]))[:2]
-    claims = []
-    for entry in strongest:
-        scores = ranked_scores(data, entry["benchmark"])
-        rank = scores.index(entry["value"]) + 1
-        suffix = {1: "st", 2: "nd"}[rank]
-        claims.append(
-            f'[{entry["benchmark"]} {entry["value"]:.2f}: {rank}{suffix} of {len(scores)} scored backends]({entry["source_url"]}#result-summary)'
-        )
-    assert lines[3] == "; ".join(claims) + "."
-    assert lines[4] == "[Results, configuration, evidence and disclosures](benchmarks/RESULTS.md)."
+    assert "[benchmark highlights](#benchmark-highlights)" in subsection
+    assert "(benchmarks/RESULTS.md)" in subsection
+    assert not re.search(r"\d", subsection)
 
 
 def test_divergent_entry_metadata_is_refused(data):
@@ -210,7 +197,11 @@ def test_release_notes_match_readme_table():
     ).stdout
     assert "<!--" not in output
     assert table_rows(output) == table_rows(highlight_block())
-    assert output.strip() == highlight_block().split("\n", 1)[1].rsplit("\n", 1)[0]
+    data = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+    assert output.strip() == renderer.render_highlights(data, release_notes=True).split("\n", 1)[1].rsplit("\n", 1)[0]
+    links = re.findall(r"\]\(([^)]+)\)", output)
+    assert links and all(link.startswith("https://github.com/") for link in links)
+    assert "https://github.com/electricsheephq/lcm-x/blob/main/benchmarks/RESULTS.md" in links
 
 
 def test_submitted_highlight_has_review_link_without_placement(data):
@@ -222,3 +213,33 @@ def test_submitted_highlight_has_review_link_without_placement(data):
         f'[in upstream review]({submitted["source_url"]}) |'
     )
     assert not re.search(r"\d+(?:st|nd|rd|th) of", row)
+
+
+def test_refresh_command_updates_every_readme_results_surface(data, tmp_path):
+    import shutil
+    import subprocess
+    import sys
+
+    root = tmp_path / "repo"
+    results = root / "benchmarks/results"
+    results.mkdir(parents=True)
+    for name in ("README.md", "plugin.yaml"):
+        shutil.copyfile(ROOT / name, root / name)
+    shutil.copyfile(RENDER_PATH, results / RENDER_PATH.name)
+    # Change both a score and its placement; old numeric README claims must go.
+    entry = next(entry for entry in data["entries"] if entry["benchmark"] == "BEAM 100K")
+    entry["value"] = 1.23
+    next(row for row in data["snapshot"]["rows"] if row["backend"] == "LCM-X")["scores"]["BEAM 100K"] = 1.23
+    (results / DATA_PATH.name).write_text(json.dumps(data), encoding="utf-8")
+    readme = (root / "README.md").read_text()
+    assert renderer.render_highlights(data) not in readme
+    subprocess.run([sys.executable, str(results / RENDER_PATH.name)], check=True)
+    refreshed = (root / "README.md").read_text()
+    assert renderer.render_highlights(data) in refreshed
+    subsection = refreshed.split("### Results\n", 1)[1].split("\n## ", 1)[0]
+    assert "### Results\n" + subsection == renderer.render_readme_results(data)
+    assert "71.84" not in refreshed
+    assert refreshed.count("1.23") == 1
+    assert "[benchmark highlights](#benchmark-highlights)" in subsection
+    subprocess.run([sys.executable, str(results / RENDER_PATH.name)], check=True)
+    assert (root / "README.md").read_text() == refreshed

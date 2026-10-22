@@ -11,6 +11,7 @@
 > Bounded context, unbounded memory. Nothing is ever lost.
 
 <!-- results-highlights:start -->
+<a id="benchmark-highlights"></a>
 **Benchmark highlights** ([OmniMemEval](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md), contributor-run, accepted upstream)
 
 | Benchmark | LCM-X | Placement |
@@ -173,9 +174,7 @@ gaps, and proof boundaries.
 
 ### Results
 
-[OmniMemEval](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md): contributor-run, accepted upstream.
-[BEAM 100K 71.84: 1st of 12 scored backends](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary); [LongMemEval 87.00: 2nd of 13 scored backends](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary).
-[Results, configuration, evidence and disclosures](benchmarks/RESULTS.md).
+See the [benchmark highlights](#benchmark-highlights) above and [results, configuration, evidence and disclosures](benchmarks/RESULTS.md).
 
 ## LCM vs built-in compression
 
