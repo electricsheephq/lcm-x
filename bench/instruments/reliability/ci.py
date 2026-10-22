@@ -25,13 +25,22 @@ G_REL_1 = ("baseline", "acp-trailing", "preflight-continue", "repeat-identical-r
 NON_GATE = ("publication-failure/rotation-child-persistent", "drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation",
             "drain/hidden-backlog-large/in-place", "drain/hidden-backlog-large/rotation",
             *(f"continuity/{shape}/{mode}" for shape in
-              ("sole-user-tool-loop", "survival-fit", "survival-fit-older-turns", "forced-compaction-then-turn")
+              ("sole-user-tool-loop", "survival-fit", "survival-fit-older-turns")
               for mode in ("in-place", "rotation")))
+# #1588: exact cells, transport and bars proven by nightly 39539195029; never whole families.
+CELL_GATE = {
+    **{f"continuity/forced-compaction-then-turn/{m}": ("acp-process", ("B1", "B2", "B3", "B4", "B8", "F4"))
+       for m in ("in-place", "rotation")},
+    **{f"native-on-off/{v}/in-place": ("in-process", ("B3", "B4", "B8")) for v in ("v0.23.3", "v0.24.3")},
+    **{c: ("in-process", ("B1", "B2")) for c in ("overflow-recovery-restart/in-place",
+       "overflow-recovery-restart/rotation", "upgrade-crash-after-rotation/rotation")},
+}
 
 
 def in_gate_set(cell_id: str) -> bool:
     family = cell_id.split("/")[0]
-    return cell_id not in NON_GATE and any(family == g or (g.endswith("-") and family.startswith(g)) for g in G_REL_1)
+    return cell_id in CELL_GATE or (cell_id not in NON_GATE and
+           any(family == g or (g.endswith("-") and family.startswith(g)) for g in G_REL_1))
 
 
 def expected_cells(transport: str | None) -> list[str]:
@@ -108,6 +117,14 @@ def gate(results: list[dict], open_issues: set[int], per_file: dict[str, list[di
                         and r["host"].startswith(C.ISSUE_HOSTS.get(target, ("",)))
                         and transport in C.ISSUE_TRANSPORTS.get(target, (transport,)) for bar in C.ISSUES[target][0]}
             failed = set(r.get("failed_bars") or {})
+            if r["cell"] in CELL_GATE:
+                lane, bars = CELL_GATE[r["cell"]]
+                if transport != lane:
+                    continue
+                if failed:
+                    failed &= set(bars) | ({"B9"} if lane == "acp-process" and r["host"] == "upstream-uid" else set())
+                    if not failed:
+                        continue
             uncovered = sorted(failed - declared)
             if not failed or uncovered:
                 detail = f"uncovered bars {uncovered}" if failed else "empty or missing failed_bars; nothing attributable"
