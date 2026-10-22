@@ -176,15 +176,15 @@ def test_mixed_day_does_not_add_unanchored_interval_operand(tmp_path, mixed):
 ])
 # Regression: the pre-fix head returns mutable, uncached legacy days.
 def test_carried_legacy_days_uses_bounded_immutable_cache(quote, expected):
-    from hermes_lcm.requirements_compiler import _carried_legacy_days
+    from hermes_lcm.requirements_compiler import _carried_legacy_days, _small_carried_legacy_days
 
     days = _carried_legacy_days(quote)
     assert isinstance(days, frozenset)
     assert days == expected
-    assert _carried_legacy_days.cache_info().maxsize == 4096
-    hits = _carried_legacy_days.cache_info().hits
+    assert _small_carried_legacy_days.cache_info().maxsize == 4096
+    hits = _small_carried_legacy_days.cache_info().hits
     assert _carried_legacy_days(quote) is days
-    assert _carried_legacy_days.cache_info().hits == hits + 1
+    assert _small_carried_legacy_days.cache_info().hits == hits + 1
 
 
 # Regression: the non-date carried cache must not retain large rows by value.
