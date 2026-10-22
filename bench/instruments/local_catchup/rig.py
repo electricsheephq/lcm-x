@@ -178,18 +178,22 @@ def main():
         state, reason = "ABORTED", reason if reason == "row_or_vector_corruption" else "final_integrity_or_residue"
     elif reason == "complete" and not all(r["complete"] for r in progress):
         state, reason = "ABORTED", "final_coverage_regressed"
+    forced = any(s["stop_killed"] for stopped in stops for s in stopped)
+    breach_fields = {"breach_reason": meter.breach} if forced and meter.breach else {}
     for r, stopped in zip(progress, stops):
         r.update(state="ABORTED" if audit_failed(r) else "COMPLETE" if r["complete"] else state,
                  reason="final_integrity_or_residue" if audit_failed(r) else "full_expected_id_audit" if r["complete"] else reason, stops=stopped)
         if any(s["stop_killed"] for s in stopped):
             r.update(state="INVALID", reason="forced_stop_after_grace")
-            state, reason = "INVALID", "forced_stop_after_grace"
+            r.update(breach_fields)
+    if forced:
+        state, reason = "INVALID", "forced_stop_after_grace"
     aggregate_end = min((meter.windows[q.pid][1] or loop_end for q in processes), default=loop_end)
     cpu = meter.summary(state, n, aggregate_start if a.screen16 else 0, end=loop_end, aggregate_window=(aggregate_start, aggregate_end))
     worst = {k: max((r[k] for r in cpu["per_process"].values()), default=None)
              if all(r[k] is not None for r in cpu["per_process"].values()) else None
              for k in ("mean_cores", "p95_rolling60_cores", "peak1s_cores", "peak_rss")}
-    dump(a.out/"summary.json", {"state": state, "screen_only_never_gated": a.screen16, "reason": reason,
+    dump(a.out/"summary.json", {"state": state, "screen_only_never_gated": a.screen16, "reason": reason, **breach_fields,
          "verify_every_polls": verify_every_polls, "verified_read_cpu_s_total": verified_read_cpu_s_total,
          "verified_read_cpu_s_max_per_read": verified_read_cpu_s_max_per_read,
          "per_process_progress": progress, "per_process_bind": [load(j.out/f"worker-{g}.json") if (j.out/f"worker-{g}.json").exists() else None for j, g in zip(jobs, generations)],

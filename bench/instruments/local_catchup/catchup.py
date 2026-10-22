@@ -209,6 +209,8 @@ def run(a):
     summary = {"state": final, "reason": reason, "stops": stops, "audit": result, "restarted": restarted, "restart": "once" if restarted else "none", "max_wall": a.max_wall,
         "end_to_end_s": elapsed, "coverage_fraction": covered/max(1, sum(x["expected"] for x in result["classes"].values())),
         "new_ids_s": (covered-initial)/elapsed, "cpu": meter.summary(final, 1, end=loop_end), "effective_config": (load(a.out/f"worker-{generation}.json")["effective_config"] if (a.out/f"worker-{generation}.json").exists() else None), "rows": manifest["rows"]}
+    if any(s["stop_killed"] for s in stops) and meter.breach:
+        summary["breach_reason"] = meter.breach
     summary.update(rows_s=(result["covered_rows"]-first["covered_rows"])/elapsed,
         chunks_s=(result["classes"]["chunks"]["covered"]-first["classes"]["chunks"]["covered"])/elapsed,
         tokens_s=sum(v["covered_tokens"]-first["classes"][k]["covered_tokens"] for k, v in result["classes"].items())/elapsed,
