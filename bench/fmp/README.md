@@ -148,12 +148,14 @@ bash bench/fmp/run.sh score "${common[@]}" --runs "$OUTPUT/A0" "$OUTPUT/A1" \
 ```
 
 `check-arms` makes no model calls and leaves run files untouched. It compares ordered
-recall-hit store IDs, question-ID sets and IDs-file hashes, counts role/speaker labels
-in saved reader prompts, and reports median/p90 estimated prompt tokens. Speaker
-arms fail on any role-labelled line; missing prompts/recall traces also fail. Keep
-`harness/<call_dir>/prompt.txt` alongside `answers.jsonl`. It prints counts/hashes
-only and creates `check-arms-<unique-id>.json` beside the runs; any mismatch exits
-nonzero. A2 changes ingestion, so A0/A1 are the retrieval-identity control.
+recall-hit store IDs per call, question-ID sets, IDs-file and dataset hashes, and
+role/speaker counts from answer-row `evidence_labels` and `evidence_sha256` receipts.
+It requires exactly one plain/role A0 (role lines only) and one plain/speaker A1
+(speaker lines only), with positive message-line counts in both. Legacy rows without
+receipts fail closed with “label check unavailable”; prompts are deleted by the harness.
+It reports median/p90 estimated prompt tokens, prints counts/hashes only, and creates
+`check-arms-<unique-id>.json` beside the runs (`--output <path>` overrides it).
+Any mismatch exits nonzero. A2 changes ingestion, so A0/A1 are the retrieval-identity control.
 Score reports all-category and cats-1–4 totals separately; #995 headlines use cats 1–4.
 
 Every session id (LME and LoCoMo) is replaced at normalisation by an opaque

@@ -209,7 +209,7 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
             "not_run": sum(r["status"] == "not_run" for r in rows),
             "skipped": sum(r["status"] == "skipped" for r in rows),
             "wall_s": manifests[arm].get("wall_s", 0)}
-        if any(r["qtype"].isdigit() for r in rows):
+        if first.get("include_adversarial") and any(r["qtype"].isdigit() for r in rows):
             summaries[arm]["category_totals"] = {
                 label: {"scored_n": len(group), "accuracy": {
                     m: mean([bool(correct(r, m)) for r in group]) for m in full}}
@@ -241,6 +241,18 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
                           if len(full) > 1 else None,
             "primary_difference_ci95": bootstrap([sum(x) / len(full) for x in zip(*vectors[left])],
                                                   [sum(x) / len(full) for x in zip(*vectors[right])])}
+        if first.get("include_adversarial"):
+            populations = {}
+            for label, types in (("all categories", None), ("cats 1-4", {"1", "2", "3", "4"}), ("category 5", {"5"})):
+                selected = [q for q in ids if types is None or arms[left][q]["qtype"] in types]
+                stats = {}
+                for m in full:
+                    a, b = [[correct(arms[arm][q], m) for q in selected] for arm in (left, right)]
+                    test = mcnemar(a, b)
+                    stats[m] = {**test, "b": test["n01"], "c": test["n10"],
+                                "accuracy_delta": mean([int(x) - int(y) for x, y in zip(a, b, strict=True)])}
+                populations[label] = {"paired_n": len(selected), "per_judge": stats}
+            comparisons[left + " vs " + right]["populations"] = populations
     report = {"arms": summaries, "paired": comparisons, "bootstrap_resamples": 10_000,
               "claim": "attempted errors count incorrect; skips and not_run excluded; paired tests use valid rows only"}
     if pair_across_commits:
@@ -316,6 +328,14 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
                                        *[str(s["per_judge"][m]["p"]) for m in full],
                                        str((s["both_agree"] or {}).get("p", "n/a")),
                                        str(s["primary_difference_ci95"])]) + " |")
+    if first.get("include_adversarial"):
+        lines += ["", "| Comparison | Population | Judge | Paired n | b (left wrong) | c (right wrong) | Exact p | Accuracy Δ (left-right) |",
+                  "|---|---|---|---:|---:|---:|---:|---:|"]
+        for pair_name, comparison in comparisons.items():
+            for population, group in comparison["populations"].items():
+                for model, stat in group["per_judge"].items():
+                    lines.append("| " + " | ".join([pair_name, population, model, str(group["paired_n"]),
+                        *[str(stat[k]) for k in ("b", "c", "p", "accuracy_delta")]]) + " |")
     lines += ["", "| Comparison | Exclusions |", "|---|---|"]
     for pair_name, s in comparisons.items():
         lines.append("| " + pair_name + " | " + ", ".join(

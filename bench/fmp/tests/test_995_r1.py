@@ -194,7 +194,14 @@ def test_flag_off_answer_and_manifest_identity(tmp_path, monkeypatch):
     for value in (before, after):
         value.pop("latency_s")
         for call in value["calls"]:
-            for key in ("call_dir", "latency_s", "at"):
+            for key in ("call_dir", "latency_s", "at", "transcripts"):
                 call.pop(key, None)
     assert {k: v for k, v in after.items() if k not in ("evidence_labels", "evidence_sha256")} == before
     assert json.loads((base_path / "run-manifest.json").read_text()) == json.loads((path / "run-manifest.json").read_text())
+    q = datasets.load(locomo(tmp_path), "locomo", None)[0][0]
+    client = SimpleNamespace(call=lambda *a, **k: {"content": "CORRECT"})
+    before_judged = base_module("judges").judge_row(before, q, client, models=[MODEL])
+    after_judged = judges.judge_row(after, q, client, models=[MODEL])
+    for key in ("evidence_labels", "evidence_sha256"):
+        after_judged.pop(key)
+    assert json.dumps(before_judged).encode() == json.dumps(after_judged).encode()

@@ -68,7 +68,7 @@ def normalize_locomo(item, adversarial=False):
     sessions, mapping = opaque(sessions)
     # D2: category 5 (adversarial) is excluded by default, as Mem0 and OmniMemEval do.
     return [Question(f"{cid}:{i}", "locomo", str(qa["category"]), qa["question"],
-                     "" if qa["category"] == 5 else str(qa.get("answer", "")),
+                     str(qa.get("answer", qa.get("adversarial_answer", ""))),
                      max(s["date"] for s in sessions), qa["category"] == 5, sessions, cid, mapping)
             for i, qa in enumerate(item["qa"]) if adversarial or qa["category"] != 5]
 

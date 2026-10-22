@@ -6,7 +6,6 @@ import json
 import math
 import os
 import random
-import re
 import subprocess
 import sys
 import time
@@ -389,7 +388,7 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
 
 
 def check_arms(runs, output=None):
-    """Audit frozen single-delivery answers and saved reader prompts, without clients."""
+    """Audit frozen single-delivery answer receipts, without clients."""
     if len(runs) != 2:
         raise ValueError("check-arms requires two runs")
     indexed, arms = [], []
@@ -399,7 +398,7 @@ def check_arms(runs, output=None):
             raise ValueError("check-arms requires single delivery")
         rows = [json.loads(line) for line in (directory / "answers.jsonl").read_text().splitlines() if line.strip()]
         by_id, hits, estimates = {r["qid"]: r for r in rows}, {}, []
-        counts = dict(role_lines=0, speaker_lines=0, summary_lines=0, missing_prompts=0, missing_recall=0)
+        counts = dict(role_lines=0, speaker_lines=0, summary_lines=0, missing_labels=0, missing_recall=0)
         for qid, row in by_id.items():
             recalls = [t["result"] for t in row.get("trace", []) if t.get("tool") == "lcm_recall" and "result" in t]
             counts["missing_recall"] += not recalls
@@ -408,43 +407,47 @@ def check_arms(runs, output=None):
                 payload = json.loads(raw) if isinstance(raw, str) else raw
                 if "error" in payload or "hits" not in payload:
                     counts["missing_recall"] += 1
-                hits[qid].extend(h["store_id"] for h in payload.get("hits", []))
-            prompts = 0
-            for call in row.get("calls", []):
-                if call.get("prompt_tokens_estimate") is not None:
-                    estimates.append(call["prompt_tokens_estimate"])
-                name = call.get("call_dir", "")
-                prompt = directory / "harness" / name / "prompt.txt"
-                if not name or Path(name).name != name or not prompt.is_file():
-                    continue
-                text = prompt.read_text()
-                _, marker, evidence = text.partition("History evidence:\n")
-                evidence, question, _ = evidence.rpartition("\nQuestion: ")
-                if not marker or not question:
-                    continue
-                prompts += 1
-                for label in re.findall(r"^\[[^\]\n]+\] ([^:\n]+): ", evidence, re.MULTILINE):
-                    key = "role_lines" if label in ("user", "assistant") else "summary_lines" if label == "summary" else "speaker_lines"
-                    counts[key] += 1
-            counts["missing_prompts"] += not prompts
-        arms.append({**counts, "qid_count": len(by_id), "duplicate_qids": len(rows) - len(by_id),
+                hits[qid].append([h["store_id"] for h in payload.get("hits", [])])
+            labels, digest = row.get("evidence_labels"), row.get("evidence_sha256")
+            if (not isinstance(labels, dict) or set(labels) != {"role", "speaker", "summary"} or
+                    any(type(n) is not int or n < 0 for n in labels.values()) or
+                    not isinstance(digest, str) or len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
+                counts["missing_labels"] += 1
+            else:
+                for label, count in labels.items():
+                    counts[label + "_lines"] += count
+            estimates.extend(c["prompt_tokens_estimate"] for c in row.get("calls", []) if c.get("prompt_tokens_estimate") is not None)
+        mode = (manifest.get("store_text"), manifest.get("hit_label"))
+        arm = {("plain", "role"): "A0", ("plain", "speaker"): "A1"}.get(mode)
+        label_ok = (counts["role_lines"] > 0 and counts["speaker_lines"] == 0 if arm == "A0" else
+                    counts["speaker_lines"] > 0 and counts["role_lines"] == 0 if arm == "A1" else False)
+        arms.append({**counts, "arm": arm, "store_text": mode[0], "hit_label": mode[1],
+            "label_check": "unavailable" if counts["missing_labels"] else "pass" if label_ok else "fail",
+            "reason": "label check unavailable: answer rows lack valid evidence_labels/evidence_sha256" if counts["missing_labels"] else None,
+            "qid_count": len(by_id), "duplicate_qids": len(rows) - len(by_id),
             "manifest_qids_match": set(by_id) == set(manifest.get("question_ids", [])),
             "qid_set_sha256": sha(json.dumps(sorted(by_id)).encode()),
-            "id_list_sha256": manifest.get("id_list_sha256"),
+            "id_list_sha256": manifest.get("id_list_sha256"), "dataset_sha256": manifest.get("dataset_sha256"),
             "answers_sha256": digest_file(directory / "answers.jsonl"),
-            "speaker_label_failure": manifest.get("hit_label") == "speaker" and counts["role_lines"] > 0,
+            "speaker_label_failure": arm == "A1" and counts["role_lines"] > 0,
             "prompt_tokens_estimate": {"median": median(estimates) if estimates else None, "p90": percentile(estimates, .9)}})
         indexed.append(hits)
     report = {"arms": arms, "qid_sets_equal": set(indexed[0]) == set(indexed[1]),
         "id_list_hash_equal": bool(arms[0]["id_list_sha256"]) and arms[0]["id_list_sha256"] == arms[1]["id_list_sha256"],
         "retrieval_differing_qids": sum(indexed[0][q] != indexed[1][q] for q in indexed[0].keys() & indexed[1].keys())}
-    report["passed"] = report["qid_sets_equal"] and report["id_list_hash_equal"] and not report["retrieval_differing_qids"] and all(
-        a["manifest_qids_match"] and not any(a[k] for k in ("duplicate_qids", "missing_prompts", "missing_recall", "speaker_label_failure"))
+    report["declared_modes_valid"] = sorted(a["arm"] or "invalid" for a in arms) == ["A0", "A1"]
+    report["dataset_hash_equal"] = bool(arms[0]["dataset_sha256"]) and arms[0]["dataset_sha256"] == arms[1]["dataset_sha256"]
+    report["passed"] = report["declared_modes_valid"] and report["dataset_hash_equal"] and report["qid_sets_equal"] and report["id_list_hash_equal"] and not report["retrieval_differing_qids"] and all(
+        a["manifest_qids_match"] and a["label_check"] == "pass" and not any(a[k] for k in ("duplicate_qids", "missing_recall"))
         for a in arms)
     output = Path(output) if output else Path(os.path.commonpath([Path(r).resolve().parent for r in runs])) / f"check-arms-{uuid.uuid4().hex}.json"
-    with output.open("x") as stream:
-        json.dump(report, stream, indent=2, sort_keys=True)
-        stream.write("\n")
+    try:
+        with output.open("x") as stream:
+            json.dump(report, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+    except OSError:
+        print("FMP check-arms report write failed: " + str(output), file=sys.stderr)
+        raise
     return report
 
 
@@ -453,10 +456,11 @@ def main():
         p = argparse.ArgumentParser(description="Read-only pre-judge arm integrity audit; counts and hashes only")
         p.add_argument("command", choices=("check-arms",))
         p.add_argument("--runs", nargs=2, required=True, type=Path)
+        p.add_argument("--output", type=Path)
         args = p.parse_args()
         os.umask(0o077)
         try:
-            report = check_arms(args.runs)
+            report = check_arms(args.runs, args.output)
         except Exception as exc:
             print("FMP check-arms failed: " + type(exc).__name__, file=sys.stderr)
             return 1

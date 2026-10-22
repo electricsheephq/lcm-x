@@ -48,10 +48,17 @@ def result_card(output, report, allow_partial, pair_across_commits, snapshots):
            "--claim-class", "advisory", "--local-raw", "false")
     lines = ["# FMP score", "", "| Arm | Accuracy | N | Receipt |", "|---|---:|---:|---|"]
     for arm, summary in report["arms"].items():
-        lines.append(f"| {arm} | {summary['primary']} | {summary['scored_n']} | report.json |")
-        if summary["primary"] is not None:
-            invoke("headline", "--benchmark", "FMP/" + arm, "--metric", "accuracy",
-                   "--value", str(summary["primary"]), "--n", str(summary["scored_n"]), "--source", "report.json")
+        primary, scored_n, metric = summary["primary"], summary["scored_n"], "accuracy"
+        if "category_totals" in summary:
+            total = summary["category_totals"]["cats 1-4"]
+            primary, scored_n, metric = (sum(total["accuracy"].values()) / len(total["accuracy"]) if total["scored_n"] else None,
+                                        total["scored_n"], "accuracy (cats 1-4)")
+            lines.append(f"| {arm} / all categories | {summary['primary']} | {summary['scored_n']} | report.json |")
+        label = arm + " / cats 1-4" if metric != "accuracy" else arm
+        lines.append(f"| {label} | {primary} | {scored_n} | report.json |")
+        if primary is not None:
+            invoke("headline", "--benchmark", "FMP/" + arm, "--metric", metric,
+                   "--value", str(primary), "--n", str(scored_n), "--source", "report.json")
     (output / "RESULT.md").write_text("\n".join(lines) + "\n\nRe-score from this run directory with "
         "FMP_RESULT_CARD_TOOL set and PYTHONPATH pointing to the recorded harness checkout:\n```sh\n" + command +
         "\n```\n\nNot proven: publication, release quality, runtime or customer readiness.\nT1: unpublished. T2: unpublished.\n")

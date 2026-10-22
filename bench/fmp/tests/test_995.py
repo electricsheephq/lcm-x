@@ -86,6 +86,8 @@ def test_category5_run_judging_and_score_reparse(tmp_path):
     assert sent[0][0] == dev.judge_messages(q, "I do not know")[0]
     assert "DECOY" not in json.dumps(sent)
     path = arm(tmp_path, "off", [row(0, qtype="5", judges=result), row(1, False, qtype="1")])
+    manifest = path / "run-manifest.json"
+    manifest.write_text(json.dumps({**json.loads(manifest.read_text()), "include_adversarial": True}))
     report = score.score([path], tmp_path / "score")
     summary = next(iter(report["arms"].values()))
     assert summary["by_type"]["5"][MODEL] == 1
