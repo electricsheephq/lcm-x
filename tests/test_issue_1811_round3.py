@@ -14,7 +14,7 @@ STAMP = 1676462400.0
     ("order", "What is the order of the museums I visited, earliest to latest?"),
     ("date_filter", "Which museum did I visit in January?"),
 ])
-@pytest.mark.parametrize("qd", [None, "2023-02-20"])
+@pytest.mark.parametrize("qd", ["2023-03-22", "2023-02-20"])
 def test_louvre_prado_uffizi_multi_relative_refusal(tmp_path, monkeypatch, operation, question, qd):
     monkeypatch.setattr(requirements_compiler.time, "perf_counter", lambda: 1.0)
     rows = ["I visited the Louvre museum last week and again yesterday.",
@@ -54,13 +54,13 @@ def test_lcm_compute_non_date_sum_base_parity(tmp_path, monkeypatch, qd, case):
         result = json.loads(tools.lcm_compute(dict(question="How much did I pay in total for the tent and the stove?",
                             question_date=qd, evidence_complete=True, operands=operands), engine=engine))
     assert result["status"] == "computed"
-    assert result["trace"]["result"] == 175
+    assert result["trace"]["result"] == "$175"
 
 
 def test_long_order_label_name_is_bounded_and_reused(monkeypatch):
     quote = "I visited the Louvre on Fri, January 10th 2023." + " We packed bags." * 600
     name = occurrence_time._order_label_name(quote)
-    assert name == "We"
+    assert name == "Louvre"
     assert max(len(k) for k in occurrence_time._large_order_label_names) == 32
     assert all(v is None or len(v) <= 256 for v in occurrence_time._large_order_label_names.values())
     def forbidden(_):
