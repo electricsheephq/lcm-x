@@ -330,6 +330,8 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                         expand_hint=f"lcm_expand(node_id={hit['node_id']}, session_id={json.dumps(sid)})"))
                     summaries.add((sid, hit["node_id"]))
         for meta in delivery["sessions"]:
+            if not meta["complete"]:
+                omissions.setdefault(meta["session_id"], []).append((reason, None))
             if not meta["complete"] and meta["omission_reason"] is None:
                 meta["omission_reason"] = reason
                 meta["expand_hint"] = f"lcm_expand(store_id={meta['seed_ids'][0]})"
@@ -354,6 +356,12 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
         # Only retry already-read budget skips, once, in admission order.
         # Refit removals and nonconverging groups never enter this list.
         for meta, pending, omission, frontier, visited in skipped:
+            try:
+                check()
+            except TimeoutError:
+                response["timeout"] = True
+                delivery.update(stop_reason="deadline", truncated=True)
+                break
             remaining = list(omissions[meta["session_id"]])
             unwalked = next((x for x in frontier if x is not None and x not in visited), None)
             if unwalked is None:
