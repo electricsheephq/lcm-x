@@ -38,6 +38,54 @@ def stored(engine: Any) -> list[Row]:
     return rows
 
 
+@pytest.mark.parametrize("anchor", ["off", "on"])
+def test_bound_retry_binding_respects_identity_anchor_switch(
+    build: Build, monkeypatch: pytest.MonkeyPatch, anchor: str,
+) -> None:
+    """The kill switch keeps a fresh pair; default-on replay remains accepted."""
+    if anchor == "off":
+        monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "0")
+    else:
+        monkeypatch.delenv("LCM_IDENTITY_ANCHOR", raising=False)
+    engine = build()
+    original = fixture(uids=False)
+    for index in range(6):
+        original.append({"role": "user", "content": f"after {index}", "timestamp": 11 + index})
+        original.extend(tool_pair(f"after-{index}", LONG + f"after{index}", tool_name="lookup"))
+        original.append({"role": "assistant", "content": f"answer after {index}"})
+    engine.ingest(deepcopy(original))
+    host = engine.compress(deepcopy(original), force=True)
+    assert engine._last_compression_status == "compacted"
+    sid = engine._session_id
+    engine.on_session_end(sid, deepcopy(original))
+    engine.on_session_start(
+        sid, boundary_reason="compression", old_session_id=sid,
+        conversation_id=engine._conversation_id, platform="cli",
+    )
+    engine.shutdown()
+    engine = build(restart=True)
+    before = stored(engine)
+    host = deepcopy(host)
+    host.extend([{"role": "user", "content": "repeat", "timestamp": 10},
+                 *tool_pair("c", CLEARED, tool_name="lookup")])
+    for index in range(2):
+        host.extend(tool_pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    host.append({"role": "assistant", "content": "final answer"})
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    counts = (
+        sum(row["role"] == "user" and row["content"] == "repeat" for row in added),
+        sum(any(call["id"] == "c" for call in row.get("tool_calls") or []) for row in added),
+        sum(row.get("tool_call_id") == "c" for row in added),
+    )
+    assert counts == ((1, 1, 1) if anchor == "off" else (0, 0, 0))
+    assert sum(str(row.get("tool_call_id") or "").startswith("following") for row in added) == 2
+    assert sum(row["role"] == "assistant" and row.get("content") == "final answer" for row in added) == 1
+
+
 @pytest.mark.parametrize("mode,uids", [("cold", True), ("cold", False), ("warm", False)],
                          ids=["cold-user-uids", "cold-no-uids", "warm-control"])
 def test_ambiguous_same_stamp_user_keeps_fresh_placeholder_pair(
