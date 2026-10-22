@@ -67,8 +67,12 @@ def _r6(engine, new_text, *, role, in_place):
 def test_r6_user_ignore_pattern_drops_row(engine, in_place):
     _pattern(engine)
     _r6(engine, f"{MARK} revised prompt", role="user", in_place=in_place)
-    assert "Deploying." in _contents(engine)
-    assert not any(MARK in text for text in _contents(engine))
+    expected = [("user", "Run the migration"), ("assistant", "Migration done.")]
+    if in_place:
+        expected.append(("user", "now deploy it"))
+    expected.append(("assistant", "Deploying."))
+    assert [(row["role"], row["content"]) for row in _rows(engine)] == expected
+    assert engine._ignore_pattern_dropped_count == 1
 
 
 def test_r6_user_control_no_pattern_stores_version(engine):
@@ -234,3 +238,44 @@ def test_steady_and_reconcile_paths_do_not_rescan(engine, monkeypatch):
     engine.ingest(host)
     assert calls == [(0, 0), (2, 2), (2, 0)]
     assert _contents(engine) == [row["content"] for row in host]
+
+
+def test_rewind_build_receives_only_unanchored_indexes(engine, monkeypatch):
+    host = _first()
+    engine.ingest(host)
+    host[0]["content"] = "Revised migration prompt"
+    host.append({"role": "assistant", "content": "Deploying.", "timestamp": 201.0})
+    build = engine._build_ingest_replay
+    calls = []
+
+    def record(**kwargs):
+        assert kwargs["messages"] is host
+        calls.append(kwargs.get("only"))
+        return build(**kwargs)
+
+    monkeypatch.setattr(engine, "_build_ingest_replay", record)
+    engine._ingest_messages(host)
+    assert calls == [None, {0}]
+
+
+def test_rewind_does_not_write_unused_anchored_ignore_digest(engine, monkeypatch):
+    host = _first()
+    host.insert(1, {"role": "user", "content": f"{MARK} anchored", "timestamp": 100.5})
+    engine.ingest(host)
+    _pattern(engine)
+    host[0]["content"] = "Revised migration prompt"
+    host.append({"role": "user", "content": f"{MARK} fresh", "timestamp": 200.0})
+    writes = []
+    write = engine._store.write_metadata_json
+
+    def record(keys, value, **kwargs):
+        if keys == engine._ignored_placeholder_metadata_keys():
+            writes.append(deepcopy(value))
+        return write(keys, value, **kwargs)
+
+    monkeypatch.setattr(engine._store, "write_metadata_json", record)
+    engine._ingest_messages(host)
+    assert len(writes) == 1, writes
+    assert [(row["role"], row["content"]) for row in _rows(engine)] == [
+        ("user", "Run the migration"), ("user", f"{MARK} anchored"),
+        ("assistant", "Migration done."), ("user", "Revised migration prompt")]
