@@ -8,8 +8,9 @@ Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `
 
 `on_turn_complete` ingests interrupted turns immediately on the already-bound
 engine; completed and failed-only callbacks do not ingest. Under the stable-use
-lease, ownership requires a positive ingest cursor, no pending reset or cursor
-reconciliation, and a cached replay-identity prefix matching the supplied history.
+lease, the original session/conversation binding must still match. Ownership also
+requires a positive ingest cursor, no pending reset or cursor reconciliation, and
+a cached replay-identity prefix matching the supplied history.
 Unproven, unbound, ignored or stateless histories wait for normal catch-up;
 callback metadata never binds or rebinds a session. Eligible rows are durable and
 searchable before the callback returns, with `note_turn_complete` in `finally`.

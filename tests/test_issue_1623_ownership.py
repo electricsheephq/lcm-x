@@ -79,7 +79,8 @@ def test_unproven_ownership_skips_without_binding_or_noting(plugin, monkeypatch,
     note.assert_not_called()
 
 
-def test_new_rebind_before_callback_lease_rechecks_new_binding(plugin, monkeypatch):
+@pytest.mark.parametrize("same_prefix", [False, True], ids=["different-prefix", "inherited-prefix"])
+def test_new_rebind_before_callback_lease_rechecks_new_binding(plugin, monkeypatch, same_prefix):
     ctx, engine = plugin
     engine.on_session_start("A", platform="cli")
     old = rows("old")
@@ -103,7 +104,7 @@ def test_new_rebind_before_callback_lease_rechecks_new_binding(plugin, monkeypat
         engine.on_session_end("A", old)
         engine.on_session_reset()
         engine.bind_session_state(session_db=None, session_id="N")
-        new = rows("new")
+        new = old if same_prefix else rows("new")
         engine.ingest(new)
     finally:
         release.set()

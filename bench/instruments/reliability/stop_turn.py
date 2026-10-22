@@ -40,6 +40,8 @@ def phase(run, first):
         run.proc.initialize(run.budget())
         if run.phase == "A":
             run.sid = run.proc.new_session(run.files, run.budget())
+            run.turn(0)  # A completed prefix proves ownership before the stopped turn.
+            snapshot(run, "warmup")
             def cancel():
                 while not done.wait(.01):
                     if run.notes("stop_tool_ready"):
@@ -87,9 +89,19 @@ def score(run, last):
             or len(stopped_requests) != 1 or stopped_requests[0].get("step") != 0):
         return {"verdict": "ERROR", "reason": "successful tool / real interrupted_by_user / catch-up not confirmed"}
     reads = {k: json.loads((run.d / f"stop-{k}.json").read_text()) for k in ("immediate", "end", "catchup")}
+    warm_prefix = True
+    if (run.d / "stop-warmup.json").exists():
+        warm = json.loads((run.d / "stop-warmup.json").read_text())
+        count = len(warm["state"]["rows"])
+        warm_prefix = (count == 2 and warm["lcm"]["rows"] == warm["state"]["rows"]
+                       and all(warm[db]["owners_match"] and v[db]["rows"][:count] == warm[db]["rows"]
+                               for v in reads.values() for db in ("lcm", "state")))
+        for v in reads.values():
+            for db in ("lcm", "state"):
+                v[db]["rows"] = v[db]["rows"][count:]
     expected = reads["immediate"]["state"]["rows"]
     once = [reads["catchup"]["lcm"]["rows"].count(r) for r in expected]
-    checks = {"complete_tool_group": len(expected) == 4 and [r["role"] for r in expected] == [
+    checks = {"warm_prefix": warm_prefix, "complete_tool_group": len(expected) == 4 and [r["role"] for r in expected] == [
                   "user", "assistant", "tool", "assistant"] and bool(expected[1]["calls"])
                   and expected[1]["calls"][0]["id"] == expected[2]["tool_call_id"],
               "bound_owner": all(v[db]["owners_match"] for v in reads.values() for db in ("lcm", "state")),

@@ -2834,9 +2834,11 @@ class LCMEngine(
             # turns may still fire it; meta has no final-response/hook-fired bit.
             if not meta.get("interrupted"):
                 return
+            binding = (self._session_id, self._conversation_id)
 
             def ingest_stopped(active_engine):
-                if (not active_engine._session_id or active_engine._session_ignored
+                if ((active_engine._session_id, active_engine._conversation_id) != binding
+                        or not active_engine._session_id or active_engine._session_ignored
                         or active_engine._session_stateless or active_engine._thread_context_stateless()):
                     return
                 cached = getattr(active_engine, "_last_active_replay_source_identities", None)

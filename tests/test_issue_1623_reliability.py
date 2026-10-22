@@ -73,3 +73,24 @@ def test_stop_scorer_rejects_deferred_rows_and_metadata_corruption(measured, dam
     result = ST.score(run, {"exit": "done"})
     assert result["verdict"] == ("PASS" if damage is None else "ERROR" if damage in (
         "tool-error", "not-interrupted", "second-request") else "FAIL")
+
+
+@pytest.mark.parametrize("damage", [False, True], ids=["preserved-prefix", "changed-prefix"])
+def test_warm_stop_cell_checks_prefix_and_scores_only_stopped_rows(measured, damage):
+    run, rows, _ = measured
+    prefix = ST.shape([{"role": "user", "content": "warm question"},
+                       {"role": "assistant", "content": "warm answer"}])
+    warm = {db: {"rows": prefix, "owners_match": True} for db in ("lcm", "state")}
+    (run.d / "stop-warmup.json").write_text(json.dumps(warm))
+    for phase in ("immediate", "end", "catchup"):
+        path = run.d / f"stop-{phase}.json"
+        data = json.loads(path.read_text())
+        for db in ("lcm", "state"):
+            data[db]["rows"] = copy.deepcopy(prefix + rows)
+        if damage and phase == "end":
+            data["lcm"]["rows"][0]["content_sha256"] = "changed"
+        path.write_text(json.dumps(data))
+    result = ST.score(run, {"exit": "done"})
+    assert result["verdict"] == ("FAIL" if damage else "PASS")
+    assert result["stop_checks"]["warm_prefix"] is not damage
+    assert result["stopped_rows"] == result["immediate_rows"] == len(rows)
