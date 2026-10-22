@@ -4660,6 +4660,9 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
         # absence into absence and let a stale first walk pass its CAS.
         initial = dict(gap_scan_state, scan_value=None)
         _record_chunk_gapfill_progress(conn, identity_hash, initial, {"epoch": uuid.uuid4().hex})
+        if low_band and initial["scan_value"] is None:
+            gap_scan_state["unproven"] = True
+            return  # The parent changed; a later call must capture a fresh fence.
         saved = ((initial["scan_value"],) if initial["scan_value"] is not None else
                  conn.execute("SELECT value FROM metadata WHERE key = ?", (scan_key,)).fetchone())
     gap_scan_state["scan_value"] = saved[0] if saved else None
@@ -4853,6 +4856,8 @@ def _record_chunk_gapfill_progress(conn, identity_hash, state, progress, values=
     previous = previous if isinstance(previous, dict) else {}
     progress = dict(progress, epoch=state.get("parent_epoch") or previous.get("epoch") or uuid.uuid4().hex,
                     turn=state.get("turn", previous.get("turn", 0) + 1))
+    if state.get("deferred_low"):
+        progress["deferred_low"] = True
     value = json.dumps(progress)
     conn.execute("SAVEPOINT chunk_gapfill_progress")
     try:
@@ -4975,10 +4980,11 @@ def _chunk_frontier_rows(
                            (f"chunk_gapfill_scan:{identity_hash}", f"chunk_gapfill_scan:{identity_hash}:low")))
             upper = json.loads(records.get(f"chunk_gapfill_scan:{identity_hash}", "{}"))
             lower = json.loads(records.get(f"chunk_gapfill_scan:{identity_hash}:low", "{}"))
-            if upper.get("epoch") and (lower.get("epoch") != upper["epoch"] or lower.get("turn", -1) < upper.get("turn", 0)):
+            if upper.get("deferred_low") and upper.get("epoch") and (lower.get("epoch") != upper["epoch"] or lower.get("turn", -1) < upper.get("turn", 0)):
                 gap_ranges = gap_ranges[::-1]
         except (ValueError, AttributeError):
             pass
+    gap_scan_state["deferred_low"] = record_progress and len(gap_ranges) > 1
     for band in gap_ranges:
         gap_scan_state["coverage"] = coverage
         for row in _chunk_gapfill_rows(

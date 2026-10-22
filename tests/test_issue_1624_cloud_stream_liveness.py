@@ -8,7 +8,7 @@ import pytest
 from tests.test_issue_1536_chunk_revision import (
     LONG, add_rows, command, counts, metadata, store as store,
 )
-from tests.test_issue_1543_coverage_marker import ROWS, marker, older_walk, run
+from tests.test_issue_1543_coverage_marker import ROWS, certify, marker, older_walk, run
 
 
 @pytest.mark.parametrize("gap", [None, 3])
@@ -108,3 +108,40 @@ def test_low_walk_cannot_survive_parent_metadata_invalidation(store):
     resumed = list(command._chunk_gapfill_rows(conn, identity, (1, 5), "conversational", 32,
                     record_progress=True, gap_scan_state={"coverage": (6, 7, "conversational")}))
     assert 1 in [row[0] for row in resumed]
+
+
+def test_first_disjoint_band_call_keeps_upper_selection(store):
+    add_rows(store, ROWS, {6, 7})
+    metadata(store, "chunk_policy_revision", 2)
+    certify(store, (6, 7))
+    older_walk(store, {1, 3})
+    add_rows(store, [(i, "user", LONG) for i in (8, 9, 10)], {10})
+    _, selected, _ = command._chunk_pending_rows(store[1].connection, store[2].identity_hash,
+        "conversational", 1, incremental=True, record_progress=True, gap_scan_state={})
+    assert selected[0][0] == "9:0", "only an actual deferred low band authorizes alternation"
+
+
+def test_parent_invalidation_before_first_low_insert_terminates(store):
+    add_rows(store, ROWS, {6, 7})
+    metadata(store, "chunk_policy_revision", 2)
+    certify(store, (6, 7))
+    older_walk(store, {1, 3})
+    conn, identity = store[1].connection, store[2].identity_hash
+    attempts = []
+
+    class InvalidateBeforeCAS:
+        def execute(self, sql, parameters=()):
+            if sql.startswith("INSERT INTO metadata(key,value) SELECT") and parameters[0].endswith(":low"):
+                attempts.append(1)
+                assert len(attempts) == 1, "a rejected parent fence must not spin"
+                conn.execute("DELETE FROM lcm_chunk_meta WHERE store_id=1")
+            return conn.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(conn, name)
+
+    state = {"coverage": (6, 7, "conversational")}
+    assert list(command._chunk_gapfill_rows(InvalidateBeforeCAS(), identity, (1, 5),
+                "conversational", 32, record_progress=True, gap_scan_state=state)) == []
+    assert attempts == [1] and state["unproven"]
+    assert metadata(store, "chunk_policy_revision_through") is None
