@@ -437,7 +437,11 @@ def test_running_compress_reader_uses_pass_store_ids(tmp_path, monkeypatch):
         monkeypatch.setattr(engine, "_get_store_id_map_for_messages", remember)
         monkeypatch.setattr(engine._store, "get", read)
         summaries = ScriptedSummarizer(mode="scripted", fn=summarize).install(monkeypatch)
-        result = engine.compress(_history(), force=True)
-        assert summaries.calls and observed and len(result) < len(_history())
-        # The pass-level assignment is deliberately persistent, unlike temporary scopes.
-        assert engine._current_compress_store_ids_by_message_id is observed[-1]
+        try:
+            result = engine.compress(_history(), force=True)
+            assert summaries.calls and observed and len(result) < len(_history())
+            # The pass-level assignment is deliberately persistent, unlike temporary scopes.
+            assert engine._current_compress_store_ids_by_message_id is observed[-1]
+        finally:
+            # Rollups share this provider callback; finish its store reads before shutdown closes it.
+            assert engine.drain_rollup_maintenance(timeout=5)
