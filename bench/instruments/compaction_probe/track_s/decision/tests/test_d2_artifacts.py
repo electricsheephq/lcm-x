@@ -32,7 +32,9 @@ def artifacts(row, attempt, path, pin):
     run = path / f"lcmx-runs/LCMX-fleet-rc3/seed-{seed}/{label}"
     write(run / "summary.json", dict(status="DONE", worktree_head="a"*40, stop_row_index=304,
                                       material_sha256="b"*64, lane="glm", reader="glm",
+                                      events=[dict(summariser_calls=[dict(lane_model="glm-5.3", effort="low")])],
                                       arm=dict(env={"LCM_SUMMARY_REASONING_EFFORT": "low"})))
+    write(path / ("cell.json" if k == attempt == 1 else f"cell-{label.split('-', 1)[1]}.json"), dict(fault=None))
     receipt = path / f"decision/logs/s2-LCMX-fleet-rc3-{label}.log.wall"
     receipt.parent.mkdir(parents=True, exist_ok=True)
     receipt.write_text("start 0 2026-01-01T00:00:00Z\nexit 0 end 1 2026-01-01T00:00:01Z\n")
@@ -93,6 +95,9 @@ def test_prepare_resolves_every_pin_and_refuses_route_drift(producer_env, monkey
     config = pins()
     config.update(material=str(material), builds={a: dict(worktree=str(kit), sha=env["PRODUCT_SHA"], arm="LCMX-fleet-rc3")
                                                  for a in ("candidate", "comparison")})
+    config["expected_instrument_hash"] = hashlib.sha256(json.dumps(
+        {p: driver.digest(kit / p) for p in driver.git(kit, "ls-files", "--", ".").splitlines()},
+        sort_keys=True).encode()).hexdigest()
     result = driver.prepare(config, "B", True)
     assert result["instrument_hash"] and result["kit_sha"] == env["PRODUCT_SHA"]
     assert all(r["fact_ids"] == ["f"] for r in result["materials"].values())
