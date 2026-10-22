@@ -39,7 +39,7 @@ class GLMReader:
         req = urllib.request.Request(self._glm.URL, method="POST", data=json.dumps(
             {"model": self._glm.MODEL, "messages": msgs, "max_tokens": 8192, "thinking": {"type": "disabled"}}).encode(),
             headers={"Content-Type": "application/json", "Authorization": "Bearer " + self._k})
-        with urllib.request.urlopen(req, timeout=READER_TIMEOUT_S) as r:
+        with self._glm._open(req, READER_TIMEOUT_S, self.readback) as r:
             data = json.loads(r.read().decode())
         self.readback["model"] = data.get("model")
         if self.readback["model"] != self._glm.MODEL:

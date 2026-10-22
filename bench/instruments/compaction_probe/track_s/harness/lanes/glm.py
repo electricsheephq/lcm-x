@@ -1,9 +1,12 @@
 """GLM lane (spec Track P lane 3): z.ai coding chat completions; key read in-process, never emitted."""
 from __future__ import annotations
 
+import io
 import json
 import os
+import re
 import socket
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -21,6 +24,32 @@ def _key() -> str:
     return value
 
 
+def _open(req, timeout, receipt):
+    """Retry only transient throttles, preserving the request and terminal error."""
+    receipt["throttle_retries"] = 0
+    receipt.setdefault("throttle_retries_total", 0)
+    for attempt in range(4):
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if e.code != 429:
+                raise
+            detail = e.read()
+            e.close()
+            e.fp = io.BytesIO(detail)
+            e.read = e.fp.read  # preserve the body for the existing terminal handler
+            if attempt == 3 or any(marker in detail.decode(errors="replace").lower()
+                                   for marker in ("usage limit", "quota")):
+                raise
+            header = (e.headers or {}).get("Retry-After", "").strip()
+            delay = min(float(header), 120) if re.fullmatch(r"\d+(?:\.\d+)?", header) else (30, 60, 120)[attempt]
+            receipt["throttle_retries"] += 1
+            receipt["throttle_retries_total"] += 1
+            seconds = f"{delay:.2f}".rstrip("0").rstrip(".")  # broad brakes also scan digits in fractional waits
+            print(f"GLM throttle: retry {attempt + 1}/3 after {seconds} s", file=sys.stderr, flush=True)
+            time.sleep(delay)
+
+
 class GLMLane(Lane):
     name = "glm"
 
@@ -36,8 +65,9 @@ class GLMLane(Lane):
         req = urllib.request.Request(URL, data=json.dumps(body).encode(), method="POST", headers={
             "Content-Type": "application/json", "Authorization": "Bearer " + self._k})
         t0 = time.monotonic()
+        throttle = {}
         try:
-            with urllib.request.urlopen(req, timeout=CALL_TIMEOUT_S) as r:
+            with _open(req, CALL_TIMEOUT_S, throttle) as r:
                 data = json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
             detail = e.read().decode(errors="replace")[:300]
@@ -50,6 +80,7 @@ class GLMLane(Lane):
         except (KeyError, IndexError, TypeError, AttributeError):
             raise LaneError(f"malformed response: {json.dumps(data)[:300]}", dt)
         return Reply(msg.get("content") or "", {
+            "throttle_retries": throttle["throttle_retries"],
             "lane_model": data.get("model", MODEL), "latency_s": dt, "finish_reason": choice.get("finish_reason"),
             "usage": data.get("usage"), "reasoning_chars": len(msg.get("reasoning_content") or ""),
             "max_tokens_sent": body.get("max_tokens"), "max_tokens_enforced": bool(max_tokens)})
