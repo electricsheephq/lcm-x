@@ -3244,6 +3244,7 @@ class ReconcileMixin:
             if not _has_lossy_redacted_identity(identity)
         )
         replayed: set[int] = set()
+        bound_replays: set[int] = set()
         index = max(0, cursor)
         while index < len(messages):
             assistant = messages[index]
@@ -3272,6 +3273,8 @@ class ReconcileMixin:
                 result_identity = self._message_replay_identity(result)
                 borrows = (content == _HERMES_PRUNED_TOOL_PLACEHOLDER
                            and result_identity[1] != _HERMES_PRUNED_TOOL_PLACEHOLDER)
+                if borrows and self._bound_retry_placeholder_replay(messages, index, probe, stored_rows):
+                    bound_replays.update((index, probe))
                 if (
                     tool_call_id in call_ids
                     and not _is_hermes_persisted_output_marker(content)
@@ -3294,7 +3297,37 @@ class ReconcileMixin:
                 replayed.add(index)
                 replayed.update(result_indexes.values())
             index = max(index + 1, probe)
-        return replayed
+        return replayed | bound_replays
+
+    def _bound_retry_placeholder_replay(self, messages, call_index, result_index, stored_rows) -> bool:
+        """Bind a borrowed pair to the durable occurrence of its stamped user."""
+        user_index = call_index - 1
+        if user_index < 0 or str(messages[user_index].get("role") or "") != "user":
+            return False
+        stamp = _normalize_observed_at(messages[user_index].get("timestamp"))
+        if stamp is None:
+            return False  # Unknown metadata is not proof of replay (nor a conflict).
+        user_identity = self._message_replay_identity(messages[user_index], allow_pruned_tool_alias=False)
+        call_identity = self._message_replay_identity(messages[call_index], allow_pruned_tool_alias=False)
+        result_literal = self._message_replay_identity(messages[result_index], allow_pruned_tool_alias=False)
+        result_id = str(messages[result_index].get("tool_call_id") or "")
+        protected = result_index in _hermes_salvage_protected_positions(messages)
+        for j, row in enumerate(stored_rows):
+            if not (str(row.get("role") or "") == "user" and j + 2 < len(stored_rows)
+                    and _normalize_observed_at(row.get("observed_at")) == stamp
+                    and self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False) == user_identity):
+                continue
+            stored_call, stored_result = stored_rows[j + 1], stored_rows[j + 2]
+            if self._message_replay_identity(stored_call, stored_row=True, allow_pruned_tool_alias=False) != call_identity:
+                continue
+            stored_literal = self._message_replay_identity(stored_result, stored_row=True, allow_pruned_tool_alias=False)
+            stored_text = str(stored_result.get("content") or "")
+            if stored_literal == result_literal or (
+                    not protected and str(stored_result.get("role") or "") == "tool"
+                    and str(stored_result.get("tool_call_id") or "") == result_id
+                    and len(stored_text) > _HERMES_PRUNE_MIN_CHARS and not _is_stored_nonstring_content(stored_text)):
+                return True
+        return False
 
     def _raw_externalized_placeholder_replay_identity(self, msg: Dict[str, Any]) -> tuple[str, str, str, str]:
         return (

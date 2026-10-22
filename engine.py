@@ -6705,6 +6705,11 @@ class LCMEngine(
         return metadata
 
     @classmethod
+    def _host_occurrence_known(cls, message) -> bool:
+        """Whether a host stamp or UID can witness this occurrence."""
+        return any(value is not None for value in cls._host_occurrence_metadata(message).values())
+
+    @classmethod
     def _host_occurrence_changed(cls, message, previous) -> bool:
         current, old = cls._host_occurrence_metadata(message), cls._host_occurrence_metadata(previous)
         stamp, old_stamp = current["timestamp"], old["timestamp"]
@@ -6987,6 +6992,17 @@ class LCMEngine(
                 if cursor > 0 and cached_source_identities is not None and len(cached_source_identities) >= cursor
                 else None
             )
+        if accepted_compaction_prefix or reconciled_existing_session:
+            # #1540: unknown metadata cannot prove replay within a known-new
+            # user turn. The next user starts a separate occurrence span.
+            for start in sorted(new_prefix_occurrences):
+                if str(messages[start].get("role") or "") != "user":
+                    continue
+                for idx in range(start + 1, n):
+                    if str(messages[idx].get("role") or "") == "user":
+                        break
+                    if idx in unchanged_prefix_occurrences and not self._host_occurrence_known(messages[idx]):
+                        unchanged_prefix_occurrences.discard(idx)
         unchanged_prefix_occurrences -= new_prefix_occurrences
         anchor_plan = None
         unaudited_from = None
