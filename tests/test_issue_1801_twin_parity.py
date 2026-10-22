@@ -19,17 +19,17 @@ QUESTIONS = {"date_filter": "Which vacation did I take in {month}?",
              "finite": "How many vacations did I take in {month}?"}
 
 
-def normalize(value, spelling):
+def normalize(value, spelling, iso=FORMS[0]):
     """Compare answer fields; ignore spelling, spans, digests and diagnostic metrics."""
     if isinstance(value, dict):
-        return {k: normalize(v, spelling) for k, v in value.items()
+        return {k: normalize(v, spelling, iso) for k, v in value.items()
                 if not k.endswith("sha256") and k not in {
                     "metrics", "latency_ms", "span_start", "span_end", "char_start", "char_end"}}
     if isinstance(value, list):
-        return [normalize(v, spelling) for v in value]
+        return [normalize(v, spelling, iso) for v in value]
     if isinstance(value, str):
         return re.sub(r"lcm:(\d+):\d+-\d+", r"lcm:\1:SPAN",
-                      value.replace(spelling, FORMS[0]) if spelling else value)
+                      value.replace(spelling, iso) if spelling else value)
     return value
 
 
@@ -61,12 +61,19 @@ def test_carried_twin_parity(tmp_path, shape, form, operation, window):
     results = []
     for arm, spelling in enumerate([iso_form, form]):
         with engine_context(tmp_path / str(arm), embeddings_enabled=False) as engine:
-            refs = plant(engine, [quote(shape, spelling),
+            text = quote(shape, spelling)
+            if shape == "two-date" and arm == 0 and form != FORMS[0]:
+                # E7's twin respells EVERY named date, including parentheticals.
+                text = text.replace("February 1, 2023", "2023-02-01")
+            refs = plant(engine, [text,
                 "I took a vacation to Kyoto on 2023-03-05."])
             before = engine._store.connection.total_changes
             result = run(engine, refs, operation, window)
             assert engine._store.connection.total_changes == before
-            results.append(normalize(result, spelling))
+            normalized = normalize(result, spelling)
+            if shape == "two-date" and form != FORMS[0]:
+                normalized = normalize(normalized, "February 1, 2023", "2023-02-01")
+            results.append(normalized)
     iso, named = results
     if shape == "time-suffix" and form != FORMS[0] and named != iso:
         # Named-month + ISO T-time hybrids are unsupported (e4). Each differing
