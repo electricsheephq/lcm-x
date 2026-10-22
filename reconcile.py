@@ -3332,7 +3332,13 @@ class ReconcileMixin:
         result_literal = self._message_replay_identity(messages[result_index], allow_pruned_tool_alias=False)
         result_id = str(messages[result_index].get("tool_call_id") or "")
         protected = result_index in _hermes_salvage_protected_positions(messages)
-        for j, row in enumerate(stored_rows):
+        matches = [(j, row) for j, row in enumerate(stored_rows)
+                   if str(row.get("role") or "") == "user"
+                   and _normalize_observed_at(row.get("observed_at")) == stamp
+                   and self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False) == user_identity]
+        if len(matches) != 1:
+            return False  # An ambiguous or absent stored occurrence cannot prove replay.
+        for j, row in matches:
             if not (str(row.get("role") or "") == "user" and j + 2 < len(stored_rows)
                     and _normalize_observed_at(row.get("observed_at")) == stamp
                     and self._message_replay_identity(row, stored_row=True, allow_pruned_tool_alias=False) == user_identity):
