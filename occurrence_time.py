@@ -54,6 +54,9 @@ _DATE_FORMATS = (
     "%B %d %Y",
     "%b %d, %Y",
     "%b %d %Y",
+    # Keep established forms first on the warm named-date path.
+    "%Y-%m/%d",
+    "%Y/%m-%d",
 )
 _WEEKDAYS = {
     name: index
@@ -63,9 +66,11 @@ _WEEKDAYS = {
 }
 
 
-def _date_value(raw: str) -> date | None:
+def _date_value(raw: str, *, allow_mixed: bool = True) -> date | None:
     normalized = " ".join(str(raw or "").strip().split())
     for pattern in _DATE_FORMATS:
+        if not allow_mixed and pattern in ("%Y-%m/%d", "%Y/%m-%d"):
+            continue
         try:
             return datetime.strptime(normalized, pattern).date()
         except ValueError:
@@ -87,9 +92,11 @@ def _strip_order_dates(normalized):
 
 def _parse_quote_date_info(content):
     normalized = _carried_date_text(content)
-    days = {_date_value(m.group(0)) for m in _DATE_TEXT_RE.finditer(normalized)} - {None}
+    tokens = [m.group(0) for m in _DATE_TEXT_RE.finditer(normalized)]
+    days = {_date_value(token) for token in tokens} - {None}
     reason = ("ambiguous_multiple_explicit_dates" if len(days) > 1 else
-              "mixed_absolute_and_relative_dates" if days and _RELATIVE_MENTION.search(content) else None)
+              "mixed_absolute_and_relative_dates" if days and _RELATIVE_MENTION.search(content)
+              and any(_date_value(token, allow_mixed=False) for token in tokens) else None)
     # Reuse this bounded parse for labels; large rows never retain source text.
     label_text = _strip_order_dates(normalized) if len(content) <= 1200 else None
     return (next(iter(days)) if len(days) == 1 else None), reason, label_text
