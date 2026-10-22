@@ -370,6 +370,7 @@ def install_clock(patch: pytest.MonkeyPatch) -> None:
 
 
 def observe(case: Scenario, root: Path) -> Trace:
+    root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     events: Trace = []
     with pytest.MonkeyPatch.context() as patch:

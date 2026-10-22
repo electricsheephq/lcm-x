@@ -435,6 +435,7 @@ def seed(root: Path, case: Scenario, patch: pytest.MonkeyPatch) -> Any:
 
 
 def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) -> list[str]:
+    root = root.resolve()
     o, clock, stop = Observer(root, payloads), Clock(), threading.Event()
     o.case = case
     class FrozenDateTime(datetime):

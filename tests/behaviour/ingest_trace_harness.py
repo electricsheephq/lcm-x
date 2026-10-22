@@ -716,6 +716,7 @@ def sqlite_fault(engine: Any, fault: str, events: Trace) -> Iterator[None]:
 
 
 def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None) -> Trace:
+    root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     events: Trace = []
     with pytest.MonkeyPatch.context() as patch:
