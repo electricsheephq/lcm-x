@@ -1,0 +1,91 @@
+{
+  "cells": 60,
+  "equal": 60,
+  "bali_controls": 2,
+  "rows": [
+    {
+      "carried": false,
+      "noise_index": 0,
+      "placement": "separate",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": false,
+      "noise_index": 0,
+      "placement": "partial",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": false,
+      "noise_index": 1,
+      "placement": "separate",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": false,
+      "noise_index": 1,
+      "placement": "partial",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": false,
+      "noise_index": 2,
+      "placement": "separate",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": false,
+      "noise_index": 2,
+      "placement": "partial",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": true,
+      "noise_index": 0,
+      "placement": "separate",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": true,
+      "noise_index": 0,
+      "placement": "partial",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": true,
+      "noise_index": 1,
+      "placement": "separate",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": true,
+      "noise_index": 1,
+      "placement": "partial",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": true,
+      "noise_index": 2,
+      "placement": "separate",
+      "equal": 5,
+      "cells": 5
+    },
+    {
+      "carried": true,
+      "noise_index": 2,
+      "placement": "partial",
+      "equal": 5,
+      "cells": 5
+    }
+  ]
+}

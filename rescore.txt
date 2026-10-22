@@ -1,0 +1,15 @@
+"""Re-score retained aggregate/raw outputs; no corpus or scratch dependency."""
+import json,statistics
+from pathlib import Path
+p=Path(__file__).parent
+raw=json.loads((p/'cost-raw.json').read_text());identity=json.loads((p/'identity-retention.json').read_text())
+for n,modes in raw.items():
+    med={mode:{a:statistics.median(v)/1e6 for a,v in values.items()} for mode,values in modes.items()}
+    assert all(len(v)>=200 for values in modes.values() for v in values.values())
+    delta=med['warm']['head']-med['warm']['base'];bar=max(.05,.1*med['warm']['base'])
+    print(n,'refs',med,'delta',delta,'bar',bar,'PASS' if delta<=bar else 'FAIL')
+    assert delta<=bar
+assert identity['resolver_mismatches']==0
+assert all(r['mismatches']==0 for r in identity['census'].values())
+assert all(r['retained_bytes']<2*1024*1024 for r in identity['retention'])
+print('resolver byte identity and retained-byte limits: PASS')

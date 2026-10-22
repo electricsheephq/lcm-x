@@ -1,0 +1,10 @@
+{
+  "head": "e06cc78879cc345c153a9e6afdc5eb3cde638c2e",
+  "pack_status": "evidence_ready",
+  "occurrence_sources": [
+    "unknown",
+    "explicit"
+  ],
+  "grounding_status": "grounded",
+  "store_writes": 0
+}

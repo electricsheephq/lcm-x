@@ -1,0 +1,182 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "20261022-occurrence-time-fix-r1b-public",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "occurrence-time-fix-r1b",
+  "claim_class": "advisory",
+  "created": "2026-10-22T05:12:06Z",
+  "settled": "2026-10-22T05:17:33Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "e06cc78879cc345c153a9e6afdc5eb3cde638c2e",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python3 rescore.txt",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "compiler-2-refs",
+      "metric": "warm_delta_ms",
+      "value": 0.0018330000000000013,
+      "n": 200,
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "compiler-6-refs",
+      "metric": "warm_delta_ms",
+      "value": 0.005584000000000006,
+      "n": 200,
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "compiler-10-refs",
+      "metric": "warm_delta_ms",
+      "value": 0.007417000000000007,
+      "n": 200,
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "compiler-12-refs",
+      "metric": "warm_delta_ms",
+      "value": 0.011229000000000045,
+      "n": 200,
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "compiler-24-refs",
+      "metric": "warm_delta_ms",
+      "value": 0.013228500000000032,
+      "n": 200,
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "non-date-identity",
+      "metric": "matching_cells",
+      "value": 60.0,
+      "n": 60,
+      "source": "matrix-summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "cost-raw.json",
+      "role": "per-item",
+      "sha256": "7d6a75c0082b092372b735ebb42137c0da53349df8e044d54491a0474d29e90a",
+      "bytes": 32123
+    },
+    {
+      "path": "cost-summary.json",
+      "role": "per-item",
+      "sha256": "c20ebaa5c71786644fd96a7b211314f4fc0bb9b5f261fdc3e3fb436ba5dddeaf",
+      "bytes": 1488
+    },
+    {
+      "path": "identity-retention.json",
+      "role": "per-item",
+      "sha256": "5619b69f1ce83a25ed77962f12a6f6b3f63c4eff0a2522b014130c47fded1a2c",
+      "bytes": 698
+    },
+    {
+      "path": "matrix-summary.json",
+      "role": "per-item",
+      "sha256": "74e392f2ab71442a18ecbb038070e5d3290eede3206169b9c4fc1a6ec3b0691d",
+      "bytes": 1583
+    },
+    {
+      "path": "date-matrix.json",
+      "role": "per-item",
+      "sha256": "a8c4e066c35c39e1c50854b612f7d13a45a8118355bab16512e0560256e855b0",
+      "bytes": 157289
+    },
+    {
+      "path": "date-delta-disposition.json",
+      "role": "per-item",
+      "sha256": "5e13726e7d23fa58ccf4e1379b54e62b27c5e17257336f51be2d39a6a5d7d361",
+      "bytes": 423
+    },
+    {
+      "path": "golden-pinned-inventory.json",
+      "role": "per-item",
+      "sha256": "369352ca78f566bcfbb877aaeeee3bc7b60a60e5865edd5925ccd85ff2bebeb7",
+      "bytes": 1192
+    },
+    {
+      "path": "rescore.txt",
+      "role": "config",
+      "sha256": "183329bc931280cd421f689477d2154f5c58cdcb69371d9167448f3d4be20663",
+      "bytes": 913
+    },
+    {
+      "path": "proof-receipt.md",
+      "role": "receipt",
+      "sha256": "4f79972669e527108437af5c5cdf6c0ca7d95bdfeed944e71abf47be6cadccd4",
+      "bytes": 4431
+    },
+    {
+      "path": "resolver-cost-summary.json",
+      "role": "receipt",
+      "sha256": "b94a041e0ef2018f0cd9d9be54934b8660ff9e9ff08e4120eaa0a0f70f05036d",
+      "bytes": 157
+    },
+    {
+      "path": "resolver-cost-raw.json",
+      "role": "receipt",
+      "sha256": "895f5066c44c777c0eda74271581b265ee1a65cafca2ae7e493c51abf436741f",
+      "bytes": 60528
+    },
+    {
+      "path": "resolver-cost-quotes.json",
+      "role": "receipt",
+      "sha256": "54acf3673d7005c40a2d28a4373607a899f44b4a32524b535563d4e4ca5a2a2e",
+      "bytes": 54851
+    },
+    {
+      "path": "recall-membership.json",
+      "role": "receipt",
+      "sha256": "e8c603a11d778f417485b9e81acf2a8d900628afccb7184cbed1b85d047e91c4",
+      "bytes": 4072
+    },
+    {
+      "path": "pack-ground-proof.json",
+      "role": "receipt",
+      "sha256": "53de1b42be4a4d38dfd0f1259d676e27f0b96a86da1a7d3bbff442a8a616ff71",
+      "bytes": 207
+    }
+  ],
+  "rescore": {
+    "command": "python3 rescore.txt",
+    "inputs": [
+      "cost-raw.json",
+      "identity-retention.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "cost-raw.json",
+    "cost-summary.json",
+    "date-delta-disposition.json",
+    "date-matrix.json",
+    "golden-pinned-inventory.json",
+    "identity-retention.json",
+    "matrix-summary.json",
+    "pack-ground-proof.json",
+    "proof-receipt.md",
+    "recall-membership.json",
+    "rescore.txt",
+    "resolver-cost-quotes.json",
+    "resolver-cost-raw.json",
+    "resolver-cost-summary.json"
+  ],
+  "local_raw": "."
+}

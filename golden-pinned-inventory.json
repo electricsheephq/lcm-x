@@ -1,0 +1,37 @@
+[
+  {
+    "path": "tests/behaviour/recall_delivery_golden.json",
+    "sha256": "76a379441d989bdc2b42df9e6648fc537da9720700a432ee18044d776b51e7d5",
+    "identical": true
+  },
+  {
+    "path": "tests/behaviour/recall_pipeline_golden.json",
+    "sha256": "1c2ad206e51d3679062c3ed4ad2978f9af55c3ada8350fac385fd7e4f4a0de7b",
+    "identical": true
+  },
+  {
+    "path": "tests/behaviour/recall_ranking_golden.json",
+    "sha256": "21041b9e6f1b1ec02987d13c22917a550d9d648dafccd76e3ef7c85ffd80edb0",
+    "identical": true
+  },
+  {
+    "path": "tests/issue_1811_base_occurrences.json",
+    "sha256": "a11d4b07d12bc012df2f37cf3777923e67b3c29ca62f7cf4fe8e3853ec83ff50",
+    "identical": true
+  },
+  {
+    "path": "tests/test_issue_1801_twin_parity.py",
+    "sha256": "42d4b432ae405b77e9130bf0dfc7c6c82901bde6f71518a6b3f393cd1f54dc52",
+    "identical": true
+  },
+  {
+    "path": "tests/test_issue_1801_carried_followups.py",
+    "sha256": "86be018c41f975ff8e118d2d61ea85114a99b0da267072899f7a88cc64beea08",
+    "identical": true
+  },
+  {
+    "path": "tests/issue_1811_non_date_base_hashes.json",
+    "sha256": "6ea74ed2691b9216d35994ac37d9b8d778d7266715182de57df0de9e5ed82304",
+    "identical": true
+  }
+]

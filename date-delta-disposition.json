@@ -1,0 +1,9 @@
+{
+  "full_row_cells": 1700,
+  "equal": 1530,
+  "ordinary_finite_metadata_only": 170,
+  "carried_equal": 850,
+  "ordinary_partial_changes": 5,
+  "unexpected_changes": 0,
+  "reason": "Item 1(a) scopes ordinary extracted candidate refs and explicitly partial baseline refs to quote. Source full-row pre-loop still withholds mixed rows. Finite certificate digest reflects exclusion metadata; state/reason/answers unchanged."
+}

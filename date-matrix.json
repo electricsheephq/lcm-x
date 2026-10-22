@@ -1,0 +1,5498 @@
+{
+  "full_row_cells": 1700,
+  "full_row_changes": [
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 0,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-71",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 1,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-67",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-67",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-67",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 2,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 3,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-72",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-72",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-72",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 4,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 5,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 6,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-71",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 7,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-72",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-72",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-72",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 8,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-71",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 9,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-72",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-72",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-72",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 10,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 11,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 12,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-71",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 13,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 14,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 15,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 16,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 17,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 18,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 19,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 20,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 21,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 22,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 23,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 24,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 25,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 26,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 27,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 28,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 29,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-86",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-86",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-86",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 30,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 31,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 32,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 0,
+      "phrase_index": 33,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:35-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 0,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 1,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 2,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 3,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 4,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 5,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 6,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 7,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 8,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 9,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 10,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 11,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 12,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 13,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 14,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 15,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 16,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 17,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 18,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 19,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 20,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 21,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 22,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 23,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 24,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 25,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 26,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 27,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-89",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-89",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-89",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 28,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 29,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-92",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-92",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-92",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 30,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 31,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-85",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-85",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-85",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 32,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-86",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-86",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-86",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 1,
+      "phrase_index": 33,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-85",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:41-85",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-85",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 0,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 1,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-69",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-69",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-69",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 2,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 3,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 4,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 5,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 6,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 7,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 8,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 9,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-74",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 10,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 11,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 12,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-73",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 13,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 14,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 15,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 16,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 17,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 18,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 19,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 20,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 21,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 22,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 23,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 24,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 25,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 26,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 27,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-85",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-85",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-85",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 28,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 29,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-88",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-88",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-88",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 30,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 31,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 32,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 2,
+      "phrase_index": 33,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:37-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 0,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 1,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-72",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-72",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-72",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 2,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 3,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 4,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 5,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 6,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 7,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 8,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 9,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 10,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 11,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 12,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 13,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 14,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 15,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 16,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 17,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 18,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 19,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 20,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 21,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 22,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 23,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 24,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 25,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-82",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 26,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 27,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-88",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-88",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-88",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 28,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 29,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-91",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-91",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-91",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 30,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 31,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-84",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-84",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-84",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 32,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-85",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-85",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-85",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 3,
+      "phrase_index": 33,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-84",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:40-84",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-84",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 0,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 1,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-71",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 2,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 3,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 4,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 5,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 6,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 7,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 8,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 9,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-76",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 10,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 11,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 12,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-75",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 13,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-77",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 14,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 15,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 16,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 17,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 18,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 19,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 20,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 21,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 22,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 23,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-78",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 24,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 25,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-81",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 26,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 27,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-87",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-87",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-87",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 28,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-80",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 29,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-90",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-90",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-90",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 30,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-79",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 31,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 32,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-84",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-84",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-84",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    },
+    {
+      "carried": false,
+      "form_index": 4,
+      "phrase_index": 33,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "changed_fields": [
+        "coverage_certificate",
+        "exclusions",
+        "exclusion_counts"
+      ],
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "uncertain_source_observation_time",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        },
+        {
+          "exact_ref": "lcm:1:39-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": [
+        {
+          "exact_ref": "lcm:1:0-83",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ]
+    }
+  ],
+  "partial_cells": 10,
+  "partial_changes": [
+    {
+      "carried": false,
+      "question": "Which vacation did I take in January?",
+      "question_date": "2023-03-22",
+      "before_state": "unknown",
+      "after_state": "answer_sufficient",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "baseline_already_answer_sufficient",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:35-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": []
+    },
+    {
+      "carried": false,
+      "question": "How many vacations did I take in January?",
+      "question_date": "2023-03-22",
+      "before_state": "unknown",
+      "after_state": "computation_sufficient",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "finite_coverage_product_verified",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:35-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": []
+    },
+    {
+      "carried": false,
+      "question": "What is the order of events in January?",
+      "question_date": "2023-03-22",
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "missing_operand_2",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:35-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": []
+    },
+    {
+      "carried": false,
+      "question": "What is the order of events?",
+      "question_date": null,
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "missing_operand_2",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:35-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": []
+    },
+    {
+      "carried": false,
+      "question": "What is the order of events?",
+      "question_date": "2023-03-22",
+      "before_state": "unknown",
+      "after_state": "unknown",
+      "before_reason": "uncertain_source_observation_time",
+      "after_reason": "missing_operand_2",
+      "before_exclusions": [
+        {
+          "exact_ref": "lcm:1:35-71",
+          "reason_code": "uncertain_source_observation_time"
+        }
+      ],
+      "after_exclusions": []
+    }
+  ]
+}

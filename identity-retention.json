@@ -1,0 +1,31 @@
+{
+  "generated_quotes": 10000,
+  "session_dates": 4,
+  "generated_comparisons": 40000,
+  "resolver_mismatches": 0,
+  "census": {
+    "lme": {
+      "comparisons": 246750,
+      "input_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+      "mismatches": 0
+    },
+    "locomo": {
+      "comparisons": 5882,
+      "input_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+      "mismatches": 0
+    }
+  },
+  "retention": [
+    {
+      "carried": false,
+      "retained_bytes": 12598,
+      "large_entries": 64
+    },
+    {
+      "carried": true,
+      "retained_bytes": 14071,
+      "large_entries": 64
+    }
+  ],
+  "cache_equality_quotes": 3000
+}
