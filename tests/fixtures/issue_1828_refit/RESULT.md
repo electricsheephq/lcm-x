@@ -1,7 +1,7 @@
 # Issue #1828 final-refit acceptance receipt
 
-Run: `issue-1828-refit-20261023`. Claim class: advisory, delivery correctness and local proof.
-Measured code: `75149e5a5ef20f1e402dcff296b6749a935909c0`.
+Run: `issue-1828-refit-20261023-r2`. Claim class: advisory, delivery correctness and local proof.
+Measured code: `07510c16558eb3acca0dec0b274a82fa20b99f8d`.
 Base: `e5a239ee1d02acf2068150583b7eff2576635d09`.
 
 | Gate | Receipt |
@@ -11,8 +11,8 @@ Base: `e5a239ee1d02acf2068150583b7eff2576635d09`.
 | RED -> GREEN | Both new parametrized cases fail at base; 49 affected tests pass at head |
 | CAP-SCAN | 1502 cells: equal 1496; head_superset 6; head_subset 0; incomparable 0 |
 | Maximality | 0 skipped-group additions fit the final head envelope |
-| COST, no skips | 300 runs per arm: base median 4.8106875 ms; head 4.8129585 ms; threshold 5.34175625 ms: PASS |
-| COST, skips | 300 runs per arm: base median 0.229687 ms; head 0.3035415 ms; 2 skipped groups, one retry each |
+| COST, no skips | 300 runs per arm: base median 4.7885 ms; head 4.7802085 ms; threshold 5.31735 ms: PASS |
+| COST, skips | 300 runs per arm: base median 0.224083 ms; head 0.2966875 ms; 1 skipped group, 1 retry check |
 | Ruff | ruff 0.15.13; `ruff check .`: `All checks passed!` |
 
 The cost fixture has 25 ranked sessions with 300-852 character source messages,
@@ -39,8 +39,8 @@ git diff --check
 
 Observed final lines:
 ```text
-2 failed in 3.49s
-49 passed, 12 warnings in 18.22s
+2 failed in 0.88s
+49 passed, 12 warnings in 10.48s
 ruff 0.15.13
 All checks passed!
 ```
