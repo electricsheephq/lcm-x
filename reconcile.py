@@ -3277,13 +3277,18 @@ class ReconcileMixin:
                            and result_identity[1] != _HERMES_PRUNED_TOOL_PLACEHOLDER)
                 if borrows and self._bound_retry_placeholder_replay(messages, index, probe, stored_rows):
                     if metadata is None:
-                        proof = self._durable_commit_proof_payload()
-                        metadata = self._remapped_output_metadata(messages, proof or {}, len(messages))
-                        # A prefix edit can end the forward remap before this
-                        # occurrence. Resolve its UID by membership, not position.
-                        stored_uids = {row["message_uid"] for row in (proof or {}).get("output_metadata", ())
-                                       if row.get("message_uid")}
-                    bound_replays.update((index, probe))
+                        try:
+                            proof = self._durable_commit_proof_payload()
+                            metadata = self._remapped_output_metadata(messages, proof or {}, len(messages))
+                            # A prefix edit can end the forward remap before this
+                            # occurrence. Resolve its UID by membership, not position.
+                            stored_uids = {row["message_uid"] for row in (proof or {}).get("output_metadata", ())
+                                           if row.get("message_uid")}
+                        except Exception:
+                            logger.debug("LCM replayed tool-segment proof load failed", exc_info=True)
+                            metadata = False  # Unprovable: borrowed pairs stay unbound (base behaviour).
+                    if metadata is not False:
+                        bound_replays.update((index, probe))
                 if (
                     tool_call_id in call_ids
                     and not _is_hermes_persisted_output_marker(content)

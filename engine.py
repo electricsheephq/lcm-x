@@ -6998,11 +6998,30 @@ class LCMEngine(
             for start in sorted(new_prefix_occurrences):
                 if str(messages[start].get("role") or "") != "user":
                     continue
+                segments: dict[int, list[int]] = {}
+                call_owners: dict[str, int] = {}
                 for idx in range(start + 1, n):
-                    if str(messages[idx].get("role") or "") == "user":
+                    role = str(messages[idx].get("role") or "")
+                    if role == "user":
                         break
-                    if idx in unchanged_prefix_occurrences and not self._host_occurrence_known(messages[idx]):
+                    calls = messages[idx].get("tool_calls") if role == "assistant" else None
+                    if calls:
+                        segments[idx] = [idx]
+                        call_owners.update((str(call.get("id") or ""), idx) for call in calls
+                                           if isinstance(call, dict) and call.get("id"))
+                    elif role == "tool" and str(messages[idx].get("tool_call_id") or "") in call_owners:
+                        segments[call_owners[str(messages[idx].get("tool_call_id") or "")]].append(idx)
+                    elif idx in unchanged_prefix_occurrences and not self._host_occurrence_known(messages[idx]):
                         unchanged_prefix_occurrences.discard(idx)
+                for segment in segments.values():
+                    proven = any(idx in unchanged_prefix_occurrences and self._host_occurrence_known(messages[idx])
+                                 for idx in segment)
+                    # Only unknown siblings inherit proof; known changed rows remain fresh.
+                    unknown = {idx for idx in segment if not self._host_occurrence_known(messages[idx])}
+                    if proven:
+                        unchanged_prefix_occurrences.update(unknown)
+                    else:
+                        unchanged_prefix_occurrences.difference_update(unknown)
         unchanged_prefix_occurrences -= new_prefix_occurrences
         anchor_plan = None
         unaudited_from = None
