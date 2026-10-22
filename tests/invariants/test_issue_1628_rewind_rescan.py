@@ -167,7 +167,7 @@ def test_rescan_preserves_anchored_replay_and_reconcile_input(engine, monkeypatc
 
     def record_build(**kwargs):
         result = build(**kwargs)
-        observed.setdefault("builds", []).append((kwargs["cursor"], deepcopy(result)))
+        observed.setdefault("builds", []).append((kwargs["cursor"], kwargs.get("only"), deepcopy(result)))
         return result
 
     def record_prematch(messages, identity_messages, *args, **kwargs):
@@ -188,10 +188,11 @@ def test_rescan_preserves_anchored_replay_and_reconcile_input(engine, monkeypatc
     assert active == host
     assert _contents(engine).count(host[1]["content"]) == 1
     if len(observed["builds"]) == 2:  # Also a base-green preservation control.
-        (scan_start, first), (rewound, second) = observed["builds"]
+        (scan_start, _, first), (rewound, mask, second) = observed["builds"]
         assert rewound < scan_start
-        assert first[1][1] is False and second[1][1] is True
-        assert second[2][1] != active[1]
+        assert mask == {0}
+        assert first[1][1] is False and second[1][1] is False
+        assert first[2][1] == active[1]
         assert active[scan_start:] == first[2][scan_start:]
 
 
