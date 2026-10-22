@@ -7025,6 +7025,9 @@ class LCMEngine(
 
         def remember(active):
             previous_replay = getattr(self, "_last_active_replay_messages", ())
+            previous_generated_ids = (
+                self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
+            )
             result = self._remember_active_replay_messages(messages, active)
             # #1353: keep paired proof for the unaudited prefix, never the newly stored tail.
             if unaudited_from is not None:
@@ -7032,6 +7035,10 @@ class LCMEngine(
                           len(self._last_active_replay_source_identities), len(self._last_active_replay_messages))
                 self._last_active_replay_source_identities[unaudited_from:end] = cached_source_identities[unaudited_from:end]
                 self._last_active_replay_messages[unaudited_from:end] = previous_replay[unaudited_from:end]
+                for message in self._last_active_replay_messages[unaudited_from:end]:
+                    if id(message) in previous_generated_ids:
+                        self._generated_ignored_active_replay_placeholder_message_ids.add(id(message))
+                        self._generated_ignored_active_replay_placeholder_messages[id(message)] = message
             return result
 
         if not new_messages:
