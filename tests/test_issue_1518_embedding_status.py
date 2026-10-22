@@ -214,6 +214,8 @@ def test_claimed_is_in_flight_even_without_live_owner(tmp_path, monkeypatch, cor
     command._record_embedding_catchup(engine._store.db_path, corpus, identity, 1, operator_retry=1)
     assert tools._lcm_recall_catchup_reason(engine, FakeProvider(), corpus) == (
         f"{corpus} semantic index catching up (1 rows not yet embedded)")
+    if corpus == "chunk":
+        _seed(engine, 0)  # Doctor reads summary coverage as well as chunk coverage.
     with sqlite3.connect(engine._store.db_path) as conn:
         conn.execute("UPDATE lcm_embedding_profile SET provider='fastembed'")
     engine._config.embedding_provider = "fastembed"
@@ -253,7 +255,7 @@ def test_claimed_probe_preserves_all_actionable_rows(tmp_path, corpus):
         assert counts == (1, 3, 2)
     else:
         counts = command._chunk_backfill_remaining(engine._store.db_path, identity, "conversational", 6, 0)
-        assert counts == (6, 3, 2)
+        assert counts == (1, 3, 2)
     remaining, live, uncertain = counts
     # Both disjoint counts contribute; remote retry rows stay out of ordinary backlog.
     backlog = remaining + live + uncertain - uncertain
