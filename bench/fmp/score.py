@@ -161,7 +161,9 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         rows = list(indexed.values())
         eligible = [r for r in rows if not invalid(r, full)]
         valid = [r for r in eligible if pair and all(ok_verdict(r, m) for m in pair)]
-        disagreements += [{k: r[k] for k in ("qid", "question", "gold", "hypothesis")} for r in valid
+        disagreements += [{**{k: r[k] for k in ("qid", "question", "gold", "hypothesis")},
+                           **({"gold": "", "adversarial_answer": r.get("adversarial_answer", r["gold"])}
+                              if r["qtype"] == "5" else {})} for r in valid
                           if r["judges"][pair[0]]["correct"] != r["judges"][pair[1]]["correct"]]
         calls = [c for r in rows for c in r.get("calls", [])]
         mcp = [c for c in calls if "mcp_ready" in c]
