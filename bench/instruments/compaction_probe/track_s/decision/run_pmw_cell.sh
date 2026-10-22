@@ -2,7 +2,22 @@
 # Track S per-message-wait cell: one repeat per seed, GLM reader, Codex summariser.
 # Only an observed 429 / usage-limit marker brakes the cell (exit 3).
 # FACTS_FLOOR is the cp-304 floor the release declares (RELEASE-READINESS-V1 D7: the previous GA's D7 mean - 0.10).
-set -eu
+set -euC
+K=${1:-1}
+ATTEMPT=${2:-1}
+case "$K" in [1-9]) ;; *) echo "STOP: replay index must be 1..9" >&2; exit 2;; esac
+case "$ATTEMPT" in ''|*[!0-9]*|0*) echo "STOP: attempt must be positive without leading zeros" >&2; exit 2;; esac
+[ "$#" -le 2 ] || { echo "STOP: expected replay index and attempt only" >&2; exit 2; }
+R=r$K
+SUMMARY_LANE=${SUMMARY_LANE:-codex-sol}
+case "$SUMMARY_LANE" in glm|codex-sol) ;; *) echo "STOP: unsupported summary lane" >&2; exit 2;; esac
+[ "$ATTEMPT" = 1 ] || R=$R-a$ATTEMPT
+SUFFIX=
+set --
+if [ "$K" != 1 ] || [ "$ATTEMPT" != 1 ]; then
+  SUFFIX=-$R
+  set -- --runs "$K" --attempt "$ATTEMPT"
+fi
 if [ "${S2_FAULT_SLEEP_S+x}" = x ]; then
   echo "STOP: S2_FAULT_SLEEP_S must be unset for a cell" >&2; exit 2
 fi
@@ -11,6 +26,10 @@ case "$FAULT" in ''|T|P) ;; *) echo "STOP: FAULT must be empty, T or P" >&2; exi
 for var in PRODUCT_WT PRODUCT_SHA KIT_DIR MATERIAL OUT PY GLM_API_KEY FACTS_FLOOR; do
   if [ -z "${!var:-}" ]; then echo "STOP: required environment variable $var is unset" >&2; exit 2; fi
 done
+if [ -n "$SUFFIX" ]; then
+  OUT=$OUT/replay-$R
+  [ ! -e "$OUT" ] || { echo "STOP: existing path $OUT" >&2; exit 2; }
+fi
 export GLM_API_KEY
 ARM=${ARM:-LCMX-fleet-rc3}
 SEEDS=${SEEDS:-1 2 3}
@@ -30,9 +49,18 @@ if ! kit_sha=$(git -C "$KIT_DIR" rev-parse HEAD) ||
   echo "STOP: KIT_DIR must be inside a clean git checkout: $KIT_DIR" >&2; exit 2
 fi
 H=$OUT/decision
+[ ! -e "$H" ] || { echo "STOP: existing path $H" >&2; exit 2; }
+for path in "$OUT/cell$SUFFIX.json" "$OUT/score$SUFFIX.log" "$OUT/pmw-read$SUFFIX.json"; do
+  [ ! -e "$path" ] || { echo "STOP: existing path $path" >&2; exit 2; }
+done
+for seed in "${seeds[@]}"; do
+  for path in "$OUT/lcmx-runs/$ARM/seed-$seed/d$seed-$R" "$H/logs/s2-$ARM-d$seed-$R.log" "$H/logs/s2-$ARM-d$seed-$R.log.wall"; do
+    [ ! -e "$path" ] || { echo "STOP: existing path $path" >&2; exit 2; }
+  done
+done
 mkdir -p "$H/logs" "$OUT/tmp"
 [ ! -f "$OUT/STOP" ] || { echo "STOP: existing limit marker" >&2; exit 3; }
-"$PY" -B - "$OUT/cell.json" "$PRODUCT_SHA" "$kit_sha" "$ARM" "$SEEDS" "$FACTS_FLOOR" "${FAULT:-}" <<'PY'
+"$PY" -B - "$OUT/cell$SUFFIX.json" "$PRODUCT_SHA" "$kit_sha" "$ARM" "$SEEDS" "$FACTS_FLOOR" "${FAULT:-}" <<'PY'
 import json
 import sys
 from pathlib import Path
@@ -47,14 +75,15 @@ if fault:
     reasons.append(f"FAULT={fault} injects summariser hangs (cell 1096-H)")
 if reasons:
     print("NON-GATING: " + "; ".join(reasons), file=sys.stderr)
-Path(path).write_text(json.dumps(dict(product_sha=product_sha, kit_sha=kit_sha, arm=arm,
+with Path(path).open("x") as receipt:
+    receipt.write(json.dumps(dict(product_sha=product_sha, kit_sha=kit_sha, arm=arm,
                                      seeds=[int(n) for n in seeds.split()], facts_floor=float(floor), fault=fault or None,
                                      gating=not reasons), indent=1) + "\n")
 PY
 
 limited() {
   local seed=$1 file
-  for file in "$H/logs/s2-$ARM-d$seed-r1.log" "$OUT/lcmx-runs/$ARM/seed-$seed/d$seed-r1/engine.log"; do
+  for file in "$H/logs/s2-$ARM-d$seed-$R.log" "$OUT/lcmx-runs/$ARM/seed-$seed/d$seed-$R/engine.log"; do
     if [ -f "$file" ] && grep -q -i -E 'HTTP 429|HTTP Error 429|usage[- ]limit|too many requests' "$file"; then
       echo "LIMIT marker in $file" >&2
       touch "$OUT/STOP"
@@ -68,11 +97,11 @@ one() {
   local seed=$1 name pid rc=0 wait_rc
   set --
   [ -z "$FAULT" ] || set -- --fault-hang "$FAULT"
-  name=s2-$ARM-d$seed-r1
+  name=s2-$ARM-d$seed-$R
   echo "start $(date +%s) $(date -u +%FT%TZ)" > "$H/logs/$name.log.wall"
   TRACK_S_OUT=$OUT TMPDIR=$OUT/tmp TRACK_S_MATERIAL=$MATERIAL S2_PRODUCT_WORKTREE=$PRODUCT_WT S2_PRODUCT_SHA=$PRODUCT_SHA \
     perl -e 'setpgrp or die; exec @ARGV or die' nice -n 19 "$PY" -B "$KIT_DIR/s2/run_s_lcmx.py" \
-    --arm "$ARM" --seed "$seed" --run "d$seed-r1" --lane codex-sol --reader glm \
+    --arm "$ARM" --seed "$seed" --run "d$seed-$R" --lane "$SUMMARY_LANE" --reader glm \
     --turn-end-notify --checkpoints 176,304 "$@" > "$H/logs/$name.log" 2>&1 < /dev/null & pid=$!
   trap 'kill -TERM -- "-$pid" 2>/dev/null || true' EXIT
   while kill -0 "$pid" 2>/dev/null; do
@@ -108,6 +137,6 @@ while [ "$i" -lt "${#seeds[@]}" ]; do
   [ "$status" -eq 0 ] || exit "$status"
 done
 "$PY" -B "$KIT_DIR/decision/score_decision.py" --run-root "$OUT/lcmx-runs" --logs "$H/logs" \
-  --material "$MATERIAL" --out "$H" --arms "$ARM" --seeds "${seeds[@]}" --checkpoints 176 304 > "$OUT/score.log" 2>&1
+  --material "$MATERIAL" --out "$H" --arms "$ARM" --seeds "${seeds[@]}" --checkpoints 176 304 "$@" > "$OUT/score$SUFFIX.log" 2>&1
 "$PY" -B "$KIT_DIR/decision/pmw_read.py" --run-root "$OUT" --material "$MATERIAL" \
-  --arm "$ARM" --seeds "${seeds[@]}" --facts-floor "$FACTS_FLOOR" --json "$OUT/pmw-read.json"
+  --arm "$ARM" --seeds "${seeds[@]}" --facts-floor "$FACTS_FLOOR" --json "$OUT/pmw-read$SUFFIX.json" "$@"

@@ -236,7 +236,7 @@ replacement selection and the small fixed-material sample do not establish stabl
 provider throughput. Reserve capacity before execution; zero marginal charge proves no capacity.
 
 **Option-A contingency.** Only when the release manager records that the 54-replay reservation
-cannot be funded: fixed 3 seeds × 4 replays per arm (24 total), using the seed-stratified
+cannot be funded: fixed 3 seeds × 4 replays per arm (24 total), using the two-sided seed-stratified
 run-level permutation regression screen, p<0.05 AND loss≥0.05 at cp-304. Label it a
 **coarse regression screen, never non-inferiority**. Keep the same complete-run, cp-176
 placebo, replacement, concurrency and 6-hour elapsed stop rules. The permutation producer
