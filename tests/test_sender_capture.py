@@ -254,6 +254,9 @@ def test_t7_update_contention_is_nonblocking_and_retried_after_ingest(tmp_path, 
     with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
         current = message()
         e.ingest([current])
+        # Only the test's holder may contend: the bind-time rollup pass would
+        # otherwise race the retried UPDATE after release.
+        assert e.drain_rollup_maintenance(timeout=10)
         conn = e._store.connection
         timeout = conn.execute("PRAGMA busy_timeout").fetchone()[0]
         ready, release = threading.Event(), threading.Event()

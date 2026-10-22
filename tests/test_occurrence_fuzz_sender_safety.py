@@ -86,6 +86,9 @@ def test_registered_compress_copy_matches_but_unregistered_copy_does_not(tmp_pat
     with engine_context(tmp_path, window=128000, conversation_id="conv") as e:
         row, copy = message(), message()
         e.ingest([row])
+        # The bind-time rollup pass writes on its own connection; the guarded
+        # UPDATE is non-blocking by design, so let that pass finish first.
+        assert e.drain_rollup_maintenance(timeout=10)
         p = begin(e, [row])
         assert not capture_module().matches(e, p, copy)
         e._rekey_host_rewrite_watch([row], [copy])
