@@ -3338,6 +3338,8 @@ class ReconcileMixin:
 
     def _bound_retry_placeholder_replay(self, messages, call_index, result_index, stored_rows, users, protected) -> bool:
         """Bind a borrowed pair to the durable occurrence of its stamped user."""
+        if not identity_anchor_enabled():
+            return False
         user_index = call_index - 1
         if user_index < 0 or str(messages[user_index].get("role") or "") != "user":
             return False
