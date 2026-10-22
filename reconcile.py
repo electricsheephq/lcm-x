@@ -3304,7 +3304,13 @@ class ReconcileMixin:
                     stored_uid = (metadata or {}).get(index - 1, {}).get("message_uid")
                     # Pair UIDs, when known, outrank the user's: the row-level check below governs them.
                     pair_uid = any(self._host_occurrence_metadata(messages[i])["message_uid"] for i in (index, probe))
-                    if metadata is not False and not (user_uid and stored_uid and user_uid != stored_uid and not pair_uid):
+                    new_user_uid = metadata is not False and user_uid and (
+                        user_uid != stored_uid if stored_uid is not None else (
+                            index - 1 < len((proof or {}).get("output_metadata", ()))
+                            and user_uid not in stored_uids
+                        )
+                    )
+                    if metadata is not False and not (new_user_uid and not pair_uid):
                         bound_replays.update((index, probe))
                 if (
                     tool_call_id in call_ids

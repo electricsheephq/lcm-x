@@ -6795,6 +6795,7 @@ class LCMEngine(
         cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
         unchanged_prefix_occurrences = set()
+        proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
         accepted_compaction_prefix = 0
         proof = getattr(self, "_compress_commit_proof", None)
         if (
@@ -6831,6 +6832,7 @@ class LCMEngine(
             ] == proof["output"]:
                 # Content proves position, but a known metadata conflict proves
                 # a new occurrence. Use the output snapshot, not the input cache.
+                proven_cursor = self._ingest_cursor
                 new_prefix_occurrences = {
                     idx for idx, previous in enumerate(proof.get("output_metadata", ()))
                     if self._host_occurrence_changed(messages[idx], previous)
@@ -6856,6 +6858,7 @@ class LCMEngine(
                 if remapped is None and proof.get("native"):
                     remapped = self._remap_cursor_through_native_host_repair(messages, proof)
                 if remapped is not None:
+                    proven_cursor = remapped
                     metadata = self._remapped_output_metadata(messages, proof, remapped)
                     new_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
@@ -7019,7 +7022,7 @@ class LCMEngine(
                     # Only unknown siblings inherit proof; known changed rows remain fresh.
                     unknown = {idx for idx in segment if not self._host_occurrence_known(messages[idx])}
                     if proven:
-                        unchanged_prefix_occurrences.update(unknown)
+                        unchanged_prefix_occurrences.update(idx for idx in unknown if idx < (proven_cursor or 0))
                     else:
                         unchanged_prefix_occurrences.difference_update(unknown)
         unchanged_prefix_occurrences -= new_prefix_occurrences
