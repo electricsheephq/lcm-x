@@ -233,4 +233,4 @@ jobs:
         run: >-
           python scripts/ci/check_tests_ran.py
           --junit reports/test-{3.11,3.12,3.13,3.14}/{main,privacy}.xml
-          reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-scale389-tests,scoreboard,tools-tests}.xml
+          reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml
