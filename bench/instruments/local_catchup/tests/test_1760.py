@@ -25,6 +25,7 @@ def fast_bootstrap(monkeypatch):
     monkeypatch.setattr(recall, "bootstrap", lambda v, f, seed: [f(v)])
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_floor_real_home_reaches_recall_safety(tmp_path, monkeypatch):
     real = tmp_path/"real"
     real.mkdir()
@@ -74,6 +75,7 @@ def test_floor_real_home_reaches_coverage(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("problem", ["vector", "metadata", "preimage", "expected", "identities", "rows", "shape", "baseline", "seed", "missing", "unparsable", "honest"])
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_persisted_covered_manifest(corpus, tmp_path, monkeypatch, problem):
     db, fresh, mod = corpus
     source, out = tmp_path/"covered", tmp_path/"out"

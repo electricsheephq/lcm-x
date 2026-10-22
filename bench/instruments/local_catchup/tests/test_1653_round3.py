@@ -273,6 +273,7 @@ def test_final_sample_error_cannot_pass_catchup(fake_catchup, monkeypatch):
     assert (result["state"], result["reason"]) == ("ABORTED", "sampler_error:OSError")
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_final_sample_error_cannot_pass_i2_cell(tmp_path, monkeypatch):
     a = NS(scratch=tmp_path/"scratch", out=tmp_path/"out", model_cache=tmp_path,
            lcmx_repo=tmp_path, hermes_source=tmp_path, smoke=True, label="Mac", max_seconds=1)

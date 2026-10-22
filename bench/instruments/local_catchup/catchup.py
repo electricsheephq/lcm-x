@@ -14,7 +14,7 @@ from .cpu import flags, supervisor
 
 WORKER_POLL_S = 1
 STOP_GRACE_S = 60
-assert STOP_GRACE_S > WORKER_POLL_S+2+10+15  # poll + retirement + exit publication + margin
+assert STOP_GRACE_S > WORKER_POLL_S+5+2+5+10+15  # poll + session end + retirement + exit session end/publication + margin
 
 
 def state(audit_result, elapsed, idle, ready, max_wall):

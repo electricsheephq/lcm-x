@@ -150,12 +150,13 @@ def test_aborted_block_keeps_completed_state_summaries(tmp_path, monkeypatch):
     root = tmp_path/"0-OFF"
     assert common.load(root/"summary.json")["reason"] == "calibration_window_short"
     assert "standalone_calibration_s" in completed[0]
-    # A conflicting recorded verdict stays non-PASS and reports every difference.
+    assert rescore.v2(root)["state"] == "UNCALIBRATED"
+    # A disagreement is INVALID; the honest completed state stays UNCALIBRATED.
     raw = common.load(root/"raw-summary.json")
     raw.update(reason="recorded_before_abort", host_check="recorded_unknown")
     common.dump(root/"raw-summary.json", raw)
     result = rescore.v2(root)
-    assert result["state"] == "UNCALIBRATED"
+    assert result["state"] == "INVALID"
     assert result["rescore_disagreement"] == {
         "reason": dict(recorded="recorded_before_abort", recomputed="calibration_window_short"),
         "host_check": dict(recorded="recorded_unknown", recomputed="UNCALIBRATED")}
@@ -178,6 +179,7 @@ def test_rig_records_every_stop_and_forced_stop_class(fake_rig, monkeypatch):
 
 
 @pytest.mark.parametrize("killed", [True, False])
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_measurement_records_stop_and_freeze_summary(tmp_path, monkeypatch, killed):
     import sqlite3
     a = NS(scratch=tmp_path, out=tmp_path/"out", model_cache=tmp_path,

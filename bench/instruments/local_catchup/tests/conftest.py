@@ -10,7 +10,7 @@ from benchmarking.standalone import ensure_agent_context_engine_importable
 ensure_agent_context_engine_importable()
 
 
-@pytest.fixture(autouse=True)
+@pytest.fixture
 def fake_store_disk_headroom(monkeypatch):
     # Tiny synthetic stores do not require the production instrument's 150 GiB.
     usage = shutil.disk_usage

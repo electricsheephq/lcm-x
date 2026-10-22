@@ -147,6 +147,7 @@ def test_zero_recall_rows_capped_is_invalid(tmp_path, monkeypatch, state):
 
 
 @pytest.mark.parametrize("problem", ["absent", "empty", "one-pin", "metadata-absent", "metadata-empty", "metadata-one-pin", "integer", "null"])
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_persisted_pins_cannot_be_recreated(corpus, tmp_path, monkeypatch, problem):
     db, fresh, mod = corpus
     source, out = tmp_path/"covered", tmp_path/"out"

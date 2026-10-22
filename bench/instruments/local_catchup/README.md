@@ -108,7 +108,8 @@ exclude new trace rows; full expected-ID audits run at block start and end.
 ## v2.3
 
 Graceful stop allows 60 seconds, exceeding the worker's 1-second poll + up to
-2 seconds retirement + 10 seconds exit publication + 15 seconds margin.
+5 seconds session end + 2 seconds retirement + 5 seconds exit session end +
+10 seconds exit publication + 15 seconds margin (38 seconds total).
 Every stop records signal/exit monotonic times, forced-kill status and return code.
 A forced stop is INVALID (`forced_stop_after_grace`); residue after graceful exit
 still fails the unchanged final integrity audit. Claims and markers are preserved.
@@ -116,7 +117,8 @@ The recall watchdog aborts only when both the fixed-corpus fingerprint and globa
 completed embedding-publication count remain unchanged for 600 seconds with the
 provider ready. Progress and state summaries report the longest fixed-corpus freeze
 and embedded commits during that freeze. Completed states are finalized on abort;
-rescore disagreements preserve the recorded verdict and list differing values.
+finalization preserves parent-side stop/breach verdicts. Rescore disagreements list
+all differing values and return the worst of recorded, recomputed and INVALID.
 Recall declares saturation worst case: one serial unpaced recall thread at about
 2 recalls/s and about 97% active duty, plus the unpaced publication trace at about
 0.7–1.0 turns/s, measured in v2. These cells judge latency and health under load;

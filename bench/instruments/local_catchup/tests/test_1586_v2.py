@@ -268,6 +268,7 @@ def test_rescore_saved_recall_classes(tmp_path, publications, valid):
     assert result["rescore_disagreement"]
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_setup_resume_preserves_partial_store(corpus, tmp_path, monkeypatch):
     from contextlib import closing
     import sqlite3

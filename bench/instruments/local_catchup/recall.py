@@ -373,6 +373,13 @@ def finalize_block(a, block, results):
             scored["state"] = rollup([scored["state"], "INVALID"])
         if calibrated is None and result.get("measurement_valid") is not False:
             scored["reason"] = "calibration_window_short"
+        parent_state = result["state"]
+        # An uncalibrated child is provisional until this block's window is applied.
+        if parent_state == "UNCALIBRATED" and result.get("calibration_s") is None and not result.get("reason"):
+            parent_state = rollup(c["state"] for c in result["classes"].values())
+        scored["state"] = rollup([scored["state"], parent_state, "INVALID" if result.get("stop_killed") else "PASS"])
+        if result.get("stop_killed"):
+            scored["reason"] = "forced_stop_after_grace"
         result.update(scored, calibration_s=calibrated,
             standalone_calibration_s=a.standalone_calibration_s)
         for name in ("raw-summary.json", "summary.json"):

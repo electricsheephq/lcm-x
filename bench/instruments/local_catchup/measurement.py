@@ -161,6 +161,8 @@ def cell(a, state, block, kind):
     result.update(stopped)
     if stopped["stop_killed"]:
         result.update(state="INVALID", reason="forced_stop_after_grace")
+        if reason:
+            result["breach_reason"] = reason
     if (root/"progress.jsonl").exists():
         last = json.loads((root/"progress.jsonl").read_text().splitlines()[-1])
         result.update({k: last[k] for k in ("fixed_corpus_frozen_s", "global_live_commits_during_freeze") if k in last})
@@ -169,8 +171,8 @@ def cell(a, state, block, kind):
         path.write_text("".join(json.dumps(row, sort_keys=True)+"\n" for row in labelled))
     result.update(label=SMOKE if a.smoke else a.label, cpu=meter.summary("NOT_JUDGED" if a.smoke else "INCOMPLETE"), exit=proc.returncode)
     dump(root/"summary.json", result)
-    if result.get("state") == "ABORTED":
-        raise RuntimeError(f"cell stopped: {root.name}: {result.get('reason')}")
+    if reason or result.get("state") == "ABORTED":
+        raise RuntimeError(f"cell stopped: {root.name}: {reason or result.get('reason')}")
     return result
 
 

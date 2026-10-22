@@ -39,7 +39,7 @@ def recall_cell(tmp_path, monkeypatch, fake_store_disk_headroom):
         pubs = [dict(start=0, end=10, node_id=i) for i in range(10)]
         for name, values in (("recalls", samples), ("publications", pubs)):
             (root/f"{name}.jsonl").write_text("".join(json.dumps(v)+"\n" for v in values))
-        raw = recall.score(samples, pubs, calibration_s=.572)
+        raw = recall.score(samples, pubs, calibration_s=recall.window_calibration(window_batches()))
         raw.update(measurement_valid=True, catchup_activity=False)
         assert raw["state"] == "PASS"
         common.dump(root/"raw-summary.json", raw)
@@ -133,6 +133,25 @@ def test_bare_pass_is_invalid(tmp_path):
     result = rescore.v2(tmp_path)
     assert result["state"] == "INVALID"
     assert result["rescore_disagreement"]
+
+
+@pytest.mark.parametrize("recorded,tampered,expected", [
+    ("PASS", True, "INVALID"), ("FAIL", True, "FAIL"), ("PASS", False, "ABORTED"),
+])
+def test_aborted_entry_preserves_disagreement(recall_cell, recorded, tampered, expected):
+    a, control = recall_cell
+    control.killed = False
+    measurement.cell(a, "OFF", 0, "recall")
+    root = a.out/"0-OFF"
+    common.dump(root/"summary.json", dict(state="ABORTED", reason="floor_deadline"))
+    raw = common.load(root/"raw-summary.json")
+    raw["state"] = recorded
+    if tampered:
+        raw["host_check"] = "forged"
+    common.dump(root/"raw-summary.json", raw)
+    result = rescore.v2(root)
+    assert result["state"] == expected
+    assert bool(result.get("rescore_disagreement")) == tampered
 
 
 @pytest.fixture(scope="module")
