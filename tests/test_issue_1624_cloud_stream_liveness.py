@@ -35,6 +35,7 @@ def test_cloud_maintenance_certifies_only_contiguous_metadata(store, monkeypatch
         assert maintenance.run_incremental_embedding_pass(config.database_path, config) != "error"
     assert marker(cloud) == {"from": 1, "through": 2 if gap else 5, "policy": "conversational"}
     assert counts(cloud) == before and not texts
+    monkeypatch.setattr(command, "_embedding_current_profile", lambda _: None)
     snapshot = list(vectors.connection.iterdump())
     engine = SimpleNamespace(_config=config, _store=SimpleNamespace(db_path=config.database_path))
     assert f"embedding_backlog_chunks: {1 if gap else 0}" in "\n".join(command._embedding_maintenance_status_lines(engine))
@@ -83,3 +84,27 @@ def test_low_band_liveness_with_arrivals_before_every_writable_call(store):
             break
     else:
         pytest.fail(f"low band did not converge after {call + 1} calls: {marker(store)}")
+
+
+def test_low_walk_cannot_survive_parent_metadata_invalidation(store):
+    add_rows(store, ROWS, {6, 7})
+    metadata(store, "chunk_policy_revision", 2)
+    command._record_chunk_policy_revision(store[1].connection, store[2].identity_hash, (6, 7), "conversational")
+    older_walk(store, {1, 3})
+    conn, identity = store[1].connection, store[2].identity_hash
+    state = {"coverage": (6, 7, "conversational")}
+    rows = command._chunk_gapfill_rows(conn, identity, (1, 5), "conversational", 1,
+                                      record_progress=True, gap_scan_state=state)
+    assert next(rows)[0] == 5
+    rows.close()
+    command._record_chunk_gapfill_walk(conn, identity, state)
+    low_key = f"chunk_gapfill_scan:{identity}:low"
+    assert conn.execute("SELECT 1 FROM metadata WHERE key=?", (low_key,)).fetchone()
+    conn.execute("DELETE FROM lcm_chunk_meta WHERE store_id=1")
+    assert metadata(store, "chunk_gapfill_scan") is None
+    command._record_chunk_gapfill_progress(conn, identity, state, {"high": 5},
+                                          [(f"chunk_policy_revision_through:{identity}", "999")])
+    assert metadata(store, "chunk_policy_revision_through") is None
+    resumed = list(command._chunk_gapfill_rows(conn, identity, (1, 5), "conversational", 32,
+                    record_progress=True, gap_scan_state={"coverage": (6, 7, "conversational")}))
+    assert 1 in [row[0] for row in resumed]

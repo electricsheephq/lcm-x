@@ -273,6 +273,8 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any, slice_state=None) 
         del result  # providers are disposable; FastEmbed shares its model
     if breaker is not None and breaker.is_open():
         return "circuit_open", None  # the query path's breaker is cooling down
+    if not _automatic_chunks_allowed(config, command):
+        command._validate_cloud_chunk_metadata(config, db_path)
     probe = probe_provider_availability(config)
     if not probe["available"]:
         return "provider_unavailable", str(probe["detail"])
