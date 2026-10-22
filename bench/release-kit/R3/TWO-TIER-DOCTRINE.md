@@ -40,3 +40,7 @@ exists to surface.
 Third-party board rows are the one exception. They use the board's fixed reader and judge for every
 backend, so the score stays comparable on that board. A same-family pair there is disclosed in the
 row's caveats and the row is not rescored; a cross-family rescore is a separate Tier F row.
+This applies the SOTA-models policy's own rule that already-registered instruments run as registered,
+with the same-family caveat disclosed (`bench/STRATEGY-ADDENDUM-2026-07-29-R3.md`, 2026-08-02). A
+board's protocol is registered by the board, so the policy's reader and judge defaults govern only
+rows whose configuration we declare ourselves.

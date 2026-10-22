@@ -250,11 +250,21 @@
         "top_k": 20
       },
       "run_date": "2026-10-22",
-      "harness_commit": "cd955c46a40a5d7f386cdfaec711ef8c966ff97d",
+      "harness_commit": "282be0b82281d41eb6684b38e93b9bac544fb20b",
+      "harness_commits": [
+        {
+          "sha": "cd955c46a40a5d7f386cdfaec711ef8c966ff97d",
+          "role": "90 ingest sessions"
+        },
+        {
+          "sha": "282be0b82281d41eb6684b38e93b9bac544fb20b",
+          "role": "conversation 7's 10 ingest sessions, search, answer and evaluation"
+        }
+      ],
       "source_url": "https://github.com/MemTensor/OmniMemEval/pull/18",
       "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-beam10m-results-20261022",
       "claim_class": "contributor-run, submitted upstream",
-      "disclosures": "BEAM 10M (submitted, not yet accepted): one run of 200 questions, so no run-to-run variance. Conversation 7 was ingested with the null-time-anchor fix (harness `282be0b8`). Answer and judge calls went through OpenRouter, with the same model-receipt limitation as above."
+      "disclosures": "BEAM 10M (submitted, not yet accepted): one run of 200 questions, so no run-to-run variance. Ingestion of 90 sessions ran at harness `cd955c46`; conversation 7's 10 sessions and every later stage ran at `282be0b8`, which adds the null-time-anchor fix. Answer and judge calls went through OpenRouter, with the same model-receipt limitation as above."
     },
     {
       "board": "OmniMemEval",

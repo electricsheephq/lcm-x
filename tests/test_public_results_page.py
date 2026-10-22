@@ -91,6 +91,11 @@ def test_page_values_and_placements_match_snapshot(data):
     line = next(line for line in page.splitlines() if line.startswith("Submitted upstream, pending review: "))
     assert "BEAM 10M nugget score 63.32 " in line and submitted["source_url"] in line
     assert submitted["evidence_url"] in line and submitted["disclosures"] in page
+    # A resumed run names every harness commit with its role, ending at the one that scored it.
+    assert [c["sha"][:8] for c in submitted["harness_commits"]] == ["cd955c46", "282be0b8"]
+    assert submitted["harness_commits"][-1]["sha"] == submitted["harness_commit"]
+    for commit in submitted["harness_commits"]:
+        assert f'`{commit["sha"][:8]}` ({commit["role"]})' in line
     assert "| BEAM 10M |" not in page
     expected_review = "our Agent Memory Leaderboard Cycle 2 entry; the board publishes its own results."
     assert f"In review: {expected_review}" in page

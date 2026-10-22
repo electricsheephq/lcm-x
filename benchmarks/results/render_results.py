@@ -102,7 +102,11 @@ def render_results(data):
         *(
             f'Submitted upstream, pending review: {entry["benchmark"]} {entry["metric"]} {entry["value"]:.2f} '
             f'([upstream review]({entry["source_url"]}) · [Evidence]({entry["evidence_url"]})); '
-            f'{entry["run_date"]} run, LCM-X {entry["lcmx_version"]}, harness `{entry["harness_commit"][:8]}`.'
+            f'{entry["run_date"]} run, LCM-X {entry["lcmx_version"]}, harness '
+            + " and ".join(f'`{c["sha"][:8]}` ({c["role"]})'
+                           for c in entry.get("harness_commits") or [{"sha": entry["harness_commit"], "role": "all stages"}])
+            + "."
+
             for entry in submitted
         ),
         f'In review: our {data["in_review"]["board"]} entry; the board publishes its own results.',
