@@ -455,12 +455,15 @@ def test_s2_probe_isolation_failure(tmp_path, snapshots, changed):
 @pytest.mark.parametrize("model", ["other-model", None])
 def test_reader_model_mismatch_fails_run(tmp_path, monkeypatch, model):
     import urllib.request
+    monkeypatch.syspath_prepend(str(TRACK / "harness"))
+    from lanes.glm import _open
+
     tree = ast.parse((TRACK / "s2/s2lib/reader.py").read_text())
     tree.body = [n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "GLMReader"]
     ns = {"json": json, "urllib": __import__("urllib"), "READER_TIMEOUT_S": 1}
     exec(compile(tree, "reader", "exec"), ns)
     reader = ns["GLMReader"].__new__(ns["GLMReader"])
-    reader._glm = SimpleNamespace(URL="https://offline.invalid", MODEL="glm-5.3")
+    reader._glm = SimpleNamespace(URL="https://offline.invalid", MODEL="glm-5.3", _open=_open)
     reader._k, reader.readback = "synthetic", {"model": None}
     models = iter(["glm-5.3", model, "glm-5.3"])
     class Response:
@@ -476,6 +479,7 @@ def test_reader_model_mismatch_fails_run(tmp_path, monkeypatch, model):
         reader._post([])
     assert reader.readback["model"] == model
     reader._post([])  # a later matching response cannot clear the run failure
+    assert reader.readback["pin_ok"] is False
     rc, summary, cpdir = s2_receipt_phase(tmp_path, reader=reader)
     assert rc != 0 and summary["status"] == "FAILED"
     assert json.loads((cpdir / "summary.json").read_text())["status"] == "FAILED"
