@@ -1,4 +1,5 @@
 """Blinded, independent judgments using verbatim upstream templates."""
+import copy
 import json
 import re
 
@@ -27,6 +28,15 @@ def messages(q, hypothesis):
     return user if q.dataset.startswith("lme") else [{"role": "system", "content": JUDGE_SYSTEM_PROMPT}, *user]
 
 
+def judge_messages(q, hypothesis):
+    if q.dataset == "locomo" and getattr(q, "is_abstention", False):
+        # Existing FMP/LME abstention rubric; cat5's adversarial_answer is never a gold answer.
+        abstention = copy.copy(q)
+        abstention.dataset, abstention.qtype, abstention.gold = "lme-s", "single-session-user", ""
+        return messages(abstention, hypothesis), "lme-s"
+    return messages(q, hypothesis), q.dataset
+
+
 def parse(text, dataset):
     if dataset.startswith("lme"):
         lines = text.strip().splitlines() or [""]
@@ -53,12 +63,12 @@ def parse(text, dataset):
 def judge(q, hypothesis, client, records=None, models=JUDGES, agreement_model=None):
     # BudgetStopped propagates: a spend stop is a run state, not a verdict.
     results, records = {}, records if records is not None else []
+    jm, dataset = judge_messages(q, hypothesis)
     for model in dict.fromkeys([*models, *([agreement_model] if agreement_model else [])]):
         verdict, raw, error = None, [], None
         for attempt in range(2):
             try:
-                message = client.call(model, messages(q, hypothesis), records,
-                                      temperature=None if q.dataset.startswith("lme") else 0)
+                message = client.call(model, jm, records, temperature=None if dataset.startswith("lme") else 0)
             except BudgetStopped as exc:
                 if model in models:
                     exc.partial = dict(results)
@@ -69,7 +79,7 @@ def judge(q, hypothesis, client, records=None, models=JUDGES, agreement_model=No
                 error = type(exc).__name__
                 break
             raw.append(message.get("content") or "")
-            verdict = parse(raw[-1], q.dataset)
+            verdict = parse(raw[-1], dataset)
             if verdict is not None:
                 break
         status = "ok" if verdict is not None else "not_run" if error == "budget_stopped" else "judge_error"

@@ -33,11 +33,13 @@ def test_default_loader_identity(tmp_path):
     assert "include_adversarial" not in run.switches(cli(tmp_path))
 
 
-def test_flag_load_and_manifest(tmp_path, monkeypatch):
-    questions, _, _, excluded = datasets.load(locomo(tmp_path), "locomo", None, include_adversarial=True)
-    assert [q.qid for q in questions] == ["fixture:0", "fixture:1"]
-    assert questions[1].gold == "" and questions[1].is_abstention and excluded == {}
-    args = cli(tmp_path, "answer", "--include-adversarial", "--delivery", "single")
+@pytest.mark.parametrize("flag", [False, True])
+def test_flag_load_and_manifest(tmp_path, monkeypatch, flag):
+    questions, _, _, excluded = datasets.load(locomo(tmp_path), "locomo", None, include_adversarial=flag)
+    assert [q.qid for q in questions] == (["fixture:0", "fixture:1"] if flag else ["fixture:0"])
+    if flag:
+        assert questions[1].gold == "" and questions[1].is_abstention and excluded == {}
+    args = cli(tmp_path, "answer", "--delivery", "single", *(["--include-adversarial"] if flag else []))
     args.output.mkdir()
     store = SimpleNamespace(generation="synthetic", engine=lambda q: nullcontext((None, None)))
     monkeypatch.setattr(run.delivery, "schemas", lambda _: [])
@@ -46,7 +48,25 @@ def test_flag_load_and_manifest(tmp_path, monkeypatch):
     next(job)
     job.close()
     manifest = json.loads((args.output / "run-manifest.json").read_text())
-    assert manifest["include_adversarial"] is True and manifest["excluded"] == {}
+    assert (manifest.get("include_adversarial") is True) == flag
+    assert flag or "include_adversarial" not in manifest
+    assert manifest["excluded"] == ({} if flag else {"locomo_category_5_adversarial": 1})
+    args.command, args.include_adversarial = "judge", not flag
+    with pytest.raises(ValueError, match="include_adversarial"):
+        next(run.run(args, None, questions, "dataset-hash", "ids-hash", excluded, None))
+
+
+@pytest.mark.parametrize("flag", [False, True])
+def test_execute_passes_loader_flag(tmp_path, monkeypatch, flag):
+    args = cli(tmp_path, "answer", "--data", str(locomo(tmp_path)), *(["--include-adversarial"] if flag else []))
+    monkeypatch.setattr(run, "commit", lambda _: "synthetic")
+    monkeypatch.setattr(run, "load_lcm", lambda _: None)
+    def load(*args, **kwargs):
+        assert args[-1] is flag
+        raise RuntimeError("fixture loader reached before any client")
+    monkeypatch.setattr(datasets, "load", load)
+    with pytest.raises(RuntimeError, match="fixture loader reached"):
+        run.execute(args)
 
 
 def test_dev_judge_bytes_identity():
@@ -149,3 +169,13 @@ def test_check_arms_cli(tmp_path, bad):
     assert "PRIVATE_" not in result.stdout + result.stderr
     reports = list(tmp_path.glob("check-arms-*.json"))
     assert len(reports) == 1 and json.loads(reports[0].read_text())["passed"] is (not bad)
+
+
+def test_check_arms_even_median(tmp_path):
+    paths = [make_answers(tmp_path, "A0", "role"), make_answers(tmp_path, "A1")]
+    for path in paths:
+        payload = json.loads((path / "answers.jsonl").read_text())
+        payload["calls"].append({"prompt_tokens_estimate": 300})
+        (path / "answers.jsonl").write_text(json.dumps(payload))
+    report = run.check_arms(paths, tmp_path / "check.json")
+    assert report["arms"][0]["prompt_tokens_estimate"] == {"median": 200, "p90": 300}

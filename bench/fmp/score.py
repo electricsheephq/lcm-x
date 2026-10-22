@@ -76,7 +76,7 @@ def invalid(row, models):
 EXCLUDED = ("skipped", "not_run")  # skips: explicit denominators; not_run: spend stops (D7)
 IDENTITY = ("lcmx_commit", "harness_commit", "split_label", "dataset_sha256", "id_list_sha256", "judges",
             "agreement_judge", "summaries", "agreement_sample", "agreement_seed", "agreement_fraction",
-            "harness_tree_sha256", "toolset", "store_text", "hit_label")
+            "harness_tree_sha256", "toolset", "store_text", "hit_label", "include_adversarial")
 TOKEN_KEYS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "wrapper_overhead_tokens")
 
 
@@ -118,7 +118,7 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         for row in rows:
             for judge in row.get("judges", {}).values():
                 if judge.get("raw"):
-                    judge["correct"] = parse(judge["raw"][-1], "locomo" if row["qtype"].isdigit() else "lme-s")
+                    judge["correct"] = parse(judge["raw"][-1], "locomo" if row["qtype"].isdigit() and row["qtype"] != "5" else "lme-s")
         if len({r["qid"] for r in rows}) != len(rows):
             raise ValueError("duplicate result ids")
         arm = "/".join([manifest["config"], manifest["delivery"], manifest["reader"]])
@@ -209,6 +209,12 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
             "not_run": sum(r["status"] == "not_run" for r in rows),
             "skipped": sum(r["status"] == "skipped" for r in rows),
             "wall_s": manifests[arm].get("wall_s", 0)}
+        if any(r["qtype"].isdigit() for r in rows):
+            summaries[arm]["category_totals"] = {
+                label: {"scored_n": len(group), "accuracy": {
+                    m: mean([bool(correct(r, m)) for r in group]) for m in full}}
+                for label, group in (("all categories", attempted),
+                                     ("cats 1-4", [r for r in attempted if r["qtype"] in ("1", "2", "3", "4")]))}
     for summary in summaries.values():
         for accuracies in summary["by_type"].values():
             accuracies["primary"] = mean(list(accuracies.values())) if all(v is not None for v in accuracies.values()) else None
@@ -300,6 +306,9 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
     for arm, summary in summaries.items():
         for qtype, accuracies in summary["by_type"].items():
             lines.append("| " + " | ".join([arm, qtype, *[str(accuracies[m]) for m in full]]) + " |")
+        for label, total in summary.get("category_totals", {}).items():
+            lines.append("| " + " | ".join([arm, f"{label} (n={total['scored_n']})",
+                                          *[fmt(total["accuracy"][m]) for m in full]]) + " |")
     lines += ["", "| Comparison | Paired n | Dropped for errors | " + " | ".join(f"{m} exact p" for m in full) +
               " | Both agree exact p | Primary Δ 95% CI |", "|---|---:|---:|" + "---:|" * len(full) + "---:|---|"]
     for pair_name, s in comparisons.items():
