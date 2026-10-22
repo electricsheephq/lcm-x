@@ -6956,7 +6956,8 @@ class LCMEngine(
             audit_from = None
             if not reconciled_existing_session and current_prefix_identities is not None:
                 audit_from = next((idx for idx, identity in enumerate(current_prefix_identities)
-                                   if identity != cached_source_identities[idx]), None)
+                                   if idx >= accepted_compaction_prefix
+                                   and identity != cached_source_identities[idx]), None)
             try:
                 if (reconciled_existing_session or accepted_compaction_prefix) and cursor > 0:
                     self._store.backfill_observed_at_many(
@@ -7023,12 +7024,14 @@ class LCMEngine(
         original_new_messages = messages[cursor:] if cursor < n else []
 
         def remember(active):
+            previous_replay = getattr(self, "_last_active_replay_messages", ())
             result = self._remember_active_replay_messages(messages, active)
-            # #1353: retain the old identity so the next ingest retries the failed prefix audit.
-            if unaudited_from is not None and unaudited_from < min(
-                len(self._last_active_replay_source_identities), len(cached_source_identities)
-            ):
-                self._last_active_replay_source_identities[unaudited_from] = cached_source_identities[unaudited_from]
+            # #1353: keep paired proof for the unaudited prefix, never the newly stored tail.
+            if unaudited_from is not None:
+                end = min(cursor, len(cached_source_identities), len(previous_replay),
+                          len(self._last_active_replay_source_identities), len(self._last_active_replay_messages))
+                self._last_active_replay_source_identities[unaudited_from:end] = cached_source_identities[unaudited_from:end]
+                self._last_active_replay_messages[unaudited_from:end] = previous_replay[unaudited_from:end]
             return result
 
         if not new_messages:
