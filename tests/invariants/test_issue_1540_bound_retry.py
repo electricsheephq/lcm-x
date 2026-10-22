@@ -489,6 +489,8 @@ def test_mixed_metadata_retry_keeps_segment_atomic(build, monkeypatch, mode, met
               sum(row.get("tool_call_id") == "c" for row in added))
     if mode == "warm":
         assert counts == (0, 0)  # Exact base parity in all six warm shapes.
+    elif (metadata, user_change) == ("result-only-uid", "new-uid"):
+        assert counts == (0, 0)  # Either known pair UID preserves the bound segment.
     else:
         assert counts[0] == counts[1]  # Base's lone result (0/1) must be fixed.
     assert sum(row.get("content") == "repeat" for row in added) == 1
@@ -497,6 +499,63 @@ def test_mixed_metadata_retry_keeps_segment_atomic(build, monkeypatch, mode, met
     print("R9_MIXED", mode, metadata, user_change, counts)
     engine.ingest(deepcopy(host))
     assert stored(engine) == after
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("shape", ["first-paired", "last-paired", "both-paired", "host-keeps-u2"])
+def test_stored_side_ambiguity_guard_with_single_host_user(
+    build: Build, monkeypatch: pytest.MonkeyPatch, mode: str, shape: str,
+) -> None:
+    """A unique host user cannot disambiguate two durable stamped occurrences."""
+    import tests.invariants.test_issue_1529_warm_proof_salvage as shapes
+    from tests.test_compression_boundary import _turn
+
+    def occurrence(paired: bool, tag: int) -> list[Row]:
+        user = {"role": "user", "content": "repeat", "timestamp": 10}
+        if paired:
+            return [user, *tool_pair("c", LONG + "c", tool_name="lookup"),
+                    {"role": "assistant", "content": f"done {tag}"}]
+        return [user, {"role": "assistant", "content": f"ack {tag}"}]
+
+    def fillers(tag: str) -> list[Row]:
+        return [row for i in range(8) for row in (
+            {"role": "user", "content": f"filler {tag} {i} " + "lorem ipsum " * 30},
+            {"role": "assistant", "content": f"filler reply {tag} {i}"})]
+
+    def two_occurrences(*, uids: bool = False) -> list[Row]:
+        rows = [row for i in range(12) for row in _turn(i)]
+        rows += occurrence(shape in ("first-paired", "both-paired", "host-keeps-u2"), 1)
+        rows += fillers("a")
+        rows += occurrence(shape in ("last-paired", "both-paired"), 2)
+        if shape == "host-keeps-u2":
+            rows.pop()  # Keep U2 as the host's final fresh-tail row.
+        else:
+            rows += fillers("b")
+        return rows
+
+    monkeypatch.setattr(shapes, "fixture", two_occurrences)
+    engine, host = compact(build, mode=mode)
+    before = stored(engine)
+    host_repeat = sum(row.get("role") == "user" and row.get("content") == "repeat" for row in host)
+    assert host_repeat == (1 if shape == "host-keeps-u2" else 0)
+    assert sum(row["role"] == "user" and row["content"] == "repeat" for row in before) == 2
+    if shape != "host-keeps-u2":
+        host.append({"role": "user", "content": "repeat", "timestamp": 10})
+    assert sum(row.get("role") == "user" and row.get("content") == "repeat" for row in host) == 1
+    host.extend(tool_pair("c", CLEARED, tool_name="lookup"))
+    for index in range(2):
+        host.extend(tool_pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    host.append({"role": "assistant", "content": "final answer"})
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    counts = (sum(any(call["id"] == "c" for call in row.get("tool_calls") or []) for row in added),
+              sum(row.get("tool_call_id") == "c" for row in added))
+    print("R11E_STORED", shape, mode, counts, len(added))
+    assert counts == (1, 1), "the stored-side ambiguity guard must retain the fresh pair"
+    assert len(added) == 7  # Base 9eacedb9: all four shapes, warm and cold.
 
 
 @pytest.mark.parametrize("fault", ["corrupt-proof", "remap-raises"])

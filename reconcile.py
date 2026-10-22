@@ -3226,6 +3226,8 @@ class ReconcileMixin:
         matches by construction, not by occurrence. It cannot prove segment
         replay: a fresh same-id call can genuinely return the placeholder text.
         Prefer a duplicate ambiguous salvage pair over losing a fresh pair.
+        #1540 exception: a borrowed pair bound to a unique stamped user occurrence,
+        with proven UIDs, can be suppressed.
         """
         if not self._session_id or cursor >= len(messages):
             return set()
