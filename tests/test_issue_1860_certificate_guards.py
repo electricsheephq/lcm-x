@@ -64,9 +64,10 @@ def test_cloud_legacy_rewrite_revalidates_wider_scan(store, monkeypatch):
     certify(store, (5, 7))
     older_walk(store, {1, 2, 4})
     metadata(store, "chunk_policy_revision_through", 2)
-    monkeypatch.setattr(command, "chunk_message", lambda *a, **k: pytest.fail("cloud chunked"))
-    monkeypatch.setattr(command, "resolve_provider", lambda *a, **k: pytest.fail("cloud dispatched"))
-    command._validate_cloud_chunk_metadata(store[0], store[0].database_path)
+    with monkeypatch.context() as cloud_patch:
+        cloud_patch.setattr(command, "chunk_message", lambda *a, **k: pytest.fail("cloud chunked"))
+        cloud_patch.setattr(command, "resolve_provider", lambda *a, **k: pytest.fail("cloud dispatched"))
+        command._validate_cloud_chunk_metadata(store[0], store[0].database_path)
     assert_repaired_or_visible(store, {3})
     assert command._chunk_backlog_estimate(store[1].connection, store[2].identity_hash, "conversational") == "1 (gap-fill)"
 
