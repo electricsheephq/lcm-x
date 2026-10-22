@@ -10,6 +10,22 @@
 
 > Bounded context, unbounded memory. Nothing is ever lost.
 
+<!-- results-highlights:start -->
+<a id="benchmark-highlights"></a>
+**Benchmark highlights** ([OmniMemEval](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md), contributor-run, accepted upstream)
+
+| Benchmark | LCM-X | Placement |
+| --- | ---: | --- |
+| BEAM 100K | 71.84 | [1st of 12](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary) |
+| LongMemEval | 87.00 | [2nd of 13](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary) |
+| LoCoMo | 78.83 | [5th of 15](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary) |
+| HaluMem | 81.68 | [5th of 13](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary) |
+| PersonaMem v2 | 33.96 | [8th of 13](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary) |
+| BEAM 10M | 63.32 | [in upstream review](https://github.com/MemTensor/OmniMemEval/pull/18) |
+
+Configuration, evidence and disclosures: [benchmarks/RESULTS.md](benchmarks/RESULTS.md).
+<!-- results-highlights:end -->
+
 LCM-X replaces one-shot active-context compression with a SQLite-backed,
 DAG-based context engine. It keeps the live prompt bounded, preserves raw
 messages, and gives the agent tools to recover exact detail after compaction.
@@ -158,9 +174,7 @@ gaps, and proof boundaries.
 
 ### Results
 
-[OmniMemEval](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md): contributor-run, accepted upstream.
-[BEAM 100K 71.84: 1st of 12 scored backends](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary); [LongMemEval 87.00: 2nd of 13 scored backends](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary).
-[Results, configuration, evidence and disclosures](benchmarks/RESULTS.md).
+See the [benchmark highlights](#benchmark-highlights) above and [results, configuration, evidence and disclosures](benchmarks/RESULTS.md).
 
 ## LCM vs built-in compression
 
