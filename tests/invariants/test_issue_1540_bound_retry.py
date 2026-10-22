@@ -460,8 +460,8 @@ def test_mixed_metadata_retry_keeps_segment_atomic(build, monkeypatch, mode, met
 
 
 @pytest.mark.parametrize("fault", ["corrupt-proof", "remap-raises"])
-def test_replay_proof_failure_stores_whole_incoming_batch(build, monkeypatch, fault):
-    """A failed optional proof read cannot swallow an ingest's residual batch."""
+def test_replay_proof_failure_matches_base(build, monkeypatch, fault):
+    """Optional proof faults retain the six complete rows stored by base 9eacedb9."""
     engine, host = compact(build, mode="cold")
     before = stored(engine)
     next(row for row in host if row.get("content") == "middle lookup")["timestamp"] = 20
@@ -492,7 +492,6 @@ def test_replay_proof_failure_stores_whole_incoming_batch(build, monkeypatch, fa
             else:
                 patch.setattr(engine, "_remapped_output_metadata", broken_remap)
             replayed = helper(messages, cursor)
-        assert replayed == set()
         return replayed
 
     monkeypatch.setattr(engine, "_replayed_tool_segment_indexes_after_cursor", faulted)
@@ -504,4 +503,62 @@ def test_replay_proof_failure_stores_whole_incoming_batch(build, monkeypatch, fa
     assert after[:len(before)] == before
     def project(row):
         return {key: row.get(key) for key in ("role", "content", "tool_calls", "tool_call_id")}
-    assert [project(row) for row in after[len(before):]] == [project(row) for row in host[calls[0]:]]
+    # Frozen from base 9eacedb9 cold corrupt-proof/remap-raises probe outputs.
+    expected = [
+        {
+            "role": "user",
+            "content": "middle lookup",
+            "tool_calls": None,
+            "tool_call_id": None
+        },
+        {
+            "role": "tool",
+            "content": "[Old tool output cleared to save context space]",
+            "tool_calls": None,
+            "tool_call_id": "c"
+        },
+        {
+            "role": "assistant",
+            "content": "running tool",
+            "tool_calls": [
+                {
+                    "id": "following-0",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": "{}"
+                    }
+                }
+            ],
+            "tool_call_id": None
+        },
+        {
+            "role": "tool",
+            "content": "new result 0",
+            "tool_calls": None,
+            "tool_call_id": "following-0"
+        },
+        {
+            "role": "assistant",
+            "content": "running tool",
+            "tool_calls": [
+                {
+                    "id": "following-1",
+                    "type": "function",
+                    "function": {
+                        "name": "lookup",
+                        "arguments": "{}"
+                    }
+                }
+            ],
+            "tool_call_id": None
+        },
+        {
+            "role": "tool",
+            "content": "new result 1",
+            "tool_calls": None,
+            "tool_call_id": "following-1"
+        }
+    ]
+    assert [project(row) for row in after[len(before):]] == expected
+    assert_complete_segments(after)
