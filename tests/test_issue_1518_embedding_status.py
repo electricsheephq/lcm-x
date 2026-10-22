@@ -101,6 +101,9 @@ def _dispatch_fixture(tmp_path, corpus):
         embedded_id = str(_seed(engine, 1)[0])
     else:
         _seed_messages(engine, _user_msgs(1))
+        from hermes_lcm.db_bootstrap import ensure_chunk_tables
+        with sqlite3.connect(engine._store.db_path) as conn:
+            ensure_chunk_tables(conn)
         embedded_id = command.chunk_message(1, "user", "u" * 60, policy="conversational")[0].chunk_id
     with sqlite3.connect(engine._store.db_path) as conn:
         conn.row_factory = sqlite3.Row

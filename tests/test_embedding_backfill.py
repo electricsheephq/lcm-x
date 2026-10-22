@@ -571,10 +571,11 @@ def test_inflight_row_requires_explicit_uncertain_retry_after_crash(monkeypatch,
     monkeypatch.setattr(command_mod, "resolve_provider", lambda _config, **_kw: provider)
 
     first = handle_lcm_command("embed backfill --apply", engine)
-    # Nothing recorded; both rows are left marked in_flight.
+    # Nothing recorded; both rows have uncertain remote acceptance.
     assert "status: partial" in first
     assert "embedded: 0" in first
-    assert "in_flight: 2" in first
+    assert "in_flight: 0" in first
+    assert "uncertain_remote_acceptance: 2" in first
     assert _meta_ids(engine) == []
 
     healthy = FakeProvider()
@@ -1673,7 +1674,7 @@ def test_summary_dispatch_page_boundary_and_resume(monkeypatch, tmp_path, count,
     )
     if apply:
         expected.update(
-            in_flight=count - selected if retry else 0,
+            in_flight=0,
             uncertain=count - selected if retry else 0, stop_reason=None,
         )
     else:
@@ -1754,7 +1755,7 @@ def test_summary_dispatch_failure_mid_page_keeps_accepted_prefix(monkeypatch, tm
     )} == dict(
         status="partial", embedded=1, remaining=1,
         failed=[(str(node_ids[1]), "provider_error:synthetic mid-page failure")],
-        in_flight=1, uncertain=1,
+        in_flight=0, uncertain=1,
     )
     assert provider.calls == [["summary-2"], ["summary-1"]]
     assert _summary_dispatch_rows(engine) == [str(node_ids[2]), str(node_ids[1])]
