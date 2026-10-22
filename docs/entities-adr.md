@@ -63,11 +63,16 @@ An earlier internal triple-store prototype keyed facts on (entity, predicate) an
   - Selected notes are superseded by copies that point at E2.
   - Mentions are derived, so they are rebuilt for the moved aliases.
   - Undo replays the inverse event.
-- **Logging.** Every merge, split, alias change, kind change, forget and undo is a row in `lcm_memory_events` (`event_id`, `op`, `payload_json`, `actor`, `created_at`, and `target_event_id` for an undo). Nothing curated is updated in place except `status`, `merged_into` and `retired_at`. Each change to those three fields is mirrored by an event.
+- **Logging.** Every merge, split, alias change, kind change, forget and undo is a row in `lcm_memory_events` (`event_id`, `op`, `payload_json`, `actor`, `created_at`, and `target_event_id` for an undo). Nothing curated is updated in place except four projected fields: `status`, `merged_into`, `retired_at` and a note's `superseded_by`. Each change to them is mirrored by an event in the same transaction, and replaying the log reproduces all four.
+- **One op, one event.** A composite operation (merge, split, undo) writes exactly one event, whose payload records the before and after value of every projected field it changed and the ids of the rows it created.
+- **Kind is derived.** A kind change is an event. The current kind is the latest kind event that has not been undone, else the kind the entity was created with. Every kind comparison uses the current kind.
 - **Undo is an event, and "undone" is derived.**
   - An undo appends an event whose `target_event_id` names the event it reverses.
   - Whether an event is undone is derived from the log; no column on the original event is updated.
-  - **Chained undo.** An undo is refused while any later, not-undone event touches the same entities or aliases. Dependents are undone first, last-in first-out per affected object.
+  - **Chained undo.** An undo is refused while any later event that is not itself an undo, and has not been undone, touches the same entities, aliases or notes (including rows that event created). Undo events never block. Dependents are undone first, last-in first-out per affected object.
+  - **Void, not delete.** Rows created by an event that is later undone are excluded from the resolved view. Aliases among them are also retired.
+  - **Undo order.** An undo first retires the aliases its target created, then restores the ones it retired. Restoring a `platform_id` that another entity now holds is refused; it is never left to the unique index.
+  - **No redo in v1.** Undoing an undo is refused; the operation is run again instead.
 
 ### D5. Automatic merges
 The agent or a background pass acts without asking only in these cases:
@@ -80,7 +85,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 ### D6. The bridge to #1191 (`lcm_entity_keys`)
 - **Shape.** `lcm_entity_keys(subject_key, owner_entity_id, entity_id, method, source_store_ids, created_at, retired_at)`, with `method` ∈ {`alias_match`, `override`}.
   - The key's identity is (`subject_key`, `owner_entity_id`).
-  - **Relation-phrase keys** map per (`subject_key`, owner). Every other key has `owner_entity_id = NULL`.
+  - **Relation-phrase keys** map per (`subject_key`, owner). So do **`user` keys resolved through a source row's verified sender**: two senders' `user:self` are two keys, never one shared row. In a single-user profile, `user` keys resolve to the profile's user entity. Every other key has `owner_entity_id = NULL`.
   - Keys carry the source rows they were resolved from (`source_store_ids`).
 - **It is derived.** It is rebuilt from current aliases, plus override rows that are themselves recorded as events.
 - **Overrides are never global while a key is ambiguous.** An override applies only:
@@ -110,7 +115,9 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
     The match is exact. Entities of kind `other` or `topic` never resolve a key automatically; an override can link them. A namespace added later is unbridged until this table lists it.
   - **Relation-phrase keys** (`person:sister`) resolve only with an owner: the verified sender of the assertion's `source_store_id`, and only when the source statement is marked first person (D3). With no verified sender, or with quoted, reported or second-person phrasing, the key stays unresolved. It is never collapsed into one shared entity.
 - **Subject-key churn.** A re-extraction under a new `extraction_version` may produce a different key for the same subject. The bridge resolves the new key through aliases again.
-  - Override rows are keyed by `subject_key` text, so they survive an `extraction_version` change.
+  - Override rows are keyed by `subject_key` text and carry the source rows they were made for. An override **applies** only while at least one of those rows is still a current source of the key. Otherwise it is dormant: kept, but not applied. So an override survives an `extraction_version` change of the same evidence, but a reused key text never binds unrelated new evidence.
+  - A renamed key with no matching alias stays unresolved.
+  - Source-scoped overrides are recorded as events and applied per source row when a key is read; they are not materialised as key rows.
   - A key that disappears is retired, not deleted.
 - **#1191 is unchanged.** `lcm_assertions` is not altered.
 - **No delivered content changes yet.** Bridge resolution changes no delivered content until E2 passes its gate (invariant 5).
@@ -125,6 +132,8 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 - When AccessContextV1 (`docs/access-context-v1.md`) is active, an entity note, link, alias or key is visible to a principal only if its cited set is **non-empty** and every cited row is visible to that principal.
   - Uncited records are hidden unless an explicit grant exists.
   - An alias with no source rows is visible to the profile owner only.
+  - **Citation kinds.** A citation is either a store row (`store_id`) or a host memory-file revision (`lcm_memory_host_file_revisions.revision_id`, see D10). A file-revision citation counts toward the non-empty cited set. A record citing any file revision is visible to the profile owner only, and every other citation it carries must also be visible.
+  - **Entity visibility.** Entity rows carry no citations of their own. An entity (its canonical-map entry, card and candidate slot) is visible to a principal only when at least one of its own aliases or notes, or those of an entity merged into it, is visible.
 - **Ambiguity is counted after visibility.** Under AccessContextV1, alias and key candidates are filtered by visibility **before** ambiguity is counted. Candidate sets and ambiguity flags therefore never reveal an entity that the principal cannot see.
 - Entity cards apply the same filters.
 - Without AccessContextV1, no entity content is injected automatically. The agent reaches entity content only by calling `lcm_memory`, the same way it reaches `lcm_recall` results today.
@@ -147,6 +156,28 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
   - Enumerate every consumer of the messages table (product, bench, scripts, tests).
   - For each one, either pin an explicit column list, or declare the change with an instrument-hash note for any digest that moves.
   - A test shows those outputs are unchanged, or changed only as declared, once the new columns exist.
+
+### D10. Host memory files (MEMORY.md and USER.md)
+- **Why.** Hermes injects both files into every system prompt. LCM-X reads them for history, removals and entity-card coverage, not for current facts.
+- **Capture.** At session start, and at idle where the engine has an idle point, LCM-X reads the bound profile home's `memories/MEMORY.md` and `memories/USER.md`.
+  - Entries are split the way Hermes's own memory store parses them. The entry, not the line, is the unit.
+  - Each content change becomes one `lcm_memory_host_file_revisions` row: `revision_id`, absolute `path`, `revision_sha`, `content_hash`, `captured_at`, `scope_key`. The entry text itself is kept in the note it creates.
+  - No message rows are written (invariant 5). The files are never written.
+- **Notes.**
+  - An added entry becomes a note with `author = host_memory_file`, cited to its revision.
+  - Authorship is never inferred from the file name or a role: `asserted_by_entity_id` stays empty.
+  - A removed entry supersedes its note, which remains as history.
+  - A removal is a retraction only when it traces to an explicit user forget request (a message row). Otherwise it may become a review-queue candidate.
+- **Trust.** Inside LCM-X delivery, file-derived notes carry the same trust label as other recalled memory, with no elevation. Hermes's own system-prompt copy of these files is outside LCM-X and keeps its host behaviour; this ADR makes no claim about it.
+
+### D11. Forget (E2)
+- **What a forget is.** `lcm_memory forget` writes a `kind = retraction` note. It cites the user's request and names the retracted message rows or note. The note is the only flag.
+- **Hiding.** While the note stands, the retracted rows are hidden from every agent-facing read path. Hiding is limited to rows inside the requester's own visibility, so it never hides another principal's rows. Responses report a count of hidden rows, never their content.
+- **Lossless.** Message rows, summaries, FTS and embeddings are never modified. Undo of the forget restores byte-identical retrieval. Real deletion (purge) is a separate, owner-confirmed operation and never a side effect of forget.
+- **Scope in v1.** A forget targets rows and notes, not a whole entity, so it needs no cutoff rule for future statements. A later statement is new evidence.
+  - Summaries are never rewritten. A delivered summary that spans a forgotten row carries the withdrawal note.
+  - Host memory files (D10) are outside this mechanism. An entry there is removed through Hermes's own memory tool.
+- **Detector links are not forgets.** The query-time retraction detector only changes how `lcm_recall` renders a hit. It never hides anything on any other path.
 
 ## Consequences
 - The bridge needs aliases to exist before it resolves anything. Until E1 and E2 populate them, #1191 keys stay unresolved. That is safe: today's behaviour.
@@ -174,6 +205,12 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
   - "your sister" and reported speech stay unresolved.
 - **Overrides:** a global override on an ambiguous key is refused; a scoped override applies only to its rows.
 - **Bridge churn:** after re-extraction under a new `extraction_version` with a changed subject key, the key resolves through aliases, and override rows survive.
+- **Override applicability:** unchanged key under a new version keeps applying; a renamed key with and without an alias; a disappeared key; reused key text with unrelated evidence leaves the old override dormant.
+- **Owner-scoped `user` keys:** two verified senders each with `user:self` give two keys and two entities.
+- **Chained undo, executable:** undo the second of two chained splits, then the first; both succeed and the resolved view is identical.
+- **One op, one event:** each operation adds exactly one event; replaying the log reproduces the projected fields.
+- **Host files (D10):** a revision with an added entry gives one cited note, visible to the owner only under AccessContextV1. A removed entry supersedes the note and creates no retraction. No message rows are written: the messages-table digest is unchanged.
+- **Forget (D11):** the same fact, present as raw text, inside a summary and as a note, is asked about before and after a forget, including from a new session; hidden on every agent-facing path; undo restores byte-identical retrieval; a principal can never hide another principal's rows.
 - **Byte-identity:** with the flag off and on, and the tool unused, recall output and assembled context are identical across a fixture corpus.
 - **Whole-row consumers (D9):** with the new nullable columns present, every enumerated `SELECT *` consumer's output is unchanged, or changed exactly as declared.
 - **Namespace table (D6):** each namespace resolves only to its listed kind; `event` and `conversation` keys stay unbridged.
