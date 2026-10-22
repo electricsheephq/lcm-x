@@ -7072,7 +7072,7 @@ class LCMEngine(
         if rewound:
             _s, rescan_ignored, rescan_replay = self._build_ingest_replay(
                 messages=messages, n=n, cursor=cursor, only=set(rewound),
-                store_ids=(ignored_original_messages.store_ids if not any(
+                store_ids=(ignored_original_messages.store_ids if self._compiled_ignore_message_patterns and not any(
                     anchor_plan.get(key) for key in ("ws", "relations"))
                     and all(row.get("session_id") == self._session_id for row in anchor_plan.get("carry", ()))
                     and ignored_original_messages.rewrite_overrides == getattr(self, "_host_rewrite_overrides", {}) else None),
@@ -7252,14 +7252,12 @@ class LCMEngine(
         store_ids: Optional[dict[int, int]] = None,
     ) -> tuple[int, list[bool], List[Dict[str, Any]]]:
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
-        class IgnoreDecisions(list):
-            # Reuse requires unchanged rewrite overrides as well as a plan
-            # without rewrite/ancestor-carry/relation changes.
-            store_ids: Optional[dict[int, int]] = None
-            rewrite_overrides: Optional[dict[int, Any]] = None
-
-        ignored_original_messages = IgnoreDecisions([False] * n)
+        ignored_original_messages = [False] * n
         if self._compiled_ignore_message_patterns:
+            class IgnoreDecisions(list):
+                """Carry the full-list map and override snapshot within this ingest only."""
+
+            ignored_original_messages = IgnoreDecisions(ignored_original_messages)
             store_id_scope = self._compress_run.preserve_store_ids()
             ignored_original_messages.store_ids = (
                 self._get_store_id_map_for_messages(messages) if store_ids is None else store_ids

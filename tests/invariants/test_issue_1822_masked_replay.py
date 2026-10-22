@@ -51,7 +51,7 @@ def exercise(seed, root, *, full=False, engine_class=LCMEngine, decisions=True):
             only = {changed} | {idx for idx in range(cursor, len(messages)) if rng.random() < .3}
             expected = build(messages=messages, n=len(messages), cursor=cursor)
             actual = build(messages=messages, n=len(messages), cursor=cursor, only=only,
-                                                  store_ids=expected[1].store_ids)
+                                                  store_ids=getattr(expected[1], "store_ids", None))
             assert actual[0] == expected[0]
             for idx in only:
                 assert (actual[1][idx], actual[2][idx]) == (expected[1][idx], expected[2][idx]), (seed, idx)
