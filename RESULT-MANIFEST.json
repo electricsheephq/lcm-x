@@ -1,0 +1,76 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1860-fix-r1c-20261023-public",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "1860-fix-r1c",
+  "claim_class": "advisory",
+  "created": "2026-10-22T16:01:24Z",
+  "settled": "2026-10-22T16:13:02Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "566c498c0ed8f256946e9aed2352a12ba571580b",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "Prescribed fix-round acceptance; normalized commands and observed outputs in RESULT.md",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "PR1860 fix-round steady status",
+      "metric": "status_p50_ms",
+      "value": 0.2622,
+      "n": 200,
+      "baseline_run": "91a039891afd969f9569897115990fe0c419e034",
+      "source": "SUMMARY.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "SUMMARY.json",
+      "role": "receipt",
+      "sha256": "e6925a63320c5cd48e9237cba5535666d679350f483e35a1a90b8fd99d7ff8cc",
+      "bytes": 45574
+    },
+    {
+      "path": "PROBE-RECORDS.json",
+      "role": "receipt",
+      "sha256": "f28bdff4c6eca6f702c5247a0cee45d4d39d8a5605310ebd358c0386f1eff51c",
+      "bytes": 45506
+    },
+    {
+      "path": "PROBE-TABLE.md",
+      "role": "receipt",
+      "sha256": "d07fb7fc8fc80c41987e38852f6609c3900553fe39478efd602a4b3af2ea584f",
+      "bytes": 740
+    },
+    {
+      "path": "rescore.py",
+      "role": "receipt",
+      "sha256": "31d5fbe0199ac3cff2d2420e632076a508d82341bf31002fdb9749e43b253f9b",
+      "bytes": 1231
+    }
+  ],
+  "rescore": {
+    "command": "python3 rescore.py",
+    "inputs": [
+      "SUMMARY.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "PROBE-RECORDS.json",
+    "PROBE-TABLE.md",
+    "RESULT.md",
+    "SUMMARY.json",
+    "rescore.py"
+  ]
+}
