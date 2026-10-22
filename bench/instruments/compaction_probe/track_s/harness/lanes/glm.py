@@ -28,9 +28,10 @@ def _open(req, timeout, receipt):
     """Retry only transient throttles, preserving the request and terminal error."""
     receipt["throttle_retries"] = 0
     receipt.setdefault("throttle_retries_total", 0)
+    deadline = time.monotonic() + timeout
     for attempt in range(4):
         try:
-            return urllib.request.urlopen(req, timeout=timeout)
+            return urllib.request.urlopen(req, timeout=deadline - time.monotonic())
         except urllib.error.HTTPError as e:
             if e.code != 429:
                 raise
@@ -38,11 +39,13 @@ def _open(req, timeout, receipt):
             e.close()
             e.fp = io.BytesIO(detail)
             e.read = e.fp.read  # preserve the body for the existing terminal handler
-            if attempt == 3 or any(marker in detail.decode(errors="replace").lower()
-                                   for marker in ("usage limit", "quota")):
+            if attempt == 3 or re.search(r"usage[- _]limit|quota", detail.decode(errors="replace"), re.I):
                 raise
             header = (e.headers or {}).get("Retry-After", "").strip()
             delay = min(float(header), 120) if re.fullmatch(r"\d+(?:\.\d+)?", header) else (30, 60, 120)[attempt]
+            if delay >= deadline - time.monotonic() - 1:
+                receipt["throttle_deadline_stop"] = True
+                raise
             receipt["throttle_retries"] += 1
             receipt["throttle_retries_total"] += 1
             seconds = f"{delay:.2f}".rstrip("0").rstrip(".")  # broad brakes also scan digits in fractional waits

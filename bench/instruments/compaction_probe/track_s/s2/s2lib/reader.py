@@ -48,6 +48,7 @@ class GLMReader:
         return (data["choices"][0]["message"].get("content") or ""), data.get("usage")
 
     def ask(self, system, view, turns, replies):
+        retries_before = self.readback.get("throttle_retries_total", 0)
         native = ([{"role": "system", "content": system}] if system else []) + [
             {**{k: m[k] for k in ("role", "tool_call_id", "tool_calls") if k in m},
              "content": m["content"] if isinstance(m.get("content"), str) else json.dumps(m.get("content") or "")}
@@ -60,7 +61,8 @@ class GLMReader:
                 raise
             text, usage = self._post([{"role": "user", "content": flatten(system, view)}] + _convo(turns, replies))
             fmt = "flattened (native rejected: HTTP 400)"
-        return text, {"context_format": fmt, "usage": usage}
+        return text, {"context_format": fmt, "usage": usage,
+                      "throttle_retries": self.readback.get("throttle_retries_total", 0) - retries_before}
 
 class AstraLowReader:
     MODEL, EFFORT = "gpt-6-astra", "low"
@@ -116,7 +118,10 @@ def answer(reader, system, view, batch_prompt, tools_engine=None, schemas=None, 
     def ask(turns, replies):
         reader.request_prompt = flatten(system, view) + "\n" + json.dumps(_convo(turns, replies), ensure_ascii=False)
         try:
-            return reader.ask(system, view, turns, replies)
+            text, info = reader.ask(system, view, turns, replies)
+            if "throttle_retries" in info:
+                info["usage"] = dict(info.get("usage") or {}, throttle_retries=info["throttle_retries"])
+            return text, info
         except Exception as exc:
             meta["reader_calls"].append(dict(prompt_tokens=count_tokens(reader.request_prompt), completion_tokens=0, estimated=True))
             exc.reader_calls = list(meta["reader_calls"])
