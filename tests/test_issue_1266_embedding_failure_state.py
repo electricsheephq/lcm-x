@@ -85,3 +85,14 @@ def test_completed_pass_rearms_warning(tmp_path, monkeypatch, caplog, outcome):
         maintenance.run_incremental_embedding_pass(db, object())
     assert maintenance.incremental_embedding_state(db)[1] == 1
     assert [r.levelno for r in caplog.records] == [logging.WARNING]
+
+
+def test_mixed_pass_with_embedded_rows_still_counts_failure(tmp_path, monkeypatch, caplog):
+    db = tmp_path / "mixed.db"
+    monkeypatch.setattr(maintenance, "_run_pass", lambda *_a: (
+        "summaries=complete:3 chunks=failed", "chunks: provider failed"))
+    with caplog.at_level(logging.DEBUG, logger=maintenance.__name__):
+        for expected_count in (1, 2, 3):
+            maintenance.run_incremental_embedding_pass(db, object())
+            assert maintenance.incremental_embedding_state(db)[1] == expected_count
+    assert [r.levelno for r in caplog.records] == [logging.WARNING, logging.DEBUG, logging.DEBUG]

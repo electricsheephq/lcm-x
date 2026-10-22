@@ -188,3 +188,103 @@ def test_doctor_uses_same_lease_split(tmp_path, monkeypatch, change):
                          (f"$.{field}", value, command._EMBEDDING_BACKFILL_CLAIM_KEY))
     assert "; uncertain 1" in readiness()
     assert "in flight" not in readiness()
+
+
+@pytest.mark.parametrize("corpus", ["summary", "chunk"])
+@pytest.mark.parametrize("owner_state", ["live", "expired", "missing", "owner", "generation"])
+def test_claimed_is_in_flight_even_without_live_owner(tmp_path, monkeypatch, corpus, owner_state):
+    engine, identity = _dispatch_fixture(tmp_path, corpus)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("UPDATE lcm_embedding_backfill_inflight SET state='claimed'")
+        if owner_state == "missing":
+            conn.execute("DELETE FROM metadata WHERE key=?", (command._EMBEDDING_BACKFILL_CLAIM_KEY,))
+        elif owner_state != "live":
+            field, value = {"expired": ("heartbeat_at", time.time() - 601),
+                            "owner": ("owner", "successor"), "generation": ("generation", 2)}[owner_state]
+            conn.execute("UPDATE metadata SET value=json_set(value, ?, ?) WHERE key=?",
+                         (f"$.{field}", value, command._EMBEDDING_BACKFILL_CLAIM_KEY))
+        assert command._embedding_inflight_counts(conn, identity) == (1, 0)
+    index = 0 if corpus == "summary" else 1
+    assert command._embedding_maintenance_status_lines(engine)[index].endswith(" (in flight 1)")
+    if corpus == "summary":
+        remaining = command._embedding_backfill_remaining(engine._store.db_path, identity, 1, 0)
+    else:
+        remaining = command._chunk_backfill_remaining(engine._store.db_path, identity, "conversational", 1, 0)
+    assert remaining[1:] == (1, 0)
+    command._record_embedding_catchup(engine._store.db_path, corpus, identity, 1, operator_retry=1)
+    assert tools._lcm_recall_catchup_reason(engine, FakeProvider(), corpus) == (
+        f"{corpus} semantic index catching up (1 rows not yet embedded)")
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("UPDATE lcm_embedding_profile SET provider='fastembed'")
+    engine._config.embedding_provider = "fastembed"
+    monkeypatch.setattr(tools, "probe_provider_availability", lambda _c: dict(
+        available=True, provider="fastembed", model="model-a"))
+    from hermes_lcm import embedding_maintenance
+    monkeypatch.setattr(embedding_maintenance, "local_model_state", lambda _c: None)
+    readiness = tools._embedding_provider_health_check(engine)["detail"]["readiness"]
+    assert "; in flight 1" in readiness and "uncertain" not in readiness
+
+
+@pytest.mark.parametrize("corpus", ["summary", "chunk"])
+def test_claimed_probe_preserves_all_actionable_rows(tmp_path, corpus):
+    engine = _engine(tmp_path)
+    if corpus == "summary":
+        ids = [str(node) for node in _seed(engine, 6)]
+    else:
+        _seed_messages(engine, _user_msgs(6))
+        from hermes_lcm.db_bootstrap import ensure_chunk_tables
+        with sqlite3.connect(engine._store.db_path) as conn:
+            ensure_chunk_tables(conn)
+        ids = [command.chunk_message(i, "user", "u" * 60, policy="conversational")[0].chunk_id
+               for i in range(1, 7)]
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.row_factory = sqlite3.Row
+        command._ensure_inflight_table(conn)
+        profile = (command._embedding_current_profile if corpus == "summary" else command._chunk_current_profile)(conn)
+        identity = profile["identity_hash"]
+        lease = command._acquire_embedding_backfill_lease(conn, ttl_s=600, heartbeat_s=60)
+        for embedded_id, state in zip(ids, ["claimed", "dispatched", "dispatched", "uncertain", "uncertain"]):
+            conn.execute("INSERT INTO lcm_embedding_backfill_inflight "
+                         "(embedded_id, identity_hash, lease_id, generation, state, request_id, updated_at) "
+                         "VALUES (?, ?, ?, ?, ?, 'probe', ?)",
+                         (embedded_id, identity, lease.lease_id, lease.generation, state, time.time()))
+    if corpus == "summary":
+        counts = command._embedding_backfill_remaining(engine._store.db_path, identity, 6, 0)
+        assert counts == (1, 3, 2)
+    else:
+        counts = command._chunk_backfill_remaining(engine._store.db_path, identity, "conversational", 6, 0)
+        assert counts == (6, 3, 2)
+    remaining, live, uncertain = counts
+    # Both disjoint counts contribute; remote retry rows stay out of ordinary backlog.
+    backlog = remaining + live + uncertain - uncertain
+    assert backlog == remaining + 3
+    assert command._embedding_maintenance_status_lines(engine)[0 if corpus == "summary" else 1].endswith(
+        " (in flight 3, uncertain 2)")
+
+
+@pytest.mark.parametrize("corpus", ["summary", "chunk"])
+@pytest.mark.parametrize("provider_id", ["fastembed", "ollama"])
+def test_recall_reason_fastembed_skips_inflight_query(tmp_path, monkeypatch, corpus, provider_id):
+    engine, identity = _dispatch_fixture(tmp_path, corpus)
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("UPDATE lcm_embedding_profile SET provider=?", (provider_id,))
+        conn.execute("UPDATE lcm_embedding_backfill_inflight SET state='uncertain'")
+    command._record_embedding_catchup(engine._store.db_path, corpus, identity, 3, operator_retry=1)
+    statements = []
+    connect = sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(tools.sqlite3, "connect", traced_connect)
+    provider = SimpleNamespace(model_id="model-a", provider_id=provider_id)
+    expected = f"{corpus} semantic index catching up (3 rows not yet embedded)"
+    if provider_id != "fastembed":
+        target = "chunks" if corpus == "chunk" else "summary"
+        expected += (f"; {corpus} semantic index has 1 rows awaiting /lcm embed backfill "
+                     f"--apply --retry-uncertain --corpus {target}")
+    assert tools._lcm_recall_catchup_reason(engine, provider, corpus) == expected
+    inflight_queries = [sql for sql in statements if "lcm_embedding_backfill_inflight" in sql]
+    assert len(inflight_queries) == (0 if provider_id == "fastembed" else 1)
