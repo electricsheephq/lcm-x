@@ -189,8 +189,12 @@ def harness_agentic(q, client, reader, server, records):
     messages = [{"role": "system", "content": system}, {"role": "user", "content": "Question: " + q.question}]
     result = {"qid": q.qid, "qtype": q.qtype, "status": "ok", "hypothesis": "", "calls": records,
               "trace": [], "tool_calls": 0, "forced_final": None, "finish_reason": None}
+    def retryable(attempt_records):
+        return not any(json.loads(line).get("counted") for c in attempt_records if c.get("mcp_log")
+                       for log in [Path(c["mcp_log"])] if log.exists() for line in log.read_text().splitlines())
     try:
-        message = retry_call(lambda: client.agentic(reader, messages, records, server, readiness_attempts=1), records, result)
+        message = retry_call(lambda: client.agentic(reader, messages, records, server, readiness_attempts=1),
+                             records, result, retryable=retryable)
     except Exception as exc:
         exc.delivery_result = result
         raise

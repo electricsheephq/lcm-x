@@ -264,7 +264,7 @@ def limited(text):
     return any(k in (text or "").lower() for k in USAGE_LIMIT)
 
 
-def retry_call(call, records, receipt):
+def retry_call(call, records, receipt, retryable=None):
     """Retry transport failures only; retain the caller's frozen prompt and receipts."""
     first = len(records)
     for attempt in range(1, 4):
@@ -277,7 +277,7 @@ def retry_call(call, records, receipt):
                 raise
             receipt["attempts"] = attempt
             receipt.setdefault("attempt_errors", []).append(error)
-            if attempt == 3:
+            if attempt == 3 or (retryable is not None and not retryable(records[before:])):
                 raise
             delay = (5, 20)[attempt - 1]
             receipt["retry_backoff_s"] = receipt.get("retry_backoff_s", 0) + delay
