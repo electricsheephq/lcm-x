@@ -50,6 +50,15 @@ try:
             result = command._chunk_backfill_run(config, db, apply=True, limit=100,
                 retry_uncertain=False, policy="conversational", incremental=incremental)
             assert not result["error"] and not result["failed"], result
+        # The older Store has no general content-update API. Exercise the
+        # message trigger through its connection while destination proofs stand.
+        c = engine._store.connection
+        proof_keys = (f"chunk_gapfill_scan:{identity}", f"chunk_policy_revision_through:{identity}")
+        c.executemany("INSERT OR REPLACE INTO metadata VALUES(?, 'rollback-proof')", [(k,) for k in proof_keys])
+        assert c.execute("UPDATE messages SET content='Edited rollback fact.' "
+                         "WHERE store_id=40 AND role='user'").rowcount == 1
+        assert not c.execute("SELECT key FROM metadata WHERE key IN (?,?)", proof_keys).fetchall(), "destination proof"
+        c.commit()
         publish(engine, identity, [40])  # replacement invalidates the newer trigger proof
         # Exercise session deletion after a fresh old-reader open, independently
         # of its long-lived FTS connection during backfill schema setup.
@@ -94,11 +103,21 @@ def test_gapwalk_forward(tmp_path, old_tree, host_root):
 
 
 @pytest.mark.parametrize("reader", ["gapwalk-base", "v0.28.1", PREVIOUS_GA])
-def test_gapwalk_rollback(tmp_path, old_tree, host_root, reader):
+@pytest.mark.parametrize("trigger", ["normal", "abort", "noop"])
+def test_gapwalk_rollback(tmp_path, old_tree, host_root, reader, trigger):
     old = old_tree(reader, {**READERS, "gapwalk-base": BASE,
                             "v0.28.1": "77b2b4f795fb6a4f84c55abf6d0441da4469971e"})
     original = run_old(old, tmp_path, host_root, OLD_CHUNKS, mode="write")
     upgrade(tmp_path / "lcm.db", original["identity"])
+    if trigger != "normal":
+        with sqlite3.connect(tmp_path / "lcm.db") as conn:
+            conn.execute("DROP TRIGGER lcm_chunk_gapfill_message")
+            body = "SELECT RAISE(ABORT, 'message-trigger-sentinel')" if trigger == "abort" else "SELECT 1"
+            conn.execute("CREATE TRIGGER lcm_chunk_gapfill_message AFTER UPDATE OF content ON messages "
+                         f"WHEN NEW.role='user' BEGIN {body}; END")
+        with pytest.raises(AssertionError, match="message-trigger-sentinel|destination proof"):
+            run_old(old, tmp_path, host_root, OLD_CHUNKS)
+        return
     assert run_old(old, tmp_path, host_root, OLD_CHUNKS) == original
     with sqlite3.connect(tmp_path / "lcm.db") as conn:
         before = list(conn.execute("SELECT * FROM messages ORDER BY store_id"))

@@ -3,9 +3,28 @@ import json
 from hermes_lcm.command import CHUNK_POLICY_REVISION, chunk_message
 
 
+def _assert_frozen_eligibility():
+    # This arm intentionally calls live chunking, but its eligibility must stay
+    # at revision 2. Stop the comparison rather than silently move the baseline.
+    assert CHUNK_POLICY_REVISION == 2, "frozen base revision changed"
+    corpus = [("user", "short"), ("assistant", "x"), ("tool", "result"),
+              ("system", "instruction"), (" USER ", "x"), ("user", "\n"),
+              ("assistant", "\t"), ("tool", "\u00a0"), ("user", "\u3000"),
+              ("user", None), ("user", [{"type": "text", "text": "fact"}])]
+    expected = {
+        "conversational": (True, True, False, False, True, False, False, False, False, False, True),
+        "heads": (True, True, True, False, True, False, False, False, False, False, True),
+        "full": (True, True, True, True, True, False, False, False, False, False, True),
+    }
+    for policy, eligibility in expected.items():
+        assert tuple(any(c.char_end > c.char_start for c in chunk_message(i, role, content, policy=policy))
+                     for i, (role, content) in enumerate(corpus, 1)) == eligibility, "frozen base eligibility changed"
+
+
 def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_progress=False,
                         gap_page_size=None, gap_scan_state=None):
     """Scan new territory once; revisit unpublished candidates by id until covered."""
+    _assert_frozen_eligibility()
     low, high = bounds
     scan_key = f"chunk_gapfill_scan:{identity_hash}"
     saved = conn.execute("SELECT value FROM metadata WHERE key = ?", (scan_key,)).fetchone()

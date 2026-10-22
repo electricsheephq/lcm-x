@@ -4641,17 +4641,24 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
                 "AND trim(COALESCE(content, '')) != '' AND NOT EXISTS "
                 "(SELECT 1 FROM lcm_chunk_meta c WHERE c.store_id=m.store_id AND c.identity_hash=?) "
                 "ORDER BY store_id DESC LIMIT ?",
-                (max(low - 1, scan["high"]), top_ceiling, identity_hash, page_size),
+                (max(low - 1, scan["high"]), top_ceiling, identity_hash, min(page_size, limit - reached)),
             ).fetchall()
             for row in rows:
+                reached += 1
                 top_ceiling = row[0]
                 if any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
-                    reached += 1
                     unpublished.append(row[0])
                     candidates.append(row[0])
                     yield row
-                    if reached == limit:
-                        return
+            if reached == limit:
+                # The old walk lies below this boundary, so rescan it naturally;
+                # only unpublished top candidates need explicit replay.
+                gap_scan_state["walk_progress"] = {
+                    "revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
+                    "ceiling": ceiling,
+                    "walk": {"below": top_ceiling, "pending": unpublished},
+                }
+                return
             if len(rows) < page_size:
                 break
     # Fetch each page completely: no SQLite cursor survives a yield to a writer.
@@ -4733,6 +4740,14 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             record(progress, values)
     if not range_complete:
         record_ceiling(pending_complete=True)
+        if not candidates and "pending" not in scan:
+            # Exhausting the row budget proves no coverage below the page.
+            # Retain this empty walk so a new high cannot restart the prefix.
+            gap_scan_state["walk_progress"] = {
+                "revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
+                "ceiling": ceiling,
+                "walk": {"below": page_ceiling, "pending": [*unpublished, *replay]},
+            }
 
 
 def _record_chunk_gapfill_progress(conn, identity_hash, state, progress, values=()):
