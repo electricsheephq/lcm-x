@@ -217,7 +217,7 @@ def test_legacy_integer_trusted_for_default_and_revalidated_once_for_heads(store
     assert scans == []
 
 
-def test_v0281_reader_falls_back_to_full_range_on_json(store: Store):
+def test_v0281_reader_bounds_do_not_trust_json(store: Store):
     add_rows(store, ROWS, {6, 7})
     metadata(store, "chunk_policy_revision", 2)
     certify(store, (6, 7))
@@ -226,3 +226,32 @@ def test_v0281_reader_falls_back_to_full_range_on_json(store: Store):
     source = Path(__file__).with_name("fixtures") / "issue_1543_v0281_gapfill_bounds.py.txt"
     exec(compile(source.read_text(), str(source), "exec"), namespace)
     assert namespace["_chunk_gapfill_bounds"](store[1].connection, store[2].identity_hash, (6, 7), 2) == (6, 7)
+
+
+def test_v0281_reader_gapfill_uses_saved_scan_on_json(store: Store):
+    """JSON falls through bounds parsing; the older scan record still narrows reads."""
+    add_rows(store, ROWS, {1, 3, 5, 6, 7})
+    metadata(store, "chunk_policy_revision", 2)
+    certify(store, (6, 7))
+    conn, identity = store[1].connection, store[2].identity_hash
+    conn.execute("INSERT OR REPLACE INTO metadata VALUES(?, ?)",
+                 (f"chunk_gapfill_scan:{identity}", json.dumps({
+                     "revision": 2, "policy": "conversational", "high": 7, "pending": [2, 4],
+                 })))
+    namespace = dict(vars(command))
+    for filename in ("issue_1543_v0281_gapfill_bounds.py.txt", "issue_1543_v0281_gapfill_rows.py.txt"):
+        source = Path(__file__).with_name("fixtures") / filename
+        exec(compile(source.read_text(), str(source), "exec"), namespace)
+    bounds = namespace["_chunk_gapfill_bounds"](conn, identity, (1, 7), 2)
+    assert bounds == (1, 7)
+    before = list(conn.execute("SELECT * FROM metadata ORDER BY key"))
+    sql = []
+    conn.set_trace_callback(sql.append)
+    try:
+        rows = list(namespace["_chunk_gapfill_rows"](conn, identity, bounds, "conversational", 32))
+    finally:
+        conn.set_trace_callback(None)
+    assert [r[0] for r in rows] == [4, 2]
+    assert any("store_id IN (2,4)" in statement for statement in sql)
+    assert not any("WHERE store_id >= 1 AND store_id <= 7" in statement for statement in sql)
+    assert list(conn.execute("SELECT * FROM metadata ORDER BY key")) == before
