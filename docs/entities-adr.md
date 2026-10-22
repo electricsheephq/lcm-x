@@ -89,7 +89,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
   - Keys carry the source rows they were resolved from (`source_store_ids`).
 - **It is derived.** It is rebuilt from current aliases, plus override rows that are themselves recorded as events.
 - **Overrides are never global while a key is ambiguous.** An override applies only:
-  - (a) when the key has exactly one candidate; or
+  - (a) when the key has exactly one candidate, to all of the key's source rows it cites (a global override); or
   - (b) scoped to the assertion or source rows it disambiguates.
 
   A global override is refused while the key is ambiguous.
@@ -115,16 +115,17 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
     The match is exact. Entities of kind `other` or `topic` never resolve a key automatically; an override can link them. A namespace added later is unbridged until this table lists it.
   - **Relation-phrase keys** (`person:sister`) resolve only with an owner: the verified sender of the assertion's `source_store_id`, and only when the source statement is marked first person (D3). With no verified sender, or with quoted, reported or second-person phrasing, the key stays unresolved. It is never collapsed into one shared entity.
 - **Subject-key churn.** A re-extraction under a new `extraction_version` may produce a different key for the same subject. The bridge resolves the new key through aliases again.
-  - Override rows are keyed by `subject_key` text and carry the source rows they were made for. An override **applies** only while at least one of those rows is still a current source of the key. Otherwise it is dormant: kept, but not applied. So an override survives an `extraction_version` change of the same evidence, but a reused key text never binds unrelated new evidence.
+  - Override rows are keyed by `subject_key` text and carry the source rows they were made for. **An override, global or scoped, binds only the source rows it cites.** New evidence that produces the same key is not bound by it until it is reviewed. The override stays dormant for those rows even while an original source is current. For each cited row, it applies while that row is still a current source of the key, so it survives an `extraction_version` change of the same evidence; a reused key text never binds unrelated new evidence.
   - A renamed key with no matching alias stays unresolved.
   - Source-scoped overrides are recorded as events and applied per source row when a key is read; they are not materialised as key rows.
+  - A global override's key row (`method = override`) carries its cited `source_store_ids` and resolves only assertions whose source row is among them. Other assertions with the same key resolve through aliases, or stay unresolved.
   - A key that disappears is retired, not deleted.
 - **#1191 is unchanged.** `lcm_assertions` is not altered.
 - **No delivered content changes yet.** Bridge resolution changes no delivered content until E2 passes its gate (invariant 5).
 
 ### D7. Tenancy
 - Every entity, alias, note, link, key and event row carries `scope_key`.
-- In v1, `scope_key = 'profile'` for every row: each profile has its own store, and there are no cross-store reads.
+- In v1, `scope_key` is the bound profile identity (the same identity D10 records on file revisions), set on every insert. Normally each profile has its own store. When a configured `database_path` makes one database serve several profile homes, rows from different profiles still never share a `scope_key`. So D3's hard identity, D5(a) attach, D6 keys and every read are per profile, and no read crosses `scope_key`.
 - A future Teams scope is an additive value with an explicit share. It is not a migration.
 
 ### D8. Labels are not permissions (invariant 6)
@@ -133,8 +134,9 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
   - Uncited records are hidden unless an explicit grant exists.
   - An alias with no source rows is visible to the profile owner only.
   - **Citation kinds.** A citation is either a store row (`store_id`) or a host memory-file revision (`lcm_memory_host_file_revisions.revision_id`, see D10). A file-revision citation counts toward the non-empty cited set. A record citing any file revision is visible to the profile owner only, and every other citation it carries must also be visible.
+  - **Forget hiding is a delivery filter, not a visibility change (D11).** Hidden rows still count as visible when D8 evaluates the citations of the retraction note that hides them, so the note and its withdrawal marker stay visible to the forgetting principal.
   - **Entity visibility.** Entity rows carry no citations of their own. An entity (its canonical-map entry, card and candidate slot) is visible to a principal only when at least one of its own aliases or notes, or those of an entity merged into it, is visible.
-- **Ambiguity is counted after visibility.** Under AccessContextV1, alias and key candidates are filtered by visibility **before** ambiguity is counted. Candidate sets and ambiguity flags therefore never reveal an entity that the principal cannot see.
+- **Ambiguity is counted after visibility.** Under AccessContextV1, alias and key candidates are filtered by visibility **before** ambiguity is counted. Stored key rows (D6) are the principal-independent derivation. Resolution and ambiguity for a reader are evaluated at read time over that reader's visible candidates. Candidate sets and ambiguity flags therefore never reveal an entity that the principal cannot see.
 - Entity cards apply the same filters.
 - Without AccessContextV1, no entity content is injected automatically. The agent reaches entity content only by calling `lcm_memory`, the same way it reaches `lcm_recall` results today.
 - Rows without a gateway `sender_source` carry unverified labels.
@@ -177,7 +179,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 - **Flag.** Forget hiding runs only with the entities flag on (`LCM_ENTITIES_ENABLED`, default off). With the flag off, no forget notes are written and nothing is hidden. The default stays off until the E2 measurement reports zero false hides.
 - **What a forget is.** `lcm_memory forget` writes a `kind = retraction` note. It cites the user's request and names the retracted message rows or note. The note is the only flag.
 - **Authorization.** A forget may name only rows and notes visible to the requesting principal. Any other id, foreign or nonexistent, gets the same refusal, writes no note and reports no count.
-- **Hiding.** While the note stands, the retracted rows are hidden from every agent-facing read path. The hide is bound to the requesting principal: it applies only to reads evaluated in that principal's access context. Other principals who can see the same row still see it, until they forget it themselves. Only the principal who forgot a row can undo that forget. A single-user profile is unaffected. Responses report a count of hidden rows, never their content. The fresh tail and the live host transcript are not hidden: LCM-X does not rewrite the live conversation.
+- **Hiding.** While the note stands, the retracted rows are hidden from every agent-facing read path. The hide is bound to the requesting principal: it applies only to reads evaluated in that principal's access context. Other principals who can see the same row still see it, until they forget it themselves. Only the principal who forgot a row can undo that forget. A single-user profile is unaffected. Responses report a count of hidden rows, never their content. The fresh tail and the live host transcript are not hidden: LCM-X does not rewrite the live conversation. Hiding is a delivery filter, not a visibility change (D8): the retraction note and its withdrawal marker stay visible to the forgetting principal.
 - **The request row.** The request row that carries a forget is hidden together with its targets, on the same paths and under the same principal binding, because it usually restates the fact. The retraction note keeps the citation for audit and undo. The fresh tail and live transcript stay excluded, as for the targets.
 - **Lossless.** Message rows, summaries, FTS and embeddings are never modified. Undo of the forget restores byte-identical retrieval. Real deletion (purge) is a separate, owner-confirmed operation and never a side effect of forget.
 - **Rollback.** Readers older than D11 do not honour forgets. A rollback to them makes forgotten rows visible again, because forget is not purge. A user who needs removal on every version uses purge. The rollback test asserts that the older reader opens the store, and the release notes state this boundary.
@@ -189,7 +191,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 ## Consequences
 - The bridge needs aliases to exist before it resolves anything. Until E1 and E2 populate them, #1191 keys stay unresolved. That is safe: today's behaviour.
 - Ambiguity is visible to the agent and on the review queue. That is extra UX work, accepted in exchange for avoiding silent wrong merges.
-- Relation phrases depend on S0 sender capture. In single-user profiles the owner is the user, and the profile's user entity serves.
+- Relation phrases depend on S0 sender capture, in single-user profiles too. There, once S0 verifies the user's rows, the owner is the profile's user entity.
 
 ## Tests this ADR requires (E1/E2 specs carry them)
 
@@ -219,9 +221,12 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 - **Host files (D10):** a revision with an added entry gives one cited note, visible to the owner only under AccessContextV1. A removed entry supersedes the note and creates no retraction. No message rows are written: the messages-table digest is unchanged.
 - **Forget is per principal (D11):** a row is visible to principals A and B. After A forgets it, A's reads hide it and B's reads are unchanged, and B cannot undo A's forget.
 - **Host files under a shared database (D10):** two profiles share one `database_path`. Profile B's reads never see notes derived from profile A's MEMORY.md.
+- **Shared database scope (D7):** two profiles share one `database_path` and see the same verified `platform_id`. Each gets its own entity (no cross-profile attach), and profile B's reads never see A's entities, aliases, notes, keys or events.
 - **Schema compatibility:** `lcm_memory_host_file_revisions`, like every E2 table, follows `docs/process/schema-changes.md`: a forward migration test, a rollback test against the previous release (v0.28.x), and the oldest compatible reader recorded. Readers older than D11 do not honour forgets: the rollback test asserts that the older reader opens the store, and the release notes state that forgotten rows become visible again after a rollback (forget is not purge).
 - **Forget (D11):** the same fact, present as raw text, inside a summary and as a note, is asked about before and after a forget, including from a new session. After the forget, the forgotten raw rows and notes are absent on every agent-facing path, and a summary that spans them is delivered unchanged with the withdrawal note present (marked, not hidden). Undo restores byte-identical retrieval, and a principal can never hide another principal's rows.
 - **Forget request row (D11):** after "forget that my access code is 1234", neither the target nor the request row is retrievable on any agent-facing path. The retraction note keeps the citation, and undo restores both.
+- **Forget keeps its own note visible (D8, D11):** after a forget, the forgetter's spanning summary still carries the withdrawal note, and the retraction note stays visible to that principal although it cites the hidden request row.
+- **Override scope (D6):** an original source stays current, new unrelated evidence reuses the key, and that new evidence stays unbound.
 - **Forget authorization (D11):** a forget naming a foreign row id and one naming a nonexistent id give byte-identical responses: the same refusal, no note written, no count reported.
 - **Host files unreadable (D10):** a permission error and an undecodable file each record no revision, change no notes, never fail session start, and are logged and counted in `lcm_status`.
 - **Byte-identity:** with the flag off and on, and the tool unused, recall output and assembled context are identical across a fixture corpus.
