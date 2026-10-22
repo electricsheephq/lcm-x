@@ -15,7 +15,7 @@ HERE = Path(__file__).resolve().parents[1]
 
 
 @pytest.mark.parametrize("count", [4, 9])
-def test_reader_selected_replays_and_legacy_default(cell, count):
+def test_reader_selected_replays_and_legacy_default(cell, count):  # noqa: F811
     root, _ = cell
     for seed in (1, 2):
         source = root / "lcmx-runs" / ARM / f"seed-{seed}/d{seed}-r1"
@@ -91,9 +91,10 @@ def test_distinct_replay_attempt_paths_and_arguments(producer_env, k, attempt, l
     env = producer_env
     result = produce(env, k, attempt)
     assert result.returncode == 0, result.stderr
-    log = Path(env["OUT"]) / f"decision/logs/s2-{env['ARM']}-{label}.log"
+    root = Path(env["OUT"]) / ("replay-" + label.split("-", 1)[1])
+    log = root / f"decision/logs/s2-{env['ARM']}-{label}.log"
     assert json.loads(log.read_text())["argv"][5] == label
-    commands = (Path(env["OUT"]) / "commands.jsonl").read_text()
+    commands = (root / "commands.jsonl").read_text()
     assert '"--runs", "' + str(k) + '"' in commands
     assert '"--attempt", "' + str(attempt) + '"' in commands
 

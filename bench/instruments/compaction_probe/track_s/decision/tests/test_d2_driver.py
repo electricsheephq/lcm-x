@@ -1,7 +1,6 @@
 """Deterministic producer processes: no credentials, network or summariser."""
 import copy
 import json
-from pathlib import Path
 
 import pytest
 
@@ -19,8 +18,8 @@ class Clock:
 
 
 class Producer:
-    def __init__(self, failures=(), rate=False, low=False):
-        self.failures, self.rate, self.low = failures, rate, low
+    def __init__(self, failures=(), rate=False, low=False, rate_exit=False):
+        self.failures, self.rate, self.low, self.rate_exit = failures, rate, low, rate_exit
         self.active, self.maximum, self.started = set(), 0, []
 
     def __call__(self, row, attempt, path):
@@ -44,7 +43,7 @@ class Producer:
                 if not done:
                     owner.active.remove(row["arm"])
                     done = True
-                return 0
+                return 3 if owner.rate_exit else 0
 
             def terminate(self):
                 nonlocal ticks
@@ -130,8 +129,9 @@ def test_no_second_replacement_for_one_slot(tmp_path):
     assert all(len(r["attempts"]) <= 2 for r in data["rows"])
 
 
-def test_first_rate_marker_stops_and_never_replaces(tmp_path):
-    result, data, producer = run(tmp_path, Producer(rate=True))
+@pytest.mark.parametrize("exit_only", [False, True])
+def test_first_rate_marker_stops_and_never_replaces(tmp_path, exit_only):
+    result, data, producer = run(tmp_path, Producer(rate=not exit_only, rate_exit=exit_only))
     assert result["raw_verdict"] == "INCONCLUSIVE"
     assert data["stop_reason"] == "rate_limited"
     assert len(producer.started) <= 2
