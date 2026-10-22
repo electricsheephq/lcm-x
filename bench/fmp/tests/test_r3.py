@@ -182,7 +182,7 @@ def test_regression_overhead_label_is_honest(tmp_path):
 @pytest.mark.parametrize("qtype", ["temporal-reasoning", "2", "multi-session"])
 def test_regression_date_metadata_on_delivery(tmp_path, qtype):
     q = SimpleNamespace(qid="synthetic", qtype=qtype, question="Q?", question_date="2025-01-01")
-    fake = SimpleNamespace(agentic=lambda *a: {"content": "x"})
+    fake = SimpleNamespace(agentic=lambda *a, **kw: {"content": "x"})
     result = delivery.answer(q, "agentic", fake, models.CODEX_DEFAULT_READER, records=[])
     assert result["wall_date_visible"] is True
     assert result["temporal_question"] is (qtype in ("temporal-reasoning", "2"))

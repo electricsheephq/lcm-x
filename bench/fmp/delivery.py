@@ -190,14 +190,14 @@ def harness_agentic(q, client, reader, server, records):
     result = {"qid": q.qid, "qtype": q.qtype, "status": "ok", "hypothesis": "", "calls": records,
               "trace": [], "tool_calls": 0, "forced_final": None, "finish_reason": None}
     try:
-        message = retry_call(lambda: client.agentic(reader, messages, records, server), records, result)
+        message = retry_call(lambda: client.agentic(reader, messages, records, server, readiness_attempts=1), records, result)
     except Exception as exc:
         exc.delivery_result = result
         raise
     finally:
         logs = [Path(c["mcp_log"]) for c in records if c.get("mcp_log")]
-        if logs and logs[-1].exists():
-            result["trace"] = [json.loads(line) for line in logs[-1].read_text().splitlines()]
+        result["trace"] = [{**json.loads(line), **({"attempt": i} if len(logs) > 1 else {})}
+                           for i, log in enumerate(logs, 1) if log.exists() for line in log.read_text().splitlines()]
         result["tool_calls"] = sum(bool(t.get("counted")) for t in result["trace"])
         result["forced_final"] = "tool_calls" if any(t.get("counted") is False for t in result["trace"]) else None
     if any(t.get("fatal") == "DeliveryMismatch" for t in result["trace"]):

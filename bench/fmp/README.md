@@ -37,6 +37,14 @@ keep their existing output shape. Quota and usage-limit stops are never retried.
 `check-arms` fails closed with a distinct errored/not-run row reason, even when
 those rows retain valid delivery receipts.
 
+Recovered transport attempts stay in the audit records with `retried: true`; scoring
+and tokens-per-question ignore those superseded attempts. Retry backoff is recorded
+per row and excluded from latency percentiles. Per-call `attempts` counts reset for
+each model call. Agentic readiness and transport retries share a three-send cap.
+`check-arms` fails only on `error` and `not_run` statuses; `tool_violation` and
+`budget_exceeded` are measurement outcomes, excluded from both paired arms by scoring.
+Every non-ok status is reported per arm in `non_ok_statuses` when present.
+
 `glm:<model>` uses the z.ai Coding Plan subscription through the isolated Claude Code runner
 at `api.z.ai`, with low thinking and no metered API charge. The operator exports `GLM_API_KEY`
 from their own secret store; the harness reads only that environment variable and passes it only

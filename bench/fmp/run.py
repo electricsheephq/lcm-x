@@ -425,6 +425,8 @@ def check_arms(runs, output=None):
                     for status in ("error", "not_run")]
         failure_reason = "; ".join(f"{len(qids)} answer rows {'errored' if status == 'error' else 'not run'}: " +
                                    ", ".join(qids) for status, qids in failures if qids)
+        non_ok = {s: sum(r.get("status") == s for r in by_id.values())
+                  for s in sorted({r["status"] for r in by_id.values() if r.get("status", "ok") != "ok"})}
         arm = {("plain", "role"): "A0", ("plain", "speaker"): "A1"}.get(mode)
         label_ok = (counts["role_lines"] > 0 and counts["speaker_lines"] == 0 if arm == "A0" else
                     counts["speaker_lines"] > 0 and counts["role_lines"] == 0 if arm == "A1" else False)
@@ -432,6 +434,7 @@ def check_arms(runs, output=None):
             "label_check": "unavailable" if counts["missing_labels"] else "pass" if label_ok else "fail",
             "reason": failure_reason or ("label check unavailable: answer rows lack valid evidence_labels/evidence_sha256" if counts["missing_labels"] else None),
             **({"errored_rows": sum(len(qids) for _, qids in failures)} if failure_reason else {}),
+            **({"non_ok_statuses": non_ok} if non_ok else {}),
             "qid_count": len(by_id), "duplicate_qids": len(rows) - len(by_id),
             "manifest_qids_match": set(by_id) == set(manifest.get("question_ids", [])),
             "qid_set_sha256": sha(json.dumps(sorted(by_id)).encode()),
