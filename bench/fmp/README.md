@@ -169,6 +169,7 @@ role/speaker counts from answer-row `evidence_labels` and `evidence_sha256` rece
 `evidence_sha256` is an audit receipt, not evidence verification: check-arms checks
 its format without recomputing it (the rendered prompt is not retained).
 It also compares recorded reader specs (harness, model and effort), harness settings,
+harness commit/tree and prompt hashes,
 config, summary mode and store generation, delivery unit/budget, reasoning, token
 limits and tool budgets. Missing-versus-present fields differ; each mismatch is named.
 The A0/A1 `hit_label` switch is allowed in either arm order.

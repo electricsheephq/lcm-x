@@ -468,7 +468,8 @@ def check_arms(runs, output=None):
         indexed.append(hits)
     # run() records the complete reader spec (harness/model/effort), settings and
     # summary-store identity. A0/A1 vary only hit_label; keep that switch allowed.
-    configuration_keys = ("reader", "harness", "config", "summaries", "store_generation",
+    configuration_keys = ("reader", "harness", "harness_commit", "harness_tree_sha256", "prompts_sha256",
+                          "config", "summaries", "store_generation",
                           "delivery_unit", "delivery_budget", "reasoning", "max_tokens", "tool_budget")
     mismatches = [key for key in configuration_keys if
                   (key in manifests[0]) != (key in manifests[1]) or

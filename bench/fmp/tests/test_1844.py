@@ -55,6 +55,8 @@ def test_legacy_and_new_scores_identical_with_safe_adjudication(tmp_path):
 
 
 CONFIG = {"reader": models.CODEX_DEFAULT_READER, "harness": {"versions": {"codex": "fixture"}},
+          "harness_commit": "synthetic-harness", "harness_tree_sha256": "a" * 64,
+          "prompts_sha256": {"delivery.py": "b" * 64},
           "config": "local", "summaries": "none", "store_generation": "local-none-synthetic",
           "delivery_unit": "hits", "delivery_budget": None, "reasoning": {"effort": "high"},
           "max_tokens": {"reader": 32000}, "tool_budget": {"calls": 0, "input_tokens": 200000}}
@@ -72,6 +74,8 @@ CONFIG = {"reader": models.CODEX_DEFAULT_READER, "harness": {"versions": {"codex
     ("reasoning", {"effort": "low"}), ("max_tokens", {"reader": 16000}),
     ("tool_budget", {"calls": 0, "input_tokens": 100000}),
     ("store_generation", None),
+    ("harness_commit", "different-harness"), ("harness_tree_sha256", "c" * 64),
+    ("prompts_sha256", {"delivery.py": "d" * 64}),
 ])
 def test_check_arms_config_mismatch(tmp_path, key, value, reverse):
     paths = [make_answers(tmp_path, "A0", "role"), make_answers(tmp_path, "A1")]
