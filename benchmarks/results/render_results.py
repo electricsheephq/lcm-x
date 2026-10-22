@@ -1,6 +1,8 @@
 """Render the public results snapshot using only the standard library."""
 
+import argparse
 import json
+import re
 from pathlib import Path
 
 
@@ -64,6 +66,39 @@ def render_readme_results(data):
     )
 
 
+def render_highlights(data):
+    """Render the README and release-note showcase from the public snapshot."""
+    first = shared_metadata(reported_entries(data))
+    entries = sorted(
+        reported_entries(data),
+        key=lambda entry: int(placement(data, entry["benchmark"]).split()[0][:-2]),
+    )
+    lines = [
+        "<!-- results-highlights:start -->",
+        f'**Benchmark highlights** ([OmniMemEval]({first["source_url"]}), {first["claim_class"]})',
+        "",
+        "| Benchmark | LCM-X | Placement |",
+        "| --- | ---: | --- |",
+    ]
+    for entry in entries:
+        lines.append(
+            f'| {entry["benchmark"]} | {entry["value"]:.2f} | '
+            f'[{placement(data, entry["benchmark"])}]({entry["source_url"]}#result-summary) |'
+        )
+    for entry in data["entries"]:
+        if entry["status"] == "submitted":
+            lines.append(
+                f'| {entry["benchmark"]} | {entry["value"]:.2f} | '
+                f'[in upstream review]({entry["source_url"]}) |'
+            )
+    lines += [
+        "",
+        "Configuration, evidence and disclosures: [benchmarks/RESULTS.md](benchmarks/RESULTS.md).",
+        "<!-- results-highlights:end -->",
+    ]
+    return "\n".join(lines)
+
+
 def render_results(data):
     entries = reported_entries(data)
     first = shared_metadata(entries)
@@ -116,4 +151,37 @@ def render_results(data):
 
 
 if __name__ == "__main__":
-    PAGE_PATH.write_text(render_results(json.loads(DATA_PATH.read_text(encoding="utf-8"))), encoding="utf-8")
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--release-notes", action="store_true")
+    args = parser.parse_args()
+    data = json.loads(DATA_PATH.read_text(encoding="utf-8"))
+    block = render_highlights(data)
+    if args.release_notes:
+        print("\n".join(block.splitlines()[1:-1]))
+    else:
+        PAGE_PATH.write_text(render_results(data), encoding="utf-8")
+        root = DATA_PATH.parents[2]
+        readme_path = root / "README.md"
+        readme = readme_path.read_text(encoding="utf-8")
+        if "<!-- results-highlights:start -->" in readme:
+            readme = re.sub(
+                r"<!-- results-highlights:start -->.*?<!-- results-highlights:end -->",
+                lambda match: block, readme, flags=re.DOTALL,
+            )
+        else:
+            tagline = "> Bounded context, unbounded memory. Nothing is ever lost."
+            readme = readme.replace(tagline + "\n", tagline + "\n\n" + block + "\n", 1)
+        readme_path.write_text(readme, encoding="utf-8")
+        plugin_path = root / "plugin.yaml"
+        plugin = plugin_path.read_text(encoding="utf-8")
+        placements = ", ".join(
+            f'{entry["benchmark"]} {placement(data, entry["benchmark"])}'
+            for entry in strongest_entries(data)
+        )
+        def description(match):
+            sentence = json.loads(match[1]).split(" OmniMemEval:", 1)[0]
+            return "description: " + json.dumps(
+                f"{sentence} OmniMemEval: {placements}.", ensure_ascii=False,
+            )
+        plugin = re.sub(r'^description: (".*")$', description, plugin, flags=re.MULTILINE)
+        plugin_path.write_text(plugin, encoding="utf-8")
