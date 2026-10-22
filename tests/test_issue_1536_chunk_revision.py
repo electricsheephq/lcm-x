@@ -78,6 +78,12 @@ def metadata(store: Store, key: str, value: int | None = None) -> str | None:
     return None if row is None else str(row[0])
 
 
+def coverage_through(store: Store) -> int | None:
+    value = metadata(store, "chunk_policy_revision_through")
+    decoded = json.loads(value) if value is not None else None
+    return decoded["through"] if isinstance(decoded, dict) else decoded
+
+
 def run(store: Store, *, limit: int = 32, incremental: bool = True) -> None:
     config, vectors, _, _ = store
     before = list(vectors.connection.execute("SELECT * FROM messages ORDER BY store_id"))
@@ -110,7 +116,7 @@ def test_completed_marker_repairs_rollback_and_already_affected_store(store: Sto
     assert counts(store) == {1: 1, 2: 1, 3: 1, 4: 1, 5: 1}
     assert store[3] == ["I work Fridays."]
     assert metadata(store, "chunk_policy_revision") == "2"
-    assert metadata(store, "chunk_policy_revision_through") == "5"
+    assert coverage_through(store) == 5
     run(store)
     assert store[3] == ["I work Fridays."]
 
@@ -141,14 +147,14 @@ def test_mid_fill_skip_does_not_hide_new_rollback_rows(store: Store, scoped_skip
         run(store, limit=1)
     assert counts(store) == {1: 1, 2: 1, 3: 1, 5: 1, 6: 1, 7: 1}
     assert store[3] == ["My cat is grey.", SHORT]
-    assert metadata(store, "chunk_policy_revision_through") == "7"
+    assert coverage_through(store) == 7
 
 
 def test_legacy_marker_with_full_coverage_is_revalidated_once(store: Store, monkeypatch: pytest.MonkeyPatch) -> None:
     add_rows(store, [(1, "user", LONG), (2, "user", SHORT), (3, "assistant", LONG)], {1, 2, 3})
     metadata(store, "chunk_policy_revision", 2)
     run(store)
-    assert metadata(store, "chunk_policy_revision_through") == "3"
+    assert coverage_through(store) == 3
 
     def unexpected(*args: Any, **kwargs: Any) -> None:
         pytest.fail("steady coverage must not repeat gap-fill")
@@ -165,18 +171,18 @@ def test_unpublished_gaps_do_not_advance_coverage_bound(store: Store) -> None:
     metadata(store, "chunk_policy_revision_through", 1)
     run(store, limit=1)
     assert counts(store) == {1: 1, 3: 1, 4: 1}
-    assert metadata(store, "chunk_policy_revision_through") == "1"
+    assert coverage_through(store) == 1
     for _ in range(3):
         run(store, limit=1)
     assert counts(store) == {1: 1, 2: 1, 3: 1, 4: 1}
-    assert metadata(store, "chunk_policy_revision_through") == "4"
+    assert coverage_through(store) == 4
 
 
 def test_full_backfill_stamps_coverage_bound(store: Store) -> None:
     add_rows(store, [(1, "user", LONG), (2, "user", SHORT), (3, "assistant", LONG)], {1, 3})
     run(store, incremental=False)
     assert counts(store) == {1: 1, 2: 1, 3: 1}
-    assert metadata(store, "chunk_policy_revision_through") == "3"
+    assert coverage_through(store) == 3
 
 
 @pytest.mark.parametrize("kind", ["whitespace", "heads", "provider"])

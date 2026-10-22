@@ -7,7 +7,7 @@ import pytest
 
 from tests.test_issue_1536_chunk_revision import (
     LONG, SHORT, Store, add_rows, chunking, command, counts, metadata,
-    store,  # noqa: F401 -- shared offline fake Ollama fixture
+    store as store,  # shared offline fake Ollama fixture
 )
 
 ROWS = [(1, "user", LONG), (2, "user", SHORT), (3, "assistant", LONG),
@@ -142,30 +142,53 @@ def test_repaired_steady_state_does_not_scan(store: Store, monkeypatch):
     assert_status(store, "conversational", "0")
 
 
-def test_own_history_walk_scans_at_most_one_walked_band(store: Store, monkeypatch):
+def test_own_history_walk_scans_at_most_two_bounded_bands(store: Store, monkeypatch):
     add_rows(store, [(i, "user", LONG) for i in range(1, 18)], {16, 17})
     metadata(store, "chunk_policy_revision", 2)
     certify(store, (16, 17))
     gapfill = command._chunk_gapfill_rows
     bands = []
 
+    class CountedConnection:
+        def __init__(self, conn, visited):
+            self.conn = conn
+            conn.create_function("coverage_band_visit", 1, lambda i: visited.append(i) or 1)
+
+        def execute(self, sql, parameters=()):
+            if "SELECT store_id, role, content FROM messages AS m " in sql:
+                sql = sql.replace("AND NOT EXISTS", "AND coverage_band_visit(m.store_id) AND NOT EXISTS")
+            return self.conn.execute(sql, parameters)
+
+        def __getattr__(self, name):
+            return getattr(self.conn, name)
+
     def counted(*args, **kwargs):
-        bands.append(args[2])
-        yield from gapfill(*args, **kwargs)
+        visited = []
+        bands.append((kwargs.get("record_progress", False), args[2], visited))
+        yield from gapfill(CountedConnection(args[0], visited), *args[1:], **kwargs)
 
     monkeypatch.setattr(command, "_chunk_gapfill_rows", counted)
     monkeypatch.setattr(command, "_CHUNK_HISTORY_SCAN_MESSAGES", 4)
     previous_low = 16
     previous_walk = 0
+    saw_two = False
     for _ in range(6):
         bands.clear()
         run(store, limit=4)
-        assert len(bands) <= 1
-        if bands:
-            assert bands == [(previous_low, previous_low + previous_walk - 1)]
-            assert bands[0][1] - bands[0][0] + 1 <= 4
+        assert len(bands) <= 2
         low = command._chunk_cursor(store[1].connection, store[2].identity_hash)[0]
+        assert len({writable for writable, _, _ in bands}) == len(bands)
+        saw_two |= len(bands) == 2
+        for writable, band, visited in bands:
+            expected = ((previous_low, previous_low + previous_walk - 1) if writable
+                        else (low, previous_low - 1))
+            assert band == expected
+            assert band[1] - band[0] + 1 <= 4
+            assert len(visited) <= band[1] - band[0] + 1
+            assert all(band[0] <= i <= band[1] for i in visited)
+        print("COVERAGE_BANDS " + json.dumps(bands))
         previous_walk, previous_low = previous_low - low, low
+    assert saw_two
     assert counts(store) == dict.fromkeys(range(1, 18), 1)
     assert marker(store) == {"from": 1, "through": 17, "policy": "conversational"}
 
@@ -179,13 +202,14 @@ def test_legacy_integer_trusted_for_default_and_revalidated_once_for_heads(store
     scans = []
 
     def counted(*args, **kwargs):
-        scans.append(args[2])
+        if kwargs.get("record_progress"):
+            scans.append(args[2])
         yield from gapfill(*args, **kwargs)
 
     monkeypatch.setattr(command, "_chunk_gapfill_rows", counted)
     for _ in range(3):
         run(store, policy=policy)
-    assert scans == ([(1, 3), (1, 3)] if policy == "heads" else [])
+    assert scans == ([(1, 3), (2, 3)] if policy == "heads" else [])
     assert set(counts(store)) == ({1, 2, 3} if policy == "heads" else {1, 3})
     assert marker(store) == {"from": 1, "through": 3, "policy": policy}
     scans.clear()

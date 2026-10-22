@@ -158,7 +158,10 @@ def put(conn, identity, key, value):
 
 def get(conn, identity, key):
     row = conn.execute("SELECT value FROM metadata WHERE key=?", (f"{key}:{identity}",)).fetchone()
-    return json.loads(row[0]) if row else None
+    value = json.loads(row[0]) if row else None
+    if key == "chunk_policy_revision_through" and isinstance(value, dict):
+        return value["through"]
+    return value
 
 
 def scan_record(conn, identity, high, policy="conversational", **kwargs):
