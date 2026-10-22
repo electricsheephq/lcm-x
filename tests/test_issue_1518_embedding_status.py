@@ -215,7 +215,7 @@ def test_claimed_is_in_flight_even_without_live_owner(tmp_path, monkeypatch, cor
     assert tools._lcm_recall_catchup_reason(engine, FakeProvider(), corpus) == (
         f"{corpus} semantic index catching up (1 rows not yet embedded)")
     if corpus == "chunk":
-        _seed(engine, 0)  # Doctor reads summary coverage as well as chunk coverage.
+        return  # Doctor readiness reports summary coverage only.
     with sqlite3.connect(engine._store.db_path) as conn:
         conn.execute("UPDATE lcm_embedding_profile SET provider='fastembed'")
     engine._config.embedding_provider = "fastembed"
