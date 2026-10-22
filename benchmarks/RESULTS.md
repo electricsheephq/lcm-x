@@ -21,6 +21,7 @@ Harness: [`162640314863db64b5af62138b5b81776516d1ff`](https://github.com/electri
 ## Disclosures
 
 The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed.
+BEAM 10M (submitted, not yet accepted): one run of 200 questions, so no run-to-run variance. Conversation 7 was ingested with the null-time-anchor fix (harness `282be0b8`). Answer and judge calls went through OpenRouter, with the same model-receipt limitation as above.
 
-Not yet run: BEAM 10M.
+Submitted upstream, pending review: BEAM 10M nugget score 63.32 ([upstream review](https://github.com/MemTensor/OmniMemEval/pull/18) · [Evidence](https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-beam10m-results-20261022)); 2026-10-22 run, LCM-X v0.28.0, harness `cd955c46`.
 In review: our Agent Memory Leaderboard Cycle 2 entry; the board publishes its own results.

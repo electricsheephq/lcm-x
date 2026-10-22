@@ -67,6 +67,9 @@ def render_readme_results(data):
 def render_results(data):
     entries = reported_entries(data)
     first = shared_metadata(entries)
+    not_run = [entry["benchmark"] for entry in data["entries"] if entry["status"] == "not_run"]
+    # A submitted entry carries its own run metadata; it joins the table only once upstream accepts it.
+    submitted = [entry for entry in data["entries"] if entry["status"] == "submitted"]
     lines = [
         "# Public results",
         "",
@@ -93,11 +96,15 @@ def render_results(data):
         "",
         "## Disclosures",
         "",
-        *dict.fromkeys(entry["disclosures"] for entry in entries),
+        *dict.fromkeys(entry["disclosures"] for entry in entries + submitted),
         "",
-        "Not yet run: " + ", ".join(
-            entry["benchmark"] for entry in data["entries"] if entry["status"] == "not_run"
-        ) + ".",
+        *(["Not yet run: " + ", ".join(not_run) + "."] if not_run else []),
+        *(
+            f'Submitted upstream, pending review: {entry["benchmark"]} {entry["metric"]} {entry["value"]:.2f} '
+            f'([upstream review]({entry["source_url"]}) · [Evidence]({entry["evidence_url"]})); '
+            f'{entry["run_date"]} run, LCM-X {entry["lcmx_version"]}, harness `{entry["harness_commit"][:8]}`.'
+            for entry in submitted
+        ),
         f'In review: our {data["in_review"]["board"]} entry; the board publishes its own results.',
         "",
     ]

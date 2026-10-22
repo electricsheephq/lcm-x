@@ -36,3 +36,7 @@ and judge identity + full prompts publish with every number. This is the same pr
 cross-model code review, applied to scoring — same-family judging carries a measured
 leniency bias, and it is exactly the kind of silent config choice the disclosure standard
 exists to surface.
+
+Third-party board rows are the one exception. They use the board's fixed reader and judge for every
+backend, so the score stays comparable on that board. A same-family pair there is disclosed in the
+row's caveats and the row is not rescored; a cross-family rescore is a separate Tier F row.

@@ -241,20 +241,20 @@
       "board": "OmniMemEval",
       "benchmark": "BEAM 10M",
       "metric": "nugget score",
-      "value": null,
-      "status": "not_run",
-      "lcmx_version": "v0.28.0-rc1",
-      "executable_identity": "executable code identical to v0.28.0",
+      "value": 63.32,
+      "status": "submitted",
+      "lcmx_version": "v0.28.0",
+      "executable_identity": "v0.28.0 release",
       "config": {
         "embeddings": "local fastembed BAAI/bge-small-en-v1.5",
         "top_k": 20
       },
-      "run_date": "2026-10-18",
-      "harness_commit": "162640314863db64b5af62138b5b81776516d1ff",
-      "source_url": "https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md",
-      "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-results-20261018",
-      "claim_class": "contributor-run, accepted upstream",
-      "disclosures": "The template requests direct OpenAI dated models; these runs requested those models via OpenRouter, whose answer receipts resolve to `openai/gpt-4.1-mini`. The receipts establish the reported model identifier and token usage, but do not establish the exact dated revision, equivalence to a direct OpenAI run, or that the model differed."
+      "run_date": "2026-10-22",
+      "harness_commit": "cd955c46a40a5d7f386cdfaec711ef8c966ff97d",
+      "source_url": "https://github.com/MemTensor/OmniMemEval/pull/18",
+      "evidence_url": "https://github.com/electricsheephq/OmniMemEval/releases/tag/lcmx-v0.28.0-beam10m-results-20261022",
+      "claim_class": "contributor-run, submitted upstream",
+      "disclosures": "BEAM 10M (submitted, not yet accepted): one run of 200 questions, so no run-to-run variance. Conversation 7 was ingested with the null-time-anchor fix (harness `282be0b8`). Answer and judge calls went through OpenRouter, with the same model-receipt limitation as above."
     },
     {
       "board": "OmniMemEval",
