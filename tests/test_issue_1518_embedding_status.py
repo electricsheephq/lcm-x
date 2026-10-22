@@ -44,6 +44,7 @@ def test_abandoned_dispatch_recovers_as_uncertain(tmp_path, monkeypatch):
     engine = _engine(tmp_path)
     ids = _seed(engine, 1)
     with sqlite3.connect(engine._store.db_path) as conn:
+        conn.row_factory = sqlite3.Row
         command._ensure_inflight_table(conn)
         identity = command._embedding_current_profile(conn)["identity_hash"]
         conn.execute("INSERT INTO lcm_embedding_backfill_inflight "
