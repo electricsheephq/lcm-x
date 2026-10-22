@@ -188,7 +188,9 @@ def find(d, k):
 
 def read(args):
     arm = args.arm
-    runs = [(n, 1) for n in args.seeds]
+    attempt = getattr(args, "attempt", 1)
+    runs = [(n, k if attempt == 1 else f"{k}-a{attempt}") for n in args.seeds
+            for k in (getattr(args, "runs", None) or [1])]
     out = {"per_run": {}, "pooled": {}}
     for n, r in runs:
         out["per_run"][f"{arm}|d{n}-r{r}"] = run_metrics(args.run_root, args.material, arm, n, r)
@@ -228,6 +230,8 @@ def main(argv=None):
     ap.add_argument("--material", type=Path, required=True, help="Track S material directory")
     ap.add_argument("--arm", default="LCMX-fleet-rc3")
     ap.add_argument("--seeds", type=int, nargs="+", default=[1, 2, 3])
+    ap.add_argument("--runs", type=int, nargs="+", choices=range(1, 10), help="replay indices (default: 1)")
+    ap.add_argument("--attempt", type=int, default=1)
     ap.add_argument("--json", type=Path, required=True, metavar="OUT")
     ap.add_argument("--facts-floor", type=float, default=0.583)
     ap.add_argument("--leaf-chunk-tokens", type=int, default=24000)

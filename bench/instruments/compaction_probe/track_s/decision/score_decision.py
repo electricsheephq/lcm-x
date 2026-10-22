@@ -50,8 +50,9 @@ def runs(n: int, args):
                 if rdir.is_dir():
                     yield arm, rdir.name, rdir, cps
         return
-    for k in (1, 2):
-        r = f"d{n}-r{k}"
+    for k in (getattr(args, "runs", None) or (1, 2)):
+        attempt = getattr(args, "attempt", 1)
+        r = f"d{n}-r{k}" + (f"-a{attempt}" if attempt != 1 else "")
         for arm in (args.arms or ["LCMX-fleet", "LCMX-fleet-v2"]):
             if arm.startswith("LCMX") and not arm.endswith("-open"):
                 yield arm, r, args.run_root / arm / s / r, {c: f"cp-{c}" for c in args.checkpoints}
@@ -73,6 +74,8 @@ def main():
     ap.add_argument("--out", type=Path, default=Path(os.environ["TRACK_S_OUT"]) / "decision" if os.environ.get("TRACK_S_OUT") else None)
     ap.add_argument("--arms", nargs="+", help="score only these arms")
     ap.add_argument("--seeds", type=int, nargs="+", default=None)
+    ap.add_argument("--runs", type=int, nargs="+", choices=range(1, 10), help="replay indices (v3; default: 1,2)")
+    ap.add_argument("--attempt", type=int, default=1)
     ap.add_argument("--checkpoints", nargs="+", default=None, help="v3 rows or v4 ids/lifecycle")
     ap.add_argument("--expected-product-sha", help="expected LCM-X code pin for deep scoring")
     ap.add_argument("--expected-host-sha", help="expected Hermes code pin for deep scoring")
