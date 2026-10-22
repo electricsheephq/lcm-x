@@ -297,11 +297,11 @@ Expected signals:
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm-x:hermes-lcm` on hosts that support plugin skills
 
-On the `main` line, output with both opt-in flags enabled is:
+On the `main` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.28.1 (15 tools)
+  ✓ hermes-lcm-x v0.28.1 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -586,6 +586,7 @@ until their backing flag is on in the loaded process config:
 - `lcm_compute`, `lcm_compile_evidence`, and `lcm_evidence_pack` are bounded,
   provider-neutral operations over caller-supplied exact refs. Calling them does
   not enable a store, run an extractor, or activate an answering model.
+- `lcm_memory` is advertised only when `LCM_ENTITIES_ENABLED=1`; lookup/list read existing messages and optional assertion facts.
 - `lcm_query_state` is advertised only when `LCM_ASSERTIONS_ENABLED=true`
   creates/binds the rebuildable assertion sidecar.
 - `lcm_retrieve` is advertised only when
@@ -597,10 +598,11 @@ until their backing flag is on in the loaded process config:
 flag is on, and refuses direct calls to it. A host calling a cached dormant
 schema still receives the handler's existing `status: disabled` response.
 Restart after changing the loaded flags. `plugin.yaml` continues to declare
-all 15 tools for manifest checks.
+all 16 tools for manifest checks.
 
 | Variable | Default | Use |
 |----------|---------|-----|
+| `LCM_ENTITIES_ENABLED` | `false` | Expose read-only `lcm_memory lookup/list`; no new tables, writes or model calls. Restart after changing the flag. |
 | `LCM_ASSERTIONS_ENABLED` | `false` | Create and bind the same-DB assertion sidecar so `lcm_query_state` can return typed, source-cited state. This alone performs no extraction or backfill. |
 | `LCM_ASSERTION_EXTRACTION_ENABLED` | `false` | With assertions enabled, run bounded structured extraction over exact persisted rows before compaction. This may send source text to the configured extraction/summary model. |
 | `LCM_ASSERTION_EXTRACTION_MODEL` | empty | Extraction-model override; otherwise uses `LCM_EXTRACTION_MODEL`, then the summary model. |

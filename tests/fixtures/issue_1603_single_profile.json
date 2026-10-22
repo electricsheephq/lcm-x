@@ -134,7 +134,8 @@
     "LCM_TEMPORAL_ROLLUPS_ENABLED": "true",
     "LCM_THRESHOLD_FULL_SWEEP_ENABLED": "true",
     "SILICONFLOW_API_KEY": "fixture-siliconflow-key",
-    "VOYAGE_API_KEY": "fixture-voyage-key"
+    "VOYAGE_API_KEY": "fixture-voyage-key",
+    "LCM_ENTITIES_ENABLED": "false"
   },
   "expected": {
     "adaptive_retrieval_enabled": false,
@@ -304,6 +305,7 @@
     "survival_fit": true,
     "survival_reserve": 0.15,
     "temporal_rollups_enabled": true,
-    "threshold_full_sweep_enabled": true
+    "threshold_full_sweep_enabled": true,
+    "entities_enabled": false
   }
 }

@@ -1,6 +1,7 @@
 """Freeze tool exposure bytes, registration metadata, and late-bound dispatch."""
 
 import importlib.util
+import itertools
 import json
 import os
 import sys
@@ -16,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCHEMA_BYTES = (Path(__file__).with_name("tool_registry_schema_bytes.json")).read_bytes().rstrip(b"\n")
 FROZEN_SCHEMAS = json.loads(SCHEMA_BYTES)
 NAMES = [schema["name"] for schema in FROZEN_SCHEMAS]
-EMOJIS = ["🔍", "🧠", "🧾", "🧮", "🧷", "📦", "🧭", "🕒", "📋", "📊", "🔎", "❓", "💚", "🧭", "🏥"]
+EMOJIS = ["🔍", "🧠", "🧾", "🧮", "🧷", "📦", "🧭", "🕒", "📋", "📊", "🔎", "❓", "💚", "🧭", "🏥", "🗂️"]
 
 
 @pytest.fixture(scope="module")
@@ -46,20 +47,23 @@ def isolated_env(tmp_path, monkeypatch):
     monkeypatch.setenv("LCM_EMBEDDINGS_ENABLED", "false")
 
 
-@pytest.mark.parametrize("disabled_count", [0, 1, 3, 15])
-@pytest.mark.parametrize("flags", [None, (False, False), (True, False), (False, True), (True, True)])
+@pytest.mark.parametrize("disabled_count", [0, 1, 3, 16])
+@pytest.mark.parametrize("flags", [None, *itertools.product([False, True], repeat=3)])
 def test_exposure_bytes_and_registration_sequence(plugin, monkeypatch, flags, disabled_count):
     if flags is not None:
         monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", str(flags[0]).lower())
         monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", str(flags[1]).lower())
+        monkeypatch.setenv("LCM_ENTITIES_ENABLED", str(flags[2]).lower())
     if disabled_count:
         monkeypatch.setenv("LCM_DISABLED_TOOLS", ",".join(NAMES[:disabled_count]))
-    assertions, adaptive = flags or (False, False)
+    assertions, adaptive, entities = flags or (False, False, False)
     omitted = set(NAMES[:disabled_count])
     if not assertions:
         omitted.add("lcm_query_state")
     if not adaptive:
         omitted.add("lcm_retrieve")
+    if not entities:
+        omitted.add("lcm_memory")
     expected = [schema for schema in FROZEN_SCHEMAS if schema["name"] not in omitted]
     calls = []
 
@@ -101,7 +105,7 @@ def test_exposure_bytes_and_registration_sequence(plugin, monkeypatch, flags, di
 def test_dispatch_resolves_every_handler_after_construction(tmp_path, monkeypatch, enabled):
     engine = LCMEngine(config=LCMConfig(
         database_path=str(tmp_path / "dispatch.db"),
-        assertions_enabled=enabled, adaptive_retrieval_enabled=enabled,
+        assertions_enabled=enabled, adaptive_retrieval_enabled=enabled, entities_enabled=enabled,
     ))
     calls = []
 

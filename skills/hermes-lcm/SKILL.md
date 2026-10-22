@@ -35,4 +35,4 @@ Working rules:
 - Keep current-session, cross-conversation, and Hermes history outside `lcm.db` distinct.
 - Do not treat open-cardinality results as complete without product-verifiable enumeration or coverage.
 - Use `lcm_compile_evidence` when a historical answer needs several named facets, exact operands, conflict handling, or latest-state selection; treat its semantic proposal as untrusted until the product returns validated evidence.
-- Keep default-off assertion, query-view, adaptive-retrieval, and destructive operator paths default-off unless the user explicitly asks to enable them.
+- Keep default-off entity, assertion, query-view, adaptive-retrieval, and destructive operator paths default-off unless the user explicitly asks to enable them.

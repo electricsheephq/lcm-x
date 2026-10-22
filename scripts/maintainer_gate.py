@@ -76,6 +76,7 @@ TURN_PATH_FILES = {
 }
 # Explicit exclusions: classify every top-level Python module, not just reachable dependencies.
 NON_TURN_PATH_FILES = {
+    "memory_tools.py",
     "adaptive_retrieval.py",  # Default-off adaptive retrieval controller.
     "answer_contract.py",  # Default-off pre-answer requirements.
     "assertion_extraction.py",  # Default-off structured extraction.

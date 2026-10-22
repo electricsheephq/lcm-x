@@ -1879,6 +1879,7 @@ class MessageStore:
                     allow_operators: bool = False,
                     agent_operators: bool = False,
                     stemmed: bool = False,
+                    store_ids: Collection[int] | None = None,
                     _include_like_excerpt: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
@@ -1918,6 +1919,7 @@ class MessageStore:
                 time_from=time_from,
                 time_to=time_to,
                 exclude_session_ids=exclude_session_ids,
+                store_ids=store_ids,
                 _include_excerpt=_include_like_excerpt,
             )
 
@@ -1944,6 +1946,9 @@ class MessageStore:
                 if session_id is not None:
                     where.append("m.session_id = ?")
                     args.append(session_id)
+                if store_ids is not None:
+                    where.append("m.store_id IN (SELECT value FROM json_each(?))")
+                    args.append(json.dumps(list(store_ids)))
                 if exclude_session_ids:
                     where.append(
                         "m.session_id NOT IN (SELECT value FROM json_each(?))"
@@ -2019,6 +2024,7 @@ class MessageStore:
                     time_from=time_from,
                     time_to=time_to,
                     exclude_session_ids=exclude_session_ids,
+                    store_ids=store_ids,
                     _include_excerpt=_include_like_excerpt,
                 )
 
@@ -2062,6 +2068,7 @@ class MessageStore:
                      time_from: float | None = None,
                      time_to: float | None = None,
                      exclude_session_ids: Collection[str] | None = None, *,
+                     store_ids: Collection[int] | None = None,
                      _include_excerpt: bool = False) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
@@ -2076,6 +2083,9 @@ class MessageStore:
         if session_id is not None:
             where.append("session_id = ?")
             args.append(session_id)
+        if store_ids is not None:
+            where.append("store_id IN (SELECT value FROM json_each(?))")
+            args.append(json.dumps(list(store_ids)))
         if exclude_session_ids:
             where.append("session_id NOT IN (SELECT value FROM json_each(?))")
             args.append(json.dumps(list(exclude_session_ids)))

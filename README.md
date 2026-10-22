@@ -93,7 +93,7 @@ Core capabilities:
   payloads instead of dumping everything into the prompt
 - **Agent tools** - `lcm_grep`, `lcm_recall`, `lcm_query_state`, `lcm_compute`, `lcm_compile_evidence`, `lcm_evidence_pack`, `lcm_retrieve`, `lcm_recent`, `lcm_load_session`,
   `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`,
-  and `lcm_doctor`
+  `lcm_doctor`, and the opt-in `lcm_memory`
 - **Source-aware retrieval** - filters raw rows and summaries by descendant
   source lineage
 - **Session controls** - ignore noisy sessions or keep sessions read-only with
@@ -142,8 +142,8 @@ installed stable product.
 The `main` line and v0.28.1 carry the `hermes-lcm-x v0.28.1` identity.
 An identity is never a restamp of any past commit's own recorded identity
 (#385 fixed the earlier drift).
-The manifest declares 15 tools; runtime discovery advertises 13 by default,
-or 15 with both assertion and adaptive-retrieval flags on.
+The manifest declares 16 tools; runtime discovery advertises 13 by default,
+or 16 with assertion, adaptive-retrieval and entity flags on.
 
 Every compaction LCM-X starts today runs on the turn thread, so the user waits
 for it. v0.25.0 makes a hidden backlog drain at turn pace (#597); v0.31.0
@@ -267,11 +267,11 @@ Expected signals:
 - the normal available-skills index includes `hermes-lcm`; current hosts can
   also resolve the explicit plugin-qualified skill `hermes-lcm-x:hermes-lcm`
 
-On the `main` line, output with both opt-in flags enabled is:
+On the `main` line, output with all three opt-in flags enabled is:
 
 ```text
 Plugins (1):
-  ✓ hermes-lcm-x v0.28.1 (15 tools)
+  ✓ hermes-lcm-x v0.28.1 (16 tools)
 
 Provider Plugins:
   Context Engine: lcm-x
@@ -340,7 +340,7 @@ Before upgrading to v0.23.1, resolve the effective database path from
 restart that runtime so `/lcm` is registered, then run `/lcm backup`.
 Otherwise stop every SQLite writer and copy that configured database with its
 WAL/SHM companions as one cold set. Check out the exact stable tag/SHA, restart
-Hermes, and verify the loaded path, version, database path, schema 5, and all 15
+Hermes, and verify the loaded path, version, database path, schema 5, and all 16
 tools. No manual core migration is required for the upgrade itself. Existing
 cloud vectors from a pre-v0.23.1 identity require privacy-policy warmup, an
 identity check from the warmup/profile output, and the finite monotonic
@@ -443,7 +443,7 @@ verdict:
   maintainer skills and config examples that reference `AGENTS.md`,
   `config.yaml`, or loopback endpoints.
 
-`hermes plugins validate` also warns that the 15 `provides_tools` are not
+`hermes plugins validate` also warns that the 16 `provides_tools` are not
 registered by `register()`: LCM-X serves its tools through the context-engine
 tool schemas (`ContextEngine.get_tool_schemas`), which is the intended path.
 
@@ -456,10 +456,11 @@ Use these tools for current-session recall after compaction. Use Hermes
 outside the LCM database.
 
 Both host paths hide `lcm_query_state` until `LCM_ASSERTIONS_ENABLED=true`
-and `lcm_retrieve` until `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`. The other 13
+and `lcm_retrieve` until `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`, plus
+`lcm_memory` until `LCM_ENTITIES_ENABLED=1`. The other 13
 schemas remain advertised by default. `LCM_DISABLED_TOOLS` hides any named
 tool, including a flag-enabled tool. Restart after changing the loaded flags.
-The manifest still declares all 15 tools.
+The manifest still declares all 16 tools.
 
 | Tool | Use |
 |------|-----|
@@ -478,6 +479,7 @@ The manifest still declares all 15 tools.
 | `lcm_status` | Show runtime health, context pressure, config, source lineage, and lifecycle stats. |
 | `lcm_inspect` | Read-only operator inventory for current-session lineage, frontier/fresh-tail metadata, externalized refs/readability, compaction skip/no-op reasons, and matched ignore/stateless patterns. Returns metadata only; use retrieval tools for content. |
 | `lcm_doctor` | Run database, FTS, lifecycle, config, and context-pressure diagnostics. |
+| `lcm_memory` | Default-off read-only `lookup`/`list` over this profile. Lookup accepts a name and up to 8 aliases; returns capped mention counts, event/write-labelled first/last times, sessions, cited snippets and compatible assertion facts. Optional question ranks up to 5 mentions within the matching rows. List groups assertion subjects by namespace; without assertions there is no registry until E2. No writes or model calls. |
 
 ## Recall skill and policy
 

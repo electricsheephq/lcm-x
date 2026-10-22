@@ -152,7 +152,7 @@ def test_dev_posture_covers_every_tool_despite_disabled_tools_env(tmp_path):
     assert "Registry coverage: `COMPLETE`" in receipt
     assert "Missing matrix rows: `none`" in receipt
     assert "Unexpected scenario rows: `none`" in receipt
-    assert receipt.count("| local | `lcm_") == 15
+    assert receipt.count("| local | `lcm_") == 16
     assert "| local | `lcm_doctor` | PASS |" in receipt
     assert "| cloud-default | `lcm_recall` | SKIP | SKIP: VOYAGE_API_KEY is absent |" in receipt
     for battery in (
@@ -465,10 +465,11 @@ def test_engine_threads_embedding_privacy_setting(tmp_path, privacy_setting, exp
 
     assert captured["sensitive_patterns_enabled"] is False
     assert captured["embedding_privacy_enabled"] is expected
-    # The all-tools matrix must expose both default-dormant tools.
+    # The all-tools matrix must expose all default-dormant tools.
     assert captured["assertions_enabled"] is True
     assert captured["adaptive_retrieval_enabled"] is True
-    assert len(phase_a.SCENARIOS) == 15
+    assert captured["entities_enabled"] is True
+    assert len(phase_a.SCENARIOS) == 16
 
 
 def test_noop_scenario_is_a_runner_failure(tmp_path):
