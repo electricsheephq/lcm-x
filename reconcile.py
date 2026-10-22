@@ -43,6 +43,7 @@ from .externalize import (
     find_externalized_tool_result_content_for_call,
     load_externalized_payload,
 )
+from .identity_anchor import identity_anchor_enabled
 from .ingest_protection import (
     _add_inline_persisted_output_generation_metadata,
     _add_inline_persisted_output_identity_metadata,
@@ -3132,6 +3133,31 @@ class ReconcileMixin:
             )
             return lossy_at
         if cursor is not None and cursor > 0:
+            # #1511: full literal replay proves position, not a later user occurrence.
+            # Keep partial/adopted views and UID-bound occurrences on their existing proofs.
+            if (identity_anchor_enabled() and cursor == len(messages) == len(stored_tail_rows)
+                    and stored_tail == [self._message_replay_identity(m) for m in messages]):
+                later = [i for i, (message, row) in enumerate(zip(messages, stored_tail_rows))
+                         if message.get("role") == "user" and not message.get("message_uid")
+                         and (stamp := _normalize_observed_at(message.get("timestamp"))) is not None
+                         and row.get("observed_at") is not None and stamp > row["observed_at"]]
+                if later and proof_cursor is None and not self._active_emission_proof():
+                    # A durable stamp witness explains the row even beyond its recorded stamp.
+                    explained = {rel["store_id"] for kind in ("carried_stamp", "alt_stamp")
+                                 for rel in self._store.get_message_relations(
+                                     [stored_tail_rows[i]["store_id"] for i in later], kind)}
+                    bound = {}
+                    if self._store._host_uid_table_exists():
+                        lineage, _problem = self._host_uid_lineage_key()
+                        bound = self._store.host_uid_uids_of_stores(
+                            lineage, [stored_tail_rows[i]["store_id"] for i in later], ("canonical",)
+                        ) if lineage is not None else {r["store_id"]: True for r in stored_tail_rows}
+                    rewind = min((i for i in later if stored_tail_rows[i]["store_id"] not in explained
+                                  and not bound.get(stored_tail_rows[i]["store_id"])),
+                                 default=cursor)
+                    # An unstamped remainder cannot be audited without duplicating a control.
+                    if all(_normalize_observed_at(m.get("timestamp")) is not None for m in messages[rewind:]):
+                        cursor = rewind
             reason = (
                 "skipped scaffold-only prefix"
                 if not self._effective_replay_identities(messages[:cursor])
