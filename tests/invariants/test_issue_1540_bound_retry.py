@@ -38,6 +38,41 @@ def stored(engine: Any) -> list[Row]:
     return rows
 
 
+@pytest.mark.parametrize("restart", [False, True], ids=["steady", "restart-after-15"])
+def test_replay_segment_helper_only_runs_on_reconcile_ingest(build: Build, monkeypatch, restart: bool) -> None:
+    """Thirty steady turns include compaction; only a restart invokes the helper."""
+    from hermes_lcm.reconcile import ReconcileMixin
+
+    original = ReconcileMixin._replayed_tool_segment_indexes_after_cursor
+    calls = []
+
+    def counted(self, messages, cursor):
+        calls.append(cursor)
+        return original(self, messages, cursor)
+
+    monkeypatch.setattr(ReconcileMixin, "_replayed_tool_segment_indexes_after_cursor", counted)
+    engine = build()
+    host = []
+    per_turn = []
+    for turn in range(1, 31):
+        if restart and turn == 16:
+            engine.shutdown()
+            engine = build(restart=True)
+        host.append({"role": "user", "content": f"turn {turn} " + LONG, "timestamp": turn})
+        if turn % 2 == 0:
+            host.extend(tool_pair(f"tool-{turn}", LONG + str(turn), tool_name="lookup"))
+        host.append({"role": "assistant", "content": f"answer {turn} " + LONG})
+        before = len(calls)
+        engine.ingest(deepcopy(host))
+        stored(engine)
+        if turn == 10:
+            host = engine.compress(deepcopy(host), force=True)
+            assert engine._last_compression_status == "compacted"
+        per_turn.append(len(calls) - before)
+    assert per_turn == [int(restart and turn == 16) for turn in range(1, 31)]
+    assert all(cursor > 0 for cursor in calls)
+
+
 @pytest.mark.parametrize("mode", ["warm", "cold"])
 @pytest.mark.parametrize("following", [2, 4])
 @pytest.mark.parametrize("uid_change", ["all", "user-only", "pair-only"])
