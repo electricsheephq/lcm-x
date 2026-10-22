@@ -144,7 +144,8 @@ def test_print_hash_cli_matches_prepare_without_run(prepared, tmp_path):  # noqa
     path = tmp_path / "config.json"
     path.write_text(json.dumps(config))
     result = subprocess.run([sys.executable, str(kit / "decision/d2_driver.py"), "--config", str(path),
-                             "--print-instrument-hash", "--aa"], text=True, capture_output=True, timeout=10)
+                             "--print-instrument-hash", "--aa"], text=True, capture_output=True, timeout=10,
+                            env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
     assert result.returncode == 0, result.stderr
     assert len(result.stdout.splitlines()) == 1 and len(result.stdout.strip()) == 64
     config["expected_instrument_hash"] = result.stdout.strip()

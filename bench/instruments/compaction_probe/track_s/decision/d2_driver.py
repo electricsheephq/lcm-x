@@ -379,11 +379,14 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
                     if state != "valid":
                         pending.append(row)
                 save()
-                if active:
+                if active and not data["stop_reason"]:
                     sleep(2)
             if data["stop_reason"]:
                 break
     except BaseException as exc:
+        for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            if signal.getsignal(signum) != signal.SIG_IGN:
+                signal.signal(signum, signal.SIG_IGN)
         data.update(stop_reason=str(exc) if isinstance(exc, RunSignal) else type(exc).__name__,
                     state="interrupted", raw_verdict="INCONCLUSIVE")
         stop_active([])

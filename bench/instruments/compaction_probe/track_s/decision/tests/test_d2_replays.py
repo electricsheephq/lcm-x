@@ -37,6 +37,7 @@ def producer_env(tmp_path):
     kit = tmp_path / "kit"
     (kit / "s2").mkdir(parents=True)
     (kit / "decision").mkdir()
+    (kit / ".gitignore").write_text("__pycache__/\n")
     (kit / "s2/run_s_lcmx.py").write_text(
         "import json, os, sys\n"
         "print(json.dumps({'argv':sys.argv[1:], 'out':os.environ['TRACK_S_OUT'], "
