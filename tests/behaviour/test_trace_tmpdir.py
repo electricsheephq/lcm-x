@@ -12,7 +12,7 @@ import pytest
     ("assembly", "system-note"),
     ("backfill", None),
     ("compress", "externalized-payloads"),
-    ("ingest", "tool-stub-single"),
+    ("ingest", "sequence-rewrite"),
     ("reconcile", "persisted-full"),
 ])
 def test_trace_regeneration_with_symlinked_tmpdir(tmp_path, harness, scenario):
