@@ -255,3 +255,17 @@ def test_v0281_reader_gapfill_uses_saved_scan_on_json(store: Store):
     assert any("store_id IN (2,4)" in statement for statement in sql)
     assert not any("WHERE store_id >= 1 AND store_id <= 7" in statement for statement in sql)
     assert list(conn.execute("SELECT * FROM metadata ORDER BY key")) == before
+
+
+@pytest.mark.parametrize("policy", ["conversational", "heads"])
+def test_legacy_rewrite_does_not_reuse_wider_band_scan(store: Store, policy):
+    rows = [(i, "tool" if policy == "heads" and i == 3 else "user", LONG) for i in range(1, 8)]
+    add_rows(store, rows, {5, 6, 7})
+    metadata(store, "chunk_policy_revision", 2)
+    certify(store, (5, 7), policy=policy)  # Saved high=7 scan proves only the old top band.
+    older_walk(store, {1, 2, 4})
+    metadata(store, "chunk_policy_revision_through", 2)  # Older reader's truthful integer.
+    assert_status(store, policy, "1 (gap-fill)")
+    for _ in range(3):
+        run(store, policy=policy)
+    assert counts(store) == dict.fromkeys(range(1, 8), 1)
