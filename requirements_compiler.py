@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
+from functools import lru_cache
 import hashlib
 import json
 import math
@@ -381,10 +382,11 @@ def _carried_absolute_day(source, *, date_dependent=True):
     return _quote_date_info(source["quote"])[0]
 
 
+@lru_cache(maxsize=4096)
 def _carried_legacy_days(quote):
     # Non-date contracts retain the pre-#1851 parse mode of the shared grammar.
-    return {_date_value(m.group(0), allow_mixed=False)
-            for m in _DATE_TEXT_RE.finditer(_carried_date_text(quote))} - {None}
+    return frozenset({_date_value(m.group(0), allow_mixed=False)
+            for m in _DATE_TEXT_RE.finditer(_carried_date_text(quote))} - {None})
 
 
 def _carried_mixed_dates(source, *, date_dependent=True):
