@@ -60,6 +60,11 @@ def identity_anchor_enabled() -> bool:
     return _parse_bool_env("LCM_IDENTITY_ANCHOR", True, unknown=True, true_values=())
 
 
+def _ws_equivalent(stored, identity) -> bool:
+    return (identity[0] == "user" and bool(identity[1].strip()) and stored != identity
+            and stored[1].strip() == identity[1].strip() and tuple(stored[2:]) == tuple(identity[2:]))
+
+
 class IdentityAnchorMixin:
     """Mixed into LCMEngine; reads ``self._store``, the reconcile identity helpers and ``_state_db_path``."""
 
@@ -338,8 +343,30 @@ class IdentityAnchorMixin:
                        if stamps[idx] in wanted and identity_at(idx) is not None]
         def keys_of(r):
             return {(float(r["observed_at"]), form) for form in forms_of[id(r)]}
+        ws_index = None
+
+        def diag_keys_of(r):
+            nonlocal ws_index
+            if ws_index is None:  # Only reached after the observer's mode/valid-UID gates.
+                from .host_uid import _valid_uid
+
+                ws_index = defaultdict(set)
+                for idx, key in occurrences:
+                    if not _valid_uid(identity_messages[idx].get("message_uid")):
+                        continue
+                    ident = key[1]
+                    if ident[0] == "user" and ident[1].strip():
+                        ws_index[(key[0], ident[1].strip(), tuple(ident[2:]))].add(key)
+            keys = keys_of(r)
+            if r.get("role") == "user":
+                forms = forms_of[id(r)]  # A singleton is necessarily the exact stored identity.
+                stored = next(iter(forms)) if len(forms) == 1 else self._message_replay_identity(r, stored_row=True)
+                bucket = (float(r["observed_at"]), stored[1].strip(), tuple(stored[2:]))
+                keys.update(key for key in ws_index.get(bucket, ()) if _ws_equivalent(stored, key[1]))
+            return keys
+
         self._observe_alias_uid_conflicts(
-            rows, getattr(rows, "canonical_stamps", None), keys_of, occurrences, identity_messages)
+            rows, getattr(rows, "canonical_stamps", None), diag_keys_of, occurrences, identity_messages)
         for store_id, idx in _match_occurrences(rows, keys_of, occurrences).items():
             consumed.add(store_id)
             matched[idx] = [next(r for r, _forms in by_stamp[stamps[idx]] if int(r["store_id"]) == store_id)]
@@ -868,8 +895,7 @@ class IdentityAnchorMixin:
         for row in rows:
             stored = self._message_replay_identity(row, stored_row=True)
             if (row.get("role") == "user" and int(row["store_id"]) not in consumed
-                    and _normalize_observed_at(row.get("observed_at")) == stamp and stored != identity
-                    and stored[1].strip() == text and tuple(stored[2:]) == tuple(identity[2:])):
+                    and _normalize_observed_at(row.get("observed_at")) == stamp and _ws_equivalent(stored, identity)):
                 return row
         return None
 
