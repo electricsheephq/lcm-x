@@ -38,6 +38,46 @@ def stored(engine: Any) -> list[Row]:
     return rows
 
 
+@pytest.mark.parametrize("mode,uids", [("cold", True), ("cold", False), ("warm", False)],
+                         ids=["cold-user-uids", "cold-no-uids", "warm-control"])
+def test_ambiguous_same_stamp_user_keeps_fresh_placeholder_pair(
+    build: Build, monkeypatch: pytest.MonkeyPatch, mode: str, uids: bool,
+) -> None:
+    """A second matching user without an adjacent pair makes replay ambiguous."""
+    import tests.invariants.test_issue_1529_warm_proof_salvage as shapes
+
+    plain = shapes.fixture
+
+    def two_users(*, uids: bool = False) -> list[Row]:
+        rows = plain(uids=False)
+        rows.append({"role": "user", "content": "repeat", "timestamp": 10})
+        if uids:
+            for index, row in enumerate(rows):
+                if row["role"] == "user":
+                    row["message_uid"] = f"{index + 1:032x}"
+        return rows
+
+    monkeypatch.setattr(shapes, "fixture", two_users)
+    engine, host = compact(build, mode=mode, uids=uids)
+    before = stored(engine)
+    assert host[-1]["content"] == host[-4]["content"] == "repeat"
+    assert host[-1]["timestamp"] == host[-4]["timestamp"] == 10
+    if uids:
+        assert host[-1]["message_uid"] != host[-4]["message_uid"]
+    host.extend(tool_pair("c", CLEARED, tool_name="lookup"))
+    for index in range(2):
+        host.extend(tool_pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    host.append({"role": "assistant", "content": "final answer"})
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    counts = (sum(any(call["id"] == "c" for call in row.get("tool_calls") or []) for row in after),
+              sum(row.get("tool_call_id") == "c" for row in after))
+    assert counts == (2, 2), "fresh pair after the cursor-matched user was suppressed"
+    assert len(after) - len(before) == 7
+
+
 @pytest.mark.parametrize("restart", [False, True], ids=["steady", "restart-after-15"])
 def test_replay_segment_helper_only_runs_on_reconcile_ingest(build: Build, monkeypatch, restart: bool) -> None:
     """Thirty steady turns include compaction; only a restart invokes the helper."""
