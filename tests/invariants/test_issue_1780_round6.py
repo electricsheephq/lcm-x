@@ -94,9 +94,8 @@ def test_diagnostic_fault_preserves_ingest(tmp_path, monkeypatch, caplog, mode, 
             arms.append(replay(tmp_path / str(observe), patch, caplog, fault, ws, uid, observe))
     assert arms[0][:2] == arms[1][:2], "diagnostic changed rows, bindings or ordered write SQL"
     assert not any("pre-match failed" in r.getMessage() for r in arms[1][2])
-    # R1-ws observation remains #1787's separate visibility gap. SQLite versions can
-    # also consume an unmatched surrogate inside the IN subquery without decoding it.
-    if ws or fault == "surrogate":
+    # SQLite versions can consume an unmatched surrogate inside the IN subquery without decoding it.
+    if fault == "surrogate":
         return
     failed = [r for r in arms[1][2] if "host UID observation unavailable" in r.msg]
     assert failed, "fixture did not exercise diagnostic fault containment"
