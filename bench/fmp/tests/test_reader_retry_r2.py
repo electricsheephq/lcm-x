@@ -38,8 +38,8 @@ def test_second_send_readiness_retry_counted(tmp_path, monkeypatch):
         log = tmp_path / f"mcp-{len(sends)}.jsonl"
         log.write_text("\n".join(map(json.dumps, [
             dict(event="initialize", startup_status="ok" if ready else "startup_failed"),
-            dict(event="tools/list", offered_tools=int(ready)),
-            dict(tool="lcm_recall", counted=True)])))
+            dict(event="tools/list", offered_tools=int(ready))] +
+            ([dict(tool="lcm_recall", counted=True)] if ready else []))))
         records.append(dict(status="ok", mcp_log=str(log)))
         return {"content": "teal"}
     backend.call = call

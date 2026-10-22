@@ -150,7 +150,8 @@ def test_agentic_send_budget_and_class(tmp_path, monkeypatch, states, expected):
         sends.append(1)
         log = tmp_path / f"mcp-{len(sends)}.jsonl"
         log.write_text("\n".join(map(json.dumps, [dict(event="initialize", startup_status="ok" if ready else "startup_failed"),
-            dict(event="tools/list", offered_tools=int(ready)), dict(tool="lcm_recall", counted=True)])))
+            dict(event="tools/list", offered_tools=int(ready))] +
+            ([dict(tool="lcm_recall", counted=True)] if ready else []))))
         records.append(dict(status="error" if error else "ok", error=error, mcp_log=str(log)))
         if error:
             raise RuntimeError(error)
@@ -162,12 +163,12 @@ def test_agentic_send_budget_and_class(tmp_path, monkeypatch, states, expected):
             delivery.harness_agentic(q, backend, models.CODEX_DEFAULT_READER, {}, [])
         result = raised.value.delivery_result
         assert result["calls"][-1]["error"] == expected
-        assert len(sends) == 3
+        assert len(sends) == (2 if states[0] == (False, None) and states[1][0] else 3)
     else:
         result = delivery.harness_agentic(q, backend, models.CODEX_DEFAULT_READER, {}, [])
         assert result["hypothesis"] == "teal" and len(sends) == 2
-    assert result["tool_calls"] == len(sends)
-    assert len({t["attempt"] for t in result["trace"] if "tool" in t}) == len(sends)
+    assert result["tool_calls"] == sum(ready for ready, _ in states[:len(sends)])
+    assert len({t["attempt"] for t in result["trace"] if "tool" in t}) == result["tool_calls"]
 
 
 @pytest.mark.parametrize("status", ["tool_violation", "budget_exceeded", "skipped", "error", "not_run"])
