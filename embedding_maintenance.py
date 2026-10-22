@@ -274,7 +274,10 @@ def _run_pass(db_path: str | Path, config: Any, breaker: Any, slice_state=None) 
     if breaker is not None and breaker.is_open():
         return "circuit_open", None  # the query path's breaker is cooling down
     if not _automatic_chunks_allowed(config, command):
-        command._validate_cloud_chunk_metadata(config, db_path)
+        try:
+            command._validate_cloud_chunk_metadata(config, db_path)
+        except Exception as exc:
+            logger.debug("Cloud chunk metadata walk remains unproven: %s", exc)
     probe = probe_provider_availability(config)
     if not probe["available"]:
         return "provider_unavailable", str(probe["detail"])

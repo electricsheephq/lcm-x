@@ -4652,6 +4652,9 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             parent = json.loads(saved[0]) if saved else {}
         gap_scan_state.update(parent_value=saved[0] if saved else None,
                               parent_epoch=parent.get("epoch"), turn=parent.get("turn", 0))
+        if gap_scan_state["parent_value"] is None:
+            gap_scan_state["unproven"] = True
+            return  # A low walk needs a captured parent fence.
         scan_key += ":low"
         saved = conn.execute("SELECT value FROM metadata WHERE key=?", (scan_key,)).fetchone()
     gap_scan_state["scan_key"] = scan_key
@@ -4903,8 +4906,10 @@ def _validate_cloud_chunk_metadata(config, db_path):
         identity = profile["identity_hash"]
         policy = normalize_content_policy(getattr(config, "embedding_content_policy", ""))
         bounds = _chunk_cursor(conn, identity)
-        for band in _chunk_gapfill_ranges(conn, identity, bounds, _chunk_policy_revision(conn, identity), policy):
-            state = {"metadata_only": True}
+        coverage = _chunk_coverage(conn, identity, bounds[0]) if bounds else None
+        for band in _chunk_gapfill_ranges(conn, identity, bounds, _chunk_policy_revision(conn, identity),
+                                         policy, coverage=coverage):
+            state = {"metadata_only": True, "coverage": coverage}
             list(_chunk_gapfill_rows(conn, identity, band, policy, _CHUNK_HISTORY_SCAN_MESSAGES,
                                     record_progress=True, gap_scan_state=state))
             _record_chunk_gapfill_walk(conn, identity, state)
@@ -5808,6 +5813,7 @@ def _chunk_backfill_run(
             bounds = _chunk_cursor(conn, identity)
             coverage = _chunk_coverage(conn, identity, bounds[0]) if bounds else None
             if (coverage and coverage[2] == policy and coverage[0] <= bounds[0] and coverage[1] < bounds[1]
+                    and _chunk_policy_revision(conn, identity) >= CHUNK_POLICY_REVISION
                     and not _chunk_inflight_ids(conn, identity)):
                 state = {"metadata_only": True, "coverage": coverage}
                 list(_chunk_gapfill_rows(conn, identity, (coverage[1] + 1, bounds[1]), policy,
