@@ -664,6 +664,41 @@ def test_user_uid_veto_without_pair_uids(build, monkeypatch, form, uid_case):
     assert counts == expected, "new user UID must not suppress an unlabelled pair"
 
 
+@pytest.mark.parametrize("pair_uids", [True, False], ids=["known-pair-uids", "no-pair-uids"])
+def test_pair_uid_precedence_over_changed_user_uid(build: Build, monkeypatch, pair_uids: bool) -> None:
+    """Known pair UIDs govern replay; an unlabelled pair uses the user veto."""
+    import tests.invariants.test_issue_1529_warm_proof_salvage as shapes
+
+    plain = shapes.fixture
+
+    def pair_uid_fixture(*, uids=False):
+        rows = plain(uids=True)
+        if not pair_uids:
+            for row in rows[-2:]:
+                row.pop("message_uid")
+        return rows
+
+    monkeypatch.setattr(shapes, "fixture", pair_uid_fixture)
+    engine, host = compact(build, mode="cold", uids=True)
+    before = stored(engine)
+    previous_pair = deepcopy(host[-2:])
+    host[-3]["message_uid"] = f"{0xa2:032x}"
+    assert all(row.get("message_uid") == old.get("message_uid")
+               for row, old in zip(host[-2:], previous_pair))
+    host[-1]["content"] = CLEARED
+    for i in range(2):
+        host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    counts = (sum(row["role"] == "user" and row["content"] == "repeat" for row in added),
+              sum(any(call["id"] == "c" for call in row.get("tool_calls") or []) for row in added),
+              sum(row.get("tool_call_id") == "c" for row in added))
+    assert counts == ((1, 0, 0) if pair_uids else (1, 1, 1))
+
+
 def test_ambiguous_user_rejects_first_and_last_match(build, monkeypatch):
     """The replay scan cannot arbitrarily choose either matching user's pair."""
     import tests.invariants.test_issue_1529_warm_proof_salvage as shapes
