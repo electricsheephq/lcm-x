@@ -38,10 +38,10 @@ def test_restart_observers_preserve_pre_turn_calls_without_inventing_lineage(sea
         return merged, 1
 
     helpers = SimpleNamespace(_merge_consecutive_users=merge, _SEQUENCE_REPAIR_PASSES=(merge,))
-    scope = {"etype": Engine, "helpers": helpers, "event": lambda **e: events.append(e), "out": {},
-             "trace_occurrences": probe.trace_occurrences, "trace_user_merges": probe.trace_user_merges}
-    exec(compile(ast.Module(body=setup, type_ignores=[]), "probe-restart-setup", "exec"), scope)
-    assert scope["cur"]["turn"] == 0 and "session" not in scope["cur"]
+    execution_globals = {"etype": Engine, "helpers": helpers, "event": lambda **e: events.append(e), "out": {},
+                         "trace_occurrences": probe.trace_occurrences, "trace_user_merges": probe.trace_user_merges}
+    exec(compile(ast.Module(body=setup, type_ignores=[]), "probe-restart-setup", "exec"), execution_globals)
+    assert execution_globals["cur"]["turn"] == 0 and "session" not in execution_globals["cur"]
     rows = [{"role": "user", "content": "alpha"}, {"role": "user", "content": "beta"}]
     if seam == "engine_ingress":
         assert Engine().compress(rows) is rows
