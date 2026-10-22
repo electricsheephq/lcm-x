@@ -48,3 +48,40 @@ def test_single_database_repeats_and_success(tmp_path, caplog):
     maintenance._record(db, "complete", None)
     assert maintenance.incremental_embedding_state(db)[0][1] == "complete"
     assert maintenance.incremental_embedding_state(db)[1] == 0
+
+
+@pytest.mark.parametrize("outcome", [
+    "circuit_open", "model_preparing", "model_unavailable", "lease_held",
+    "slice_budget", "stopped", "no_profile", "model_prepare_exhausted",
+    "summaries=refused", "summaries=complete:0 chunks=lease_held",
+    "chunks=partial:0 row_backoff", "chunks=partial:0 no_progress",
+])
+def test_deferral_preserves_failure_and_spent_warning(tmp_path, monkeypatch, caplog, outcome):
+    db = tmp_path / "deferred.db"
+    outcomes = iter([("error", "first"), (outcome, None), ("error", "second")])
+    monkeypatch.setattr(maintenance, "_run_pass", lambda *_a: next(outcomes))
+    with caplog.at_level(logging.DEBUG, logger=maintenance.__name__):
+        for _ in range(3):
+            maintenance.run_incremental_embedding_pass(db, object())
+    assert maintenance.incremental_embedding_state(db)[1] == 2
+    assert [r.levelno for r in caplog.records if "pass skipped" in r.message] == [
+        logging.WARNING, logging.DEBUG,
+    ]
+
+
+@pytest.mark.parametrize("outcome", [
+    "complete", "summaries=complete:0 chunks=complete:0 complete",
+    "summaries=complete:3", "chunks=partial:2", "chunks=complete:0 complete",
+])
+def test_completed_pass_rearms_warning(tmp_path, monkeypatch, caplog, outcome):
+    db = tmp_path / "completed.db"
+    outcomes = iter([("error", "first"), (outcome, None), ("error", "second")])
+    monkeypatch.setattr(maintenance, "_run_pass", lambda *_a: next(outcomes))
+    maintenance.run_incremental_embedding_pass(db, object())
+    maintenance.run_incremental_embedding_pass(db, object())
+    assert maintenance.incremental_embedding_state(db)[1] == 0
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG, logger=maintenance.__name__):
+        maintenance.run_incremental_embedding_pass(db, object())
+    assert maintenance.incremental_embedding_state(db)[1] == 1
+    assert [r.levelno for r in caplog.records] == [logging.WARNING]
