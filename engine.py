@@ -6040,7 +6040,7 @@ class LCMEngine(
             )
         except Exception as exc:  # pragma: no cover - defensive only
             logger.debug("LCM ingest cursor reconciliation probe failed: %s", exc)
-            self._ingest_cursor_needs_reconcile = False
+            self._ingest_cursor_needs_reconcile = True
 
     def _stored_row_externalized_text_parts_for_pattern_matching(self, msg: Dict[str, Any]) -> list[str]:
         ref_sources: list[str] = []
