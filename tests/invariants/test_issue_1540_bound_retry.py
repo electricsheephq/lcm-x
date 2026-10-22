@@ -14,16 +14,17 @@ from tests.test_issue_671_stub_first_exit import tool_pair
 
 @pytest.mark.parametrize("mode", ["warm", "cold"])
 @pytest.mark.parametrize("following", [2, 4])
-@pytest.mark.parametrize("uid_change", ["all", "user-only"])
+@pytest.mark.parametrize("uid_change", ["all", "user-only", "pair-only"])
 def test_same_stamp_known_uid_retry(build: Build, mode: str, following: int, uid_change: str) -> None:
-    """A positive UID conflict vetoes replay even when the user stamp is equal."""
+    """Each known UID identifies its own row, independently of the other rows."""
     engine, host = compact(build, mode=mode, uids=True)
     before = stored(engine)
     previous = deepcopy(host[-3:])
-    for index, row in enumerate(host[-3:] if uid_change == "all" else host[-3:-2]):
+    changed = host[-3:] if uid_change == "all" else host[-3:-2] if uid_change == "user-only" else host[-2:]
+    for index, row in enumerate(changed):
         row["message_uid"] = f"{100 + index:032x}"
     assert host[-3]["timestamp"] == previous[0]["timestamp"]
-    assert engine._host_occurrence_changed(host[-3], previous[0])
+    assert engine._host_occurrence_changed(host[-3], previous[0]) == (uid_change != "pair-only")
     if uid_change == "user-only":
         assert [row["message_uid"] for row in host[-2:]] == [row["message_uid"] for row in previous[1:]]
     host[-1]["content"] = CLEARED
@@ -40,7 +41,7 @@ def test_same_stamp_known_uid_retry(build: Build, mode: str, following: int, uid
     repeated = stored(engine)
     print("\nUID_CASE " + json.dumps(dict(mode=mode, following=following, uid_change=uid_change,
                                           counts=counts, repeat_added=len(repeated) - len(after))))
-    assert counts == (1, 1, 1)
+    assert counts == {"all": (1, 1, 1), "user-only": (1, 0, 0), "pair-only": (0, 1, 1)}[uid_change]
     assert repeated == after
 
 
