@@ -1,0 +1,32 @@
+{
+  "status": {
+    "median_ms": {
+      "base": 50.230354500000004,
+      "candidate": 50.513771000000006
+    },
+    "n": 200,
+    "allowed_ms": 55.253389950000006,
+    "pass": true
+  },
+  "recall": {
+    "median_ms": {
+      "base": 3.6152290000000002,
+      "candidate": 3.5773539999999997
+    },
+    "n": 200,
+    "allowed_ms": 3.9767519000000005,
+    "pass": true
+  },
+  "inflight": {
+    "median_ms": {
+      "base": 224.345396,
+      "candidate": 26.494083
+    },
+    "n": 20,
+    "uncertain_rows": 3060,
+    "sources": 60,
+    "selection_isolation": "_chunk_pending_rows returns empty for both arms; full pass including actionable count and record publication"
+  }
+}
+.
+1 passed in 38.18s

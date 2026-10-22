@@ -1,0 +1,9 @@
+pwd: <local-path>
+HEAD: 238d1a9e876dea55b2e2f7a68110afd21c4e779e
+.                                                                        [100%]
+============================= slowest 25 durations =============================
+0.48s setup    tests/test_rollup_builder.py::test_session_start_does_not_wait_for_slow_rollup_provider_latency
+0.13s call     tests/test_rollup_builder.py::test_session_start_does_not_wait_for_slow_rollup_provider_latency
+
+(1 durations < 0.005s hidden.  Use -vv to show these durations.)
+1 passed in 0.73s

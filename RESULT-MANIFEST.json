@@ -1,0 +1,278 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1659-r2",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "lcmx-1659-r2",
+  "claim_class": "advisory",
+  "created": "2026-10-22T20:32:57Z",
+  "settled": "2026-10-22T20:32:59Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "6dd578221b0522b0e9665fa1a39e1cb187bdcf0d",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "SPEC Amendment 1: final focused proof, 600 seeds, paired costs; full suite once plus bounded remediation",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "1659-final-truth-oracle",
+      "metric": "false_coverage_cases",
+      "value": 0.0,
+      "n": 600,
+      "source": "final-differential.log"
+    },
+    {
+      "benchmark": "1659-final-status-base",
+      "metric": "median_ms",
+      "value": 50.230354500000004,
+      "n": 200,
+      "source": "costs.json"
+    },
+    {
+      "benchmark": "1659-final-status-candidate",
+      "metric": "median_ms",
+      "value": 50.513771000000006,
+      "n": 200,
+      "source": "costs.json"
+    },
+    {
+      "benchmark": "1659-final-recall-base",
+      "metric": "median_ms",
+      "value": 3.6152290000000002,
+      "n": 200,
+      "source": "costs.json"
+    },
+    {
+      "benchmark": "1659-final-recall-candidate",
+      "metric": "median_ms",
+      "value": 3.5773539999999997,
+      "n": 200,
+      "source": "costs.json"
+    },
+    {
+      "benchmark": "1659-final-inflight-base",
+      "metric": "median_ms",
+      "value": 224.345396,
+      "n": 20,
+      "source": "costs.json"
+    },
+    {
+      "benchmark": "1659-final-inflight-candidate",
+      "metric": "median_ms",
+      "value": 26.494083,
+      "n": 20,
+      "source": "costs.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "red-base-final.log",
+      "role": "log",
+      "sha256": "65e48ea0238607cec97fd2ad72a54302503e0734ed80e0783bbdf05aafc06cd7",
+      "bytes": 7667
+    },
+    {
+      "path": "final-focused.log",
+      "role": "log",
+      "sha256": "4eafd15ca0ff136ca7e534ea54fe9a0ec5478b00d0b5db99d11123d1a5d36936",
+      "bytes": 3453
+    },
+    {
+      "path": "final-differential.log",
+      "role": "log",
+      "sha256": "fab5cea0b9ef04ef72b868c77265924ff47f03bf454174b5345222a3baffcda6",
+      "bytes": 741
+    },
+    {
+      "path": "full-suite.log",
+      "role": "log",
+      "sha256": "3ff3333b0b653039b3c6ce3c555954a7907baacbe97d1a6fd1d9dda039de88f2",
+      "bytes": 174741
+    },
+    {
+      "path": "final-costs.log",
+      "role": "log",
+      "sha256": "8c33ef9e1cac9a69983ce7afb55d8fdfd9aa003158257900f25e67353963093a",
+      "bytes": 696
+    },
+    {
+      "path": "costs.json",
+      "role": "per-item",
+      "sha256": "37113beac674f2a2f8510a3839c47e77b287020b65e5a4fbf1fe20251faabf2a",
+      "bytes": 16463
+    },
+    {
+      "path": "latency-checks.log",
+      "role": "log",
+      "sha256": "3c7ee05bd1e73ca73363541fcec448f3620a6edcca7bb271678b000252460dd0",
+      "bytes": 475
+    },
+    {
+      "path": "latency-results.json",
+      "role": "per-item",
+      "sha256": "c25d9a2c2459336a60540d4e8a5f6aff7d71a6043c7cdfede3faf9ba30550685",
+      "bytes": 668
+    },
+    {
+      "path": "ruff.log",
+      "role": "log",
+      "sha256": "82b3e6a6c090a57601d22943bd23fca9218d1031dbe5a7b754092f9a156b4f18",
+      "bytes": 19
+    },
+    {
+      "path": "diff-check.log",
+      "role": "log",
+      "sha256": "7b124e794331424627aa339cd17fb601b6e8ec92985c42bae92822d4692f491f",
+      "bytes": 35
+    },
+    {
+      "path": "trace-delta.log",
+      "role": "log",
+      "sha256": "c27c21683e94c39a35a8427e381c40cf4bba9c9b9c14cc5b5001117f4c82f288",
+      "bytes": 881
+    },
+    {
+      "path": "trace-payloads.json",
+      "role": "per-item",
+      "sha256": "4cc3555b39b3cb939fe84d1f8aec48c68242ec1241eca76b51dc76a26dfa4931",
+      "bytes": 4601913
+    },
+    {
+      "path": "summary-writer-diagnosis.log",
+      "role": "log",
+      "sha256": "bc9bf9b6e3477732dda5418071ca8df0d493949632080d4f023bdd94d7543679",
+      "bytes": 197
+    },
+    {
+      "path": "final-source-hashes.json",
+      "role": "per-item",
+      "sha256": "4ce213183da6f39cdb8b9901686e53d2f71c6180144a1aff8ce32de503afe402",
+      "bytes": 516
+    },
+    {
+      "path": "test_costs.py",
+      "role": "config",
+      "sha256": "84d17ab0c983cb6460a568727ef4ddcbf59fbd36fa2951c67066e3ef504516ae",
+      "bytes": 4090
+    },
+    {
+      "path": "test_full_differential.py",
+      "role": "config",
+      "sha256": "3a5ae7de59505e27ae32e51c54079661ecb801ba940277ed552da58fd1e8a7a4",
+      "bytes": 4655
+    },
+    {
+      "path": "RESULT.md",
+      "role": "receipt",
+      "sha256": "02dfa7605186387b8829ff15fe19ce7eaf0eacc4721b10f4cb144a8701e7298e",
+      "bytes": 2934
+    },
+    {
+      "path": "latency-candidate-1.log",
+      "role": "log",
+      "sha256": "8213a0b52db9f3ee042c196930155e78e5aefc5c253295c188e76e50e2733e58",
+      "bytes": 532
+    },
+    {
+      "path": "latency-candidate-2.log",
+      "role": "log",
+      "sha256": "bcc85a04b2e965241ce42e11681e121f759e32e2f684ee60cb4b4cf8379e8ae4",
+      "bytes": 532
+    },
+    {
+      "path": "latency-candidate-3.log",
+      "role": "log",
+      "sha256": "f8db06d5f03533dc0784c8b73cd58d82b8ff948ce4366e36d7d35972d5b58e54",
+      "bytes": 532
+    },
+    {
+      "path": "latency-candidate-4.log",
+      "role": "log",
+      "sha256": "352b3419adf4eb83059b0b84e95e0028cb3bdc78317e5de0ccdba3be0a5bf95f",
+      "bytes": 532
+    },
+    {
+      "path": "latency-candidate-5.log",
+      "role": "log",
+      "sha256": "49560c66ddbcc03365874a357c5bf0507a4e13738a4d96a30db09f1f38c4e21b",
+      "bytes": 532
+    },
+    {
+      "path": "latency-base-1.log",
+      "role": "log",
+      "sha256": "fc605efccf2754cb3294362dd5eefee1791d9218c8f918a5851964f282678d97",
+      "bytes": 532
+    },
+    {
+      "path": "latency-base-2.log",
+      "role": "log",
+      "sha256": "0820b5c3b17a605984bd34832ec8b33a7cfdfaf2de158b5ae63f65d6da0d8fe4",
+      "bytes": 532
+    },
+    {
+      "path": "latency-base-3.log",
+      "role": "log",
+      "sha256": "0820b5c3b17a605984bd34832ec8b33a7cfdfaf2de158b5ae63f65d6da0d8fe4",
+      "bytes": 532
+    },
+    {
+      "path": "latency-base-4.log",
+      "role": "log",
+      "sha256": "117d6602b0142ae88b8a69337077d89213f346ae7e22d9a69e45d421e4e326e5",
+      "bytes": 532
+    },
+    {
+      "path": "latency-base-5.log",
+      "role": "log",
+      "sha256": "a4777b4b61fb02e561f6a6e760c8a8cc0c1db70be2db27f6a7f81155efeac63c",
+      "bytes": 532
+    }
+  ],
+  "rescore": {
+    "command": "Recompute statistics.median from costs.json samples_ms arrays. Read seed outcomes from final-differential.log; rerun source is test_full_differential.py.",
+    "inputs": [
+      "costs.json",
+      "final-differential.log"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "costs.json",
+    "diff-check.log",
+    "final-costs.log",
+    "final-differential.log",
+    "final-focused.log",
+    "final-source-hashes.json",
+    "full-suite.log",
+    "latency-base-1.log",
+    "latency-base-2.log",
+    "latency-base-3.log",
+    "latency-base-4.log",
+    "latency-base-5.log",
+    "latency-candidate-1.log",
+    "latency-candidate-2.log",
+    "latency-candidate-3.log",
+    "latency-candidate-4.log",
+    "latency-candidate-5.log",
+    "latency-checks.log",
+    "latency-results.json",
+    "red-base-final.log",
+    "ruff.log",
+    "summary-writer-diagnosis.log",
+    "test_costs.py",
+    "test_full_differential.py",
+    "trace-delta.log",
+    "trace-payloads.json"
+  ]
+}

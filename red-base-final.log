@@ -1,0 +1,134 @@
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+_________ test_completion_cannot_clear_an_append_after_remaining_scan __________
+
+engine = <hermes_lcm.engine.LCMEngine object at 0x10bf7e510>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c581810>
+
+    def test_completion_cannot_clear_an_append_after_remaining_scan(engine, monkeypatch):
+        engine._config.ollama_base_url = "http://192.0.2.1:11434"
+        backfill(engine, "chunk", limit=100)
+        original = command._record_embedding_catchup
+        appended = []
+    
+        def append_before_write(*args, **kwargs):
+            if args[1] == "chunk":
+                appended.append(engine._store.append("seed", {
+                    "role": "user", "content": "cobalt arrived between scan and write",
+                }))
+                assert record(engine, "chunk")["remaining"] is True
+            return original(*args, **kwargs)
+    
+        monkeypatch.setattr(command, "_record_embedding_catchup", append_before_write)
+        backfill(engine, "chunk", limit=100)
+        assert appended
+>       assert record(engine, "chunk")["remaining"], "completion overwrote the newer ingest mark"
+E       AssertionError: completion overwrote the newer ingest mark
+E       assert 0
+
+tests/test_issue_1659_catchup.py:33: AssertionError
+______________ test_manual_override_keeps_configured_full_backlog ______________
+
+engine = <hermes_lcm.engine.LCMEngine object at 0x10c709a90>
+
+    def test_manual_override_keeps_configured_full_backlog(engine):
+        engine._config.ollama_base_url = "http://192.0.2.1:11434"
+        engine._config.embedding_content_policy = "full"
+        for role in ("system", "tool"):
+            engine._store.append("seed", {"role": role, "content": "cobalt configured full " * 60})
+        report = command._embedding_backfill_text(
+            ["--apply", "--corpus", "chunks", "--policy", "conversational"], engine,
+        )
+        assert "error:" not in report, report
+>       assert record(engine, "chunk")["remaining"] > 0
+E       assert 0 > 0
+
+tests/test_issue_1659_catchup.py:46: AssertionError
+____________________ test_inflight_walk_is_capped_per_pass _____________________
+
+engine = <hermes_lcm.engine.LCMEngine object at 0x10c709d30>
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c822ad0>
+
+    def test_inflight_walk_is_capped_per_pass(engine, monkeypatch):
+        identity, total = seed_uncertain(engine)
+        assert total >= 3000
+        walked = []
+        original = command._embedding_read_connection
+    
+        class Counted:
+            def __init__(self, conn):
+                self.conn = conn
+                conn.create_function("visit_inflight", 1, lambda value: walked.append(value) or value)
+    
+            def execute(self, sql, parameters=()):
+                if sql.startswith("SELECT embedded_id, state, lease_id, generation FROM"):
+                    sql = sql.replace("SELECT embedded_id,", "SELECT visit_inflight(embedded_id),", 1)
+                return self.conn.execute(sql, parameters)
+    
+            def __getattr__(self, name):
+                return getattr(self.conn, name)
+    
+        monkeypatch.setattr(command, "_embedding_read_connection", lambda *a: Counted(original(*a)))
+        monkeypatch.setattr(command, "_chunk_pending_rows", lambda *a, **kw: (0, [], {}))
+        result = command._chunk_backfill_run(
+            engine._config, engine._store.db_path, apply=True, limit=1,
+            retry_uncertain=False, policy="conversational", maintenance_slice=1,
+        )
+        assert result["error"] is None, result
+>       assert len(walked) <= 256, f"walked {len(walked)} in-flight rows after one bounded pass"
+E       AssertionError: walked 3060 in-flight rows after one bounded pass
+E       assert 3060 <= 256
+E        +  where 3060 = len(['10:0', '10:1', '10:10', '10:11', '10:12', '10:13', ...])
+
+tests/test_issue_1659_catchup.py:99: AssertionError
+_____________ test_cloud_low_band_advances_despite_upper_arrivals ______________
+
+store = (LCMConfig(fresh_tail_count=24, fresh_tail_max_tokens=24000, fresh_tail_pressure_yield_enabled=True, fresh_tail_pressu...ty(provider='ollama', model_name='model-a', revision='', dim=2, dtype='float32', byteorder='little', task='chunk'), [])
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10c70d450>
+
+    def test_cloud_low_band_advances_despite_upper_arrivals(store, monkeypatch):
+        config, vectors, identity, texts = store
+        config.ollama_base_url = "http://192.0.2.1:11434"
+        add_rows(store, [(i, "user", LONG) for i in range(1, 9)], {6, 7, 8})
+        metadata(store, "chunk_policy_revision", 2)
+        certify(store, (6, 8))
+        older_walk(store, {1, 2, 3, 4, 5})
+        monkeypatch.setattr(command, "_CHUNK_HISTORY_SCAN_MESSAGES", 2)
+        monkeypatch.setattr(command, "chunk_message", lambda *a, **kw: (_ for _ in ()).throw(
+            AssertionError("metadata validation must not chunk text")))
+        for call in range(6):
+            high = 9 + call * 2
+            # A missing upper row precedes the newly published frontier on every call.
+            add_rows(store, [(high, "user", LONG), (high + 1, "user", LONG)], set())
+            # Publish without using the patched command chunker.
+            from tests.test_issue_1536_chunk_revision import chunking
+            for chunk in chunking.chunk_message(high + 1, "user", LONG, policy="full"):
+                vectors.record_chunk_embedding(chunk.chunk_id, "model-a", [1., 0.],
+                    store_id=chunk.store_id, chunk_index=chunk.chunk_index, char_start=chunk.char_start,
+                    char_end=chunk.char_end, token_estimate=chunk.token_estimate, identity=identity)
+            command._validate_cloud_chunk_metadata(config, config.database_path)
+            proof = marker(store)
+            assert all(sid in counts(store) for sid in range(proof["from"], proof["through"] + 1))
+            if proof["from"] == 1:
+                break
+        else:
+>           raise AssertionError(f"low band starved for six calls: {marker(store)}")
+E           AssertionError: low band starved for six calls: {'from': 6, 'through': 8, 'policy': 'conversational'}
+
+tests/test_issue_1659_catchup.py:132: AssertionError
+============================= slowest 25 durations =============================
+0.62s call     tests/test_issue_1659_catchup.py::test_inflight_walk_is_capped_per_pass
+0.49s setup    tests/test_issue_1659_catchup.py::test_completion_cannot_clear_an_append_after_remaining_scan
+0.01s setup    tests/test_issue_1659_catchup.py::test_inflight_walk_is_capped_per_pass
+0.01s setup    tests/test_issue_1659_catchup.py::test_manual_override_keeps_configured_full_backlog
+0.01s call     tests/test_issue_1659_catchup.py::test_cloud_low_band_advances_despite_upper_arrivals
+0.01s call     tests/test_issue_1659_catchup.py::test_completion_cannot_clear_an_append_after_remaining_scan
+0.01s call     tests/test_issue_1659_catchup.py::test_manual_override_keeps_configured_full_backlog
+
+(5 durations < 0.005s hidden.  Use -vv to show these durations.)
+=========================== short test summary info ============================
+FAILED tests/test_issue_1659_catchup.py::test_completion_cannot_clear_an_append_after_remaining_scan
+FAILED tests/test_issue_1659_catchup.py::test_manual_override_keeps_configured_full_backlog
+FAILED tests/test_issue_1659_catchup.py::test_inflight_walk_is_capped_per_pass
+FAILED tests/test_issue_1659_catchup.py::test_cloud_low_band_advances_despite_upper_arrivals
+4 failed in 1.34s

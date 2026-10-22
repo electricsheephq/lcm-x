@@ -1,0 +1,5 @@
+Retained synthetic summary-only failing fixture, read-only immutable EXPLAIN:
+messages table: False
+summary_nodes table: True
+catchup records: 0
+conditional writer prepare: no such table: messages
