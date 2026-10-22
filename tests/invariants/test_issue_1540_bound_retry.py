@@ -602,3 +602,89 @@ def test_replay_proof_failure_matches_base(build, monkeypatch, fault):
     ]
     assert [project(row) for row in after[len(before):]] == expected
     assert_complete_segments(after)
+
+
+@pytest.mark.parametrize("uids", [False, True], ids=["no-uids", "stored-uids"])
+@pytest.mark.parametrize("following", [2, 4])
+def test_fresh_same_stamp_user_ordinal_keeps_pair(build, uids, following):
+    """An appended U2 cannot borrow U1's pair while U1 remains on the host."""
+    engine, host = compact(build, mode="cold", uids=uids)
+    before = stored(engine)
+    host.extend([{"role": "user", "content": "repeat", "timestamp": 10},
+                 *tool_pair("c", CLEARED, tool_name="lookup")])
+    for i in range(following):
+        host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+    host.append({"role": "assistant", "content": "final answer"})
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    counts = (sum(r["role"] == "user" and r["content"] == "repeat" for r in after),
+              sum(any(c["id"] == "c" for c in r.get("tool_calls") or []) for r in after),
+              sum(r.get("tool_call_id") == "c" for r in after))
+    assert counts == (2, 2, 2), "fresh same-stamp occurrence lost its pair"
+
+
+@pytest.mark.parametrize("form", ["append", "replace"])
+@pytest.mark.parametrize("uid_case", ["different", "same", "adopt"])
+def test_user_uid_veto_without_pair_uids(build, monkeypatch, form, uid_case):
+    """A known-different user vetoes binding; absent stored UIDs allow adoption."""
+    import tests.invariants.test_issue_1529_warm_proof_salvage as shapes
+
+    plain = shapes.fixture
+    u1, u2 = f"{0xa1:032x}", f"{0xa2:032x}"
+
+    def user_uid_only(*, uids=False):
+        rows = plain(uids=False)
+        if uid_case != "adopt":
+            rows[-3]["message_uid"] = u1
+        return rows
+
+    monkeypatch.setattr(shapes, "fixture", user_uid_only)
+    engine, host = compact(build, mode="cold")
+    before = stored(engine)
+    uid = u1 if uid_case == "same" else u2
+    if form == "append":
+        host.extend([{"role": "user", "content": "repeat", "timestamp": 10, "message_uid": uid},
+                     *tool_pair("c", CLEARED, tool_name="lookup")])
+    else:
+        host[-3]["message_uid"] = uid
+        host[-1]["content"] = CLEARED
+    for i in range(2):
+        host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    counts = (sum(any(c["id"] == "c" for c in r.get("tool_calls") or []) for r in added),
+              sum(r.get("tool_call_id") == "c" for r in added))
+    # Only replacement with an equal or adopted UID is a proven replay.
+    expected = (0, 0) if form == "replace" and uid_case != "different" else (1, 1)
+    assert counts == expected, "new user UID must not suppress an unlabelled pair"
+
+
+def test_ambiguous_user_rejects_first_and_last_match(build, monkeypatch):
+    """The replay scan cannot arbitrarily choose either matching user's pair."""
+    import tests.invariants.test_issue_1529_warm_proof_salvage as shapes
+
+    plain = shapes.fixture
+
+    def repeated_pair_fixture(*, uids=False):
+        rows = plain(uids=False)
+        rows[-3:-3] = deepcopy(rows[-3:])
+        return rows
+
+    monkeypatch.setattr(shapes, "fixture", repeated_pair_fixture)
+    engine, _host = compact(build, mode="cold")
+    # Exercise both positions explicitly: cold cursor reconciliation may skip
+    # the last pair before the replay helper, hiding a last-match mutation.
+    for occurrence in (0, 1):
+        host = repeated_pair_fixture()
+        user_index = len(host) - 6 + 3 * occurrence
+        host[user_index + 2]["content"] = CLEARED
+        for i in range(2):
+            host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+        replayed = engine._replayed_tool_segment_indexes_after_cursor(host, user_index + 1)
+        assert user_index + 1 not in replayed, "ambiguous first/last match suppressed the call"
+        assert user_index + 2 not in replayed, "ambiguous first/last match suppressed the result"
