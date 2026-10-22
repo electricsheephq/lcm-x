@@ -126,7 +126,13 @@ def test_explicit_carried_window_keeps_base(tmp_path, text, operation, window):
             outputs.append(run(engine, refs, operation, window))
             assert engine._store.connection.total_changes == before
     carried, ordinary = outputs
-    if window == "outside":
+    if "booked" in text:
+        # #1814 supersedes the former ISO-first exception for distinct days.
+        for output in outputs:
+            assert output["state"] == "unknown"
+            assert output["direct_fact"] is None and output["computation"] is None
+            assert output["exclusions"]
+    elif window == "outside":
         assert normalize(carried, "") == normalize(ordinary, "")
         if operation == "date_filter":
             assert "Kyoto" in carried["direct_fact"]["value"]
@@ -156,7 +162,6 @@ def test_two_date_parser_divergence_is_deliberate():
     assert _quote_supports_day(text, date(2023, 2, 1), "")
 
 
-@pytest.mark.xfail(strict=True, reason="follow-up: ordinary mixed-date binding")
 def test_ordinary_mixed_date_binding_characterization(tmp_path):
     with engine_context(tmp_path, embeddings_enabled=False) as engine:
         refs = plant(engine, ["I reviewed the plan on 2023-01-10. I took a vacation to Bali yesterday.",
