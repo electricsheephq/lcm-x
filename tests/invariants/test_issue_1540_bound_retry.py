@@ -7,9 +7,35 @@ from typing import Any
 import pytest
 
 from tests.invariants.test_issue_1529_warm_proof_salvage import (
-    Build, CLEARED, LONG, Row, build as build, compact, fixture, stored, assert_retry,
+    Build, CLEARED, LONG, Row, build as build, compact, fixture, stored as raw_stored, assert_retry,
 )
 from tests.test_issue_671_stub_first_exit import tool_pair
+
+
+def assert_complete_segments(rows: list[Row]) -> None:
+    """Every result belongs to the active call, and each call has all results.
+
+    A steady content update may reuse the last call occurrence across a user
+    row (#1179); a later assistant call closes that segment permanently.
+    """
+    active: set[str] = set()
+    seen: set[str] = set()
+    for row in rows:
+        if row.get("role") == "assistant":
+            assert active <= seen, ("split segment", active, seen)
+            active = {call["id"] for call in row.get("tool_calls") or []}
+            seen = set()
+        elif row.get("role") == "tool":
+            cid = row.get("tool_call_id")
+            assert cid in active, ("orphan result", cid, active)
+            seen.add(cid)
+    assert active <= seen, ("incomplete segment", active, seen)
+
+
+def stored(engine: Any) -> list[Row]:
+    rows = raw_stored(engine)
+    assert_complete_segments(rows)
+    return rows
 
 
 @pytest.mark.parametrize("mode", ["warm", "cold"])
@@ -211,5 +237,138 @@ def test_stamped_undo_pair_is_fresh(build: Build, mode: str) -> None:
               sum(row.get("tool_call_id") == "c" for row in added))
     assert counts == (1, 1, 1)
     after = stored(engine)
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("uid_change", ["all", "pair-only", "equal"])
+@pytest.mark.parametrize("prefix_change", ["edit", "insert"])
+def test_prefix_change_requires_positive_uid_proof(build, mode, uid_change, prefix_change):
+    engine, host = compact(build, mode=mode, uids=True)
+    before = stored(engine)
+    older = next(i for i, row in enumerate(host) if row.get("content") == "middle lookup")
+    if prefix_change == "edit":
+        host[older]["content"] += " edited"
+    else:
+        host.insert(older, {"role": "user", "content": "inserted prefix"})
+    if uid_change != "equal":
+        for i, row in enumerate(host[-3:] if uid_change == "all" else host[-2:]):
+            row["message_uid"] = f"{200 + i:032x}"
+    host[-1]["content"] = CLEARED
+    for i in range(2):
+        host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    added = after[len(before):]
+    counts = (sum(bool(r.get("tool_calls")) and r["tool_calls"][0]["id"] == "c" for r in added),
+              sum(r.get("tool_call_id") == "c" for r in added))
+    print("B1", mode, uid_change, prefix_change, counts)
+    assert counts == ((0, 0) if uid_change == "equal" else (1, 1))
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+
+
+def parallel_compact(build, mode, uids):
+    engine = build()
+    original = fixture(uids=uids)
+    other_call, other_result = tool_pair("d", LONG + "d", tool_name="lookup")
+    original[-2]["tool_calls"].extend(other_call["tool_calls"])
+    if uids:
+        other_result["message_uid"] = f"{90:032x}"
+    original.append(other_result)
+    engine.ingest(deepcopy(original))
+    output = engine.compress(deepcopy(original), force=True)
+    assert engine._last_compression_status == "compacted"
+    sid = engine._session_id
+    engine.on_session_end(sid, deepcopy(original))
+    engine.on_session_start(sid, boundary_reason="compression", old_session_id=sid,
+                            conversation_id=engine._conversation_id, platform="cli")
+    if mode == "cold":
+        engine.shutdown()
+        engine = build(restart=True)
+    return engine, output
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("new_user", [False, True])
+def test_reordered_parallel_retry_keeps_new_uid_results(build, mode, new_user):
+    engine, host = parallel_compact(build, mode, True)
+    before = stored(engine)
+    for i, row in enumerate(host[-4:] if new_user else host[-3:]):
+        row["message_uid"] = f"{300 + i:032x}"
+    host[-2]["content"] = CLEARED
+    host[-2:] = reversed(host[-2:])
+    for i in range(2):
+        host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    added = after[len(before):]
+    assert sum(r.get("tool_call_id") == "c" for r in added) == 1
+    assert sum(r.get("tool_call_id") == "d" for r in added) == 1
+    assert [r.get("tool_call_id") for r in added if r.get("tool_call_id") in {"c", "d"}] == ["d", "c"]
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("reorder", [False, True])
+@pytest.mark.parametrize("changed_output", [False, True])
+def test_parallel_borrowed_retry_is_atomic(build, mode, reorder, changed_output):
+    engine, host = parallel_compact(build, mode, False)
+    before = stored(engine)
+    host[-2]["content"] = CLEARED
+    if changed_output:
+        host[-1]["content"] = "new d output"
+    if reorder:
+        host[-2:] = reversed(host[-2:])
+    for i in range(2):
+        host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    added = after[len(before):]
+    counts = tuple(sum((any(c["id"] == "c" for c in r.get("tool_calls") or []) if kind == "call"
+                        else r.get("tool_call_id") == kind) for r in added) for kind in ("call", "c", "d"))
+    print("B3", mode, reorder, changed_output, counts)
+    assert counts in ((0, 0, 0), (1, 1, 1))
+    if changed_output:
+        assert counts == (1, 1, 1)
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+    engine.shutdown()
+    engine = build()
+    engine.ingest(deepcopy(host))
+    restarted = stored(engine)
+    delta = restarted[len(after):]
+    assert sum(r.get("tool_call_id") == "c" for r in delta) <= 1
+    assert sum(r.get("tool_call_id") == "d" for r in delta) <= 1
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == restarted
+
+
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("following", [2, 4])
+@pytest.mark.parametrize("shape", ["same-stamp", "new-stamp", "prefix-edit"])
+@pytest.mark.parametrize("clear_earlier", [False, True])
+def test_missing_uid_compatibility(build, mode, following, shape, clear_earlier):
+    engine, host = compact(build, mode=mode)
+    before = stored(engine)
+    assert not any(r.get("message_uid") for r in host)
+    if shape == "new-stamp":
+        host[-3]["timestamp"] = 20
+    elif shape == "prefix-edit":
+        next(r for r in host if r.get("content") == "middle lookup")["content"] += " edited"
+    if clear_earlier:
+        next(r for r in host if r.get("tool_call_id") == "older")["content"] = CLEARED
+    host[-1]["content"] = CLEARED
+    for i in range(following):
+        host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    added = after[len(before):]
+    counts = (sum(r.get("role") == "user" for r in added),
+              sum(bool(r.get("tool_calls")) for r in added),
+              sum(r.get("role") == "tool" for r in added))
+    print("MISSING_UID", mode, following, shape, clear_earlier, counts)
     engine.ingest(deepcopy(host))
     assert stored(engine) == after
