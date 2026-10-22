@@ -39,11 +39,15 @@ An earlier internal triple-store prototype keyed facts on (entity, predicate) an
 - The agent itself is one `agent` entity per profile.
 
 ### D3. Aliases
-- **Normalisation:** `alias_norm` = NFKC, casefold, whitespace collapsed to single spaces, leading and trailing punctuation stripped.
+- **Normalisation of names:** for `name`, `nickname` and `relation_phrase` only, `alias_norm` = NFKC, casefold, whitespace collapsed to single spaces, leading and trailing punctuation stripped.
+- **Platform ids are never name-normalised.** A `platform_id` is stored as `<platform>:<id>`: the platform lowercased, the id byte-exact.
 - **`alias_kind`:**
   - `name`, `nickname`;
-  - `relation_phrase`: requires `owner_entity_id`, the speaker who uses the phrase. "my sister" said by U1 and by U2 are different aliases;
-  - `platform_id`: `<platform>:<id>`, created only from a verified gateway `sender_source` (#995).
+  - `relation_phrase`: requires `owner_entity_id`, the speaker who uses the phrase. "my sister" said by U1 and by U2 are different aliases.
+    - Ownership comes only from a **direct first-person statement by a verified sender**, and extraction must mark the statement as first person.
+    - Quoted, reported or second-person phrases ("your sister", "she said her sister") stay unresolved.
+  - `platform_id`: created only from a verified gateway `sender_source` (#995).
+- **Provenance.** Every alias carries the source rows it came from (`source_store_ids`). An alias with no source rows is visible to the profile owner only (see D8).
 - **One alias, several entities.** The same `alias_norm` may map to several entities. Lookups return all candidates and mark the result ambiguous. Nothing silently picks one.
 - **The one hard identity.** At most one active entity per (`scope_key`, `platform_id`).
 - **Removal.** Aliases are retired (`retired_at`), never deleted.
@@ -59,7 +63,11 @@ An earlier internal triple-store prototype keyed facts on (entity, predicate) an
   - Selected notes are superseded by copies that point at E2.
   - Mentions are derived, so they are rebuilt for the moved aliases.
   - Undo replays the inverse event.
-- **Logging.** Every merge, split, alias change, kind change, forget and undo is a row in `lcm_memory_events` (`op`, `payload_json`, `actor`, `created_at`, `undone_by`). Nothing curated is updated in place except `status`, `merged_into` and `retired_at`. Each change to those three fields is mirrored by an event.
+- **Logging.** Every merge, split, alias change, kind change, forget and undo is a row in `lcm_memory_events` (`event_id`, `op`, `payload_json`, `actor`, `created_at`, and `target_event_id` for an undo). Nothing curated is updated in place except `status`, `merged_into` and `retired_at`. Each change to those three fields is mirrored by an event.
+- **Undo is an event, and "undone" is derived.**
+  - An undo appends an event whose `target_event_id` names the event it reverses.
+  - Whether an event is undone is derived from the log; no column on the original event is updated.
+  - **Chained undo.** An undo is refused while any later, not-undone event touches the same entities or aliases. Dependents are undone first, last-in first-out per affected object.
 
 ### D5. Automatic merges
 The agent or a background pass acts without asking only in these cases:
@@ -70,8 +78,16 @@ The agent or a background pass acts without asking only in these cases:
 Otherwise the agent asks: in chat when the current answer depends on it, else on the review queue.
 
 ### D6. The bridge to #1191 (`lcm_entity_keys`)
-- **Shape.** `lcm_entity_keys(subject_key, entity_id, method, created_at, retired_at)`, with `method` ∈ {`alias_match`, `override`}.
+- **Shape.** `lcm_entity_keys(subject_key, owner_entity_id, entity_id, method, source_store_ids, created_at, retired_at)`, with `method` ∈ {`alias_match`, `override`}.
+  - The key's identity is (`subject_key`, `owner_entity_id`).
+  - **Relation-phrase keys** map per (`subject_key`, owner). Every other key has `owner_entity_id = NULL`.
+  - Keys carry the source rows they were resolved from (`source_store_ids`).
 - **It is derived.** It is rebuilt from current aliases, plus override rows that are themselves recorded as events.
+- **Overrides are never global while a key is ambiguous.** An override applies only:
+  - (a) when the key has exactly one candidate; or
+  - (b) scoped to the assertion or source rows it disambiguates.
+
+  A global override is refused while the key is ambiguous.
 - **Resolution:**
   - Take the `value` part of `namespace:value`, normalise it as in D3, and look it up among aliases.
   - Exactly one candidate of a compatible kind gives a resolved key. Zero or several candidates leave it unresolved; nothing guesses.
@@ -92,7 +108,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
     | `conversation` | not bridged | A conversation is a session, not an entity |
 
     The match is exact. Entities of kind `other` or `topic` never resolve a key automatically; an override can link them. A namespace added later is unbridged until this table lists it.
-  - **Relation-phrase keys** (`person:sister`) resolve only with an owner: the verified sender of the assertion's `source_store_id`. With no verified sender, the key stays unresolved. It is never collapsed into one shared entity.
+  - **Relation-phrase keys** (`person:sister`) resolve only with an owner: the verified sender of the assertion's `source_store_id`, and only when the source statement is marked first person (D3). With no verified sender, or with quoted, reported or second-person phrasing, the key stays unresolved. It is never collapsed into one shared entity.
 - **Subject-key churn.** A re-extraction under a new `extraction_version` may produce a different key for the same subject. The bridge resolves the new key through aliases again.
   - Override rows are keyed by `subject_key` text, so they survive an `extraction_version` change.
   - A key that disappears is retired, not deleted.
@@ -106,8 +122,11 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 
 ### D8. Labels are not permissions (invariant 6)
 - A sender or author label never decides recall access.
-- When AccessContextV1 (`docs/access-context-v1.md`) is active, an entity note or link is visible to a principal only if every source row it cites is visible to that principal.
-- Entity cards apply the same filter.
+- When AccessContextV1 (`docs/access-context-v1.md`) is active, an entity note, link, alias or key is visible to a principal only if its cited set is **non-empty** and every cited row is visible to that principal.
+  - Uncited records are hidden unless an explicit grant exists.
+  - An alias with no source rows is visible to the profile owner only.
+- **Ambiguity is counted after visibility.** Under AccessContextV1, alias and key candidates are filtered by visibility **before** ambiguity is counted. Candidate sets and ambiguity flags therefore never reveal an entity that the principal cannot see.
+- Entity cards apply the same filters.
 - Without AccessContextV1, no entity content is injected automatically. The agent reaches entity content only by calling `lcm_memory`, the same way it reaches `lcm_recall` results today.
 - Rows without a gateway `sender_source` carry unverified labels.
 - **Scope of D8.** D8 covers entity notes, links and cards reached through `lcm_memory`. #1191's own profile-block injection (gap 3) is governed by #1191's spec, where invariant 6 is also written. D8 neither permits nor forbids it.
@@ -143,12 +162,22 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
   - split then undo returns the identical resolved view;
   - a merge is refused when `canonical(A) == canonical(B)`, including A == B and cycles;
   - merging an already-merged entity resolves to its canonical;
-  - a split that moves a `platform_id` alias never leaves two active holders, even mid-transaction.
+  - a split that moves a `platform_id` alias never leaves two active holders, even mid-transaction;
+  - **chained split:** split E → E2, then E2 → E3. Undoing the first split is refused until the second is undone. After undoing both in LIFO order, the resolved view is identical.
+- **Undo log:** an undo appends an event with `target_event_id`; the original event row is unchanged; the undone state is derived.
+- **Platform-id storage:** platform ids keep the id byte-exact (no casefold, no NFKC); only the platform prefix is lowercased.
 - **Platform-id attach:** a new verified sender row with a held `platform_id` attaches to the holder and creates no entity.
 - **Ambiguity:** two entities share an alias; lookup returns both and marks the result ambiguous.
-- **Relation phrase:** "my sister" from two verified senders gives two entities; with no verified sender, the key stays unresolved.
+- **Relation phrase:**
+  - "my sister" from two verified senders gives two entities, and two bridge keys differing by owner;
+  - with no verified sender, the key stays unresolved;
+  - "your sister" and reported speech stay unresolved.
+- **Overrides:** a global override on an ambiguous key is refused; a scoped override applies only to its rows.
 - **Bridge churn:** after re-extraction under a new `extraction_version` with a changed subject key, the key resolves through aliases, and override rows survive.
 - **Byte-identity:** with the flag off and on, and the tool unused, recall output and assembled context are identical across a fixture corpus.
 - **Whole-row consumers (D9):** with the new nullable columns present, every enumerated `SELECT *` consumer's output is unchanged, or changed exactly as declared.
 - **Namespace table (D6):** each namespace resolves only to its listed kind; `event` and `conversation` keys stay unbridged.
-- **Access (D8):** under AccessContextV1, a note citing one invisible source row is hidden.
+- **Access (D8):**
+  - under AccessContextV1, a note citing one invisible source row is hidden;
+  - an uncited note is hidden without an explicit grant (uncited denial);
+  - **two principals:** P1 and P2 each have an entity named "Alex", with P1's sourced only from rows P2 cannot see. For P2, lookup returns one candidate, not ambiguous, and never reveals P1's entity.
