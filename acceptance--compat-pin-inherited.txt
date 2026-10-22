@@ -1,0 +1,2 @@
+Inherited isolated-compat receipt: compat-pin-resume.txt (prior lane evidence; not rerun during resume2)
+254 passed, 27 xfailed in 139.06s (0:02:19)

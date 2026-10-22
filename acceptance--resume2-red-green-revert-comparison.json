@@ -1,0 +1,18 @@
+{
+  "same62_nodeids": true,
+  "groups": {
+    "tests/test_sender_capture.py": 37,
+    "tests/test_store_wedge_inspect.py": 1,
+    "tests/test_sender_columns_schema.py": 7,
+    "bench/instruments/occurrence_fuzz/tests/test_sender_safety.py": 11,
+    "tests/test_sender_delivered_identity.py": 4,
+    "tests/compat/test_sender_migration.py": 2
+  },
+  "receipts": {
+    "red_base": "resume2-red-base.txt",
+    "green": "resume2-green-acceptance.txt",
+    "red_product_reverse": "resume2-red-product-revert.txt"
+  },
+  "product_restore": "resume2-child-product-restore.json",
+  "expected_negative": "all62 RED on BASE and product-only reverse; all62 GREEN candidate"
+}

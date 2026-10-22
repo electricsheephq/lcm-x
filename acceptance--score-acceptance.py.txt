@@ -1,0 +1,29 @@
+"""Re-read safe immutable pytest terminal-count receipts, without executing tests."""
+import json
+from pathlib import Path
+import sys
+
+root = Path(sys.argv[1])
+receipts = {
+    "inventory": "resume2-four-guards.txt",
+    "red_base": "resume2-red-base.txt",
+    "green": "resume2-green-acceptance.txt",
+    "red_product_reverse": "resume2-red-product-revert.txt",
+    "consumers": "resume2-consumers-pins.txt",
+    "full_suite": "resume2-full-suite.txt",
+}
+results = {}
+for label, name in receipts.items():
+    lines = (root / name).read_text().splitlines()
+    counts = [json.loads(line.removeprefix("E1B_COUNTS=")) for line in lines if line.startswith("E1B_COUNTS=")]
+    codes = [int(line.removeprefix("exit=")) for line in lines if line.startswith("exit=")]
+    assert len(counts) == len(codes) == 1
+    results[label] = {"counts": counts[0], "exit": codes[0]}
+assert results["inventory"]["counts"]["passed"] == 4
+assert results["green"]["counts"]["passed"] == 62
+assert results["consumers"]["counts"]["passed"] == 932
+for label in ("red_base", "red_product_reverse"):
+    assert results[label]["counts"]["failed"] == 62 and results[label]["exit"] == 1
+for label in ("inventory", "green", "consumers", "full_suite"):
+    assert results[label]["exit"] == 0 and not results[label]["counts"].get("failed", 0) and not results[label]["counts"].get("error", 0)
+print(json.dumps(results, sort_keys=True))

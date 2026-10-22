@@ -1,0 +1,22 @@
+"""Re-score the preserved interleaved timing rows, with no product execution."""
+import json
+from pathlib import Path
+import statistics
+import sys
+
+root = Path(sys.argv[1])
+rows = [json.loads(line) for line in (root / "raw-timings.jsonl").read_text().splitlines()]
+assert len(rows) == 600 and all(row["status"] == "complete" for row in rows)
+base = [row["elapsed_ns"] / 1e6 for row in rows if row["arm"] == "base"]
+head = [row["elapsed_ns"] / 1e6 for row in rows if row["arm"] == "candidate" and row["mode"] == "ingest"]
+hook = [row["elapsed_ns"] / 1e6 for row in rows if row["mode"] == "hook"]
+assert len(base) == len(head) == len(hook) == 200
+b, h = statistics.median(base), statistics.median(head)
+summary = json.loads((root / "summary.json").read_text())
+expected = {"base_median_ms": b, "candidate_median_ms": h,
+            "paired_delta_median_ms": statistics.median([y - x for x, y in zip(base, head)]),
+            "allowed_delta_ms": max(b * .10, .05),
+            "hook_creation_plus_update_median_ms": statistics.median(hook)}
+assert all(summary[key] == value for key, value in expected.items())
+assert summary["pass"] == (h - b <= max(b * .10, .05))
+print(json.dumps({**expected, "pairs": 200, "pass": summary["pass"]}, sort_keys=True))

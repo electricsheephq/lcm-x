@@ -1,0 +1,109 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "e1b-s0-resume2-cost-paired-200",
+  "project": "lcm-x",
+  "kind": "benchmark",
+  "status": "settled",
+  "owner_lane": "e1b-s0",
+  "claim_class": "advisory",
+  "created": "2026-10-22T22:10:49Z",
+  "settled": "2026-10-22T22:11:24Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "04627819e6599935ac38a62e6ea0d8e2fa213eb0",
+    "dirty": true,
+    "diff_sha256": "c4bcc4235689e4cef9022a41d71480c7591b8191bf96d1008aa167a62bf71440",
+    "base_sha": "5df5a3c2736c01b46acf26906a510e41e367e73e",
+    "working_candidate_sha256": "554c626a2a7ce760577118343a5fe71ca4999241b84ee6d25080e8eaccb7daf3"
+  },
+  "env": {
+    "command": "python resume2-paired-cost.py (single serial interleaved 200-pair run; 200-message fresh session per sample)",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "E1b-S0-cost",
+      "metric": "base_median_ms",
+      "value": 7.2074584999999995,
+      "n": 200,
+      "baseline_run": "base-5df5a3c",
+      "source": "summary.json"
+    },
+    {
+      "benchmark": "E1b-S0-cost",
+      "metric": "candidate_median_ms",
+      "value": 7.236625,
+      "n": 200,
+      "baseline_run": "base-5df5a3c",
+      "source": "summary.json"
+    },
+    {
+      "benchmark": "E1b-S0-cost",
+      "metric": "hook_creation_plus_update_median_ms",
+      "value": 0.203125,
+      "n": 200,
+      "baseline_run": "base-5df5a3c",
+      "source": "summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "raw-timings.jsonl",
+      "role": "per-item",
+      "sha256": "f5a6fc5f3e99868d5f67f4d6641564297a779b4cc5143ac27239b373c4135651",
+      "bytes": 56882
+    },
+    {
+      "path": "summary.json",
+      "role": "receipt",
+      "sha256": "688c687ae95991f3b0145f10d5a10cdb6185982fbd98ba537d35e36a7607a0a9",
+      "bytes": 791
+    },
+    {
+      "path": "resume2-score-cost.py",
+      "role": "receipt",
+      "sha256": "ed6aaebaced8a46faba9b6c91f1db77cb0ee11bb557eb2354198e50bae612f22",
+      "bytes": 1250
+    },
+    {
+      "path": "resume2-candidate-frozen.json",
+      "role": "receipt",
+      "sha256": "11e23176d7466b7669c50f21bf4f987e83f22d4d41583a867ed1f9e64af3d92a",
+      "bytes": 6062
+    },
+    {
+      "path": "resume2-base-product-identity.json",
+      "role": "receipt",
+      "sha256": "bb147bb2a839ce7dbe59199860cd7d053487b20c235bbdb915e413c70cdc5e17",
+      "bytes": 240
+    },
+    {
+      "path": "resume2-runner-dependencies.json",
+      "role": "receipt",
+      "sha256": "13829507fb1366095aac2f7d821a629a49c4f46425be781a4bfef85fbafd3900",
+      "bytes": 569
+    }
+  ],
+  "rescore": {
+    "command": "python resume2-score-cost.py .",
+    "inputs": [
+      "raw-timings.jsonl",
+      "summary.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "raw-timings.jsonl",
+    "resume2-base-product-identity.json",
+    "resume2-candidate-frozen.json",
+    "resume2-runner-dependencies.json",
+    "resume2-score-cost.py",
+    "summary.json"
+  ]
+}

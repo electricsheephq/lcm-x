@@ -1,0 +1,6 @@
+command=actionlint
+pwd=$CHECKOUT
+HEAD=04627819e6599935ac38a62e6ea0d8e2fa213eb0
+stdout=<empty>
+stderr=<empty>
+exit=0

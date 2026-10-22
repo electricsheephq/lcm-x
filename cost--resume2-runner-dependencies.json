@@ -1,0 +1,19 @@
+{
+  "python": "3.12.13",
+  "sqlite": "3.53.1",
+  "packages": {
+    "pytest": "9.1.1",
+    "hypothesis": "6.141.1",
+    "numpy": "2.5.4",
+    "pytest-xdist": "3.8.0"
+  },
+  "workers": 1,
+  "timeout_seconds": 2100,
+  "host_stub_sha256": "efc2bc2c0a6e511c5365a98e504e8e19767701863a53bd531d99170cc686899f",
+  "host_stub_equals_CI": true,
+  "runner": "resume2-safe-pytest.py",
+  "raw_diagnostic_policy": "discarded in memory; statuses and terminal counts only",
+  "cwd": "$CHECKOUT",
+  "candidate_manifest": "resume2-candidate-frozen.json",
+  "source_corrections_used": 2
+}

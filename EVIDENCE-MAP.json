@@ -1,0 +1,211 @@
+{
+  "schema": "e1b-public-evidence-map/1",
+  "working_candidate_sha256": "554c626a2a7ce760577118343a5fe71ca4999241b84ee6d25080e8eaccb7daf3",
+  "files": [
+    {
+      "run": "cost",
+      "original_path": "RESULT-MANIFEST.json",
+      "published_filename": "cost--RESULT-MANIFEST.json",
+      "sha256": "55d28b7cfd428d13b325a5806dcd500d11e2573a6e08d00616458901ce35ca11",
+      "bytes": 3042
+    },
+    {
+      "run": "cost",
+      "original_path": "RESULT.md",
+      "published_filename": "cost--RESULT.md",
+      "sha256": "a08b800dd8c5a89fc052a13aa4a2d9b159464ee35cc8f0aac5bce3764c96fc88",
+      "bytes": 1700
+    },
+    {
+      "run": "cost",
+      "original_path": "raw-timings.jsonl",
+      "published_filename": "cost--raw-timings.jsonl.txt",
+      "sha256": "f5a6fc5f3e99868d5f67f4d6641564297a779b4cc5143ac27239b373c4135651",
+      "bytes": 56882
+    },
+    {
+      "run": "cost",
+      "original_path": "resume2-base-product-identity.json",
+      "published_filename": "cost--resume2-base-product-identity.json",
+      "sha256": "bb147bb2a839ce7dbe59199860cd7d053487b20c235bbdb915e413c70cdc5e17",
+      "bytes": 240
+    },
+    {
+      "run": "cost",
+      "original_path": "resume2-candidate-frozen.json",
+      "published_filename": "cost--resume2-candidate-frozen.json",
+      "sha256": "11e23176d7466b7669c50f21bf4f987e83f22d4d41583a867ed1f9e64af3d92a",
+      "bytes": 6062
+    },
+    {
+      "run": "cost",
+      "original_path": "resume2-runner-dependencies.json",
+      "published_filename": "cost--resume2-runner-dependencies.json",
+      "sha256": "13829507fb1366095aac2f7d821a629a49c4f46425be781a4bfef85fbafd3900",
+      "bytes": 569
+    },
+    {
+      "run": "cost",
+      "original_path": "resume2-score-cost.py",
+      "published_filename": "cost--resume2-score-cost.py.txt",
+      "sha256": "ed6aaebaced8a46faba9b6c91f1db77cb0ee11bb557eb2354198e50bae612f22",
+      "bytes": 1250
+    },
+    {
+      "run": "cost",
+      "original_path": "summary.json",
+      "published_filename": "cost--summary.json",
+      "sha256": "688c687ae95991f3b0145f10d5a10cdb6185982fbd98ba537d35e36a7607a0a9",
+      "bytes": 791
+    },
+    {
+      "run": "acceptance",
+      "original_path": "RESULT-MANIFEST.json",
+      "published_filename": "acceptance--RESULT-MANIFEST.json",
+      "sha256": "d110b2f53c89d4cbc70d0b4c833f1bef3e1081a5adf43b42e61fcd8d3518c57d",
+      "bytes": 6853
+    },
+    {
+      "run": "acceptance",
+      "original_path": "RESULT.md",
+      "published_filename": "acceptance--RESULT.md",
+      "sha256": "de6a27e947348e9ce5ca7a4326f533a8ef5a4931a65c41752f1385261edc6b37",
+      "bytes": 2311
+    },
+    {
+      "run": "acceptance",
+      "original_path": "compat-pin-inherited.txt",
+      "published_filename": "acceptance--compat-pin-inherited.txt",
+      "sha256": "a7b691d36d97151a7c278f3eac32aa793cd1c3f7b7dd751d02ea226a747de7b3",
+      "bytes": 149
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-actionlint.txt",
+      "published_filename": "acceptance--resume2-actionlint.txt",
+      "sha256": "772fa144b16d526724bdf6002da291f0122138ff9f7348684619bef2f4df8824",
+      "bytes": 116
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-base-product-identity.json",
+      "published_filename": "acceptance--resume2-base-product-identity.json",
+      "sha256": "bb147bb2a839ce7dbe59199860cd7d053487b20c235bbdb915e413c70cdc5e17",
+      "bytes": 240
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-candidate-frozen.json",
+      "published_filename": "acceptance--resume2-candidate-frozen.json",
+      "sha256": "11e23176d7466b7669c50f21bf4f987e83f22d4d41583a867ed1f9e64af3d92a",
+      "bytes": 6062
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-child-product-restore.json",
+      "published_filename": "acceptance--resume2-child-product-restore.json",
+      "sha256": "deab13cf63302d392b6a9e4920f2cda264103d3c7537be946f7e937e7d0cce10",
+      "bytes": 455
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-consumers-pins.txt",
+      "published_filename": "acceptance--resume2-consumers-pins.txt",
+      "sha256": "13563fddd90864e185999e0c4655c6041fb31785d6621b44d7857040a8581bfb",
+      "bytes": 95696
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-documentation-reconciliation.json",
+      "published_filename": "acceptance--resume2-documentation-reconciliation.json",
+      "sha256": "924ab5bea99c3338fe8745819bc00aae90d394ce886686a22dfb995383527c6a",
+      "bytes": 494
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-four-guards.txt",
+      "published_filename": "acceptance--resume2-four-guards.txt",
+      "sha256": "6aab4d054ff95ff81589694c7483435e4bc0c38ef7c5c0dace86a29f587dd019",
+      "bytes": 969
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-full-suite.txt",
+      "published_filename": "acceptance--resume2-full-suite.txt",
+      "sha256": "2ed61366ed48a99c081662e09967370c8f18fbd458b284b70f0e61f993a77640",
+      "bytes": 2277283
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-green-acceptance.txt",
+      "published_filename": "acceptance--resume2-green-acceptance.txt",
+      "sha256": "ec66a14d0c075152d67ab5be1f8b56c7cc539eac6d2a94cdead680460eecab3b",
+      "bytes": 7302
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-pin-sql-fixtures.json",
+      "published_filename": "acceptance--resume2-pin-sql-fixtures.json",
+      "sha256": "d688d9f263e4d0753cc849fc22d317a1b6ae35fc1d86e3ed037ce383cce310ac",
+      "bytes": 1325
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-red-base.txt",
+      "published_filename": "acceptance--resume2-red-base.txt",
+      "sha256": "f6aef210cf5324aaaffa7b049fd574ee384988a594359f5c2acdadb41ca68b7d",
+      "bytes": 7334
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-red-green-revert-comparison.json",
+      "published_filename": "acceptance--resume2-red-green-revert-comparison.json",
+      "sha256": "536f508c0194eaf0082aa9d49e92e1d4e026ff271ef756fd6603ab2323e459b7",
+      "bytes": 665
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-red-product-revert.txt",
+      "published_filename": "acceptance--resume2-red-product-revert.txt",
+      "sha256": "2e87227b0859bbe5939a1dd2e72c083fcd0237de2cf78f2cd276fc1ed5c4feed",
+      "bytes": 7330
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-ruff.txt",
+      "published_filename": "acceptance--resume2-ruff.txt",
+      "sha256": "6259a98e02c3f92ec0ea47396a5e22b5857d3edcc062c7937d61fed4e784545d",
+      "bytes": 140
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-runner-dependencies.json",
+      "published_filename": "acceptance--resume2-runner-dependencies.json",
+      "sha256": "13829507fb1366095aac2f7d821a629a49c4f46425be781a4bfef85fbafd3900",
+      "bytes": 569
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-t6-recorded.json",
+      "published_filename": "acceptance--resume2-t6-recorded.json",
+      "sha256": "edc545904dddc530ba3847384a4f612f98a9a35d79ef5c17c6a57d2c76099910",
+      "bytes": 554
+    },
+    {
+      "run": "acceptance",
+      "original_path": "resume2-wedge-overlay-identity.json",
+      "published_filename": "acceptance--resume2-wedge-overlay-identity.json",
+      "sha256": "bd45c0457005fe5ba6cd703614a8296bf5586cd6f54661c3c9c184bd2283e7bf",
+      "bytes": 270
+    },
+    {
+      "run": "acceptance",
+      "original_path": "score-acceptance.py",
+      "published_filename": "acceptance--score-acceptance.py.txt",
+      "sha256": "6ecc254216bc9f1a29650cef9b04f59ce23774cf31a99798b32ff7106522cc6b",
+      "bytes": 1401
+    }
+  ],
+  "restore": "Download each run separately, rename each published_filename to original_path, then run the card rescore.command. .txt suffixes preserve original bytes.",
+  "proof_boundary": "unit/integration/compat and local fixture cost only; no live host/admitted-turn correctness; product candidate was measured before commit."
+}

@@ -1,0 +1,8 @@
+{
+  "discrepancy": "SPEC docs/configuration.md absent at BASE and candidate; bundled reference existing",
+  "resolution": "root directed short docs/configuration.md pointer page and manual non-field entry in existing bundled reference; scalar generated section regenerated unchanged",
+  "generator": "existing Python3.12.13 venv/bin/python scripts/gen_config_reference.py",
+  "result": "exit0; no field/ENV_FIELD_SPECS addition",
+  "source_corrections_used": 2,
+  "recovery_attempts_used": 1
+}

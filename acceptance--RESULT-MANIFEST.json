@@ -1,0 +1,230 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "e1b-s0-resume2-acceptance",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "e1b-s0",
+  "claim_class": "advisory",
+  "created": "2026-10-22T21:39:55Z",
+  "settled": "2026-10-22T22:11:01Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "04627819e6599935ac38a62e6ea0d8e2fa213eb0",
+    "dirty": true,
+    "diff_sha256": "c4bcc4235689e4cef9022a41d71480c7591b8191bf96d1008aa167a62bf71440",
+    "base_sha": "5df5a3c2736c01b46acf26906a510e41e367e73e",
+    "working_candidate_sha256": "554c626a2a7ce760577118343a5fe71ca4999241b84ee6d25080e8eaccb7daf3"
+  },
+  "env": {
+    "command": "python -m pytest --assert=plain --tb=no --disable-warnings -q -rA -p resume2_receipts -m \"not latency\" -o tmp_path_retention_policy=failed --basetemp=\"$SCRATCH/pt-resume2-full-suite\"; other exact named-set commands are preserved in individual receipts",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "E1b-S0",
+      "metric": "acceptance_passed",
+      "value": 62.0,
+      "n": 62,
+      "baseline_run": "base-5df5a3c",
+      "source": "resume2-green-acceptance.txt"
+    },
+    {
+      "benchmark": "E1b-S0",
+      "metric": "base_expected_red",
+      "value": 62.0,
+      "n": 62,
+      "source": "resume2-red-base.txt"
+    },
+    {
+      "benchmark": "E1b-S0",
+      "metric": "product_reverse_expected_red",
+      "value": 62.0,
+      "n": 62,
+      "source": "resume2-red-product-revert.txt"
+    },
+    {
+      "benchmark": "E1b-S0",
+      "metric": "consumer_passed",
+      "value": 932.0,
+      "n": 932,
+      "source": "resume2-consumers-pins.txt"
+    },
+    {
+      "benchmark": "E1b-S0",
+      "metric": "inventory_guards_passed",
+      "value": 4.0,
+      "n": 4,
+      "source": "resume2-four-guards.txt"
+    },
+    {
+      "benchmark": "E1b-compat-inherited",
+      "metric": "passed",
+      "value": 254.0,
+      "n": 281,
+      "source": "compat-pin-inherited.txt"
+    },
+    {
+      "benchmark": "E1b-S0-full-suite",
+      "metric": "passed",
+      "value": 19940.0,
+      "n": 20147,
+      "source": "resume2-full-suite.txt"
+    }
+  ],
+  "results": [
+    {
+      "path": "resume2-four-guards.txt",
+      "role": "receipt",
+      "sha256": "6aab4d054ff95ff81589694c7483435e4bc0c38ef7c5c0dace86a29f587dd019",
+      "bytes": 969
+    },
+    {
+      "path": "resume2-red-base.txt",
+      "role": "receipt",
+      "sha256": "f6aef210cf5324aaaffa7b049fd574ee384988a594359f5c2acdadb41ca68b7d",
+      "bytes": 7334
+    },
+    {
+      "path": "resume2-green-acceptance.txt",
+      "role": "receipt",
+      "sha256": "ec66a14d0c075152d67ab5be1f8b56c7cc539eac6d2a94cdead680460eecab3b",
+      "bytes": 7302
+    },
+    {
+      "path": "resume2-red-product-revert.txt",
+      "role": "receipt",
+      "sha256": "2e87227b0859bbe5939a1dd2e72c083fcd0237de2cf78f2cd276fc1ed5c4feed",
+      "bytes": 7330
+    },
+    {
+      "path": "resume2-consumers-pins.txt",
+      "role": "receipt",
+      "sha256": "13563fddd90864e185999e0c4655c6041fb31785d6621b44d7857040a8581bfb",
+      "bytes": 95696
+    },
+    {
+      "path": "resume2-ruff.txt",
+      "role": "receipt",
+      "sha256": "6259a98e02c3f92ec0ea47396a5e22b5857d3edcc062c7937d61fed4e784545d",
+      "bytes": 140
+    },
+    {
+      "path": "resume2-actionlint.txt",
+      "role": "receipt",
+      "sha256": "772fa144b16d526724bdf6002da291f0122138ff9f7348684619bef2f4df8824",
+      "bytes": 116
+    },
+    {
+      "path": "resume2-candidate-frozen.json",
+      "role": "receipt",
+      "sha256": "11e23176d7466b7669c50f21bf4f987e83f22d4d41583a867ed1f9e64af3d92a",
+      "bytes": 6062
+    },
+    {
+      "path": "resume2-red-green-revert-comparison.json",
+      "role": "receipt",
+      "sha256": "536f508c0194eaf0082aa9d49e92e1d4e026ff271ef756fd6603ab2323e459b7",
+      "bytes": 665
+    },
+    {
+      "path": "resume2-child-product-restore.json",
+      "role": "receipt",
+      "sha256": "deab13cf63302d392b6a9e4920f2cda264103d3c7537be946f7e937e7d0cce10",
+      "bytes": 455
+    },
+    {
+      "path": "resume2-pin-sql-fixtures.json",
+      "role": "receipt",
+      "sha256": "d688d9f263e4d0753cc849fc22d317a1b6ae35fc1d86e3ed037ce383cce310ac",
+      "bytes": 1325
+    },
+    {
+      "path": "resume2-documentation-reconciliation.json",
+      "role": "receipt",
+      "sha256": "924ab5bea99c3338fe8745819bc00aae90d394ce886686a22dfb995383527c6a",
+      "bytes": 494
+    },
+    {
+      "path": "resume2-runner-dependencies.json",
+      "role": "receipt",
+      "sha256": "13829507fb1366095aac2f7d821a629a49c4f46425be781a4bfef85fbafd3900",
+      "bytes": 569
+    },
+    {
+      "path": "resume2-base-product-identity.json",
+      "role": "receipt",
+      "sha256": "bb147bb2a839ce7dbe59199860cd7d053487b20c235bbdb915e413c70cdc5e17",
+      "bytes": 240
+    },
+    {
+      "path": "resume2-t6-recorded.json",
+      "role": "receipt",
+      "sha256": "edc545904dddc530ba3847384a4f612f98a9a35d79ef5c17c6a57d2c76099910",
+      "bytes": 554
+    },
+    {
+      "path": "compat-pin-inherited.txt",
+      "role": "receipt",
+      "sha256": "a7b691d36d97151a7c278f3eac32aa793cd1c3f7b7dd751d02ea226a747de7b3",
+      "bytes": 149
+    },
+    {
+      "path": "score-acceptance.py",
+      "role": "receipt",
+      "sha256": "6ecc254216bc9f1a29650cef9b04f59ce23774cf31a99798b32ff7106522cc6b",
+      "bytes": 1401
+    },
+    {
+      "path": "resume2-wedge-overlay-identity.json",
+      "role": "receipt",
+      "sha256": "bd45c0457005fe5ba6cd703614a8296bf5586cd6f54661c3c9c184bd2283e7bf",
+      "bytes": 270
+    },
+    {
+      "path": "resume2-full-suite.txt",
+      "role": "receipt",
+      "sha256": "2ed61366ed48a99c081662e09967370c8f18fbd458b284b70f0e61f993a77640",
+      "bytes": 2277283
+    }
+  ],
+  "rescore": {
+    "command": "python score-acceptance.py .",
+    "inputs": [
+      "resume2-four-guards.txt",
+      "resume2-red-base.txt",
+      "resume2-green-acceptance.txt",
+      "resume2-red-product-revert.txt",
+      "resume2-consumers-pins.txt",
+      "resume2-full-suite.txt"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "compat-pin-inherited.txt",
+    "resume2-actionlint.txt",
+    "resume2-base-product-identity.json",
+    "resume2-candidate-frozen.json",
+    "resume2-child-product-restore.json",
+    "resume2-consumers-pins.txt",
+    "resume2-documentation-reconciliation.json",
+    "resume2-four-guards.txt",
+    "resume2-full-suite.txt",
+    "resume2-green-acceptance.txt",
+    "resume2-pin-sql-fixtures.json",
+    "resume2-red-base.txt",
+    "resume2-red-green-revert-comparison.json",
+    "resume2-red-product-revert.txt",
+    "resume2-ruff.txt",
+    "resume2-runner-dependencies.json",
+    "resume2-t6-recorded.json",
+    "resume2-wedge-overlay-identity.json",
+    "score-acceptance.py"
+  ]
+}

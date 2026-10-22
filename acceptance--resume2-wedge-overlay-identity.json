@@ -1,0 +1,6 @@
+{
+  "full_module_AST_identical": false,
+  "selected_acceptance_function_AST_identical": true,
+  "source_byte_difference": "top-level node ordering differs; same nodes and selected acceptance function, no test execution repeated",
+  "same_top_level_AST_multiset": true
+}

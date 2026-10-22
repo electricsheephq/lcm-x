@@ -1,0 +1,15 @@
+{
+  "verified_hashes": {
+    "__init__.py": true,
+    "db_bootstrap.py": true,
+    "engine.py": true,
+    "store.py": true,
+    "sender_capture.py": true,
+    "bench/instruments/local_catchup/audit.py": true,
+    "bench/instruments/local_catchup/measurement.py": true,
+    "bench/instruments/local_catchup/messages_snapshot.py": true
+  },
+  "candidate": "e1b-s0-1",
+  "head": "04627819e6599935ac38a62e6ea0d8e2fa213eb0",
+  "result": "8/8 exact restored"
+}

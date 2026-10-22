@@ -1,0 +1,17 @@
+{
+  "pairs": 200,
+  "base_median_ms": 7.2074584999999995,
+  "candidate_median_ms": 7.236625,
+  "paired_delta_median_ms": 0.07810299999999959,
+  "allowed_delta_ms": 0.72074585,
+  "pass": true,
+  "hook_creation_plus_update_median_ms": 0.203125,
+  "base_iqr_ms": 0.5237187500000005,
+  "candidate_iqr_ms": 0.5405622499999989,
+  "hook_iqr_ms": 0.03596849999999999,
+  "base": "5df5a3c2736c01b46acf26906a510e41e367e73e",
+  "candidate_head": "04627819e6599935ac38a62e6ea0d8e2fa213eb0",
+  "working_candidate_sha256": "554c626a2a7ce760577118343a5fe71ca4999241b84ee6d25080e8eaccb7daf3",
+  "configuration": "same fallback token counter; embeddings and temporal rollups off; fresh 200-message session per sample",
+  "proof_boundary": "local fixture costs only; no live-host latency or admission claim"
+}

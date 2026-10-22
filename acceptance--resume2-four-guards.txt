@@ -1,0 +1,11 @@
+pwd=$CHECKOUT
+HEAD=04627819e6599935ac38a62e6ea0d8e2fa213eb0
+command=$SCRATCH/venv/bin/python -m pytest --assert=plain --tb=no --disable-warnings -q -rA -p resume2_receipts tests/behaviour/test_bool_env_policies.py::test_boolean_policy_inventory tests/behaviour/test_config_parsing_table.py::test_key_inventory_is_complete tests/invariants/test_issue_1603_profile_config.py::test_environment_read_inventory tests/test_maintainer_gate.py::test_top_level_modules_are_classified --basetemp=$SCRATCH/pt-resume2-four-guards
+E1B_COUNTS={"passed": 4}
+PASSED tests/behaviour/test_bool_env_policies.py::test_boolean_policy_inventory
+PASSED tests/behaviour/test_config_parsing_table.py::test_key_inventory_is_complete
+PASSED tests/invariants/test_issue_1603_profile_config.py::test_environment_read_inventory
+PASSED tests/test_maintainer_gate.py::test_top_level_modules_are_classified
+4 passed in 4.33s
+exit=0
+diagnostic_policy=raw payload-bearing diagnostics discarded in memory

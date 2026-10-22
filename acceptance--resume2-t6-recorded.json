@@ -1,0 +1,20 @@
+{
+  "proof_boundary": "Hermes-shaped fixtures; admission semantics not proven",
+  "observations": [
+    {
+      "scenario": "desktop-tui-telegram",
+      "sender_label": "[redacted synthetic principal]",
+      "sender_source": "gateway_principal"
+    },
+    {
+      "scenario": "heartbeat-loop",
+      "sender_label": "[redacted synthetic principal]",
+      "sender_source": "gateway_principal"
+    },
+    {
+      "scenario": "viewer-submit",
+      "sender_label": "[redacted synthetic principal]",
+      "sender_source": "gateway_principal"
+    }
+  ]
+}

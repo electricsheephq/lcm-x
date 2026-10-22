@@ -1,0 +1,7 @@
+{
+  "base": "5df5a3c2736c01b46acf26906a510e41e367e73e",
+  "top_level_python_files_verified": 107,
+  "all_base_bytes": true,
+  "sender_module_absent": true,
+  "purpose": "true BASE acceptance negative and cost arm; new tests overlay only"
+}
