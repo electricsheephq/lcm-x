@@ -194,7 +194,9 @@ def test_summary_only_forgeries_rejected(tmp_path, forgery):
         with pytest.raises(AssertionError):
             rescore.v2(tmp_path)
     else:
-        assert any(c.get("rescore_disagreement") for c in rescore.v2(tmp_path)["blocks"])
+        result = rescore.v2(tmp_path)
+        assert result["state"] != "PASS"
+        assert any(c.get("rescore_disagreement") for c in result["blocks"])
 
 
 def test_rescore_floor_output_root(tmp_path):

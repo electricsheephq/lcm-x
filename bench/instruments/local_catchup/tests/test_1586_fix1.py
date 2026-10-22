@@ -205,6 +205,7 @@ def test_rescore_rejects_tampered_duration(tmp_path):
     (tmp_path/"catchup/events.jsonl").write_text("".join(json.dumps(v)+"\n" for v in events()))
     common.dump(tmp_path/"summary.json", floor.rate(raw, 7200, 250000, events()))
     result = rescore.v2(tmp_path)
+    assert result["state"] != "PASS"
     assert result["rescore_disagreement"]["measured_seconds"] == dict(recorded=7200, recomputed=3600)
 
 

@@ -61,7 +61,7 @@ def test_early_invalid_cannot_hide_recall_receipts(tmp_path, state):
     for name in ("summary.json", "raw-summary.json"):
         common.dump(cell/name, forged)
     result = rescore.v2(cell)
-    assert result["state"] == "INVALID"
+    assert result["state"] == "FAIL"
     assert result["rescore_disagreement"]  # Forged early exit cannot hide the check.
 
 
