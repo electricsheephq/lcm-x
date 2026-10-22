@@ -162,7 +162,8 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 - **Why.** Hermes injects both files into every system prompt. LCM-X reads them for history, removals and entity-card coverage, not for current facts.
 - **Capture.** At session start, and at idle where the engine has an idle point, LCM-X reads the bound profile home's `memories/MEMORY.md` and `memories/USER.md`.
   - Entries are split the way Hermes's own memory store parses them. The entry, not the line, is the unit.
-  - Each content change becomes one `lcm_memory_host_file_revisions` row: `revision_id`, absolute `path`, `revision_sha`, `content_hash`, `captured_at`, `scope_key`. The entry text itself is kept in the note it creates.
+  - Each content change becomes one `lcm_memory_host_file_revisions` row: `revision_id`, absolute `path`, `revision_sha`, `content_hash`, `captured_at`, and the bound profile identity the engine already uses for ownership.
+  - A file-revision citation is visible only to the owner of that same profile. When one database serves several profile homes (a configured `database_path`), each profile's files are captured under its own identity, and one profile never sees notes from another profile's files. The entry text itself is kept in the note it creates.
   - No message rows are written (invariant 5). The files are never written.
 - **Notes.**
   - An added entry becomes a note with `author = host_memory_file`, cited to its revision.
@@ -174,7 +175,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 ### D11. Forget (E2)
 - **Flag.** Forget hiding runs only with the entities flag on (`LCM_ENTITIES_ENABLED`, default off). With the flag off, no forget notes are written and nothing is hidden. The default stays off until the E2 measurement reports zero false hides.
 - **What a forget is.** `lcm_memory forget` writes a `kind = retraction` note. It cites the user's request and names the retracted message rows or note. The note is the only flag.
-- **Hiding.** While the note stands, the retracted rows are hidden from every agent-facing read path. Hiding is limited to rows inside the requester's own visibility, so it never hides another principal's rows. Responses report a count of hidden rows, never their content.
+- **Hiding.** While the note stands, the retracted rows are hidden from every agent-facing read path. The hide is bound to the requesting principal: it applies only to reads evaluated in that principal's access context. Other principals who can see the same row still see it, until they forget it themselves. Only the principal who forgot a row can undo that forget. A single-user profile is unaffected. Responses report a count of hidden rows, never their content.
 - **Lossless.** Message rows, summaries, FTS and embeddings are never modified. Undo of the forget restores byte-identical retrieval. Real deletion (purge) is a separate, owner-confirmed operation and never a side effect of forget.
 - **Scope in v1.** A forget targets rows and notes, not a whole entity, so it needs no cutoff rule for future statements. A later statement is new evidence.
   - Summaries are never rewritten or hidden. A delivered summary that spans a forgotten row is **marked**: it carries the withdrawal note.
@@ -212,6 +213,9 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 - **Chained undo, executable:** undo the second of two chained splits, then the first; both succeed and the resolved view is identical.
 - **One op, one event:** each operation adds exactly one event; replaying the log reproduces the projected fields.
 - **Host files (D10):** a revision with an added entry gives one cited note, visible to the owner only under AccessContextV1. A removed entry supersedes the note and creates no retraction. No message rows are written: the messages-table digest is unchanged.
+- **Forget is per principal (D11):** a row is visible to principals A and B. After A forgets it, A's reads hide it and B's reads are unchanged, and B cannot undo A's forget.
+- **Host files under a shared database (D10):** two profiles share one `database_path`. Profile B's reads never see notes derived from profile A's MEMORY.md.
+- **Schema compatibility:** `lcm_memory_host_file_revisions`, like every E2 table, follows `docs/process/schema-changes.md`: a forward migration test, a rollback test against the previous release (v0.28.x), and the oldest compatible reader recorded.
 - **Forget (D11):** the same fact, present as raw text, inside a summary and as a note, is asked about before and after a forget, including from a new session. After the forget, the forgotten raw rows and notes are absent on every agent-facing path, and a summary that spans them is delivered unchanged with the withdrawal note present (marked, not hidden). Undo restores byte-identical retrieval, and a principal can never hide another principal's rows.
 - **Byte-identity:** with the flag off and on, and the tool unused, recall output and assembled context are identical across a fixture corpus.
 - **Whole-row consumers (D9):** with the new nullable columns present, every enumerated `SELECT *` consumer's output is unchanged, or changed exactly as declared.
