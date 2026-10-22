@@ -4,6 +4,22 @@ Hermes `/new` starts a new host session. LCM-X binds that session to its own lif
 
 Do not promise that `/new` deletes historical LCM data. Earlier rows remain in `lcm.db` unless an explicitly authorized cleanup removes them, and they remain available through bounded cross-session recall.
 
+## Stopped-turn persistence
+
+`on_turn_complete` ingests interrupted turns immediately on the already-bound
+engine; completed and failed-only callbacks do not ingest. Under the stable-use
+lease, the original session/conversation binding must still match. Ownership also
+requires a positive ingest cursor, no pending reset or cursor reconciliation, and
+a cached replay-identity prefix matching the supplied history.
+Histories ending in a user row also wait for catch-up: retry can still merge
+that open tail with the next prompt, so ownership alone does not prove it stable.
+Unproven, unbound, ignored or stateless histories wait for normal catch-up;
+callback metadata never binds or rebinds a session. Eligible rows are durable and
+searchable before the callback returns, with `note_turn_complete` in `finally`.
+Errors log only their class and do not escape host finalization; no leaves are
+prepared here. A host failed-turn boundary appended after the callback is stored
+once by the next completed turn or a session-end flush supplied that final history.
+
 ## CLI reset-time bind host contract
 
 The minimum Hermes capability for CLI `/new` rebinding is a reset-time call to

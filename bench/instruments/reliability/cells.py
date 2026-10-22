@@ -17,6 +17,7 @@ FAULTS = {"crash_after_compaction_before_reply", "clean_exit_before_turn", "cras
           "publication_failure", "plugin_switch", "forced_recovery", "p8_inject", "forced_compaction_then_turn"}
 # issue -> (the bars that decide it, what an uncovered issue would need)
 ISSUES = {
+    1623: (("B1", "B2"), "acp-process stopped-turn immediate persistence"),
     1588: (("B8",), "native rotation expected-negative: #592 not-planned ruling; #1588 receipt audit"),
     1797: (("B1", "B2"), "exact-content preservation under permanent child-publication failure; never require publication success"),
     926: (("B5",), "sole-user tool loop makes no publication progress"),

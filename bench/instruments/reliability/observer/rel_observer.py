@@ -253,7 +253,9 @@ def patch_engine(agent):
     etype._rel_patched = True
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     cell_path = DIR / "cell.json"
-    in_place = json.loads(cell_path.read_text()).get("in_place") if cell_path.exists() else None
+    cell = json.loads(cell_path.read_text()) if cell_path.exists() else {}
+    in_place = cell.get("in_place")
+    cur["stop_after_tool"] = cell.get("stop_after_tool", False)
 
     def observer_failed(where, exc):
         try:  # an observer failure is evidence (the cell ERRORs on it), never a change to the engine call
@@ -373,6 +375,7 @@ def patch_run_agent(mod):
     def run_conversation(self, *a, **k):
         ensure_tap()
         tc = load_turn()
+        cur["agent"] = self
         try:
             from agent.turn_failure_copy import FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE
             notices = [FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE]
@@ -404,6 +407,7 @@ def patch_run_agent(mod):
               interrupted=interrupted, session=self.session_id, user_tags=user_tags, host_notices=own,
               host_commits=logstate["commits"] - cur["commits0"])
         note("turn_end", tag=tag(), turn_kind=cur["kind"], interrupted=interrupted, failed=failed, session=self.session_id,
+             reason=result.get("turn_exit_reason"),
              reply_tag=next(iter(re.findall(r"reply to ([A-Z]\d{2,3}):", tc.get("reply") or "")), None)
              if reply_held and not failed and not interrupted else None)
         snapshot(failed_turn_notices=notices, provenance=_r1.provenance(json.loads((DIR / "cell.json").read_text()), []))
@@ -457,7 +461,15 @@ def patch_model_tools(mod):
 
     def traced(*a, **kw):
         name, args = (a[0] if a else kw.get("function_name")), (a[1] if len(a) > 1 else kw.get("function_args"))
-        return dispatched(lambda: orig(*a, **kw), name, args, kw.get("tool_call_id"), "tool_dispatch")
+        result = dispatched(lambda: orig(*a, **kw), name, args, kw.get("tool_call_id"), "tool_dispatch")
+        if cur.get("stop_after_tool") and PHASE == "A" and not cur.get("stop_waited"):
+            cur["stop_waited"] = True
+            note("stop_tool_ready")
+            deadline = time.monotonic() + 15
+            while not getattr(cur["agent"], "_interrupt_requested", False) and time.monotonic() < deadline:
+                time.sleep(.01)
+            note("stop_interrupt_observed", interrupted=bool(getattr(cur["agent"], "_interrupt_requested", False)))
+        return result
     mod.handle_function_call = traced
 
 

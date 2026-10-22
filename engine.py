@@ -45,6 +45,7 @@ from .engine_registry import (
     ActiveEngineUseResult,
     ActiveEngineUseStatus,
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
+    use_lcm_engine,
 )
 from .escalation import (
     _THRESHOLD_FULL_SWEEP_MIN_CALL_SECONDS,
@@ -2822,6 +2823,45 @@ class LCMEngine(
             session_id,
         )
         return True
+
+    def on_turn_complete(self, messages: List[Dict[str, Any]], usage=None, **meta) -> None:
+        """Persist stopped turns on the already-bound engine (#1623)."""
+        try:
+            base = getattr(super(), "on_turn_complete", None)
+            if callable(base):
+                base(messages, usage=usage, **meta)
+            # The pinned hosts skip post_llm_call when interrupted. Failed-only
+            # turns may still fire it; meta has no final-response/hook-fired bit.
+            if not meta.get("interrupted"):
+                return
+            binding = (self._session_id, self._conversation_id)
+
+            def ingest_stopped(active_engine):
+                if ((active_engine._session_id, active_engine._conversation_id) != binding
+                        or not active_engine._session_id or active_engine._session_ignored
+                        or active_engine._session_stateless or active_engine._thread_context_stateless()):
+                    return
+                cached = getattr(active_engine, "_last_active_replay_source_identities", None)
+                if (active_engine._ingest_cursor <= 0 or active_engine._pending_reset_session_id
+                        or active_engine._ingest_cursor_needs_reconcile or cached is None
+                        or cached != [active_engine._message_replay_identity(message, strip_carrier=False)
+                                      for message in messages[:len(cached)]]):
+                    # Check under the lease: a reset/rebind may have won admission.
+                    logger.debug("LCM stopped-turn ownership unproven; defer to completed-turn catch-up")
+                    return
+                if messages and messages[-1].get("role") == "user":
+                    # Retry can still merge this open tail into its next user
+                    # row. Persisting it now changes the later replay match.
+                    logger.debug("LCM stopped user tail still mutable; defer to completed-turn catch-up")
+                    return
+                try:
+                    active_engine.ingest(messages)
+                finally:
+                    active_engine.note_turn_complete()
+
+            use_lcm_engine(self, ingest_stopped, timeout=None)
+        except Exception as exc:
+            logger.debug("LCM on_turn_complete error: %s", type(exc).__name__)
 
     def ingest(self, messages: List[Dict[str, Any]]) -> None:
         """Persist messages to the durable store every turn.

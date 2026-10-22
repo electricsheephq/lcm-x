@@ -23,6 +23,7 @@ G_REL_1 = ("baseline", "acp-trailing", "preflight-continue", "repeat-identical-r
            "cancel-retry", "publication-failure")
 # Data cells inside a gate family that never gate (still expected rows for completeness).
 NON_GATE = ("publication-failure/rotation-child-persistent", "drain/hidden-backlog/in-place", "drain/hidden-backlog/rotation",
+            "stop-after-tool/no-retry/in-place",
             "drain/hidden-backlog-large/in-place", "drain/hidden-backlog-large/rotation",
             *(f"continuity/{shape}/{mode}" for shape in
               ("sole-user-tool-loop", "survival-fit", "survival-fit-older-turns")

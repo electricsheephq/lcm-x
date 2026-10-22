@@ -167,7 +167,10 @@ def _differences(real, stub, plugin, plugin_base):
         real_signature = _signature(method)
         stub_method = getattr(stub, name, None)
         if not callable(stub_method):
-            differences.append(f"stub lacks used real method: {name}{real_signature}")
+            # The optional completion callback has a guarded super() call;
+            # older stubs may omit it. Its override must still bind every real call.
+            if name != "on_turn_complete":
+                differences.append(f"stub lacks used real method: {name}{real_signature}")
         elif _signature(stub_method) != real_signature:
             differences.append(
                 f"stub signature {name}: real {real_signature}; stub {_signature(stub_method)}"
@@ -217,3 +220,22 @@ def test_ci_stub_and_lcm_overrides_match_real_host(monkeypatch):
 
     differences = _differences(_real_engine(monkeypatch), _stub_engine(), LCMEngine, ContextEngine)
     assert not differences, "ContextEngine parity differences:\n" + "\n".join(differences)
+
+
+def test_optional_completion_still_checks_override_call_shapes():
+    class Host:
+        __abstractmethods__ = frozenset()
+
+        def on_turn_complete(self, messages, usage=None, **kwargs):
+            pass
+
+    class Stub:
+        pass
+
+    class Broken(Stub):
+        def on_turn_complete(self, messages):
+            pass
+
+    differences = _differences(Host, Stub, Broken, Stub)
+    assert any("incompatible override on_turn_complete" in difference for difference in differences)
+    assert not any("stub lacks" in difference for difference in differences)
