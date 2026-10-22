@@ -3300,7 +3300,9 @@ class ReconcileMixin:
                             metadata = False  # Unprovable: borrowed pairs stay unbound (base behaviour).
                     user_uid = self._host_occurrence_metadata(messages[index - 1])["message_uid"]
                     stored_uid = (metadata or {}).get(index - 1, {}).get("message_uid")
-                    if metadata is not False and not (user_uid and stored_uid and user_uid != stored_uid):
+                    # Pair UIDs, when known, outrank the user's: the row-level check below governs them.
+                    pair_uid = any(self._host_occurrence_metadata(messages[i])["message_uid"] for i in (index, probe))
+                    if metadata is not False and not (user_uid and stored_uid and user_uid != stored_uid and not pair_uid):
                         bound_replays.update((index, probe))
                 if (
                     tool_call_id in call_ids
