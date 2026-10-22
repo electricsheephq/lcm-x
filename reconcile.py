@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional
 
+from .config import host_message_uid_mode
 # Keep this facade: runtime callers and patch seams resolve projection here.
 from .emission_projection import (
     EmissionProjectionEntry as EmissionProjectionEntry,
@@ -43,6 +44,7 @@ from .externalize import (
     find_externalized_tool_result_content_for_call,
     load_externalized_payload,
 )
+from .identity_anchor import identity_anchor_enabled
 from .ingest_protection import (
     _add_inline_persisted_output_generation_metadata,
     _add_inline_persisted_output_identity_metadata,
@@ -3132,7 +3134,36 @@ class ReconcileMixin:
             )
             return lossy_at
         if cursor is not None and cursor > 0:
+            rewound = False
+            # #1511: full literal replay proves position, not a later user occurrence.
+            # Keep partial/adopted views and UID-bound occurrences on their existing proofs.
+            if (identity_anchor_enabled() and cursor == len(messages) == len(stored_tail_rows)
+                    and stored_tail == [self._message_replay_identity(m) for m in messages]):
+                stamps = [_normalize_observed_at(m.get("timestamp")) for m in messages]
+                changed = [i for i, (stamp, row) in enumerate(zip(stamps, stored_tail_rows))
+                           if stamp is not None and row.get("observed_at") is not None
+                           and stamp != row["observed_at"]]
+                rewind = changed[0] if len(changed) == 1 else cursor
+                if (rewind < cursor and proof_cursor is None and not self._active_emission_proof()
+                        and messages[rewind].get("role") == "user" and not messages[rewind].get("message_uid")
+                        and stamps[rewind] > stored_tail_rows[rewind]["observed_at"]
+                        and all(stamps[i] is not None and stamps[i] == stored_tail_rows[i].get("observed_at")
+                                for i in range(rewind + 1, len(messages)))):
+                    # A durable stamp witness explains the row even beyond its recorded stamp.
+                    explained = {rel["store_id"] for kind in ("carried_stamp", "alt_stamp")
+                                 for rel in self._store.get_message_relations(
+                                     [stored_tail_rows[rewind]["store_id"]], kind)}
+                    bound = {}
+                    if host_message_uid_mode() != "off" and self._store._host_uid_table_exists():
+                        lineage, _problem = self._host_uid_lineage_key()
+                        bound = self._store.host_uid_uids_of_stores(
+                            lineage, [stored_tail_rows[rewind]["store_id"]], ("canonical",)
+                        ) if lineage is not None else {r["store_id"]: True for r in stored_tail_rows}
+                    if stored_tail_rows[rewind]["store_id"] not in explained and not bound.get(stored_tail_rows[rewind]["store_id"]):
+                        cursor = rewind
+                        rewound = True
             reason = (
+                "replayed durable tail before a later user occurrence" if rewound else
                 "skipped scaffold-only prefix"
                 if not self._effective_replay_identities(messages[:cursor])
                 else "replayed durable tail"
