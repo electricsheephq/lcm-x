@@ -111,11 +111,27 @@ def test_frozen_base_rejects_live_policy_drift(tmp_path, monkeypatch, drift):
             list(frozen._chunk_gapfill_rows(conn, "synthetic", (1, 4), "conversational", 2000))
 
 
+# CI checks out one commit, so the pinned main function is vendored rather than read from git history.
+MAIN_GAPFILL = Path(__file__).resolve().parent / "fixtures" / "issue_1765_main_chunk_gapfill_rows.py.txt"
+MAIN_GAPFILL_SHA256 = "3cc696b2d85e113a1516706d5cb8f685578d2a0f9e5a17b9879f2b49b2550526"
+
+
+def test_vendored_main_gapfill_is_pinned():
+    assert hashlib.sha256(MAIN_GAPFILL.read_bytes()).hexdigest() == MAIN_GAPFILL_SHA256
+
+
+def test_vendored_main_gapfill_matches_main_history():
+    root = Path(__file__).resolve().parents[1]
+    shown = subprocess.run(["git", "show", f"{MAIN}:command.py"], cwd=root, capture_output=True, text=True)
+    if shown.returncode:
+        pytest.skip(f"{MAIN[:8]} is not in this checkout's history")
+    node = next(n for n in ast.parse(shown.stdout).body
+                if isinstance(n, ast.FunctionDef) and n.name == "_chunk_gapfill_rows")
+    assert ast.get_source_segment(shown.stdout, node) + "\n" == MAIN_GAPFILL.read_text()
+
+
 def pinned_main_gapfill():
-    source = subprocess.run(["git", "show", f"{MAIN}:command.py"],
-                            cwd=Path(__file__).resolve().parents[1],
-                            check=True, capture_output=True, text=True).stdout
-    node = next(n for n in ast.parse(source).body
+    node = next(n for n in ast.parse(MAIN_GAPFILL.read_text()).body
                 if isinstance(n, ast.FunctionDef) and n.name == "_chunk_gapfill_rows")
     namespace = dict(vars(command))
     exec(compile(ast.Module(body=[node], type_ignores=[]), "pinned_main_gapfill", "exec"), namespace)
