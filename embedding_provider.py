@@ -1815,8 +1815,8 @@ class FastembedProvider(_ResilientProvider):
             return _FASTEMBED_MODELS.setdefault(key, model)
 
     def _cache_key(self) -> tuple[str, str, int]:
-        # #1586: one intra-op thread per process for bge-small, not a CPU quota.
-        threads = 1 if self.model_id == "BAAI/bge-small-en-v1.5" else _FASTEMBED_THREADS
+        # #1586 floor probe only (not for merge): two intra-op threads for bge-small.
+        threads = _FASTEMBED_THREADS
         return self.model_id, str(self.cache_dir.resolve()), threads
 
     def _construct_uncached(self, *, allow_download: bool) -> Any:
