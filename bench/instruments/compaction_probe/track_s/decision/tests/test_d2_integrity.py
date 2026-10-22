@@ -157,6 +157,28 @@ def test_wall_clock_sleep_cannot_hide_elapsed(tmp_path):
     assert not producer.active
 
 
+def test_wall_clock_includes_setup_and_scoring(tmp_path):
+    clock, wall = Clock(), Clock()
+
+    def scorer(data):
+        result = load("d2_score").score(data)
+        wall.now += 21600
+        return result
+
+    result, data, _ = run(tmp_path, clock=clock, wall_clock=wall, wall_started=-5, scorer=scorer)
+    assert result["raw_verdict"] == "INCONCLUSIVE" and data["elapsed_s"] == 21605
+
+
+def test_interrupt_during_scoring_records_stop(tmp_path):
+    def scorer(data):
+        raise SystemExit(143)
+
+    with pytest.raises(SystemExit):
+        run(tmp_path, scorer=scorer)
+    data = json.loads((tmp_path / "comparison/ledger.json").read_text())
+    assert data["stop_reason"] == "SystemExit" and data["raw_verdict"] == "INCONCLUSIVE"
+
+
 def test_aa_cards_have_aa_claim(tmp_path):
     scorer = load("d2_score")
     result = scorer.score(ledger(aa=True))
@@ -188,7 +210,7 @@ def test_monitor_retries_once_and_records_error(tmp_path, monkeypatch, failures)
     fake, original_open, failed = Producer(rate=True), Path.open, []
 
     def flaky(path, *args, **kwargs):
-        if path.name == "producer.log" and args and args[0] in ("r", "rb") and len(failed) < failures:
+        if path.name == "producer.log" and (args[0] if args else kwargs.get("mode")) in ("r", "rb") and len(failed) < failures:
             failed.append(path)
             raise OSError("synthetic log race")
         return original_open(path, *args, **kwargs)
@@ -266,5 +288,5 @@ def test_scorer_runs_without_site_packages():
 
 def test_option_a_spec_is_explicitly_two_sided():
     spec = HERE.parents[3] / "specs/RELEASE-READINESS-V1.md"
-    text = spec.read_text().split("**Option-A contingency.**", 1)[1]
+    text = " ".join(spec.read_text().split("**Option-A contingency.**", 1)[1].split())
     assert "two-sided seed-stratified run-level permutation regression screen" in text
