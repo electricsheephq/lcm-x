@@ -22,7 +22,7 @@ from .answer_contract import (
     compile_answer_contract,
 )
 from .evidence_compiler import observation_independent
-from .occurrence_time import resolve_occurrence_time
+from .occurrence_time import _RELATIVE, resolve_occurrence_time
 from .reasoning import (
     EvidencePlan,
     execute_plan,
@@ -392,15 +392,33 @@ def _date_value(raw: str) -> date | None:
     return None
 
 
-def _carried_absolute_day(source):
+def _carried_absolute_day(source, *, first_named=False):
     """Share the compiler date parser; a year is required for independence."""
-    if not source.get("time_uncertain"):
+    if not source.get("time_uncertain") or _carried_mixed_dates(source):
         return None
-    quote = re.sub(r"(\d{1,2})(?:st|nd|rd|th)\b", r"\1", str(source["quote"]), flags=re.IGNORECASE)
-    quote = re.sub(r"(\b[A-Za-z]{3,9}\s+\d{1,2})\s+(\d{4})\b", r"\1, \2", quote)
-    days = {day for match in _DATE_TEXT_RE.finditer(quote)
-            if (day := _date_value(match.group(0))) is not None}
-    return days.pop() if len(days) == 1 else None
+    quote = _carried_date_text(source["quote"])
+    days = [(day, match.group(0)) for match in _DATE_TEXT_RE.finditer(quote)
+            if (day := _date_value(match.group(0))) is not None]
+    return days[0][0] if days and (len({d for d, _ in days}) == 1 or
+        (first_named and all(not raw[0].isdigit() for _, raw in days))) else None
+
+
+def _carried_date_text(quote):
+    quote = re.sub(r"(\d{1,2})(?:st|nd|rd|th)\b", r"\1", str(quote), flags=re.IGNORECASE)
+    quote = re.sub(r"(?<=\d)T(?=\d{2}:)", " ", quote)
+    return re.sub(r"(\b[A-Za-z]{3,9}\s+\d{1,2})\s+(\d{4})\b", r"\1, \2", quote)
+
+
+def _carried_mixed_dates(source):
+    if not source.get("time_uncertain"):
+        return False
+    quote = source.get("content", source["quote"])
+    return _RELATIVE.search(quote) and any(_date_value(match.group(0)) is not None
+        for match in _DATE_TEXT_RE.finditer(_carried_date_text(quote)))
+
+
+def _carried_known_day(source):
+    return not _carried_mixed_dates(source) and ((source.get("occurrence_time") or {}).get("event_time_source") == "explicit" or _carried_absolute_day(source, first_named=True) is not None)
 
 
 def _clause_bounds(text: str, start: int, end: int) -> tuple[int, int]:
@@ -715,7 +733,7 @@ def _ordered_event_candidate(
         if isinstance(occurrence, Mapping)
         else ""
     )
-    absolute_day = _carried_absolute_day(source)
+    absolute_day = _carried_absolute_day(source, first_named=True)
     if absolute_day is not None:
         event_date = absolute_day.isoformat()
     if not event_date:
@@ -820,7 +838,7 @@ def _record_exclusion(result, candidate, reason, *, count=False):
     if result is None:
         return
     item = dict(exact_ref=candidate["exact_ref"], time_uncertain="carried", reason_code=reason)
-    if reason == "event_outside_temporal_window":
+    if reason in {"event_outside_temporal_window", "uncertain_source_observation_time"}:
         result["_uncertain_window_exclusion"] = True
     records = result.setdefault("exclusions", [])
     if item not in records and len(records) < result["budgets"]["max_candidates"]:
@@ -944,7 +962,7 @@ def _select_temporal_event(
         for item in eligible
         if int(item.get("anchor_score") or 0) == best_score
     )
-    if _carried_absolute_day(chosen) is None and _candidate_time(chosen)[1] == "uncertain_source_observation_time":
+    if not _carried_known_day(chosen) and _candidate_time(chosen)[1] == "uncertain_source_observation_time":
         _record_exclusion(result, chosen, "uncertain_source_observation_time")
         return None, "uncertain_source_observation_time"
     return dict(chosen), "best_supported_event_in_window"
@@ -981,7 +999,7 @@ def _candidate_time(candidate: Mapping[str, Any]) -> tuple[float | None, str]:
 
 
 def _candidate_event_day(candidate: Mapping[str, Any]) -> tuple[date | None, str]:
-    absolute_day = _carried_absolute_day(candidate)
+    absolute_day = _carried_absolute_day(candidate, first_named=True)
     if absolute_day is not None:
         return absolute_day, "occurred_at"
     occurrence = candidate.get("occurrence_time")
@@ -1035,6 +1053,9 @@ def _temporally_eligible_candidates(
 ) -> list[dict[str, Any]]:
     eligible: list[dict[str, Any]] = []
     for candidate in candidates:
+        if _carried_mixed_dates(candidate):
+            _record_exclusion(result, candidate, "uncertain_source_observation_time")
+            continue
         if not _available_as_of(candidate, contract):
             if candidate.get("time_uncertain"):
                 _record_exclusion(result, candidate, "source_observed_after_question_as_of")
@@ -1050,7 +1071,7 @@ def _temporally_eligible_candidates(
                 <= event_day
                 < contract.temporal_window.end
             ):
-                if candidate.get("time_uncertain") and _carried_absolute_day(candidate) is None:
+                if candidate.get("time_uncertain") and not _carried_known_day(candidate):
                     _record_exclusion(result, candidate, "event_outside_temporal_window")
                 continue
             candidate = {**candidate, "temporal_match_basis": basis}
@@ -1869,6 +1890,9 @@ def _finite_enumeration(
             if row["store_id"] in carried:
                 hydrated["time_uncertain"] = "carried"
                 hydrated["occurrence_time"]["time_uncertain"] = "carried"
+            if _carried_mixed_dates(hydrated):
+                _record_exclusion(result, hydrated, "uncertain_source_observation_time", count=True)
+                continue
             event_day, basis = _candidate_event_day(hydrated)
             if event_day is None:
                 certificate["unknown_time_clauses"] += 1
@@ -1884,7 +1908,7 @@ def _finite_enumeration(
                 <= event_day
                 < contract.temporal_window.end
             ):
-                if hydrated.get("time_uncertain") and _carried_absolute_day(hydrated) is None:
+                if hydrated.get("time_uncertain") and not _carried_known_day(hydrated):
                     uncertain_window_exclusion = True
                     if result is not None:
                         _record_exclusion(result, hydrated, "event_outside_temporal_window", count=True)
