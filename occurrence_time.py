@@ -9,6 +9,8 @@ valid ``unknown`` results; observation time is never reused as event time.
 from __future__ import annotations
 
 import calendar
+import hashlib
+from functools import lru_cache
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
@@ -72,13 +74,32 @@ def _carried_date_text(quote):
     return re.sub(r"(\b[A-Za-z]{3,9}\s+\d{1,2})\s+(\d{4})\b", r"\1, \2", quote)
 
 
-def _withhold_reason(content):
+def _parse_quote_date_info(content):
     days = {_date_value(m.group(0)) for m in _DATE_TEXT_RE.finditer(_carried_date_text(content))} - {None}
-    if len(days) > 1:
-        return "ambiguous_multiple_explicit_dates"
-    if days and _RELATIVE_MENTION.search(content):
-        return "mixed_absolute_and_relative_dates"
-    return None
+    reason = ("ambiguous_multiple_explicit_dates" if len(days) > 1 else
+              "mixed_absolute_and_relative_dates" if days and _RELATIVE_MENTION.search(content) else None)
+    return (next(iter(days)) if len(days) == 1 else None), reason
+
+
+_small_quote_date_info = lru_cache(maxsize=4096)(_parse_quote_date_info)
+_large_quote_date_info = {}
+
+
+def _quote_date_info(content):
+    """Bound retained text to short quotes; retain only digests for large rows."""
+    if len(content) <= 1200:
+        return _small_quote_date_info(content)
+    key = hashlib.sha256(content.encode("utf-8", "surrogatepass")).digest()
+    if key not in _large_quote_date_info:
+        value = _parse_quote_date_info(content)
+        if len(_large_quote_date_info) >= 4096:
+            _large_quote_date_info.clear()
+        _large_quote_date_info[key] = value
+    return _large_quote_date_info[key]
+
+
+def _withhold_reason(content):
+    return _quote_date_info(content)[1]
 
 
 def _parse_anchor(value: Any) -> date | None:

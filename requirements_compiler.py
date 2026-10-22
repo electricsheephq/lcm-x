@@ -9,7 +9,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
-from functools import lru_cache
 import hashlib
 import json
 import math
@@ -24,7 +23,7 @@ from .answer_contract import (
 )
 from .evidence_compiler import observation_independent
 from .occurrence_time import (
-    _DATE_TEXT_RE, _carried_date_text, _date_value, _RELATIVE_MENTION,
+    _DATE_TEXT_RE, _ISO_DATE, _carried_date_text, _date_value, _quote_date_info, _RELATIVE,
     resolve_occurrence_time,
 )
 from .reasoning import (
@@ -378,18 +377,15 @@ def _carried_absolute_day(source):
     return _quote_date_info(source["quote"])[0]
 
 
-@lru_cache(maxsize=4096)
-def _quote_date_info(quote: str):
-    """Reuse pure date parsing across candidates from the same quote."""
-    days = {_date_value(match.group(0)) for match in _DATE_TEXT_RE.finditer(_carried_date_text(quote))} - {None}
-    mixed = bool(days) and (len(days) > 1 or bool(_RELATIVE_MENTION.search(quote)))
-    return (next(iter(days)) if len(days) == 1 else None), mixed
-
-
-def _carried_mixed_dates(source):
+def _carried_mixed_dates(source, *, date_dependent=True):
     # Shared by ordinary and carried rows, including base-unknown named dates.
-    quote = source.get("content", source["quote"])
-    return _quote_date_info(quote)[1]
+    quote = source.get("content", source["quote"]) if source.get("time_uncertain") else source["quote"]
+    if source.get("time_uncertain") and not date_dependent:
+        days = {_date_value(m.group(0)) for m in _DATE_TEXT_RE.finditer(_carried_date_text(quote))} - {None}
+        # Preserve the base predicate on contracts without a date requirement.
+        explicit = {_date_value(m.group(0)) for m in _ISO_DATE.finditer(quote)} - {None}
+        return bool(days) and bool(_RELATIVE.search(quote) or (len(days) > 1 and len(explicit) != 1))
+    return bool(_quote_date_info(quote)[1])
 
 
 def _carried_known_day(source):
@@ -731,7 +727,7 @@ def _ordered_event_candidate(
         if place is not None:
             label = place.group(1).strip()
     quote_without_dates = re.sub(
-        r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday),?\s+(?=" + _DATE_TEXT_RE.pattern + ")",
+        r"\b(?:Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|Mon|Tue|Tues|Wed|Thu|Thur|Thurs|Fri|Sat|Sun)\.?,?\s+(?=" + _DATE_TEXT_RE.pattern + ")",
         "", _carried_date_text(quote), flags=re.IGNORECASE,
     )
     quote_without_dates = _DATE_TEXT_RE.sub(" ", quote_without_dates)
@@ -793,6 +789,10 @@ def _extract_candidates(
     return output
 
 
+def _date_dependent(contract: AnswerContract) -> bool:
+    return contract.temporal_window is not None or contract.operation in {"date_filter", "order", "date_interval"}
+
+
 def _candidate_inventory(
     sources: Sequence[Mapping[str, Any]],
     contract: AnswerContract,
@@ -805,9 +805,10 @@ def _candidate_inventory(
         carried = engine._store.get_carried_stamp_ids([int(s["store_id"]) for s in sources])
         sources = [{**s, **({"time_uncertain": "carried"} if s["store_id"] in carried else {})}
                    for s in sources]
-    for source in sources:
-        if _carried_mixed_dates(source):
-            _record_exclusion(result, source, "uncertain_source_observation_time")
+    if _date_dependent(contract):
+        for source in sources:
+            if _carried_mixed_dates(source):
+                _record_exclusion(result, source, "uncertain_source_observation_time")
     extracted = _extract_candidates(sources, contract)[:limit]
     for candidate in extracted:
         if not candidate.get("time_uncertain"):
@@ -819,9 +820,10 @@ def _candidate_inventory(
 def _record_exclusion(result, candidate, reason, *, count=False):
     if result is None:
         return
-    item = dict(exact_ref=candidate["exact_ref"], reason_code=reason)
+    item = dict(exact_ref=candidate["exact_ref"])
     if candidate.get("time_uncertain"):
         item["time_uncertain"] = "carried"
+    item["reason_code"] = reason
     if reason in {"event_outside_temporal_window", "uncertain_source_observation_time"}:
         result["_uncertain_window_exclusion"] = True
     records = result.setdefault("exclusions", [])
@@ -1037,7 +1039,7 @@ def _temporally_eligible_candidates(
 ) -> list[dict[str, Any]]:
     eligible: list[dict[str, Any]] = []
     for candidate in candidates:
-        if _carried_mixed_dates(candidate):
+        if (candidate.get("time_uncertain") or _date_dependent(contract)) and _carried_mixed_dates(candidate, date_dependent=_date_dependent(contract)):
             _record_exclusion(result, candidate, "uncertain_source_observation_time")
             continue
         if not _available_as_of(candidate, contract):
