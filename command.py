@@ -2817,7 +2817,7 @@ def _acquire_embedding_backfill_lease(
 
 
 def _embedding_inflight_counts(conn, identity_hash, rows=None, *, eligible="") -> tuple[int, int]:
-    """Split dispatches by exact live lease ownership; abandoned work is uncertain."""
+    """Count unsent claims as in flight; split dispatches by live lease ownership."""
     try:
         raw = conn.execute("SELECT value FROM metadata WHERE key=?", (_EMBEDDING_BACKFILL_CLAIM_KEY,)).fetchone()
         lease = json.loads(raw[0]) if raw else {}
@@ -2829,13 +2829,15 @@ def _embedding_inflight_counts(conn, identity_hash, rows=None, *, eligible="") -
         try:
             rows = conn.execute(
                 "SELECT state, lease_id, generation, COUNT(*) FROM lcm_embedding_backfill_inflight "
-                "WHERE identity_hash=? AND state IN ('dispatched','uncertain') " + eligible + " GROUP BY state, lease_id, generation",
+                "WHERE identity_hash=? AND state IN ('claimed','dispatched','uncertain') " + eligible + " GROUP BY state, lease_id, generation",
                 (identity_hash,),
             )
         except sqlite3.OperationalError:
             return (0, 0)
     counts = [0, 0]
     for state, lease_id, generation, count in rows:
+        if state == "claimed":
+            counts[0] += count  # Unsent work is safely retryable even without a live owner.
         if state in {"dispatched", "uncertain"}:
             counts[0 if state == "dispatched" and owner[0] is not None and (lease_id, generation) == owner else 1] += count
     return tuple(counts)

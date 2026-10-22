@@ -46,10 +46,14 @@ Hermes commits a compaction by calling the session-end hook with the list it com
 At process exit, scheduler work and orphaned local encoder workers share one deadline.
 A timed-out encoder holds its worker slot until it finishes. Exit waits for that slot
 only within the remaining deadline; it does not guarantee that native inference stops.
+The drain does not fence new slot acquisitions after it returns, including a preparing
+model or a late recall query embed (see [#1832](https://github.com/electricsheephq/lcm-x/issues/1832)).
 Embedding failure counts and the first warning belong to each database. Deferred passes
-preserve them. A completed pass or embedded rows resets the count and re-arms the warning.
-Status and doctor label dispatches owned by a live lease as `in flight`. An expired or
-missing owner makes them `uncertain`, as does a recovered uncertain marker.
+preserve them. A pass with no failure in any corpus that embedded rows or completed resets
+the count and re-arms the warning; a failure in any corpus counts as a failure, even
+if another corpus wrote rows.
+Status and doctor label unsent claimed rows and dispatches owned by a live lease as `in flight`.
+A dispatch with an expired or missing owner is `uncertain`, as is a recovered uncertain marker.
 
 `LCM_NATIVE_RECOVERY`: removed in v0.25.0; ignored if set. Native adoption proofs and replay-snapshot digests that older versions wrote are still read, so a host replay of an adopted native summary reconciles after a restart or rotation.
 

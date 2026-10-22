@@ -3471,9 +3471,10 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
             ).fetchone()
             record = json.loads(row[0]) if row else {}
             if record.get("remaining") or record.get("operator_retry"):
-                from .command import _embedding_inflight_counts
-                _, uncertain = _embedding_inflight_counts(conn, row[1].split(":", 2)[2])
-                record["operator_retry"] = uncertain if embedding_provider_id(provider.provider_id) != "fastembed" else 0
+                record["operator_retry"] = 0
+                if embedding_provider_id(provider.provider_id) != "fastembed":
+                    from .command import _embedding_inflight_counts
+                    _, record["operator_retry"] = _embedding_inflight_counts(conn, row[1].split(":", 2)[2])
         finally:
             conn.close()
         remaining = record.get("remaining", 0)
