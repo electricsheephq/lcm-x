@@ -168,7 +168,8 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         mcp_summary = {"ready_rate": mean([c["mcp_ready"] for c in mcp]),
             "offered_tools_distribution": dict(Counter(c["offered_tools"] for c in mcp)),
             "zero_lcm_calls_ready": sum(c["mcp_ready"] and c["lcm_tool_calls"] == 0 for c in mcp),
-            "mcp_unavailable_retried": sum(c.get("retries", 0) == 1 for c in mcp),
+            "mcp_unavailable_retried": sum(c.get("retries", 0) == 1 or
+                (c.get("error") == "mcp_unavailable" and bool(c.get("retried"))) for c in mcp),
             "mcp_unavailable_excluded": sum("mcp_unavailable" in invalid(r, full) for r in rows)}
         finishes = [c.get("finish_reason") for c in calls if c.get("status") == "ok"]
         judge_calls = [c for r in rows for c in r.get("judge_calls", [])]

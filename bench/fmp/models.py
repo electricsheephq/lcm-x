@@ -493,7 +493,7 @@ class Codex(Harness):
                                                      ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"))})
         record.update(identity_source=info["identity_source"], wrapper_overhead_tokens=None,
                       input_tokens_label="total incl. retrieved evidence")
-        if limited(failure) or limited(proc.stderr):
+        if limited(failure) or ((proc.returncode != 0 or done is None or not texts) and limited(proc.stderr)):
             self.quota.stop("codex")
             records.append({**record, "status": "error", "error": "usage_limit"})
             raise BudgetStopped()
