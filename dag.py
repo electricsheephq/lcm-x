@@ -46,10 +46,12 @@ from .search_query import (
     normalize_search_sort,
     requires_like_fallback,
     sanitize_fts5_query,
+    is_fts5_syntax_error,
     sanitize_like_query,
     should_apply_directness_rank_adjustment,
 )
 from .store import _normalize_source_value, _UNKNOWN_SOURCE, _legacy_blank_source_clause
+from .sqlite_session import ConnectionPolicy, open_connection
 from .sqlite_util import _run_sqlite_write_with_snapshot_retry
 
 
@@ -181,9 +183,17 @@ class SummaryDAG:
         return self._conn
 
     def _init_db(self):
-        self._conn = sqlite3.connect(str(self.db_path), timeout=5.0, check_same_thread=False)
-        refuse_schema_version_too_new(self._conn)
-        configure_connection(self._conn)
+        # #1159: reserve the write lock before FTS5 can read during re-prepare.
+        open_connection(ConnectionPolicy(
+            database=str(self.db_path),
+            connect_kwargs=(
+                ("timeout", 5.0), ("check_same_thread", False), ("isolation_level", "IMMEDIATE"),
+            ),
+            before_row_factory=(refuse_schema_version_too_new, configure_connection),
+            row_factory=None,
+            on_open=lambda conn: setattr(self, "_conn", conn),
+            on_setup_error=None,
+        ))
         self._conn.executescript("""
             CREATE TABLE IF NOT EXISTS summary_nodes (
                 node_id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -544,6 +554,22 @@ class SummaryDAG:
             for row in rows
         }
 
+    def get_session_depths(self, session_id: str) -> List[int]:
+        """Every depth that has a node in the session, ascending, without a row cap (#750).
+
+        Depth discovery must not use :meth:`get_session_nodes`: its default
+        ``ORDER BY depth, created_at LIMIT 1000`` fills with depth-0 rows first,
+        so the deeper levels of a long session are never seen.
+        """
+        with self._db_lock:
+            rows = self._conn.execute(
+                """SELECT DISTINCT depth FROM summary_nodes
+                   WHERE session_id = ?
+                   ORDER BY depth""",
+                (session_id,),
+            ).fetchall()
+        return [int(r[0]) for r in rows]
+
     def get_node_provenance(self, node_id: int) -> Optional[Dict[str, Any]]:
         """Return the recorded escalation level and model for a node, or ``None`` (#441)."""
         with self._db_lock:
@@ -635,7 +661,9 @@ class SummaryDAG:
 
     def search(self, query: str, session_id: str | None = None,
                limit: int = 20, sort: str | None = None,
-               source: str | None = None) -> List[SummaryNode]:
+               source: str | None = None, *,
+               agent_operators: bool = False,
+               allow_operators: bool = False) -> List[SummaryNode]:
         """FTS5 search across summary nodes.
 
         Retrieval contract:
@@ -646,7 +674,8 @@ class SummaryDAG:
           session-level source presence
         - mixed-source nodes may match more than one ``source`` filter
         """
-        safe_query = sanitize_fts5_query(query)
+        safe_query = sanitize_fts5_query(query, agent_operators=agent_operators, allow_operators=allow_operators)
+        syntax_retried = False
         terms = extract_search_terms(safe_query)
         phrases = extract_quoted_phrases(safe_query)
         # LIKE is the fallback for text sanitization LOSES (CJK/emoji) and for a
@@ -686,6 +715,12 @@ class SummaryDAG:
                         ).fetchall()
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
+                if agent_operators and not syntax_retried and is_fts5_syntax_error(exc):
+                    safe_query = sanitize_fts5_query(query)
+                    syntax_retried = True
+                    offset = scanned_rows = 0
+                    results.clear()
+                    continue
                 logger.warning("FTS node search failed, falling back to LIKE: %s", exc)
                 return self._search_like(query, session_id=session_id, limit=limit, sort=sort, source=source)
 

@@ -11,8 +11,8 @@ the real ACP/gateway processes, real transports or customer boxes.
 ## Run
 ```
 uv run --no-project python bench/instruments/reliability/run_matrix.py \
-  --hosts-file <hosts.local.json> --hosts eva-0.21.5,customer-0.21.2 \
-  --plugin-ref origin/main[,v0.24.2,...] --cells 'crash-*,baseline/*' | all --jobs 8 --out <dir> [--keep-homes] [--keep-dbs fail|all] \
+  --hosts-file <hosts.local.json> --hosts ref-0.21.5,customer-0.21.2 \
+  --plugin-ref origin/main[,v0.24.2,...] --cells 'crash-*,baseline/*' | all --jobs 8 --out <dir> [--keep-homes] [--keep-dbs none|fail|all] [--scratch-root <dir>] \
   [--lcm-env LCM_KEY=VAL ...]
 ```
 - Hosts file: `--hosts-file`, else `$LCM_RELIABILITY_HOSTS`, else the host-prep lane's file; see
@@ -24,16 +24,23 @@ uv run --no-project python bench/instruments/reliability/run_matrix.py \
 - Each ref is exported once with `git archive` into `<out>/plugins/<sha12>/`; the plugin dir name,
   `plugins.enabled` entry and engine name are read from that tree (v0.23.x = `hermes-lcm`/`lcm`).
 - Per cell: `<out>/cells/<host>/<sha12>/<cell-slug>/` holds cell.json, transcript.jsonl, phase-*.json,
-  probe logs, `db/` (sqlite backup-API copies) and verdict.json. `--keep-homes` keeps hermes-home.
-- `--keep-dbs fail` (default) drops the db/ copies of PASS cells (regenerable), except a PASS that carries host-parity licences; `--lcm-env` overrides LCM_*
-  on every cell and is recorded in run.json and MATRIX.md.
+  probe logs and verdict.json: the scored outputs only. The cell's Hermes home (state.db, lcm.db), its HOME/TMPDIR
+  and the `db/` sqlite backup-API copies the scorers read live in a private scratch dir under `--scratch-root`
+  (default `$TMPDIR`), deleted once the cell is scored, an ERROR or a harness failure included. A full state.db is
+  several GB per cell, so no Hermes database is left in `<out>` by default.
+- Debugging: `--keep-dbs fail` keeps the `db/` copies of non-PASS cells and of a PASS that carries host-parity
+  licences, `--keep-dbs all` those of every cell, and `--keep-homes` the hermes-home; each is moved into the cell
+  dir (`<cell>/db/`, `<cell>/hermes-home/`); re-scoring a cell later (`scorers/cli.py --cell-dir`) needs its kept
+  `db/`. If a move fails, nothing is deleted and the error names both dirs. A caller that sandboxes host writes to one
+  dir passes a `--scratch-root` inside it.
+- `--lcm-env` overrides LCM_* on every cell and is recorded in run.json and MATRIX.md.
 - Output: `results.jsonl`, `MATRIX.md`, `ISSUE-MAP.md`. Re-render: `python report.py <out>`.
 - Standalone scoring: `python -m bench.instruments.reliability.scorers.cli --db <lcm.db> --gauntlet-run <dir>`
   (copies the DB into a private temp dir first; the source file is never opened).
 
 ## How a cell runs
 `probe.py` runs one phase: `<host python> probe.py --cell <cell.json> --phase A --start-turn N --cell-dir <dir>`
-with cwd = host src, `HERMES_HOME=<cell>/hermes-home`, `HOME=<cell>/home`. It refuses (exit 3) a
+with cwd = host src, `HERMES_HOME=<scratch>/hermes-home`, `HOME=<scratch>/home`. It refuses (exit 3) a
 HERMES_HOME/HOME at or under the real home's `.hermes`, and a cell dir under /tmp. Sockets are blocked;
 the provider is a MagicMock scripted per turn (unique or repeated replies, tool plans, usage that is
 estimated, provider-real or scaled); the host aux LLM and the LCM summariser (tag-preserving) are stubbed.
@@ -65,6 +72,12 @@ the host reported `interrupted`. Any other assistant row is surplus.
   stored-only key and every split reply is surplus and fails. Expected =
   what the host held per attempt after its ACP strip and consecutive-user merge (a crashed prompt folded
   into the next composite counts once).
+  B2 strips assistant edges too; Phase C alone uses exact assistant bytes (see `RELEASE-READINESS-V1`).
+  Externalized rows are recognized and loaded by the product's own predicate and payload reader,
+  using the cell's isolated Hermes home. B1 tags and B2 keys use the original content (with B2's
+  existing edge-whitespace rule; tool-result hashes remain exact). Missing/unreadable payloads or
+  absent content are real deficits and fail B2; `numbers.B2.externalized` reports resolved/unresolved
+  counts, loss reasons and up to 10 store ids, separately from ordinary deficits.
 - **Host-parity licence (D-A, DESIGN-436 REVISION 2 P-HOST; `scorers/host_parity.py`).** A stored USER-row surplus
   of a B2 key (or a B1 user tag) in lineage L is licensed only up to what the cell's own host state.db holds in L:
   `min(surplus, host_count - expected)`, floored at 0. host_count is what one host view holds: the most ACTIVE rows
@@ -107,12 +120,13 @@ asks it to publish. R1 only.
 
 `publication-failure/rotation-child` (G-REL-1, #541's bar) injects ONE publication failure, on the first rotation-child
 publication; the next child compaction must commit. `publication-failure/rotation-child-persistent` fails every
-rotation-child publication: a data cell (no target, `ci.NON_GATE`) for the degraded mode where no child compaction can
-ever publish, a product question outside stabilization.
+rotation-child publication: a data cell for the degraded mode where no child compaction can ever publish. It targets
+#1797 (exact content preserved under permanent child-publication failure; publication success is never required) and
+stays in `ci.NON_GATE`, so it never gates.
 
-Native cells: `native-short-prefix/*` are rejected before the host summary call (`prefix_too_short`) and are
-data; `native-long-prefix/*` (default tuning, 1M window) run the host ContextCompressor summary (stubbed aux
-LLM, so no slow-summary timeouts) and LCM's post-summary checks; every rejection reason is recorded.
+Native cells: native recovery was removed (#777), so the native-only cells (`native-short-prefix/*`,
+`native-long-prefix/*`) were retired with it. `native-on-off/*` remain: an older lcm-x runs with native recovery ON,
+then the candidate (which ignores the key) takes over the same store.
 
 Verdicts: PASS, FAIL (failed bars with numbers), INCONCLUSIVE (no bar fails, one could not decide), ERROR (harness or host failure; never a PASS),
 UNSUPPORTED (with the reason). A cell must prove its scenario ran or it is UNSUPPORTED, never PASS: every
@@ -126,9 +140,150 @@ whose plugin module is not the exported tree, or whose interpreter is not the ho
 `sql_dup_counter.py`, `summary_nodes_report.py` and `compaction_ledger.py`
 are ported as `scorers/dupes.py` and `scorers/summary.py` (diagnostics and the B5 ledger).
 
+## First-request continuity (diagnostic, except the promoted cells)
+
+R2 records the first `main` provider request after each committed compaction:
+F1 is the system LCM note, F2 the first user's tag in sole-user cells, F3 the
+last completed assistant reply's tag, and F4 the current user's tag. The new
+`continuity/sole-user-tool-loop/{in-place,rotation}` cells send one prompt and
+12 tool rounds reading distinct files because the host deduplicates identical reads,
+with a 15,360-token trigger; `continuity/survival-fit/{in-place,rotation}` lowers the survival
+ceiling and follows large turns with ordinary turns.
+`continuity/survival-fit-older-turns/{in-place,rotation}` uses a moderate reserve
+and short later turns to measure F3 while the newest turn fits. The optional
+`continuity/forced-compaction-then-turn/{in-place,rotation}` reuses `/compress`
+after turn 19 and sends turn 20. Existing `baseline/{mode}/acp` cells supply
+the F3 negative control. These checks are outside `BARS`. The sole-user, survival-fit and
+survival-fit-older-turns cells are in `ci.NON_GATE`; the two forced-compaction-then-turn cells gate on exact bars
+(F4 among them) through `ci.CELL_GATE` (#1588, listed under the nightly CI gate below). The two survival-fit shapes keep B1–B7 and B9, but omit B8
+because survival fitting is their required scenario. Other cell definitions and
+the bar implementations are unchanged.
+
+In continuity cells only, a missing current tag in the last user message is
+a diagnostic `FAIL` on F4, targeting #916 in `survival-fit`; a last user message
+starting with `[LCM survival fit:` records `current_user_projected=true`.
+Other cells still report this condition as `ERROR`. Infrastructure errors
+still gate; continuity findings gate only in the promoted forced-compaction-then-turn cells.
+
+`MATRIX.md` reports per-host/cell counts and each compaction's kind, turn,
+previous-reply tag and whether its input row was replaced. Unknown data and
+compactions with no following request are explicit; a missing scenario is
+reported, never inferred from configuration. New provider metadata contains
+only booleans, synthetic tags and message role/counts, with no request text.
+This answers #900/#798 on pinned CI hosts and seeds #659; literal presence
+does not prove an instruction remains operative. No real model is called.
+
+### #659 continuity probes (recorded, non-gating, opt-in)
+`continuity/probe-{host-instruction,todo,constraint-head,constraint-mid,constraint-shape}/{in-place,rotation}`
+(`cells.probe_cells`, R2 only) are selected by an explicit pattern and never by `--cells all`, so the nightly matrix,
+`ci.expected_cells` and the gate are unchanged. Run them with
+`run_matrix.py --transport acp-process --hosts <host> --plugin-ref <ref> --cells 'continuity/probe-*' --out <dir>`.
+Each cell plants nonces (letters G-Z only, so no hex-shaped token) and the fake provider checks them at request time
+(`provider-requests.jsonl` keeps no text): presence, count and carrier class (system, user_raw, summary_or_head,
+todo_fold, tool_result, tool_args, assistant) in the first main request after each committed compaction, beside F1-F4.
+`apply_probes` records a per-probe rate in `probes_recorded`; it never sets a bar, the verdict or the gate. With a bar,
+any unknown event (no request, no markers) reads "incomplete", never "meets bar".
+- **P1 host instruction** (`host-instruction`, bar 100%): a SOUL.md nonce line, exactly once in a system message.
+  SOUL.md is rewritten with no restart before the first turn from 12 on that follows a commit: the new line must appear
+  only after the next commit, and every
+  main request between the rewrite and that commit must still carry the old one (`host-instruction-rebuild`). The
+  scenario counts as observed only when an observed commit follows the rewrite.
+- **P2 open todos** (`todo-open`): the scripted model writes todos through the default `tool_call` bridge (the defer
+  list is not changed); the observer wraps the inline `todo_list` executor and B6 binds the bridge call to the unwrapped
+  dispatch. Open items must sit in the host's fold row; the completed item never may (`todo-done-control`). Its own
+  cell: the fold merge shape is #538.
+- **P5 constraint before the fresh tail** (`constraint`): a turn-3 constraint at the head, mid-text, or in another
+  nonce shape (the three "seeds"), then three large reads in turn 6; from turn 20 each user row carries its own control
+  nonce, checked only in that turn's requests (`constraint-control`). The trigger is 32,000 tokens (`LCM_CONTEXT_THRESHOLD=0.25`, tail 4).
+
+Not measured: the summariser is a scripted fake that keeps tags only, so P5 on LCM-X measures structural retention
+(fresh tail and head anchor), not whether a real summary carries the constraint; literal presence does not prove an
+instruction is obeyed. P3/P4 (plan, goal) and the plain-Hermes arm are #659 PR B/C.
+
+## Shipped-default small windows (R1, opt-in)
+
+Select `--cells 'default-window/*'` explicitly. These two backtest candidates
+are excluded from `--cells all` and nightly admission. Broad globs such as
+`--cells '*'` also include opt-in cells, as they do for the continuity probes.
+The `default-window/` id prefix is the dispatch contract: `run_matrix.config_yaml`
+omits the host threshold override, and `process_cell.unsupported` rejects R2,
+which lacks the ordered R1 request records. Giving another cell that prefix
+opts into both behaviors. No existing cell definition or nightly selection changes.
+
+Both use `lcm_env={}` (unlike `None`, which selects `tight()`). Their generated
+host config omits the harness's usual `compression.threshold: 0.8`, so the plugin
+uses each ref's shipped defaults. No LCM tuning override is injected.
+
+- `default-window/64k-cadence`: 101 turns, 400 filler repeats per user
+  (about 2,300 tokens), 300 repeats per fake summary (about 1,750 tokens).
+  At rc8 the trigger is 48,000 tokens; traffic totals about 232,300 tokens,
+  before summaries and assistant replies. The final backlog extension reaches
+  turn 104 at rc8, after its last automatic commit at 103, and B4 publishes.
+  The culprit still commits on every closing turn through 104, so its B4 is
+  INCONCLUSIVE even though C1 fails. This part of acceptance remains unmet.
+- `default-window/objective-1221`: a 32,768-token window, one short setup
+  request/reply, then one plain user objective of about 12,020 fallback tokens
+  on turn 2 (the fixed `plan ` document from #1221's engine regression).
+  Eleven sequential real `read_file` calls read deterministic numbered records:
+  24,000 characters, 16,000 characters, then nine files of 7,400 characters.
+  The host supplies line numbers and JSON formatting. Fixed
+  `~/objective-1221/big-NN.txt` tool arguments resolve inside the cell's private
+  HOME; output/scratch path lengths do not enter those arguments. No DAG state
+  is injected and no final forced `/compress` is used. Only **B1, B2, B6 and F4**
+  gate this cell. B6 confirms the window pressure is real: all eleven reads
+  return their records as stored tool groups, with no split group, orphan drop
+  or tool failure. B8 is excluded because survival fitting is the designed fallback.
+  F4 checks the complete current request, not merely its synthetic turn tag.
+
+The old `default-window/64k-large-objective` cell was removed: all four historical
+refs passed its three calibration attempts, so it was not a #1221 detector.
+The 32K cadence candidate was removed earlier: within 400 turns it never reached
+the historical every-call regime, and its B8 failure was not a C1 detector.
+
+C1 fails when more than half the model calls after the first automatic committed
+compaction are immediately preceded by a commit. Count one main provider request
+per call, ignore final/cron commits, and keep the pending commit through a noop.
+A trailing commit with no following request makes the evidence INCONCLUSIVE.
+C1 also flags v0.26.2 at 64K (48/81); it measures cadence, not #1139 specifically.
+
+B1/B2 map a held row beginning with the exact generated objective-marker line
+`[Current user objective preserved from compacted history]` plus a newline back
+to that attempt's persisted original. The carrier is a generated projection,
+not a new stored user row. Quoted markers, other carrier types and similar text
+are not mapped. A real duplicate original still fails B1/B2.
+
+### #1221 controls and mechanism
+
+Use the fix controls: rc5 `76769913` RED, rc6 `bd46fd9f` GREEN and rc8
+`4e603ed6` GREEN. The defaults-onset date remains **unknown**. The former
+`207092cd` / `10e10d82` comparison cannot serve as this detector's RED/GREEN
+pair: their prefix-bound code is identical. Rc5 ships 24,000-token leaves
+(`76769913:config.py:670`), dynamic sizing off (`:689`), a 24-row/24K fresh tail
+(`:651–654`) and a 0.75 trigger (`:672`). The selector uses the fixed leaf budget
+(`compaction.py:525–553`); the full sweep selects raw rows outside that tail
+(`:1800,:1850–1857`).
+
+The normal host sequence first crosses 24,576 at tool round 2, after 21,910
+below / 26,398 above: margins 2,666 / 1,822 tokens on all three control refs.
+That pass no-ops with no leaf. Round 3 reaches 28,441 and publishes leaf 1 over
+stored rows [1, 2, 3]:
+the earlier user, its assistant reply and the current objective. Rc5's next
+assembly omits the objective; the first subsequent provider request fails F4.
+The plain row has no smaller fallback, and the default prefix bound skips its
+oversized anchor (`76769913:engine.py:8127–8166`). The fix preserves it and
+lets survival fitting handle the whole list. Engine-direct regression coverage
+also remains in `tests/test_issue_1221_objective_default_bound.py`, added by rc6.
+
+Path replays with output lengths 97 / 200 and scratch-root lengths 97 / 205
+characters have identical crossing rounds, compression inputs and verdicts on
+all three refs. Raw host estimates shift by 81 tokens: the long-path bracket is
+21,991 / 26,479, still at least 1,903 above and 2,585 below. This proves stable
+triggering messages and verdicts, not path-invariant token accounting. Both cells
+remain opt-in; these in-process controls do not establish release readiness.
+
 ## Positive controls
 `controls.py` holds each control's refs, hosts, cells and expected red/green pattern; `run_matrix.py --control
-PC-1 --out <dir>` runs it and writes CONTROL.json (HOLDS or the mismatches). PC-1 is a differential: lcm-x `47bd28e7` (before #498, the #494 fix) vs `ae1fb16d` on eva-0.21.5, rs34-0.21.5
+PC-1 --out <dir>` runs it and writes CONTROL.json (HOLDS or the mismatches). PC-1 is a differential: lcm-x `47bd28e7` (before #498, the #494 fix) vs `ae1fb16d` on ref-0.21.5, rs34-0.21.5
 and upstream-main: `baseline/in-place/acp` PASSes at both, `acp-trailing/in-place` FAILs only at
 `47bd28e7` (the host's post-commit-proof persist strip). customer-0.21.2 passes both refs (no such strip).
 
@@ -174,15 +329,49 @@ gateway cells are UNSUPPORTED with the reason; `--transport gateway-process` is 
 
 ### Nightly CI (`.github/workflows/reliability-nightly.yml`)
 Triggers: daily schedule and `workflow_dispatch` (effective once on main), and `pull_request` path-filtered to
-`bench/instruments/reliability/**` and the workflow file. Not a required check; default token only. Matrix over
-`hosts.ci.json` (pinned shas): eva-0.21.5 and customer-0.21.2 on Python 3.11, upstream-main on 3.14. `ci.py prep`
+`bench/instruments/reliability/**` and the workflow file. Not a required check; default token only. The workflow
+names its hosts in its own matrix (adding a `hosts.ci.json` entry alone adds no nightly coverage); each named host is
+pinned in `hosts.ci.json`: ref-0.21.5, floor-0.21.3, r34.4-0.21.5 and r34.10-0.21.5 on Python 3.11, r34.15-0.21.5
+(the fleet runtime candidate) on 3.12, upstream-main and upstream-uid on 3.14. floor-0.21.3 is upstream v2026.9.14 (345cd2b0), the oldest host the plugin declares (`requires_hermes: ">=0.21.3"`).
+It replaced customer-0.21.2 in the nightly matrix: that host is below the declared floor, so Hermes skips the plugin
+there and every cell errors by design. Its `hosts.ci.json` entry stays for local runs and history.
+floor-0.21.3 does not re-anchor the turn after a post-tool compaction, so on those turns its request copy replaces the
+live tool results with its own dangling-tail notices while the host stores the dispatched results (0.21.5 re-anchors).
+B2 then expects the dispatched result for such a call and reports it under `host_wire_notice_licensed`; the licence
+is scoped by host sha to 0.21.3 and 0.21.4 (`tool_calls.HOSTS_WITHOUT_POST_TOOL_REANCHOR`). upstream-uid (2667c960) is upstream after its message-uid change: the one CI host with message uids and the P8
+flush seams. upstream-main (6f7a7991) stays before it, where the host archive copies uncovered rows behind the running
+turn (the shape that exposed #845). `ci.py prep`
 fetches the sha and installs it editable with `[acp,edge-tts,bedrock,vertex,anthropic]` (the harness verifies git HEAD
 and cites source); R1 all cells and R2 acp-process all cells run with `--plugin-ref HEAD`; MATRIX.md is the job
-summary and results are uploaded. `ci.py gate` fails on any ERROR, on a FAIL in the G-REL-1 cell set unless the
-cell targets an open issue, and on an empty set or any missing, duplicate or unexpected row per (host, transport,
+summary and results are uploaded. `ci.py gate` fails on any ERROR, on a FAIL in the G-REL-1 cell set unless every
+failed bar is declared by at least one open target in `cells.ISSUES`, and on an empty set or any missing, duplicate or unexpected row per (host, transport,
 plugin sha) against that transport's `--cells all` list. Linux has no `sandbox-exec`: there containment is the proxy sink plus the socket guard.
+A FAIL with empty or missing `failed_bars` always gates; an open target absent from `ISSUES` declares no bars, and a
+target listed in `cells.ISSUE_HOSTS` declares its bars only on hosts whose name starts with one of its prefixes.
+G-REL-1 diagnostics list uncovered bars, targets and open targets.
+The exact-cell additions in `ci.CELL_GATE` are: R2 `continuity/forced-compaction-then-turn/{in-place,rotation}`
+on every pinned host at B1/B2/B3/B4/B8/F4, plus B9 on `upstream-uid`; R1 `native-on-off/{v0.23.3,v0.24.3}/in-place`
+at B3/B4/B8; and R1 `overflow-recovery-restart/{in-place,rotation}` and `upgrade-crash-after-rotation/rotation`
+at B1/B2. The last three gate on UID-capable hosts; stamp-only failures remain excused by open #534/#1508
+and #1501/#1506 targets via `ISSUE_HOSTS`. Other continuity cells remain outside the gate.
 
 ### Claim boundary
 R2 proves the plugin's behaviour through a real `hermes acp` process on the pinned host shas, with every model route
 at a deterministic localhost fake. It does not prove live-model behaviour, the gateway process, several sessions in
 one process, or the process-side publication-failure hook (R2b, #569), and it says nothing about customer boxes.
+
+P8 / B9 audits R1 in-process and R2 `acp-process` host flushes using the host's own resolvers and digests:
+I0 pins committed live addresses; I1 forbids archived writes/adopts; I2 pins session/role/uid
+and unique uid-snapshot resolution; I3 forbids adopts; I5 rejects active uid twins
+involving LCM output (host-only twins are reported). Events contain no payload.
+Missing host seams, audit errors, no observed commit or no observed host flush give B9 UNSUPPORTED. At least one
+flush must follow a commit of the same session in log order, across phases; otherwise B9 is UNSUPPORTED too.
+The audit records the resolved target's session and fails I2 on a mismatch; older events without that field
+keep their previous scoring. A flushed dict whose address resolves to no row is counted as `UNRESOLVED`
+(report-only: after a rotation a parent-session `_row_id` legitimately resolves to nothing), not as `INSERT`.
+`p8-control/{archived,other-active,random-snapshot}` fail I1/I2/I3; `none` passes.
+On R2 the same controls inject after the second commit inside the ACP subprocess.
+The nightly gate checks this pattern per host and transport, with B9 required in each FAIL's failed bars.
+`controls.py` records the measured must-support pairs, where missing or UNSUPPORTED controls gate; other pairs
+may be UNSUPPORTED, but any PASS/FAIL must match.
+Disable wraps with `LCM_RELIABILITY_P8=off` or `--lcm-env LCM_RELIABILITY_P8=off`; faults stay.

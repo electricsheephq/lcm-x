@@ -6,6 +6,7 @@ import copy
 import hashlib
 import json
 import sys
+from datetime import datetime
 from types import SimpleNamespace
 
 import pytest
@@ -300,11 +301,13 @@ def test_checkpoint_is_fsynced_after_header_and_each_completed_question(
 
 
 def test_directory_fsync_skips_unsupported_platform(tmp_path, monkeypatch):
-    monkeypatch.setattr(
-        lme.os, "open", lambda *_args, **_kwargs: (_ for _ in ()).throw(NotImplementedError())
-    )
+    # Scoped so the failing os.open is gone before tmp_path cleanup runs.
+    with monkeypatch.context() as patched:
+        patched.setattr(
+            lme.os, "open", lambda *_args, **_kwargs: (_ for _ in ()).throw(NotImplementedError())
+        )
 
-    lme._fsync_parent_directory(tmp_path / "checkpoint.jsonl")
+        lme._fsync_parent_directory(tmp_path / "checkpoint.jsonl")
 
 
 def test_question_checkpoint_record_does_not_mutate_scored_input():
@@ -527,7 +530,10 @@ def test_resume_with_changed_template_mode_fails_closed_naming_field(tmp_path, m
         )
 
 
-def test_fully_completed_resume_skips_provider_initialization(tmp_path, monkeypatch):
+@pytest.mark.parametrize("advance_seconds", [0, 1])
+def test_fully_completed_resume_skips_provider_initialization(tmp_path, monkeypatch, advance_seconds):
+    report_times = iter([lme.time.gmtime(1704067200 + offset) for offset in (0, advance_seconds)])
+    monkeypatch.setattr(lme, "time", SimpleNamespace(**(vars(lme.time) | {"gmtime": lambda: next(report_times)})))
     checkpoint = tmp_path / lme.PER_QUESTION_CHECKPOINT_FILENAME
     monkeypatch.setattr(
         lme, "evaluate_question", lambda question, *_args, **_kwargs: _scored(question.question_id)
@@ -547,6 +553,11 @@ def test_fully_completed_resume_skips_provider_initialization(tmp_path, monkeypa
         selected_question_ids=["q0"],
     )
 
+    timestamps = [
+        datetime.strptime(report.pop("generated_at_utc"), "%Y-%m-%dT%H:%M:%SZ")
+        for report in (expected, actual)
+    ]
+    assert (timestamps[1] - timestamps[0]).total_seconds() == advance_seconds
     assert actual == expected
 
 

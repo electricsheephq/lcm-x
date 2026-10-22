@@ -75,12 +75,24 @@ WRITES_AS_SELF = {
 HOST_ONLY = {
     "enable_teams", "setup_teams", "disable_teams", "preflight_teams",
     "update_model", "shutdown", "clone_for_agent", "drain_rollup_maintenance",
+    # Hermes reset callback (#1306): requires the engine object and a finalized
+    # foreground binding; uses ordinary start guards and ignores the host DB.
+    "bind_session_state",
     # Sets the host-facing engine name from the Hermes config at register /
     # clone time (#471); it reads no store and grants nothing.
     "apply_identity_migration",
     # The host breaker's refusal notification (#651): it starts the in-memory
     # no-progress hold of this engine; it reads no store and grants nothing.
     "record_rejected_compaction",
+    # #597: turn-end notification clears only this engine's in-memory progress
+    # refusal hold; it reads no store and grants no access.
+    "note_turn_complete",
+    # #1623: the host owns this object; ingest uses only its existing bound
+    # context under a lease. No binding from metadata or model-facing caller.
+    "on_turn_complete",
+    # #1014: waits for this engine's queued incremental embedding passes (tests
+    # and diagnostics), like drain_rollup_maintenance; it reads no store.
+    "drain_embedding_maintenance",
 }
 
 

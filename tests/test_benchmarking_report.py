@@ -132,8 +132,12 @@ def test_summarize_metrics_groups_summary_failure_modes():
 
 def test_build_community_export_is_scrubbed_and_includes_policy_settings():
     rows = [
-        _metrics(policy_name="baseline_272k", repeated_compaction_risk=True, fresh_tail_pressure_ratio=0.80),
-        _metrics(policy_name="codex_gpt_long_context"),
+        _metrics(
+            policy_name="baseline_272k",
+            repeated_compaction_risk=True,
+            fresh_tail_pressure_ratio=0.80,
+        ),
+        _metrics(policy_name="codex_gpt_long_context", policy_version="2"),
     ]
     rows[0].database_path = "/tmp/private/lcm.db"
     rows[0].hermes_home = "/home/w0lf/.hermes/profiles/turing"
@@ -153,9 +157,14 @@ def test_build_community_export_is_scrubbed_and_includes_policy_settings():
     assert export["provider"] == "openai-codex"
     assert export["model"] == "gpt-5.5"
     assert export["transcript_contents_included"] is False
-    assert export["policy_settings"]["codex_gpt_long_context@1"]["fresh_tail_count"] == 24
-    assert export["policy_settings"]["codex_gpt_long_context@1"]["leaf_chunk_tokens"] == 8000
-    assert "notes" not in export["policy_settings"]["codex_gpt_long_context@1"]
+    assert (
+        export["policy_settings"]["codex_gpt_long_context@2"]["fresh_tail_count"] == 24
+    )
+    assert (
+        export["policy_settings"]["codex_gpt_long_context@2"]["leaf_chunk_tokens"]
+        == 24000
+    )
+    assert "notes" not in export["policy_settings"]["codex_gpt_long_context@2"]
     assert export["fixture_suite"] == summary["fixture_suite"]
     assert export["policy_comparison"] == summary["policy_comparison"]
     assert "database_path" not in serialized

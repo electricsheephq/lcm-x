@@ -1,7 +1,7 @@
 # M7 — THE ABSTENTION/FALSE-PREMISE CLASS IS THE PROGRAM'S BIGGEST UNTOUCHED LOSS MASS
 
 _Found 2026-07-25 by the orchestrator (Opus 5) from the raw per-question data of BOTH completed full runs.
-Written to ~/.claude because /Volumes/LEXAR became inaccessible (macOS removable-volume permission reset at the
+Written to local fallback storage because an external disk became inaccessible (macOS removable-volume permission reset at the
 app upgrade) — move to the program packet artifacts dir once access is restored._
 
 ## The numbers (raw per_question.jsonl, both lanes — computed, not estimated)

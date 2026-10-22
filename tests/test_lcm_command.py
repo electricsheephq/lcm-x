@@ -273,7 +273,7 @@ def test_lcm_status_does_not_report_invalid_env_as_effective_source(tmp_path, mo
 
     payload = json.loads(lcm_tools.lcm_status({}, engine=engine))
 
-    assert payload["config"]["leaf_chunk_tokens"] == 20000
+    assert payload["config"]["leaf_chunk_tokens"] == 24000
     assert payload["config_sources"]["leaf_chunk_tokens"] == "default"
     assert any("LCM_LEAF_CHUNK_TOKENS" in warning for warning in payload["config_source_warnings"])
 
@@ -281,7 +281,7 @@ def test_lcm_status_does_not_report_invalid_env_as_effective_source(tmp_path, mo
 def test_lcm_status_text_reports_config_source_for_context_threshold(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes_home"
     hermes_home.mkdir()
-    (hermes_home / "config.yaml").write_text("compression:\n  threshold: 0.44\n")
+    (hermes_home / "config.yaml").write_text("compression:\n  threshold: 0.84\n")
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("LCM_CONTEXT_THRESHOLD", raising=False)
 
@@ -292,7 +292,7 @@ def test_lcm_status_text_reports_config_source_for_context_threshold(tmp_path, m
 
     result = handle_lcm_command("status", engine)
 
-    assert "context_threshold: 0.44" in result
+    assert "context_threshold: 0.84" in result
     assert "context_threshold_source: config_yaml:compression.threshold" in result
 
 
@@ -490,7 +490,7 @@ def test_lcm_status_reports_runtime_identity(engine):
     repo_root = Path(__file__).resolve().parent.parent
 
     assert "plugin_name: hermes-lcm-x" in result
-    assert "plugin_version: 0.24.9" in result
+    assert "plugin_version: 0.28.1" in result
     assert f"plugin_path: {repo_root}" in result
     assert "module_path:" in result
     assert "database_path_source: config.database_path" in result
@@ -530,7 +530,7 @@ def test_lcm_doctor_reports_health_checks(engine):
     assert "messages_fts: ok" in result
     assert "nodes_fts: ok" in result
     assert "plugin_name: hermes-lcm-x" in result
-    assert "plugin_version: 0.24.9" in result
+    assert "plugin_version: 0.28.1" in result
     assert f"plugin_path: {repo_root}" in result
     assert "plugin_git_commit:" in result
     assert "triage_guidance:\n- none" in result
@@ -573,7 +573,21 @@ def test_lcm_doctor_survival_fit_guidance_names_the_backup_restore_rollback(engi
         assert phrase in line, phrase
     restore = "restore the database backup taken before the first v0.24.5 install together with the plugin"
     assert not any("remain in the host session" in text for text in (observation, line))
-    assert not any("plugin-only" in text for text in (observation, line))
+    if projected is None or projected > 0:
+        # #919 review: positive or unknown projections move the plugin-alone target to v0.27.0 in both texts.
+        assert "the plugin alone to v0.27.0 or later is fine" in observation and "v0.27.0 or later is fine" in line
+        assert not any("v0.24.5 or later is fine" in text for text in (observation, line))
+        # #919: positive or unknown projections add the v0.27.0 plugin-only rollback floor.
+        assert "a plugin-only rollback must target v0.27.0 or later" in observation
+        # #919 F2: the floor explains the cold-resume risk and a self-contained older-target procedure.
+        assert ("v0.26.x or earlier cannot recognise a short projected row (head + mark) and stores it again "
+                "on a cold resume (#601 duplicates); to roll back further, stop Hermes and move the configured "
+                "database file (by default lcm.db, with its -wal and -shm companions) aside and keep it") in observation
+        # #919: triage guidance retains its existing advice without the projection clause.
+        assert "plugin-only" not in line
+    else:
+        # #919: zero projections preserve the original absence of plugin-only advice.
+        assert not any("plugin-only" in text for text in (observation, line))
     assert ("stop Hermes, move the configured database file (by default lcm.db, with its -wal and -shm companions) "
             "aside and keep it") in line
     assert restore in line and "stay in the file you moved aside" in line
@@ -637,6 +651,22 @@ def test_lcm_doctor_context_pressure_uses_runtime_threshold(tmp_path):
 
         assert pressure["status"] == "pass"
         assert pressure["detail"] == "82.7% used, compaction triggers at 85.0%"
+    finally:
+        engine.shutdown()
+
+
+def test_issue_1175_lcm_doctor_context_pressure_uses_gate_tokens(tmp_path):
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "doctor-gate-pressure.db")))
+    try:
+        engine.context_length = 400_000
+        engine.last_prompt_tokens = 100_000
+        engine._last_gate_tokens = 380_000
+
+        doctor = json.loads(lcm_tools.lcm_doctor({}, engine=engine))
+        pressure = next(check for check in doctor["checks"] if check["check"] == "context_pressure")
+
+        assert pressure["status"] == "warn"
+        assert pressure["detail"].startswith("95.0% used")
     finally:
         engine.shutdown()
 
@@ -827,7 +857,8 @@ def test_lcm_doctor_tool_guidance_maps_warning_classes_to_operator_actions(engin
 def test_lcm_doctor_survival_fit_guidance_scopes_the_restore_to_versions_older_than_v0245():
     """#620: the diagnostics advice restores the backup only for a rollback to a version older than v0.24.5,
     and names the configured database file rather than lcm.db alone."""
-    guidance = doctor_guidance_for_check({"check": "survival_fit", "status": "warn", "detail": {"count": 1}})
+    guidance = doctor_guidance_for_check({"check": "survival_fit", "status": "warn",
+                                          "detail": {"count": 1, "projected_count": 0}})  # #919: no projection
 
     assert guidance is not None
     text = guidance["operator_action"]

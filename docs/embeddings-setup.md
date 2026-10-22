@@ -9,7 +9,7 @@ FTS-only exactly as before.
 | Option | Cost | Signup | Install | Best for |
 |---|---|---|---|---|
 | Voyage AI | free tier (200M tokens for the voyage-4 group), then ~$0.02–0.12 per million tokens | yes (no credit card) | none | best quality, zero local footprint |
-| fastembed | $0 | no | `pip install fastembed` (ONNX, no torch) | local default — no accounts, no daemon |
+| fastembed | $0 | no | `pip install "fastembed>=0.8.0,<1.0"` (ONNX, no torch) | local default — no accounts, no daemon |
 | Ollama | $0 | no | Ollama app/daemon | you already run Ollama |
 | OpenAI-compatible | provider pricing | yes (per provider) | none | reuse an existing `/v1/embeddings` service (SiliconFlow, llama.cpp, vLLM) |
 
@@ -68,7 +68,7 @@ worker slots).
 external service — just a pip package.
 
 ```bash
-pip install fastembed          # or: pip install -r requirements-semantic.txt
+pip install "fastembed>=0.8.0,<1.0"          # or: pip install -r requirements-semantic.txt
 export LCM_EMBEDDINGS_ENABLED=true
 export LCM_EMBEDDING_PROVIDER=fastembed
 export LCM_EMBEDDING_MODEL=BAAI/bge-small-en-v1.5   # 384-dim, compact and quick on CPU
@@ -82,13 +82,17 @@ model's query-specific encoding (distinct from document encoding) so query/passa
 preserved. When `LCM_EMBEDDINGS_ENABLED=false`, `warmup` is inert: it does not resolve a provider,
 download a model, create embedding tables, or create the configured database.
 
+The model runs with 2 threads. To load it from another cache, for example one shared, read-only
+cache for several profiles, set fastembed's own `FASTEMBED_CACHE_PATH` (default `~/.cache/fastembed`).
+Pre-seed a read-only cache: `warmup` cannot download into it.
+
 ### A host update can remove fastembed
 
 `fastembed` lives in the virtualenv that runs Hermes, not in LCM-X (which is installed by symlink
 and pulls in no Python packages of its own). `hermes update` can build a **new** environment under
 `installs/<id>/environments/<hash>/venv`. It carries over the dependencies Hermes itself records
 (its extras and the dependencies plugins declare), but a package installed by hand with
-`pip install fastembed` is not recorded, so **a hand-installed embedding dependency can be dropped
+`pip install "fastembed>=0.8.0,<1.0"` is not recorded, so **a hand-installed embedding dependency can be dropped
 by a host update**.
 
 Nothing about your LCM data changes when this happens — the store stays lossless and existing
@@ -193,10 +197,55 @@ walk is itself capped; a missing legacy `source` column or an over-budget lineag
 with `unverifiable_provenance`, so it never becomes an allow-all. A source-filtered semantic result
 therefore reports bounded coverage rather than claiming universal pre-bound source coverage.
 
+## New content is embedded automatically
+
+With `LCM_EMBEDDINGS_ENABLED=true` and a registered profile (`/lcm embed warmup`), LCM-X
+embeds new content in the background: after each leaf summary is published (condensed summaries
+are not embedding targets, as with `/lcm embed backfill`), and
+once when a session binds. Each pass handles at most one backfill batch per corpus, runs off the
+turn path, and uses the same lease, privacy policy, operation budget and provider timeout as
+`/lcm embed backfill`. If a manual backfill or another process holds the lease, the pass skips;
+the next pass picks up whatever is still unembedded. A manual backfill started while a pass runs
+is refused until the pass ends, as with two manual runs. There is no new setting.
+
+- **Summaries** are embedded with any provider. With a cloud provider this means new summaries
+  are sent to it automatically, one bounded batch per pass, without a manual backfill.
+- **Message chunks** are embedded automatically only with fastembed, or with Ollama whose
+  `LCM_OLLAMA_BASE_URL` host is loopback (`localhost`, `127.0.0.0/8`, `::1`). Each pass takes new
+  messages first, then older history newest first, one bounded batch at a time, so its cost follows
+  new messages, not the store, and an existing store's recent messages are covered before its old
+  history; `/lcm embed backfill` embeds the whole backlog in one go. On a cloud provider or a
+  remote Ollama the chunk corpus stays operator-initiated: `--confirm-raw-text` authorizes one invocation and is never
+  stored, so run `/lcm embed backfill --corpus chunks --apply --confirm-raw-text` yourself when you
+  want chunk recall.
+- If the provider is unavailable (for example fastembed is not installed), the pass is skipped and
+  counted; the first skip in a process logs a `WARNING`, later ones log at `DEBUG`.
+
+`/lcm status` shows `embedding_backlog_summaries`, `embedding_backlog_chunks` (what the automatic passes
+still have ahead of them, counted over at most 2,000 messages and shown as `N+` beyond that; a chunk the
+passes skipped inside the embedded range is not counted, and a dry run of
+`/lcm embed backfill --corpus chunks` gives the exact total; with any rows left
+`uncertain` by a failure after dispatch, which only `--retry-uncertain` resends), the time and outcome
+of the last incremental pass (`embedding_incremental_last_pass`) and the process's skipped-pass
+count (`embedding_incremental_failures`). `/lcm embed backfill --apply` is still the way to embed
+an existing history in one go.
+
 ## Performance & footprint
 
-- Vector math is dependency-free by default; installing **numpy** (optional) accelerates large
-  corpora — the top-k scan is milliseconds warm once numpy is loaded.
+- NumPy remains optional. When available, it enables vectorized search and the
+  float32 chunk-loader fast path; the import guard and pure-Python fallback remain.
+  Install it in the Python environment that actually runs Hermes: for a user-managed
+  environment, `python -m pip install numpy`; for a managed build, use that host's
+  supported dependency-installation mechanism rather than modifying a generated venv.
+  Restart long-lived hosts after changing their dependency environment.
+- Float32 chunk matrices are loaded directly from their little-endian BLOBs,
+  avoiding a round trip through Python float objects. Joining the BLOBs still
+  copies bytes; this is not an end-to-end zero-copy pipeline. Int8 decoding,
+  stored vector identities, and search coverage are unchanged.
+- Reproduce the loader comparison without a profile or provider call with
+  `python benchmarks/benchmark_float32_chunk_loader.py --count 2000 --dim 384`.
+  The synthetic benchmark checks exact IDs, matrix values and dot-product scores;
+  timings are host-dependent and are not asserted by tests.
 - Metadata/id resolution uses a temp-table join rather than a giant `IN (...)` list, so it scales
   past the SQLite host-parameter limit that previously failed near ~32k ids (validated to 40k).
 - Without numpy, search scans the most recent `LCM_EMBEDDING_BOUNDED_SCAN_ROWS` vectors (default
@@ -244,6 +293,8 @@ FTS-only instantly.
 - `summary` (default) — embeds the generated **summaries** of your history.
 - `chunks` — embeds provider input derived from **raw, verbatim message text**, chunked by `--policy`
   (`conversational` | `heads` | `full`), for verbatim/chunk-KNN recall.
+  `conversational` (the default) embeds every non-empty user and assistant turn, however short; `heads` adds the
+  head and error chunks of tool results; `full` embeds every role.
 - `both` — runs the summary backfill, then the chunk backfill, in one command.
 
 The distinction matters for privacy. The summary corpus starts from model-generated summaries; the

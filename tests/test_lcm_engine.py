@@ -14,10 +14,16 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
+from hermes_lcm import expand_query_tools
+
 import hermes_lcm.engine as lcm_engine
 import hermes_lcm.tools as lcm_tools
 
 from agent.context_engine import ContextEngine
+from tests.timing_helpers import ContentionProbe
+
+from hermes_lcm import expansion_evidence
+from tests.harness import make_engine
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.dag import SummaryNode
 from hermes_lcm.engine import LCMEngine
@@ -46,6 +52,19 @@ def engine(tmp_path):
 
 
 @pytest.fixture
+def expansion_engine(tmp_path):
+    """Shared harness with the existing expansion fixture's configuration."""
+    e = make_engine(tmp_path, fresh_tail_count=4, leaf_chunk_tokens=100)
+    e._session_id = "test-session"
+    e.context_length = 200000
+    e.threshold_tokens = int(200000 * e._config.context_threshold)
+    try:
+        yield e
+    finally:
+        e.shutdown()
+
+
+@pytest.fixture
 def externalized_search_engine(tmp_path):
     home = tmp_path / "hermes-search"
     config = LCMConfig(
@@ -57,6 +76,151 @@ def externalized_search_engine(tmp_path):
     instance._session_id = "test-session"
     try:
         yield instance
+    finally:
+        instance.shutdown()
+
+
+def test_delegated_child_clone_keeps_host_model_and_window(tmp_path):
+    prototype = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "child-clone.db")))
+    clone = prototype.clone_for_agent()
+
+    class ChildAgent:
+        session_id = "child"
+        _parent_session_id = "parent"
+        log_prefix = "[subagent-1] "
+
+        def start(self):
+            clone.update_model("gpt-5.5", 272_000, provider="openai-codex", api_mode="responses")
+            clone.on_session_start(
+                self.session_id, platform="subagent", model="gpt-5.5",
+                context_length=clone.context_length,
+            )
+            assert clone.model == "gpt-5.5"
+            assert clone.context_length == 272_000
+            assert clone.provider == "openai-codex"
+            assert clone.api_mode == "responses"
+            assert clone._session_id == ""
+            self.check_threshold()
+            clone.update_model("fallback-model", 128_000, provider="openrouter")
+            assert clone.model == "fallback-model"
+            assert clone.context_length == 128_000
+            assert clone.provider == "openrouter"
+            assert clone._session_id == ""
+            self.check_threshold()
+
+        def check_threshold(self):
+            assert clone.threshold_tokens > 0
+            assert clone._bypasses_lcm_context_management()
+            assert clone.should_compress(clone.threshold_tokens)
+            assert not clone.should_compress(clone.threshold_tokens - 1)
+
+    try:
+        ChildAgent().start()
+    finally:
+        clone.shutdown()
+        prototype.shutdown()
+
+
+@pytest.mark.parametrize("make_clone", ["clone_for_agent", "deepcopy"])
+def test_delegated_child_clone_of_bound_parent_accepts_child_updates(tmp_path, make_clone):
+    import copy
+
+    parent = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "bound-parent.db")))
+    parent.update_model("gpt-5.5", 272_000, provider="openai-codex", api_mode="responses")
+    parent.on_session_start("parent", platform="cli", model="gpt-5.5", context_length=272_000)
+    assert parent._session_id == "parent"
+    parent_before = (parent.model, parent.context_length, parent.threshold_tokens, parent._session_id)
+
+    clone = parent.clone_for_agent() if make_clone == "clone_for_agent" else copy.deepcopy(parent)
+
+    class ChildAgent:
+        # The update runs inside a delegated child's frame, so the bound-engine guard is armed: a clone that kept
+        # the parent's session binding would ignore this update and keep a zero threshold.
+        session_id = "child"
+        _parent_session_id = "parent"
+        log_prefix = "[subagent-1] "
+
+        def start(self):
+            clone.update_model("child-model", 128_000, provider="openrouter")
+
+    try:
+        assert clone is not parent
+        assert clone._session_id == ""
+        ChildAgent().start()
+        assert clone.model == "child-model"
+        assert clone.context_length == 128_000
+        assert clone.threshold_tokens > 0
+        assert clone.should_compress(clone.threshold_tokens)
+        assert not clone.should_compress(clone.threshold_tokens - 1)
+        assert (parent.model, parent.context_length, parent.threshold_tokens, parent._session_id) == parent_before
+    finally:
+        clone.shutdown()
+        parent.shutdown()
+
+
+def test_subagent_child_model_update_does_not_mutate_foreground_threshold(tmp_path):
+    config = LCMConfig(database_path=str(tmp_path / "shared-child.db"))
+    instance = LCMEngine(config=config)
+
+    class ChildAgent:
+        session_id = "child"
+        _parent_session_id = "foreground-session"
+        log_prefix = "[subagent-1] "
+
+        def update_context_engine(self):
+            instance.update_model("tiny-child-model", 1_000)
+
+    try:
+        instance.on_session_start("foreground-session", platform="telegram", context_length=200_000)
+        instance.update_model("foreground-model", 200_000)
+        ChildAgent().update_context_engine()
+        assert instance._session_id == "foreground-session"
+        assert instance.model == "foreground-model"
+        assert instance.context_length == 200_000
+        assert instance.threshold_tokens == int(200_000 * config.context_threshold)
+    finally:
+        instance.shutdown()
+
+
+@pytest.mark.parametrize("summary_model", ["", "aux-summary"])
+def test_bypass_host_fallback_never_sends_unknown_model(tmp_path, monkeypatch, caplog, summary_model):
+    constructors = []
+    updates = []
+
+    class FakeContextCompressor:
+        def __init__(self, **kwargs):
+            constructors.append(kwargs)
+            self.compression_count = 0
+
+        def update_model(self, **kwargs):
+            updates.append(kwargs)
+
+        def compress(self, messages, **kwargs):
+            self.compression_count += 1
+            return [{"role": "system", "content": "native compacted"}]
+
+    compressor_module = ModuleType("agent.context_compressor")
+    compressor_module.ContextCompressor = FakeContextCompressor
+    monkeypatch.setitem(sys.modules, "agent.context_compressor", compressor_module)
+    config = LCMConfig(database_path=str(tmp_path / "unresolved-model.db"), summary_model=summary_model)
+    instance = LCMEngine(config=config)
+    messages = [{"role": "user", "content": f"message {i}"} for i in range(10)]
+    try:
+        instance._set_context_length(1_000, source="test")
+        instance._mark_thread_context_stateless("aux:sid")
+        with caplog.at_level(logging.INFO):
+            result = instance.compress(messages, force=True)
+            instance.compress(messages, force=True)
+        if not summary_model:
+            assert constructors == []
+            assert updates == []
+            assert any("[Context omitted:" in row.get("content", "") for row in result)
+            assert caplog.text.count("host_fallback_unresolved_model") == 1
+        else:
+            assert [call["model"] for call in constructors] == ["aux-summary"]
+            assert updates and all(call["model"] == "aux-summary" for call in updates)
+            assert result == [{"role": "system", "content": "native compacted"}]
+        assert all(call["model"] != "unknown" for call in constructors + updates)
     finally:
         instance.shutdown()
 
@@ -73,6 +237,8 @@ def test_shutdown_closes_lifecycle_store(tmp_path):
 def test_stable_active_use_blocks_rebind_and_keeps_ingest_in_original_session(tmp_path):
     config = LCMConfig(database_path=str(tmp_path / "stable-active-use.db"))
     engine = LCMEngine(config=config)
+    probe = ContentionProbe(engine._stable_use_lock)
+    engine._stable_use_lock = probe
     use_started = threading.Event()
     release_use = threading.Event()
     rebind_started = threading.Event()
@@ -112,7 +278,8 @@ def test_stable_active_use_blocks_rebind_and_keeps_ingest_in_original_session(tm
         assert use_started.wait(timeout=2)
         rebind_thread.start()
         assert rebind_started.wait(timeout=2)
-        assert not rebind_finished.wait(timeout=0.05)
+        assert probe.contended.wait(timeout=10), "competing lifecycle call never attempted the held lock"
+        assert not rebind_finished.is_set()
         assert engine.bound_session_id == "session-a"
 
         release_use.set()
@@ -178,15 +345,19 @@ def test_stable_active_use_blocks_rebind_and_keeps_ingest_in_original_session(tm
 def test_shutdown_waits_for_stable_use_and_is_terminal_and_idempotent(tmp_path):
     config = LCMConfig(database_path=str(tmp_path / "stable-shutdown.db"))
     engine = LCMEngine(config=config)
+    probe = ContentionProbe(engine._stable_use_lock)
+    engine._stable_use_lock = probe
     operation_started = threading.Event()
     release_operation = threading.Event()
     shutdown_finished = threading.Event()
+    probe.release_guard = release_operation
+    use_thread = shutdown_thread = None
     try:
         engine.on_session_start("session-a", conversation_id="conversation-a")
 
         def hold_engine(selected):
             operation_started.set()
-            assert release_operation.wait(timeout=2)
+            assert release_operation.wait(timeout=20), "test did not release the active operation"
 
         use_thread = threading.Thread(
             target=lambda: use_active_lcm_engine(
@@ -201,11 +372,16 @@ def test_shutdown_waits_for_stable_use_and_is_terminal_and_idempotent(tmp_path):
         use_thread.start()
         assert operation_started.wait(timeout=2)
         shutdown_thread.start()
-        assert not shutdown_finished.wait(timeout=0.05)
+        assert probe.contended.wait(timeout=10), "competing lifecycle call never attempted the held lock"
+        assert probe.attempts == [(True, -1)], "shutdown must acquire with blocking=True and no timeout"
+        assert not probe.acquired.is_set(), "shutdown acquired before the active operation was released"
+        assert not shutdown_finished.is_set()
 
         release_operation.set()
         use_thread.join(timeout=2)
         shutdown_thread.join(timeout=2)
+        assert probe.acquired.is_set(), "shutdown never completed its blocking acquire"
+        assert not probe.returned_before_release
         assert shutdown_finished.is_set()
         engine.shutdown()
 
@@ -213,6 +389,10 @@ def test_shutdown_waits_for_stable_use_and_is_terminal_and_idempotent(tmp_path):
         assert closed.status is ActiveEngineUseStatus.CLOSED_ENGINE
     finally:
         release_operation.set()
+        if use_thread is not None and use_thread.ident is not None:
+            use_thread.join(timeout=10)
+        if shutdown_thread is not None and shutdown_thread.ident is not None:
+            shutdown_thread.join(timeout=10)
         engine.shutdown()
 
 
@@ -451,7 +631,9 @@ def test_profile_rebind_clears_old_auxiliary_session_state(tmp_path):
         engine.shutdown()
 
 
-def test_config_database_path_profile_rebind_updates_externalization_home(tmp_path):
+def test_config_database_path_profile_rebind_updates_externalization_home(tmp_path, monkeypatch):
+    # #1055: force externalization for this fixture independently of the bound window.
+    monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
     home_a = tmp_path / "profile-a"
     home_b = tmp_path / "profile-b"
     config = LCMConfig(
@@ -540,7 +722,7 @@ def test_lcm_tool_status_includes_optional_cache_usage_metrics(engine):
     assert payload["last_compression_noop_reason"] == ""
     assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm-x"
     assert payload["runtime_identity"]["database_path_source"] == "config.database_path"
-    assert payload["config"]["summary_timeout_ms"] == 60_000
+    assert payload["config"]["summary_timeout_ms"] == 120_000
 
 
 def test_compress_exception_sets_terminal_error_status_and_reraises_same_exception(
@@ -1345,7 +1527,7 @@ def test_get_status_exposes_runtime_identity_for_loaded_plugin_tree(tmp_path):
 
     assert identity["engine"] == "lcm-x"
     assert identity["plugin_name"] == "hermes-lcm-x"
-    assert identity["plugin_version"] == "0.24.9"
+    assert identity["plugin_version"] == "0.28.1"
     assert Path(identity["plugin_path"]) == repo_root
     assert Path(identity["module_path"]).name == "engine.py"
     assert Path(identity["database_path"]) == db_path
@@ -1364,56 +1546,51 @@ def test_plugin_metadata_refreshes_when_manifest_changes(tmp_path, monkeypatch):
     import hermes_lcm.runtime_identity as identity_mod
 
     repo_root = Path(identity_mod.__file__).resolve().parent
-    manifest = repo_root / "plugin.yaml"
-    original = manifest.read_text(encoding="utf-8")
+    original = (repo_root / "plugin.yaml").read_text(encoding="utf-8")
+    manifest = tmp_path / "plugin.yaml"
+    manifest.write_text(original, encoding="utf-8")
 
+    monkeypatch.setattr(identity_mod, "_PLUGIN_ROOT", tmp_path)
     monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
 
     initial = identity_mod._plugin_metadata()
     assert initial["name"] == "hermes-lcm-x"
-    assert initial["version"] == "0.24.9"
+    assert initial["version"] == "0.28.1"
 
-    updated = original.replace('version: "0.24.9"', 'version: "9.9.9-test"')
+    updated = original.replace('version: "0.28.1"', 'version: "9.9.9-test"')
     if updated == original:
-        updated = original.replace('version: 0.24.9', 'version: 9.9.9-test')
+        updated = original.replace('version: 0.28.1', 'version: 9.9.9-test')
     assert updated != original
 
-    try:
-        manifest.write_text(updated, encoding="utf-8")
-        refreshed = identity_mod._plugin_metadata()
-        assert refreshed == {"name": "hermes-lcm-x", "version": "9.9.9-test"}
+    manifest.write_text(updated, encoding="utf-8")
+    refreshed = identity_mod._plugin_metadata()
+    assert refreshed == {"name": "hermes-lcm-x", "version": "9.9.9-test"}
 
-        manifest.unlink()
-        fallback = identity_mod._plugin_metadata()
-        assert fallback == {"name": "hermes-lcm-x", "version": "9.9.9-test"}
-    finally:
-        manifest.write_text(original, encoding="utf-8")
-        monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
+    manifest.unlink()
+    fallback = identity_mod._plugin_metadata()
+    assert fallback == {"name": "hermes-lcm-x", "version": "9.9.9-test"}
 
 
 def test_plugin_metadata_defaults_when_manifest_missing_before_first_read(tmp_path, monkeypatch):
     import hermes_lcm.runtime_identity as identity_mod
 
     repo_root = Path(identity_mod.__file__).resolve().parent
-    manifest = repo_root / "plugin.yaml"
-    original = manifest.read_text(encoding="utf-8")
+    manifest = tmp_path / "plugin.yaml"
+    manifest.write_text((repo_root / "plugin.yaml").read_text(encoding="utf-8"), encoding="utf-8")
 
+    monkeypatch.setattr(identity_mod, "_PLUGIN_ROOT", tmp_path)
     monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
 
-    try:
-        manifest.unlink()
-        metadata = identity_mod._plugin_metadata()
-        assert metadata == {"name": "hermes-lcm-x", "version": "unknown"}
-    finally:
-        manifest.write_text(original, encoding="utf-8")
-        monkeypatch.setattr(identity_mod, "_PLUGIN_METADATA", None)
+    manifest.unlink()
+    metadata = identity_mod._plugin_metadata()
+    assert metadata == {"name": "hermes-lcm-x", "version": "unknown"}
 
 
 def test_lcm_doctor_json_includes_runtime_identity(engine):
     payload = json.loads(engine.handle_tool_call("lcm_doctor", {}))
 
     assert payload["runtime_identity"]["plugin_name"] == "hermes-lcm-x"
-    assert payload["runtime_identity"]["plugin_version"] == "0.24.9"
+    assert payload["runtime_identity"]["plugin_version"] == "0.28.1"
     assert "plugin_git_commit" in payload["runtime_identity"]
 
 
@@ -1699,11 +1876,10 @@ class TestEscalationStripReasoning:
 
     def test_synthesize_expansion_answer_strips_reasoning_from_response(self, monkeypatch):
         """Integration: lcm_expand_query routes through
-        tools._synthesize_expansion_answer, which is a separate LLM call path
+        expand_query_tools._synthesize_expansion_answer, which is a separate LLM call path
         from _call_llm_for_summary. Both must strip reasoning blocks before
         returning, otherwise expand_query answers leak the model's internal
         reasoning back to the caller."""
-        import hermes_lcm.tools as tools_mod
 
         class _FakeMessage:
             def __init__(self, content):
@@ -1728,7 +1904,7 @@ class TestEscalationStripReasoning:
 
         self._install_fake_auxiliary_client(monkeypatch, fake_call_llm)
 
-        result = tools_mod._synthesize_expansion_answer(
+        result = expand_query_tools._synthesize_expansion_answer(
             prompt="What was discussed?",
             context_blocks=[{"role": "user", "content": "ignored in fake"}],
             model="any",
@@ -1752,7 +1928,6 @@ class TestEscalationStripReasoning:
     def test_synthesize_expansion_routes_reasoning_config_to_hermes(
         self, monkeypatch, effort, expected
     ):
-        import hermes_lcm.tools as tools_mod
 
         seen = {}
 
@@ -1768,12 +1943,12 @@ class TestEscalationStripReasoning:
 
         self._install_fake_auxiliary_client(monkeypatch, fake_call_llm)
         monkeypatch.setattr(
-            tools_mod,
+            expand_query_tools,
             "apply_lcm_model_route",
             lambda kwargs, model: kwargs.update(extra_body={"unrelated": True}),
         )
 
-        result = tools_mod._synthesize_expansion_answer(
+        result = expand_query_tools._synthesize_expansion_answer(
             prompt="What was discussed?",
             context_blocks=[{"role": "user", "content": "context"}],
             model="any",
@@ -2008,6 +2183,7 @@ class TestEngineABC:
             fresh_tail_count=4,
             leaf_chunk_tokens=100,
             fresh_tail_pressure_yield_enabled=False,
+            threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
         )
         instance = LCMEngine(config=config)
         instance._session_id = "test-session"
@@ -2039,6 +2215,7 @@ class TestEngineABC:
             fresh_tail_count=4,
             leaf_chunk_tokens=100,
             fresh_tail_pressure_yield_enabled=False,
+            threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
         )
         instance = LCMEngine(config=config)
         instance._session_id = "test-session"
@@ -2700,6 +2877,7 @@ class TestEngineABC:
 
         config = LCMConfig(database_path=str(tmp_path / "thread-stateless-no-arg-compress.db"))
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "short"}]
         try:
             instance.on_session_start("foreground:session", platform="cli", context_length=1_000)
@@ -2750,6 +2928,7 @@ class TestEngineABC:
 
         config = LCMConfig(database_path=str(tmp_path / "thread-stateless-no-usage-compress.db"))
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "first auxiliary payload " + ("x " * 200)}]
         try:
             instance.on_session_start("foreground:session", platform="cli", context_length=1_000)
@@ -3015,6 +3194,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         try:
             instance.on_session_start("ignored:sync-failure", platform="cli", context_length=2_000)
             instance.threshold_tokens = 500
@@ -3094,6 +3274,7 @@ class TestEngineABC:
         config.sensitive_patterns_enabled = True
         config.sensitive_patterns = ["password_assignment"]
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "password: supersecret1234 " + "x" * 400},
@@ -3105,6 +3286,7 @@ class TestEngineABC:
 
             instance.compress(messages, current_tokens=200)
 
+            assert captured_messages
             serialized = json.dumps(captured_messages)
             assert "supersecret1234" not in serialized
         finally:
@@ -3140,6 +3322,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:native-invalid", platform="cli", context_length=2_000)
@@ -3185,6 +3368,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:first", platform="cli", context_length=2_000)
@@ -3234,6 +3418,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:reused", platform="cli", context_length=2_000)
@@ -3316,6 +3501,7 @@ class TestEngineABC:
             ignore_session_patterns=["cron"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("reused-id", platform="cron", context_length=2_000)
@@ -3363,6 +3549,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:reset", platform="cli", context_length=2_000)
@@ -3411,6 +3598,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 1_000}]
         try:
             instance.on_session_start("ignored:old", platform="cli", context_length=2_000)
@@ -3712,7 +3900,9 @@ class TestEngineABC:
         finally:
             instance.shutdown()
 
-    def test_late_off_current_normal_session_end_dedupes_externalized_prefix(self, tmp_path):
+    def test_late_off_current_normal_session_end_dedupes_externalized_prefix(self, tmp_path, monkeypatch):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         config = LCMConfig(
             database_path=str(tmp_path / "late-off-current-externalized-prefix.db"),
             ignore_session_patterns=["cron"],
@@ -3722,7 +3912,7 @@ class TestEngineABC:
         )
         instance = LCMEngine(config=config)
         try:
-            raw_opener = {"role": "user", "content": "externalized opener " + "x" * 200}
+            raw_opener = {"role": "user", "content": "x" * 900 + " externalized opener " + "x" * 900}  # #1016: marker outside the stub's head/tail preview
 
             instance.on_session_start("reused-id", platform="cron", context_length=1_000)
             instance.ingest([{"role": "user", "content": "ignored opener"}])
@@ -3862,6 +4052,7 @@ class TestEngineABC:
             ignore_session_patterns=["ignored:*"],
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [{"role": "user", "content": "oversized " + "x" * 2_000}]
         try:
             instance.on_session_start("ignored:zero-tokens", platform="cli", context_length=4_000)
@@ -3904,6 +4095,7 @@ class TestEngineABC:
             max_assembly_tokens=200,
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "older " + "x" * 2_000},
@@ -3949,6 +4141,7 @@ class TestEngineABC:
             max_assembly_tokens=200,
         )
         instance = LCMEngine(config=config)
+        instance.model = "test-model"
         messages = [
             {"role": "system", "content": "system"},
             {"role": "user", "content": "older " + "x" * 2_000},
@@ -6034,39 +6227,39 @@ class TestSessionFiltering:
         """
         from hermes_lcm.command import _status_text
 
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_command_consistency.db"),
-            ignore_session_patterns=["cron:*"],
-        )
-        instance = LCMEngine(config=config)
-        instance.on_session_start(
-            "telegram-foreground",
-            platform="telegram",
-            conversation_id="telegram-conversation",
-            context_length=200_000,
-        )
-        instance._store.append(
-            "telegram-foreground",
-            {"role": "user", "content": "telegram row"},
-            token_estimate=2,
-            source="telegram",
-        )
-        instance.on_session_start(
-            "cron_xxx",
-            platform="cron",
-            conversation_id="cron-conversation",
-            context_length=200_000,
-        )
+        from tests.harness import engine_context
 
-        text = _status_text(instance)
-        assert "session_id: telegram-foreground" in text
-        assert "conversation_id: telegram-conversation" in text
-        assert "lifecycle_current_session_id: telegram-foreground" in text
-        assert "source_messages_total: 1" in text
-        assert "store_messages: 1" in text
-        assert "session_ignored: no" in text
-        assert "session_stateless: no" in text
-        assert "side_channel_active: yes" in text
+        with engine_context(tmp_path, ignore_session_patterns=["cron:*"]) as instance:
+            instance.on_session_start(
+                "telegram-foreground",
+                platform="telegram",
+                conversation_id="telegram-conversation",
+                context_length=200_000,
+            )
+            instance._store.append(
+                "telegram-foreground",
+                {"role": "user", "content": "telegram row"},
+                token_estimate=2,
+                source="telegram",
+            )
+            instance.on_session_start(
+                "cron_xxx",
+                platform="cron",
+                conversation_id="cron-conversation",
+                context_length=200_000,
+            )
+
+            text = _status_text(instance)
+            assert "session_id: telegram-foreground" in text
+            assert "conversation_id: telegram-conversation" in text
+            assert "lifecycle_current_session_id: telegram-foreground" in text
+            assert "source_messages_total: 1" in text
+            assert "store_messages: 1" in text
+            assert "session_ignored: no" in text
+            assert "session_stateless: no" in text
+            assert "side_channel_active: yes" in text
+            assert instance._session_id == "cron_xxx"
+            assert instance._session_ignored is True
 
     def test_lcm_doctor_retention_targets_foreground_during_cron_tick(self, tmp_path):
         """The /lcm doctor retention surface must report on the foreground
@@ -6160,6 +6353,7 @@ class TestMessageFiltering:
         monkeypatch.setattr(message_patterns_mod, "_regex_engine", _FakeTimeoutRegexEngine)
 
     def _make_engine(self, tmp_path, db_name, **config_kwargs):
+        config_kwargs.setdefault("threshold_full_sweep_enabled", False)  # #1013: pre-#1013 single-pass compaction
         config = LCMConfig(
             database_path=str(tmp_path / db_name),
             **config_kwargs,
@@ -6373,6 +6567,11 @@ class TestMessageFiltering:
             ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
             sensitive_patterns_enabled=True,
             sensitive_patterns=["api_key"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured_texts: list[str] = []
 
@@ -6436,6 +6635,11 @@ class TestMessageFiltering:
             ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
             sensitive_patterns_enabled=True,
             sensitive_patterns=["api_key"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured: dict[str, str] = {}
 
@@ -6461,6 +6665,11 @@ class TestMessageFiltering:
             "lcm_msg_ignore_placeholder_no_patterns.db",
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured.clear()
         second.compress(
@@ -6727,6 +6936,12 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         first.on_session_start(
@@ -6762,6 +6977,12 @@ class TestMessageFiltering:
                 database_path=str(db_path),
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         try:
@@ -6795,6 +7016,12 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         engine.on_session_start(
@@ -6860,6 +7087,12 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         first.on_session_start(
@@ -6893,6 +7126,12 @@ class TestMessageFiltering:
                 database_path=str(db_path),
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         try:
@@ -6932,6 +7171,11 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         first.on_session_start(
@@ -6959,6 +7203,11 @@ class TestMessageFiltering:
                 database_path=str(db_path),
                 fresh_tail_count=10,
                 leaf_chunk_tokens=10,
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         try:
@@ -6979,7 +7228,13 @@ class TestMessageFiltering:
         finally:
             second.shutdown()
 
-    def test_new_placeholder_literal_after_rollover_is_stored_losslessly(self, tmp_path):
+    @pytest.mark.parametrize("externalized", [
+        False,
+        pytest.param(True, marks=pytest.mark.xfail(
+            strict=True, raises=AssertionError,
+            reason="#1053: with externalization + active-replay stubbing on, the literal is stored twice")),
+    ], ids=["externalization-off", "externalization-on"])
+    def test_new_placeholder_literal_after_rollover_is_stored_losslessly(self, tmp_path, externalized):
         db_path = tmp_path / "lcm_msg_ignore_placeholder_rollover_new_literal.db"
         first = LCMEngine(
             config=LCMConfig(
@@ -6989,6 +7244,8 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+                large_output_externalization_enabled=externalized,
+                large_output_active_replay_stubbing_enabled=externalized,
             )
         )
         first.on_session_start(
@@ -7044,6 +7301,11 @@ class TestMessageFiltering:
                 ignore_message_patterns=[r"api_key=sk-ignore\.\.\.cdef"],
                 sensitive_patterns_enabled=True,
                 sensitive_patterns=["api_key"],
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         first.on_session_start(
@@ -7072,6 +7334,11 @@ class TestMessageFiltering:
                 database_path=str(db_path),
                 fresh_tail_count=10,
                 leaf_chunk_tokens=10,
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         try:
@@ -7911,6 +8178,8 @@ class TestMessageFiltering:
             second.shutdown()
 
     def test_source_ids_exclude_stored_externalized_rows_ignored_by_current_filter(self, tmp_path, monkeypatch):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         db_path = tmp_path / "lcm_msg_ignore_externalized_source_ids_exclude.db"
         hermes_home = tmp_path / "hermes-externalized-ignore"
         first = LCMEngine(
@@ -7926,7 +8195,7 @@ class TestMessageFiltering:
         first.on_session_start("session", platform="telegram", context_length=1000)
         ignored_store_id = first._store.append(
             "session",
-            {"role": "user", "content": "SECRET_PAYLOAD_MARKER externalized row " + "x" * 200},
+            {"role": "user", "content": "x" * 900 + " SECRET_PAYLOAD_MARKER externalized row " + "x" * 900},  # #1016: marker outside the stub's head/tail preview
         )
         stored_externalized_row = first._store.get(ignored_store_id)
         assert stored_externalized_row is not None
@@ -7971,7 +8240,9 @@ class TestMessageFiltering:
         finally:
             second.shutdown()
 
-    def test_preflight_filters_stored_externalized_rows_ignored_by_current_filter(self, tmp_path):
+    def test_preflight_filters_stored_externalized_rows_ignored_by_current_filter(self, tmp_path, monkeypatch):
+        # #1016: the subject is an externalized user/assistant row, not the 100k floor.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._NON_TOOL_EXTERNALIZATION_FLOOR_CHARS", 0)
         db_path = tmp_path / "lcm_msg_ignore_externalized_preflight.db"
         hermes_home = tmp_path / "hermes-externalized-preflight"
         first = LCMEngine(
@@ -7988,7 +8259,7 @@ class TestMessageFiltering:
         first.on_session_start("session", platform="telegram", context_length=1000)
         ignored_store_id = first._store.append(
             "session",
-            {"role": "user", "content": "SECRET_PAYLOAD_MARKER externalized row " + "x" * 200},
+            {"role": "user", "content": "x" * 900 + " SECRET_PAYLOAD_MARKER externalized row " + "x" * 900},  # #1016: marker outside the stub's head/tail preview
         )
         stored_externalized_row = first._store.get(ignored_store_id)
         assert stored_externalized_row is not None
@@ -8030,6 +8301,8 @@ class TestMessageFiltering:
     def test_user_copied_externalized_placeholder_after_ignored_externalized_row_is_not_filtered(
         self, tmp_path, monkeypatch
     ):
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_externalized_literal_copy.db"
         hermes_home = tmp_path / "hermes-externalized-literal-copy"
         first = LCMEngine(
@@ -8091,7 +8364,9 @@ class TestMessageFiltering:
         finally:
             second.shutdown()
 
-    def test_prior_externalized_placeholder_scan_pages_past_default_limit(self, tmp_path):
+    def test_prior_externalized_placeholder_scan_pages_past_default_limit(self, tmp_path, monkeypatch):
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_externalized_prior_scan_pages.db"
         hermes_home = tmp_path / "hermes-externalized-prior-scan-pages"
         engine = LCMEngine(
@@ -8130,6 +8405,8 @@ class TestMessageFiltering:
     def test_duplicate_stored_externalized_rows_ignored_by_current_filter_are_all_filtered(
         self, tmp_path, monkeypatch
     ):
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_duplicate_externalized_replay.db"
         hermes_home = tmp_path / "hermes-duplicate-externalized-replay"
         first = LCMEngine(
@@ -8392,7 +8669,9 @@ class TestMessageFiltering:
         finally:
             engine.shutdown()
 
-    def test_active_externalized_stub_without_store_id_is_filtered_after_ignore_added(self, tmp_path):
+    def test_active_externalized_stub_without_store_id_is_filtered_after_ignore_added(self, tmp_path, monkeypatch):
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_externalized_active_stub.db"
         hermes_home = tmp_path / "hermes-externalized-active-stub"
         first = LCMEngine(
@@ -8629,6 +8908,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         dependent_reply = "dependent reply from ignored turn"
 
@@ -8764,6 +9048,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         repeated_reply = "same assistant reply text"
         first_result = engine.compress(
@@ -8802,6 +9091,11 @@ class TestMessageFiltering:
             fresh_tail_count=2,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         repeated_reply = "same assistant reply text"
         captured_texts: list[str] = []
@@ -9071,6 +9365,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured_texts: list[str] = []
 
@@ -9101,6 +9400,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         dependent_reply = "dependent assistant reply after ignored turn"
         continuation = "assistant continuation derived from ignored turn"
@@ -9143,6 +9447,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         dependent_reply = "dependent assistant reply carried in active tail"
         continuation = "fresh tail continuation derived from ignored turn"
@@ -9187,6 +9496,12 @@ class TestMessageFiltering:
                 fresh_tail_count=1,
                 leaf_chunk_tokens=10,
                 ignore_message_patterns=["SECRET"],
+                threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
+
+                # #1013 part B: protection tests cover the off path (owner scope ban)
+                large_output_externalization_enabled=False,
+                large_output_active_replay_stubbing_enabled=False,
+                temporal_rollups_enabled=False,
             )
         )
         engine.on_session_start(
@@ -9333,6 +9648,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["SECRET"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         messages = [
             {"role": "user", "content": "SECRET ignored backlog " + "x" * 4000},
@@ -9444,7 +9764,9 @@ class TestMessageFiltering:
         finally:
             second.shutdown()
 
-    def test_preflight_ambiguous_generated_placeholder_still_requests_externalization_cleanup(self, tmp_path):
+    def test_preflight_ambiguous_generated_placeholder_still_requests_externalization_cleanup(self, tmp_path, monkeypatch):
+        # #1055: force externalization for this fixture independently of the bound window.
+        monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_preflight_placeholder_externalize_cleanup.db"
         first = LCMEngine(
             config=LCMConfig(
@@ -9947,6 +10269,11 @@ class TestMessageFiltering:
             "lcm_msg_quarantine_placeholder_literal_compaction.db",
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured: dict[str, str] = {}
         placeholder = (
@@ -9980,6 +10307,11 @@ class TestMessageFiltering:
             fresh_tail_count=1,
             leaf_chunk_tokens=10,
             ignore_message_patterns=["^Cronjob Response:"],
+
+            # #1013 part B: protection tests cover the off path (owner scope ban)
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False,
         )
         captured: dict[str, str] = {}
         placeholder = (
@@ -11440,7 +11772,7 @@ class TestEngineCompress:
         assert secret not in node_text
         assert trailing_request in node_text
 
-    def test_compress_does_not_reanchor_carried_preserved_objective_scaffold(self, tmp_path, monkeypatch):
+    def test_compress_carries_sanitized_preserved_objective_scaffold(self, tmp_path, monkeypatch):
         config = LCMConfig(
             fresh_tail_count=4,
             leaf_chunk_tokens=1,
@@ -11475,8 +11807,8 @@ class TestEngineCompress:
 
         result_text = "\n".join(str(msg.get("content", "")) for msg in result)
 
-        assert "[Current user objective preserved from compacted history]" not in result_text
-        assert trailing_request not in result_text
+        assert result_text.count("[Current user objective preserved from compacted history]") == 1
+        assert trailing_request in result_text
         assert secret not in result_text
         assert "active_memory" not in result_text
         assert "Untrusted context" not in result_text
@@ -11523,7 +11855,7 @@ class TestEngineCompress:
         assert "active_memory" not in result_text
         assert "Untrusted context" not in result_text
 
-    def test_compress_does_not_reanchor_preserved_user_request_across_repeated_compaction(self, tmp_path, monkeypatch):
+    def test_compress_carries_preserved_user_request_across_repeated_compaction(self, tmp_path, monkeypatch):
         config = LCMConfig(
             fresh_tail_count=4,
             leaf_chunk_tokens=1,
@@ -11560,8 +11892,8 @@ class TestEngineCompress:
             {"role": "tool", "tool_call_id": "call_4", "content": "out4"},
         ])
         second_serialized = "\n".join(str(msg.get("content", "")) for msg in second)
-        assert latest_request not in second_serialized
-        assert "[Current user objective preserved from compacted history]" not in second_serialized
+        assert latest_request in second_serialized
+        assert second_serialized.count("[Current user objective preserved from compacted history]") == 1
 
     def test_compress_preserves_system_and_tail(self, engine):
         """Compression should always keep system prompt and fresh tail."""
@@ -12353,7 +12685,10 @@ class TestEngineCompress:
             condensation_fanin=2,
             database_path=str(tmp_path / "lcm_cache_friendly_suppress.db"),
         )
-        config.cache_friendly_condensation_enabled = True
+        monkeypatch.setenv("LCM_CACHE_FRIENDLY_CONDENSATION_ENABLED", "true")
+        loaded = LCMConfig.from_env()
+        config.cache_friendly_condensation_enabled = loaded.cache_friendly_condensation_enabled
+        config.config_source_warnings = loaded.config_source_warnings
         config.cache_friendly_min_debt_groups = 2
         engine = LCMEngine(config=config)
         engine._session_id = "test-session"
@@ -13406,24 +13741,35 @@ class TestSessionRollover:
 
         assert "LCM session-end lifecycle finalization interrupted" in caplog.text
 
-    def test_on_session_end_returns_quickly_under_real_sqlite_writer_lock(self, engine, caplog):
+    def test_on_session_end_returns_quickly_under_real_sqlite_writer_lock(self, engine, caplog, monkeypatch, latency_check):
         engine.on_session_start("test-session", platform="discord")
         engine._store._conn.execute("PRAGMA busy_timeout=750")
         engine._lifecycle._conn.execute("PRAGMA busy_timeout=750")
+        original_timeout = lcm_engine._temporary_sqlite_busy_timeout
+        timeout_args = []
+
+        def recorded_timeout(connections, timeout_ms):
+            timeout_args.append(timeout_ms)
+            assert timeout_ms == 50
+            return original_timeout(connections, timeout_ms)
+
+        monkeypatch.setattr(lcm_engine, "_temporary_sqlite_busy_timeout", recorded_timeout)
 
         locker = sqlite3.connect(str(engine._store.db_path), timeout=1.0, isolation_level=None)
         locker.execute("PRAGMA journal_mode=WAL")
         locker.execute("BEGIN IMMEDIATE")
         try:
-            started = time.monotonic()
+            started = time.monotonic() if latency_check else None
             with caplog.at_level(logging.WARNING):
                 engine.on_session_end("test-session", [{"role": "user", "content": "hello"}])
-            elapsed = time.monotonic() - started
+            elapsed = time.monotonic() - started if latency_check else None
         finally:
             locker.execute("ROLLBACK")
             locker.close()
 
-        assert elapsed < 0.3
+        if latency_check:
+            assert elapsed < 0.3
+        assert timeout_args == [50]
         assert engine._store._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 750
         assert engine._lifecycle._conn.execute("PRAGMA busy_timeout").fetchone()[0] == 750
         assert "LCM session-end raw-message ingest skipped due to SQLite lock" in caplog.text
@@ -15358,6 +15704,61 @@ class TestSessionRollover:
         assert normal_state is not None
         assert normal_state.last_finalized_session_id == "reused-session"
         assert engine.current_session_id == "foreground-2"
+
+    def test_auxiliary_boundary_preserves_suppressed_foreground_marker(self, tmp_path, caplog):
+        hermes_home = tmp_path / "hermes-home"
+        hermes_home.mkdir()
+        engine = LCMEngine(
+            config=LCMConfig(database_path=str(tmp_path / "suppressed-foreground-boundary.db")),
+            hermes_home=str(hermes_home),
+        )
+        try:
+            engine.on_session_start("foreground-session", platform="cli", context_length=200000)
+            child = self._start_host_child(
+                engine, hermes_home, "reused-session", "foreground-session",
+            )
+            child.on_session_end(engine, [])
+            engine.on_session_start(
+                "reused-session", platform="cli", conversation_id="normal-conversation",
+                context_length=200000,
+            )
+            engine.ingest([{"role": "user", "content": "normal prefix must remain"}])
+            assert engine._auxiliary_lineage_suppressed_as_foreground("reused-session")
+            assert engine._active_auxiliary_session_ids() == set()
+            assert engine._known_auxiliary_lineage_session_ids() == {"reused-session"}
+
+            # A new host frame explicitly continues the reused foreground session.
+            continuation = self.HostAgentFrame("aux-continuation", "reused-session", hermes_home)
+            caplog.clear()
+            with caplog.at_level(logging.INFO, logger=lcm_engine.__name__):
+                continuation.on_compression_boundary_from(engine, old_session_id="reused-session")
+
+            assert engine._auxiliary_foreground_reused_session_ids == {"reused-session"}
+            assert engine._auxiliary_lineage_suppressed_as_foreground("reused-session")
+            assert engine._active_auxiliary_session_ids() == {"aux-continuation"}
+            assert engine._known_auxiliary_lineage_session_ids() == {
+                "reused-session", "aux-continuation",
+            }
+            assert set(engine._auxiliary_session_generations) == {"aux-continuation"}
+            assert engine._auxiliary_last_prompt_tokens == {}
+            assert engine.current_session_id == "reused-session"
+            assert engine._conversation_id == "normal-conversation"
+            assert [row["content"] for row in engine._store.get_range("reused-session")] == [
+                "normal prefix must remain",
+            ]
+            assert engine._store.get_session_count("aux-continuation") == 0
+            assert [
+                (record.levelname, record.getMessage())
+                for record in caplog.records if record.name == lcm_engine.__name__
+            ] == [
+                (
+                    "INFO",
+                    "LCM auxiliary session reused-session compressed to aux-continuation"
+                    " — keeping boundary stateless",
+                ),
+            ]
+        finally:
+            engine.shutdown()
 
     def test_stale_auxiliary_boundary_preserves_off_current_reused_normal_suffix(self, tmp_path):
         hermes_home = tmp_path / "hermes-home"
@@ -18137,6 +18538,7 @@ class TestSessionRollover:
         hermes_home.mkdir()
         config = LCMConfig(database_path=str(tmp_path / "lcm_aux_zero_current_tokens.db"))
         engine = LCMEngine(config=config, hermes_home=str(hermes_home))
+        engine.model = "test-model"
         engine.on_session_start(
             "foreground-session",
             hermes_home=str(hermes_home),
@@ -21526,6 +21928,10 @@ class TestDeferredMaintenanceDebt:
         assert compressed == [messages[0], messages[-1]]
 
     def test_critical_budget_pressure_continues_dynamic_catchup_after_first_pass(self, engine, monkeypatch):
+        # #1013 part B: deferred catchup covers the feature-off leaf mechanism
+        engine._config.large_output_externalization_enabled = False
+        engine._config.large_output_active_replay_stubbing_enabled = False
+        engine._config.temporal_rollups_enabled = False
         engine._config.leaf_chunk_tokens = 50
         engine._config.dynamic_leaf_chunk_enabled = True
         engine._config.dynamic_leaf_chunk_max = 50
@@ -21628,7 +22034,7 @@ class TestConfigCleanup:
     def test_has_summary_timeout_ms(self):
         config = LCMConfig()
         assert hasattr(config, "summary_timeout_ms")
-        assert config.summary_timeout_ms == 60_000
+        assert config.summary_timeout_ms == 120_000
 
     def test_has_expansion_timeout_ms(self):
         config = LCMConfig()
@@ -24673,7 +25079,8 @@ class TestEngineTools:
         assert second["expanded"][0]["content_offset"] == 1
         assert second["pagination"]["next_content_offset"] == 2
 
-    def test_expand_query_routes_configured_reasoning_effort_to_synthesis(self, engine, monkeypatch):
+    def test_expand_query_routes_configured_reasoning_effort_to_synthesis(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._config.expansion_reasoning_effort = "low"
         engine._store.append(
             "test-session", {"role": "user", "content": "reasoning expansion evidence"}
@@ -24684,7 +25091,7 @@ class TestEngineTools:
             captured.update(kwargs)
             return "expanded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         result = json.loads(engine.handle_tool_call("lcm_expand_query", {
             "prompt": "What is the evidence?",
             "query": "reasoning expansion evidence",
@@ -24693,14 +25100,15 @@ class TestEngineTools:
         assert result["answer"] == "expanded answer"
         assert captured["reasoning_effort"] == "low"
 
-    def test_handle_expand_query_recursively_descends_parent_nodes_to_leaf_messages(self, engine, monkeypatch):
+    def test_handle_expand_query_recursively_descends_parent_nodes_to_leaf_messages(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "recursive answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "LEAF RAW SECRET zeta detail"},
@@ -24759,14 +25167,15 @@ class TestEngineTools:
         assert "LEAF RAW SECRET zeta detail" in serialized_context
         assert any(block.get("type") == "child_messages" for block in captured["context_blocks"])
 
-    def test_handle_expand_query_deep_parent_reaches_leaf_messages(self, engine, monkeypatch):
+    def test_handle_expand_query_deep_parent_reaches_leaf_messages(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "deep recursive answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "DEEP LEAF RAW SECRET omega detail"},
@@ -24815,7 +25224,8 @@ class TestEngineTools:
         assert sum(block.get("type") == "descendant_child_nodes" for block in captured["context_blocks"]) >= 5
         assert any(block.get("type") == "child_messages" for block in captured["context_blocks"])
 
-    def test_expand_query_descendant_collection_handles_zero_token_deep_chain_without_recursion(self, engine):
+    def test_expand_query_descendant_collection_handles_zero_token_deep_chain_without_recursion(self, expansion_engine):
+        engine = expansion_engine
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "ZERO TOKEN DEEP LEAF evidence"},
@@ -24847,26 +25257,27 @@ class TestEngineTools:
             )
 
         root = engine._dag.get_node(child_id)
-        blocks = lcm_tools._collect_context_blocks_for_node(engine, root, max_tokens=32000)
+        blocks = expand_query_tools._collect_context_blocks_for_node(engine, root, max_tokens=32000)
 
         serialized_context = json.dumps(blocks)
         assert "ZERO TOKEN DEEP LEAF evidence" not in serialized_context
         assert len(blocks) < 1105
-        assert lcm_tools._context_content_token_count(blocks) <= 33000
+        assert expansion_evidence._context_content_token_count(blocks) <= 33000
         path_blocks = [block for block in blocks if "source_path" in block]
         assert path_blocks
         assert max(len(block["source_path"]) for block in path_blocks) <= 8
         assert any(block.get("source_path_truncated") is True for block in path_blocks)
         assert any(block.get("source_path_depth", 0) > len(block["source_path"]) for block in path_blocks)
 
-    def test_handle_expand_query_uses_raw_hits_when_summary_search_misses(self, engine, monkeypatch):
+    def test_handle_expand_query_uses_raw_hits_when_summary_search_misses(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "raw bridge answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "PHOENIXRAWONLY appears only in the raw message"},
@@ -24901,7 +25312,8 @@ class TestEngineTools:
         serialized_context = json.dumps(captured["context_blocks"])
         assert "PHOENIXRAWONLY appears only in the raw message" in serialized_context
 
-    def test_handle_expand_query_keeps_raw_snippets_out_of_synthesis_context(self, engine, monkeypatch):
+    def test_handle_expand_query_keeps_raw_snippets_out_of_synthesis_context(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -24922,7 +25334,7 @@ class TestEngineTools:
                 }
             ]
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         monkeypatch.setattr(engine._store, "search", fake_store_search)
 
         result = json.loads(
@@ -24944,14 +25356,15 @@ class TestEngineTools:
         raw_block = next(block for block in captured["context_blocks"] if block["type"] == "raw_messages")
         assert "snippet" not in raw_block["messages"][0]
 
-    def test_handle_expand_query_deduped_raw_hit_does_not_leak_snippet(self, engine, monkeypatch):
+    def test_handle_expand_query_deduped_raw_hit_does_not_leak_snippet(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "deduped raw answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "DEDUPEDRAW message evidence"},
@@ -25005,7 +25418,8 @@ class TestEngineTools:
         assert not any(block.get("type") == "raw_messages" for block in captured["context_blocks"])
         assert result["raw_matches"] == []
 
-    def test_handle_expand_query_keeps_raw_tool_calls_out_of_synthesis_context(self, engine, monkeypatch):
+    def test_handle_expand_query_keeps_raw_tool_calls_out_of_synthesis_context(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -25028,7 +25442,7 @@ class TestEngineTools:
                 }
             ]
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         monkeypatch.setattr(engine._store, "search", fake_store_search)
 
         result = json.loads(
@@ -25053,7 +25467,8 @@ class TestEngineTools:
         assert raw_item["tool_call_id"] == "call_123"
         assert raw_item["tool_name"] == "expensive_tool"
 
-    def test_handle_expand_query_raw_hit_context_windows_around_match(self, engine, monkeypatch):
+    def test_handle_expand_query_raw_hit_context_windows_around_match(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -25076,7 +25491,7 @@ class TestEngineTools:
                 }
             ]
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         monkeypatch.setattr(engine._store, "search", fake_store_search)
 
         result = json.loads(
@@ -25099,7 +25514,8 @@ class TestEngineTools:
         assert raw_item["match_window_offset"] == content.index("TAILMATCH")
         assert "prefix-noise" not in raw_item["content"]
 
-    def test_handle_expand_query_raw_hit_match_window_uses_sanitized_query_terms(self, engine, monkeypatch):
+    def test_handle_expand_query_raw_hit_match_window_uses_sanitized_query_terms(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -25122,7 +25538,7 @@ class TestEngineTools:
                 }
             ]
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         monkeypatch.setattr(engine._store, "search", fake_store_search)
 
         for query in ["tail-match", "tail.match", "tail/match", "tail:match", "tail(match)"]:
@@ -25147,7 +25563,8 @@ class TestEngineTools:
             assert raw_item["match_window_offset"] == content.index("tail match")
             assert "match unrelated" not in raw_item["content"]
 
-    def test_handle_expand_query_raw_hit_truncation_returns_store_expand_cursor(self, engine, monkeypatch):
+    def test_handle_expand_query_raw_hit_truncation_returns_store_expand_cursor(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         import hermes_lcm.tokens as token_utils
 
         def fake_count_tokens(text):
@@ -25157,7 +25574,7 @@ class TestEngineTools:
             return "raw cursor answer"
 
         monkeypatch.setattr(token_utils, "count_tokens", fake_count_tokens)
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "PHOENIXRAWCURSOR has a longer raw detail"},
@@ -25178,7 +25595,8 @@ class TestEngineTools:
         raw_page = next(item for item in result["context_pagination"] if item["type"] == "raw_messages")
         assert raw_page["expand_args"] == {"store_id": store_id, "content_offset": 1}
 
-    def test_handle_expand_query_advances_content_cursor_when_context_budget_cannot_fit_character(self, engine, monkeypatch):
+    def test_handle_expand_query_advances_content_cursor_when_context_budget_cannot_fit_character(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         import hermes_lcm.tokens as token_utils
 
         captured = {}
@@ -25191,7 +25609,7 @@ class TestEngineTools:
             return "bounded answer"
 
         monkeypatch.setattr(token_utils, "count_tokens", fake_count_tokens)
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "abcdef"},
@@ -25631,7 +26049,8 @@ class TestEngineTools:
         assert second["content_offset"] == 1
         assert second["next_content_offset"] == 2
 
-    def test_handle_expand_query_uses_independent_context_budget_for_auxiliary_retrieval(self, engine, monkeypatch):
+    def test_handle_expand_query_uses_independent_context_budget_for_auxiliary_retrieval(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
@@ -25639,7 +26058,7 @@ class TestEngineTools:
             captured["max_tokens"] = max_tokens
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         first_store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "first filler " * 80},
@@ -25678,14 +26097,15 @@ class TestEngineTools:
         context_json = json.dumps(captured["context_blocks"])
         assert "SECOND RAW DETAIL" in context_json
 
-    def test_handle_expand_query_applies_context_budget_globally_across_nodes(self, engine, monkeypatch):
+    def test_handle_expand_query_applies_context_budget_globally_across_nodes(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         first_store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "first filler " * 80},
@@ -25739,14 +26159,15 @@ class TestEngineTools:
             for item in result["context_pagination"]
         )
 
-    def test_handle_expand_query_counts_summary_blocks_against_context_budget(self, engine, monkeypatch):
+    def test_handle_expand_query_counts_summary_blocks_against_context_budget(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         store_id = engine._store.append(
             "test-session",
             {"role": "user", "content": "raw detail should wait behind summary budget"},
@@ -25786,14 +26207,15 @@ class TestEngineTools:
             for item in result["context_pagination"]
         )
 
-    def test_handle_expand_query_reports_last_child_summary_truncation_in_context_pagination(self, engine, monkeypatch):
+    def test_handle_expand_query_reports_last_child_summary_truncation_in_context_pagination(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         captured = {}
 
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             captured["context_blocks"] = context_blocks
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         child_id = engine._dag.add_node(
             SummaryNode(
                 session_id="test-session",
@@ -25854,19 +26276,18 @@ class TestEngineTools:
             captured["context_blocks"] = context_blocks
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_expand_query_externalized_truncated.db"),
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
+        engine = make_engine(
+            tmp_path,
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=200,
         )
-        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         engine._session_id = "test-session"
         content = "EXTERNALIZED RAW DETAIL " + ("abcdef" * 1000)
         engine._serialize_messages(
             [{"role": "tool", "tool_call_id": "call_ext", "content": content}]
         )
-        ref = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json")).name
+        ref = next((tmp_path / "home" / "lcm-large-outputs").glob("*.json")).name
         placeholder = f"[GC'd externalized tool output: tool_call_id=call_ext; chars={len(content)}; ref={ref}]"
         store_id = engine._store.append(
             "test-session",
@@ -25955,19 +26376,18 @@ class TestEngineTools:
             return "bounded answer"
 
         monkeypatch.setattr(token_utils, "count_tokens", fake_count_tokens)
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_expand_query_externalized_transcript_budget.db"),
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
+        engine = make_engine(
+            tmp_path,
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=2,
         )
-        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         engine._session_id = "test-session"
         content = "PAYLOAD"
         engine._serialize_messages([
             {"role": "tool", "tool_call_id": "call_ext", "content": content}
         ])
-        ref = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json")).name
+        ref = next((tmp_path / "home" / "lcm-large-outputs").glob("*.json")).name
         transcript_content = (
             f"[GC'd externalized tool output: tool_call_id=call_ext; chars={len(content)}; ref={ref}]"
             + (" transcript filler" * 20)
@@ -26036,19 +26456,18 @@ class TestEngineTools:
             captured["context_blocks"] = context_blocks
             return "bounded answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
-        config = LCMConfig(
-            database_path=str(tmp_path / "lcm_expand_query_externalized.db"),
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
+        engine = make_engine(
+            tmp_path,
             large_output_externalization_enabled=True,
             large_output_externalization_threshold_chars=200,
         )
-        engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         engine._session_id = "test-session"
         content = "EXTERNALIZED RAW DETAIL survives for auxiliary retrieval " + ("abcdef" * 100)
         engine._serialize_messages([
             {"role": "tool", "tool_call_id": "call_ext", "content": content}
         ])
-        ref = next((tmp_path / "hermes" / "lcm-large-outputs").glob("*.json")).name
+        ref = next((tmp_path / "home" / "lcm-large-outputs").glob("*.json")).name
         placeholder = f"[GC'd externalized tool output: tool_call_id=call_ext; chars={len(content)}; ref={ref}]"
         store_id = engine._store.append(
             "test-session",
@@ -26093,6 +26512,10 @@ class TestEngineTools:
             large_output_externalization_threshold_chars=200,
             large_output_transcript_gc_enabled=True,
         )
+        monkeypatch.setenv("LCM_LARGE_OUTPUT_TRANSCRIPT_GC_ENABLED", "true")
+        loaded = LCMConfig.from_env()
+        config.large_output_transcript_gc_enabled = loaded.large_output_transcript_gc_enabled
+        config.config_source_warnings = loaded.config_source_warnings
         engine = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         engine._session_id = "test-session"
         engine.context_length = 200000
@@ -26335,7 +26758,8 @@ class TestEngineTools:
         assert "error" in result
         assert "prompt" in result["error"]
 
-    def test_handle_expand_query_uses_expansion_model(self, engine, monkeypatch):
+    def test_handle_expand_query_uses_expansion_model(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._config.expansion_model = "expansion-model-x"
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         node_id = engine._dag.add_node(
@@ -26361,7 +26785,7 @@ class TestEngineTools:
             seen["timeout"] = timeout
             return "Expansion answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
 
         result = json.loads(
             engine.handle_tool_call(
@@ -26379,7 +26803,8 @@ class TestEngineTools:
         assert seen["prompt"] == "What was the plan?"
         assert seen["context_blocks"]
 
-    def test_handle_expand_query_timeout_returns_explicit_degraded_error(self, engine, monkeypatch):
+    def test_handle_expand_query_timeout_returns_explicit_degraded_error(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._config.expansion_timeout_ms = 2500
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         node_id = engine._dag.add_node(
@@ -26398,7 +26823,7 @@ class TestEngineTools:
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             raise TimeoutError("expansion timed out")
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
 
         result = json.loads(
             engine.handle_tool_call(
@@ -26414,7 +26839,8 @@ class TestEngineTools:
         assert result["matches"]
         assert "answer" not in result
 
-    def test_handle_expand_query_unexpected_synthesis_error_is_not_degraded(self, engine, monkeypatch):
+    def test_handle_expand_query_unexpected_synthesis_error_is_not_degraded(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         engine._dag.add_node(
             SummaryNode(
@@ -26432,7 +26858,7 @@ class TestEngineTools:
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             raise RuntimeError("schema bug")
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
 
         with pytest.raises(RuntimeError, match="schema bug"):
             engine.handle_tool_call(
@@ -26440,7 +26866,8 @@ class TestEngineTools:
                 {"query": "docker", "prompt": "What was the plan?"},
             )
 
-    def test_handle_expand_query_blank_synthesis_is_not_false_success(self, engine, monkeypatch):
+    def test_handle_expand_query_blank_synthesis_is_not_false_success(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         node_id = engine._dag.add_node(
             SummaryNode(
@@ -26454,7 +26881,7 @@ class TestEngineTools:
                 created_at=0,
             )
         )
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "   ")
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", lambda **kwargs: "   ")
 
         result = json.loads(
             engine.handle_tool_call(
@@ -26469,7 +26896,8 @@ class TestEngineTools:
         assert result["matches"]
         assert "answer" not in result
 
-    def test_handle_expand_query_node_ids_timeout_preserves_requested_match(self, engine, monkeypatch):
+    def test_handle_expand_query_node_ids_timeout_preserves_requested_match(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         node_id = engine._dag.add_node(
             SummaryNode(
@@ -26487,7 +26915,7 @@ class TestEngineTools:
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             raise TimeoutError("expansion timed out")
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
 
         result = json.loads(
             engine.handle_tool_call(
@@ -26503,7 +26931,8 @@ class TestEngineTools:
         assert result["matches"][0]["node_id"] == node_id
         assert "answer" not in result
 
-    def test_handle_expand_query_hyphenated_operator_query_falls_back_cleanly(self, engine, monkeypatch):
+    def test_handle_expand_query_hyphenated_operator_query_falls_back_cleanly(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._store.append(
             "test-session",
             {
@@ -26525,7 +26954,7 @@ class TestEngineTools:
         )
 
         monkeypatch.setattr(
-            lcm_tools, "_synthesize_expansion_answer",
+            expand_query_tools, "_synthesize_expansion_answer",
             lambda **kwargs: "Recovered through normalized retrieval",
         )
         monkeypatch.setattr(
@@ -26600,7 +27029,8 @@ class TestEngineTools:
 
         assert result["error"] == "node_ids must contain only integers"
 
-    def test_handle_expand_query_accepts_valid_integer_node_ids(self, engine, monkeypatch):
+    def test_handle_expand_query_accepts_valid_integer_node_ids(self, expansion_engine, monkeypatch):
+        engine = expansion_engine
         engine._store.append("test-session", {"role": "user", "content": "Discussed docker rollout plan"})
         node_id = engine._dag.add_node(
             SummaryNode(
@@ -26618,7 +27048,7 @@ class TestEngineTools:
         def fake_synthesize(*, prompt, context_blocks, model, max_tokens, timeout):
             return "Expansion answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
 
         result = json.loads(
             engine.handle_tool_call(
@@ -26715,7 +27145,7 @@ class TestEngineTools:
         assert preset["suggested_preset"]["name"] == "codex_gpt_long_context"
         assert preset["suggested_preset"]["family"] == "GPT/Codex long-context"
         assert preset["match_confidence"] == "context-only"
-        assert preset["provenance"]["benchmark_version"] == "2"
+        assert preset["provenance"]["benchmark_version"] == "pmw-1"
         assert preset["invalid_overrides"]["fresh_tail_count"] == {
             "env": "LCM_FRESH_TAIL_COUNT",
             "value": "abc",
@@ -27180,8 +27610,9 @@ class TestEngineTools:
         assert result["node_ids"] == [strong_id]
 
     def test_handle_expand_query_searches_bounded_explicit_sessions(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
+        engine = expansion_engine
         captured = {}
         old_store_id = engine._store.append(
             "old-session",
@@ -27208,7 +27639,7 @@ class TestEngineTools:
             captured["context_blocks"] = kwargs["context_blocks"]
             return "cross-session answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         result = json.loads(
             engine.handle_tool_call(
                 "lcm_expand_query",
@@ -27229,12 +27660,13 @@ class TestEngineTools:
         assert "NEEDLE excluded raw evidence" not in serialized_context
 
     def test_handle_expand_query_raw_matches_carry_session_ownership(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
         # Cross-session hits that match only raw messages: `matches` is empty
         # because no summary node matches, and the `answer` output returns no
         # context blocks, so `raw_matches` is the caller's only channel for
         # session ownership. Losing it here loses provenance entirely.
+        engine = expansion_engine
         alpha_store_id = engine._store.append(
             "alpha-session",
             {"role": "user", "content": "KRYPTONITE alpha raw evidence"},
@@ -27245,7 +27677,7 @@ class TestEngineTools:
         )
 
         monkeypatch.setattr(
-            lcm_tools,
+            expand_query_tools,
             "_synthesize_expansion_answer",
             lambda **kwargs: "cross-session raw answer",
         )
@@ -27361,8 +27793,9 @@ class TestEngineTools:
         assert result["error"] == "session_ids accepts at most 20 entries"
 
     def test_handle_expand_query_evidence_skips_synthesis_and_stays_bounded(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
+        engine = expansion_engine
         store_id = engine._store.append(
             "old-session",
             {"role": "user", "content": "bounded evidence " * 200},
@@ -27383,7 +27816,7 @@ class TestEngineTools:
         def fail_synthesis(**kwargs):
             raise AssertionError("evidence output must not call the synthesis model")
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fail_synthesis)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fail_synthesis)
         result = json.loads(
             engine.handle_tool_call(
                 "lcm_expand_query",
@@ -27475,10 +27908,11 @@ class TestEngineTools:
 
     @pytest.mark.parametrize("invalid_output", ["", 0, []])
     def test_handle_expand_query_rejects_explicit_invalid_output(
-        self, engine, monkeypatch, invalid_output
+        self, expansion_engine, monkeypatch, invalid_output
     ):
+        engine = expansion_engine
         monkeypatch.setattr(
-            lcm_tools,
+            expand_query_tools,
             "_synthesize_expansion_answer",
             lambda **kwargs: pytest.fail("invalid output must not invoke synthesis"),
         )
@@ -27497,13 +27931,14 @@ class TestEngineTools:
         assert result["error"] == "output must be one of: answer, evidence"
 
     def test_handle_expand_query_keeps_raw_cursor_when_summaries_exhaust_budget(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
         # Summaries can consume the whole context budget while distinct raw
         # messages still matched. Dropping the raw arm silently strands those
         # hits: `context_truncated` alone gives the caller no handle to
         # continue into them, so the raw-message cursor must survive even when
         # no raw content fits.
+        engine = expansion_engine
         raw_store_id = engine._store.append(
             "old-session",
             {"role": "user", "content": "SENTINEL raw hit that must stay reachable"},
@@ -27522,7 +27957,7 @@ class TestEngineTools:
         )
 
         monkeypatch.setattr(
-            lcm_tools, "_synthesize_expansion_answer", lambda **kwargs: "answer"
+            expand_query_tools, "_synthesize_expansion_answer", lambda **kwargs: "answer"
         )
         result = json.loads(
             engine.handle_tool_call(
@@ -27586,11 +28021,12 @@ class TestEngineTools:
         assert raw_entry["expand_args"] == {"store_id": raw_store_id}
 
     def test_handle_expand_query_answer_provenance_reports_explicit_sessions(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
         # A multi-session answer must not describe its retrieval scope as the
         # current session, and its summary locators must replay against the
         # session the node came from rather than the active one.
+        engine = expansion_engine
         historical_node_id = engine._dag.add_node(
             SummaryNode(
                 session_id="old-session",
@@ -27617,7 +28053,7 @@ class TestEngineTools:
         )
 
         monkeypatch.setattr(
-            lcm_tools,
+            expand_query_tools,
             "_synthesize_expansion_answer",
             lambda **kwargs: "cross-session answer",
         )
@@ -27650,11 +28086,12 @@ class TestEngineTools:
         assert items[current_node_id]["expand_args"] == {"node_id": current_node_id}
 
     def test_handle_expand_query_marks_historical_messages_as_not_current(
-        self, engine, monkeypatch
+        self, expansion_engine, monkeypatch
     ):
         # Threading the node's session into child expansion selects the lookup
         # scope. `from_current_session` still describes the ACTIVE session, so
         # archived rows must not be advertised as current.
+        engine = expansion_engine
         store_id = engine._store.append(
             "old-session",
             {"role": "user", "content": "TOPAZ historical raw evidence"},
@@ -27678,7 +28115,7 @@ class TestEngineTools:
             captured["context_blocks"] = kwargs["context_blocks"]
             return "historical answer"
 
-        monkeypatch.setattr(lcm_tools, "_synthesize_expansion_answer", fake_synthesize)
+        monkeypatch.setattr(expand_query_tools, "_synthesize_expansion_answer", fake_synthesize)
         json.loads(
             engine.handle_tool_call(
                 "lcm_expand_query",
@@ -29165,6 +29602,7 @@ class TestExtractionDuringCompress:
             extraction_model="test-extract-model",
             fresh_tail_count=4,
             leaf_chunk_tokens=100,
+            threshold_full_sweep_enabled=False,  # #1013: pin the pre-#1013 single-pass compaction
         )
         eng = LCMEngine(config=config, hermes_home=str(tmp_path / "hermes"))
         eng._session_id = "extract-integration"

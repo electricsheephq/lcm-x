@@ -67,6 +67,7 @@ def _run_policy(
         threshold_full_sweep_enabled=full_sweep,
         summary_prefix_target_tokens=1_000_000,
         database_path=str(root / f"{name}.db"),
+        temporal_rollups_enabled=False,  # time the two compaction policies only (#1013 part B)
     )
     engine = LCMEngine(config=config, hermes_home=str(root / f"{name}-home"))
     engine._session_id = f"synthetic-{name}"

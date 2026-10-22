@@ -2,7 +2,7 @@
 
 Disabled tools are excluded from injected schemas AND refused in
 handle_tool_call, so they cost zero tokens per turn while remaining fully
-reversible (unset the env var to restore all 15 tools).
+reversible (unset the env var to restore all flag-enabled tools).
 """
 from __future__ import annotations
 
@@ -19,7 +19,11 @@ DISABLED = "lcm_compute,lcm_compile_evidence,lcm_evidence_pack,lcm_retrieve,lcm_
 
 @pytest.fixture
 def engine(tmp_path):
-    config = LCMConfig(database_path=str(tmp_path / "disabled_tools.db"))
+    config = LCMConfig(
+        database_path=str(tmp_path / "disabled_tools.db"),
+        assertions_enabled=True,
+        adaptive_retrieval_enabled=True,
+    )
     e = LCMEngine(config=config)
     e._session_id = "test-session"
     try:
@@ -74,3 +78,46 @@ def test_disabled_tool_names_parsing(monkeypatch):
 
     monkeypatch.delenv("LCM_DISABLED_TOOLS", raising=False)
     assert LCMEngine._disabled_tool_names() == set()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_schema_exposure_uses_loaded_config_not_current_env(tmp_path, monkeypatch, enabled):
+    monkeypatch.delenv("LCM_DISABLED_TOOLS", raising=False)
+    # Deliberately disagree with the loaded config on both flags.
+    monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", str(not enabled).lower())
+    monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", str(not enabled).lower())
+    engine = LCMEngine(config=LCMConfig(
+        database_path=str(tmp_path / "loaded-config.db"),
+        assertions_enabled=enabled,
+        adaptive_retrieval_enabled=enabled,
+    ))
+    try:
+        names = {schema["name"] for schema in engine.get_tool_schemas()}
+        assert ("lcm_query_state" in names) is enabled
+        assert ("lcm_retrieve" in names) is enabled
+        assert len(names) == (15 if enabled else 13)
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize(("name", "expected"), [
+    ("lcm_query_state", {
+        "status": "disabled",
+        "error": "V4 assertions are not enabled for this profile",
+    }),
+    ("lcm_retrieve", {
+        "status": "disabled",
+        "reason": "adaptive retrieval is disabled",
+        "enable_with": "LCM_ADAPTIVE_RETRIEVAL_ENABLED=true",
+        "provenance": {"controller": {
+            "transport": "deterministic_local", "provider": "none", "model": "none",
+        }},
+    }),
+])
+def test_cached_dormant_tool_call_preserves_disabled_response(tmp_path, monkeypatch, name, expected):
+    monkeypatch.delenv("LCM_DISABLED_TOOLS", raising=False)
+    engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "dormant.db")))
+    try:
+        assert json.loads(engine.handle_tool_call(name, {})) == expected
+    finally:
+        engine.shutdown()

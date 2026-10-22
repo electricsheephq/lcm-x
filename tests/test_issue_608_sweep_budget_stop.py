@@ -349,7 +349,7 @@ def test_no_leaf_budget_stop_holds_the_threshold_answer_only(tmp_path, summaries
 def test_empty_anchor_slice_is_not_mapped_and_the_pass_result_is_the_same(tmp_path, summaries, monkeypatch):
     """No system prompt: the anchor slice is empty. Skipping its map uses the value the map returns for
     an empty slice, so the pass publishes the same leaf and returns the same list as without the skip."""
-    engine = _engine(tmp_path)
+    engine = _engine(tmp_path, summary_prefix_target_tokens=400)  # Keep this leaf-only mapping case's original target.
     view = _view()[1:]
     mapped = []
     original = engine._get_store_ids_for_messages
@@ -528,13 +528,14 @@ def test_rejected_request_after_a_no_leaf_stop_comes_back_shorter(tmp_path, summ
 
 
 def test_same_state_without_a_recovery_attempt_uses_the_exit_cap(tmp_path, summaries, clock, monkeypatch):
-    """C2 + #668: threshold exit gets headroom (whole turns before the fresh tail) without the recovery cap."""
+    """C2 + #668: threshold exit gets headroom (whole turns before the fresh tail) without the recovery cap.
+    #738: an exit fit drops only covered turns."""
     engine, view = _rejected_state(tmp_path, monkeypatch, clock)
     try:
         result = engine.compress(view, current_tokens=engine._survival_measure(view) + 1_000, bypass_cooldown=False)
-        assert len(result) < len(view) and engine._last_survival_fit["reason"] == "exit_fit:noop"
+        # no leaf was stored, so no turn before the fresh tail is covered: the exit fit cuts none of them
+        assert len(result) == len(view) and engine._last_survival_fit is None
         assert result[-2:] == view[-2:]  # the fresh tail (two rows) stays
-        assert engine._survival_measure(result) + HOST_TOKENS <= int(THRESHOLD * 0.95)
     finally:
         engine.shutdown()
 

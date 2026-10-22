@@ -2343,3 +2343,10 @@ def test_durable_proof_does_not_cross_hermes_homes_on_a_shared_database(tmp_path
         assert engine._cursor_from_durable_commit_proof(host) is None
     finally:
         engine.shutdown()
+
+
+@pytest.fixture(autouse=True)
+def _historical_native_proof_writer(request, monkeypatch):
+    if request.node.originalname == "test_native_adoption_with_summary_carrier_survives_restart_without_loss":
+        from tests.legacy_native_state import legacy_commit_proof
+        monkeypatch.setattr(LCMEngine, "_record_compress_commit_proof", legacy_commit_proof)

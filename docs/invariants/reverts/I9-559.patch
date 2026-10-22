@@ -1,0 +1,11 @@
+--- a/engine.py
++++ b/engine.py
+@@ -2181,7 +2181,7 @@
+             if smaller and len(smaller) < len(current_chunk):
+                 return smaller
+
+-        return current_chunk[: tool_group_safe_end(current_chunk, len(current_chunk) - 1)]
++        return current_chunk[:-1]
+
+     def _leaf_target_tokens(self, source_tokens: int) -> int:
+         """Leaf summary target (#614); defaults give a fixed 2,000-token target: min(2000, max(2000, 20%)).

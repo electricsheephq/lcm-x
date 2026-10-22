@@ -43,6 +43,9 @@ def _engine(tmp_path, **overrides):
     config = LCMConfig(
         database_path=str(tmp_path / "lcm.db"),
         large_output_externalization_path=str(tmp_path / "externalized"),
+        # #1013: these resume cells were sized for the pre-#1013 compaction defaults.
+        context_threshold=0.35, fresh_tail_count=32, fresh_tail_max_tokens=0, leaf_chunk_tokens=20_000,
+        threshold_full_sweep_enabled=False,
     )
     for key, value in overrides.items():
         setattr(config, key, value)
@@ -227,7 +230,7 @@ def test_positive_control_same_harness_resumes(tmp_path, monkeypatch):
     today = _control_run(tmp_path / "today", monkeypatch, lambda engine, replay: None, resume=False)
     assert fixed["resumed"] == [110]
     assert (fixed["status"], fixed["calls"], fixed["rows"], fixed["duplicates"]) == ("compacted", 1, 142, 0)
-    assert (today["status"], today["calls"], today["rows"]) == ("error", 2, 142)
+    assert (today["status"], today["calls"], today["rows"]) == ("sanitized", 1, 142)
 
 
 # -- a cancel between leaf passes: the retry summarizes only the remainder ---------------------

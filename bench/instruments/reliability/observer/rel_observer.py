@@ -28,11 +28,16 @@ PHASE = os.environ.get("REL_PHASE", "A")
 COMMITTED = '"commit_status":"committed"'
 _lock = threading.Lock()
 cur = {"turn": 0, "prefix": "T", "kind": "normal", "native": 0, "final": False, "commits0": 0}
-counters = {"compacted_turns": [], "lcm_tool_calls": 0, "orphan_drops": 0, "native_max": 0, "failed": []}
-logstate = {"commits": 0, "conflicts": 0}
+counters = {"compacted_turns": [], "lcm_tool_calls": 0, "orphan_drops": 0, "native_max": 0, "failed": [], "compactions": []}
+logstate = {"commits": 0, "conflicts": 0, "survival_fits": 0}
 _depth = threading.local()
 _r1 = None
 _tap = None
+_p8_finish = {"supported": False, "notes": [], "duplicates": []}.copy
+
+
+def _p8_pin(messages):
+    pass
 
 
 def _append(path, rec):
@@ -55,7 +60,30 @@ def note(what, **rec):
 
 
 def snapshot(**extra):
-    note("counters", counters=counters, orphan_hook=cur.get("orphan_hook"), **extra)
+    note("counters", counters=counters, orphan_hook=cur.get("orphan_hook"), p8=_p8_finish(), **extra)
+
+
+def install_p8():
+    global _p8_pin, _p8_finish
+    if cur.get("p8_installed"):
+        return
+    cur["p8_installed"] = True
+    try:
+        cell = json.loads((DIR / "cell.json").read_text())
+        path = DIR / "faults-fired.jsonl"
+        fired = {json.loads(x)["kind"] for x in path.read_text().splitlines()} if path.exists() else set()
+
+        def fire(kind, turn, **extra):
+            _append(path, {"kind": kind, "phase": PHASE, "turn": turn})
+            fired.add(kind)
+            event(turn=turn, event=kind, fault=kind, session_prefix=cur["prefix"], **extra)
+
+        _, _p8_pin, _p8_finish = _r1.install_p8(
+            DIR, PHASE, {f["kind"]: f for f in cell["faults"]}, fired, fire, cur,
+            checkpoint=lambda: note("p8", p8=_p8_finish()))
+    except Exception as exc:
+        state = {"supported": False, "notes": [type(exc).__name__], "duplicates": []}
+        _p8_finish = state.copy
 
 
 def load_turn():
@@ -134,6 +162,7 @@ class _Tap(logging.Handler):
         with _lock:
             logstate["commits"] += line.count(COMMITTED)
             logstate["conflicts"] += line.count("publication_invariant_conflict")
+            logstate["survival_fits"] += line.count("LCM survival fit applied")
             self.fh.write(line + "\n")
             self.fh.flush()
 
@@ -179,6 +208,43 @@ def depth0():
         return None
 
 
+def store_cover():
+    """(message-sourced depth-0 summaries, distinct store ids they cover) in lcm.db, or (None, None)."""
+    try:
+        con = sqlite3.connect(f"file:{Path(os.environ['HERMES_HOME']) / 'lcm.db'}?mode=ro", uri=True)
+        try:
+            return con.execute(
+                "SELECT (SELECT COUNT(*) FROM summary_nodes WHERE depth = 0 AND source_type = 'messages'), "
+                "(SELECT COUNT(DISTINCT source.value) FROM summary_nodes AS node, json_each(node.source_ids) AS source "
+                "WHERE node.depth = 0 AND node.source_type = 'messages')").fetchone()
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return None, None
+
+
+def list_counts(messages, result) -> dict:
+    """``in``/``out``: the lengths of the list handed to ``compress`` and of the list it returned;
+    ``host_rows_summarized``: the input rows absent from the output, i.e. the host rows a leaf replaced with a
+    summary. A leaf built only from stored rows the host no longer holds removes none. An input row is retained when
+    the output holds that very dict or, since LCM returns retained rows as equal copies (measured at 2e04a205), an
+    equal dict (``==``: every key, timestamp included) not already matched; ``copied`` counts the latter. Taken
+    from a list captured before the call, so an in-place mutation of the input list cannot hide a row."""
+    if not isinstance(result, list) or not isinstance(messages, list):
+        return {"in": len(messages) if isinstance(messages, list) else None,
+                "out": len(result) if isinstance(result, list) else None, "host_rows_summarized": None, "copied": None}
+    free = {id(m) for m in result}
+    unmatched = [m for m in messages if id(m) not in free]
+    free -= {id(m) for m in messages}
+    pool, copied = [m for m in result if id(m) in free], 0
+    for m in unmatched:
+        k = next((i for i, o in enumerate(pool) if o == m), None)
+        if k is not None:
+            pool.pop(k)
+            copied += 1
+    return {"in": len(messages), "out": len(result), "host_rows_summarized": len(unmatched) - copied, "copied": copied}
+
+
 def patch_engine(agent):
     engine = getattr(agent, "context_compressor", None)
     etype = type(engine)
@@ -186,19 +252,73 @@ def patch_engine(agent):
         return
     etype._rel_patched = True
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
+    cell_path = DIR / "cell.json"
+    cell = json.loads(cell_path.read_text()) if cell_path.exists() else {}
+    in_place = cell.get("in_place")
+    cur["stop_after_tool"] = cell.get("stop_after_tool", False)
+
+    def observer_failed(where, exc):
+        try:  # an observer failure is evidence (the cell ERRORs on it), never a change to the engine call
+            note("observer_error", where=where, error=repr(exc)[:300])
+        except Exception:
+            pass
+
+    def elapsed(started):
+        return None if started is None else round(time.monotonic() - started, 3)
 
     def traced_compress(self, messages, *args, **kwargs):
-        result = orig_compress(self, messages, *args, **kwargs)
-        status = getattr(self, "_last_compression_status", None)
-        self._probe_calls, self._probe_status = getattr(self, "_probe_calls", 0) + 1, status
-        if status in ("compacted", "host_native"):
-            counters["compacted_turns"].append(cur["turn"])
-            note("compaction_committed", turn=cur["turn"], prefix=cur["prefix"], status=status, final=cur["final"])
-        event(turn=cur["turn"], event="compaction", session=getattr(self, "_session_id", None), final=cur["final"],
-              session_prefix=cur["prefix"], compression_status=status,
-              noop_reason=getattr(self, "_last_compression_noop_reason", None),
-              depth0_nodes=depth0() if status == "compacted" else None, rejection=_r1.rejection(self),
-              native_attempts=cur["native"])
+        started, given, cover0 = None, messages, (None, None)
+        fits0 = logstate["survival_fits"]
+        try:
+            started = time.monotonic()
+            given, cover0 = list(messages) if isinstance(messages, list) else messages, store_cover()
+        except Exception as exc:
+            observer_failed("traced_compress:before", exc)
+        try:
+            result = orig_compress(self, messages, *args, **kwargs)
+        except BaseException as exc:
+            try:
+                counters["compactions"].append({"turn": cur["turn"], **list_counts(given, None), "status": "error",
+                                                "final": cur["final"], "secs": elapsed(started),
+                                                "error": f"{type(exc).__name__}: {exc}"[:300]})
+            except Exception as obs:
+                observer_failed("traced_compress:error-record", obs)
+            raise
+        try:
+            secs = elapsed(started)
+            _p8_pin(result)
+            status = getattr(self, "last_compression_status", getattr(self, "_last_compression_status", None))
+            cover = store_cover()  # leaves written by this call and the stored rows they newly cover (hidden or host)
+            delta = [None if a is None or b is None else b - a for a, b in zip(cover0, cover)]
+            counters["compactions"].append({"turn": cur["turn"], **list_counts(given, result), "status": status,
+                                            "final": cur["final"], "secs": secs, "leaves": delta[0], "rows_covered": delta[1]})
+            self._probe_calls, self._probe_status = getattr(self, "_probe_calls", 0) + 1, status
+            fitted = logstate["survival_fits"] > fits0
+            if status in ("compacted", "host_native"):
+                counters["compacted_turns"].append(cur["turn"])
+            if status in ("compacted", "host_native") or fitted:
+                pool, removed = list(result) if isinstance(result, list) else [], []
+                for row in given if isinstance(given, list) else []:
+                    match = next((i for i, out in enumerate(pool) if row == out), None)
+                    if match is None:
+                        removed.append(row)
+                    else:
+                        pool.pop(match)
+                tags = sorted({t for row in removed if row.get("role") == "assistant"
+                               for t in re.findall(r"reply to ([A-Z]\d{2,3}):", str(row.get("content") or ""))})
+                note("compaction_committed" if status in ("compacted", "host_native") else "survival_fit_committed",
+                     turn=cur["turn"], prefix=cur["prefix"], status=status, final=cur["final"],
+                     compaction_kind="forced" if cur["final"] else "survival fit" if fitted else
+                     "in-place" if in_place else "rotation" if in_place is False else None,
+                     survival_fit=fitted, fit_reason=(getattr(self, "_last_survival_fit", None) or {}).get("reason")
+                     if fitted else None, compacted_reply_tags=tags)
+            event(turn=cur["turn"], event="compaction", session=getattr(self, "_session_id", None), final=cur["final"],
+                  session_prefix=cur["prefix"], compression_status=status,
+                  noop_reason=getattr(self, "last_compression_noop_reason", getattr(self, "_last_compression_noop_reason", None)),
+                  depth0_nodes=depth0() if status == "compacted" else None, rejection=_r1.rejection(self),
+                  native_attempts=cur["native"])
+        except Exception as exc:
+            observer_failed("traced_compress:after", exc)
         return result
     etype.compress = traced_compress
 
@@ -245,6 +365,7 @@ def patch_run_agent(mod):
     def init(self, *a, **k):
         orig_init(self, *a, **k)
         ensure_tap()
+        install_p8()
         patch_engine(self)
         note("agent_built", session=getattr(self, "session_id", None), platform=k.get("platform"),
              engine=getattr(getattr(self, "context_compressor", None), "name", None), model=getattr(self, "model", None),
@@ -254,6 +375,7 @@ def patch_run_agent(mod):
     def run_conversation(self, *a, **k):
         ensure_tap()
         tc = load_turn()
+        cur["agent"] = self
         try:
             from agent.turn_failure_copy import FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE
             notices = [FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE]
@@ -284,7 +406,10 @@ def patch_run_agent(mod):
               reply=tc.get("reply") if reply_held else None, failed=failed, native_attempts=cur["native"],
               interrupted=interrupted, session=self.session_id, user_tags=user_tags, host_notices=own,
               host_commits=logstate["commits"] - cur["commits0"])
-        note("turn_end", tag=tag(), turn_kind=cur["kind"], interrupted=interrupted, failed=failed, session=self.session_id)
+        note("turn_end", tag=tag(), turn_kind=cur["kind"], interrupted=interrupted, failed=failed, session=self.session_id,
+             reason=result.get("turn_exit_reason"),
+             reply_tag=next(iter(re.findall(r"reply to ([A-Z]\d{2,3}):", tc.get("reply") or "")), None)
+             if reply_held and not failed and not interrupted else None)
         snapshot(failed_turn_notices=notices, provenance=_r1.provenance(json.loads((DIR / "cell.json").read_text()), []))
         return result
     cls.run_conversation = run_conversation
@@ -310,7 +435,7 @@ def final_attempt(agent, entry, run, status_of):
     finally:
         rec["engine_calls"] = getattr(engine, "_probe_calls", 0) - calls0
         rec["engine_status"] = getattr(engine, "_probe_status", None) if rec["engine_calls"] else None
-        rec["noop_reason"] = getattr(engine, "_last_compression_noop_reason", None)
+        rec["noop_reason"] = getattr(engine, "last_compression_noop_reason", getattr(engine, "_last_compression_noop_reason", None))
         rec["rejection"] = _r1.rejection(engine)
         note("final_attempt", **rec)
         snapshot()
@@ -336,8 +461,30 @@ def patch_model_tools(mod):
 
     def traced(*a, **kw):
         name, args = (a[0] if a else kw.get("function_name")), (a[1] if len(a) > 1 else kw.get("function_args"))
-        return dispatched(lambda: orig(*a, **kw), name, args, kw.get("tool_call_id"), "tool_dispatch")
+        result = dispatched(lambda: orig(*a, **kw), name, args, kw.get("tool_call_id"), "tool_dispatch")
+        if cur.get("stop_after_tool") and PHASE == "A" and not cur.get("stop_waited"):
+            cur["stop_waited"] = True
+            note("stop_tool_ready")
+            deadline = time.monotonic() + 15
+            while not getattr(cur["agent"], "_interrupt_requested", False) and time.monotonic() < deadline:
+                time.sleep(.01)
+            note("stop_interrupt_observed", interrupted=bool(getattr(cur["agent"], "_interrupt_requested", False)))
+        return result
     mod.handle_function_call = traced
+
+
+def patch_inline_tools(mod):
+    """#659 P2: ``todo_list`` is an agent-level inline tool (``INLINE_TOOL_EXECUTORS``), dispatched before the registry,
+    so ``handle_function_call`` never sees it. Only that entry is wrapped: no other cell plans an inline tool."""
+    table = getattr(mod, "INLINE_TOOL_EXECUTORS", None)
+    run = table.get("todo_list") if isinstance(table, dict) else None
+    if run is None:
+        return
+
+    def traced(agent, args, ctx):
+        return dispatched(lambda: run(agent, args, ctx), "todo_list", args, getattr(ctx, "tool_call_id", None),
+                          "inline_tool_dispatch")
+    table["todo_list"] = traced
 
 
 def patch_helpers(mod):
@@ -354,4 +501,4 @@ def patch_helpers(mod):
 
 
 PATCHES = {"run_agent": patch_run_agent, "model_tools": patch_model_tools, "agent.agent_runtime_helpers": patch_helpers,
-           "agent.conversation_compression_manual": patch_manual}
+           "agent.conversation_compression_manual": patch_manual, "agent.inline_tool_executors": patch_inline_tools}

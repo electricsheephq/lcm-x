@@ -9,6 +9,7 @@ the source file is never opened, so a positive-control DB cannot be modified.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import sys
@@ -31,11 +32,17 @@ def gauntlet_transcript(run: Path) -> list[tuple[str, str]]:
             if key in r:
                 v = r[key]
                 return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, sort_keys=True)
-        raise ValueError(r)
+        raise ValueError("prompt has no text field")
     material = run / "actual-material.jsonl" if (run / "actual-material.jsonl").is_file() else run / "material/turns.jsonl"
     sent = [text(r) for r in rows(material) + rows(run / "probes.jsonl")]
     items = []
-    for i, r in enumerate(rows(run / "results.jsonl")):
+    results = rows(run / "results.jsonl")
+    if len(sent) != len(results):
+        raise ValueError(f"prompt/result count mismatch: prompts={len(sent)}, results={len(results)}, "
+                         f"first misaligned index={min(len(sent), len(results))}")
+    for i, r in enumerate(results):
+        if "input_sha256" in r and r["input_sha256"] != hashlib.sha256(sent[i].encode("utf-8")).hexdigest():
+            raise ValueError(f"input_sha256 mismatch at index {i}")
         items.append(("user", sent[i]))
         if r.get("raw_answer"):
             items.append(("assistant", r["raw_answer"]))
@@ -68,10 +75,14 @@ def main(argv=None) -> int:
             import sqlite3
             con = sqlite3.connect(f"file:{copy}?mode=ro", uri=True)
             try:
-                stored = con.execute("select store_id, session_id, role, coalesce(content,'') from messages order by store_id").fetchall()
+                stored = con.execute("select store_id, session_id, role, coalesce(content,''), conversation_id "
+                                     "from messages order by store_id").fetchall()
             finally:
                 con.close()
-            ms = multiset.score(gauntlet_transcript(a.gauntlet_run), stored)
+            try:
+                ms = multiset.phase_c_score(gauntlet_transcript(a.gauntlet_run), stored)
+            except ValueError as exc:
+                ms = {"verdict": "INCONCLUSIVE", "reason": str(exc)}
             dup = dupes.count(copy)
         report = {"db": str(a.db), "multiset": {k: v for k, v in ms.items() if k not in ("missing", "duplicated", "extra")},
                   "dupes": {k: v for k, v in dup.items() if k != "per_session"}}
