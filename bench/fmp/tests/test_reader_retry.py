@@ -174,3 +174,13 @@ def test_dev_panel_keeps_same_151_ids():
     for name in ("dev100.json", "guard.json"):
         assert (dev_panel.PANELS / name).read_bytes() == subprocess.check_output(
             ["git", "show", f"{BASE}:bench/fmp/panels/{name}"], cwd=REPO)
+
+
+def test_successful_check_arms_bytes_match_main(tmp_path):
+    baseline = base_module("run")
+    source = subprocess.check_output(["git", "show", f"{BASE}:bench/fmp/run.py"], cwd=REPO)
+    exec(compile(source, baseline.__file__, "exec"), baseline.__dict__)
+    paths = [make_answers(tmp_path, "A0", "role"), make_answers(tmp_path, "A1")]
+    baseline.check_arms(paths, tmp_path / "before.json")
+    run.check_arms(paths, tmp_path / "after.json")
+    assert (tmp_path / "before.json").read_bytes() == (tmp_path / "after.json").read_bytes()

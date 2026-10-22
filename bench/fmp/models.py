@@ -264,6 +264,25 @@ def limited(text):
     return any(k in (text or "").lower() for k in USAGE_LIMIT)
 
 
+def retry_call(call, records, receipt):
+    """Retry transport failures only; retain the caller's frozen prompt and receipts."""
+    for attempt in range(1, 4):
+        before = len(records)
+        if "attempts" in receipt:
+            receipt["attempts"] += 1
+        try:
+            return call()
+        except RuntimeError:
+            error = records[-1].get("error") if len(records) > before else None
+            if error not in ("codex_failed", "claude_failed", "timeout"):
+                raise
+            receipt.setdefault("attempts", 1)
+            receipt.setdefault("attempt_errors", []).append(error)
+            if attempt == 3:
+                raise
+            time.sleep((5, 20)[attempt - 1])
+
+
 class Harness:
     def __init__(self, root, quota, runner=None, binary=None, timeout=(600, 1800)):
         self.root = Path(root) / "harness"
@@ -470,7 +489,7 @@ class Codex(Harness):
             self.quota.stop("codex")
             records.append({**record, "status": "error", "error": "usage_limit"})
             raise BudgetStopped()
-        if proc.returncode != 0 or done is None or not texts:
+        if proc.returncode != 0 or done is None or not texts or any(e.get("type") in ("turn.failed", "error") for e in events):
             records.append({**record, "status": "error", "error": "codex_failed"})
             raise RuntimeError("codex_call_failed")
         if info["model"] and info["model"] != model:

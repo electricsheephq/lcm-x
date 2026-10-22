@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from .common import sha
-from .models import READER_MAX_TOKENS, harness, input_bound
+from .models import READER_MAX_TOKENS, harness, input_bound, retry_call
 
 # Never offered: lcm_expand_query calls another model; the rest are operator tools.
 EXCLUDED_TOOLS = ("lcm_expand_query", "lcm_status", "lcm_inspect", "lcm_doctor")
@@ -190,7 +190,10 @@ def harness_agentic(q, client, reader, server, records):
     result = {"qid": q.qid, "qtype": q.qtype, "status": "ok", "hypothesis": "", "calls": records,
               "trace": [], "tool_calls": 0, "forced_final": None, "finish_reason": None}
     try:
-        message = client.agentic(reader, messages, records, server)
+        message = retry_call(lambda: client.agentic(reader, messages, records, server), records, result)
+    except Exception as exc:
+        exc.delivery_result = result
+        raise
     finally:
         logs = [Path(c["mcp_log"]) for c in records if c.get("mcp_log")]
         if logs and logs[-1].exists():
@@ -242,8 +245,12 @@ def _answer(q, mode, client, reader, engine, speakers, tool_budget, input_budget
         if used + estimate > input_budget:
             raise RuntimeError("input_budget_exceeded")
         # D6: the forced final keeps the tool definitions and disables them with tool_choice.
-        message = client.call(reader, messages, records, tools=offered, max_tokens=READER_MAX_TOKENS,
-                              tool_choice="auto" if tools_on else "none")
+        try:
+            message = retry_call(lambda: client.call(reader, messages, records, tools=offered,
+                max_tokens=READER_MAX_TOKENS, tool_choice="auto" if tools_on else "none"), records, result)
+        except Exception as exc:
+            exc.delivery_result = result
+            raise
         ok = [c for c in records if c.get("status") == "ok"]
         used = sum(c["input_tokens"] if c["input_tokens"] is not None else input_bound(messages, offered) for c in ok)
         last, sent = ok[-1]["input_tokens"] if ok[-1]["input_tokens"] is not None else input_bound(messages, offered), len(messages)

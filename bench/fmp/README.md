@@ -29,6 +29,14 @@ explicit opt-in metered path and needs `--max-spend` and `--spend-ledger`. Defau
 `claude:claude-opus-5-5` on a seeded 10% sample of question ids (`--agreement-judge none` disables),
 4 workers. `run.sh` loads the OpenRouter key only for an OpenRouter spec.
 
+Reader and judge transport failures get at most three attempts, waiting 5 s then
+20 s. Retries reuse the frozen messages; single delivery retrieves once, retaining
+the same trace, labels and evidence digest even if every call fails. Rows with a
+transient failure record `attempts` and `attempt_errors`; successful first calls
+keep their existing output shape. Quota and usage-limit stops are never retried.
+`check-arms` fails closed with a distinct errored/not-run row reason, even when
+those rows retain valid delivery receipts.
+
 `glm:<model>` uses the z.ai Coding Plan subscription through the isolated Claude Code runner
 at `api.z.ai`, with low thinking and no metered API charge. The operator exports `GLM_API_KEY`
 from their own secret store; the harness reads only that environment variable and passes it only
