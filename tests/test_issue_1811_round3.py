@@ -54,7 +54,7 @@ def test_lcm_compute_non_date_sum_base_parity(tmp_path, monkeypatch, qd, case):
         result = json.loads(tools.lcm_compute(dict(question="How much did I pay in total for the tent and the stove?",
                             question_date=qd, evidence_complete=True, operands=operands), engine=engine))
     assert result["status"] == "computed"
-    assert result["computation"]["result"] == 175
+    assert result["trace"]["result"] == 175
 
 
 def test_long_order_label_name_is_bounded_and_reused(monkeypatch):
