@@ -87,6 +87,64 @@ def licensed_parts(text: str, licences: dict, times: int) -> dict | None:
     return dict(Counter(parts)) if parts and len(parts) >= 2 else None
 
 
+def merge_witnesses(host, events, group):
+    """Attach observed merges independently of surplus licences (generated carriers license no surplus)."""
+    histories = defaultdict(lambda: defaultdict(list))
+    for index, event in enumerate(events):
+        if event.get("event") in ("host_merge", "engine_carrier") and event.get("session"):
+            witness = {"witness": {"event_index": index, "phase": event.get("phase"), "turn": event.get("turn")},
+                       "spans": event.get("spans", []), "bytes": event.get("bytes"), "kind": event["event"]}
+            histories[group(event["session"])][event["sha256"]].append(witness)
+    if host is None:  # no host DB / lineage evidence
+        return
+    for g, history in histories.items():
+        keys = host.setdefault(g, {"keys": {}, "tags": {}})["keys"]
+        for digest, witnesses in history.items():
+            witnessed_merges = [w for w in witnesses if w["kind"] == "host_merge"]
+            if not witnessed_merges:
+                continue  # a carrier verifier alone grants no host-merge credit
+            held = keys.setdefault(("user", digest), {"n": 0, "ids": []})
+            held.update(span_witnesses=witnessed_merges, merge_history=history, span_capacity=max(1, held["n"]))
+            # An exact observed newline join can also prove the existing split-parts case. Replays
+            # of the same join are one witness, not independent occurrence capacity.
+            if not held.get("merges"):
+                for witness in witnessed_merges:
+                    offset, parts = 0, []
+                    for span in witness["spans"]:
+                        if span.get("byte_offset") != offset:
+                            break
+                        parts.append(("user", span["sha256"]))
+                        offset += span["bytes"] + 2
+                    else:
+                        if len(parts) >= 2 and offset - 2 == witness["bytes"]:
+                            held["merges"] = [{"parts": parts, "witness": witness["witness"]}]
+                            break
+
+
+def merged_boundaries(raw, witness, history):
+    """Expand only earlier observed input joins, checking every nested slice hash before using its boundaries."""
+    pending, boundaries = [(0, witness)], []
+    steps = 0
+    while pending and steps < COVER_STEPS:
+        base, current = pending.pop()
+        steps += 1
+        for span in current.get("spans", []):
+            offset, size = span.get("byte_offset"), span.get("bytes")
+            if type(offset) is not int or type(size) is not int or offset < 0 or size <= 0:
+                continue
+            start, end = base + offset, base + offset + size
+            if end > len(raw) or hashlib.sha256(raw[start:end]).hexdigest() != span.get("sha256"):
+                continue
+            boundaries.append((start, end))
+            if len(boundaries) > COVER_PARTS:
+                return []  # fail closed on oversized or ambiguous evidence
+            for child in history.get(span["sha256"], []):
+                if child["witness"]["event_index"] < current["witness"]["event_index"]:
+                    pending.append((start, child))
+                    break
+    return boundaries if not pending else []
+
+
 def embedded_credits(texts, want, stored_rows, stored, paired, host):
     """Reserve nonoverlapping byte spans proved by the host's actual merge pass, within one lineage.
 
@@ -106,26 +164,30 @@ def embedded_credits(texts, want, stored_rows, stored, paired, host):
             used[sid].append((0, len(raw)))
         held = (host or {}).get(key, {})
         slots[key] += 1
-        if slots[key] > held.get("n", 0):
+        if slots[key] > held.get("span_capacity", held.get("n", 0)):
             continue
         witnesses = held.get("span_witnesses", [])
         for witness in witnesses:
-            for span in witness.get("spans", []):
-                part = ("user", span.get("sha256"))
-                if part not in want or len(stored.get(part, [])) + paired[part] + counts[part] >= want[part]:
+            boundaries = merged_boundaries(raw, witness, held.get("merge_history", {}))
+            starts, ends = sorted({a for a, _b in boundaries}), {b for _a, b in boundaries}
+            for part in want:
+                if len(stored.get(part, [])) + paired[part] + counts[part] >= want[part]:
                     continue
-                offset, size = span.get("byte_offset"), span.get("bytes")
-                if type(offset) is not int or type(size) is not int or offset < 0 or size <= 0:
+                if part[0] != "user":
                     continue
-                end = offset + size
-                if end > len(raw) or raw[offset:end] != norm(texts[part]).encode() or any(
-                        offset < b and a < end for a, b in used[sid]):
-                    continue
-                used[sid].append((offset, end))
-                counts[part] += 1
-                credits.append({"role": "user", "sha256": part[1], "store_id": sid,
-                                "byte_offset": offset, "bytes": size, "composite_sha256": key[1],
-                                "provenance": "host_merge_span", "witness": witness["witness"]})
+                target = norm(texts[part]).encode()
+                for offset in starts:
+                    end = offset + len(target)
+                    if end not in ends or raw[offset:end] != target or any(
+                            offset < b and a < end for a, b in used[sid]):
+                        continue
+                    used[sid].append((offset, end))
+                    counts[part] += 1
+                    credits.append({"role": "user", "sha256": part[1], "store_id": sid,
+                                    "byte_offset": offset, "bytes": len(target), "composite_sha256": key[1],
+                                    "provenance": "host_merge_span", "witness": witness["witness"]})
+                    if len(stored.get(part, [])) + paired[part] + counts[part] >= want[part]:
+                        break
     return counts, credits
 
 
@@ -152,6 +214,9 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
         for merge in ((host or {}).get(key) or {}).get("merges", []):
             if len(stored.get(key, [])) + paired[key] >= n:
                 break
+            if "witness" in merge and any(role == "user" and norm(texts[key]) in norm(content)
+                                           for _sid, _session, role, content in stored_rows):
+                continue  # observed-event fallback: prefer one exact, reserved embedded span
             uses = Counter(merge["parts"])
             if any(len(stored.get(k, [])) - want[k] < count for k, count in uses.items()):
                 continue
@@ -163,7 +228,8 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
             paired[key] += 1
             spent.update(uses)  # the host rows that prove the record license no surplus too
             composites.append({"role": "user", "expected": n, "as_parts": 1, "parts": parts,
-                               "provenance": "host_merge_record", "host_row_id": merge["host_row_id"]})
+                               **({"provenance": "host_merge_event", "witness": merge["witness"]} if "witness" in merge
+                                  else {"provenance": "host_merge_record", "host_row_id": merge["host_row_id"]})})
     embedded, span_credits = embedded_credits(texts, want, stored_rows, stored, paired, host)
     missing, duplicated, split, licensed = [], [], [], []
     for key, n in want.items():
@@ -199,18 +265,28 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
     # licensed by host parity; the composite key is then not a deficit. Only the occurrences the host did not store
     # as the composite itself pair (those LCM should have stored whole): the whole deficit must fit within them. Same
     # lineage only; reported, never silent.
-    by_key = {(r["role"], r["sha256"]): r for r in licensed}
+    embedded_ids = {c["store_id"] for c in span_credits}
+    licence_records = {(r["role"], r["sha256"]): r for r in licensed}
+    by_key = {}
+    for key, record in licence_records.items():
+        reserved = want[key] - paired[key] - embedded[key]
+        ids = [sid for sid in stored[key][reserved:] if sid not in embedded_ids]
+        by_key[key] = dict(record, licensed=min(record["licensed"], len(ids)), store_ids=ids)
     for entry in list(missing):
         deficit = entry["expected"] - entry["stored"]
         held = ((host or {}).get(("user", entry["sha256"])) or {}).get("n", 0)
         if entry["role"] == "user" and deficit <= entry["expected"] - held and \
                 (uses := licensed_parts(norm(texts[("user", entry["sha256"])]), by_key, deficit)):
+            parts = []
             for key, n in uses.items():
-                by_key[key]["licensed"] -= n * deficit
+                count = n * deficit
+                by_key[key]["licensed"] -= count
+                licence_records[key]["licensed"] -= count
+                ids, by_key[key]["store_ids"] = by_key[key]["store_ids"][:count], by_key[key]["store_ids"][count:]
+                parts.append({"sha256": key[1], "uses": n, "store_ids": ids})
             missing.remove(entry)
             composites.append({"role": "user", "expected": entry["expected"], "as_parts": deficit, "preview": entry["preview"],
-                               "parts": [{"sha256": key[1], "uses": n, "store_ids": by_key[key]["store_ids"]}
-                                         for key, n in uses.items()]})
+                               "parts": parts})
     licensed = [r for r in licensed if r["licensed"] > 0]
     # Every stored-only key and every split reply is surplus: no host transform licenses them.
     return {

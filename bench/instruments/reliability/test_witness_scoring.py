@@ -80,6 +80,75 @@ def test_disjoint_repeated_spans_and_utf8_offsets():
         len((parts[0] + "\n\n").encode()), len((parts[0] + "\n\n" + HELD + "\n\n").encode())]
 
 
+def test_embedded_span_cannot_be_reused_by_whole_row_parts_fallback():
+    a, c, b = "alpha", "prefix\n\nalpha", "tail"
+    d = c + "\n\n" + b
+    host = witnessed_host(("prefix", a))
+    host[("user", multiset.h(b))] = {"n": 1, "ids": [3]}
+    out = multiset.score([("user", a), ("user", d)], [(1, "S0", "user", c), (2, "S0", "user", b)], host)
+    assert out["verdict"] == "FAIL" and out["deficit_rows"] == 1
+    assert len(out["embedded_span_credits"]) == 1 and out["held_composites_as_parts"] == []
+
+
+def test_nested_observed_join_credits_only_witnessed_boundaries():
+    # The held double crosses the boundary between a nested input and a new user row.
+    first = EARLIER + "\n\n" + ORIGINAL
+    events = merge_events((EARLIER, ORIGINAL)) + merge_events((first, ORIGINAL))
+    host = {"chat": {"keys": {}, "tags": {}}}  # carrier composite excluded from surplus licensing
+    multiset.merge_witnesses(host, events, lambda _s: "chat")
+    out = multiset.score([("user", HELD)], [(93, "S0", "user", COMPOSITE)], host["chat"]["keys"])
+    assert out["deficit_rows"] == 0 and out["surplus_rows"] == 1
+    [credit] = out["embedded_span_credits"]
+    assert credit["byte_offset"] == len((EARLIER + "\n\n").encode())
+    # Same bytes, but no earlier observation proving the nested boundary: no credit.
+    host = {"chat": {"keys": {}, "tags": {}}}
+    multiset.merge_witnesses(host, events[1:], lambda _s: "chat")
+    out = multiset.score([("user", HELD)], [(93, "S0", "user", COMPOSITE)], host["chat"]["keys"])
+    assert out["deficit_rows"] == 1
+
+
+def test_observed_double_join_pairs_two_original_rows_once():
+    host = {"chat": {"keys": {}, "tags": {}}}
+    multiset.merge_witnesses(host, merge_events((ORIGINAL, ORIGINAL)) * 2, lambda _s: "chat")
+    rows = [(1, "S0", "user", ORIGINAL), (2, "S0", "user", ORIGINAL)]
+    out = multiset.score([("user", HELD)], rows, host["chat"]["keys"])
+    assert out["deficit_rows"] == 0
+    assert out["held_composites_as_parts"][0]["provenance"] == "host_merge_event"
+    out = multiset.score([("user", HELD)] * 2, rows * 1, host["chat"]["keys"])
+    assert out["deficit_rows"] == 1
+
+
+@pytest.mark.parametrize("case", ["valid", "unverified_prefix", "altered_remainder", "foreign"])
+def test_verified_carrier_remainder_is_only_a_nested_host_merge_witness(case):
+    prefix, events = "verified DAG summary\n\n", []
+
+    class Engine:
+        _session_id = "cron" if case == "foreign" else "S0"
+
+        def _generated_context_carrier_remainder(self, message):
+            text = message["content"]
+            return text[len(prefix):] if text.startswith(prefix) else None
+
+        def compress(self, messages):
+            return messages
+    probe.trace_occurrences(Engine, lambda **e: events.append(e), lambda: {"phase": "A", "turn": 37})
+    carrier = ("unverified DAG summary\n\n" if case == "unverified_prefix" else prefix) + HELD
+    Engine().compress([{"role": "user", "content": carrier}])
+    events += merge_events((carrier, "new turn"))
+    text = carrier + "\n\nnew turn"
+    if case == "altered_remainder":
+        text = text.replace("synthetic", "syntheti!")
+    host = {"S0": {"keys": {}, "tags": {}}}
+    multiset.merge_witnesses(host, events, lambda s: s)
+    out = multiset.score([("user", HELD)], [(93, "S0", "user", text)], host["S0"]["keys"])
+    assert out["deficit_rows"] == int(case != "valid")
+    assert out["surplus_rows"] == 1  # verifier never licenses a generated carrier surplus
+    # Even an authentic carrier alone cannot license composite accounting without a host merge.
+    host = {"S0": {"keys": {}, "tags": {}}}
+    multiset.merge_witnesses(host, [e for e in events if e["event"] != "host_merge"], lambda s: s)
+    assert multiset.score([("user", HELD)], [(93, "S0", "user", carrier)], host["S0"]["keys"])["deficit_rows"] == 1
+
+
 @pytest.mark.parametrize("foreign", [False, True])
 def test_observed_merge_is_grouped_by_lineage(tmp_path, foreign):
     events = fixture.turn_events(37, held=HELD)

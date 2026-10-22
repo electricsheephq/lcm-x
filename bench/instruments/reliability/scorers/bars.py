@@ -222,13 +222,7 @@ def score(cell: dict, cell_dir: Path, db_dir: Path | None = None) -> dict:
     b2_full, ext, ext_ids = externalized.resolve(full, db_dir.parent / "hermes-home")
     b2_stored = [r[:4] for r in b2_full]
     projection_receipts = projections.verify(atts, b2_full, events, group, plugin.get("tree"))
-    # These are observations of the real host merge, grouped by its owning lineage, never hash co-presence.
-    for index, e in enumerate(events):
-        if e.get("event") == "host_merge" and e.get("session") and host is not None:
-            held = host.get(group(e["session"]), {}).get("keys", {}).get(("user", e.get("sha256")))
-            if held is not None:
-                held.setdefault("span_witnesses", []).append({"witness": {"event_index": index,
-                    "phase": e.get("phase"), "turn": e.get("turn")}, "spans": e.get("spans", [])})
+    multiset.merge_witnesses(host, events, group)
     per = {g: (expected_items([a for a in atts if attempt_group(a, group) == g], notices),
                [r for r in b2_stored if group(r[1]) == g]) for g in groups}
     applicable = [b for b in cell.get("bars") or ALL_BARS

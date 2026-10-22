@@ -87,6 +87,24 @@ def occurrence_rows(messages):
 
 def trace_occurrences(etype, emit, context):
     """Observe actual engine ingress without changing arguments, return values or exceptions."""
+    def carriers(engine, messages):
+        verify = getattr(engine, "_generated_context_carrier_remainder", None)
+        if verify is None:
+            return
+        for message in messages:
+            remainder = verify(message)  # the product checks the summary bytes against its DAG nodes
+            if not isinstance(remainder, str) or not remainder.strip():
+                continue
+            content = message["content"]
+            if not content.endswith(remainder):
+                continue
+            offset = len(content[:-len(remainder)].encode()) + len(remainder.encode()) - len(remainder.lstrip().encode())
+            offset -= len(content.encode()) - len(content.lstrip().encode())
+            emit(event="engine_carrier", session=getattr(engine, "_session_id", None), **context(),
+                 sha256=hashlib.sha256(content.strip().encode()).hexdigest(), bytes=len(content.strip().encode()),
+                 spans=[{"sha256": hashlib.sha256(remainder.strip().encode()).hexdigest(),
+                         "byte_offset": offset, "bytes": len(remainder.strip().encode())}])
+
     for name in ("ingest", "on_turn_complete", "compress"):
         original = getattr(etype, name, None)
         if original is None:
@@ -95,7 +113,11 @@ def trace_occurrences(etype, emit, context):
         def traced(self, messages, *args, _original=original, _name=name, **kwargs):
             emit(event="engine_ingress", seam=_name, session=getattr(self, "_session_id", None),
                  **context(), occurrences=occurrence_rows(messages))
-            return _original(self, messages, *args, **kwargs)
+            carriers(self, messages)
+            result = _original(self, messages, *args, **kwargs)
+            if _name == "compress" and isinstance(result, list):
+                carriers(self, result)
+            return result
         setattr(etype, name, traced)
 
 
