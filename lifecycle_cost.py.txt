@@ -1,0 +1,75 @@
+"""Paired lifecycle-call cost; 20 warmup and 200 measured pairs per shape."""
+import argparse
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import platform
+import statistics
+import sys
+import time
+import types
+
+p = argparse.ArgumentParser()
+p.add_argument('--main', type=Path, required=True)
+p.add_argument('--candidate', type=Path, required=True)
+p.add_argument('--scratch', type=Path, required=True)
+p.add_argument('--output', type=Path, required=True)
+a = p.parse_args()
+
+def load(root, name):
+    package = types.ModuleType(name)
+    package.__path__ = [str(root)]
+    sys.modules[name] = package
+    spec = importlib.util.spec_from_file_location(name + '.lifecycle_state', root / 'lifecycle_state.py')
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module.LifecycleStateStore
+
+classes = {'main': load(a.main, 'baseline'), 'candidate': load(a.candidate, 'candidate')}
+a.scratch.mkdir(exist_ok=False)
+stores = {k: cls(a.scratch / (k + '.db')) for k, cls in classes.items()}
+rows = []
+try:
+    for shape in ('new_bind', 'bound_noop', 'rollover_bind', 'resume_bind', 'finalize'):
+        pairs = []
+        for i in range(220):
+            cid = f'{shape}-{i}'
+            for store in stores.values():
+                if shape != 'new_bind':
+                    store.bind_session('A', conversation_id=cid)
+                    store.advance_frontier(cid, 'A', 100)
+                if shape == 'resume_bind':
+                    store.finalize_session(cid, 'A', 100)
+            sample = {}
+            for arm in (('main', 'candidate') if i % 2 == 0 else ('candidate', 'main')):
+                store = stores[arm]
+                t = time.perf_counter_ns()
+                if shape == 'finalize':
+                    store.finalize_session(cid, 'A', 100)
+                else:
+                    store.bind_session('B' if shape == 'rollover_bind' else 'A', conversation_id=cid)
+                sample[arm] = (time.perf_counter_ns() - t) / 1e6
+            if i >= 20:
+                pairs.append(sample)
+        base = statistics.median(x['main'] for x in pairs)
+        cand = statistics.median(x['candidate'] for x in pairs)
+        delta = statistics.median(x['candidate'] - x['main'] for x in pairs)
+        limit = max(base * .1, .05)
+        rows.append({'shape': shape, 'n': 200, 'main_median_ms': base,
+                     'candidate_median_ms': cand, 'paired_median_delta_ms': delta,
+                     'paired_delta_mad_ms': statistics.median(abs(x['candidate'] - x['main'] - delta) for x in pairs),
+                     'allowed_delta_ms': limit, 'pass': delta <= limit, 'pairs': pairs})
+finally:
+    for store in stores.values():
+        store.close()
+result = {'python': platform.python_version(), 'warmup_pairs': 20, 'measured_pairs': 200,
+          'main_lifecycle_sha256': hashlib.sha256((a.main / 'lifecycle_state.py').read_bytes()).hexdigest(),
+          'candidate_lifecycle_sha256': hashlib.sha256((a.candidate / 'lifecycle_state.py').read_bytes()).hexdigest(),
+          'rows': rows}
+a.output.write_text(json.dumps(result, indent=2) + '\n')
+for row in rows:
+    print('{shape}: main={main_median_ms:.6f} ms candidate={candidate_median_ms:.6f} ms '
+          'paired_delta={paired_median_delta_ms:+.6f} ms limit={allowed_delta_ms:.6f} ms pass={pass}'.format(**row))
+assert all(row['pass'] for row in rows)

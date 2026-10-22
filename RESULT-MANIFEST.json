@@ -1,0 +1,62 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "20261023-lifecycle-cas-730",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "lifecycle-cas-730",
+  "claim_class": "advisory",
+  "created": "2026-10-22T20:12:46Z",
+  "settled": "2026-10-22T20:17:50Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "a75ef0d90b49354f88472f7734827e03f7753e9a",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python lifecycle_cost.py --main \"$MAIN\" --candidate \"$CANDIDATE\" --scratch \"$SCRATCH/cost-dbs\" --output cost.json",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "lifecycle-cas-paired200",
+      "metric": "shapes_within_cost_limit",
+      "value": 5.0,
+      "n": 5,
+      "baseline_run": "de14a7f6ec16b671daafc43049171af741f23479",
+      "source": "cost.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "cost.json",
+      "role": "per-item",
+      "sha256": "656c89f331bd129aa6db382dd4184f89eb617f5eac7437b41d8bf068777b1bbf",
+      "bytes": 82264
+    },
+    {
+      "path": "lifecycle_cost.py.txt",
+      "role": "per-item",
+      "sha256": "03f227fd04730dde4c435a18ee3778c5aea2b117e79a87765dbd937793e2c9f4",
+      "bytes": 3449
+    }
+  ],
+  "rescore": {
+    "command": "python -c \"import json; from statistics import median; d=json.load(open(\\\"cost.json\\\")); print([(r[\\\"shape\\\"],median(p[\\\"candidate\\\"]-p[\\\"main\\\"] for p in r[\\\"pairs\\\"])) for r in d[\\\"rows\\\"]])\"",
+    "inputs": [
+      "cost.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "cost.json",
+    "lifecycle_cost.py.txt"
+  ]
+}
