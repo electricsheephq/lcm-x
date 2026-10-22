@@ -38,7 +38,7 @@ def test_flag_load_and_manifest(tmp_path, monkeypatch, flag):
     questions, _, _, excluded = datasets.load(locomo(tmp_path), "locomo", None, include_adversarial=flag)
     assert [q.qid for q in questions] == (["fixture:0", "fixture:1"] if flag else ["fixture:0"])
     if flag:
-        assert questions[1].gold == "" and questions[1].is_abstention and excluded == {}
+        assert questions[1].gold == "DECOY" and questions[1].is_abstention and excluded == {}
     args = cli(tmp_path, "answer", "--delivery", "single", *(["--include-adversarial"] if flag else []))
     args.output.mkdir()
     store = SimpleNamespace(generation="synthetic", engine=lambda q: nullcontext((None, None)))
@@ -108,29 +108,28 @@ def test_score_refuses_mixed_adversarial_flag(tmp_path):
 def make_answers(root, name, label="speaker", hit=2, qid="synthetic-q", ids_hash="same-hash", evidence=None):
     path = root / name
     path.mkdir()
-    prompt = path / "harness/call/prompt.txt"
-    prompt.parent.mkdir(parents=True)
     evidence = evidence or f"[2025-01-01] {'Ada' if label == 'speaker' else 'user'}: PRIVATE_EVIDENCE"
-    prompt.write_text("Instructions\n\nHistory evidence:\n" + evidence + "\nQuestion: PRIVATE_QUESTION")
-    (path / "run-manifest.json").write_text(json.dumps({"delivery": "single", "hit_label": label,
+    role = int("assistant:" in evidence or "user:" in evidence)
+    (path / "run-manifest.json").write_text(json.dumps({"delivery": "single", "hit_label": label, "store_text": "plain", "dataset_sha256": "dataset",
         "id_list_sha256": ids_hash, "question_ids": [qid]}))
     (path / "answers.jsonl").write_text(json.dumps({"qid": qid, "question": "PRIVATE_QUESTION",
-        "hypothesis": "PRIVATE_ANSWER", "trace": [{"tool": "lcm_recall", "result": json.dumps({
+        "hypothesis": "PRIVATE_ANSWER", "evidence_labels": {"role": role, "speaker": 1-role, "summary": 0},
+        "evidence_sha256": common.sha(evidence.encode()), "trace": [{"tool": "lcm_recall", "result": json.dumps({
             "hits": [{"store_id": 1}, {"store_id": hit}], "snippet": "PRIVATE_EVIDENCE"})}],
         "calls": [{"call_dir": "call", "prompt_tokens_estimate": 100}]}))
     return path
 
 
-@pytest.mark.parametrize("failure", [None, "retrieval", "order", "labels", "qids", "ids_hash", "missing_prompt"])
+@pytest.mark.parametrize("failure", [None, "retrieval", "order", "labels", "qids", "ids_hash", "missing_receipt"])
 def test_check_arms(tmp_path, failure):
     a0 = make_answers(tmp_path, "A0", "role")
     a1 = make_answers(tmp_path, "A1", hit=3 if failure == "retrieval" else 2,
                       qid="other-q" if failure == "qids" else "synthetic-q",
                       ids_hash="different" if failure == "ids_hash" else "same-hash",
                       evidence="[2025-01-01] assistant: PRIVATE_EVIDENCE" if failure == "labels" else None)
-    if failure == "missing_prompt":
+    if failure == "missing_receipt":
         source = json.loads((a1 / "answers.jsonl").read_text())
-        source["calls"][0]["call_dir"] = "absent"
+        source.pop("evidence_labels")
         (a1 / "answers.jsonl").write_text(json.dumps(source))
     if failure == "order":
         source = json.loads((a1 / "answers.jsonl").read_text())
