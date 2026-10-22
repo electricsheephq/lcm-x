@@ -4652,9 +4652,9 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             parent = json.loads(saved[0]) if saved else {}
         gap_scan_state.update(parent_value=saved[0] if saved else None,
                               parent_epoch=parent.get("epoch"), turn=parent.get("turn", 0))
-        if gap_scan_state["parent_value"] is None:
+        if record_progress and gap_scan_state["parent_value"] is None:
             gap_scan_state["unproven"] = True
-            return  # A low walk needs a captured parent fence.
+            return  # A writable low walk needs a captured parent fence.
         scan_key += ":low"
         saved = conn.execute("SELECT value FROM metadata WHERE key=?", (scan_key,)).fetchone()
     gap_scan_state["scan_key"] = scan_key
