@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `d0feaa4e738f1d788ab962d03c06db210aacf5acb8fe4c1bcf4ea94b8a0dd977`, rows: 58)
+Generated from `results.jsonl` (sha256: `26061ac53ab5edff1fdd46f81926bdcd9171deb1c35ed25e1e953b6bc11ff342`, rows: 59)
 
 ## Summary
 
@@ -10,6 +10,7 @@ Generated from `results.jsonl` (sha256: `d0feaa4e738f1d788ab962d03c06db210aacf5a
 |---|---|---|---|---|---|
 | AMA-Bench (open-ended, 208 episodes) | strict judged accuracy, fail-closed denominator | 1180/2496 = 47.3% (scored-only 1180/2460 = 48.0%) | F | 2026-08-02 | [details](#ama208-full-2026-08-02) |
 | BEAM-10M (200q) | nugget_score | 0.6332 ± 0.4002 (200 questions) | F | 2026-10-22 | [details](#beam-10m-v0280-20261022) |
+| Coverage marker round 3 (#1624 items 1-2, #1853) | cloud_status_after_one_pass_p50_ms | 12.578187 -> 0.585375 ms after one cloud maintenance pass | P | 2026-10-22 | [details](#coverage-marker-round3-2026-10-22) |
 | D5-A (engine-direct latency proxy) | max_lcm_owned_s | 49.1 s | P | 2026-10-16 | [details](#d5a-max-v0270-2026-10-16) |
 | D5-A (engine-direct latency proxy) | mean_wait_s_per_message | 7.9 s | P | 2026-10-16 | [details](#d5a-mean-wait-v0270-2026-10-16) |
 | D5-A (engine-direct latency proxy) | compaction_p90_s | 44.5 s | P | 2026-10-16 | [details](#d5a-p90-v0270-2026-10-16) |
@@ -190,6 +191,68 @@ NUM_RUNS=1; ± is per-question population SD, not run-to-run variance
 - One public-text scanner match inside third-party benchmark output was reviewed by the release manager and kept unchanged.
 - Public evidence archive SHA-256: 653690d99ec53416f8ccce2a204ed33b0c25baaf96e2577f07acd5aa17c4318f. One run; no upstream acceptance or listing, multi-run variance, or customer value proven.
 - Tier F: one run with no A/A' noise floor or pre-registered gate. Reader and judge are both OpenAI models because OmniMemEval fixes that pair for every backend; the score is comparable across that board, not a cross-family score.
+
+### <a id="coverage-marker-round3-2026-10-22"></a>coverage-marker-round3-2026-10-22
+
+**id:**
+coverage-marker-round3-2026-10-22
+
+**benchmark:**
+Coverage marker round 3 (#1624 items 1-2, #1853)
+
+**metric:**
+cloud_status_after_one_pass_p50_ms
+
+**value:**
+0.585375
+
+**display:**
+12.578187 -> 0.585375 ms after one cloud maintenance pass
+
+**tier:**
+P
+
+**date:**
+2026-10-22
+
+**system_commit:**
+c0b1f17e86868c5312e9752ac1d0594412856997 final metadata-only revision guard; stream and certified-steady measurements cef344e54167848829c22752c6a431191a763985 with explicit unchanged-path delta coverage; identity map linked
+
+**harness_commit:**
+5195676522b0a66f123e3e4c9e9e7d649f98559b public re-score; supplied r2/reviewer instruments and raw-input digests retained under T2 tag lcm-x/lcmx-1624-r3-20261022
+
+**judge:**
+n/a (deterministic instrument, no model judge)
+
+**reader:**
+n/a (synthetic SQLite workload, no answering model)
+
+**retrieval_config:**
+20k metadata-covered cloud rows; chunk revision2 and no initial coverage keys; one bounded metadata-only maintenance pass; no chunking or provider dispatch. Stream: 2000 enclosed4096-byte gap rows, batch32. Exact comparators and remaining scenarios in linked report.
+
+**dataset_exposure:**
+Generated synthetic rows only; no customer text or external provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/RESULT.md; per-measurement source map https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/MEASUREMENT-IDENTITIES.json; T2 tag lcm-x/lcmx-1624-r3-20261022
+
+**variance:**
+Cloud paired interleaved n60/arm; final after p50 .585375ms/IQR .087833ms versus fresh GA .5050835/.1077195. Stream paired n40/arm with p50/IQR; steady paired n200/arm; arrival n30 sequential pairs/tree. No cross-run absolute performance claim.
+
+**failclose:**
+0 new step mismatches in both600-seed oracle modes; false certificates only4accepted legacy seeds; same32 selected chunks; no timing samples omitted after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/ACCEPTANCE-SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/MEASUREMENT-IDENTITIES.json
+
+**caveats:**
+- Local synthetic and unit-host evidence only; remote matrix, merge, release, runtime/customer readiness unproven.
+- One full suite at7852ad7d:1failed17460passed141skipped64xfailed. Introduced revision-promotion failure fixed; affected94+golden90 passed on content committedc0. Final full suite was not rerun.
+- Inherited legacy false-certificate seeds150/212/422/491 remain accepted; differential parity does not repair inherited baseline limitations.
+- Three golden traces explained; early cancellation preserves remaining backlog3 and zero dispatch while existing classifier changes partial to complete.
 
 ### <a id="d5a-max-v0270-2026-10-16"></a>d5a-max-v0270-2026-10-16
 
