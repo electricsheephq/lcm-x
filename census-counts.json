@@ -1,0 +1,213 @@
+[
+  {
+    "corpus": "lme",
+    "input_sha256": "d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
+    "counts": {
+      "messages": 246750,
+      "base_explicit": 106,
+      "explicit_to_unknown": 10,
+      "unknown_identity_violations": 0,
+      "day_additions": 0,
+      "changed": 137,
+      "non_shrink_changes": 0,
+      "changed_to_day": 0
+    },
+    "size_delta_counts": {
+      "-57": 3,
+      "-56": 5,
+      "-55": 3,
+      "-54": 15,
+      "-52": 16,
+      "-50": 7,
+      "-49": 4,
+      "-48": 40,
+      "-47": 1,
+      "-46": 30,
+      "-44": 3,
+      "-40": 7,
+      "-39": 1,
+      "-38": 2
+    },
+    "max_changed_size_delta": -38,
+    "base_explicit_to_unknown_share": 0.09433962264150944,
+    "transitions": [
+      {
+        "base": [
+          "unknown",
+          "no_supported_occurrence_time"
+        ],
+        "head": [
+          "unknown",
+          "no_supported_occurrence_time"
+        ],
+        "count": 240706
+      },
+      {
+        "base": [
+          "relative_to_session",
+          ""
+        ],
+        "head": [
+          "relative_to_session",
+          ""
+        ],
+        "count": 5064
+      },
+      {
+        "base": [
+          "unknown",
+          "ambiguous_relative_expression"
+        ],
+        "head": [
+          "unknown",
+          "ambiguous_relative_expression"
+        ],
+        "count": 616
+      },
+      {
+        "base": [
+          "unknown",
+          "ambiguous_multiple_explicit_dates"
+        ],
+        "head": [
+          "unknown",
+          "ambiguous_multiple_explicit_dates"
+        ],
+        "count": 131
+      },
+      {
+        "base": [
+          "relative_to_session",
+          ""
+        ],
+        "head": [
+          "unknown",
+          "ambiguous_relative_expression"
+        ],
+        "count": 107
+      },
+      {
+        "base": [
+          "explicit",
+          ""
+        ],
+        "head": [
+          "explicit",
+          ""
+        ],
+        "count": 96
+      },
+      {
+        "base": [
+          "relative_to_session",
+          ""
+        ],
+        "head": [
+          "unknown",
+          "mixed_absolute_and_relative_dates"
+        ],
+        "count": 17
+      },
+      {
+        "base": [
+          "explicit",
+          ""
+        ],
+        "head": [
+          "unknown",
+          "mixed_absolute_and_relative_dates"
+        ],
+        "count": 9
+      },
+      {
+        "base": [
+          "relative_to_session",
+          ""
+        ],
+        "head": [
+          "unknown",
+          "ambiguous_multiple_explicit_dates"
+        ],
+        "count": 3
+      },
+      {
+        "base": [
+          "explicit",
+          ""
+        ],
+        "head": [
+          "unknown",
+          "ambiguous_multiple_explicit_dates"
+        ],
+        "count": 1
+      }
+    ],
+    "gate": "STOP"
+  },
+  {
+    "corpus": "locomo",
+    "input_sha256": "79fa87e90f04081343b8c8debecb80a9a6842b76a7aa537dc9fdf651ea698ff4",
+    "counts": {
+      "messages": 5882,
+      "base_explicit": 0,
+      "explicit_to_unknown": 0,
+      "unknown_identity_violations": 0,
+      "day_additions": 0,
+      "changed": 1,
+      "non_shrink_changes": 0,
+      "changed_to_day": 0
+    },
+    "size_delta_counts": {
+      "-48": 1
+    },
+    "max_changed_size_delta": -48,
+    "base_explicit_to_unknown_share": 0.0,
+    "transitions": [
+      {
+        "base": [
+          "unknown",
+          "no_supported_occurrence_time"
+        ],
+        "head": [
+          "unknown",
+          "no_supported_occurrence_time"
+        ],
+        "count": 5744
+      },
+      {
+        "base": [
+          "relative_to_session",
+          ""
+        ],
+        "head": [
+          "relative_to_session",
+          ""
+        ],
+        "count": 136
+      },
+      {
+        "base": [
+          "unknown",
+          "ambiguous_relative_expression"
+        ],
+        "head": [
+          "unknown",
+          "ambiguous_relative_expression"
+        ],
+        "count": 1
+      },
+      {
+        "base": [
+          "relative_to_session",
+          ""
+        ],
+        "head": [
+          "unknown",
+          "ambiguous_relative_expression"
+        ],
+        "count": 1
+      }
+    ],
+    "gate": "PASS"
+  }
+]
