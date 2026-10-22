@@ -204,7 +204,7 @@ def test_fix1_mcp_mismatch_invalidates_row(tmp_path):
     log = tmp_path / "mcp.jsonl"
     log.write_text('{"fatal":"DeliveryMismatch"}\n')
     class Client:
-        def agentic(self, reader, messages, records, server):
+        def agentic(self, reader, messages, records, server, **kwargs):
             records.append({"mcp_log": str(log)})
             return {"content": "unsupported evidence must not be scored"}
     q = SimpleNamespace(qid="q", qtype="x", question="needle", question_date="")

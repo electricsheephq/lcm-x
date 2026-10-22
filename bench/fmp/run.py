@@ -343,11 +343,14 @@ def run(args, client, questions, dataset_sha, ids_sha, excluded, store):
                         speakers = json.loads((store.directory(q) / "speakers.json").read_text()) if args.hit_label == "speaker" else None
                         row.update(delivery.answer(q, args.delivery, client, args.reader, engine, speakers,
                                                    records=calls, hit_label=args.hit_label, store_text=args.store_text))
-            except BudgetStopped:  # D7: a run state (spend or plan quota), excluded from scoring
+            except BudgetStopped as exc:  # D7: a run state (spend or plan quota), excluded from scoring
+                row.update(getattr(exc, "delivery_result", {}))
                 row.update(status="not_run", reason="budget_stopped")
-            except ToolViolation:  # the harness used a non-MCP tool: a failed question
+            except ToolViolation as exc:  # the harness used a non-MCP tool: a failed question
+                row.update(getattr(exc, "delivery_result", {}))
                 row.update(status="tool_violation")
             except Exception as exc:
+                row.update(getattr(exc, "delivery_result", {}))
                 row.update(status="error", error=type(exc).__name__)
             return {**row, "latency_s": time.monotonic() - start}
         destination = args.output / "answers.jsonl"
@@ -418,12 +421,20 @@ def check_arms(runs, output=None):
                     counts[label + "_lines"] += count
             estimates.extend(c["prompt_tokens_estimate"] for c in row.get("calls", []) if c.get("prompt_tokens_estimate") is not None)
         mode = (manifest.get("store_text"), manifest.get("hit_label"))
+        failures = [(status, sorted(qid for qid, row in by_id.items() if row.get("status") == status))
+                    for status in ("error", "not_run")]
+        failure_reason = "; ".join(f"{len(qids)} answer rows {'errored' if status == 'error' else 'not run'}: " +
+                                   ", ".join(qids) for status, qids in failures if qids)
+        non_ok = {s: sum(r.get("status") == s for r in by_id.values())
+                  for s in sorted({r["status"] for r in by_id.values() if r.get("status", "ok") != "ok"})}
         arm = {("plain", "role"): "A0", ("plain", "speaker"): "A1"}.get(mode)
         label_ok = (counts["role_lines"] > 0 and counts["speaker_lines"] == 0 if arm == "A0" else
                     counts["speaker_lines"] > 0 and counts["role_lines"] == 0 if arm == "A1" else False)
         arms.append({**counts, "arm": arm, "store_text": mode[0], "hit_label": mode[1],
             "label_check": "unavailable" if counts["missing_labels"] else "pass" if label_ok else "fail",
-            "reason": "label check unavailable: answer rows lack valid evidence_labels/evidence_sha256" if counts["missing_labels"] else None,
+            "reason": failure_reason or ("label check unavailable: answer rows lack valid evidence_labels/evidence_sha256" if counts["missing_labels"] else None),
+            **({"errored_rows": sum(len(qids) for _, qids in failures)} if failure_reason else {}),
+            **({"non_ok_statuses": non_ok} if non_ok else {}),
             "qid_count": len(by_id), "duplicate_qids": len(rows) - len(by_id),
             "manifest_qids_match": set(by_id) == set(manifest.get("question_ids", [])),
             "qid_set_sha256": sha(json.dumps(sorted(by_id)).encode()),
@@ -438,7 +449,7 @@ def check_arms(runs, output=None):
     report["declared_modes_valid"] = sorted(a["arm"] or "invalid" for a in arms) == ["A0", "A1"]
     report["dataset_hash_equal"] = bool(arms[0]["dataset_sha256"]) and arms[0]["dataset_sha256"] == arms[1]["dataset_sha256"]
     report["passed"] = report["declared_modes_valid"] and report["dataset_hash_equal"] and report["qid_sets_equal"] and report["id_list_hash_equal"] and not report["retrieval_differing_qids"] and all(
-        a["manifest_qids_match"] and a["label_check"] == "pass" and not any(a[k] for k in ("duplicate_qids", "missing_recall"))
+        a["manifest_qids_match"] and a["label_check"] == "pass" and not any(a.get(k, 0) for k in ("duplicate_qids", "missing_recall", "errored_rows"))
         for a in arms)
     output = Path(output) if output else Path(os.path.commonpath([Path(r).resolve().parent for r in runs])) / f"check-arms-{uuid.uuid4().hex}.json"
     try:

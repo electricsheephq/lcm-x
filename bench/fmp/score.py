@@ -55,7 +55,7 @@ def invalid(row, models):
     # Judge-call failures count against their own judge; a call without attribution (older records) stays row-wide.
     calls = row.get("calls", []) + [c for c in row.get("judge_calls", [])
                                     if not c.get("requested_model") or c.get("requested_model") in requested]
-    reasons = {c.get("error") for c in calls} & {"timeout", "model_mismatch"}
+    reasons = {c.get("error") for c in calls if not c.get("retried")} & {"timeout", "model_mismatch"}
     terminal = (row.get("calls") or [{}])[-1]
     if terminal.get("error") == "mcp_unavailable" or ("mcp_ready" in terminal and (
             not terminal["mcp_ready"] or terminal.get("offered_tools", 0) == 0)):
@@ -90,6 +90,7 @@ def ok_verdict(row, model):
 
 
 def usage(calls, n):
+    calls = [c for c in calls if not c.get("retried")]
     return {k: sum(c[k] for c in calls) / max(1, n) if calls and all(c.get(k) is not None for c in calls)
             else None for k in TOKEN_KEYS}
 
@@ -167,7 +168,8 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
         mcp_summary = {"ready_rate": mean([c["mcp_ready"] for c in mcp]),
             "offered_tools_distribution": dict(Counter(c["offered_tools"] for c in mcp)),
             "zero_lcm_calls_ready": sum(c["mcp_ready"] and c["lcm_tool_calls"] == 0 for c in mcp),
-            "mcp_unavailable_retried": sum(c.get("retries", 0) == 1 for c in mcp),
+            "mcp_unavailable_retried": sum(c.get("retries", 0) == 1 or
+                (c.get("error") == "mcp_unavailable" and bool(c.get("retried"))) for c in mcp),
             "mcp_unavailable_excluded": sum("mcp_unavailable" in invalid(r, full) for r in rows)}
         finishes = [c.get("finish_reason") for c in calls if c.get("status") == "ok"]
         judge_calls = [c for r in rows for c in r.get("judge_calls", [])]
@@ -191,8 +193,8 @@ def score(runs, output, allow_partial=False, pair_across_commits=False):
             "reader_tokens_per_question": usage([c for r in attempted for c in r.get("calls", [])], len(attempted)),
             "judge_tokens_per_question": usage([c for r in attempted for c in r.get("judge_calls", [])], len(attempted)),
             "quota": quota(calls + judge_calls),
-            "latency_p50_s": percentile([r.get("latency_s", 0) for r in eligible], .5),
-            "latency_p90_s": percentile([r.get("latency_s", 0) for r in eligible], .9),
+            "latency_p50_s": percentile([r.get("latency_s", 0) - r.get("retry_backoff_s", 0) for r in eligible], .5),
+            "latency_p90_s": percentile([r.get("latency_s", 0) - r.get("retry_backoff_s", 0) for r in eligible], .9),
             "reader_cost": sum(c.get("cost", 0) for c in calls),
             "judge_cost": sum(c.get("cost", 0) for c in judge_calls),
             "cost": sum(c.get("cost", 0) for c in calls + judge_calls),

@@ -851,7 +851,7 @@ def test_harness_agentic_delivery_reads_server_trace(question, tmp_path):
     log = tmp_path / "mcp-log.jsonl"
 
     class Agent:
-        def agentic(self, spec, messages, records, server):
+        def agentic(self, spec, messages, records, server, **kwargs):
             assert "NOT in this prompt" in messages[0]["content"] and server == {"s": 1}
             log.write_text("".join(json.dumps({"tool": "lcm_grep", "counted": c}) + "\n" for c in [True] * 30 + [False]))
             records.append({"status": "ok", "mcp_log": str(log), "finish_reason": "stop", "input_tokens": 1})
@@ -926,7 +926,7 @@ def test_canary_fails_on_leak_violation_or_missing_mcp_and_cleans_up(tmp_path, q
         def call(self, spec, messages, records, **_):
             return self._run(messages, records, False)
 
-        def agentic(self, spec, messages, records, server):
+        def agentic(self, spec, messages, records, server, **kwargs):
             return self._run(messages, records, True)
     data = tmp_path / "data"
     data.mkdir()

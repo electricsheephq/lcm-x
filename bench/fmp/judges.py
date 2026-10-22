@@ -3,7 +3,7 @@ import copy
 import json
 import re
 
-from .models import JUDGES, BudgetStopped
+from .models import JUDGES, BudgetStopped, retry_call
 from .prompts import JUDGE_PROMPT, JUDGE_SYSTEM_PROMPT, get_anscheck_prompt
 
 # OmniMemEval scripts/utils/nlp_metrics.py extract_label_json (fenced or not): the JSON
@@ -66,9 +66,11 @@ def judge(q, hypothesis, client, records=None, models=JUDGES, agreement_model=No
     jm, dataset = judge_messages(q, hypothesis)
     for model in dict.fromkeys([*models, *([agreement_model] if agreement_model else [])]):
         verdict, raw, error = None, [], None
+        retries = {}
         for attempt in range(2):
             try:
-                message = client.call(model, jm, records, temperature=None if dataset.startswith("lme") else 0)
+                message = retry_call(lambda: client.call(model, jm, records,
+                    temperature=None if dataset.startswith("lme") else 0), records, retries)
             except BudgetStopped as exc:
                 if model in models:
                     exc.partial = dict(results)
@@ -84,7 +86,7 @@ def judge(q, hypothesis, client, records=None, models=JUDGES, agreement_model=No
                 break
         status = "ok" if verdict is not None else "not_run" if error == "budget_stopped" else "judge_error"
         results[model] = {"status": status, "correct": verdict, "verdict": "valid" if verdict is not None else "invalid",
-                          "raw": raw, **({"error": error} if error else {})}
+                          "raw": raw, **({"error": error} if error else {}), **retries}
     return results, records
 
 

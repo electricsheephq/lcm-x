@@ -264,6 +264,36 @@ def limited(text):
     return any(k in (text or "").lower() for k in USAGE_LIMIT)
 
 
+def retry_call(call, records, receipt, retryable=None):
+    """Retry transport failures only; retain the caller's frozen prompt and receipts."""
+    first = len(records)
+    for attempt in range(1, 4):
+        before = len(records)
+        try:
+            result = call()
+        except RuntimeError:
+            error = records[-1].get("error") if len(records) > before else None
+            if error not in ("codex_failed", "claude_failed", "timeout", "mcp_unavailable"):
+                raise
+            receipt["attempts"] = attempt
+            receipt.setdefault("attempt_errors", []).append(error)
+            if attempt == 3 or (retryable is not None and not retryable(records[before:])):
+                raise
+            delay = (5, 20)[attempt - 1]
+            receipt["retry_backoff_s"] = receipt.get("retry_backoff_s", 0) + delay
+            time.sleep(delay)
+        else:
+            for record in records[first:before]:
+                record["retried"] = True
+            return result
+        finally:
+            if attempt > 1 or "attempts" in receipt:
+                for record in records[first:]:
+                    record["attempts"] = attempt
+            if attempt > 1:
+                receipt["attempts"] = attempt
+
+
 class Harness:
     def __init__(self, root, quota, runner=None, binary=None, timeout=(600, 1800)):
         self.root = Path(root) / "harness"
@@ -318,8 +348,8 @@ class Harness:
         (call / "events.jsonl").write_text(proc.stdout or "")
         return proc
 
-    def agentic(self, spec, messages, records, server):
-        for attempt in range(2):
+    def agentic(self, spec, messages, records, server, readiness_attempts=2):
+        for attempt in range(readiness_attempts):
             failure = None
             start = len(records)
             try:
@@ -340,16 +370,13 @@ class Harness:
             record.update(mcp_ready=status == "ok" and count > 0, offered_tools=count,
                 offered_tools_hash=offered.get("offered_tools_hash", sha(b"")), startup_status=status,
                 lcm_tool_calls=sum("tool" in e for e in events), retries=attempt)
-            if isinstance(failure, (ToolViolation, BudgetStopped)):
-                raise failure
-            if not record["mcp_ready"] or not count:
-                # Keep the backend's own failure (timeout, model_mismatch, ...) beside the readiness label.
-                record.update(status="error", error="mcp_unavailable", backend_error=record.get("error"))
-                if not attempt:
-                    continue
-                raise RuntimeError("mcp_unavailable") from failure
             if failure:
                 raise failure
+            if not record["mcp_ready"] or not count:
+                record.update(status="error", error="mcp_unavailable", backend_error=record.get("error"))
+                if attempt + 1 < readiness_attempts:
+                    continue
+                raise RuntimeError("mcp_unavailable") from failure
             return result
 
 
@@ -466,11 +493,13 @@ class Codex(Harness):
                                                      ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens"))})
         record.update(identity_source=info["identity_source"], wrapper_overhead_tokens=None,
                       input_tokens_label="total incl. retrieved evidence")
-        if limited(failure):
+        if limited(failure) or ((proc.returncode != 0 or done is None or not texts) and limited(proc.stderr)):
             self.quota.stop("codex")
             records.append({**record, "status": "error", "error": "usage_limit"})
             raise BudgetStopped()
-        if proc.returncode != 0 or done is None or not texts:
+        if proc.returncode != 0 or done is None or not texts or any(
+                e.get("type") == "turn.failed" or (e.get("type") == "error" and not any(
+                    later.get("type") == "turn.completed" for later in events[i + 1:])) for i, e in enumerate(events)):
             records.append({**record, "status": "error", "error": "codex_failed"})
             raise RuntimeError("codex_call_failed")
         if info["model"] and info["model"] != model:
@@ -645,9 +674,9 @@ class Backends:
         backend, model = self.backend(spec)
         return backend.call(spec if backend is not self.openrouter else model, messages, records, tools=tools, **kwargs)
 
-    def agentic(self, spec, messages, records, server):
+    def agentic(self, spec, messages, records, server, **kwargs):
         backend, _ = self.backend(spec)
-        return backend.agentic(spec, messages, records, server)
+        return backend.agentic(spec, messages, records, server, **kwargs)
 
     def context_length(self, spec):
         backend, model = self.backend(spec)
