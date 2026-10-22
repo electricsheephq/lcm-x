@@ -108,8 +108,9 @@ def test_rescore_rejects_summary_calibration_tampering(tmp_path, monkeypatch, fi
     pubs = [json.loads(s) for s in (root/"publications.jsonl").read_text().splitlines()]
     raw.update(recall.score(samples, pubs, **params))
     common.dump(root/"raw-summary.json", raw)
-    with pytest.raises(AssertionError):
-        rescore.v2(root)
+    result = rescore.v2(root)
+    assert result["state"] != "PASS"
+    assert result["rescore_disagreement"]
 
 
 @pytest.mark.parametrize("slow,expected", [(False, "INVALID"), (True, "FAIL")])
@@ -119,6 +120,7 @@ def test_finalization_validity_and_fail_precedence(tmp_path, monkeypatch, slow, 
     assert rescore.v2(tmp_path)["state"] == expected
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_prepare_isolates_mac_setup_environment(corpus, tmp_path, monkeypatch):
     _, manifest, _ = corpus
     monkeypatch.setenv("HOME", str(tmp_path))
@@ -166,6 +168,7 @@ def test_guarded_worker_receipt_rescores(tmp_path, state):
 
 
 @pytest.mark.parametrize("problem", ["unfinished", "tampered", "missing-directory", "missing-db", "missing-table", "omitted"])
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_cell_pre_audit_invalid_receipt(corpus, tmp_path, monkeypatch, problem):
     db, manifest, mod = corpus
     source = tmp_path/"covered"
@@ -199,6 +202,7 @@ def test_cell_pre_audit_invalid_receipt(corpus, tmp_path, monkeypatch, problem):
         assert result["pre_audit"]["reason"]
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_recall_dispatch_omits_absent_store(tmp_path, monkeypatch):
     a = NS(out=tmp_path, scratch=tmp_path, cgroup=tmp_path, cell="recall", lcmx_repo=REPO,
            hermes_source=REPO, rows=250000, model_cache=tmp_path, shape="short", baseline="empty",
@@ -229,6 +233,7 @@ def test_recall_dispatch_rejects_short_budget(tmp_path, monkeypatch):
         floor.main()
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_absent_covered_store_does_not_skip_other_states(tmp_path, monkeypatch):
     a = NS(out=tmp_path, scratch=tmp_path, queries=200, seed=1586, blocks=1, block=0,
         covered_store=tmp_path/"nonexistent", standalone_calibration_s=.572,

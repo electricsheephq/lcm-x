@@ -39,6 +39,7 @@ def test_13_recall_thread_provider_build_is_foreground(tmp_path, monkeypatch):
     assert errors == ["foreground/download preparation forbidden"]
 
 
+@pytest.mark.usefixtures("fake_store_disk_headroom")
 def test_14_mixed_prepare_pilot_covers_every_shard(tmp_path, monkeypatch):
     repo = Path(__file__).resolve().parents[4]
     a = Namespace(scratch=tmp_path/"scratch", out=tmp_path/"out", model_cache=tmp_path,

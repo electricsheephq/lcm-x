@@ -373,6 +373,13 @@ def finalize_block(a, block, results):
             scored["state"] = rollup([scored["state"], "INVALID"])
         if calibrated is None and result.get("measurement_valid") is not False:
             scored["reason"] = "calibration_window_short"
+        parent_state = result["state"]
+        # An uncalibrated child is provisional until this block's window is applied.
+        if parent_state == "UNCALIBRATED" and result.get("calibration_s") is None and not result.get("reason"):
+            parent_state = rollup(c["state"] for c in result["classes"].values())
+        scored["state"] = rollup([scored["state"], parent_state, "INVALID" if result.get("stop_killed") else "PASS"])
+        if result.get("stop_killed"):
+            scored["reason"] = "forced_stop_after_grace"
         result.update(scored, calibration_s=calibrated,
             standalone_calibration_s=a.standalone_calibration_s)
         for name in ("raw-summary.json", "summary.json"):
@@ -399,9 +406,12 @@ def main(a):
     dump(a.out/"queries.json", pinned)
     results = []
     for b in ([a.block] if getattr(a, "block", None) is not None else range(a.blocks)):
-        block = [dict(block=b, state=s, result=cell(a, s, b, "recall"))
-                 for s in ("OFF", "ON-catching-up", "ON-covered")]
-        finalize_block(a, b, block)
+        block = []
+        try:
+            for s in ("OFF", "ON-catching-up", "ON-covered"):
+                block.append(dict(block=b, state=s, result=cell(a, s, b, "recall")))
+        finally:
+            finalize_block(a, b, block)
         results.extend(block)
     states = [r["result"]["state"] for r in results]
     dump(a.out/"summary.json", dict(state=rollup(states),

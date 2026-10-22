@@ -28,6 +28,7 @@ def test_early_abort_writes_summary_and_refreshes_events(fake_catchup, monkeypat
     monkeypatch.setattr(catchup, "launch", failed_launch)
     def stop(_):
         common.append(a.out/"events.jsonl", {"event": "prepared", "seconds": 3})
+        return dict(stop_killed=False)
     monkeypatch.setattr(catchup, "stop", stop)
     # Ensure summary rates have nonzero elapsed time even on an immediate exit.
     clock = fake_catchup[4]
@@ -56,7 +57,7 @@ def test_hung_bind_aborts_with_named_worker(fake_rig, monkeypatch):
         assert clock[0] <= 6, "pre-bind wait escaped max-wall"
     monkeypatch.setattr(rig.time, "sleep", bounded_sleep)
     stops = []
-    monkeypatch.setattr(rig, "stop", lambda p: stops.append((p.pid, clock[0])))
+    monkeypatch.setattr(rig, "stop", lambda p: stops.append((p.pid, clock[0])) or dict(stop_killed=False))
     rig.main()
     summary = common.load(a.out/"summary.json")
     assert (summary["state"], summary["reason"]) == ("ABORTED", "bind_timeout:1")

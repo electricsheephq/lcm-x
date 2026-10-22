@@ -1,12 +1,20 @@
 """Restore process-wide offline instrumentation after each isolated test."""
 import socket
 import subprocess
+import shutil
 
 import pytest
 
 from benchmarking.standalone import ensure_agent_context_engine_importable
 
 ensure_agent_context_engine_importable()
+
+
+@pytest.fixture
+def fake_store_disk_headroom(monkeypatch):
+    # Tiny synthetic stores do not require the production instrument's 150 GiB.
+    usage = shutil.disk_usage
+    monkeypatch.setattr(shutil, "disk_usage", lambda path: usage(path)._replace(free=200*2**30))
 
 
 @pytest.fixture(autouse=True)
