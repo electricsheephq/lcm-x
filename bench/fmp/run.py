@@ -474,8 +474,8 @@ def check_arms(runs, output=None):
                   (key in manifests[0]) != (key in manifests[1]) or
                   json.dumps(manifests[0].get(key), sort_keys=True) != json.dumps(manifests[1].get(key), sort_keys=True)]
     report = {"arms": arms, "qid_sets_equal": set(indexed[0]) == set(indexed[1]),
-        "configuration_mismatches": mismatches,
-        "reason": "run configuration mismatch: " + ", ".join(mismatches) if mismatches else None,
+        **({"configuration_mismatches": mismatches,
+            "reason": "run configuration mismatch: " + ", ".join(mismatches)} if mismatches else {}),
         "id_list_hash_equal": bool(arms[0]["id_list_sha256"]) and arms[0]["id_list_sha256"] == arms[1]["id_list_sha256"],
         "retrieval_differing_qids": sum(indexed[0][q] != indexed[1][q] for q in indexed[0].keys() & indexed[1].keys())}
     report["declared_modes_valid"] = sorted(a["arm"] or "invalid" for a in arms) == ["A0", "A1"]
