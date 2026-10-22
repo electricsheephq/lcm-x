@@ -138,8 +138,10 @@ def test_unreadable_payload_entries_are_reported(engine, monkeypatch):
         def __exit__(self, *exc):
             return self.inner.__exit__(*exc)
 
-    monkeypatch.setattr(maintenance.os, "scandir", lambda p: Entries(real_scandir(p)))
-    output = handle_lcm_command("backup", engine)
+    # Scoped so tmp_path cleanup sees real directory entries.
+    with monkeypatch.context() as patched:
+        patched.setattr(maintenance.os, "scandir", lambda p: Entries(real_scandir(p)))
+        output = handle_lcm_command("backup", engine)
 
     assert "externalized_payload_files: 0" in output
     assert "externalized_payload_unreadable: 1 (not counted above)" in output

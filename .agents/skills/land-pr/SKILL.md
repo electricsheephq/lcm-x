@@ -46,6 +46,8 @@ Require success on the pinned head for:
 
 - `workflow-lint`
 - `lint`
+- `bench-tests`
+- `tests-ran`
 - `test (3.11)`
 - `test (3.12)`
 - `test (3.13)`
@@ -54,8 +56,14 @@ Require success on the pinned head for:
 
 Treat pending, skipped, missing, stale-head, or failing required checks as blocking. Require one
 result per required name; resolve each Actions run and bind its `head_sha` to `$head` and its
-`workflow_id` to protected `CI` (`Differential` for `differential`). Reject name-only, duplicate, or mixed identities. Require strict
-up-to-date status enforcement so a protected-base change blocks merging until CI passes again.
+`workflow_id` to protected `CI` (`Differential` for `differential`). Reject name-only, duplicate, or mixed identities. Require the merge queue
+(`MERGE`, `ALLGREEN`, strict status checks off); do not update the branch before enqueueing.
+
+Build `protected_policy` from `gh api repos/electricsheephq/lcm-x/rulesets/20888757`: copy
+`required_status_checks.parameters` fields `strict_required_status_checks_policy` and `required_status_checks`
+(the latter as `required_checks`, ordered as `REQUIRED_CHECK_PAIRS`); project `merge_queue.parameters` to `merge_queue: {merge_method, grouping_strategy, max_entries_to_merge}`.
+Copy `enforcement` and `conditions.ref_name` as `conditions: {ref_name}`; require active enforcement, include `~DEFAULT_BRANCH` or `refs/heads/main`, no main exclusion, and `max_entries_to_merge: 1`.
+Include `source: "protected-main"`, `base_ref: "main"`, pinned `base_sha`, and `ruleset_id: 20888757`; never invent missing rules.
 
 ## 4. Verify Exact-Head Review Coverage
 
@@ -179,13 +187,18 @@ Only after a maintainer authorizes landing this PR at `$head`, in this order:
 3. Post one merge receipt comment that lists only pointers: GitHub review ids with `user.id`,
    `commit_id`, and `state`; review-log paths or comment links; the author model and each
    reviewer model; any `REVIEW_SKIPPED` line. Never restate verdicts or scores.
-4. Merge with the pinned head:
+4. Immediately repeat Section 3’s exact-head, `workflow_id`, and duplicate identity validation with the same command, then enqueue only the pinned head (green checks and zero unresolved threads):
 
    ```bash
-   gh pr merge <PR> --repo electricsheephq/lcm-x --merge --match-head-commit "$head"
+   gh pr checks <PR> --repo electricsheephq/lcm-x \
+     --json name,state,bucket,workflow,link,startedAt,completedAt
+   node_id="$(gh pr view <PR> --repo electricsheephq/lcm-x --json id --jq .id)"
+   gh api graphql -f query='mutation($id:ID!,$h:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$h}){mergeQueueEntry{position state}}}' -f id="$node_id" -f h="$head"
    ```
 
-Treat `gh pr merge` as the last command; do not run it before steps 1-3 pass.
+The queue-only mutation must fail when the PR is not enqueueable; never arm auto-merge.
+The queue’s `merge_group` CI re-tests the merged tree, and the ruleset enforces thread resolution.
+Treat enqueue as the last write; steps 1-3 and the repeated Section 3 identity validation must pass. A dequeue after failed merge-group CI is a stop, never an automatic retry.
 
 Never use auto-merge, squash, rebase merge, direct `main` pushes, force pushes, branch deletion,
 or a ruleset bypass.
@@ -197,11 +210,11 @@ Verify the result:
 ```bash
 merge_commit="$(gh pr view <PR> --repo electricsheephq/lcm-x \
   --json state,mergeCommit --jq 'select(.state == "MERGED") | .mergeCommit.oid')"; test -n "$merge_commit" && \
-test "$(gh api repos/electricsheephq/lcm-x/commits/main --jq .sha)" = "$merge_commit" && \
-required="$(gh api repos/electricsheephq/lcm-x/rulesets/20888757 --jq '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | {name: .context, app_id: .integration_id}]')" && gh api "repos/electricsheephq/lcm-x/commits/$merge_commit/check-runs?per_page=100" | jq -e --argjson required "$required" --argjson expected '["workflow-lint","lint","test (3.11)","test (3.12)","test (3.13)","test (3.14)","differential"]' --argjson merge_expected '[{"name":"workflow-lint","app_id":15368},{"name":"lint","app_id":15368},{"name":"test (3.11)","app_id":15368},{"name":"test (3.12)","app_id":15368},{"name":"test (3.13)","app_id":15368},{"name":"test (3.14)","app_id":15368}]' '(($required | map(.name) | sort) == ($expected | sort)) and ([.check_runs[] | select(.status == "completed" and .conclusion == "success") | {name, app_id: .app.id}]) as $passed | ($merge_expected - $passed | length == 0)'
+git fetch origin main && git merge-base --is-ancestor "$merge_commit" origin/main && \
+required="$(gh api repos/electricsheephq/lcm-x/rulesets/20888757 --jq '[.rules[] | select(.type == "required_status_checks") | .parameters.required_status_checks[] | {name: .context, app_id: .integration_id}]')" && gh api --paginate --slurp "repos/electricsheephq/lcm-x/commits/$merge_commit/check-runs?per_page=100&filter=all" | jq -e --arg sha "$merge_commit" --argjson required "$required" --argjson expected '["workflow-lint","lint","test (3.11)","test (3.12)","test (3.13)","test (3.14)","bench-tests","tests-ran","differential"]' '. as $pages | ([$required[] | .name] | sort) == ($expected | sort) and all($required[]; .app_id == 15368) and all($required[]; . as $job | [$pages[].check_runs[] | select(.name == $job.name and .app.id == $job.app_id and .head_sha == $sha)] | length > 0 and all(.status == "completed" and .conclusion == "success"))'
 ```
-- Confirm the PR is merged and the six CI checks pass on the merge commit. `differential` runs on PRs only, so it is
-  checked on the pinned head before merge, not on the merge commit.
+- Wait for the queue result; enqueueing is not merging. Evaluate all nine checks on the PR’s own merge commit, a tested group tip because verified `max_entries_to_merge == 1`. Require at least one success per job and every run successful; pending, cancelled or failing runs block.
+  `differential` comes from `Differential` on `merge_group`, not main pushes; CI may have both queue and push runs. Main may advance if the merge commit remains its ancestor; a dequeued entry is a stop.
 - Confirm verified closing issues are closed as completed.
 - Thank external contributors and link the landed PR.
 - Leave ambiguous issues open with a precise relationship note.

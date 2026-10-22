@@ -23,13 +23,20 @@ identity changes. Return `NOT_DIRECTLY_LANDABLE` for a non-`main` base.
 Build JSON for `scripts/maintainer_gate.py` from live reads:
 
 - schema `1`, mode `readiness`, and repository `electricsheephq/lcm-x`;
-- protected base ref/SHA, ruleset `20888757`, strict up-to-date enforcement, and every required
-  `(context, integration_id)` pair;
+- protected base ref/SHA, ruleset `20888757`, `strict_required_status_checks_policy: false`,
+  `enforcement: "active"`, `conditions.ref_name` including `~DEFAULT_BRANCH` or `refs/heads/main` and not excluding main, `merge_queue: {merge_method: "MERGE", grouping_strategy: "ALLGREEN", max_entries_to_merge: 1}`, and every required `(context, integration_id)` pair;
 - PR number, base/head identity, state, draft flag, and accepted issue;
 - exact-head check-runs with name, app id, status, and conclusion;
 - changed files (`filename` and `previous_filename`) for the review-lanes hint;
 - exact-head review evidence for each lane: pointer, head, lane, author model, reviewer model;
 - every review thread and every verified finding with its terminal disposition.
+
+Read `gh api repos/electricsheephq/lcm-x/rulesets/20888757`: copy strict/check fields from the
+`required_status_checks` rule parameters (checks as `required_checks`, ordered as `REQUIRED_CHECK_PAIRS`); copy enforcement/conditions from the ruleset and queue method/grouping/batch size from `merge_queue.parameters`.
+Require `bench-tests` and `tests-ran` from app `15368`, as well as the other required pairs.
+For later authorized landing, require green checks on this exact head and zero unresolved threads, then enqueue
+with the queue-only `enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$h})` mutation in `land-pr` after repeating exact-head check identity validation. It must fail if not enqueueable; never arm auto-merge.
+Do not update the branch first. A dequeue after failed merge-group CI is a stop. Review itself never enqueues.
 
 Do not include merge authorization in readiness mode. Run the standard-library evaluator with
 JSON on stdin. Its output is advisory: it does not prove the provenance of caller-supplied facts

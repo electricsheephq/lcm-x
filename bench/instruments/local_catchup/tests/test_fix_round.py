@@ -49,7 +49,7 @@ def test_3_active_windows_and_na(tmp_path, monkeypatch):
     m.samples[2] = [(i, 1, .5) for i in range(1, 121)]
     m.aggregate = [(i, 1, 1.5) for i in range(1, 121)]
     m.windows = {1: [0, 60], 2: [10, 100]}
-    s = m.summary("COMPLETE", 2)
+    s = m.summary("COMPLETE", 2, end=120)  # Close at the synthetic samples' endpoint.
     assert s["per_process"]["1"]["mean_cores"] == 1
     assert s["aggregate"]["seconds"] == 50
     assert s["tail"]["seconds"] == 60

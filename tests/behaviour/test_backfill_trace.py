@@ -95,8 +95,19 @@ def reached(case: h.Scenario, payloads: list[str]) -> None:
         assert values(payloads, "reopen")
         assert dict(reports[1])["embedded"] > 0
         if shape == "incremental-revision-gap-checkpoint":
-            state = values(payloads, "discovery state")[0]
-            assert any(key.startswith("chunk_gapfill_scan:") for key, _ in state["tables"]["metadata"])
+            states = values(payloads, "discovery state")
+            # A walk is durable intent, not coverage: every fetched, unfilled
+            # row must remain replayable and no through certificate may escape.
+            assert not any(key.startswith("chunk_policy_revision_through:")
+                           for key, _ in states[0]["tables"]["metadata"])
+            scan = next(json.loads(value) for key, value in states[0]["tables"]["metadata"]
+                        if key.startswith("chunk_gapfill_scan:"))
+            assert scan["walk"] == {"below": 2, "pending": [3, 2]}
+            assert "pending" not in scan
+            final = states[-1]["tables"]
+            assert len(final["lcm_chunk_meta"]) == 4
+            assert any(key.startswith("chunk_policy_revision_through:") and value == "4"
+                       for key, value in final["metadata"])
     if shape == "contextual-model-cap-and-estimates":
         preview, applied = (dict(report) for report in reports)
         assert preview["estimated_batches"] == len(values(payloads, "provider dispatch"))

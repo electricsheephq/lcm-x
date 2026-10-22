@@ -11,6 +11,7 @@ from pathlib import Path
 from tests.phase0_hygiene import product_env_keys
 
 _IMPORT_FAILURES = {}
+pytest_plugins = ["tests.diag_1753_capture"]
 # Measured with/without the CI host stub: only engine needs agent.context_engine.
 # Allow that missing host dependency, never arbitrary errors in engine itself.
 _OPTIONAL_HOST_IMPORTS = {"hermes_lcm.engine": {"agent", "agent.context_engine"}}
@@ -111,18 +112,36 @@ def _wait_scheduler_idle(scheduler, timeout: float) -> bool:
 
     deadline = time.monotonic() + timeout
     with scheduler._condition:
-        while (scheduler._queued_keys or scheduler._active_keys or scheduler._follow_up_key) and \
-                time.monotonic() < deadline:
+        # The same background work the scheduler's own drain() waits for: deferred jobs are promoted
+        # once the active one finishes. Exclusive keys belong to the test's own synchronous rebuilds.
+        def busy():
+            return (scheduler._queued_keys or scheduler._deferred_jobs or scheduler._active_keys
+                    or scheduler._follow_up_key)
+
+        while busy() and time.monotonic() < deadline:
             scheduler._condition.wait(max(0.0, deadline - time.monotonic()))
-        return not (scheduler._queued_keys or scheduler._active_keys or scheduler._follow_up_key)
+        return not busy()
 
 
 @pytest.fixture(autouse=True)
 def _isolate_embedding_process_state(request):
     """Keep process caches and model preparation inside the test that owns them."""
+    if "tmp_path" in request.fixturenames:
+        # Set tmp_path up first so it is torn down last: tmp_path_retention_policy=failed deletes a
+        # passing test's directory at its teardown, which must follow the model-preparation and
+        # background-maintenance drains below, not precede them.
+        request.getfixturevalue("tmp_path")
     with pytest.MonkeyPatch.context() as patch:
         provider = sys.modules.get("hermes_lcm.embedding_provider")
         maintenance = sys.modules.get("hermes_lcm.embedding_maintenance")
+        engine = sys.modules.get("hermes_lcm.engine")
+        retrieval = sys.modules.get("hermes_lcm.retrieval_core")
+        # These caches are keyed by database path. tmp_path_retention_policy=failed deletes a
+        # passing test's tmp_path, so a later test can be handed the same path again.
+        if engine is not None:
+            patch.setattr(engine, "_EMBEDDING_SCHEMA_READY", set())
+        if retrieval is not None:
+            retrieval._reset_vector_store_pool()
         if provider is not None:
             patch.setattr(provider, "_FASTEMBED_MODELS", {})
             patch.setattr(provider, "_FASTEMBED_BUILD_LOCKS", {})

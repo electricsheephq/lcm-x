@@ -345,6 +345,16 @@ def build_recall_or_query(query: str) -> str:
     return " OR ".join(recall_content_terms(query))
 
 
+def is_identifier_shaped_query(query: str) -> bool:
+    """Recognize unquoted compound identifiers without changing prose/LIKE routes."""
+    if not query or '"' in query or any(char.isspace() for char in query):
+        return False
+    if "_" not in query and not any(char.isdigit() for char in query):
+        return False
+    safe = sanitize_fts5_query(query)
+    return not requires_like_fallback(query, safe) and len(safe.split()) >= 2
+
+
 def escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
@@ -463,21 +473,38 @@ def normalize_search_sort(sort: str | None) -> str:
 
 
 def build_snippet(text: str, terms: List[str], width: int = 80) -> str:
+    return build_snippet_with_span(text, terms, width)[0]
+
+
+def build_snippet_with_span(text: str, terms: List[str], width: int = 80) -> tuple[str, int, int]:
+    """Return the legacy preview and its undecorated source span."""
     content = (text or "")
     if not content:
-        return ""
+        return "", 0, 0
     lowered = content.lower()
     for term in terms:
         if not term:
             continue
         idx = lowered.find(term.lower())
         if idx >= 0:
-            start = max(0, idx - width // 2)
-            end = min(len(content), idx + len(term) + width // 2)
+            match_start, match_end = idx, idx + len(term)
+            if len(lowered) != len(content):
+                lowered_end = idx + len(term.lower())
+                lowered_pos = 0
+                for source_pos, ch in enumerate(content):
+                    next_pos = lowered_pos + len(ch.lower())
+                    if lowered_pos <= idx < next_pos:
+                        match_start = source_pos
+                    if next_pos >= lowered_end:
+                        match_end = source_pos + 1
+                        break
+                    lowered_pos = next_pos
+            start = max(0, match_start - width // 2)
+            end = min(len(content), match_end + width // 2)
             snippet = content[start:end]
             if start > 0:
                 snippet = "..." + snippet
             if end < len(content):
                 snippet = snippet + "..."
-            return snippet
-    return content[:width] + ("..." if len(content) > width else "")
+            return snippet, start, end
+    return content[:width] + ("..." if len(content) > width else ""), 0, min(len(content), width)

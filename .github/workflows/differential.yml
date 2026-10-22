@@ -3,6 +3,7 @@ on:
   schedule: [{cron: "41 4 * * *"}]
   workflow_dispatch:
   pull_request:
+  merge_group:
 permissions: {contents: read}
 concurrency: {group: '${{ github.workflow }}-${{ github.ref }}', cancel-in-progress: true}
 jobs:
@@ -18,7 +19,7 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
           # Keep identical to scripts/maintainer_gate.py's TURN_PATH_FILES.
           TURN_PATH_FILES: |-
             __init__.py
@@ -84,7 +85,7 @@ jobs:
             tool_registry.py
         run: |
           relevant=true
-          if [[ "$EVENT_NAME" == pull_request ]]; then
+          if [[ "$EVENT_NAME" == pull_request || "$EVENT_NAME" == merge_group ]]; then
             relevant=false
             changed_paths=$(git diff --no-renames --name-only "$PR_BASE_SHA"...HEAD)
             while IFS= read -r path; do

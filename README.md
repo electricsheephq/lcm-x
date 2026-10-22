@@ -156,6 +156,12 @@ See [VISION.md](VISION.md), the [roadmap](ROADMAP.md), the tracker
 [Benchmark methodology](benchmarks/METHODOLOGY.md) for current identities,
 gaps, and proof boundaries.
 
+### Results
+
+[OmniMemEval](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md): contributor-run, accepted upstream.
+[BEAM 100K 71.84: 1st of 12 scored backends](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary); [LongMemEval 87.00: 2nd of 13 scored backends](https://github.com/MemTensor/OmniMemEval/blob/f7476c55/docs/user_memory/results.md#result-summary).
+[Results, configuration, evidence and disclosures](benchmarks/RESULTS.md).
+
 ## LCM vs built-in compression
 
 Hermes core may persist original conversation history in `state.db` before

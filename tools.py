@@ -90,11 +90,12 @@ from .retrieval_core import (
     run_knn,
 )
 from .search_query import (
-    AGE_DECAY_RATE, build_recall_or_query, contains_emoji, normalize_search_sort, recall_content_terms,
+    AGE_DECAY_RATE, build_recall_or_query, contains_emoji, is_identifier_shaped_query,
+    normalize_search_sort, recall_content_terms,
     requires_like_fallback, sanitize_fts5_query,
 )
 from .store import _normalize_observed_at, build_message_fts_spec
-from .vector_store import VectorStore
+from .vector_store import VectorStore, _interrupt_read_on_deadline
 from .config import LCMConfig, embedding_provider_id, profile_bound
 
 if TYPE_CHECKING:
@@ -355,16 +356,8 @@ def _retrieval_candidate_session_ids(
     if deadline is not None and time.monotonic() >= deadline:
         return [], True
     sessions: set[str] = set()
-    # A progress handler is CONNECTION-GLOBAL, and ``MessageStore._conn`` is
-    # explicitly shared across threads (opened ``check_same_thread=False``).
-    # Installing this request's deadline there would let it interrupt a
-    # concurrent read/ingest on the same connection, and the `finally` teardown
-    # would clear a concurrent request's handler -- silently disabling ITS
-    # timeout. So the enumeration gets a private read-only connection and owns
-    # its handler alone: the same idiom every other deadline-guarded read path
-    # here uses (``_lcm_recall_summary_sources``, the chunk/summary hydrators in
-    # ``retrieval_core``). Python's sqlite3 exposes no getter for the installed
-    # handler, so save/restore on the shared connection is not expressible.
+    # Deadline ownership stays on a private connection; the shared store may
+    # already carry another operation's connection-global progress handler.
     connection: sqlite3.Connection | None = None
     try:
         db_path = Path(engine._store.db_path).resolve()
@@ -378,15 +371,23 @@ def _retrieval_candidate_session_ids(
             ),
         )
         connection.execute("PRAGMA query_only=ON")
-        if deadline is not None:
-            connection.set_progress_handler(
-                lambda: 1 if time.monotonic() >= deadline else 0, 1000
-            )
-        for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
-            rows = connection.execute(
-                _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
-            ).fetchall()
-            sessions.update(str(row[0]) for row in rows if row[0] is not None)
+        with _interrupt_read_on_deadline(connection, deadline):
+            for table in _RETRIEVAL_SESSION_SCOPE_TABLES:
+                sql = _RETRIEVAL_DISTINCT_SESSIONS_SQL.format(table=table)
+                try:
+                    row = connection.execute(
+                        f"SELECT json_group_array(session_id) FROM ({sql})"
+                    ).fetchone()
+                    sessions.update(json.loads(row[0]))
+                except (sqlite3.Error, MemoryError) as exc:
+                    if not isinstance(exc, MemoryError) and getattr(exc, "sqlite_errorcode", None) not in (
+                        sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM,
+                    ):
+                        raise
+                    rows = connection.execute(sql).fetchall()
+                    sessions.update(str(row[0]) for row in rows if row[0] is not None)
+            if deadline is not None and time.monotonic() >= deadline:
+                return [], True
     except sqlite3.OperationalError:
         if deadline is not None and time.monotonic() >= deadline:
             return [], True
@@ -1199,6 +1200,7 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                 exclude_session_ids=excluded_session_ids,
                 allow_operators=bool(args.get("_allow_operators", False)),
                 **({"stemmed": True} if args.get("_stemmed") else {}),
+                **({"_include_like_excerpt": True} if args.get("mode") == "recall" else {}),
                 **({"agent_operators": True} if args.get("_agent_operators") else {}),
             )
             if args.get("mode") != "recall":
@@ -1213,6 +1215,8 @@ def _lcm_grep_full_text(args: Dict[str, Any], **kwargs) -> str:
                         has_current_session=has_current_session,
                     )
                 )
+                if args.get("mode") == "recall" and "_like_excerpt" in hit:
+                    results[-1]["_like_excerpt"] = hit["_like_excerpt"]
         except Exception as exc:
             # Grep degrades to whatever the other stages produce, but the
             # failure must reach the PAYLOAD, not just the log: lcm_recall's
@@ -1574,7 +1578,9 @@ def _lcm_grep_full_text_with_deadline(
     def invoke() -> dict[str, Any]:
         message_conn: sqlite3.Connection | None = None
         dag_conn: sqlite3.Connection | None = None
-        expired = [False]
+        stop = threading.Event()
+        close_lock = threading.Lock()
+        watchdog: threading.Thread | None = None
 
         def require_remaining(stage: str) -> float:
             stage_remaining = deadline - time.monotonic()
@@ -1582,11 +1588,21 @@ def _lcm_grep_full_text_with_deadline(
                 raise TimeoutError(f"lcm full-text deadline exhausted before {stage}")
             return stage_remaining
 
-        def interrupt_if_expired() -> int:
-            if time.monotonic() >= deadline:
-                expired[0] = True
-                return 1
-            return 0
+        def interrupt_when_expired() -> None:
+            if stop.wait(max(0.0, deadline - time.monotonic())):
+                return
+            while not stop.is_set():
+                with close_lock:
+                    if stop.is_set():
+                        return
+                    for conn in (message_conn, dag_conn):
+                        if conn is not None:
+                            try:
+                                conn.interrupt()
+                            except sqlite3.ProgrammingError:
+                                pass
+                # Sticky cancellation also covers statements begun after an interrupt.
+                stop.wait(0.01)
 
         try:
             require_remaining("database path resolution")
@@ -1612,8 +1628,10 @@ def _lcm_grep_full_text_with_deadline(
                 conn.row_factory = sqlite3.Row
                 conn.execute("PRAGMA query_only=ON")
                 require_remaining("connection setup")
-                conn.set_progress_handler(interrupt_if_expired, 1000)
-                require_remaining("connection setup")
+            watchdog = threading.Thread(
+                target=interrupt_when_expired, name="full-text-deadline", daemon=True,
+            )
+            watchdog.start()
             read_engine = copy.copy(engine)
             read_io = RetrievalContext(engine._store, engine._dag).bind(
                 message_conn, dag_conn,
@@ -1628,16 +1646,20 @@ def _lcm_grep_full_text_with_deadline(
                     _limit_cap=limit_cap,
                 )
             )
-            if expired[0] or time.monotonic() >= deadline:
+            if time.monotonic() >= deadline:
                 return _lcm_grep_deadline_error(
                     str(args.get("mode") or "semantic").lower(), "full_text"
                 )
             return payload
         finally:
-            if message_conn is not None:
-                message_conn.close()
-            if dag_conn is not None:
-                dag_conn.close()
+            stop.set()
+            with close_lock:
+                if message_conn is not None:
+                    message_conn.close()
+                if dag_conn is not None:
+                    dag_conn.close()
+            if watchdog is not None:
+                watchdog.join()
 
     try:
         return _run_within_deadline(
@@ -2781,6 +2803,14 @@ class _LcmRecallStrictSelector:
                 "content_offset": candidate.get("content_offset"),
             }
             span = _lcm_recall_verified_span(probe, row)
+            used_like_excerpt = False
+            if span is None and candidate.get("_like_excerpt"):
+                # LIKE's ellipses are presentation too. Keep its producer's
+                # exact span, then check the original excerpt against this row.
+                probe.update(candidate["_like_excerpt"])
+                probe["snippet"] = probe["snippet"][:_LCM_RECALL_SNIPPET_CHARS]
+                span = _lcm_recall_verified_span(probe, row)
+                used_like_excerpt = span is not None
             used_fts_window = False
             if span is None:
                 match_span = _lcm_recall_fts_match_span(
@@ -2797,11 +2827,11 @@ class _LcmRecallStrictSelector:
                     used_fts_window = span is not None
             if span is None:
                 continue
-            if used_fts_window or candidate is not hit or probe["snippet"] != hit.get("snippet"):
+            if used_fts_window or used_like_excerpt or candidate is not hit or probe["snippet"] != hit.get("snippet"):
                 # Same row, quoted where it really says it.
                 hit["snippet"] = probe["snippet"]
                 hit["content_offset"] = probe["content_offset"]
-                if used_fts_window:
+                if used_fts_window or used_like_excerpt:
                     hit.pop("chunk_span", None)
                 elif candidate.get("chunk_span"):
                     hit["chunk_span"] = candidate["chunk_span"]
@@ -2972,6 +3002,8 @@ def _lcm_recall_event_time(stored: dict[str, Any] | None) -> dict[str, str]:
     source = stored.get("observed_at_source")
     if source:
         fields["event_time_source"] = str(source)
+    if stored.get("time_uncertain") == "carried":
+        fields["time_uncertain"] = "carried"
     return fields
 
 
@@ -2988,8 +3020,8 @@ def _lcm_recall_event_time_rows(
     optional, so the read gets a private read-only connection whose busy wait
     and statement run are bounded by the remaining budget, the idiom of
     ``_lcm_recall_summary_source_hits``; the shared store connection's 30 s busy
-    timeout is never used and never changed. It selects only the three columns
-    the field needs, never ``content`` or ``tool_calls``, and a read that ends
+    timeout is never used and never changed. It selects only time metadata and
+    carried relation IDs, never ``content`` or ``tool_calls``, and a read that ends
     past the deadline is dropped rather than returned late (#995).
     """
     if time.monotonic() >= deadline:
@@ -3018,6 +3050,12 @@ def _lcm_recall_event_time_rows(
             f"WHERE store_id IN ({placeholders})",
             store_ids,
         ).fetchall()
+        # The writer cannot mark an unstamped row, and recall shows no event
+        # time for one. Avoid adding relation reads to that ordinary path.
+        timed_ids = [int(sid) for sid, observed, _source in rows if observed is not None]
+        carried_ids = (
+            engine._store.get_carried_stamp_ids(timed_ids, connection=conn) if timed_ids else set()
+        )
     except (sqlite3.Error, OSError) as exc:
         logger.debug("lcm_recall event_time read failed: %s", exc)
         if expired[0] or time.monotonic() >= deadline:
@@ -3029,7 +3067,10 @@ def _lcm_recall_event_time_rows(
     if time.monotonic() >= deadline:
         return {}, "deadline"
     return {
-        int(store_id): {"observed_at": observed_at, "observed_at_source": source}
+        int(store_id): {
+            "observed_at": observed_at, "observed_at_source": source,
+            **({"time_uncertain": "carried"} if int(store_id) in carried_ids else {}),
+        }
         for store_id, observed_at, source in rows
     }, None
 
@@ -3094,6 +3135,19 @@ def _lcm_recall_answer_ready_content(
             continue
         content = str(stored.get("content") or "")
         span = hit.get("chunk_span") or {}
+        if not span and len(content) > _LCM_RECALL_ANSWER_READY_CONTENT_CHARS:
+            # Short rows keep their legacy evidence_span and output bytes.
+            # Emoji has no lexical hydration terms; use LIKE's verified span.
+            for candidate in [hit, *entry.get("_alternates", [])]:
+                excerpt = candidate.get("_like_excerpt")
+                if not excerpt:
+                    continue
+                probe = {**candidate, **excerpt}
+                probe["snippet"] = probe["snippet"][:_LCM_RECALL_SNIPPET_CHARS]
+                like_span = _lcm_recall_verified_span(probe, stored)
+                if like_span is not None:
+                    span = {"char_start": like_span[0], "char_end": sum(like_span)}
+                    break
         if not span and fts_arm_index is not None and fts_arm_index in entry.get("ranks", {}):
             # Fusion may retain a chunk preview; use the FTS representation of
             # this same row when it is available, before the literal fallback.
@@ -3193,21 +3247,35 @@ def _lcm_recall_fts_arm(
     """FTS arm: raw messages across all eligible sessions."""
     # Emoji cannot reach MATCH: keep the raw query on the existing LIKE route.
     or_query = "" if contains_emoji(query) else build_recall_or_query(query)
-    payload = _lcm_grep_full_text_with_deadline(
-        {
-            "query": or_query or query,
-            "_allow_operators": bool(or_query),
-            "_stemmed": True,
-            "sort": "relevance" if or_query or contains_emoji(query) else "recency",
-            "mode": "recall",
-            "session_scope": "all",
-            "limit": candidate_limit,
-            "_excluded_session_ids": excluded_session_ids,
-        },
-        engine=engine,
-        deadline=deadline,
-        limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
-    )
+    args = {
+        "query": or_query or query,
+        "_allow_operators": bool(or_query),
+        "_stemmed": True,
+        "sort": "relevance" if or_query or contains_emoji(query) else "recency",
+        "mode": "recall",
+        "session_scope": "all",
+        "limit": candidate_limit,
+        "_excluded_session_ids": excluded_session_ids,
+    }
+    payload = None
+    if is_identifier_shaped_query(query):
+        payload = _lcm_grep_full_text_with_deadline(
+            {**args, "query": f'"{query}"', "_allow_operators": True, "sort": "relevance"},
+            engine=engine,
+            deadline=deadline,
+            limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
+        )
+        # A clean literal miss alone may broaden; errors keep their disclosure
+        # and never spend the semantic reservation on a second full-text query.
+        if not payload.get("results") and "error" not in payload and not payload.get("message_search_error"):
+            payload = None
+    if payload is None:
+        payload = _lcm_grep_full_text_with_deadline(
+            args,
+            engine=engine,
+            deadline=deadline,
+            limit_cap=_LCM_GREP_HYBRID_CANDIDATE_CAP,
+        )
     if "error" in payload:
         return [], payload
     # Grep survives a message-search crash on its other stages, but THIS arm
@@ -3235,6 +3303,8 @@ def _lcm_recall_fts_arm(
             "_fts_snippet": row.get("snippet") or "",
             "from_current_session": bool(row.get("from_current_session")),
         }
+        if "_like_excerpt" in row:
+            hit["_like_excerpt"] = row["_like_excerpt"]
         hit["expand_hint"] = _lcm_recall_excerpt_expand_hint(hit)
         hits.append(hit)
     return hits, None
@@ -4346,7 +4416,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         session_delivery = partial(
             deliver_session, engine=engine, deadline=deadline, excluded=excluded_session_ids,
             allowed=candidate_session_ids, seen_refs=seen_refs, delta_requested=delta_requested,
-            event_time_fields=_lcm_recall_event_time, occurrence=include_occurrence_time,
+            event_time_fields=_lcm_recall_event_time,
+            occurrence=include_occurrence_time,
             summary_leads=summary_leads,
         )
     return recall_delivery.deliver_recall(

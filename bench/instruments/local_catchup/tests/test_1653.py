@@ -240,7 +240,7 @@ def test_11_trace_only_backfill_does_not_count(tmp_path):
 
 @pytest.mark.parametrize("module", [turns, recall])
 def test_12_mac_summary_has_corpus_qualifiers(tmp_path, monkeypatch, module):
-    a = Namespace(out=tmp_path, seed=1586, blocks=1, samples=10, queries=1,
+    a = Namespace(out=tmp_path, seed=1586, blocks=1, samples=10, queries=1, standalone_calibration_s=.5,
                   smoke=True, label="Mac", shape="mixed", baseline="upgrade")
     monkeypatch.setattr(module, "prepare", lambda a: {"canaries": [dict(id="canary")]})
     monkeypatch.setattr(module, "cell", lambda *args: dict(state="INVALID", bind_ms=1,

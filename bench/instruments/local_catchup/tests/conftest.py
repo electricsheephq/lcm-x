@@ -4,6 +4,10 @@ import subprocess
 
 import pytest
 
+from benchmarking.standalone import ensure_agent_context_engine_importable
+
+ensure_agent_context_engine_importable()
+
 
 @pytest.fixture(autouse=True)
 def guard_state(monkeypatch):

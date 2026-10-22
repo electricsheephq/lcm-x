@@ -1,4 +1,5 @@
 """Complete identity-scoped coverage and immutable-preimage audit, read-only SQLite."""
+from contextlib import closing
 import hashlib
 import json
 import sqlite3
@@ -42,7 +43,7 @@ def preimage(c, node_bound=None):
 
 
 def audit(db, manifest):
-    with connect(db) as c:
+    with closing(connect(db)) as c:
         c.execute("BEGIN")
         before = manifest["preimage"]
         now = preimage(c)
@@ -97,7 +98,7 @@ def audit(db, manifest):
 
 def progress(db, manifest, verify=False):
     result = {"classes": {}, "raw_unchanged": True, "changed_vectors": [], "changed_metadata": [], "integrity": "not_checked"}
-    with connect(db) as c:
+    with closing(connect(db)) as c:
         c.execute("BEGIN")
         if verify:
             now, before = preimage(c), manifest["preimage"]
@@ -145,7 +146,7 @@ def vector_counts(db, manifest):
     audits remain authoritative; these counts only track incompleteness in flight.
     """
     counts = {}
-    with connect(db) as c:
+    with closing(connect(db)) as c:
         for kind, table, meta, key, task, scope, bound in (
             ("chunks", "lcm_chunk_vectors", "lcm_chunk_meta", "chunk_id", "chunk", "m.store_id", manifest["rows"]),
             ("leaves", "lcm_embedding_vectors", "lcm_embedding_meta", "embedded_id", "summary", "CAST(m.embedded_id AS INTEGER)", len(manifest["expected"]["leaves"]))):
@@ -157,7 +158,7 @@ def vector_counts(db, manifest):
 
 def baseline(db, manifest):
     result = audit(db, manifest)
-    with connect(db) as c:
+    with closing(connect(db)) as c:
         count = sum(c.execute(f"SELECT count(*) FROM {t}").fetchone()[0] for t in ("lcm_chunk_vectors", "lcm_embedding_vectors"))
     if (not result["raw_unchanged"] or result["changed_vectors"] or result["changed_metadata"]
             or result["unexpected_rows"] or result["unpaired_rows"] or result["residue"] or result["integrity"] != "ok"

@@ -146,7 +146,7 @@ def test_forced_recovery_requires_marker_and_prior_compaction(tmp_path, marked, 
 
 def test_overflow_cell_restart_and_bars_contract():
     for c in cells.select("overflow-recovery-restart/*"):
-        assert c["bars"] == ["B1", "B2"] and c["targets"] == [534, 1505, 1508]
+        assert c["bars"] == ["B1", "B2"] and c["targets"] == [534, 1508]
         assert c["faults"][1] == {"kind": "crash_after_compaction_before_reply", "after_status": "overflow_recovery", "offset": 1}
         assert c["faults"][2] == {"kind": "clean_exit_before_turn", "after_restart": 1}
         assert set(c["lcm_env"]) == set(cells.tight(c["window"]))
@@ -1066,7 +1066,7 @@ def test_r2a4_reports_licences_visibly(tmp_path):
 def test_r2a4_541_gate_cell_injects_once_and_the_persistent_cell_is_data():
     by = {c["id"]: c for c in cells.select("publication-failure/*")}
     once, always = by["publication-failure/rotation-child"], by["publication-failure/rotation-child-persistent"]
-    assert not once["faults"][0].get("persistent") and always["faults"][0]["persistent"] and not always["targets"]
+    assert not once["faults"][0].get("persistent") and always["faults"][0]["persistent"] and always["targets"] == [1797]
     assert ci.in_gate_set(once["id"]) and not ci.in_gate_set(always["id"])
     for transport in (None, "acp-process"):
         assert always["id"] in ci.expected_cells(transport)

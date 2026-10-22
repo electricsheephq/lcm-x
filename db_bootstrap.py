@@ -966,17 +966,29 @@ def ensure_temporal_rollup_tables(conn: sqlite3.Connection) -> None:
         )
 
     def ensure_index(name: str, create_sql: str) -> None:
-        existing = conn.execute(
-            "SELECT sql FROM sqlite_master WHERE type='index' AND name=?",
-            (name,),
-        ).fetchone()
         def normalize(value: object) -> str:
             return " ".join(str(value or "").lower().split())
-        if existing is not None and normalize(existing[0]) == normalize(create_sql):
-            return
-        if existing is not None:
-            conn.execute(f"DROP INDEX {name}")
-        conn.execute(create_sql)
+        for attempt in range(5):  # A delayed peer DROP can remove a winning index.
+            existing = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,),
+            ).fetchone()
+            if existing is not None and normalize(existing[0]) == normalize(create_sql):
+                return
+            if existing is not None:
+                conn.execute(f"DROP INDEX IF EXISTS {name}")
+            try:
+                conn.execute(create_sql)
+                return
+            except sqlite3.OperationalError as exc:
+                if str(exc) != f"index {name} already exists":
+                    raise
+                concurrent = conn.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='index' AND name=?", (name,),
+                ).fetchone()
+                if concurrent is not None and normalize(concurrent[0]) == normalize(create_sql):
+                    return
+                if attempt == 4:
+                    raise
 
     ensure_index(
         "idx_lcm_rollups_ready_period",
@@ -1127,16 +1139,31 @@ def ensure_temporal_rollup_invalidation_triggers(conn: sqlite3.Connection) -> No
     def normalized(sql: object) -> str:
         return re.sub(r"\s+", "", str(sql or "").lower()).rstrip(";")
 
-    for trigger_name, expected_sql in trigger_sql.items():
-        row = conn.execute(
+    # Healthy opens must remain read-only behind another WAL writer (#622).
+    # A repair still re-reads every definition after acquiring write ownership.
+    if all(
+        (row := conn.execute(
             "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
             (trigger_name,),
-        ).fetchone()
-        if row is not None and normalized(row[0]) != normalized(expected_sql):
-            conn.execute(f"DROP TRIGGER {trigger_name}")
-            row = None
-        if row is None:
-            conn.execute(expected_sql)
+        ).fetchone()) is not None
+        and normalized(row[0]) == normalized(expected_sql)
+        for trigger_name, expected_sql in trigger_sql.items()
+    ):
+        return
+
+    # Reuse schema-repair ownership: BEGIN IMMEDIATE before the decisive read,
+    # or a savepoint that leaves an existing caller transaction uncommitted.
+    with _fts_repair_ownership(conn):
+        for trigger_name, expected_sql in trigger_sql.items():
+            row = conn.execute(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?",
+                (trigger_name,),
+            ).fetchone()
+            if row is not None and normalized(row[0]) != normalized(expected_sql):
+                conn.execute(f"DROP TRIGGER {trigger_name}")
+                row = None
+            if row is None:
+                conn.execute(expected_sql)
 
 
 REQUIRED_TEMPORAL_ROLLUP_TABLES = (
@@ -1715,6 +1742,16 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
     vectors, keyed on ``(chunk_id, identity_hash)`` where ``chunk_id`` is
     ``store_id:chunk_index``.
     """
+    ensure_metadata_table(conn)
+    has_messages = conn.execute("SELECT 1 FROM sqlite_master WHERE name='messages' AND type='table'").fetchone()
+    observed = conn.execute(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' "
+        "AND name IN ('lcm_chunk_gapfill_delete', 'lcm_chunk_gapfill_update', 'lcm_chunk_gapfill_message')",
+    ).fetchone()[0]
+    if observed != (3 if has_messages else 2):
+        # Legacy proof predates mutation observation; revalidate it once.
+        conn.execute("DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%' "
+                     "OR key LIKE 'chunk_policy_revision_through:%'")
     conn.executescript(
         """
         CREATE TABLE IF NOT EXISTS lcm_chunk_meta (
@@ -1750,8 +1787,41 @@ def ensure_chunk_tables(conn: sqlite3.Connection) -> None:
             bits BLOB NOT NULL,
             PRIMARY KEY(chunk_id, identity_hash)
         );
+
+        -- A skip proof certifies derived coverage, never immutable source data.
+        -- Raw SQL repair and chunk replacement must invalidate it atomically.
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_delete
+        AFTER DELETE ON lcm_chunk_meta BEGIN
+            DELETE FROM metadata WHERE key IN (
+                'chunk_gapfill_scan:' || OLD.identity_hash,
+                'chunk_policy_revision_through:' || OLD.identity_hash);
+        END;
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_update
+        AFTER UPDATE OF store_id, identity_hash, chunk_id, char_start, char_end ON lcm_chunk_meta BEGIN
+            DELETE FROM metadata WHERE key IN (
+                'chunk_gapfill_scan:' || OLD.identity_hash,
+                'chunk_policy_revision_through:' || OLD.identity_hash,
+                'chunk_gapfill_scan:' || NEW.identity_hash,
+                'chunk_policy_revision_through:' || NEW.identity_hash);
+        END;
         """
     )
+    if has_messages:
+        conn.executescript("""
+        CREATE TRIGGER IF NOT EXISTS lcm_chunk_gapfill_message
+        AFTER UPDATE OF role, content ON messages
+        WHEN lower(trim(OLD.role)) IN ('user', 'assistant')
+          OR lower(trim(NEW.role)) IN ('user', 'assistant')
+          OR (OLD.role IS NOT NEW.role AND
+              (lower(trim(OLD.role)) = 'tool' OR lower(trim(NEW.role)) = 'tool'))
+          OR (lower(trim(OLD.role)) = 'tool' AND lower(trim(NEW.role)) = 'tool'
+              AND (trim(COALESCE(OLD.content, ''), char(9,10,11,12,13,32)) = '')
+                  != (trim(COALESCE(NEW.content, ''), char(9,10,11,12,13,32)) = ''))
+        BEGIN
+            DELETE FROM metadata WHERE key LIKE 'chunk_gapfill_scan:%'
+                OR key LIKE 'chunk_policy_revision_through:%';
+        END;
+        """)
 
 
 # The tables and indexes ``ensure_chunk_tables`` owns. Verified on chunk-corpus

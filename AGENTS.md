@@ -148,10 +148,10 @@ Run `actionlint` when workflows change. Record exact commands and results in the
 - Use `.agents/skills/land-pr/SKILL.md` when deciding readiness or landing a PR.
 - Pin the PR base SHA and `headRefOid`; CI and review must cover that exact head or an
   explicitly bounded delta.
-- Enforcement is strict exact-head CI (`workflow-lint`, `lint`, `test (3.11)` through
-  `test (3.14)`, and `differential` on the PR head), required review-thread resolution, and merge commits only. Keep strict
-  required-status enforcement enabled so a protected-base change blocks merging until CI passes
-  on an up-to-date head.
+- Enforcement is exact-head CI (`workflow-lint`, `lint`, `bench-tests`, `tests-ran`,
+  `test (3.11)` through `test (3.14)`, and `differential`), resolved threads, and merge commits only.
+  Strict required-status checks are off; the merge queue (`MERGE`, `ALLGREEN`) tests the merged tree.
+  Require green PR-head checks and zero unresolved threads, then enqueue the reviewed head; do not update the branch first.
 - Review obligation (`land-pr`): every PR needs at least one independent review of the exact
   head. When the `scripts/maintainer_gate.py` risk hint reports review-provenance-policy or LCM
   memory-preservation risk, it needs an acceptance review and a distinct adversarial review from
@@ -168,7 +168,7 @@ Run `actionlint` when workflows change. Record exact commands and results in the
   owner's `pull_request` bypass is for a recorded emergency only, noted on the PR.
 - Use merge commits for PRs so contributor and upstream commits remain intact. Do not squash
   or rebase-merge into `main`.
-- Merge deterministically with the pinned head:
+- Enqueue deterministically with the pinned head (a dequeue after failed merge-group CI is a stop):
 
 ```bash
 gh pr merge <PR> --merge --match-head-commit <HEAD_SHA>

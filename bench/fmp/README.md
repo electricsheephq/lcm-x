@@ -1,8 +1,8 @@
 # Frontier Measurement Protocol v1
 
 Refs electricsheephq/lcm-x#1189. This harness produces local measurement
-artifacts; the 20-question smoke is not a published quality row. No host contract
-changes. LCM-X is imported from the explicitly selected checkout, never edited.
+artifacts; the smoke (30 LME-S questions plus every LoCoMo conv-30 question outside
+category 5) is not a published quality row. No host contract changes. LCM-X is imported from the explicitly selected checkout, never edited.
 
 Run from the checkout with Python 3.11+ and `httpx`; reuse an existing LCM-X
 environment. Local embeddings require exactly fastembed 0.8.0. No install is
@@ -59,23 +59,42 @@ GLM readers support `single`, `full_context` (a conservative 128k admission cap)
 - Stores ingest at each session's date through the production store clock (format 3), so recency and
   event times behave as in a live store. Paired tests drop a question with an error in either arm.
 
-The smoke runs 30 cleaned LME-S questions stratified over question type plus
-abstention (seed 1189; ids in `lme-ids.json`/`lme-strata.json`) with `off`,
-Sol/high, three deliveries and two judges, and one LoCoMo conversation (conv-30)
-agentic and single. Its workers=3 and persistent shared $9.50 ledger cover all
-deliveries and judgments. Reruns must retain that ledger and cap. The default
-output must be outside the checkout (for example, an absolute run directory). Existing run files are never overwritten by
-answer/judge; use a new output directory.
+The subscription smoke selects 30 cleaned LME-S questions stratified over question
+type plus abstention (seed 1189; ids in `lme-ids.json`/`lme-strata.json`) and one
+LoCoMo conversation (conv-30, excluding category 5). Sol/high answers both sets
+with paired `off` and `local` configurations under `single` and `agentic` deliveries;
+`full_context` is available in the CLI but is not part of this smoke. A separate
+Opus agentic `off` arm uses a seeded 10 of the 30 LME-S ids (`opus-ids.json`).
+Both reader harnesses must pass their leakage canaries before the answer arms run.
+Judging uses the CLI defaults: Sol/medium on every answer and Opus on a seeded
+10% agreement sample, rather than two judges on every answer.
+All commands use four workers and share the subscription quota ledger `quota.json`;
+there is no spend ledger or dollar cap in this smoke. OpenRouter remains a separate
+opt-in path. The output must be outside the checkout (for example, an absolute run
+directory). The script skips an answer step only when both paired arms' `answers.jsonl`
+files already exist, and it does not check that they are complete; individual `answer`
+and `judge` commands refuse to overwrite existing files. After an interrupted answer step,
+or for a new run, use a new output directory.
+
+Smoke matrix and selection: [run_smoke.sh](run_smoke.sh). CLI defaults and options:
+[run.py](run.py); model defaults: [models.py](models.py).
 
 For individual commands, use `nice -n 19 bash bench/fmp/run.sh COMMAND` with:
 
 - `--lcmx-repo CHECKOUT --dataset lme-s|lme-m|locomo --data FILE`
 - `--question-ids FILE --split-label LABEL` (JSON string array or one id per line)
 - `--config off|local|voyage[+rerank:MODEL] --summaries none|deterministic`
-- `--store-root DIR --output DIR --max-spend USD --spend-ledger FILE`
-- `--reader MODEL --delivery agentic|single|full_context --workers N` (default 12)
-- `--allow-dirty` (answer on an LCM-X tree with uncommitted changes; recorded as `<sha>-dirty`)
-- `--allow-partial` (score arms whose run question sets differ after a spend stop)
+- `--store-root DIR --output DIR --quota-ledger FILE --quota-stop PERCENT`
+  (quota ledger defaults to `<output>/quota.json`; Codex weekly stop defaults to 95%)
+- `--max-spend USD --spend-ledger FILE` (both required only for the metered OpenRouter path)
+- `--reader MODEL --delivery agentic|single|full_context --workers N` (default 4)
+- `--allow-dirty` (permit an LCM-X tree with uncommitted changes; recorded as
+  `<sha>-<content-sha256>-dirty`, hashing the tracked diff plus untracked names/content;
+  see [common.py](common.py))
+- `--allow-partial` (score incomplete runs or arms with unequal executed question sets
+  after a budget stop; declared question ids must still match)
+- `--pair-across-commits` (opt in to scoring different LCM-X commit identities;
+  default scoring requires matching commits and toolsets)
 
 Use `build-stores`, then `answer`, then `judge` with identical dataset, selection,
 split and output arguments. `answer` verifies/builds missing stores before API
@@ -122,7 +141,9 @@ code change) that fall back to the real clock on threads without a question.
 
 The agentic system prompt states the history is not in the prompt and must be
 retrieved with the tools; single and full-context carry the evidence block.
-The budget is 12 tool calls and 200k cumulative reported `prompt_tokens`. The next
+For the metered OpenRouter loop, the budget is 12 tool calls and 200k cumulative
+reported `prompt_tokens` ([delivery.py](delivery.py)); subscription agentic readers
+use the MCP harness's 30-call cap described above. In the metered loop, the next
 call's size is the previous call's reported `prompt_tokens` plus ceil(chars/4) of
 the appended messages; a tool round is offered only while a forced final after it
 still fits, reserving the largest tool result seen (at least 8k tokens) plus 4k for
@@ -130,8 +151,8 @@ the tool-call turn. A tool result that would break the budget is replaced by an
 error. The forced final keeps `tools` with `tool_choice: "none"`; rows record
 `forced_final` and every call's `finish_reason` (reader `max_tokens` 32k).
 
-The spend ledger reserves conservative maximum request cost (including model
-pricing overrides) before dispatch. A timeout or missing accounting consumes its
+For the metered OpenRouter path, the spend ledger reserves conservative maximum
+request cost (including model pricing overrides) before dispatch. A timeout or missing accounting consumes its
 reservation as estimated cost; actual and estimated charges are distinguished
 per call. In-flight reservations prevent dispatch beyond the cap. 429/5xx and
 transport timeouts, and HTTP-200 error payloads, get at most three retries. Provider fallback is disabled;
@@ -147,8 +168,11 @@ run state (as is HTTP 402, an exhausted OpenRouter balance): those rows are `not
 `incomplete`, and `score` refuses unequal run sets unless `--allow-partial`.
 Every `--judge` model is required: a stop from any required judge excludes the row.
 Only `--agreement-judge` stops and failures leave required verdicts intact and drop the sample from agreement.
-`score` also requires equal commits, offered toolsets, split label, dataset and id-list hashes.
-Explicit `--pair-across-commits` permits toolset changes and records each arm's toolset. Agreement uses only
+By default, `score` requires equal LCM-X commits, offered toolsets, split label,
+dataset and id-list hashes. Explicit `--pair-across-commits` requires at least two
+distinct LCM-X commit identities, permits toolset changes and records each arm's
+commit and toolset. Harness identity and the other pairing checks still apply
+([score.py](score.py)). Agreement uses only
 valid paired verdicts and reports its N. Paired comparisons exclude a question
 if either arm skipped it. Bootstrap uses 10,000 resamples with seed 1189.
 
@@ -267,3 +291,77 @@ Reports also retain per-ID caps/tokens, call-cache counts and timing; result
 cards name the guard margin and measured MDE. A warm cached A/A is an identity
 control (`INCOMPLETE/no-op-arm`), never an independent placebo sample. Result cards cover advisory timing;
 publication and the full acceptance pilot remain separate owner actions.
+
+### DM0 derived-memory instrument (#1191)
+
+`python -m bench.fmp.derived [inventory|freeze|extract|answer|score] --product PRODUCT
+--source INPUT.json --run RUN [--cache W1_CACHE]` defaults to read-only inventory.
+It is bench-only and leaves product flags, V4 publication and existing FMP defaults alone.
+`freeze` requires complete LOCAL/25 retrieval/store identities, rebuilds DM0-886 from
+hash-pinned datasets, and snapshots a create-only manifest before any model call.
+Incomplete LOCAL/25 receipts refuse admission; OFF/25 cannot substitute.
+Freeze binds panel IDs and A0 bytes to verified retrievals; live `w1_cache` cannot be null.
+Added questions need `added_receipt` in the same verified LOCAL/25 cache. Imported
+controls must match their original response records and verified source identities.
+Freeze requires 44 unique repeat IDs in the panel, each with its control record and
+baseline/source/renderer/endpoint identity; missing repeat admission refuses before calls.
+The manifest pins renderer/endpoints and byte digests of every `bench/fmp` Python module.
+Resume refuses changed modules by name; a fresh run directory freezes the new identity.
+
+INPUT is a private JSON export: schema `dm0-v1`, pinned `product` source hash and
+`product_commit`, `source_files`/`dataset_sha256`, `normalizer_sha256`, `dev_ids`,
+`w1_panel`, `w1_receipt`, `w1_cache`, exact `baselines` messages by canonical ID,
+original `controls` response records, `w1_endpoint`/`w1_renderer`/`w1_sources`,
+versioned Codex/GLM `endpoints`, `renderer`, frozen `repeat_ids` (44), and an absolute
+Unix `deadline`. Missing added-question baselines require pinned-product preparation
+before freeze; this command never builds W1 stores or substitutes retrievals.
+Synthetic fixtures instead provide `questions` and `panel` and set `synthetic=true`.
+Semantic-screen evidence remains a separate prerequisite (`semantic_valid`); fabricated
+hard cases and the conservative `v4_row_candidate` diagnostic cannot certify X05 quality.
+
+Only separately authorized live runs use `extract`/`answer --activate`: subscription
+Sol/medium extraction/readers and Sol/low plus GLM 5.3 judgments, both on every answer.
+The launcher supplies GLM credentials; the instrument never reads credential files.
+Resume uses immutable inputs and successful calls; uncertain sends require disposition.
+Completed turns remain successful despite non-fatal reconnects. Failed calls use only
+the fatal outcome (last error if no turn failure) and stderr tail for classification.
+Timeouts, HTTP 5xx/unmarked 429 outside backend usage-limit predicates, resets/refusals
+and stream/protocol failures retry unchanged after 60, 180 and 600 seconds.
+Every retry rechecks the frozen deadline after sleeping, before recording or sending.
+Deadline expiry settles a partial PARK-INCOMPLETE with scoring snapshots; resume is a no-op.
+Usage limits match each backend, including GLM error-result 429 and rate-limit markers.
+Quota/usage stops return `PAUSED` without exclusions or a settled report. Rerun the
+same directory after reset to retry the paused call and reuse saved calls; paused
+wall time does not consume the frozen deadline.
+Exhausted questions are excluded from both arms and judges; more than 3% is INCOMPLETE.
+Each exclusion budget counts only IDs in its population, including targets-only interim.
+The drift cap is 3% of the 44 repeat IDs; two lost repeats fail admission.
+Extraction exclusions above 3% of panel IDs settle before any drift or main-panel call.
+Valid extraction siblings survive rejection; more than 5% rejected items is INCOMPLETE.
+Failed semantic admission (including missing approval or empty extraction) settles before
+drift or main-panel sends. Invalid extraction JSON (including non-string content),
+envelope identities or array types receive one repair attempt. All item fields must be
+strings except nullable string dates and sources; malformed items get one repair while
+valid siblings survive. A failed envelope/JSON repair is terminal:
+the saved disposition settles PARK-INCOMPLETE; resume neither retries nor sends again.
+Invalid judge replies in the main panel and drift retry once unchanged; persistent
+invalids are reported per arm/judge. Main-panel invalids above 2% are INCOMPLETE;
+drift allows `max(1, ceil(0.02 * n))` invalids per judge/arm (one at 44 repeats).
+Invalid drift settles PARK-INCOMPLETE before any main-panel send; drift quota pauses.
+Drift exhaustion excludes the question from all main-panel arms and judges.
+Drift snapshots omit volatile cache-hit labels so an interrupted checkpoint replays identically.
+Unsettled calls remain resumable.
+When memory is empty, controls reuse the A0 answer. Cards include rejection counts/rates.
+Each judge's headline reports its scored overall n; panel and evaluated-prefix lengths appear separately.
+Source-only 16k-token windows plus at most 2k context are batched three per call.
+Chunk identity `overlap-v2` overlaps by the admissible quote limit (2,400 characters,
+or half the chunk limit for smaller windows); exact source offsets deduplicate overlap.
+Whole source-linked groups, including quotes/references/header, fit an 8,192-token cap.
+A0 hit/question bytes stay fixed; only the declared memory insertion changes M8192.
+
+The fixed target runs first; conservative paired and clustered bounds may stop futility.
+GO requires both judges' +5/+2-point, Holm, positive cluster-lower, category and strict
+combined-guard gates. Every original frozen category needs evaluable items after exclusions;
+an empty category is INCOMPLETE. PARK variants distinguish futility, uncertainty, no-go
+and incomplete coverage/transport/identity. GO funds Stage 1 only. `score` replays frozen scoring inputs
+and writes a result card; T1/T2 publication, live quality and product benefit remain unproven.

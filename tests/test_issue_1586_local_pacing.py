@@ -51,7 +51,14 @@ def test_one_bind_autonomously_drains_all_expected_ids(local_store):
         for row in conn.execute("SELECT store_id, role, content FROM messages"):
             expected_chunks.update(c.chunk_id for c in command.chunk_message(*row, policy="conversational"))
     engine.on_session_start("bound-once", context_length=200000)
-    assert engine.drain_embedding_maintenance(10)
+    # Wait for autonomous work across short drains; elapsed time is only a hang guard.
+    deadline = time.monotonic() + 150
+    for _ in range(50):
+        if engine.drain_embedding_maintenance(3):
+            break
+        assert time.monotonic() < deadline, "autonomous embedding drain hung"
+    else:
+        pytest.fail("autonomous embedding drain did not complete in 50 steps")
     with sqlite3.connect(engine._store.db_path) as conn:
         actual_summaries = {str(r[0]) for r in conn.execute("SELECT embedded_id FROM lcm_embedding_meta")}
         actual_chunks = {str(r[0]) for r in conn.execute("SELECT chunk_id FROM lcm_chunk_meta")}

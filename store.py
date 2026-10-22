@@ -35,7 +35,7 @@ from .db_bootstrap import (
 from .config import LCMConfig
 from .ingest_protection import protect_message_for_ingest, protect_messages_for_ingest
 from .search_query import (
-    build_snippet,
+    build_snippet_with_span,
     compute_search_candidate_cap,
     compute_directness_rank_bonus_upper_bound,
     compute_directness_score,
@@ -74,6 +74,47 @@ _MESSAGE_SELECT_COLUMNS = (
 )
 _MESSAGE_SELECT_COLUMN_COUNT = len(_MESSAGE_SELECT_COLUMNS.split(","))
 _UNKNOWN_SOURCE = "unknown"
+
+
+class _ObservedAtRows(list):
+    """Lookup rows with private, non-persisted provenance from the same fetched data."""
+
+    def __init__(self, rows, canonical_stamps):
+        super().__init__(rows)
+        self.canonical_stamps = canonical_stamps
+
+    def __reduce__(self):
+        return list, (list(self),)
+
+    def __copy__(self):
+        return list(self)
+
+    def __deepcopy__(self, memo):
+        from copy import deepcopy
+
+        return deepcopy(list(self), memo)
+
+
+def _fetch_ranked_search_rows(conn: sqlite3.Connection, sql: str, args: list[Any]) -> list[list[Any]]:
+    # A single SQLite result avoids reacquiring Python's GIL for every candidate.
+    # JSON1 rounds REALs; tagged round-trip decimals preserve the original bits.
+    names = [name.strip() for name in _MESSAGE_SELECT_COLUMNS.split(",")] + ["search_rank", "snippet"]
+    packed = ", ".join(["ordinal"] + [
+        f"CASE WHEN typeof({name})='real' THEN json_object('_real',printf('%!.17g',{name})) ELSE {name} END"
+        for name in names
+    ])
+    aggregate = f"""WITH ranked AS NOT MATERIALIZED ({sql})
+        SELECT json_group_array(json_array({packed})) FROM ranked"""
+    try:
+        decoded = json.loads(conn.execute(aggregate, args).fetchone()[0])
+    except sqlite3.Error as exc:
+        if getattr(exc, "sqlite_errorcode", None) not in (sqlite3.SQLITE_TOOBIG, sqlite3.SQLITE_NOMEM):
+            raise
+        # Only the packed value failed: retain the same ranked full-text window.
+        return [list(row)[1:] for row in conn.execute(sql, args).fetchall()]
+    decoded.sort(key=lambda row: row[0])
+    return [[float(value['_real']) if isinstance(value, dict) else value for value in row[1:]]
+            for row in decoded]
 
 
 def _legacy_blank_source_clause(column: str) -> str:
@@ -330,6 +371,7 @@ class MessageStore:
         self._hermes_home = hermes_home or str(self.db_path.parent)
         self._context_window_tokens: dict[str, int] = {}  # transient, session-keyed; never LCMConfig/SQLite
         self._conn: Optional[sqlite3.Connection] = None
+        self._carried_relation_connections: set[sqlite3.Connection] = set()
         # ``self._conn`` is shared across threads (the connection is opened with
         # ``check_same_thread=False``). SQLite's own C-level mutex serializes
         # statements at the engine layer, but the Python ``sqlite3`` module
@@ -1083,6 +1125,7 @@ class MessageStore:
                 CREATE INDEX IF NOT EXISTS idx_msg_relations_observed ON message_relations(kind, observed_at);
             """)
         self._identity_anchor_schema_ready = True
+        self._carried_relation_connections.add(self._conn)
 
     # -- Host uid shadow bindings: droppable; canonical evidence for #1124 exclusions / #1403 audits --
 
@@ -1201,9 +1244,10 @@ class MessageStore:
         (indexed; bounded by the distinct stamps asked for)."""
         values, sessions = sorted(set(observed_ats)), set(session_ids)
         if not values or not sessions:
-            return []
+            return _ObservedAtRows([], {})
         self._ensure_identity_anchor_schema()
         found: dict[tuple[int, float], Dict[str, Any]] = {}
+        canonical_stamps = {}
         for start in range(0, len(values), 500):
             chunk = values[start:start + 500]
             marks = ",".join("?" * len(chunk))
@@ -1219,13 +1263,15 @@ class MessageStore:
             for r in rows:
                 row = self._row_to_dict(r)
                 if str(row.get("session_id") or "") in sessions:
+                    canonical_stamps[int(row["store_id"])] = row.get("observed_at")
                     found[(int(row["store_id"]), float(row["observed_at"]))] = row
             batch = self.get_batch(sorted({int(store_id) for store_id, _stamp in aliased}))
             for store_id, stamp in aliased:  # the one occurrence an H1 unstable stamp was proven for (R5)
                 row = batch.get(int(store_id))
                 if row is not None and str(row.get("session_id") or "") in sessions:
+                    canonical_stamps[int(store_id)] = row.get("observed_at")
                     found[(int(store_id), float(stamp))] = {**row, "observed_at": float(stamp)}
-        return [found[key] for key in sorted(found)]
+        return _ObservedAtRows([found[key] for key in sorted(found)], canonical_stamps)
 
     def add_message_relations(self, groups: List[List[tuple]]) -> int:
         """Append relation GROUPS; each group is ``[(store_id, kind, related_store_id, ordinal,
@@ -1258,6 +1304,38 @@ class MessageStore:
                 added += len(group)
             self._commit()
         return added
+
+    def get_carried_stamp_ids(self, store_ids: List[int], *, connection=None, session_ids=None) -> set[int]:
+        """Read carried-time provenance without creating schema or changing rows.
+
+        A caller's read-only connection keeps recall's existing deadline policy.
+        Stores predating the optional relation table have no carried markers.
+        """
+        ids = sorted({int(i) for i in store_ids})
+        conn = connection if connection is not None else self._conn
+        if not (ids or session_ids):
+            return set()
+        if conn not in self._carried_relation_connections:
+            if not conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_relations'"
+            ).fetchone():
+                return set()
+            if conn is self._conn and not conn.in_transaction:
+                self._carried_relation_connections.add(conn)
+        if session_ids:
+            # Collect the entire candidate ID set in SQL before session formatting,
+            # including neighbors later rejected by the payload budget.
+            return {int(row[0]) for row in conn.execute(
+                "SELECT store_id FROM message_relations WHERE kind = 'carried_stamp' "
+                "AND store_id IN (SELECT store_id FROM messages WHERE session_id IN ("
+                + ",".join("?" for _ in session_ids) + "))", session_ids)}
+        found: set[int] = set()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            found.update(int(row[0]) for row in conn.execute(
+                "SELECT store_id FROM message_relations WHERE kind = 'carried_stamp' "
+                f"AND store_id IN ({','.join('?' * len(chunk))})", chunk))
+        return found
 
     def get_message_relations(self, store_ids: List[int], kind: str, *, related: bool = False) -> List[Dict[str, Any]]:
         """Relation rows of ``kind`` whose ``store_id`` (or ``related_store_id``) is in ``store_ids``."""
@@ -1813,7 +1891,8 @@ class MessageStore:
                     exclude_session_ids: Collection[str] | None = None,
                     allow_operators: bool = False,
                     agent_operators: bool = False,
-                    stemmed: bool = False) -> List[Dict[str, Any]]:
+                    stemmed: bool = False,
+                    _include_like_excerpt: bool = False) -> List[Dict[str, Any]]:
         """FTS5 search across raw messages.
 
         Retrieval contract:
@@ -1852,6 +1931,7 @@ class MessageStore:
                 time_from=time_from,
                 time_to=time_to,
                 exclude_session_ids=exclude_session_ids,
+                _include_excerpt=_include_like_excerpt,
             )
 
         order_by = _build_search_order_by(
@@ -1859,6 +1939,8 @@ class MessageStore:
             "m.timestamp",
             _MESSAGE_ROLE_BIAS_SQL,
         )
+        key_order = order_by.replace(_MESSAGE_ROLE_BIAS_SQL, "key_role").replace(
+            "m.timestamp", "key_timestamp").replace("rank", "search_rank")
         fetch_limit = compute_search_fetch_limit(limit, terms, phrases)
         candidate_cap = compute_search_candidate_cap(limit)
         apply_directness_adjustment = should_apply_directness_rank_adjustment(terms, phrases)
@@ -1896,21 +1978,37 @@ class MessageStore:
                     where.append("m.timestamp <= ?")
                     args.append(time_to)
                 args.extend([fetch_limit, offset])
-                rows = self._conn.execute(
-                    f"""SELECT m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
+                rows = _fetch_ranked_search_rows(
+                    self._conn,
+                    f"""WITH ranked_keys AS MATERIALIZED (
+                           SELECT fts.rowid AS key_id, rank AS search_rank,
+                                  m.timestamp AS key_timestamp, {_MESSAGE_ROLE_BIAS_SQL} AS key_role
+                           FROM {fts_table} fts
+                           JOIN messages m ON m.store_id = fts.rowid
+                           WHERE {' AND '.join(where)}
+                           ORDER BY {order_by} LIMIT ? OFFSET ?
+                       ), numbered_keys AS (
+                           SELECT row_number() OVER (ORDER BY {key_order}, key_id) AS ordinal,
+                                  * FROM ranked_keys
+                       )
+                       SELECT keys.ordinal, m.store_id, m.session_id, m.source, m.role, m.content, m.tool_call_id,
                               m.tool_calls, m.tool_name, m.timestamp, m.token_estimate, m.pinned, m.conversation_id,
                               m.ingested_at, m.observed_at, m.observed_at_source,
-                              rank as search_rank,
+                              keys.search_rank,
                               snippet({fts_table}, 0, '>>>', '<<<', '...', 40) as snippet
-                       FROM {fts_table} fts
-                       JOIN messages m ON m.store_id = fts.rowid
-                       WHERE {' AND '.join(where)}
-                       ORDER BY {order_by} LIMIT ? OFFSET ?""",
-                    args,
-                ).fetchall()
+                       FROM numbered_keys keys
+                       CROSS JOIN {fts_table} fts
+                       CROSS JOIN messages m
+                       WHERE fts.rowid = keys.key_id AND m.store_id = keys.key_id
+                         AND {fts_table} MATCH ?
+                       ORDER BY keys.ordinal""",
+                    [*args, safe_query],
+                )
                 self._last_fts_index = "stem" if fts_table == "messages_fts_stem" else "plain"
                 scanned_rows += len(rows)
             except sqlite3.Error as exc:
+                if getattr(exc, "sqlite_errorcode", None) == sqlite3.SQLITE_INTERRUPT:
+                    raise
                 if fts_table == "messages_fts_stem":
                     fts_table = "messages_fts"
                     offset = scanned_rows = 0
@@ -1934,6 +2032,7 @@ class MessageStore:
                     time_from=time_from,
                     time_to=time_to,
                     exclude_session_ids=exclude_session_ids,
+                    _include_excerpt=_include_like_excerpt,
                 )
 
             raw_primary_values: list[float] = []
@@ -1975,7 +2074,8 @@ class MessageStore:
                      role: str | None = None,
                      time_from: float | None = None,
                      time_to: float | None = None,
-                     exclude_session_ids: Collection[str] | None = None) -> List[Dict[str, Any]]:
+                     exclude_session_ids: Collection[str] | None = None, *,
+                     _include_excerpt: bool = False) -> List[Dict[str, Any]]:
         # LIKE keeps every character the index cannot spell (emoji, punctuation)
         # because substring matching is the only way to find those rows.
         safe_query = sanitize_like_query(query)
@@ -2100,7 +2200,12 @@ class MessageStore:
                 if score <= 0:
                     continue
                 result["search_rank"] = -float(score)
-                result["snippet"] = build_snippet(content, terms)
+                snippet, start, end = build_snippet_with_span(content, terms)
+                result["snippet"] = snippet
+                if _include_excerpt:
+                    result["_like_excerpt"] = {
+                        "snippet": content[start:end], "content_offset": start,
+                    }
                 result["_fallback_score"] = float(score)
                 result["_directness_score"] = _message_directness_score(result.get("role"), content, terms, phrases)
                 results.append(result)

@@ -20,6 +20,8 @@ def floor_args(tmp_path, monkeypatch, limited=True, minutes=150):
 
 def test_item9_coverage_budget_fails_fast_before_build(tmp_path, monkeypatch):
     floor_args(tmp_path, monkeypatch, minutes=121)
+    monkeypatch.setattr(floor.subprocess, "check_output", lambda *a, **kw: "CPU fixture\n")
+    monkeypatch.setattr(floor, "standalone", lambda *a: {"standalone_calibration_s": .572})
     monkeypatch.setattr(floor, "measured_limits", lambda _: {})
     monkeypatch.setattr(floor, "isolated", lambda *a: None)
     def build(*a): raise AssertionError("build started with insufficient budget")
@@ -30,6 +32,8 @@ def test_item9_coverage_budget_fails_fast_before_build(tmp_path, monkeypatch):
 @pytest.mark.parametrize("error", [TimeoutError("floor deadline"), subprocess.TimeoutExpired("recall", 9000)])
 def test_item9_inner_timeout_writes_labelled_summary(tmp_path, monkeypatch, error):
     floor_args(tmp_path, monkeypatch)
+    monkeypatch.setattr(floor.subprocess, "check_output", lambda *a, **kw: "CPU fixture\n")
+    monkeypatch.setattr(floor, "standalone", lambda *a: {"standalone_calibration_s": .572})
     monkeypatch.setattr(floor, "measured_limits", lambda _: {})
     monkeypatch.setattr(floor, "isolated", lambda *a: None)
     def build(*a):

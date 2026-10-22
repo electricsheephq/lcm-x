@@ -38,6 +38,9 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Store]:
         "session_id TEXT NOT NULL DEFAULT 'synthetic', source TEXT DEFAULT '', "
         "timestamp REAL NOT NULL DEFAULT 0, conversation_id TEXT DEFAULT '')"
     )
+    # Raw fixture creates messages after chunk setup; finish installing its triggers
+    # before individual cases stamp coverage proof, matching a normal store open.
+    importlib.import_module("hermes_lcm.db_bootstrap").ensure_chunk_tables(vectors.connection)
     texts: list[str] = []
 
     def embed(documents: list[str]) -> list[list[float]]:
