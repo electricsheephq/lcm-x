@@ -21,12 +21,53 @@ _RELATIVE = re.compile(
     r"\b(?:(?P<count>\d+)\s+(?P<unit>days?|weeks?|months?)\s+ago|(?P<simple>today|yesterday)|last\s+(?P<weekday>monday|tuesday|wednesday|thursday|friday|saturday|sunday))\b",
     re.IGNORECASE,
 )
+_RELATIVE_MENTION = _RELATIVE
+_DATE_TEXT_RE = re.compile(
+    r"\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|"
+    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
+    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
+    r"Dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?)\b",
+    re.IGNORECASE,
+)
+_DATE_FORMATS = (
+    "%Y-%m-%d",
+    "%Y/%m/%d",
+    "%B %d, %Y",
+    "%B %d %Y",
+    "%b %d, %Y",
+    "%b %d %Y",
+)
 _WEEKDAYS = {
     name: index
     for index, name in enumerate(
         ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
     )
 }
+
+
+def _date_value(raw: str) -> date | None:
+    normalized = " ".join(str(raw or "").strip().split())
+    for pattern in _DATE_FORMATS:
+        try:
+            return datetime.strptime(normalized, pattern).date()
+        except ValueError:
+            continue
+    return None
+
+
+def _carried_date_text(quote):
+    quote = re.sub(r"(\d{1,2})(?:st|nd|rd|th)\b", r"\1", str(quote), flags=re.IGNORECASE)
+    quote = re.sub(r"(?<=\d)T(?=\d{2}:)", " ", quote)
+    return re.sub(r"(\b[A-Za-z]{3,9}\s+\d{1,2})\s+(\d{4})\b", r"\1, \2", quote)
+
+
+def _withhold_reason(content):
+    days = {_date_value(m.group(0)) for m in _DATE_TEXT_RE.finditer(_carried_date_text(content))} - {None}
+    if len(days) > 1:
+        return "ambiguous_multiple_explicit_dates"
+    if days and _RELATIVE_MENTION.search(content):
+        return "mixed_absolute_and_relative_dates"
+    return None
 
 
 def _parse_anchor(value: Any) -> date | None:
@@ -107,6 +148,8 @@ def resolve_occurrence_time(
             reason="ambiguous_multiple_explicit_dates",
         )
     if explicit:
+        if reason := _withhold_reason(content):
+            return _unknown(observed_at, session_date=session_date, reason=reason)
         day, match = explicit[0]
         anchor = _parse_anchor(session_date)
         return {
@@ -139,6 +182,12 @@ def resolve_occurrence_time(
             session_date=session_date,
             reason="relative_expression_without_session_date",
         )
+
+    # Only base day-objects may change; unknown reasons and bytes stay intact.
+    if reason := _withhold_reason(content):
+        return _unknown(observed_at, session_date=session_date, reason=reason)
+    if len(list(_RELATIVE_MENTION.finditer(content))) > 1:
+        return _unknown(observed_at, session_date=session_date, reason="ambiguous_relative_expression")
 
     match = matches[0]
     simple = (match.group("simple") or "").casefold()

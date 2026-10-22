@@ -22,7 +22,10 @@ from .answer_contract import (
     compile_answer_contract,
 )
 from .evidence_compiler import observation_independent
-from .occurrence_time import _RELATIVE, resolve_occurrence_time
+from .occurrence_time import (
+    _DATE_TEXT_RE, _carried_date_text, _date_value, _RELATIVE_MENTION,
+    resolve_occurrence_time,
+)
 from .reasoning import (
     EvidencePlan,
     execute_plan,
@@ -78,21 +81,6 @@ _SECRET_RE = re.compile(
     r"(?:Bearer\s+[A-Za-z0-9._~-]{8,}|\b(?:sk|pa)-[A-Za-z0-9_-]{8,}|"
     r"(?:api[_-]?key|token|secret|password)\s*[:=]\s*[^\s,;]+)",
     re.IGNORECASE,
-)
-_DATE_TEXT_RE = re.compile(
-    r"\b(?:\d{4}[-/]\d{1,2}[-/]\d{1,2}|"
-    r"(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|"
-    r"Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|"
-    r"Dec(?:ember)?)\s+\d{1,2}(?:,\s*\d{4})?)\b",
-    re.IGNORECASE,
-)
-_DATE_FORMATS = (
-    "%Y-%m-%d",
-    "%Y/%m/%d",
-    "%B %d, %Y",
-    "%B %d %Y",
-    "%b %d, %Y",
-    "%b %d %Y",
 )
 _TIME_FACTORS = {
     "minute": 1.0,
@@ -382,16 +370,6 @@ def _number_value(raw: str) -> int | float | None:
     return int(value) if value.is_integer() else value
 
 
-def _date_value(raw: str) -> date | None:
-    normalized = " ".join(str(raw or "").strip().split())
-    for pattern in _DATE_FORMATS:
-        try:
-            return datetime.strptime(normalized, pattern).date()
-        except ValueError:
-            continue
-    return None
-
-
 def _carried_absolute_day(source):
     """Share the compiler date parser; a year is required for independence."""
     if not source.get("time_uncertain") or _carried_mixed_dates(source):
@@ -402,19 +380,11 @@ def _carried_absolute_day(source):
     return days[0][0] if days and len({d for d, _ in days}) == 1 else None
 
 
-def _carried_date_text(quote):
-    quote = re.sub(r"(\d{1,2})(?:st|nd|rd|th)\b", r"\1", str(quote), flags=re.IGNORECASE)
-    quote = re.sub(r"(?<=\d)T(?=\d{2}:)", " ", quote)
-    return re.sub(r"(\b[A-Za-z]{3,9}\s+\d{1,2})\s+(\d{4})\b", r"\1, \2", quote)
-
-
 def _carried_mixed_dates(source):
-    if not source.get("time_uncertain"):
-        return False
+    # Shared by ordinary and carried rows, including base-unknown named dates.
     quote = source.get("content", source["quote"])
     days = {_date_value(match.group(0)) for match in _DATE_TEXT_RE.finditer(_carried_date_text(quote))} - {None}
-    return bool(days) and (_RELATIVE.search(quote) or (len(days) > 1 and
-        resolve_occurrence_time(quote, observed_at=0).get("event_time_source") != "explicit"))
+    return bool(days) and (len(days) > 1 or _RELATIVE_MENTION.search(quote))
 
 
 def _carried_known_day(source):
@@ -837,7 +807,9 @@ def _candidate_inventory(
 def _record_exclusion(result, candidate, reason, *, count=False):
     if result is None:
         return
-    item = dict(exact_ref=candidate["exact_ref"], time_uncertain="carried", reason_code=reason)
+    item = dict(exact_ref=candidate["exact_ref"], reason_code=reason)
+    if candidate.get("time_uncertain"):
+        item["time_uncertain"] = "carried"
     if reason in {"event_outside_temporal_window", "uncertain_source_observation_time"}:
         result["_uncertain_window_exclusion"] = True
     records = result.setdefault("exclusions", [])
