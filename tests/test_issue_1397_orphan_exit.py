@@ -9,8 +9,7 @@ import pytest
 
 
 @pytest.mark.parametrize("mode", ["released", "budget", "none"])
-def test_1397_exit_waits_for_real_fastembed_orphan_with_shared_budget(tmp_path, mode):
-    marker = tmp_path / "encoder-finished"
+def test_1397_exit_waits_for_real_fastembed_orphan_with_shared_budget(mode):
     script = r"""
 import atexit
 import faulthandler
@@ -24,16 +23,15 @@ from types import SimpleNamespace
 
 faulthandler.dump_traceback_later(8)  # Diagnostic only; the parent owns the hang watchdog.
 print("stage: imports", file=sys.stderr, flush=True)
-repo, marker, mode = sys.argv[1:]
+repo, mode = sys.argv[1:]
 sys.path.insert(0, repo)
 spec = importlib.util.spec_from_file_location("hermes_lcm", Path(repo) / "__init__.py", submodule_search_locations=[repo])
 package = importlib.util.module_from_spec(spec)
 sys.modules["hermes_lcm"] = package
-from hermes_lcm import engine, command, embedding_maintenance, embedding_provider
-from tests.test_issue_1330_retire_embedding_maintenance import _seed_batches
+from hermes_lcm import engine, embedding_provider
 
 started, release, pass_done, quiescing = (threading.Event() for _ in range(4))
-state = {"waits": []}
+state = {"waits": [], "finished": False}
 clock = [1000.0]
 engine._EMBEDDING_EXIT_TIMEOUT_S = 0.5
 slots = embedding_provider._LOCAL_EMBED_WORKER_SLOTS
@@ -44,8 +42,7 @@ def finish():
         available += 1
     for _ in range(available):
         slots.release()
-    state.update(available=available, max_slots=embedding_provider._LOCAL_EMBED_MAX_WORKERS,
-                 finished=Path(marker).exists())
+    state.update(available=available, max_slots=embedding_provider._LOCAL_EMBED_MAX_WORKERS)
     print(json.dumps(state), flush=True)
 
 atexit.register(finish)  # Runs after the scheduler's exit handler.
@@ -57,7 +54,7 @@ class Model:
         started.set()
         if mode != "none":
             assert release.wait(10)  # Hang watchdog only.
-        Path(marker).write_text("finished")
+        state["finished"] = True
         return [[1.0, 0.0] for _ in texts]
 
 # Freeze provider time until the fake encoder starts. Dispatch/setup cannot
@@ -66,15 +63,18 @@ def provider_now():
     return time.monotonic() - state["encoder_start"] if started.is_set() else 0.0
 
 embedding_provider.time = SimpleNamespace(monotonic=provider_now)
-config = _seed_batches(Path(marker).parent / "orphan.db", "summaries")
-print("stage: seeded", file=sys.stderr, flush=True)
 provider = embedding_provider.FastembedProvider("test-model", timeout=10 if mode == "none" else 0.01)
 provider._model = Model()
-command.resolve_provider = lambda *_a, **_k: provider
-embedding_provider.probe_provider_availability = lambda _c: {"available": True}
 
 def job():
-    embedding_maintenance.run_incremental_embedding_pass(config.database_path, config)
+    # Only the timeout/encoder/scheduler boundary matters here. Database setup
+    # is covered by the maintenance tests and must not consume this watchdog.
+    try:
+        provider.embed_documents(["exit test summary"])
+    except embedding_provider.EmbeddingProviderError:
+        assert mode != "none"
+    else:
+        assert mode == "none"
     pass_done.set()
     if mode == "budget":
         assert quiescing.wait(10)
@@ -90,10 +90,11 @@ if mode != "budget":
     assert scheduler.drain({("orphan-exit", "embeddings")}, timeout=10)
 
 def exit_now():
+    now = clock[0]
     if "quiesce_start" not in state:
-        state["quiesce_start"] = clock[0]
+        state["quiesce_start"] = now
         quiescing.set()
-    return clock[0]
+    return now
 
 class ObservedSlots:
     def acquire(self, *, timeout):
@@ -131,7 +132,7 @@ embedding_provider._drain_local_embedding_workers = observed_drain
 """
     try:
         result = subprocess.run(
-            [sys.executable, "-c", script, str(Path(__file__).resolve().parents[1]), str(marker), mode],
+            [sys.executable, "-c", script, str(Path(__file__).resolve().parents[1]), mode],
             capture_output=True, text=True, timeout=10,
         )
     except subprocess.TimeoutExpired as exc:
