@@ -1,0 +1,10 @@
+{
+  "run": 39854613143,
+  "candidate": "158191079b4ec61e676f9d03ea3f34069543e8fb",
+  "reports": 18,
+  "cases": 1076,
+  "unexplained": 0,
+  "oracle_violation_counts": {},
+  "accepted_deltas": 0,
+  "pytest": "97 passed, 2 xfailed in 183.61s (0:03:03)"
+}

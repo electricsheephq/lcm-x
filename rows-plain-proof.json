@@ -1,0 +1,6 @@
+{
+  "head": "158191079b4ec61e676f9d03ea3f34069543e8fb",
+  "compared": 11,
+  "differences": [],
+  "normalization": "existing deterministic clock; per-run synthetic payload root replaced by <payloads>; no fields omitted"
+}

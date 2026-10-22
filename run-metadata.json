@@ -1,0 +1,119 @@
+{
+  "run_id": "1822-r2-15819107-cost",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "158191079b4ec61e676f9d03ea3f34069543e8fb",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "arms": {
+    "base": "238d1a9e876dea55b2e2f7a68110afd21c4e779e",
+    "candidate": "158191079b4ec61e676f9d03ea3f34069543e8fb",
+    "pre1628": "8f121c723764be1ba49b182acd716642d94a4ecf"
+  },
+  "status": "settled",
+  "headline": [
+    {
+      "benchmark": "200-rewind-pattern-True",
+      "metric": "median_ms",
+      "value": 7.564104,
+      "n": 200,
+      "baseline_run": "8f121c723764be1ba49b182acd716642d94a4ecf",
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "200-rewind-pattern-False",
+      "metric": "median_ms",
+      "value": 4.6047080000000005,
+      "n": 200,
+      "baseline_run": "238d1a9e876dea55b2e2f7a68110afd21c4e779e",
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "200-steady-pattern-True",
+      "metric": "median_ms",
+      "value": 4.2091460000000005,
+      "n": 200,
+      "baseline_run": "238d1a9e876dea55b2e2f7a68110afd21c4e779e",
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "200-steady-pattern-False",
+      "metric": "median_ms",
+      "value": 1.1266255,
+      "n": 200,
+      "baseline_run": "238d1a9e876dea55b2e2f7a68110afd21c4e779e",
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "2000-rewind-pattern-True",
+      "metric": "median_ms",
+      "value": 68.7300205,
+      "n": 200,
+      "baseline_run": "8f121c723764be1ba49b182acd716642d94a4ecf",
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "2000-rewind-pattern-False",
+      "metric": "median_ms",
+      "value": 40.6100415,
+      "n": 200,
+      "baseline_run": "238d1a9e876dea55b2e2f7a68110afd21c4e779e",
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "2000-steady-pattern-True",
+      "metric": "median_ms",
+      "value": 39.3485,
+      "n": 200,
+      "baseline_run": "238d1a9e876dea55b2e2f7a68110afd21c4e779e",
+      "source": "cost-summary.json"
+    },
+    {
+      "benchmark": "2000-steady-pattern-False",
+      "metric": "median_ms",
+      "value": 9.655771,
+      "n": 200,
+      "baseline_run": "238d1a9e876dea55b2e2f7a68110afd21c4e779e",
+      "source": "cost-summary.json"
+    }
+  ],
+  "raw_sha256": "4f380e88cbd1263862d14a9e7ad4d8bfd9a6af7916e68f6f7d00db6dd953461f",
+  "t2_tag": "lcm-x/1822-r2-15819107-cost",
+  "verified_assets": [
+    {
+      "bytes": 26492731,
+      "sha256": "e8810b35d283a7dbec2f260a9d2dfbbd0b5bf5ddb106de404362a3feb30c24d7",
+      "verified": true,
+      "verified_at": "2026-10-22T21:15:53Z",
+      "name": "1822-r2-15819107-cost-results.tar.zst"
+    },
+    {
+      "bytes": 4212,
+      "sha256": "82680db7f724605457d8b163cdc270530f42e71a188fc87a91d6f2ba21374df6",
+      "verified": true,
+      "verified_at": "2026-10-22T21:15:53Z",
+      "name": "RESULT-MANIFEST.json"
+    },
+    {
+      "bytes": 2101,
+      "sha256": "48f11c215fe0240e405a2e5e5e67abd01fd126bb756ea70e357cb669918c280a",
+      "verified": true,
+      "verified_at": "2026-10-22T21:15:53Z",
+      "name": "RESULT.md"
+    },
+    {
+      "bytes": 267,
+      "sha256": "eb534335a7be196a975de97fe3468a0fce3eb6702c412d242bf917dd507c7abf",
+      "verified": true,
+      "verified_at": "2026-10-22T21:15:53Z",
+      "name": "SHA256SUMS"
+    }
+  ],
+  "harness_note": "Public launcher replaces machine path constants with environment variables only; timed bench_worker.py and score.py are unmodified.",
+  "original_script_hashes": {
+    "bench.py": "51b5194784941eed63f0ab81fc04c998f888f122d6d39192f1f3864a7eece23c",
+    "bench_worker.py": "8f787cefb50c16db38494f0798c0a33b791b979db21208986952d23e093efc82",
+    "score.py": "56d7fb4d277fca78f07c3216b69ac7d4a9053629d4b9eddf276ee4ac723238e7"
+  }
+}

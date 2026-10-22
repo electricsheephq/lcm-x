@@ -1,0 +1,10 @@
+{
+  "head": "158191079b4ec61e676f9d03ea3f34069543e8fb",
+  "base_rows_equal": true,
+  "mutant_rows_equal": false,
+  "candidate_events": 455,
+  "mutant_events": 385,
+  "first_divergence": 59,
+  "candidate_event": "log [\"hermes_lcm.engine\",\"INFO\",\"LCM ignore_message_patterns dropped %s message (not persisted; total dropped=%d): %r\",[\"user\",1,\"IGNORE THIS ROW edited head\"]]",
+  "mutant_event": "store _append_protected_batch sha12/len=1f54f500cecd/513"
+}
