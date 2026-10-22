@@ -299,7 +299,7 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                         omission = (meta["omission_reason"], meta["expand_hint"])
                         omissions[sid].append(omission)
                         if fit_failure == "budget":
-                            skipped.append((meta, pending, omission))
+                            skipped.append((meta, pending, omission, (before, after), visited))
                         # Try other ranked anchors/sessions, never repeatedly
                         # walk an over-budget neighborhood.
                         continue
@@ -353,9 +353,13 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
     if delivery.get("stop_reason") != "deadline":
         # Only retry already-read budget skips, once, in admission order.
         # Refit removals and nonconverging groups never enter this list.
-        for meta, pending, omission in skipped:
-            remaining = omissions[meta["session_id"]]
-            remaining.remove(omission)
+        for meta, pending, omission, frontier, visited in skipped:
+            remaining = list(omissions[meta["session_id"]])
+            unwalked = next((x for x in frontier if x is not None and x not in visited), None)
+            if unwalked is None:
+                remaining.remove(omission)
+            else:
+                remaining[remaining.index(omission)] = ("budget", f"lcm_expand(store_id={unwalked})")
             previous = dict(meta)
             meta.update(complete=not remaining, omission_reason=remaining[-1][0] if remaining else None)
             meta.pop("expand_hint", None)
@@ -366,9 +370,10 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
             admitted.append(pending)
             if not evidence_fits():
                 admitted.pop()
-                remaining.append(omission)
                 meta.clear()
                 meta.update(previous)
+            else:
+                omissions[meta["session_id"]] = remaining
         delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
             not s["complete"] for s in delivery["sessions"])
     while not fits():

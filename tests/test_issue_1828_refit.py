@@ -140,6 +140,14 @@ def test_refit_reconsiders_skipped_groups(refit_fixture, monkeypatch, sizes):
     assert all(h["exact_ref"] != seen for group in fixture.skipped for h in group)
     expired = fixture.run(deadline=-1)
     assert expired["timeout"] and not expired["hits"]
+    neighbor = fixture.store.append("session-1", {"role": "user", "content": "unwalked", "timestamp": 1})
+    monkeypatch.setattr(recall_session, "CHAR_BUDGET", 3240 if len(sizes) == 2 else 3370)
+    partial = fixture.run()
+    assert 2 in {h["store_id"] for h in partial["hits"]}
+    assert neighbor not in {h["store_id"] for h in partial["hits"]}
+    meta = next(m for m in partial["provenance"]["delivery"]["sessions"] if m["session_id"] == "session-1")
+    assert not meta["complete"] and meta["omission_reason"] == "budget"
+    assert meta.get("expand_hint", f"lcm_expand(store_id={neighbor})") == f"lcm_expand(store_id={neighbor})"
     if len(sizes) == 3:
         original = fixture.store.load_session_window
 
