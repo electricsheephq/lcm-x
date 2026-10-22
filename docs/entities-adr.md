@@ -158,6 +158,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
   - A test shows those outputs are unchanged, or changed only as declared, once the new columns exist.
 
 ### D10. Host memory files (MEMORY.md and USER.md)
+- **Flag.** Capture runs only with the entities flag on (`LCM_ENTITIES_ENABLED`, default off). With the flag off, no revisions or notes are written and the files are never opened.
 - **Why.** Hermes injects both files into every system prompt. LCM-X reads them for history, removals and entity-card coverage, not for current facts.
 - **Capture.** At session start, and at idle where the engine has an idle point, LCM-X reads the bound profile home's `memories/MEMORY.md` and `memories/USER.md`.
   - Entries are split the way Hermes's own memory store parses them. The entry, not the line, is the unit.
@@ -171,11 +172,12 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 - **Trust.** Inside LCM-X delivery, file-derived notes carry the same trust label as other recalled memory, with no elevation. Hermes's own system-prompt copy of these files is outside LCM-X and keeps its host behaviour; this ADR makes no claim about it.
 
 ### D11. Forget (E2)
+- **Flag.** Forget hiding runs only with the entities flag on (`LCM_ENTITIES_ENABLED`, default off). With the flag off, no forget notes are written and nothing is hidden. The default stays off until the E2 measurement reports zero false hides.
 - **What a forget is.** `lcm_memory forget` writes a `kind = retraction` note. It cites the user's request and names the retracted message rows or note. The note is the only flag.
 - **Hiding.** While the note stands, the retracted rows are hidden from every agent-facing read path. Hiding is limited to rows inside the requester's own visibility, so it never hides another principal's rows. Responses report a count of hidden rows, never their content.
 - **Lossless.** Message rows, summaries, FTS and embeddings are never modified. Undo of the forget restores byte-identical retrieval. Real deletion (purge) is a separate, owner-confirmed operation and never a side effect of forget.
 - **Scope in v1.** A forget targets rows and notes, not a whole entity, so it needs no cutoff rule for future statements. A later statement is new evidence.
-  - Summaries are never rewritten. A delivered summary that spans a forgotten row carries the withdrawal note.
+  - Summaries are never rewritten or hidden. A delivered summary that spans a forgotten row is **marked**: it carries the withdrawal note.
   - Host memory files (D10) are outside this mechanism. An entry there is removed through Hermes's own memory tool.
 - **Detector links are not forgets.** The query-time retraction detector only changes how `lcm_recall` renders a hit. It never hides anything on any other path.
 
@@ -210,7 +212,7 @@ Otherwise the agent asks: in chat when the current answer depends on it, else on
 - **Chained undo, executable:** undo the second of two chained splits, then the first; both succeed and the resolved view is identical.
 - **One op, one event:** each operation adds exactly one event; replaying the log reproduces the projected fields.
 - **Host files (D10):** a revision with an added entry gives one cited note, visible to the owner only under AccessContextV1. A removed entry supersedes the note and creates no retraction. No message rows are written: the messages-table digest is unchanged.
-- **Forget (D11):** the same fact, present as raw text, inside a summary and as a note, is asked about before and after a forget, including from a new session; hidden on every agent-facing path; undo restores byte-identical retrieval; a principal can never hide another principal's rows.
+- **Forget (D11):** the same fact, present as raw text, inside a summary and as a note, is asked about before and after a forget, including from a new session. After the forget, the forgotten raw rows and notes are absent on every agent-facing path, and a summary that spans them is delivered unchanged with the withdrawal note present (marked, not hidden). Undo restores byte-identical retrieval, and a principal can never hide another principal's rows.
 - **Byte-identity:** with the flag off and on, and the tool unused, recall output and assembled context are identical across a fixture corpus.
 - **Whole-row consumers (D9):** with the new nullable columns present, every enumerated `SELECT *` consumer's output is unchanged, or changed exactly as declared.
 - **Namespace table (D6):** each namespace resolves only to its listed kind; `event` and `conversation` keys stay unbridged.
