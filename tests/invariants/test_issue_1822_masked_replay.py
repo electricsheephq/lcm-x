@@ -1,12 +1,13 @@
 """I1/I2: masked replay decisions and complete stored histories equal full replay."""
 from copy import deepcopy
 import random
+from types import SimpleNamespace
 
 import pytest
 
 from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
-from tests.invariants.test_issue_1628_rewind_rescan import LOOP, MARK, _ContainsPattern
+from tests.invariants.test_issue_1628_rewind_rescan import LOOP, MARK, SESSION, _ContainsPattern, engine as engine
 
 
 def history(seed):
@@ -78,3 +79,29 @@ def test_masked_decisions_and_stored_rows_equal_full(seed, tmp_path, monkeypatch
     actual = exercise(seed, tmp_path / "masked")
     expected = exercise(seed, tmp_path / "full", full=True, decisions=False)
     assert actual == expected
+
+
+def test_merge_head_override_invalidates_initial_full_list_map(engine, monkeypatch):
+    engine._ingest_messages([{"role": "user", "content": "A", "timestamp": 100.0},
+                             {"role": "user", "content": "other", "timestamp": 101.0}])
+    engine._compiled_ignore_message_patterns = [SimpleNamespace(
+        pattern="^A$", search=lambda text, timeout=None: text == "A")]
+    build = engine._build_ingest_replay
+    rescans = []
+
+    def record(**kwargs):
+        result = build(**kwargs)
+        if kwargs.get("only") is not None:
+            rescans.append((kwargs.get("store_ids"), list(result[1])))
+        return result
+
+    monkeypatch.setattr(engine, "_build_ingest_replay", record)
+    engine._ingest_messages([
+        {"role": "user", "content": " A ", "timestamp": 999.0},
+        {"role": "user", "content": " A \n\nT", "timestamp": 100.0, "_merged_turn_prefix": " A "},
+        {"role": "user", "content": "T", "timestamp": 200.0},
+    ])
+    assert rescans == [(None, [True, False, False])]
+    assert [(row["role"], row["content"]) for row in engine._store.get_session_messages(SESSION)] == [
+        ("user", "A"), ("user", "other"), ("user", " A \n\nT"), ("user", "T")]
+    assert engine._ignore_pattern_dropped_count == 1

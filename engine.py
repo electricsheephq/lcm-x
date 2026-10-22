@@ -7073,7 +7073,8 @@ class LCMEngine(
             _s, rescan_ignored, rescan_replay = self._build_ingest_replay(
                 messages=messages, n=n, cursor=cursor, only=set(rewound),
                 store_ids=(ignored_original_messages.store_ids if not any(
-                    anchor_plan.get(key) for key in ("ws", "carry", "relations")) else None),
+                    anchor_plan.get(key) for key in ("ws", "carry", "relations"))
+                    and ignored_original_messages.rewrite_overrides == getattr(self, "_host_rewrite_overrides", {}) else None),
             )
             replay_messages = list(replay_messages)
             for idx in rewound:
@@ -7251,9 +7252,10 @@ class LCMEngine(
     ) -> tuple[int, list[bool], List[Dict[str, Any]]]:
         scan_start = 0 if self._ingest_cursor_needs_reconcile else cursor
         class IgnoreDecisions(list):
-            # Reuse only when the intervening anchor step merely backfills
-            # observations; rewrite/carry/relation changes require a fresh map.
+            # Reuse requires unchanged rewrite overrides as well as a plan
+            # without rewrite/carry/relation changes.
             store_ids: Optional[dict[int, int]] = None
+            rewrite_overrides: Optional[dict[int, Any]] = None
 
         ignored_original_messages = IgnoreDecisions([False] * n)
         if self._compiled_ignore_message_patterns:
@@ -7261,6 +7263,7 @@ class LCMEngine(
             ignored_original_messages.store_ids = (
                 self._get_store_id_map_for_messages(messages) if store_ids is None else store_ids
             )
+            ignored_original_messages.rewrite_overrides = dict(self._host_rewrite_overrides)
             self._compress_run.store_ids_by_message_id = ignored_original_messages.store_ids
             with store_id_scope:
                 for idx in range(scan_start, n):
