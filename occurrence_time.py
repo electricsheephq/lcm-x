@@ -50,12 +50,13 @@ _WEEKDAY_DATE_RE = re.compile(_WEEKDAY_PREFIX_RE.pattern + r"(?=" + _DATE_TEXT_R
 _DATE_FORMATS = (
     "%Y-%m-%d",
     "%Y/%m/%d",
-    "%Y-%m/%d",
-    "%Y/%m-%d",
     "%B %d, %Y",
     "%B %d %Y",
     "%b %d, %Y",
     "%b %d %Y",
+    # Keep established forms first on the warm named-date path.
+    "%Y-%m/%d",
+    "%Y/%m-%d",
 )
 _WEEKDAYS = {
     name: index
