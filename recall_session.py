@@ -360,6 +360,10 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 remaining.remove(omission)
             else:
                 remaining[remaining.index(omission)] = ("budget", f"lcm_expand(store_id={unwalked})")
+            # A rejected retry must not consume pointers from the accepted payload.
+            leads = {k: list(delivery[k]) for k in ("seed_leads", "summary_leads") if k in delivery}
+            hints = [(s, s.get("expand_hint")) for s in delivery["sessions"]]
+            timed = [(h, dict(h)) for g in admitted for h in g if h.get("time_uncertain")]
             previous = dict(meta)
             meta.update(complete=not remaining, omission_reason=remaining[-1][0] if remaining else None)
             meta.pop("expand_hint", None)
@@ -372,6 +376,15 @@ def deliver_session(ordered, response, *, engine, deadline, excluded, allowed, s
                 admitted.pop()
                 meta.clear()
                 meta.update(previous)
+                delivery.update(leads)
+                for session, hint in hints:
+                    if hint is None:
+                        session.pop("expand_hint", None)
+                    else:
+                        session["expand_hint"] = hint
+                for hit, fields in timed:
+                    hit.clear()
+                    hit.update(fields)
             else:
                 omissions[meta["session_id"]] = remaining
         delivery["truncated"] = bool(delivery.get("stop_reason")) or any(
