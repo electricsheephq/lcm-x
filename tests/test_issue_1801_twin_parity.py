@@ -156,7 +156,6 @@ def test_two_date_parser_divergence_is_deliberate():
     assert _quote_supports_day(text, date(2023, 2, 1), "")
 
 
-@pytest.mark.xfail(strict=True, reason="follow-up: ordinary mixed-date binding")
 def test_ordinary_mixed_date_binding_characterization(tmp_path):
     with engine_context(tmp_path, embeddings_enabled=False) as engine:
         refs = plant(engine, ["I reviewed the plan on 2023-01-10. I took a vacation to Bali yesterday.",

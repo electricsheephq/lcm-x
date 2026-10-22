@@ -55,8 +55,8 @@ def test_auto_sqlite_boundary(tmp_path, monkeypatch, entry, site):
         result = json.loads(raw)
         assert injected == [site]
         assert result["status"] == "fallback"
-        assert result["reason"] == REASON
-        assert result["reason_code"] == REASON
+        assert result["reason"] == "store_unavailable"
+        assert result["reason_code"] == "store_unavailable"
         assert result["next_path"] == "evidence_only"
         assert not result.get("context") and not result.get("computation")
         assert not result.get("evidence") and not result.get("query_view")
