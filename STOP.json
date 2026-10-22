@@ -1,0 +1,87 @@
+{
+  "result": "VERIFIED_FAILURE",
+  "continuation": "TERMINAL",
+  "failure_gate": "warm-cost-25",
+  "failed_cells": {
+    "nondate-10": {
+      "states": {
+        "base": {
+          "state": "unknown",
+          "contract": {
+            "version": "answer-contract-v1",
+            "answer_kind": "fact",
+            "operation": "none",
+            "anchors": [
+              "vacation",
+              "destination"
+            ],
+            "slots": [
+              {
+                "name": "answer",
+                "anchor": "vacation",
+                "value_type": "text",
+                "unit": null,
+                "expected_role": "any",
+                "required": true
+              }
+            ],
+            "coverage_policy": "source_asserted_fact",
+            "confidence": "high",
+            "question_as_of": null,
+            "temporal_window": null,
+            "finite_cardinality": 1,
+            "requested_unit": null,
+            "difference_direction": null,
+            "order_direction": null
+          },
+          "hydrated": 10
+        },
+        "head": {
+          "state": "unknown",
+          "contract": {
+            "version": "answer-contract-v1",
+            "answer_kind": "fact",
+            "operation": "none",
+            "anchors": [
+              "vacation",
+              "destination"
+            ],
+            "slots": [
+              {
+                "name": "answer",
+                "anchor": "vacation",
+                "value_type": "text",
+                "unit": null,
+                "expected_role": "any",
+                "required": true
+              }
+            ],
+            "coverage_policy": "source_asserted_fact",
+            "confidence": "high",
+            "question_as_of": null,
+            "temporal_window": null,
+            "finite_cardinality": 1,
+            "requested_unit": null,
+            "difference_direction": null,
+            "order_direction": null
+          },
+          "hydrated": 10
+        }
+      },
+      "warm": {
+        "base": 0.586479,
+        "head": 0.6541665
+      },
+      "cold": {
+        "base": 0.620021,
+        "head": 0.6269375
+      },
+      "warm_delta_ms": 0.067688,
+      "bar_ms": 0.058648,
+      "pass": false,
+      "n": 200
+    }
+  },
+  "production_attempts": 1,
+  "source_frozen": true
+}

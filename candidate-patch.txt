@@ -1,0 +1,86 @@
+diff --git a/evidence_tools.py b/evidence_tools.py
+index 09ab82a67..527329b41 100644
+--- a/evidence_tools.py
++++ b/evidence_tools.py
+@@ -307,6 +307,7 @@ def lcm_compute(args: Dict[str, Any], **kwargs: Any) -> str:
+             assertions=getattr(engine, "_assertions", None),
+             as_of=as_of,
+             session_dates=getattr(engine, "_session_occurrence_dates", None),
++            withhold_mixed=plan.temporal_window is not None or plan.operation in {"date_filter", "order", "date_interval"},
+         )
+     except (TypeError, ValueError, sqlite3.Error) as exc:
+         grounding = None
+diff --git a/occurrence_time.py b/occurrence_time.py
+index 5d385496c..5322b1a6d 100644
+--- a/occurrence_time.py
++++ b/occurrence_time.py
+@@ -120,6 +120,25 @@ def _order_label_text(content):
+     return _strip_order_dates(_carried_date_text(content))
+ 
+ 
++_large_order_label_names = {}
++
++
++def _order_label_name(content):
++    # Retain only a short final name, never the large stripped source text.
++    key = hashlib.sha256(content.encode("utf-8", "surrogatepass")).digest() if len(content) > 1200 else None
++    if key is not None and key in _large_order_label_names:
++        return _large_order_label_names[key]
++    names = [name for name in re.findall(
++        r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3}\b", _order_label_text(content),
++    ) if name not in {"I", "The", "A", "An", "My", "We", "On", "In"}]
++    name = names[-1] if names else None
++    if key is not None and (name is None or len(name) <= 256):
++        if len(_large_order_label_names) >= 4096:
++            _large_order_label_names.clear()
++        _large_order_label_names[key] = name
++    return name
++
++
+ def _withhold_reason(content):
+     return _quote_date_info(content)[1]
+ 
+diff --git a/requirements_compiler.py b/requirements_compiler.py
+index dbfd41852..0eb4a3bf8 100644
+--- a/requirements_compiler.py
++++ b/requirements_compiler.py
+@@ -23,7 +23,7 @@ from .answer_contract import (
+ )
+ from .evidence_compiler import observation_independent
+ from .occurrence_time import (
+-    _DATE_TEXT_RE, _carried_date_text, _date_value, _order_label_text, _quote_date_info, _RELATIVE,
++    _DATE_TEXT_RE, _carried_date_text, _date_value, _order_label_name, _quote_date_info, _RELATIVE,
+     resolve_occurrence_time,
+ )
+ from .reasoning import (
+@@ -728,16 +728,7 @@ def _ordered_event_candidate(
+         )
+         if place is not None:
+             label = place.group(1).strip()
+-    quote_without_dates = _order_label_text(quote)
+-    names = [
+-        name
+-        for name in re.findall(
+-            r"\b[A-Z][A-Za-z'-]*(?:\s+[A-Z][A-Za-z'-]*){0,3}\b",
+-            quote_without_dates,
+-        )
+-        if name not in {"I", "The", "A", "An", "My", "We", "On", "In"}
+-    ]
+-    label = label or (names[-1] if names else quote[:300])
++    label = label or _order_label_name(quote) or quote[:300]
+     slot_names = []
+     for slot in contract.slots:
+         if slot.anchor and not _tokens(slot.anchor).issubset(_tokens(quote)):
+@@ -805,7 +796,11 @@ def _candidate_inventory(
+                    for s in sources]
+     if _date_dependent(contract):
+         for source in sources:
+-            if _carried_mixed_dates(source):
++            occurrence_reason = (source.get("occurrence_time") or {}).get("reason")
++            if _carried_mixed_dates(source) or occurrence_reason in {
++                "ambiguous_relative_expression", "ambiguous_multiple_explicit_dates",
++                "mixed_absolute_and_relative_dates",
++            }:
+                 _record_exclusion(result, source, "uncertain_source_observation_time")
+     extracted = _extract_candidates(sources, contract)[:limit]
+     for candidate in extracted:

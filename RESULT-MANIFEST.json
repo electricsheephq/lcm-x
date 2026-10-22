@@ -1,0 +1,140 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "20261022-occurrence-time-fix-r3-stop-public",
+  "project": "lcm-x",
+  "kind": "acceptance",
+  "status": "settled",
+  "owner_lane": "occurrence-time-fix-r3",
+  "claim_class": "advisory",
+  "created": "2026-10-22T07:51:02Z",
+  "settled": "2026-10-22T07:51:02Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "1ca8b9322d2f51c5a43f37e77c9b5bdecbccc738",
+    "dirty": true,
+    "diff_sha256": "1f6dbe032c4461400e5e551f8e1d2dcc475ce12b3d65723c91369d109e34a3b6"
+  },
+  "env": {
+    "command": "python3 rescore.txt",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "original-warm-gates",
+      "metric": "passing_gates",
+      "value": 24.0,
+      "n": 25,
+      "source": "cost-r3-summary.json"
+    },
+    {
+      "benchmark": "long-row-warm-gates",
+      "metric": "passing_gates",
+      "value": 15.0,
+      "n": 15,
+      "source": "cost-reviewer-long.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "RESULT.md",
+      "role": "receipt",
+      "sha256": "90d9f1a103ca45f2cbf3f89b6abffe1f6daa65108cacb7848f767ce508b25e0b",
+      "bytes": 866
+    },
+    {
+      "path": "STOP.json",
+      "role": "per-item",
+      "sha256": "de0726f5277beb6b441274396fece82ac77afea4ebd6dbc19b841079491337de",
+      "bytes": 2325
+    },
+    {
+      "path": "candidate-binding.json",
+      "role": "per-item",
+      "sha256": "408c6c27b76b52da414f29048a0b5aa2d52ca0c7d13148779c2dcddbbd616002",
+      "bytes": 459
+    },
+    {
+      "path": "candidate-patch.txt",
+      "role": "config",
+      "sha256": "1f6dbe032c4461400e5e551f8e1d2dcc475ce12b3d65723c91369d109e34a3b6",
+      "bytes": 3720
+    },
+    {
+      "path": "cost-25-table.md",
+      "role": "receipt",
+      "sha256": "304ccb68626c3810be04a7e2140de056b386ce3498a8cb2f7b64ba3e6fa52f14",
+      "bytes": 2407
+    },
+    {
+      "path": "cost-long-table.md",
+      "role": "receipt",
+      "sha256": "5fe61b8be743dce1518e4376525959aa0775c10c9db06f2277781c22753dfb34",
+      "bytes": 1181
+    },
+    {
+      "path": "cost-r3-raw.json",
+      "role": "per-item",
+      "sha256": "796fa61a858dc6488a196cbeb23c2207f543ee9b626772159548219ce8ec2afc",
+      "bytes": 164753
+    },
+    {
+      "path": "cost-r3-summary.json",
+      "role": "per-item",
+      "sha256": "7fe4f0fc2660d8e5a9d1e8c732fcee968cb0196005c92c785a190f656ec73b89",
+      "bytes": 47237
+    },
+    {
+      "path": "cost-reviewer-long-raw.json",
+      "role": "per-item",
+      "sha256": "0722eb9150487fed41748ab1e616c033e8ff11869e572e85c7983cb945fe2646",
+      "bytes": 107321
+    },
+    {
+      "path": "cost-reviewer-long.json",
+      "role": "per-item",
+      "sha256": "2881589b05aa43801511b0d9137d46165328e874154f405b9fd099565f13bf0e",
+      "bytes": 7265
+    },
+    {
+      "path": "proof-receipt.md",
+      "role": "receipt",
+      "sha256": "f951ec16e63b1200e1c730eeef2eb90e0c3422dbf0a7b82e79549ca0a8485a82",
+      "bytes": 9735
+    },
+    {
+      "path": "rescore.txt",
+      "role": "config",
+      "sha256": "4df6375fb33b323a3ec8b232c4288528603d9b2a87c5aaa7eac7aa1b3cb906c2",
+      "bytes": 781
+    }
+  ],
+  "rescore": {
+    "command": "python3 rescore.txt",
+    "inputs": [
+      "cost-r3-raw.json",
+      "cost-r3-summary.json",
+      "cost-reviewer-long-raw.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "STOP.json",
+    "candidate-binding.json",
+    "candidate-patch.txt",
+    "cost-25-table.md",
+    "cost-long-table.md",
+    "cost-r3-raw.json",
+    "cost-r3-summary.json",
+    "cost-reviewer-long-raw.json",
+    "cost-reviewer-long.json",
+    "proof-receipt.md",
+    "rescore.txt"
+  ],
+  "local_raw": "."
+}

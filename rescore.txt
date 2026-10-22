@@ -1,0 +1,14 @@
+import json,statistics
+from pathlib import Path
+A=Path(__file__).parent
+raw=json.loads((A/'cost-r3-raw.json').read_text());gates=[]
+for name in json.loads((A/'cost-r3-summary.json').read_text()):
+    v=raw[name+'-warm'];b=statistics.median(v['base'])/1e6;h=statistics.median(v['head'])/1e6
+    gates.append((name,h-b<=max(.05,.1*b)))
+long=json.loads((A/'cost-reviewer-long-raw.json').read_text());lg=[]
+for name,v in long.items():
+    b=statistics.median(v['base'])/1e6;h=statistics.median(v['head-r3'])/1e6
+    lg.append((name,h-b<=max(.05,.1*b)))
+print('Original warm gates:',sum(p for _,p in gates),'/',len(gates),'failed:',[n for n,p in gates if not p])
+print('Long-row warm gates:',sum(p for _,p in lg),'/',len(lg))
+assert sum(p for _,p in gates)==24 and all(p for _,p in lg)

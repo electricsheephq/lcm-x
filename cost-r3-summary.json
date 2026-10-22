@@ -1,0 +1,2202 @@
+{
+ "date-2": {
+  "states": {
+   "base": {
+    "state": "answer_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "event",
+     "operation": "date_filter",
+     "anchors": [
+      "vacation",
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "event",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 2
+   },
+   "head": {
+    "state": "answer_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "event",
+     "operation": "date_filter",
+     "anchors": [
+      "vacation",
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "event",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 2
+   }
+  },
+  "warm": {
+   "base": 0.116208,
+   "head": 0.1204795
+  },
+  "cold": {
+   "base": 0.118646,
+   "head": 0.1694585
+  },
+  "warm_delta_ms": 0.004271,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "date-6": {
+  "states": {
+   "base": {
+    "state": "answer_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "event",
+     "operation": "date_filter",
+     "anchors": [
+      "vacation",
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "event",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   },
+   "head": {
+    "state": "answer_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "event",
+     "operation": "date_filter",
+     "anchors": [
+      "vacation",
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "event",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   }
+  },
+  "warm": {
+   "base": 0.2088955,
+   "head": 0.218333
+  },
+  "cold": {
+   "base": 0.170875,
+   "head": 0.2789585
+  },
+  "warm_delta_ms": 0.009437,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "date-10": {
+  "states": {
+   "base": {
+    "state": "answer_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "event",
+     "operation": "date_filter",
+     "anchors": [
+      "vacation",
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "event",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 10
+   },
+   "head": {
+    "state": "answer_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "event",
+     "operation": "date_filter",
+     "anchors": [
+      "vacation",
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "event",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 10
+   }
+  },
+  "warm": {
+   "base": 0.233875,
+   "head": 0.2454795
+  },
+  "cold": {
+   "base": 0.263646,
+   "head": 0.4535
+  },
+  "warm_delta_ms": 0.011604,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "date-12": {
+  "states": {
+   "base": {
+    "state": "answer_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "event",
+     "operation": "date_filter",
+     "anchors": [
+      "vacation",
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "event",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   },
+   "head": {
+    "state": "answer_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "event",
+     "operation": "date_filter",
+     "anchors": [
+      "vacation",
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "event",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   }
+  },
+  "warm": {
+   "base": 0.259833,
+   "head": 0.271167
+  },
+  "cold": {
+   "base": 0.2789795,
+   "head": 0.46675
+  },
+  "warm_delta_ms": 0.011334,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "date-24": {
+  "states": {
+   "base": {
+    "state": "answer_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "event",
+     "operation": "date_filter",
+     "anchors": [
+      "vacation",
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "event",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   },
+   "head": {
+    "state": "answer_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "event",
+     "operation": "date_filter",
+     "anchors": [
+      "vacation",
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "event",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   }
+  },
+  "warm": {
+   "base": 0.2921665,
+   "head": 0.297521
+  },
+  "cold": {
+   "base": 0.277708,
+   "head": 0.481604
+  },
+  "warm_delta_ms": 0.005354,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "order-2": {
+  "states": {
+   "base": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "list",
+     "operation": "order",
+     "anchors": [
+      "order",
+      "vacations",
+      "took"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": "ascending"
+    },
+    "hydrated": 2
+   },
+   "head": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "list",
+     "operation": "order",
+     "anchors": [
+      "order",
+      "vacations",
+      "took"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": "ascending"
+    },
+    "hydrated": 2
+   }
+  },
+  "warm": {
+   "base": 0.170688,
+   "head": 0.1735625
+  },
+  "cold": {
+   "base": 0.177667,
+   "head": 0.220021
+  },
+  "warm_delta_ms": 0.002875,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "order-6": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "list",
+     "operation": "order",
+     "anchors": [
+      "order",
+      "vacations",
+      "took"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": "ascending"
+    },
+    "hydrated": 6
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "list",
+     "operation": "order",
+     "anchors": [
+      "order",
+      "vacations",
+      "took"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": "ascending"
+    },
+    "hydrated": 6
+   }
+  },
+  "warm": {
+   "base": 0.283104,
+   "head": 0.279958
+  },
+  "cold": {
+   "base": 0.273458,
+   "head": 0.3678335
+  },
+  "warm_delta_ms": -0.003146,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "order-10": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "list",
+     "operation": "order",
+     "anchors": [
+      "order",
+      "vacations",
+      "took"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": "ascending"
+    },
+    "hydrated": 10
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "list",
+     "operation": "order",
+     "anchors": [
+      "order",
+      "vacations",
+      "took"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": "ascending"
+    },
+    "hydrated": 10
+   }
+  },
+  "warm": {
+   "base": 0.4803125,
+   "head": 0.468521
+  },
+  "cold": {
+   "base": 0.394396,
+   "head": 0.536583
+  },
+  "warm_delta_ms": -0.011791,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "order-12": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "list",
+     "operation": "order",
+     "anchors": [
+      "order",
+      "vacations",
+      "took"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": "ascending"
+    },
+    "hydrated": 12
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "list",
+     "operation": "order",
+     "anchors": [
+      "order",
+      "vacations",
+      "took"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": "ascending"
+    },
+    "hydrated": 12
+   }
+  },
+  "warm": {
+   "base": 0.4661665,
+   "head": 0.451854
+  },
+  "cold": {
+   "base": 0.412854,
+   "head": 0.579979
+  },
+  "warm_delta_ms": -0.014313,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "order-24": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "list",
+     "operation": "order",
+     "anchors": [
+      "order",
+      "vacations",
+      "took"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": "ascending"
+    },
+    "hydrated": 12
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "list",
+     "operation": "order",
+     "anchors": [
+      "order",
+      "vacations",
+      "took"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": null,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": "ascending"
+    },
+    "hydrated": 12
+   }
+  },
+  "warm": {
+   "base": 0.452896,
+   "head": 0.445791
+  },
+  "cold": {
+   "base": 0.428312,
+   "head": 0.5985
+  },
+  "warm_delta_ms": -0.007105,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "interval-2": {
+  "states": {
+   "base": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "time",
+     "operation": "date_interval",
+     "anchors": [
+      "passed",
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": 2,
+     "requested_unit": "day",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 2
+   },
+   "head": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "time",
+     "operation": "date_interval",
+     "anchors": [
+      "passed",
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": 2,
+     "requested_unit": "day",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 2
+   }
+  },
+  "warm": {
+   "base": 0.191417,
+   "head": 0.197667
+  },
+  "cold": {
+   "base": 0.1884585,
+   "head": 0.2428335
+  },
+  "warm_delta_ms": 0.00625,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "interval-6": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "time",
+     "operation": "date_interval",
+     "anchors": [
+      "passed",
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": 2,
+     "requested_unit": "day",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "time",
+     "operation": "date_interval",
+     "anchors": [
+      "passed",
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": 2,
+     "requested_unit": "day",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   }
+  },
+  "warm": {
+   "base": 0.4964375,
+   "head": 0.4893955
+  },
+  "cold": {
+   "base": 0.507104,
+   "head": 0.70975
+  },
+  "warm_delta_ms": -0.007042,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "interval-10": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "time",
+     "operation": "date_interval",
+     "anchors": [
+      "passed",
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": 2,
+     "requested_unit": "day",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 10
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "time",
+     "operation": "date_interval",
+     "anchors": [
+      "passed",
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": 2,
+     "requested_unit": "day",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 10
+   }
+  },
+  "warm": {
+   "base": 0.721271,
+   "head": 0.7674165
+  },
+  "cold": {
+   "base": 0.7165835,
+   "head": 0.9519375
+  },
+  "warm_delta_ms": 0.046145,
+  "bar_ms": 0.072127,
+  "pass": true,
+  "n": 200
+ },
+ "interval-12": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "time",
+     "operation": "date_interval",
+     "anchors": [
+      "passed",
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": 2,
+     "requested_unit": "day",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "time",
+     "operation": "date_interval",
+     "anchors": [
+      "passed",
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": 2,
+     "requested_unit": "day",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   }
+  },
+  "warm": {
+   "base": 0.494917,
+   "head": 0.5115835
+  },
+  "cold": {
+   "base": 0.51425,
+   "head": 0.796771
+  },
+  "warm_delta_ms": 0.016666,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "interval-24": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "time",
+     "operation": "date_interval",
+     "anchors": [
+      "passed",
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": 2,
+     "requested_unit": "day",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "time",
+     "operation": "date_interval",
+     "anchors": [
+      "passed",
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "operand_1",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      },
+      {
+       "name": "operand_2",
+       "anchor": null,
+       "value_type": "date",
+       "unit": "day",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "fixed_operands",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": null,
+     "finite_cardinality": 2,
+     "requested_unit": "day",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   }
+  },
+  "warm": {
+   "base": 0.574625,
+   "head": 0.5882505
+  },
+  "cold": {
+   "base": 0.5429165,
+   "head": 0.793083
+  },
+  "warm_delta_ms": 0.013625,
+  "bar_ms": 0.057463,
+  "pass": true,
+  "n": 200
+ },
+ "finite-2": {
+  "states": {
+   "base": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "quantity",
+     "operation": "scalar",
+     "anchors": [
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "january",
+       "value_type": "number",
+       "unit": "vacation",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_or_finite_enumeration",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": "vacation",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 2
+   },
+   "head": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "quantity",
+     "operation": "scalar",
+     "anchors": [
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "january",
+       "value_type": "number",
+       "unit": "vacation",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_or_finite_enumeration",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": "vacation",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 2
+   }
+  },
+  "warm": {
+   "base": 0.476125,
+   "head": 0.480542
+  },
+  "cold": {
+   "base": 0.4025,
+   "head": 0.4522915
+  },
+  "warm_delta_ms": 0.004417,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "finite-6": {
+  "states": {
+   "base": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "quantity",
+     "operation": "scalar",
+     "anchors": [
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "january",
+       "value_type": "number",
+       "unit": "vacation",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_or_finite_enumeration",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": "vacation",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   },
+   "head": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "quantity",
+     "operation": "scalar",
+     "anchors": [
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "january",
+       "value_type": "number",
+       "unit": "vacation",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_or_finite_enumeration",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": "vacation",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   }
+  },
+  "warm": {
+   "base": 0.964062,
+   "head": 0.960625
+  },
+  "cold": {
+   "base": 0.9226665,
+   "head": 1.0481455
+  },
+  "warm_delta_ms": -0.003437,
+  "bar_ms": 0.096406,
+  "pass": true,
+  "n": 200
+ },
+ "finite-10": {
+  "states": {
+   "base": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "quantity",
+     "operation": "scalar",
+     "anchors": [
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "january",
+       "value_type": "number",
+       "unit": "vacation",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_or_finite_enumeration",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": "vacation",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   },
+   "head": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "quantity",
+     "operation": "scalar",
+     "anchors": [
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "january",
+       "value_type": "number",
+       "unit": "vacation",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_or_finite_enumeration",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": "vacation",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   }
+  },
+  "warm": {
+   "base": 1.368708,
+   "head": 1.4566875
+  },
+  "cold": {
+   "base": 1.3042295,
+   "head": 1.5055005
+  },
+  "warm_delta_ms": 0.087979,
+  "bar_ms": 0.136871,
+  "pass": true,
+  "n": 200
+ },
+ "finite-12": {
+  "states": {
+   "base": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "quantity",
+     "operation": "scalar",
+     "anchors": [
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "january",
+       "value_type": "number",
+       "unit": "vacation",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_or_finite_enumeration",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": "vacation",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   },
+   "head": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "quantity",
+     "operation": "scalar",
+     "anchors": [
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "january",
+       "value_type": "number",
+       "unit": "vacation",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_or_finite_enumeration",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": "vacation",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   }
+  },
+  "warm": {
+   "base": 1.529479,
+   "head": 1.537563
+  },
+  "cold": {
+   "base": 1.4607295,
+   "head": 1.6648955
+  },
+  "warm_delta_ms": 0.008084,
+  "bar_ms": 0.152948,
+  "pass": true,
+  "n": 200
+ },
+ "finite-24": {
+  "states": {
+   "base": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "quantity",
+     "operation": "scalar",
+     "anchors": [
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "january",
+       "value_type": "number",
+       "unit": "vacation",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_or_finite_enumeration",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": "vacation",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   },
+   "head": {
+    "state": "computation_sufficient",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "quantity",
+     "operation": "scalar",
+     "anchors": [
+      "january"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "january",
+       "value_type": "number",
+       "unit": "vacation",
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_or_finite_enumeration",
+     "confidence": "high",
+     "question_as_of": "2023-03-22",
+     "temporal_window": {
+      "start": "2023-01-01",
+      "end": "2023-02-01",
+      "description": "january 2023"
+     },
+     "finite_cardinality": null,
+     "requested_unit": "vacation",
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   }
+  },
+  "warm": {
+   "base": 2.1573755,
+   "head": 2.1358545
+  },
+  "cold": {
+   "base": 2.2000415,
+   "head": 2.48575
+  },
+  "warm_delta_ms": -0.021521,
+  "bar_ms": 0.215738,
+  "pass": true,
+  "n": 200
+ },
+ "nondate-2": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "fact",
+     "operation": "none",
+     "anchors": [
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "text",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": null,
+     "temporal_window": null,
+     "finite_cardinality": 1,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 2
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "fact",
+     "operation": "none",
+     "anchors": [
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "text",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": null,
+     "temporal_window": null,
+     "finite_cardinality": 1,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 2
+   }
+  },
+  "warm": {
+   "base": 0.173417,
+   "head": 0.178979
+  },
+  "cold": {
+   "base": 0.1806665,
+   "head": 0.179104
+  },
+  "warm_delta_ms": 0.005562,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "nondate-6": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "fact",
+     "operation": "none",
+     "anchors": [
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "text",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": null,
+     "temporal_window": null,
+     "finite_cardinality": 1,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "fact",
+     "operation": "none",
+     "anchors": [
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "text",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": null,
+     "temporal_window": null,
+     "finite_cardinality": 1,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 6
+   }
+  },
+  "warm": {
+   "base": 0.363792,
+   "head": 0.3577915
+  },
+  "cold": {
+   "base": 0.423208,
+   "head": 0.4177915
+  },
+  "warm_delta_ms": -0.006001,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "nondate-10": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "fact",
+     "operation": "none",
+     "anchors": [
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "text",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": null,
+     "temporal_window": null,
+     "finite_cardinality": 1,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 10
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "fact",
+     "operation": "none",
+     "anchors": [
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "text",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": null,
+     "temporal_window": null,
+     "finite_cardinality": 1,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 10
+   }
+  },
+  "warm": {
+   "base": 0.586479,
+   "head": 0.6541665
+  },
+  "cold": {
+   "base": 0.620021,
+   "head": 0.6269375
+  },
+  "warm_delta_ms": 0.067688,
+  "bar_ms": 0.058648,
+  "pass": false,
+  "n": 200
+ },
+ "nondate-12": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "fact",
+     "operation": "none",
+     "anchors": [
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "text",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": null,
+     "temporal_window": null,
+     "finite_cardinality": 1,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "fact",
+     "operation": "none",
+     "anchors": [
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "text",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": null,
+     "temporal_window": null,
+     "finite_cardinality": 1,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   }
+  },
+  "warm": {
+   "base": 0.299,
+   "head": 0.2993545
+  },
+  "cold": {
+   "base": 0.310229,
+   "head": 0.307896
+  },
+  "warm_delta_ms": 0.000355,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ },
+ "nondate-24": {
+  "states": {
+   "base": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "fact",
+     "operation": "none",
+     "anchors": [
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "text",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": null,
+     "temporal_window": null,
+     "finite_cardinality": 1,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   },
+   "head": {
+    "state": "unknown",
+    "contract": {
+     "version": "answer-contract-v1",
+     "answer_kind": "fact",
+     "operation": "none",
+     "anchors": [
+      "vacation",
+      "destination"
+     ],
+     "slots": [
+      {
+       "name": "answer",
+       "anchor": "vacation",
+       "value_type": "text",
+       "unit": null,
+       "expected_role": "any",
+       "required": true
+      }
+     ],
+     "coverage_policy": "source_asserted_fact",
+     "confidence": "high",
+     "question_as_of": null,
+     "temporal_window": null,
+     "finite_cardinality": 1,
+     "requested_unit": null,
+     "difference_direction": null,
+     "order_direction": null
+    },
+    "hydrated": 12
+   }
+  },
+  "warm": {
+   "base": 0.340729,
+   "head": 0.343292
+  },
+  "cold": {
+   "base": 0.316875,
+   "head": 0.317396
+  },
+  "warm_delta_ms": 0.002563,
+  "bar_ms": 0.05,
+  "pass": true,
+  "n": 200
+ }
+}
