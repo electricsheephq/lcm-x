@@ -5,6 +5,9 @@ same build for --aa. --option A requires a recorded funding_refusal. Runs use th
 existing run_pmw_cell.sh; only injected test producers avoid real provider calls.
 """
 import argparse
+import contextlib
+import importlib.util
+import io
 import hashlib
 import itertools
 import json
@@ -37,8 +40,10 @@ def git(path, *args):
     return subprocess.check_output(["git", "-C", str(path), *args], text=True).strip()
 
 
-def prepare(config, option, aa):
+def prepare(config, option, aa, *, check_hash=True):
     """Resolve content identities before the first replay; never serialize environment."""
+    if check_hash:
+        card_tool()  # refuse a missing card tool before any paid replay
     pins = {k: config[k] for k in ("material", "builds", "summary", "reader", "policy")}
     if option == "A" and aa:
         raise ValueError("option A cannot be A/A")
@@ -59,7 +64,8 @@ def prepare(config, option, aa):
         raise ValueError("pins must match a supported producer route")
     if lane != "glm" and not config.get("comparability_ruling"):
         raise ValueError("changed D2 summary route requires a comparability_ruling")
-    pins.update(summary_lane=lane, comparability_ruling=config.get("comparability_ruling"))
+    pins.update(summary_lane=lane, comparability_ruling=config.get("comparability_ruling"),
+                instrument_hash_ruling=config.get("instrument_hash_ruling"))
     if {b["arm"] for b in pins["builds"].values()} != {pins["policy"]["arm"]}:
         raise ValueError("both builds must use the pinned policy arm")
     kit = Path(__file__).resolve().parents[1]
@@ -84,14 +90,17 @@ def prepare(config, option, aa):
                 kit_sha=git(kit, "rev-parse", "HEAD"), funding_refusal=config.get("funding_refusal"),
                 retry="unchanged producer/reader retries pinned by instrument hash; one replacement per slot, two total")
     pins.update(instrument_root=str(kit), expected_instrument_hash=config.get("expected_instrument_hash"))
-    if not pins["expected_instrument_hash"] or (pins["instrument_hash"] != pins["expected_instrument_hash"] and not pins["comparability_ruling"]):
-        raise ValueError("predeclared instrument hash required; mismatch requires comparability ruling")
+    if check_hash and (not pins["expected_instrument_hash"] or
+                       (pins["instrument_hash"] != pins["expected_instrument_hash"] and not pins["instrument_hash_ruling"])):
+        raise ValueError("predeclared instrument hash required; mismatch requires instrument_hash_ruling")
     return pins
 
 
 def changed(pins):
     if "instrument" not in pins:  # injected fixture producers have no prepared filesystem
         return None
+    if git(pins["instrument_root"], "status", "--porcelain", "--untracked-files=all", "--", "."):
+        return "instrument_changed"
     for kind, paths in (("instrument", {Path(pins["instrument_root"]) / p: sha for p, sha in pins.get("instrument", {}).items()}),
                         ("material", {Path(pins["material"]) / f"seed-{s}" / p: sha
                                       for s, rec in pins.get("materials", {}).items()
@@ -182,6 +191,62 @@ def stop_process(process):
     process.wait(timeout=10)
 
 
+class RunSignal(SystemExit):
+    """A termination signal routed through the existing BaseException cleanup."""
+
+
+@contextlib.contextmanager
+def run_signals():
+    previous = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    def interrupt(signum, frame):
+        for other in previous:
+            signal.signal(other, signal.SIG_IGN)  # cleanup must finish before restoration
+        raise RunSignal(signal.Signals(signum).name)
+    try:
+        for signum in (signal.SIGTERM, signal.SIGHUP):
+            if previous[signum] != signal.SIG_IGN:
+                signal.signal(signum, interrupt)
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+
+
+def card_tool():
+    path = os.environ.get("FMP_RESULT_CARD_TOOL")
+    if not path or not Path(path).is_file():
+        raise ValueError("set FMP_RESULT_CARD_TOOL to the installed bench-card.py")
+    return path
+
+
+def result_card(out, result):
+    path = card_tool()
+    spec = importlib.util.spec_from_file_location("d2_bench_card", path)
+    tool = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(tool)
+    def call(*args):
+        with contextlib.redirect_stdout(io.StringIO()):
+            if tool.execute(tool.parser().parse_args([args[0], str(out), *map(str, args[1:])])):
+                raise ValueError("D2 result card validation failed")
+    command = "python3 bench/instruments/compaction_probe/track_s/decision/d2_score.py --ledger ledger.json --out NEW_DIRECTORY"
+    # Preserve the lowercase card even on case-insensitive filesystems.
+    text = (out / "result.md").read_text()
+    card = (text + "\n| verdict | receipt |\n| --- | --- |\n"
+            + f"| {result['raw_verdict']} | result.json |\n\nRe-score: `{command}`\n\n"
+            + "Not proven: other materials/routes, release or customer readiness.\n"
+            + "T1: unpublished. T2: unpublished; retained for release-manager handoff.\n")
+    (out / "RESULT.md").write_text(card)
+    call("init", "--project", "lcm-x", "--kind", "acceptance", "--owner-lane", "d2-instrument",
+         "--code-dir", git(Path(__file__).resolve().parent, "rev-parse", "--show-toplevel"), "--command", command, "--claim-class", "advisory")
+    call("add", *sorted(p.name for p in out.iterdir() if p.name != "RESULT-MANIFEST.json"), "--role", "per-item")
+    call("rescore", "--command", command, "--input", "ledger.json", "pins.json",
+         *(["replays"] if (out / "replays").exists() else []))
+    call("status", "settled", "--owner-verdict", "Retain all results; publication is release-manager owned.")
+    call("finalize")
+    call("check", "--strict")
+
+
+@run_signals()
 def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monotonic,
                    sleep=time.sleep, scorer=d2_score.score, started=None, wall_clock=time.time, wall_started=None):
     start = clock() if started is None else started
@@ -198,7 +263,7 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
             rows.append(dict(arm=arm, seed=seed, k=k, slot=slot, attempts=[], state="planned",
                              validity_reason="not started", started=None, finished=None,
                              artifact=str(out / "replays" / f"{arm}-s{seed}-r{k}")))
-    data = dict(option=pins["option"], aa=pins["aa"], pins=pins, rows=rows, elapsed_s=elapsed(), stop_reason=None, monitor_errors=[])
+    data = dict(option=pins["option"], aa=pins["aa"], pins=pins, rows=rows, elapsed_s=elapsed(), stop_reason=None, monitor_errors=[], monitor_errors_dropped=0)
     producer = producer or real_producer(pins)
     validate = validate or (lambda r, a, p: validate_artifacts(pins, r, a, p))
     active, replacements = [], 0
@@ -225,8 +290,35 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
                         break
                     except OSError as exc:
                         if retry:
-                            data["monitor_errors"].append(dict(path=str(p), error=type(exc).__name__))
+                            if len(data["monitor_errors"]) < 50:
+                                data["monitor_errors"].append(dict(path=str(p), error=type(exc).__name__))
+                            else:
+                                data["monitor_errors_dropped"] += 1
         return hits
+
+    def monitor():
+        hits = limited()
+        if hits:
+            data["stop_reason"] = "rate_limited"
+        if elapsed() >= LIMIT_SECONDS:
+            data["stop_reason"] = "elapsed stop"
+        return hits
+
+    def stop_active(hits):
+        error = None
+        for row, process, _ in active:
+            try:
+                stop_process(process)
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+            finally:
+                row.update(state="rate_limited" if row in hits or row["state"] == "rate_limited" else "truncated",
+                           validity_reason=data["stop_reason"], finished=elapsed())
+                row["attempts"][-1].update(state=row["state"], validity_reason=row["validity_reason"], finished=row["finished"])
+        active.clear()
+        if error is not None:
+            raise error
 
     def launch(row):
         nonlocal replacements
@@ -255,31 +347,28 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
         for i in range(0, len(rows), 2):
             pending = rows[i:i+2]
             while pending or active:
-                hits = limited()
-                if hits:
-                    data["stop_reason"] = "rate_limited"
-                if elapsed() >= LIMIT_SECONDS:
-                    data["stop_reason"] = "elapsed stop"
+                hits = monitor()
                 if data["stop_reason"]:
-                    for row, process, _ in active:
-                        stop_process(process)
-                        row.update(state="rate_limited" if row in hits or row["state"] == "rate_limited" else "truncated",
-                                   validity_reason=data["stop_reason"], finished=elapsed())
-                        row["attempts"][-1].update(state=row["state"], validity_reason=row["validity_reason"], finished=row["finished"])
-                    active.clear()
+                    stop_active(hits)
                     break
                 for row in pending:
                     launch(row)
-                    if data["stop_reason"] or limited() or elapsed() >= LIMIT_SECONDS:
+                    hits = monitor()
+                    if data["stop_reason"]:
+                        stop_active(hits)
                         break
                 pending = []
+                if data["stop_reason"]:
+                    break
                 for row, process, path in list(active):
                     rc = process.poll()
                     if rc is None:
                         continue
                     if rc == 3 or row in limited():
                         data["stop_reason"] = "rate_limited"
-                        row.update(state="rate_limited", validity_reason="rate_limited")
+                        row.update(state="rate_limited", validity_reason="rate_limited", finished=elapsed())
+                        row["attempts"][-1].update(state="rate_limited", validity_reason="rate_limited", finished=row["finished"])
+                        active.remove((row, process, path))
                         continue
                     state, reason, metrics = validate(row, len(row["attempts"]), path)
                     row.update(state=state, validity_reason=reason, finished=elapsed())
@@ -290,14 +379,17 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
                     if state != "valid":
                         pending.append(row)
                 save()
-                if active:
+                if active and not data["stop_reason"]:
                     sleep(2)
             if data["stop_reason"]:
                 break
     except BaseException as exc:
-        data.update(stop_reason=type(exc).__name__, raw_verdict="INCONCLUSIVE")
-        for _, process, _ in active:
-            stop_process(process)
+        for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+            if signal.getsignal(signum) != signal.SIG_IGN:
+                signal.signal(signum, signal.SIG_IGN)
+        data.update(stop_reason=str(exc) if isinstance(exc, RunSignal) else type(exc).__name__,
+                    state="interrupted", raw_verdict="INCONCLUSIVE")
+        stop_active([])
         raise
     finally:
         for row in rows:
@@ -308,7 +400,8 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
     try:
         result = scorer(data)
     except BaseException as exc:
-        data.update(stop_reason=type(exc).__name__, raw_verdict="INCONCLUSIVE")
+        data.update(stop_reason=str(exc) if isinstance(exc, RunSignal) else type(exc).__name__,
+                    state="interrupted", raw_verdict="INCONCLUSIVE")
         save()
         raise
     drift = changed(pins)
@@ -321,6 +414,7 @@ def run_comparison(pins, out, *, producer=None, validate=None, clock=time.monoto
         result.update(raw_verdict="INCONCLUSIVE", reason="elapsed stop including scoring")
         save()
     d2_score.write_result(out, result)
+    result_card(out, result)
     return result
 
 
@@ -329,14 +423,23 @@ if __name__ == "__main__":
     wall_started = time.time()
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config", type=Path, required=True)
-    ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--out", type=Path)
     ap.add_argument("--option", choices=("A", "B"), default="B")
     ap.add_argument("--aa", action="store_true")
     ap.add_argument("--comparability-ruling")
+    ap.add_argument("--instrument-hash-ruling")
+    ap.add_argument("--print-instrument-hash", action="store_true")
     args = ap.parse_args()
     config = json.loads(args.config.read_text())
     if args.comparability_ruling:
         config["comparability_ruling"] = args.comparability_ruling
+    if args.instrument_hash_ruling:
+        config["instrument_hash_ruling"] = args.instrument_hash_ruling
+    if args.print_instrument_hash:
+        print(prepare(config, args.option, args.aa, check_hash=False)["instrument_hash"])
+        raise SystemExit(0)
+    if args.out is None:
+        ap.error("--out is required for a run")
     result = run_comparison(prepare(config, args.option, args.aa), args.out, started=started, wall_started=wall_started)
     print(result["raw_verdict"])
     raise SystemExit({"PASS": 0, "FAIL": 1, "INCONCLUSIVE": 2}[result["raw_verdict"]])

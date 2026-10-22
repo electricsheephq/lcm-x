@@ -81,9 +81,9 @@ def test_prepare_requires_predeclared_kit_and_records_ruling(prepared):
     config["expected_instrument_hash"] = "0" * 64
     with pytest.raises(ValueError, match="instrument"):
         driver.prepare(config, "B", True)
-    config["comparability_ruling"] = "https://example.invalid/ruling"
+    config["instrument_hash_ruling"] = "https://example.invalid/ruling"
     pin = driver.prepare(config, "B", True)
-    assert pin["comparability_ruling"] == config["comparability_ruling"]
+    assert pin["instrument_hash_ruling"] == config["instrument_hash_ruling"]
     assert pin["expected_instrument_hash"] == "0" * 64
 
 

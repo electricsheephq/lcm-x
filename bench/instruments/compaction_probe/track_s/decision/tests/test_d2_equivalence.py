@@ -38,9 +38,9 @@ def test_existing_fixtures_unchanged():
                     equal(scorer.score(data), old.score(data))
 
 
-def test_one_thousand_random_ledgers_unchanged():
+def test_3200_random_ledgers_unchanged():
     scorer, old, rng = load("d2_score"), oracle(), random.Random(1834)
-    for i in range(1000):
+    for i in range(3200):
         data = ledger(runs=4 if i % 2 else 9, aa=i % 3 == 0)
         loss = rng.uniform(-.12, .12)
         placebo = rng.choice((0, .06, -.06))
