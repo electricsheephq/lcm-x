@@ -163,6 +163,12 @@ def test_monitor_errors_bounded_and_dropped_counted(tmp_path, monkeypatch):
         process = fake(*args)
         (args[2] / "producer.log").write_text("synthetic")
         return process
+    card = driver.result_card
+    def after_monitor(*args):
+        # Card fingerprinting needs readable evidence after the monitor is done.
+        monkeypatch.setattr(Path, "open", original)
+        return card(*args)
+    monkeypatch.setattr(driver, "result_card", after_monitor)
     monkeypatch.setattr(Path, "open", unreadable)
     driver.run_comparison(dict(option="B", aa=False), tmp_path / "out", producer=producer,
                           validate=fake.validate, clock=clock, sleep=clock.sleep)
@@ -183,7 +189,7 @@ def test_completed_fake_run_has_validated_result_card(tmp_path):
     assert valid.returncode == 0, valid.stdout + valid.stderr
     manifest = root / "RESULT-MANIFEST.json"
     data = json.loads(manifest.read_text())
-    data.pop("code")
+    data["schema"] = "corrupted"
     manifest.write_text(json.dumps(data))
     corrupt = subprocess.run(cmd, text=True, capture_output=True, timeout=10)
     assert corrupt.returncode != 0
