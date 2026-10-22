@@ -123,7 +123,7 @@ def test_non_date_carried_fact_keeps_base_parse_mode(tmp_path, mixed, other):
         before = engine._store.connection.total_changes
         result = json.loads(tools.lcm_compile_evidence(args(refs), engine=engine))
         assert result["state"] == "answer_sufficient"
-        assert result["direct_fact"]["value"] == "green"
+        assert result["direct_fact"]["value"] == text
         assert _carried_absolute_day(dict(time_uncertain="carried", quote=text),
                                      date_dependent=False) == date(2023, 1, 12)
         assert engine._store.connection.total_changes == before
