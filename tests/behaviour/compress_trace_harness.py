@@ -775,11 +775,26 @@ def install_clock(patch: pytest.MonkeyPatch, clock: Clock) -> None:
     replacement.monotonic, replacement.perf_counter, replacement.time = clock.monotonic, clock.monotonic, clock.wall
     replacement.time_ns = clock.time_ns
     replacement.gmtime = lambda: time.gmtime(1700000000)
-    for name in ("compaction", "engine", "escalation", "store", "dag", "lifecycle_state",
-                 "survival_fit", "externalize"):
-        module = importlib.import_module(f"hermes_lcm.{name}")
-        if hasattr(module, "time"):
-            patch.setattr(module, "time", replacement)
+    namespaces = {id(vars(module)): vars(module) for name, module in list(sys.modules.items())
+                  if name.startswith("hermes_lcm.") and module is not None}
+    # A reimport changes sys.modules, not the globals retained by existing classes.
+    engine_class = harness.make_engine.__globals__["LCMEngine"]
+    for cls in engine_class.__mro__:
+        for method in vars(cls).values():
+            namespace = getattr(getattr(method, "__func__", method), "__globals__", {})
+            if namespace.get("__name__", "").startswith("hermes_lcm."):
+                namespaces[id(namespace)] = namespace
+    # Include the retained engine's imported services (store, DAG, budgets, etc.).
+    for namespace in list(namespaces.values()):
+        for value in list(namespace.values()):
+            members = vars(value).values() if inspect.isclass(value) else (value,)
+            for member in members:
+                scope = getattr(getattr(member, "__func__", member), "__globals__", {})
+                if scope.get("__name__", "").startswith("hermes_lcm."):
+                    namespaces[id(scope)] = scope
+    for namespace in namespaces.values():
+        if "time" in namespace:
+            patch.setitem(namespace, "time", replacement)
 
 
 def connections(engine: Any) -> list[tuple[str, sqlite3.Connection]]:
