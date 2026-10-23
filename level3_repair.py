@@ -173,9 +173,9 @@ def _commit_group(engine, rows, group, new) -> str:
     with engine._dag._db_lock:
         conn.execute("BEGIN IMMEDIATE")
         try:
-            current = dict(conn.execute(
-                "SELECT node_id, summary FROM summary_nodes WHERE node_id IN (SELECT value FROM json_each(?))",
-                (group_json,)).fetchall())
+            current = {node_id: (owner, text) for node_id, owner, text in conn.execute(
+                "SELECT node_id, session_id, summary FROM summary_nodes WHERE node_id IN (SELECT value FROM json_each(?))",
+                (group_json,)).fetchall()}
             new_parent = conn.execute(
                 "SELECT 1 FROM summary_nodes p, json_each(p.source_ids) j WHERE p.source_type = 'nodes' "
                 "AND CAST(j.value AS INTEGER) IN (SELECT value FROM json_each(?)) "
@@ -186,7 +186,7 @@ def _commit_group(engine, rows, group, new) -> str:
                 conn.rollback()
                 return (f"a condensation in flight uses node {in_flight[0]}; "
                         "run apply again when the agent is idle")
-            if new_parent or any(current.get(i) != rows[i][3] for i in group):
+            if new_parent or any(current.get(i) != (rows[i][1], rows[i][3]) for i in group):
                 conn.rollback()
                 return "a node changed or a new parent linked in during the repair"
             for node_id in group:
