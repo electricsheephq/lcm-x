@@ -1143,8 +1143,9 @@ class VectorStore:
         """Load ids into a unique per-call temp table in bounded chunks for JOINs.
 
         Avoids the ``WHERE id IN (?, ?, ...)`` host-parameter cap
-        (SQLITE_MAX_VARIABLE_NUMBER) that failed at ~33k ids: ``executemany``
-        binds one row at a time, so an arbitrary number of ids can be staged.
+        (SQLITE_MAX_VARIABLE_NUMBER) that failed at ~33k ids: each insert binds
+        at most 500 IDs, so an arbitrary number of IDs can be staged without
+        paying a separate SQLite statement for every row.
 
         The table name is unique per call (the store's connection is shared
         across threads, ``check_same_thread=False``); a single reused name meant
@@ -1156,11 +1157,12 @@ class VectorStore:
         try:
             for offset in range(0, len(ids), _ID_INSERT_CHUNK):
                 rows = [
-                    (str(value),)
+                    str(value)
                     for value in ids[offset:offset + _ID_INSERT_CHUNK]
                 ]
-                self._conn.executemany(
-                    f"INSERT OR IGNORE INTO {table}(id) VALUES(?)",
+                placeholders = ",".join("(?)" for _ in rows)
+                self._conn.execute(
+                    f"INSERT OR IGNORE INTO {table}(id) VALUES {placeholders}",
                     rows,
                 )
             yield table
