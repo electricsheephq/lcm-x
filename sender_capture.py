@@ -84,7 +84,9 @@ def create_pending(engine, payload):
             return None
         obj = history[-1] if isinstance(history, list) and history else None
         author = payload.get("turn_author")
-        if (not isinstance(obj, dict) or obj.get("role") != "user" or "display_kind" in obj
+        # A tail object the host reused from an earlier occurrence cannot name one row.
+        if (not isinstance(obj, dict) or any(o is obj for o in history[:-1])
+                or obj.get("role") != "user" or "display_kind" in obj
                 or (author is not None and (not isinstance(author, dict) or author.get("is_bot")
                                            or author.get("id") != raw))):
             return None

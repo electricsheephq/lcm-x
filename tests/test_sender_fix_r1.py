@@ -636,3 +636,21 @@ def test_interrupt_after_begin_rolls_back_and_releases_lock(tmp_path):
         thread.start()
         thread.join(2)
         assert acquired == [True]
+
+
+@pytest.mark.parametrize("preflight", [False, True], ids=["hook-first", "preflight-first"])
+def test_reused_tail_object_never_stamps_earlier_occurrence(hook_context, preflight):
+    ctx = hook_context
+    a = message(0)
+    view = [a]
+    ctx.engine.ingest(view)
+    assert ctx.engine.drain_rollup_maintenance(timeout=10)
+    view.extend([dict(role="assistant", content="synthetic reply", timestamp=100.5), a])
+    if preflight:
+        ctx.engine.should_compress_preflight(view)
+    ctx.hooks["pre_llm_call"](**payload(view, turn="turn-b"))
+    ctx.engine.ingest(view)
+    rows = [(r["role"], r["store_id"]) for r in ctx.engine._store.get_session_messages("S")]
+    users = [sid for role, sid in rows if role == "user"]
+    stamps = ctx.engine._store.get_message_senders(users)
+    assert all(stamps[sid] == (None, None) for sid in users)  # Reuse cannot name one occurrence.
