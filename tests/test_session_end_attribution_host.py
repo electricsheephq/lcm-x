@@ -29,7 +29,9 @@ def run_probe(tmp_path, source, **extra):
 
 @pytest.mark.parametrize("count", [245, 1400])
 def test_real_commit_attribution(tmp_path, count):
-    source = COMMIT_PROBE.split("host, t, statuses, sids, repairs, adopted =")[0]
+    commit_anchor = "host, t, statuses, sids, repairs, adopted ="
+    assert COMMIT_PROBE.count(commit_anchor) == 1, commit_anchor
+    source = COMMIT_PROBE.split(commit_anchor)[0]
     source = "import socket\nsocket.socket.connect = lambda *a: (_ for _ in ()).throw(OSError('offline'))\n" + source
     source += f'''
 engine._config.embeddings_enabled = False
@@ -84,7 +86,7 @@ engine.shutdown()
 engine = cls(config=config, hermes_home=str(home))
 engine.on_session_start("S0", platform="acp", conversation_id=cid)
 agent.context_compressor = engine
-history = copy.deepcopy(seed[-23:])
+history, expected_raw = copy.deepcopy(seed[-23:]), {}
 events = []
 class Observe(logging.Handler):
     def emit(self, record):
@@ -96,11 +98,16 @@ class Observe(logging.Handler):
 logging.getLogger().addHandler(Observe())
 sys.modules[type(engine).__module__].logger.setLevel(logging.DEBUG)
 '''
-    source = TURN_PROBE.replace("history = []", seed)
+    # Each anchor must exist; a silent miss would drop the seed or the callback marker (#1888 x #1906).
+    history_anchor = "history, expected_raw = [], {}"
+    callback_anchor = 'sent = sum(len(str(m.get("content") or ""))'
+    db_anchor = 'db = sqlite3.connect(str(home / "lcm.db"))'
+    for anchor in (history_anchor, callback_anchor, db_anchor):
+        assert TURN_PROBE.count(anchor) == 1, anchor
+    source = TURN_PROBE.replace(history_anchor, seed)
     # This timestamp/order marker runs INSIDE the real provider callback, never during response construction.
-    source = source.replace('sent = sum(len(str(m.get("content") or ""))',
-                            'events.append("API callback")\n            sent = sum(len(str(m.get("content") or ""))')
-    source = source.split('db = sqlite3.connect(str(home / "lcm.db"))')[0]
+    source = source.replace(callback_anchor, 'events.append("API callback")\n            ' + callback_anchor)
+    source = source.split(db_anchor)[0]
     source += '''
 rows = engine._store.get_session_messages("S0")
 print(json.dumps({"events": events, "stored": len(rows), "distinct": len({r["content"] for r in rows}),

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import re
 from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
@@ -24,9 +25,20 @@ def test_ingest_golden(case: Any, tmp_path: Path) -> None:
     payloads: list[str] = []
     actual = observe(case, tmp_path, payloads=payloads)
     difference = first_difference(expected[case.name], actual)
+    cache_diagnostics = []
     if difference is not None:
         (tmp_path / "actual-payload.json").write_text(json.dumps(payloads, ensure_ascii=False))
-    assert difference is None, f"{case.name}: {difference}\n{TRACE_GUIDANCE}"
+        for payload in payloads:
+            stage, marker, data = payload.partition("attr _no_progress_public_rows ")
+            if marker and isinstance(cache := json.loads(data), dict):
+                entries = {}
+                for key, value in cache.items():
+                    label = key if re.fullmatch(r"(?:retained-message|message|cached-occurrence)-\d+", key) else "<unlabelled>"
+                    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"))
+                    entries[label] = dict(sha12=hashlib.sha256(encoded.encode()).hexdigest()[:12],
+                                         fields=len(value) if isinstance(value, dict) else 0, chars=len(encoded))
+                cache_diagnostics.append(dict(stage=stage, entries=entries))
+    assert difference is None, f"{case.name}: {difference}\n{TRACE_GUIDANCE}\ncache-metadata: {json.dumps(cache_diagnostics, sort_keys=True)}"
 
 
 def test_observer_completeness(tmp_path: Path) -> None:
@@ -54,8 +66,8 @@ def test_fixture_scenario_inventory_and_size() -> None:
     assert len(names) == len(set(names))
     assert set(data) == set(names), TRACE_GUIDANCE
     # Initial, next and cold ingests now each retain their full observer stream.
-    # #1880 adds the transient per-index classification to the observer.
-    assert GOLDEN.stat().st_size <= 3_375_000
+    # Parts A/B both add transient ingest observations.
+    assert GOLDEN.stat().st_size <= 3_400_000
     assert all(len(json.dumps(trace).encode()) <= 45_000 for trace in data.values())
 
 
@@ -75,6 +87,11 @@ def test_occurrence_uids_and_structured_payload_bytes_stay_distinct(tmp_path: Pa
     assert canonical.value(first)["content"] == first["content"]
     assert canonical.value({"content": "mtime_ns=123"}) == {"content": "mtime_ns=123"}
     assert canonical.value(first) != canonical.value({**first, "timestamp": 11.})
+    replay = canonical.value(("S", "C", "sandbox-digest-a"), "_no_progress_replay")
+    assert replay == canonical.value(("S", "C", "sandbox-digest-a"), "_no_progress_replay")
+    assert replay != canonical.value(("S", "C", "sandbox-digest-b"), "_no_progress_replay")
+    assert canonical.value({id(first): first}, "_no_progress_public_rows") == {
+        "cached-occurrence-0": canonical.value(first)}
 
 
 def test_search_observation_detects_unindexed_ingest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -123,6 +140,23 @@ def test_snapshot_keeps_labelled_messages_alive(tmp_path: Path, monkeypatch: pyt
         snapshot(engine, canonical)
         engine._last_active_replay_messages = []
         assert canonical.retained_messages[id(message)] is message
+
+
+def test_copy_return_observer_retains_replaced_owners(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    owners = {}
+    harness.retain_replay_copy_owners(monkeypatch, owners)
+    with engine_context(tmp_path, window=200000, embeddings_enabled=False) as engine:
+        def copy_occurrence(content):
+            rows = engine._copy_active_replay_messages_preserving_generated_ids([
+                {"role": "assistant", "content": content}])
+            return id(rows[0])
+
+        first = copy_occurrence("first synthetic occurrence")
+        second = copy_occurrence("second synthetic occurrence")
+        assert first != second
+        assert owners[first]["content"] == "first synthetic occurrence"
+        assert owners[second]["content"] == "second synthetic occurrence"
+        assert set(engine._no_progress_public_rows) == {second}
 
 
 @pytest.mark.parametrize("name", [case.name for case in SCENARIOS if case.shape == "uid"])
