@@ -54,7 +54,7 @@ def test_fixture_scenario_inventory_and_size() -> None:
     assert len(names) == len(set(names))
     assert set(data) == set(names), TRACE_GUIDANCE
     # Initial, next and cold ingests now each retain their full observer stream.
-    assert GOLDEN.stat().st_size <= 3_350_000
+    assert GOLDEN.stat().st_size <= 3_400_000
     assert all(len(json.dumps(trace).encode()) <= 45_000 for trace in data.values())
 
 
@@ -74,6 +74,11 @@ def test_occurrence_uids_and_structured_payload_bytes_stay_distinct(tmp_path: Pa
     assert canonical.value(first)["content"] == first["content"]
     assert canonical.value({"content": "mtime_ns=123"}) == {"content": "mtime_ns=123"}
     assert canonical.value(first) != canonical.value({**first, "timestamp": 11.})
+    replay = canonical.value(("S", "C", "sandbox-digest-a"), "_no_progress_replay")
+    assert replay == canonical.value(("S", "C", "sandbox-digest-a"), "_no_progress_replay")
+    assert replay != canonical.value(("S", "C", "sandbox-digest-b"), "_no_progress_replay")
+    assert canonical.value({id(first): first}, "_no_progress_public_rows") == {
+        "cached-occurrence-0": canonical.value(first)}
 
 
 def test_search_observation_detects_unindexed_ingest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

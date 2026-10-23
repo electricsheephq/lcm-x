@@ -70,6 +70,7 @@ class ResetStateMixin:
         # #651: a hold armed by the previous binding never holds the next one. #618: nor does the #608 hold.
         self._no_progress_hold, self._no_progress_candidate = None, False
         self._no_progress_replay = None  # Reload the scoped durable hold only after current ingest proof.
+        self._no_progress_hold_persisted = False
         self._zero_leaf_streaks = {}  # #1162: nor does its zero-leaf streak (a kept conversation id included)
         self._objective_only_noop = False
         self._sweep_budget_hold_until, self._sweep_budget_hold_conversation = 0.0, ""

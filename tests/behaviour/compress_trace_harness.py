@@ -462,6 +462,7 @@ OBSERVED_ATTRIBUTES = (
     "_last_compression_noop_reason",
     "_last_compression_status",
     "_last_condensation_suppressed_reason",
+    "_last_gate_tokens",
     "_last_hidden_backlog",
     "_last_leaf_content_filter_error",
     "_last_leaf_level_3_verbatim",
@@ -486,6 +487,9 @@ OBSERVED_ATTRIBUTES = (
     "_no_progress_candidate",
     "_no_progress_hold",
     "_no_progress_hold_blocks",
+    "_no_progress_hold_persisted",
+    "_no_progress_proof_complete",
+    "_no_progress_public_rows",
     "_note_fresh_tail_pressure_relieved",
     "_objective_only_noop",
     "_overflow_recovery_assembly_cap",
@@ -577,7 +581,7 @@ class Canonical:
             return self.value(vars(value), path)
         if isinstance(value, dict):
             # These keys are Python object identities, not durable store IDs.
-            identity_keys = path.endswith(("store_ids_by_message_id", "_compress_occurrences"))
+            identity_keys = path.endswith(("store_ids_by_message_id", "_compress_occurrences", "_no_progress_public_rows"))
             return {(f"<message-{i}>" if identity_keys else str(k)): self.value(v, f"{path}.{k}")
                     for i, (k, v) in enumerate(value.items(), 1)}
         if isinstance(value, (list, tuple)):

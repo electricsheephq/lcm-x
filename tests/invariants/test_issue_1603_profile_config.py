@@ -359,7 +359,16 @@ def test_environment_read_inventory():
         ("config.py", "containment_base_dir"): "LCM_HERMES_BASE_DIR: operator containment root stays process-wide",
         ("embedding_provider.py", "__init__"): "FASTEMBED_CACHE_PATH: process-wide model download cache",
         ("inactive_record.py", "_process_start"): "LC_ALL=C subprocess for ps process identity, not profile configuration",
+        ("docs/process/evidence/1880-persisted-hold/compat_probe.py", "main"):
+            "synthetic compatibility proof tool: isolated home and lazy-install controls only",
+        ("docs/process/evidence/1880-persisted-hold/cost/cost_probe.py", "main"):
+            "synthetic admission proof tool: isolated home and lazy-install controls only",
+        ("docs/process/evidence/1880-persisted-hold/cost-review-delta/cost_probe.py", "main"):
+            "synthetic admission proof tool: isolated home and lazy-install controls only",
     }
+    integration_proof = "docs/process/evidence/1880-persisted-hold/cost-integration-delta/cost_probe.py"
+    if (ROOT / integration_proof).is_file():
+        allowed[(integration_proof, "main")] = "synthetic admission proof tool: isolated home and lazy-install controls only"
     seen = set()
     failures = []
     excluded = {"tests", "bench", "benchmarking", "benchmarks", "scripts"}

@@ -2450,11 +2450,12 @@ class LCMEngine(
         self._sweep_budget_hold_until = 0.0
         return False
 
-    def _start_no_progress_hold(self, reason: str) -> None:
+    def _start_no_progress_hold(self, reason: str, *, persist: bool = False) -> None:
         """#651: hold automatic threshold passes until its time or a stored leaf; turn-paced reasons
         (#597 progress refusals, #922 objective-only no-ops, #904 hidden-only passes) also end at turn end."""
         self._no_progress_hold = (time.monotonic() + _SWEEP_BUDGET_HOLD_SECONDS, reason)
-        if reason == "no_progress":
+        self._no_progress_hold_persisted = bool(reason == "no_progress" and persist)
+        if self._no_progress_hold_persisted:
             self._persist_no_progress_hold()
         if reason in _TURN_END_HOLD_REASONS:
             logger.info("LCM automatic compaction held until turn end (cap %.0fs): %s",
@@ -2464,7 +2465,8 @@ class LCMEngine(
 
     def _no_progress_hold_active(self) -> bool:
         """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
-        if self._no_progress_hold is None or self._no_progress_hold[1] == "no_progress":
+        if self._no_progress_hold is None or (
+                self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)):
             return self._persisted_no_progress_hold_active()
         if time.monotonic() < self._no_progress_hold[0]:
             return True
@@ -2486,8 +2488,10 @@ class LCMEngine(
         """
         self._no_progress_replay = None
         try:
+            # Public copies are already owned by the current ingest copy loop.
+            public = self._no_progress_public_rows
             payload = [self._last_active_replay_source_identities,
-                       [self._public_compression_row(row) for row in active],
+                       [public[id(row)] for row in self._last_active_replay_messages],
                        [self._host_occurrence_metadata(row) for row in original]]
             digest = hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
             self._no_progress_replay = (self._session_id, self._conversation_id, digest)
@@ -2506,6 +2510,7 @@ class LCMEngine(
             "fresh_tail_pressure_yield_min_observations", "leaf_chunk_tokens",
             "leaf_target_ratio", "leaf_target_min_tokens", "leaf_target_max_tokens",
             "l2_budget_ratio", "summary_prompt_version",
+            "stub_first_exit_target_ratio", "proactive_recall_enabled", "proactive_recall_budget_tokens",
             "dynamic_leaf_chunk_enabled", "dynamic_leaf_chunk_max", "incremental_max_depth",
             "condensation_fanin", "cache_friendly_condensation_enabled", "cache_friendly_min_debt_groups",
             "threshold_full_sweep_enabled", "summary_prefix_target_tokens", "l3_truncate_tokens",
@@ -2542,7 +2547,7 @@ class LCMEngine(
             state = [replay, bound_store[2], self._store.max_store_id(),
                      self._store_complete_frontier(),
                      self._dag._conn.execute("SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes").fetchone()[0],
-                     pressure, tokens // 1024, int(self.context_length or 0), self.threshold_tokens,
+                     pressure, tokens // 1024, tokens, int(self.context_length or 0), self.threshold_tokens,
                      self._pressure_yield_blocked_streak,
                      route,
                      [getattr(self._config, name) for name in names]]
@@ -2591,6 +2596,7 @@ class LCMEngine(
             if deadline <= time.monotonic():
                 return False
             self._no_progress_hold = (deadline, "no_progress")
+            self._no_progress_hold_persisted = True
             return True
         except Exception:
             self._no_progress_metadata_warning()
@@ -6330,6 +6336,7 @@ class LCMEngine(
         active_replay_messages: List[Dict[str, Any]],
     ) -> list[Dict[str, Any]]:
         copied_replay_messages: list[Dict[str, Any]] = []
+        public_rows = {}
         generated_message_ids = getattr(
             self,
             "_generated_ignored_active_replay_placeholder_message_ids",
@@ -6337,10 +6344,15 @@ class LCMEngine(
         )
         for message in active_replay_messages:
             copied_message = dict(message)
+            public_rows[id(copied_message)] = {
+                key: value for key, value in copied_message.items()
+                if key != "timestamp" and not str(key).startswith("_")
+            }
             if id(message) in generated_message_ids:
                 self._generated_ignored_active_replay_placeholder_message_ids.add(id(copied_message))
                 self._generated_ignored_active_replay_placeholder_messages[id(copied_message)] = copied_message
             copied_replay_messages.append(copied_message)
+        self._no_progress_public_rows = public_rows
         return copied_replay_messages
 
     def _refresh_generated_active_replay_placeholder_retention(

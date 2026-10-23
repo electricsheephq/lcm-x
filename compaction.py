@@ -716,7 +716,8 @@ class CompactionMixin:
                 # #684: nor held by a boundary cooldown.
                 self._compaction_request.cleanup_only_due_to_boundary_cooldown = False
             elif (not force and self._no_progress_hold is not None
-                  and self._no_progress_hold[1] != "no_progress") and self._no_progress_hold_blocks(
+                  and (self._no_progress_hold[1] != "no_progress"
+                       or not getattr(self, "_no_progress_hold_persisted", False))) and self._no_progress_hold_blocks(
                     current_tokens if current_tokens is not None else count_messages_tokens(messages)):
                 # #677: an automatic call the #651 hold blocks (a caller that skipped the host gate) is held
                 # maintenance; the survival ceiling and forced overflow are never blocked, so they summarise.
@@ -765,7 +766,6 @@ class CompactionMixin:
                 logger.info("LCM hidden-only compaction kept host list unchanged: leaves=%d hidden_rows=%d",
                             budget.leaves, self._compress_hidden_rows_consumed)
             pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
-                    and (self._objective_only_noop or self._no_progress_proof_complete)
                     and self._last_compression_status != "error" and len(result) >= len(messages)) and (
                     count_messages_tokens(result) >= count_messages_tokens(messages))
             self._record_compress_commit_proof(messages, result)
@@ -778,7 +778,8 @@ class CompactionMixin:
             self._rekey_host_rewrite_watch(messages, result)
             if pending_no_progress:
                 # Persist only after the complete successful pass, including proof bookkeeping.
-                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
+                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress",
+                                             persist=self._no_progress_proof_complete)
             returned = result
             return result
         except BaseException as exc:
@@ -1788,6 +1789,7 @@ class CompactionMixin:
         span_started = time.monotonic()
         try:
             state.working_messages = self._ingest_messages(messages)
+            self._record_ingest_success()
         finally:  # #1127: ingest and reconcile, untimed by the sweep steps; a raised lock wait is theirs too
             self._pre_leaf_span("ingest", span_started)
         if (not force and not recovery_attempt and not state.force_overflow
@@ -2458,6 +2460,8 @@ class CompactionMixin:
             self._no_progress_proof_complete = bool(
                 state.sweep_stop_reason in {"", "raw_prefix_drained"}
                 and state.pre_leaf_condensation_reason in {"", "summary_prefix_target_reached"}
+                and not state.unattributed_leaf_refused
+                and state.noop_reason != "selected leaf chunk lacks raw store lineage"
                 and not state.budget.summary_failure and state.budget.hung_route is None
             )
             return "return", sanitized_messages

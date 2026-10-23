@@ -286,7 +286,8 @@ def test_leaf_target_invalidation_and_bound_store_identity(tmp_path, monkeypatch
         engine.shutdown()
 
 
-@pytest.mark.parametrize("setting", ["l2_budget_ratio", "summary_prompt_version", "model", "provider", "api_mode"])
+@pytest.mark.parametrize("setting", ["l2_budget_ratio", "summary_prompt_version", "model", "provider", "api_mode",
+                                     "stub_first_exit_target_ratio", "proactive_recall_enabled", "proactive_recall_budget_tokens"])
 def test_effective_settings_and_route_only_invalidate(tmp_path, setting):
     view, before = arm(tmp_path)
     engine = rebuild(tmp_path)
@@ -294,9 +295,9 @@ def test_effective_settings_and_route_only_invalidate(tmp_path, setting):
         engine._ingest_messages(view)
         assert not engine.should_compress(10_000)
         old_window = engine.context_length
-        if setting in {"l2_budget_ratio", "summary_prompt_version"}:
+        if setting not in {"model", "provider", "api_mode"}:
             old = getattr(engine._config, setting)
-            setattr(engine._config, setting, old + (0.01 if setting.endswith("ratio") else 1))
+            setattr(engine._config, setting, not old if isinstance(old, bool) else old + (0.01 if setting.endswith("ratio") else 1))
         else:
             route = dict(model=engine.model, provider=engine.provider, api_mode=engine.api_mode)
             route[setting] = "synthetic-route"
@@ -305,5 +306,30 @@ def test_effective_settings_and_route_only_invalidate(tmp_path, setting):
         assert engine.should_compress(10_000)
         assert not engine._automatic_compression_blocked()
         assert engine._store.get_session_messages("S") == before
+    finally:
+        engine.shutdown()
+
+
+def test_recovered_direct_ingest_reuses_hold(tmp_path, monkeypatch):
+    view, _ = arm(tmp_path)
+    engine = rebuild(tmp_path)
+    try:
+        engine._record_ingest_failure("synthetic", RuntimeError("synthetic failure"))
+        scan = Mock(side_effect=AssertionError("recovered ingest repeated sweep"))
+        monkeypatch.setattr(engine, "_prepare_compression_sweep", scan)
+        assert engine.compress(view, current_tokens=10_000) == view
+        assert engine._consecutive_ingest_failures == 0
+        scan.assert_not_called()
+    finally:
+        engine.shutdown()
+
+
+def test_exact_pressure_change_inside_bucket_releases_hold(tmp_path):
+    view, _ = arm(tmp_path)
+    engine = rebuild(tmp_path)
+    try:
+        engine._ingest_messages(view)
+        assert not engine.should_compress(10_000)
+        assert engine.should_compress(10_001)
     finally:
         engine.shutdown()
