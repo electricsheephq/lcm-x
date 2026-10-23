@@ -75,7 +75,10 @@ def test_r4_2_uid_only_replacement_keeps_unchanged_suffix(machine, anchor, compa
         machine.compress()
         assert machine.engine._last_compression_status == "compacted"
     host = deepcopy(machine.host)
-    assert all((row.get("timestamp") == 10.) if known_stamp else "timestamp" not in row for row in host)
+    if known_stamp:
+        assert host[-2]["timestamp"] == host[-1]["timestamp"] == 10.
+    else:
+        assert all("timestamp" not in row for row in host)
     replacement = dict(host[-2], message_uid="replacement-user")
     host[-2] = replacement
     # Isolate suffix duplication from main's known #1179 replacement loss.
