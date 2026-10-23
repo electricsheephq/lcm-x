@@ -12,6 +12,7 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.externalize import extract_externalized_ref, load_externalized_payload
 from hermes_lcm.message_content import normalize_content_value
+from hermes_lcm.tokens import count_messages_tokens
 
 
 @pytest.fixture
@@ -320,7 +321,7 @@ def test_orphan_tool_result_is_not_externalized_as_a_phantom_reference(make_engi
     assert stubbed == messages
 
 
-def test_live_interceptor_adopts_current_tool_stub_below_compaction_threshold(make_engine):
+def test_live_interceptor_defers_current_tool_stub_below_compaction_threshold(make_engine):
     engine = make_engine(fresh_tail_count=32, leaf_chunk_tokens=20_000)
     engine.threshold_tokens = 100_000
     payload = "live current payload " * 100
@@ -329,7 +330,8 @@ def test_live_interceptor_adopts_current_tool_stub_below_compaction_threshold(ma
         *tool_pair("live-call", payload),
     ]
 
-    assert engine.should_compress_preflight(messages) is True
+    assert engine.should_compress_preflight(messages) is False
+    # Direct compress callers still adopt the durable stub, including during cooldown.
     result = engine.compress(messages, current_tokens=1_000)
 
     assert assembled_tool(result, "live-call")["content"].startswith(
@@ -339,7 +341,7 @@ def test_live_interceptor_adopts_current_tool_stub_below_compaction_threshold(ma
     assert engine.last_compression_status == "sanitized"
 
 
-def test_live_stub_adoption_outranks_compression_boundary_cooldown(make_engine):
+def test_live_stub_defers_during_compression_boundary_cooldown(make_engine):
     engine = make_engine(fresh_tail_count=32, leaf_chunk_tokens=20_000)
     engine.threshold_tokens = 100_000
     engine._last_boundary_skip_time = time.monotonic()
@@ -349,7 +351,8 @@ def test_live_stub_adoption_outranks_compression_boundary_cooldown(make_engine):
         *tool_pair("cooldown-live-call", payload),
     ]
 
-    assert engine.should_compress_preflight(messages) is True
+    assert engine.should_compress_preflight(messages) is False
+    # Direct compress callers still adopt the durable stub, including during cooldown.
     result = engine.compress(messages, current_tokens=1_000)
 
     stub = assembled_tool(result, "cooldown-live-call")["content"]
@@ -379,7 +382,7 @@ def test_flag_off_plain_preflight_cooldown_blocks_threshold_and_overflow(make_en
     assert engine.should_compress_preflight(messages) is False
 
 
-def test_flag_off_replay_cleanup_preflight_outranks_boundary_cooldown(
+def test_flag_off_size_cleanup_preflight_defers_during_boundary_cooldown(
     make_engine,
     monkeypatch,
 ):
@@ -389,8 +392,8 @@ def test_flag_off_replay_cleanup_preflight_outranks_boundary_cooldown(
     messages, cleanup_messages = externalized_raw_cleanup_messages()
     monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: cleanup_messages)
 
-    assert engine.should_compress_preflight(messages) is True
-    assert engine._preflight_cleanup_only_due_to_boundary_cooldown is True
+    assert engine.should_compress_preflight(messages) is False
+    assert engine._preflight_cleanup_only_due_to_boundary_cooldown is False
 
 
 def test_flag_off_replay_cleanup_cooldown_publishes_without_summary_llm(
@@ -407,7 +410,8 @@ def test_flag_off_replay_cleanup_cooldown_publishes_without_summary_llm(
     )
     monkeypatch.setattr(lcm_engine, "summarize_with_escalation", summary_spy)
 
-    assert engine.should_compress_preflight(messages) is True
+    assert engine.should_compress_preflight(messages) is False
+    # Direct compress callers still adopt the durable stub, including during cooldown.
     result = engine.compress(messages, current_tokens=1_000)
 
     assert result == cleanup_messages
@@ -432,7 +436,7 @@ def test_flag_off_noncleanup_replay_diff_remains_blocked_during_cooldown(
     assert engine.should_compress_preflight(messages) is False
 
 
-def test_live_stub_cooldown_adoption_skips_eligible_leaf_work(make_engine, monkeypatch):
+def test_live_stub_cooldown_adoption_skips_eligible_leaf_work_at_threshold(make_engine, monkeypatch):
     engine = make_engine(fresh_tail_count=2, leaf_chunk_tokens=1)
     engine.threshold_tokens = 100_000
     engine._last_boundary_skip_time = time.monotonic()
@@ -449,6 +453,7 @@ def test_live_stub_cooldown_adoption_skips_eligible_leaf_work(make_engine, monke
 
     monkeypatch.setattr(lcm_engine, "summarize_with_escalation", fail_if_summarized)
 
+    engine.threshold_tokens = count_messages_tokens(messages)
     assert engine.should_compress_preflight(messages) is True
     result = engine.compress(messages, current_tokens=1_000)
 

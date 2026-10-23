@@ -331,6 +331,18 @@ class CompactionMixin:
             if cleanup_requested:
                 if (
                     not force_overflow_requested
+                    and max(rough, replay_rough) < self.threshold_tokens
+                    and not self._replay_diff_requests_ingest_cleanup(
+                        messages, replay_messages, include_size_only=False,
+                    )
+                ):
+                    # Ingest already made this size reduction durable. Let the
+                    # host adopt it at the next real boundary instead of paying
+                    # for a prompt/tool rebuild just to carry a smaller replay.
+                    logger.debug("LCM preflight: deferred_size_only_cleanup")
+                    return False
+                if (
+                    not force_overflow_requested
                     and self._compression_boundary_cooldown_active()
                 ):
                     self._compaction_request.cleanup_only_due_to_boundary_cooldown = True
@@ -467,18 +479,21 @@ class CompactionMixin:
         self,
         original_messages: List[Dict[str, Any]],
         replay_messages: List[Dict[str, Any]],
+        *,
+        include_size_only: bool = True,
     ) -> bool:
+        """Match cleanup classes; exclude payload-size classes to detect mandatory adoption."""
         if len(original_messages) != len(replay_messages):
             return True
         for original_msg, replay_msg in zip(original_messages, replay_messages):
             original_text = text_content_for_pattern_matching(original_msg.get("content")) or ""
             replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
             if original_text != replay_text:
-                if replay_text.startswith("[Externalized LCM ingest payload:"):
+                if include_size_only and replay_text.startswith("[Externalized LCM ingest payload:"):
                     return True
-                if replay_text.startswith("[Externalized payload: kind=raw_payload;"):
+                if include_size_only and replay_text.startswith("[Externalized payload: kind=raw_payload;"):
                     return True
-                if replay_text.startswith("[Externalized tool output:"):
+                if include_size_only and replay_text.startswith("[Externalized tool output:"):
                     return True
                 if replay_text.startswith("[LCM active replay placeholder: assistant output quarantined;"):
                     return True
