@@ -125,6 +125,7 @@ class _CompressionState:
     leaf_compacted_this_turn: bool = False
     prep_freed: int = 0
     prep_low_water: float = 0.0
+    estimated_carry_tokens: int = 0
 
     sweep_step_seconds: Dict[str, float] = field(default_factory=dict)
     preexisting_dependent_reply_records: list[dict[str, str]] = field(default_factory=list)
@@ -178,11 +179,13 @@ class _LeafState:
 def select_oldest_leaf_chunk(
     candidate_raw: List[Dict[str, Any]],
     working_leaf_chunk_tokens: int,
+    counter=None,
 ) -> List[Dict[str, Any]]:
     selected: list[Dict[str, Any]] = []
     used = 0
+    counter = counter or count_message_tokens
     for msg in candidate_raw:
-        msg_tokens = count_message_tokens(msg)
+        msg_tokens = counter(msg)
         if used + msg_tokens > working_leaf_chunk_tokens and selected:
             break
         selected.append(msg)
@@ -191,6 +194,44 @@ def select_oldest_leaf_chunk(
 
 
 class CompactionMixin:
+    def _raw_messages_counter(self, messages, occurrences=None):
+        if self._config.user_carry_tokens <= 0 or not any(
+                self._carry_occurrence_packet((occurrences or {}).get(id(m))) for m in messages):
+            return count_messages_tokens
+        return lambda rows: sum(self._raw_message_tokens(m, (occurrences or {}).get(id(m))) for m in rows)
+
+    def _carry_emission_proof(self, view, candidates):
+        binding = self._emission_binding()
+        return {"version": 4, **binding, "output": [_emission_identity(m) for m in view],
+                "emissions": _finalize_emission_descriptors(view, candidates, binding)}
+
+    def _carry_occurrence_packet(self, occurrence):
+        if not occurrence or occurrence[0] is None:
+            return None
+        span = occurrence[0].generated_span or ""
+        from .user_carry import HEADER
+        start = span.find(HEADER)
+        end = self._verified_user_carry_end(span[start:]) if start >= 0 else None
+        return span[start:start + end] if end is not None else None
+
+    def _carry_packets(self, view, proof=None):
+        from .user_carry import HEADER, HEADER_RE
+        for row, (entry, identity) in zip(view, self._replay_occurrences(view, proof)[0]):
+            span = entry.generated_span or ""
+            start = span.find(HEADER)
+            if identity != entry.full_identity and start >= 0 and (end := self._verified_user_carry_end(span[start:])) is not None:
+                yield row, span[start:start + end], HEADER_RE.match(span[start:])
+
+    def _carry_tokens_in_view(self, view, proof=None):
+        return sum(count_message_tokens({"role": row["role"], "content": packet}) for row, packet, _ in self._carry_packets(view, proof))
+
+    def _update_carry_estimate(self, state):
+        if self._config.user_carry_tokens > 0:
+            # Reserve the cap once; the existing final trial measures the actual view.
+            current = self._config.user_carry_tokens
+            state.estimated_active_tokens += current - state.estimated_carry_tokens
+            state.estimated_carry_tokens = current
+
     def _warn_unattributed_leaf(self, rows) -> None:
         # #1147 r1: share the warn-once refusal across admission, rescue and publication.
         frontier = self._store_complete_frontier()
@@ -620,7 +661,9 @@ class CompactionMixin:
         if force_overflow:
             return True, "forced overflow recovery", 0
 
-        raw_tokens_outside_tail = count_messages_tokens(candidate_raw)
+        occurrences = dict(zip(map(id, messages), self._replay_occurrences(messages)[0])) \
+            if self._config.user_carry_tokens > 0 else {}
+        raw_tokens_outside_tail = self._raw_messages_counter(candidate_raw, occurrences)(candidate_raw)
         if allow_partial_leaf:
             return True, "eligible partial threshold-sweep leaf", raw_tokens_outside_tail
         if self._config.dynamic_leaf_chunk_enabled:
@@ -676,7 +719,8 @@ class CompactionMixin:
         candidate_raw: List[Dict[str, Any]],
         working_leaf_chunk_tokens: int,
     ) -> List[Dict[str, Any]]:
-        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens)
+        counter = self._raw_message_tokens if self._config.user_carry_tokens > 0 else None
+        return select_oldest_leaf_chunk(candidate_raw, working_leaf_chunk_tokens, counter)
 
     def compress(self, messages: List[Dict[str, Any]],
                  current_tokens: int = None,
@@ -704,6 +748,7 @@ class CompactionMixin:
             budget.pre_leaf.install([(self._store, "_conn"), (self._store, "_write_lock"), (self._dag, "_conn"),
                                      (self._dag, "_db_lock"), (self._lifecycle, "_conn"), (self._lifecycle, "_lock")])
             self._pending_emission_candidates = []
+            self.__dict__.pop("_pending_carry_anchor_store_id", None)
             self._survival_fit_emission = None
             self._compress_occurrences = None
             self._survival_fit_reason = None
@@ -766,7 +811,24 @@ class CompactionMixin:
                     count_messages_tokens(result) >= count_messages_tokens(messages)):
                 # #651: no leaf, and neither rows nor tokens fell; #922 keeps the turn-paced hold.
                 self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
+            prior_emissions = getattr(self, "_last_emission_descriptors", None)
             self._record_compress_commit_proof(messages, result)
+            if self._config.user_carry_tokens > 0:
+                # The durable proof must bind each packet at its actual occurrence.
+                packets = [(id(row), packet) for row, packet, _ in self._carry_packets(
+                    result, self._carry_emission_proof(result, self._pending_emission_candidates))]
+                if packets:
+                    durable = self._durable_commit_proof_payload()
+                    durable_packets = [(id(row), packet) for row, packet, _ in self._carry_packets(result, durable)] if durable else []
+                    if packets != durable_packets:
+                        logger.warning("LCM omitted user carry: publication proof unavailable; retaining fitted view")
+                        result = self._omit_pending_user_carry(result)
+                        self._ingest_cursor, self._ingest_cursor_needs_reconcile = len(result), False
+                        self._last_emission_descriptors = prior_emissions
+                        self._record_compress_commit_proof(messages, result)
+                    else:
+                        self._remember_compacted_active_replay_snapshot(result)
+                self._record_user_carry_status(result)
             if self._compress_commit_proof is None:  # #1000: no proof recorded the fit's carrier
                 self._bind_survival_fit_emission(messages, result)
             self._host_uid_record_engine(result)
@@ -777,6 +839,8 @@ class CompactionMixin:
             returned = result
             return result
         except BaseException as exc:
+            if self._config.user_carry_tokens > 0:
+                self._last_user_carry = None
             self._compress_occurrences = None
             self._last_compression_status = "error"
             self._last_compression_noop_reason = ""
@@ -968,6 +1032,8 @@ class CompactionMixin:
         if self._bypasses_lcm_context_management():
             return
         try:
+            prior_carry_proof = (self._durable_commit_proof_payload() or self._active_emission_proof()) if (
+                self._config.user_carry_tokens > 0 or self._has_user_carry_history()) else None
             self._compress_commit_proof = None
             if (
                 not self._session_id
@@ -1006,6 +1072,22 @@ class CompactionMixin:
                 ),
                 "emissions": emissions,
             }
+            if self._config.user_carry_tokens > 0 or prior_carry_proof:
+                prior = prior_carry_proof or {}
+                history = copy.deepcopy(prior.get("input_emissions", []))
+                if prior.get("user_carry_output") or list(self._carry_packets(messages, prior)):
+                    for item in prior.get("emissions", []):
+                        if item not in history:
+                            history.append(copy.deepcopy(item))
+                emitted = bool(list(self._carry_packets(result, proof)))
+                if emitted or history or prior.get("user_carry_emitted"):
+                    proof["user_carry_emitted"] = True
+                    self.__dict__.setdefault("_carry_history_seen", set()).add(self._conversation_id)
+                    proof["input_emissions"] = history
+                    proof["user_carry_output"] = emitted
+                if (getattr(self, "_pending_carry_anchor_store_id", None) is not None
+                        and any(item.get("kind") == "objective" for item in emissions)):
+                    proof["carry_anchor_store_id"] = self._pending_carry_anchor_store_id
             for item in emissions:  # multiplicity witness for carried-forward proofs, which omit "output"
                 item["output_multiplicity"] = proof["output"].count(proof["output"][item["output_occurrence"]["index"]])
             if proof["output"] == proof["input"]:
@@ -1046,6 +1128,7 @@ class CompactionMixin:
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,
                 **emission_binding,
                 "emissions": copy.deepcopy(emissions),
+                **{k: proof[k] for k in ("input_emissions", "user_carry_emitted", "user_carry_output", "carry_anchor_store_id") if k in proof},
             }
             self._compress_commit_proof = proof
             if any(d.get("kind") == "recovery" for d in getattr(self, "_pending_emission_candidates", ())):
@@ -1165,6 +1248,9 @@ class CompactionMixin:
                 ],
                 "emissions": copy.deepcopy(proof.get("emissions") or []),
             }
+            for key in ("input_emissions", "user_carry_emitted", "user_carry_output", "carry_anchor_store_id"):
+                if key in proof:
+                    payload[key] = copy.deepcopy(proof[key])
             if proof.get("filtered_row_keys") is not None:
                 payload["filtered_row_keys"] = [list(key) for key in proof["filtered_row_keys"]]
             if not payload["effective_sha256"]:
@@ -1458,6 +1544,7 @@ class CompactionMixin:
         anchor_source_messages: List[Dict[str, Any]],
         recovery_assembly_cap: int | None,
         persist: bool = True,
+        _emissions_out=None,
     ) -> List[Dict[str, Any]]:
         """Assemble and register replay proof for every committed leaf (``persist=False``: a no-write trial)."""
         leading_anchor_count = self._leading_anchor_count(working_messages)
@@ -1470,6 +1557,7 @@ class CompactionMixin:
                 working_messages[leading_anchor_count:],
                 assembly_cap_override=recovery_assembly_cap,
                 **({} if persist else {"persist": False}),  # the leaf path's call is unchanged
+                **({} if _emissions_out is None else {"_emissions_out": _emissions_out}),
                 **(
                     {"retained_user_message": working_messages[1]}
                     if leading_anchor_count == 2
@@ -1792,6 +1880,23 @@ class CompactionMixin:
         self._compress_occurrences = {
             id(m): occurrence for m, occurrence in zip(state.working_messages, occurrences) if positions[id(m)] == 1
         } if v4 else None
+        if self._config.user_carry_tokens > 0 or self._has_user_carry_history():
+            # Ingest restores its registry on return. Rebuild carry authority for
+            # summarizer consumers too, including outputs the host never adopted.
+            sources = [self._active_emission_proof(),
+                       *[self._durable_commit_proof_payload(sid) for sid in self._user_carry_lineage()]]
+            for source in sources:
+                if not source:
+                    continue
+                for authority in (source, {**source, "output": [], "emissions": source.get("input_emissions", [])}):
+                    historical, _ = self._replay_occurrences(state.working_messages, authority)
+                    for message, occurrence in zip(state.working_messages, historical):
+                        key = id(message)
+                        if positions[key] == 1 and self._carry_occurrence_packet(occurrence):
+                            if self._compress_occurrences is None:
+                                self._compress_occurrences = {}
+                            if not self._carry_occurrence_packet(self._compress_occurrences.get(key)):
+                                self._compress_occurrences[key] = occurrence
         self._prepare_retained_user_anchor(state.working_messages)
         state.ingest_cleanup_changed_active_context = state.working_messages != messages
         # #651: below the host threshold, the automatic compress() a preflight
@@ -1887,6 +1992,8 @@ class CompactionMixin:
             and state.observed_prompt_tokens >= self.threshold_tokens
         )
         state.anchor_source_messages = list(state.working_messages)
+        if self._config.user_carry_tokens > 0:
+            state.estimated_carry_tokens = self._carry_tokens_in_view(messages)
         state.pressure_messages = messages if len(messages) == len(state.working_messages) else state.working_messages
         state.estimated_active_tokens = (
             state.observed_prompt_tokens
@@ -2121,6 +2228,7 @@ class CompactionMixin:
             )
             state.dropped_replayed_scaffold_messages = True
             state.working_messages = [message for index, message in enumerate(state.working_messages) if index not in drops]
+            self._update_carry_estimate(state)
             state.pressure_messages = [message for index, message in enumerate(state.pressure_messages) if index not in drops]
             leaf.candidate_start = leaf.leading_anchor_count
             leaf.fresh_tail_start = self._fresh_tail_start(state.working_messages)
@@ -2615,7 +2723,7 @@ class CompactionMixin:
         sources, anchor_claims = leaf.sources, leaf.anchor_claims
         if not leaf.summary_input_chunk:
             leaf.compacted_chunk = leaf.selected_raw_chunk
-            leaf.source_tokens = count_messages_tokens(leaf.selected_raw_chunk)
+            leaf.source_tokens = self._raw_messages_counter(leaf.selected_raw_chunk)(leaf.selected_raw_chunk)
             leaf.summary_text = (
                 "Filtered replies derived from ignored messages.\n"
                 "[Expand for details: ignored-dependent reply]"
@@ -2719,7 +2827,7 @@ class CompactionMixin:
                                    dependent_reply_message_ids))
         leaf.selected_raw_len = len(leaf.source_lookup_chunk)
         leaf.remaining_messages = state.working_messages[leaf.leading_anchor_count + leaf.selected_raw_len:]
-        leaf.source_tokens = count_messages_tokens(leaf.source_lookup_chunk)
+        leaf.source_tokens = self._raw_messages_counter(leaf.source_lookup_chunk)(leaf.source_lookup_chunk)
         if not leaf.consumed_store_ids:  # #1141: oldest-prefix rescue can discard the last durable source.
             self._warn_unattributed_leaf(leaf.compacted_chunk)  # #1147 r1: keep the publication backstop.
             state.noop_reason, state.unattributed_leaf_refused = "selected leaf chunk lacks raw store lineage", True
@@ -2835,9 +2943,10 @@ class CompactionMixin:
         if leaf.prepared is not None:  # #787: a promoted pass spends no summariser pass
             leaf_prep.promoted(str(self._store.db_path), self._conversation_id, leaf.prepared)
             state.promoted_leaves, state.max_leaf_passes = state.promoted_leaves + 1, state.max_leaf_passes + 1
-            state.prep_freed += count_messages_tokens(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
+            state.prep_freed += self._raw_messages_counter(leaf.source_lookup_chunk)(leaf.source_lookup_chunk) - count_tokens(leaf.summary_text)
         state.level3_leaves += leaf.level == 3
         state.estimated_active_tokens = max(0, state.estimated_active_tokens - leaf.source_tokens + leaf.summary_tokens)
+        self._update_carry_estimate(state)
         if (
             getattr(self._config, "large_output_transcript_gc_enabled", False)
             and leaf.source_store_ids
@@ -2907,7 +3016,7 @@ class CompactionMixin:
             pressure_remaining_raw = state.pressure_messages[
                 leaf.leading_anchor_count:remaining_fresh_tail_start
             ]
-            remaining_raw_tokens = count_messages_tokens(pressure_remaining_raw)
+            remaining_raw_tokens = self._raw_messages_counter(pressure_remaining_raw)(pressure_remaining_raw)
             remaining_threshold = self._working_leaf_chunk_tokens(remaining_raw_tokens)
             if remaining_raw_tokens < remaining_threshold:
                 if not (state.deferred_maintenance_active and state.critical_budget_pressure):
@@ -2970,7 +3079,7 @@ class CompactionMixin:
             return "break", None
 
         pressure_candidate_raw = state.pressure_messages[leaf.leading_anchor_count:leaf.fresh_tail_start]
-        raw_tokens_outside_tail = count_messages_tokens(pressure_candidate_raw)
+        raw_tokens_outside_tail = self._raw_messages_counter(pressure_candidate_raw)(pressure_candidate_raw)
         if leaf.hidden_backlog:
             leaf.to_compact = []
         elif state.threshold_full_sweep_active:

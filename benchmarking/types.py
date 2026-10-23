@@ -42,6 +42,7 @@ class LCMPolicy:
     min_turns_between_compactions: int = 0
     policy_version: str = "1"
     notes: str = ""
+    user_carry_tokens: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -65,6 +66,7 @@ class LCMPolicy:
             min_turns_between_compactions=int(data.get("min_turns_between_compactions", 0)),
             policy_version=str(data.get("policy_version", "1")),
             notes=str(data.get("notes", "")),
+            user_carry_tokens=max(0, int(data.get("user_carry_tokens", 0))),
         )
 
 

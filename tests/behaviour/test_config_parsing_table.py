@@ -35,6 +35,7 @@ STRING = (D, *VALUES[1:])
 
 # Frozen ENV_FIELD_SPECS rows: field, environment key, parser, default.
 CONFIG_ROWS = (
+    ('user_carry_tokens', 'LCM_USER_CARRY_TOKENS', 'int', 0),
     ('recall_delivery_unit', 'LCM_RECALL_DELIVERY_UNIT', 'str', 'hits'),
     # config._parse_bool_env -> LCMConfig.from_env (construction time).
     ('fresh_tail_pressure_yield_enabled', 'LCM_FRESH_TAIL_PRESSURE_YIELD_ENABLED', 'bool', True),
@@ -171,6 +172,7 @@ EXTRA_CONFIG_ROWS = (
 
 # from_env has validation after the primitive reader for these fields.
 SPECIAL = {
+    "user_carry_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "recall_delivery_unit": ("hits",) * 16,
     "fresh_tail_max_tokens": (D, D, D, D, 1, 0, D, D, D, D, D, D, D, 0, D, HUGE),
     "leaf_target_ratio": (D, D, D, D, 1.0, D, D, D, D, D, D, D, D, D, 0.5, D),

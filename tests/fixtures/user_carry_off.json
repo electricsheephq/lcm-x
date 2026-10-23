@@ -1,0 +1,106 @@
+[
+  [
+    {
+      "role": "user",
+      "content": "Older constraint.",
+      "timestamp": 102.0
+    },
+    {
+      "role": "assistant",
+      "content": "Reply 1",
+      "timestamp": 103.0
+    },
+    {
+      "role": "user",
+      "content": "Latest live request.",
+      "timestamp": 104.0
+    },
+    {
+      "role": "assistant",
+      "content": "Reply 2",
+      "timestamp": 105.0
+    }
+  ],
+  [
+    {
+      "role": "user",
+      "content": "Older constraint.",
+      "timestamp": 102.0
+    },
+    {
+      "role": "assistant",
+      "content": "Reply 1",
+      "timestamp": 103.0
+    },
+    {
+      "role": "user",
+      "content": "Latest live request.",
+      "timestamp": 104.0
+    },
+    {
+      "role": "assistant",
+      "content": "Reply 2",
+      "timestamp": 105.0
+    }
+  ],
+  [
+    {
+      "role": "user",
+      "content": "Older constraint.",
+      "timestamp": 102.0
+    },
+    {
+      "role": "assistant",
+      "content": "Reply 1",
+      "timestamp": 103.0
+    },
+    {
+      "role": "user",
+      "content": "Latest live request.",
+      "timestamp": 104.0
+    },
+    {
+      "role": "assistant",
+      "content": "Reply 2",
+      "timestamp": 105.0
+    }
+  ],
+  [
+    {
+      "role": "user",
+      "content": "Older constraint.",
+      "timestamp": 102.0
+    },
+    {
+      "role": "assistant",
+      "content": "Reply 1",
+      "timestamp": 103.0
+    },
+    {
+      "role": "user",
+      "content": "Latest live request.",
+      "timestamp": 104.0
+    },
+    {
+      "role": "assistant",
+      "content": "Reply 2",
+      "timestamp": 105.0
+    }
+  ],
+  [
+    {
+      "role": "system",
+      "content": "System"
+    },
+    {
+      "role": "user",
+      "content": "Origin: preserve the exact initial objective.",
+      "timestamp": 100.0
+    },
+    {
+      "role": "assistant",
+      "content": "Reply 0",
+      "timestamp": 101.0
+    }
+  ]
+]

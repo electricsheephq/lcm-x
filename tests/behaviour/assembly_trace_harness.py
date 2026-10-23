@@ -59,6 +59,7 @@ OBJECTIVE = "[Current user objective preserved from compacted history]"
 PAD = " alpha beta gamma delta epsilon" * 40
 # Independent frozen data inventory, including external reconciliation side effects.
 OBSERVED_ATTRIBUTES = frozenset({
+    '_carry_conversation_id', '_carry_history_seen', '_pending_carry_anchor_store_id',
     '_LCM_SUMMARY_PART_HEADER_RE', '_compiled_ignore_message_patterns', '_compress_run',
     '_config', '_conversation_id', '_current_compress_placeholder_identity_counts',
     '_dag', '_hermes_home', '_kept_reply_mark', '_last_compacted_store_id', '_last_gate_tokens',
@@ -69,6 +70,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     'context_length', 'last_prompt_tokens',
     '_host_rewrite_overrides', '_host_rewrite_store', '_host_rewrite_watch',
     '_engine_uids_pending', '_host_uid_lineage_cache',
+    '_compress_occurrences', '_last_user_carry', '_lifecycle',
 })
 EXTERNAL_ATTRIBUTES = frozenset({'_host_rewrite_overrides', '_host_rewrite_store', '_host_rewrite_watch',
                                  '_engine_uids_pending', '_host_uid_lineage_cache'})
@@ -105,9 +107,14 @@ def engine_attributes(source: str) -> set[str]:
                         "Dynamic self lookup: update engine_attributes and OBSERVED_ATTRIBUTES/EXTERNAL_ATTRIBUTES.\n"
                         + TRACE_GUIDANCE)
                 attr = key.value
+            if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                    and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == '__dict__'
+                    and isinstance(node.func.value.value, ast.Name) and node.func.value.value.id == 'self'
+                    and node.args and isinstance(node.args[0], ast.Constant) and isinstance(node.args[0].value, str)):
+                found.add(node.args[0].value)
             if attr in methods:
                 pending.append(attr)
-            elif attr is not None and attr != HOLDER_NAME and not callable(getattr(engine_module.LCMEngine, attr, None)):
+            elif attr is not None and attr not in {HOLDER_NAME, '__dict__'} and not callable(getattr(engine_module.LCMEngine, attr, None)):
                 found.add(attr)
     return found
 
@@ -422,12 +429,16 @@ def setup(engine: Any, case: Scenario, patch: pytest.MonkeyPatch) -> tuple[Messa
 def snapshot(engine: Any, canonical: Canonical, result: Any = None) -> dict[str, Any]:
     state = {}
     for name in sorted(OBSERVED_ATTRIBUTES):
+        if name in ('_carry_conversation_id', '_carry_history_seen', '_pending_carry_anchor_store_id') and not hasattr(engine, name):
+            continue  # default-off has no carry state; enabled state remains observable
         value = observed_attribute(engine, name)
         if name == '_store':
             value = {table: [tuple(row) for row in engine._store._conn.execute(f'SELECT * FROM {table} ORDER BY 1')]
                      for table in ('messages', 'metadata')}
         elif name == '_dag':
             value = engine._dag.get_session_nodes('S', limit=10000)
+        elif name == '_lifecycle':
+            value = engine._lifecycle.get_by_conversation(engine._conversation_id)
         elif name == '_host_rewrite_store':
             value = {'present': value is not None}
         elif name == '_kept_reply_mark' and value is not None:

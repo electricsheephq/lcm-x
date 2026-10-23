@@ -966,6 +966,19 @@ class MessageStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def load_lineage_user_rows(self, sessions, conversation_id, cursor, limit=200, *, newest_first=False):
+        """One owned user page; callers explicitly bound the recorded session lineage."""
+        if not sessions:
+            return []
+        owned, args = owned_conversation_clause(self._conn, conversation_id)
+        direction, op = ("DESC", "<") if newest_first else ("ASC", ">")
+        placeholders = ",".join("?" for _ in sessions)
+        rows = self._conn.execute(
+            f"SELECT {_MESSAGE_SELECT_COLUMNS} FROM messages WHERE {owned} "
+            f"AND session_id IN ({placeholders}) AND role = 'user' AND store_id {op} ? "
+            f"ORDER BY store_id {direction} LIMIT ?", [*args, *sessions, cursor, limit]).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
     def load_session_window(
         self,
         session_id: str,

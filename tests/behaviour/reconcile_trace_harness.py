@@ -52,6 +52,7 @@ TARGETS = ("_find_reconciled_cursor_for_store_tail", "_reconcile_ingest_cursor_f
 # Reviewed engine-run data, including indirect reconcile helpers and external
 # helper side effects. New data lookups must fail completeness before recording.
 OBSERVED_ATTRIBUTES = frozenset({
+    '_ingest_carry_proof',
     "_compiled_ignore_message_patterns", "_compress_commit_proof", "_compress_occurrences",
     "_compress_run", "_config", "_conversation_id", "_current_compress_placeholder_identity_counts",
     "_dag", "_generated_ignored_active_replay_placeholder_message_ids", "_hermes_home",
@@ -341,6 +342,8 @@ class LiteralPattern:
 def snapshot(engine: Any, canonical: Canonical) -> dict[str, Any]:
     state: dict[str, Any] = {}
     for name in sorted(OBSERVED_ATTRIBUTES):
+        if name in ('_ingest_carry_proof',) and not hasattr(engine, name):
+            continue  # default-off has no carry state; enabled state remains observable
         value = observed_attribute(engine, name)
         if name == "_store":
             value = {table: [tuple(row) for row in engine._store._conn.execute(f"SELECT * FROM {table} ORDER BY 1")]
