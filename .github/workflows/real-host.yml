@@ -70,6 +70,7 @@ jobs:
             tests/test_real_plugin_manager_identity.py \
             tests/test_real_host_bypass_cooldown_wire.py \
             tests/test_real_turn_loop_acp_override.py \
+            tests/test_session_end_attribution_host.py \
             tests/test_real_plugin_manager_compaction.py \
             tests/test_host_stub_parity.py \
             tests/test_real_long_session.py \
