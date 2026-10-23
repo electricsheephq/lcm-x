@@ -108,6 +108,7 @@ NON_TURN_PATH_FILES = {
     "query_view_store.py",  # Default-off query views; optional-schema verification.
     "reasoning.py",  # Explicit computation or default-off pre-answer hook.
     "recall_delivery.py",  # Explicit recall; proactive assembly defaults off.
+    "retraction.py",  # Default-off retraction lookup; proactive assembly defaults off.
     "recall_session.py",  # Default-off session delivery for explicit recall only.
     "recent.py",  # Explicit recent-history tool response only.
     "requirements_compiler.py",  # Default-off pre-answer compilation.

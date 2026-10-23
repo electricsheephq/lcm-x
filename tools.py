@@ -14,7 +14,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any, Dict, TYPE_CHECKING
 
-from . import recall_delivery
+from . import recall_delivery, retraction
 from .externalize import (
     _inspect_top_level_json_string_fields_before_content as _externalized_top_level_fields_before_content,
     extract_externalized_ref,
@@ -96,7 +96,7 @@ from .search_query import (
 )
 from .store import _normalize_observed_at, build_message_fts_spec
 from .vector_store import VectorStore, _interrupt_read_on_deadline
-from .config import LCMConfig, embedding_provider_id, profile_bound
+from .config import LCMConfig, RETRACTION_DELIVERY_MODES, embedding_provider_id, profile_bound
 
 if TYPE_CHECKING:
     from .engine import LCMEngine
@@ -4425,6 +4425,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
             occurrence=include_occurrence_time,
             summary_leads=summary_leads,
         )
+    retraction_mode = getattr(engine._config, "retraction_delivery", "off")
+    if retraction_mode not in RETRACTION_DELIVERY_MODES:
+        retraction_mode = "off"
     return recall_delivery.deliver_recall(
         ordered,
         query=query,
@@ -4467,6 +4470,8 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
         ),
         rerank_enabled=lambda: bool(getattr(engine._config, "rerank_enabled", False)),
         session_delivery=session_delivery,
+        retraction_mode=retraction_mode,
+        find_retractions=partial(retraction.find_retractions, engine, excluded_session_ids=excluded_session_ids),
     )
 
 

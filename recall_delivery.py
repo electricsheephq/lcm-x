@@ -14,6 +14,7 @@ from typing import Any
 
 from .reasoning import resolve_occurrence_time
 from .retrieval_core import _hit_identity
+from .retraction import apply_retractions
 
 _EVENT_TIME_KEYS = ("event_time", "event_time_source", "time_uncertain")
 
@@ -58,6 +59,8 @@ def deliver_recall(
     read_occurrence_source: Callable[[int], tuple[dict, dict | None]],
     rerank_enabled: Callable[[], bool],
     session_delivery: Callable[..., str] | None = None,
+    retraction_mode: str = "off",
+    find_retractions: Callable | None = None,
 ) -> str:
     """Deliver ranked entries without changing retrieval or host-read policy."""
     if session_delivery is not None:
@@ -188,6 +191,7 @@ def deliver_recall(
             event_time_unread_ids = set(event_time_ids)
     event_time_unavailable = False
     hits_out: list[dict[str, Any]] = []
+    delivered_entries: list[dict[str, Any]] = []
     # Characters each delivered hit's optional event-time fields add on top of
     # its measured size (parallel to ``hits_out``).
     event_time_chars: list[int] = []
@@ -307,6 +311,7 @@ def deliver_recall(
         ):
             event_time_unavailable = True
         hits_out.append(item)
+        delivered_entries.append(entry)
         if len(hits_out) >= limit:
             break
     event_time_unavailable, event_time_unavailable_reason = _strip_hit_event_time(
@@ -318,6 +323,15 @@ def deliver_recall(
         event_time_unavailable_reason=event_time_unavailable_reason,
     )
 
+    retraction_unavailable, retraction_truncated = None, False
+    if detail == "snippets" and retraction_mode in {"codeliver", "suppress"} and find_retractions is not None:
+        links, retraction_unavailable = find_retractions(delivered_entries, deadline=deadline)
+        if retraction_unavailable is None:
+            hits_out, retraction_truncated = apply_retractions(
+                hits_out, links, mode=retraction_mode, response_chars=sum(
+                    len(json.dumps(h, ensure_ascii=False)) for h in hits_out),
+                response_char_cap=response_char_cap,
+            )
     degraded = bool(degraded_reasons)
     response: dict[str, Any] = {
         "query": query,
@@ -368,6 +382,10 @@ def deliver_recall(
         response["degraded_reason"] = "; ".join(dict.fromkeys(degraded_reasons))
     if timed_out:
         response["timeout"] = True
+    if retraction_unavailable is not None:
+        response["retraction_unavailable"] = retraction_unavailable
+    if retraction_truncated:
+        response["retraction_truncated"] = True
     if event_time_unavailable:
         response["event_time_unavailable"] = True
         response["event_time_unavailable_reason"] = event_time_unavailable_reason

@@ -6,6 +6,8 @@ including the `v1.0.0-beta.*` prereleases, have none. GitHub Releases are publis
 
 ## Unreleased
 
+- Change: add opt-in `codeliver` and `suppress` retraction delivery for recall snippets and proactive memories; default off; byte-identical when off. (Refs #1171)
+
 ## v0.28.1 (session continuity and profile settings)
 
 - Deferred: the pending-predecessor capture for #1508 shipped in the rc1 and rc2 prereleases (PR #1610, PR #1627) and is removed. With the identity anchor off it lost a turn's reply when a trailing user run repeated an earlier message (#1632), and stored duplicates after the agent was recreated in the same process (#1633). v0.28.1 keeps v0.28.0 behaviour on that path; the crash-only #1508 fix moves to v0.29.0. The rc1-only #1625 goes with the removed code. (PR #1634)

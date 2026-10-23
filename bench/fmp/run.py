@@ -432,7 +432,7 @@ def check_arms(runs, output=None):
                 payload = json.loads(raw) if isinstance(raw, str) else raw
                 if "error" in payload or "hits" not in payload:
                     counts["missing_recall"] += 1
-                hits[qid].append([h["store_id"] for h in payload.get("hits", [])])
+                hits[qid].append([h.get("store_id") for h in payload.get("hits", [])])
             labels, digest = row.get("evidence_labels"), row.get("evidence_sha256")
             # The digest is an audit receipt: format checked, never recomputed here.
             if (not isinstance(labels, dict) or set(labels) != {"role", "speaker", "summary"} or

@@ -8974,6 +8974,8 @@ class LCMEngine(
             snippet = (hit.get("snippet") or "").strip().replace("\n", " ")
             expand = hit.get("expand_hint") or ""
             line = f"- [{when}] {snippet}"
+            if hit.get("annotations"):
+                line += " " + " ".join(hit["annotations"])
             if expand:
                 line += f" (expand: {expand})"
             candidate_lines = rendered_lines + [line]

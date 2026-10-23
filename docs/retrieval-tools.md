@@ -262,6 +262,36 @@ Event time comes from host observation, never the storage timestamp. Externalize
 markers remain markers. Proactive injection keeps its independent hits budget.
 This setting makes no answer-quality or host-context-fit guarantee.
 
+#### Opt-in retraction delivery (`LCM_RETRACTION_DELIVERY`)
+
+The default `off` leaves output byte-identical. `codeliver` annotates the newest
+linked message with the user's later forget request (`annotations`, a list of
+strings). `suppress` replaces the newest linked message with a `kind: "retraction"`
+withdrawal note and removes other linked messages, without refilling the limit.
+Stored rows remain unchanged. The replacement has `withdrawn_store_id`, `cites`
+(the request's store ID), the request's `session_id` and `timestamp`, and its
+normalised `event_time` when available; it has no `store_id`, `node_id`,
+`expand_hint` or `exact_ref`. Invalid values, including `mark`, warn and fall back
+to `off` when loaded from the environment.
+
+This applies only to `detail="snippets"` with `delivery_unit="hits"`. Session
+packs, `answer_ready`, delta calls and evidence consumers retain their existing
+output. Proactive recall renders annotations and withdrawal notes within its
+existing token budget. With message hits, detection adds one bounded read-only
+lookup (at most two SQL statements per recall call, including its PRAGMA);
+without message hits it adds zero. Excluded sessions stay excluded. A failed or
+late lookup skips the arms and reports `retraction_unavailable` (`deadline` or
+`read_error`), without setting `timeout` or degrading the response.
+
+Linking uses explicit requests, content-word overlap or a deictic request's exact
+previous user turn and intervening assistant turns. Newer duplicate restatements
+and event-time conflicts prevent links. At most three messages link per request;
+the newest request wins. Request quotes are capped at 600 characters and arms
+add at most 2,000 characters within the response's hit budget; a skipped arm sets
+`retraction_truncated`. Detection scans only the newest 200 matching requests,
+so older matches may be missed. Its English phrase classifier can miss CJK and
+other unsupported phrasing. This setting makes no recall-quality claim.
+
 #### FTS anchor slot (`LCM_RECALL_FTS_ANCHOR`)
 
 `LCM_RECALL_FTS_ANCHOR` (default `true`) keeps the full-text arm's best match in

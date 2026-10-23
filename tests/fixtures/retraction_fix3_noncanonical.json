@@ -1,0 +1,4802 @@
+[
+ [
+  "Forget my old address.",
+  "my old address"
+ ],
+ [
+  "Forget my old address anymore.",
+  "my old address anymore"
+ ],
+ [
+  "Forget my old address now.",
+  "my old address now"
+ ],
+ [
+  "Forget my old address, it was wrong.",
+  "my old address, it was wrong"
+ ],
+ [
+  "Forget my old address please.",
+  "my old address please"
+ ],
+ [
+  "Forget my old address!?.",
+  "my old address"
+ ],
+ [
+  "Forget the garden shed.",
+  "the garden shed"
+ ],
+ [
+  "Forget the garden shed anymore.",
+  "the garden shed anymore"
+ ],
+ [
+  "Forget the garden shed now.",
+  "the garden shed now"
+ ],
+ [
+  "Forget the garden shed, it was wrong.",
+  "the garden shed, it was wrong"
+ ],
+ [
+  "Forget the garden shed please.",
+  "the garden shed please"
+ ],
+ [
+  "Forget the garden shed!?.",
+  "the garden shed"
+ ],
+ [
+  "Forget saffron tea.",
+  "saffron tea"
+ ],
+ [
+  "Forget saffron tea anymore.",
+  "saffron tea anymore"
+ ],
+ [
+  "Forget saffron tea now.",
+  "saffron tea now"
+ ],
+ [
+  "Forget saffron tea, it was wrong.",
+  "saffron tea, it was wrong"
+ ],
+ [
+  "Forget saffron tea please.",
+  "saffron tea please"
+ ],
+ [
+  "Forget saffron tea!?.",
+  "saffron tea"
+ ],
+ [
+  "Forget Dr. Patel.",
+  "dr. patel"
+ ],
+ [
+  "Forget Dr. Patel anymore.",
+  "dr. patel anymore"
+ ],
+ [
+  "Forget Dr. Patel now.",
+  "dr. patel now"
+ ],
+ [
+  "Forget Dr. Patel, it was wrong.",
+  "dr. patel, it was wrong"
+ ],
+ [
+  "Forget Dr. Patel please.",
+  "dr. patel please"
+ ],
+ [
+  "Forget Dr. Patel!?.",
+  "dr. patel"
+ ],
+ [
+  "Forget the 2.5 mg dose.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Forget the 2.5 mg dose anymore.",
+  "the 2.5 mg dose anymore"
+ ],
+ [
+  "Forget the 2.5 mg dose now.",
+  "the 2.5 mg dose now"
+ ],
+ [
+  "Forget the 2.5 mg dose, it was wrong.",
+  "the 2.5 mg dose, it was wrong"
+ ],
+ [
+  "Forget the 2.5 mg dose please.",
+  "the 2.5 mg dose please"
+ ],
+ [
+  "Forget the 2.5 mg dose!?.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Forget about the tea.",
+  "about the tea"
+ ],
+ [
+  "Forget about the tea anymore.",
+  "about the tea anymore"
+ ],
+ [
+  "Forget about the tea now.",
+  "about the tea now"
+ ],
+ [
+  "Forget about the tea, it was wrong.",
+  "about the tea, it was wrong"
+ ],
+ [
+  "Forget about the tea please.",
+  "about the tea please"
+ ],
+ [
+  "Forget about the tea!?.",
+  "about the tea"
+ ],
+ [
+  "Forget it.",
+  ""
+ ],
+ [
+  "Forget it anymore.",
+  ""
+ ],
+ [
+  "Forget it now.",
+  ""
+ ],
+ [
+  "Forget it, it was wrong.",
+  "it, it was wrong"
+ ],
+ [
+  "Forget it please.",
+  ""
+ ],
+ [
+  "Forget it!?.",
+  ""
+ ],
+ [
+  "Forget that, thanks.",
+  "that, thanks"
+ ],
+ [
+  "Forget that, thanks anymore.",
+  "that, thanks anymore"
+ ],
+ [
+  "Forget that, thanks now.",
+  "that, thanks now"
+ ],
+ [
+  "Forget that, thanks, it was wrong.",
+  "that, thanks, it was wrong"
+ ],
+ [
+  "Forget that, thanks please.",
+  "that, thanks please"
+ ],
+ [
+  "Forget that, thanks!?.",
+  "that, thanks"
+ ],
+ [
+  "Forget the deadline, my boss said.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Forget the deadline, my boss said anymore.",
+  "the deadline, my boss said anymore"
+ ],
+ [
+  "Forget the deadline, my boss said now.",
+  "the deadline, my boss said now"
+ ],
+ [
+  "Forget the deadline, my boss said, it was wrong.",
+  "the deadline, my boss said, it was wrong"
+ ],
+ [
+  "Forget the deadline, my boss said please.",
+  "the deadline, my boss said please"
+ ],
+ [
+  "Forget the deadline, my boss said!?.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Forget my phone number and email.",
+  "my phone number and email"
+ ],
+ [
+  "Forget my phone number and email anymore.",
+  "my phone number and email anymore"
+ ],
+ [
+  "Forget my phone number and email now.",
+  "my phone number and email now"
+ ],
+ [
+  "Forget my phone number and email, it was wrong.",
+  "my phone number and email, it was wrong"
+ ],
+ [
+  "Forget my phone number and email please.",
+  "my phone number and email please"
+ ],
+ [
+  "Forget my phone number and email!?.",
+  "my phone number and email"
+ ],
+ [
+  "Forget what she told you.",
+  null
+ ],
+ [
+  "Forget what she told you anymore.",
+  null
+ ],
+ [
+  "Forget what she told you now.",
+  null
+ ],
+ [
+  "Forget what she told you, it was wrong.",
+  null
+ ],
+ [
+  "Forget what she told you please.",
+  null
+ ],
+ [
+  "Forget what she told you!?.",
+  null
+ ],
+ [
+  "Forget everything about the trip.",
+  "everything about the trip"
+ ],
+ [
+  "Forget everything about the trip anymore.",
+  "everything about the trip anymore"
+ ],
+ [
+  "Forget everything about the trip now.",
+  "everything about the trip now"
+ ],
+ [
+  "Forget everything about the trip, it was wrong.",
+  "everything about the trip, it was wrong"
+ ],
+ [
+  "Forget everything about the trip please.",
+  "everything about the trip please"
+ ],
+ [
+  "Forget everything about the trip!?.",
+  "everything about the trip"
+ ],
+ [
+  "Forget my birthday; it changed.",
+  "my birthday; it changed"
+ ],
+ [
+  "Forget my birthday; it changed anymore.",
+  "my birthday; it changed anymore"
+ ],
+ [
+  "Forget my birthday; it changed now.",
+  "my birthday; it changed now"
+ ],
+ [
+  "Forget my birthday; it changed, it was wrong.",
+  "my birthday; it changed, it was wrong"
+ ],
+ [
+  "Forget my birthday; it changed please.",
+  "my birthday; it changed please"
+ ],
+ [
+  "Forget my birthday; it changed!?.",
+  "my birthday; it changed"
+ ],
+ [
+  "Forget the U.S. trip.",
+  "the u.s. trip"
+ ],
+ [
+  "Forget the U.S. trip anymore.",
+  "the u.s. trip anymore"
+ ],
+ [
+  "Forget the U.S. trip now.",
+  "the u.s. trip now"
+ ],
+ [
+  "Forget the U.S. trip, it was wrong.",
+  "the u.s. trip, it was wrong"
+ ],
+ [
+  "Forget the U.S. trip please.",
+  "the u.s. trip please"
+ ],
+ [
+  "Forget the U.S. trip!?.",
+  "the u.s. trip"
+ ],
+ [
+  "Forget Tom and Jerry.",
+  "tom and jerry"
+ ],
+ [
+  "Forget Tom and Jerry anymore.",
+  "tom and jerry anymore"
+ ],
+ [
+  "Forget Tom and Jerry now.",
+  "tom and jerry now"
+ ],
+ [
+  "Forget Tom and Jerry, it was wrong.",
+  "tom and jerry, it was wrong"
+ ],
+ [
+  "Forget Tom and Jerry please.",
+  "tom and jerry please"
+ ],
+ [
+  "Forget Tom and Jerry!?.",
+  "tom and jerry"
+ ],
+ [
+  "Forget the $1,200 rent.",
+  "the $1,200 rent"
+ ],
+ [
+  "Forget the $1,200 rent anymore.",
+  "the $1,200 rent anymore"
+ ],
+ [
+  "Forget the $1,200 rent now.",
+  "the $1,200 rent now"
+ ],
+ [
+  "Forget the $1,200 rent, it was wrong.",
+  "the $1,200 rent, it was wrong"
+ ],
+ [
+  "Forget the $1,200 rent please.",
+  "the $1,200 rent please"
+ ],
+ [
+  "Forget the $1,200 rent!?.",
+  "the $1,200 rent"
+ ],
+ [
+  "Forget my earlier plan.",
+  "my earlier plan"
+ ],
+ [
+  "Forget my earlier plan anymore.",
+  "my earlier plan anymore"
+ ],
+ [
+  "Forget my earlier plan now.",
+  "my earlier plan now"
+ ],
+ [
+  "Forget my earlier plan, it was wrong.",
+  "my earlier plan, it was wrong"
+ ],
+ [
+  "Forget my earlier plan please.",
+  "my earlier plan please"
+ ],
+ [
+  "Forget my earlier plan!?.",
+  "my earlier plan"
+ ],
+ [
+  "Forget my previous job.",
+  "my previous job"
+ ],
+ [
+  "Forget my previous job anymore.",
+  "my previous job anymore"
+ ],
+ [
+  "Forget my previous job now.",
+  "my previous job now"
+ ],
+ [
+  "Forget my previous job, it was wrong.",
+  "my previous job, it was wrong"
+ ],
+ [
+  "Forget my previous job please.",
+  "my previous job please"
+ ],
+ [
+  "Forget my previous job!?.",
+  "my previous job"
+ ],
+ [
+  "Forget my info.",
+  "my info"
+ ],
+ [
+  "Forget my info anymore.",
+  "my info anymore"
+ ],
+ [
+  "Forget my info now.",
+  "my info now"
+ ],
+ [
+  "Forget my info, it was wrong.",
+  "my info, it was wrong"
+ ],
+ [
+  "Forget my info please.",
+  "my info please"
+ ],
+ [
+  "Forget my info!?.",
+  "my info"
+ ],
+ [
+  "Forget anything about cats.",
+  "anything about cats"
+ ],
+ [
+  "Forget anything about cats anymore.",
+  "anything about cats anymore"
+ ],
+ [
+  "Forget anything about cats now.",
+  "anything about cats now"
+ ],
+ [
+  "Forget anything about cats, it was wrong.",
+  "anything about cats, it was wrong"
+ ],
+ [
+  "Forget anything about cats please.",
+  "anything about cats please"
+ ],
+ [
+  "Forget anything about cats!?.",
+  "anything about cats"
+ ],
+ [
+  "Please forget my old address.",
+  "my old address"
+ ],
+ [
+  "Please forget my old address anymore.",
+  "my old address anymore"
+ ],
+ [
+  "Please forget my old address now.",
+  "my old address now"
+ ],
+ [
+  "Please forget my old address, it was wrong.",
+  "my old address, it was wrong"
+ ],
+ [
+  "Please forget my old address please.",
+  "my old address please"
+ ],
+ [
+  "Please forget my old address!?.",
+  "my old address"
+ ],
+ [
+  "Please forget the garden shed.",
+  "the garden shed"
+ ],
+ [
+  "Please forget the garden shed anymore.",
+  "the garden shed anymore"
+ ],
+ [
+  "Please forget the garden shed now.",
+  "the garden shed now"
+ ],
+ [
+  "Please forget the garden shed, it was wrong.",
+  "the garden shed, it was wrong"
+ ],
+ [
+  "Please forget the garden shed please.",
+  "the garden shed please"
+ ],
+ [
+  "Please forget the garden shed!?.",
+  "the garden shed"
+ ],
+ [
+  "Please forget saffron tea.",
+  "saffron tea"
+ ],
+ [
+  "Please forget saffron tea anymore.",
+  "saffron tea anymore"
+ ],
+ [
+  "Please forget saffron tea now.",
+  "saffron tea now"
+ ],
+ [
+  "Please forget saffron tea, it was wrong.",
+  "saffron tea, it was wrong"
+ ],
+ [
+  "Please forget saffron tea please.",
+  "saffron tea please"
+ ],
+ [
+  "Please forget saffron tea!?.",
+  "saffron tea"
+ ],
+ [
+  "Please forget Dr. Patel.",
+  "dr. patel"
+ ],
+ [
+  "Please forget Dr. Patel anymore.",
+  "dr. patel anymore"
+ ],
+ [
+  "Please forget Dr. Patel now.",
+  "dr. patel now"
+ ],
+ [
+  "Please forget Dr. Patel, it was wrong.",
+  "dr. patel, it was wrong"
+ ],
+ [
+  "Please forget Dr. Patel please.",
+  "dr. patel please"
+ ],
+ [
+  "Please forget Dr. Patel!?.",
+  "dr. patel"
+ ],
+ [
+  "Please forget the 2.5 mg dose.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Please forget the 2.5 mg dose anymore.",
+  "the 2.5 mg dose anymore"
+ ],
+ [
+  "Please forget the 2.5 mg dose now.",
+  "the 2.5 mg dose now"
+ ],
+ [
+  "Please forget the 2.5 mg dose, it was wrong.",
+  "the 2.5 mg dose, it was wrong"
+ ],
+ [
+  "Please forget the 2.5 mg dose please.",
+  "the 2.5 mg dose please"
+ ],
+ [
+  "Please forget the 2.5 mg dose!?.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Please forget about the tea.",
+  "about the tea"
+ ],
+ [
+  "Please forget about the tea anymore.",
+  "about the tea anymore"
+ ],
+ [
+  "Please forget about the tea now.",
+  "about the tea now"
+ ],
+ [
+  "Please forget about the tea, it was wrong.",
+  "about the tea, it was wrong"
+ ],
+ [
+  "Please forget about the tea please.",
+  "about the tea please"
+ ],
+ [
+  "Please forget about the tea!?.",
+  "about the tea"
+ ],
+ [
+  "Please forget it.",
+  ""
+ ],
+ [
+  "Please forget it anymore.",
+  ""
+ ],
+ [
+  "Please forget it now.",
+  ""
+ ],
+ [
+  "Please forget it, it was wrong.",
+  "it, it was wrong"
+ ],
+ [
+  "Please forget it please.",
+  ""
+ ],
+ [
+  "Please forget it!?.",
+  ""
+ ],
+ [
+  "Please forget that, thanks.",
+  "that, thanks"
+ ],
+ [
+  "Please forget that, thanks anymore.",
+  "that, thanks anymore"
+ ],
+ [
+  "Please forget that, thanks now.",
+  "that, thanks now"
+ ],
+ [
+  "Please forget that, thanks, it was wrong.",
+  "that, thanks, it was wrong"
+ ],
+ [
+  "Please forget that, thanks please.",
+  "that, thanks please"
+ ],
+ [
+  "Please forget that, thanks!?.",
+  "that, thanks"
+ ],
+ [
+  "Please forget the deadline, my boss said.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Please forget the deadline, my boss said anymore.",
+  "the deadline, my boss said anymore"
+ ],
+ [
+  "Please forget the deadline, my boss said now.",
+  "the deadline, my boss said now"
+ ],
+ [
+  "Please forget the deadline, my boss said, it was wrong.",
+  "the deadline, my boss said, it was wrong"
+ ],
+ [
+  "Please forget the deadline, my boss said please.",
+  "the deadline, my boss said please"
+ ],
+ [
+  "Please forget the deadline, my boss said!?.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Please forget my phone number and email.",
+  "my phone number and email"
+ ],
+ [
+  "Please forget my phone number and email anymore.",
+  "my phone number and email anymore"
+ ],
+ [
+  "Please forget my phone number and email now.",
+  "my phone number and email now"
+ ],
+ [
+  "Please forget my phone number and email, it was wrong.",
+  "my phone number and email, it was wrong"
+ ],
+ [
+  "Please forget my phone number and email please.",
+  "my phone number and email please"
+ ],
+ [
+  "Please forget my phone number and email!?.",
+  "my phone number and email"
+ ],
+ [
+  "Please forget what she told you.",
+  null
+ ],
+ [
+  "Please forget what she told you anymore.",
+  null
+ ],
+ [
+  "Please forget what she told you now.",
+  null
+ ],
+ [
+  "Please forget what she told you, it was wrong.",
+  null
+ ],
+ [
+  "Please forget what she told you please.",
+  null
+ ],
+ [
+  "Please forget what she told you!?.",
+  null
+ ],
+ [
+  "Please forget everything about the trip.",
+  "everything about the trip"
+ ],
+ [
+  "Please forget everything about the trip anymore.",
+  "everything about the trip anymore"
+ ],
+ [
+  "Please forget everything about the trip now.",
+  "everything about the trip now"
+ ],
+ [
+  "Please forget everything about the trip, it was wrong.",
+  "everything about the trip, it was wrong"
+ ],
+ [
+  "Please forget everything about the trip please.",
+  "everything about the trip please"
+ ],
+ [
+  "Please forget everything about the trip!?.",
+  "everything about the trip"
+ ],
+ [
+  "Please forget my birthday; it changed.",
+  "my birthday; it changed"
+ ],
+ [
+  "Please forget my birthday; it changed anymore.",
+  "my birthday; it changed anymore"
+ ],
+ [
+  "Please forget my birthday; it changed now.",
+  "my birthday; it changed now"
+ ],
+ [
+  "Please forget my birthday; it changed, it was wrong.",
+  "my birthday; it changed, it was wrong"
+ ],
+ [
+  "Please forget my birthday; it changed please.",
+  "my birthday; it changed please"
+ ],
+ [
+  "Please forget my birthday; it changed!?.",
+  "my birthday; it changed"
+ ],
+ [
+  "Please forget the U.S. trip.",
+  "the u.s. trip"
+ ],
+ [
+  "Please forget the U.S. trip anymore.",
+  "the u.s. trip anymore"
+ ],
+ [
+  "Please forget the U.S. trip now.",
+  "the u.s. trip now"
+ ],
+ [
+  "Please forget the U.S. trip, it was wrong.",
+  "the u.s. trip, it was wrong"
+ ],
+ [
+  "Please forget the U.S. trip please.",
+  "the u.s. trip please"
+ ],
+ [
+  "Please forget the U.S. trip!?.",
+  "the u.s. trip"
+ ],
+ [
+  "Please forget Tom and Jerry.",
+  "tom and jerry"
+ ],
+ [
+  "Please forget Tom and Jerry anymore.",
+  "tom and jerry anymore"
+ ],
+ [
+  "Please forget Tom and Jerry now.",
+  "tom and jerry now"
+ ],
+ [
+  "Please forget Tom and Jerry, it was wrong.",
+  "tom and jerry, it was wrong"
+ ],
+ [
+  "Please forget Tom and Jerry please.",
+  "tom and jerry please"
+ ],
+ [
+  "Please forget Tom and Jerry!?.",
+  "tom and jerry"
+ ],
+ [
+  "Please forget the $1,200 rent.",
+  "the $1,200 rent"
+ ],
+ [
+  "Please forget the $1,200 rent anymore.",
+  "the $1,200 rent anymore"
+ ],
+ [
+  "Please forget the $1,200 rent now.",
+  "the $1,200 rent now"
+ ],
+ [
+  "Please forget the $1,200 rent, it was wrong.",
+  "the $1,200 rent, it was wrong"
+ ],
+ [
+  "Please forget the $1,200 rent please.",
+  "the $1,200 rent please"
+ ],
+ [
+  "Please forget the $1,200 rent!?.",
+  "the $1,200 rent"
+ ],
+ [
+  "Please forget my earlier plan.",
+  "my earlier plan"
+ ],
+ [
+  "Please forget my earlier plan anymore.",
+  "my earlier plan anymore"
+ ],
+ [
+  "Please forget my earlier plan now.",
+  "my earlier plan now"
+ ],
+ [
+  "Please forget my earlier plan, it was wrong.",
+  "my earlier plan, it was wrong"
+ ],
+ [
+  "Please forget my earlier plan please.",
+  "my earlier plan please"
+ ],
+ [
+  "Please forget my earlier plan!?.",
+  "my earlier plan"
+ ],
+ [
+  "Please forget my previous job.",
+  "my previous job"
+ ],
+ [
+  "Please forget my previous job anymore.",
+  "my previous job anymore"
+ ],
+ [
+  "Please forget my previous job now.",
+  "my previous job now"
+ ],
+ [
+  "Please forget my previous job, it was wrong.",
+  "my previous job, it was wrong"
+ ],
+ [
+  "Please forget my previous job please.",
+  "my previous job please"
+ ],
+ [
+  "Please forget my previous job!?.",
+  "my previous job"
+ ],
+ [
+  "Please forget my info.",
+  "my info"
+ ],
+ [
+  "Please forget my info anymore.",
+  "my info anymore"
+ ],
+ [
+  "Please forget my info now.",
+  "my info now"
+ ],
+ [
+  "Please forget my info, it was wrong.",
+  "my info, it was wrong"
+ ],
+ [
+  "Please forget my info please.",
+  "my info please"
+ ],
+ [
+  "Please forget my info!?.",
+  "my info"
+ ],
+ [
+  "Please forget anything about cats.",
+  "anything about cats"
+ ],
+ [
+  "Please forget anything about cats anymore.",
+  "anything about cats anymore"
+ ],
+ [
+  "Please forget anything about cats now.",
+  "anything about cats now"
+ ],
+ [
+  "Please forget anything about cats, it was wrong.",
+  "anything about cats, it was wrong"
+ ],
+ [
+  "Please forget anything about cats please.",
+  "anything about cats please"
+ ],
+ [
+  "Please forget anything about cats!?.",
+  "anything about cats"
+ ],
+ [
+  "Stop using my old address.",
+  "my old address"
+ ],
+ [
+  "Stop using my old address anymore.",
+  "my old address anymore"
+ ],
+ [
+  "Stop using my old address now.",
+  "my old address now"
+ ],
+ [
+  "Stop using my old address, it was wrong.",
+  "my old address, it was wrong"
+ ],
+ [
+  "Stop using my old address please.",
+  "my old address please"
+ ],
+ [
+  "Stop using my old address!?.",
+  "my old address"
+ ],
+ [
+  "Stop using the garden shed.",
+  "the garden shed"
+ ],
+ [
+  "Stop using the garden shed anymore.",
+  "the garden shed anymore"
+ ],
+ [
+  "Stop using the garden shed now.",
+  "the garden shed now"
+ ],
+ [
+  "Stop using the garden shed, it was wrong.",
+  "the garden shed, it was wrong"
+ ],
+ [
+  "Stop using the garden shed please.",
+  "the garden shed please"
+ ],
+ [
+  "Stop using the garden shed!?.",
+  "the garden shed"
+ ],
+ [
+  "Stop using saffron tea.",
+  "saffron tea"
+ ],
+ [
+  "Stop using saffron tea anymore.",
+  "saffron tea anymore"
+ ],
+ [
+  "Stop using saffron tea now.",
+  "saffron tea now"
+ ],
+ [
+  "Stop using saffron tea, it was wrong.",
+  "saffron tea, it was wrong"
+ ],
+ [
+  "Stop using saffron tea please.",
+  "saffron tea please"
+ ],
+ [
+  "Stop using saffron tea!?.",
+  "saffron tea"
+ ],
+ [
+  "Stop using Dr. Patel.",
+  "dr. patel"
+ ],
+ [
+  "Stop using Dr. Patel anymore.",
+  "dr. patel anymore"
+ ],
+ [
+  "Stop using Dr. Patel now.",
+  "dr. patel now"
+ ],
+ [
+  "Stop using Dr. Patel, it was wrong.",
+  "dr. patel, it was wrong"
+ ],
+ [
+  "Stop using Dr. Patel please.",
+  "dr. patel please"
+ ],
+ [
+  "Stop using Dr. Patel!?.",
+  "dr. patel"
+ ],
+ [
+  "Stop using the 2.5 mg dose.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Stop using the 2.5 mg dose anymore.",
+  "the 2.5 mg dose anymore"
+ ],
+ [
+  "Stop using the 2.5 mg dose now.",
+  "the 2.5 mg dose now"
+ ],
+ [
+  "Stop using the 2.5 mg dose, it was wrong.",
+  "the 2.5 mg dose, it was wrong"
+ ],
+ [
+  "Stop using the 2.5 mg dose please.",
+  "the 2.5 mg dose please"
+ ],
+ [
+  "Stop using the 2.5 mg dose!?.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Stop using about the tea.",
+  "about the tea"
+ ],
+ [
+  "Stop using about the tea anymore.",
+  "about the tea anymore"
+ ],
+ [
+  "Stop using about the tea now.",
+  "about the tea now"
+ ],
+ [
+  "Stop using about the tea, it was wrong.",
+  "about the tea, it was wrong"
+ ],
+ [
+  "Stop using about the tea please.",
+  "about the tea please"
+ ],
+ [
+  "Stop using about the tea!?.",
+  "about the tea"
+ ],
+ [
+  "Stop using it.",
+  ""
+ ],
+ [
+  "Stop using it anymore.",
+  ""
+ ],
+ [
+  "Stop using it now.",
+  ""
+ ],
+ [
+  "Stop using it, it was wrong.",
+  "it, it was wrong"
+ ],
+ [
+  "Stop using it please.",
+  ""
+ ],
+ [
+  "Stop using it!?.",
+  ""
+ ],
+ [
+  "Stop using that, thanks.",
+  "that, thanks"
+ ],
+ [
+  "Stop using that, thanks anymore.",
+  "that, thanks anymore"
+ ],
+ [
+  "Stop using that, thanks now.",
+  "that, thanks now"
+ ],
+ [
+  "Stop using that, thanks, it was wrong.",
+  "that, thanks, it was wrong"
+ ],
+ [
+  "Stop using that, thanks please.",
+  "that, thanks please"
+ ],
+ [
+  "Stop using that, thanks!?.",
+  "that, thanks"
+ ],
+ [
+  "Stop using the deadline, my boss said.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Stop using the deadline, my boss said anymore.",
+  "the deadline, my boss said anymore"
+ ],
+ [
+  "Stop using the deadline, my boss said now.",
+  "the deadline, my boss said now"
+ ],
+ [
+  "Stop using the deadline, my boss said, it was wrong.",
+  "the deadline, my boss said, it was wrong"
+ ],
+ [
+  "Stop using the deadline, my boss said please.",
+  "the deadline, my boss said please"
+ ],
+ [
+  "Stop using the deadline, my boss said!?.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Stop using my phone number and email.",
+  "my phone number and email"
+ ],
+ [
+  "Stop using my phone number and email anymore.",
+  "my phone number and email anymore"
+ ],
+ [
+  "Stop using my phone number and email now.",
+  "my phone number and email now"
+ ],
+ [
+  "Stop using my phone number and email, it was wrong.",
+  "my phone number and email, it was wrong"
+ ],
+ [
+  "Stop using my phone number and email please.",
+  "my phone number and email please"
+ ],
+ [
+  "Stop using my phone number and email!?.",
+  "my phone number and email"
+ ],
+ [
+  "Stop using what she told you.",
+  null
+ ],
+ [
+  "Stop using what she told you anymore.",
+  null
+ ],
+ [
+  "Stop using what she told you now.",
+  null
+ ],
+ [
+  "Stop using what she told you, it was wrong.",
+  null
+ ],
+ [
+  "Stop using what she told you please.",
+  null
+ ],
+ [
+  "Stop using what she told you!?.",
+  null
+ ],
+ [
+  "Stop using everything about the trip.",
+  "everything about the trip"
+ ],
+ [
+  "Stop using everything about the trip anymore.",
+  "everything about the trip anymore"
+ ],
+ [
+  "Stop using everything about the trip now.",
+  "everything about the trip now"
+ ],
+ [
+  "Stop using everything about the trip, it was wrong.",
+  "everything about the trip, it was wrong"
+ ],
+ [
+  "Stop using everything about the trip please.",
+  "everything about the trip please"
+ ],
+ [
+  "Stop using everything about the trip!?.",
+  "everything about the trip"
+ ],
+ [
+  "Stop using my birthday; it changed.",
+  "my birthday; it changed"
+ ],
+ [
+  "Stop using my birthday; it changed anymore.",
+  "my birthday; it changed anymore"
+ ],
+ [
+  "Stop using my birthday; it changed now.",
+  "my birthday; it changed now"
+ ],
+ [
+  "Stop using my birthday; it changed, it was wrong.",
+  "my birthday; it changed, it was wrong"
+ ],
+ [
+  "Stop using my birthday; it changed please.",
+  "my birthday; it changed please"
+ ],
+ [
+  "Stop using my birthday; it changed!?.",
+  "my birthday; it changed"
+ ],
+ [
+  "Stop using the U.S. trip.",
+  "the u.s. trip"
+ ],
+ [
+  "Stop using the U.S. trip anymore.",
+  "the u.s. trip anymore"
+ ],
+ [
+  "Stop using the U.S. trip now.",
+  "the u.s. trip now"
+ ],
+ [
+  "Stop using the U.S. trip, it was wrong.",
+  "the u.s. trip, it was wrong"
+ ],
+ [
+  "Stop using the U.S. trip please.",
+  "the u.s. trip please"
+ ],
+ [
+  "Stop using the U.S. trip!?.",
+  "the u.s. trip"
+ ],
+ [
+  "Stop using Tom and Jerry.",
+  "tom and jerry"
+ ],
+ [
+  "Stop using Tom and Jerry anymore.",
+  "tom and jerry anymore"
+ ],
+ [
+  "Stop using Tom and Jerry now.",
+  "tom and jerry now"
+ ],
+ [
+  "Stop using Tom and Jerry, it was wrong.",
+  "tom and jerry, it was wrong"
+ ],
+ [
+  "Stop using Tom and Jerry please.",
+  "tom and jerry please"
+ ],
+ [
+  "Stop using Tom and Jerry!?.",
+  "tom and jerry"
+ ],
+ [
+  "Stop using the $1,200 rent.",
+  "the $1,200 rent"
+ ],
+ [
+  "Stop using the $1,200 rent anymore.",
+  "the $1,200 rent anymore"
+ ],
+ [
+  "Stop using the $1,200 rent now.",
+  "the $1,200 rent now"
+ ],
+ [
+  "Stop using the $1,200 rent, it was wrong.",
+  "the $1,200 rent, it was wrong"
+ ],
+ [
+  "Stop using the $1,200 rent please.",
+  "the $1,200 rent please"
+ ],
+ [
+  "Stop using the $1,200 rent!?.",
+  "the $1,200 rent"
+ ],
+ [
+  "Stop using my earlier plan.",
+  "my earlier plan"
+ ],
+ [
+  "Stop using my earlier plan anymore.",
+  "my earlier plan anymore"
+ ],
+ [
+  "Stop using my earlier plan now.",
+  "my earlier plan now"
+ ],
+ [
+  "Stop using my earlier plan, it was wrong.",
+  "my earlier plan, it was wrong"
+ ],
+ [
+  "Stop using my earlier plan please.",
+  "my earlier plan please"
+ ],
+ [
+  "Stop using my earlier plan!?.",
+  "my earlier plan"
+ ],
+ [
+  "Stop using my previous job.",
+  "my previous job"
+ ],
+ [
+  "Stop using my previous job anymore.",
+  "my previous job anymore"
+ ],
+ [
+  "Stop using my previous job now.",
+  "my previous job now"
+ ],
+ [
+  "Stop using my previous job, it was wrong.",
+  "my previous job, it was wrong"
+ ],
+ [
+  "Stop using my previous job please.",
+  "my previous job please"
+ ],
+ [
+  "Stop using my previous job!?.",
+  "my previous job"
+ ],
+ [
+  "Stop using my info.",
+  "my info"
+ ],
+ [
+  "Stop using my info anymore.",
+  "my info anymore"
+ ],
+ [
+  "Stop using my info now.",
+  "my info now"
+ ],
+ [
+  "Stop using my info, it was wrong.",
+  "my info, it was wrong"
+ ],
+ [
+  "Stop using my info please.",
+  "my info please"
+ ],
+ [
+  "Stop using my info!?.",
+  "my info"
+ ],
+ [
+  "Stop using anything about cats.",
+  "anything about cats"
+ ],
+ [
+  "Stop using anything about cats anymore.",
+  "anything about cats anymore"
+ ],
+ [
+  "Stop using anything about cats now.",
+  "anything about cats now"
+ ],
+ [
+  "Stop using anything about cats, it was wrong.",
+  "anything about cats, it was wrong"
+ ],
+ [
+  "Stop using anything about cats please.",
+  "anything about cats please"
+ ],
+ [
+  "Stop using anything about cats!?.",
+  "anything about cats"
+ ],
+ [
+  "Ignore my old address.",
+  "my old address"
+ ],
+ [
+  "Ignore my old address anymore.",
+  "my old address anymore"
+ ],
+ [
+  "Ignore my old address now.",
+  "my old address now"
+ ],
+ [
+  "Ignore my old address, it was wrong.",
+  "my old address, it was wrong"
+ ],
+ [
+  "Ignore my old address please.",
+  "my old address please"
+ ],
+ [
+  "Ignore my old address!?.",
+  "my old address"
+ ],
+ [
+  "Ignore the garden shed.",
+  "the garden shed"
+ ],
+ [
+  "Ignore the garden shed anymore.",
+  "the garden shed anymore"
+ ],
+ [
+  "Ignore the garden shed now.",
+  "the garden shed now"
+ ],
+ [
+  "Ignore the garden shed, it was wrong.",
+  "the garden shed, it was wrong"
+ ],
+ [
+  "Ignore the garden shed please.",
+  "the garden shed please"
+ ],
+ [
+  "Ignore the garden shed!?.",
+  "the garden shed"
+ ],
+ [
+  "Ignore saffron tea.",
+  "saffron tea"
+ ],
+ [
+  "Ignore saffron tea anymore.",
+  "saffron tea anymore"
+ ],
+ [
+  "Ignore saffron tea now.",
+  "saffron tea now"
+ ],
+ [
+  "Ignore saffron tea, it was wrong.",
+  "saffron tea, it was wrong"
+ ],
+ [
+  "Ignore saffron tea please.",
+  "saffron tea please"
+ ],
+ [
+  "Ignore saffron tea!?.",
+  "saffron tea"
+ ],
+ [
+  "Ignore Dr. Patel.",
+  "dr. patel"
+ ],
+ [
+  "Ignore Dr. Patel anymore.",
+  "dr. patel anymore"
+ ],
+ [
+  "Ignore Dr. Patel now.",
+  "dr. patel now"
+ ],
+ [
+  "Ignore Dr. Patel, it was wrong.",
+  "dr. patel, it was wrong"
+ ],
+ [
+  "Ignore Dr. Patel please.",
+  "dr. patel please"
+ ],
+ [
+  "Ignore Dr. Patel!?.",
+  "dr. patel"
+ ],
+ [
+  "Ignore the 2.5 mg dose.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Ignore the 2.5 mg dose anymore.",
+  "the 2.5 mg dose anymore"
+ ],
+ [
+  "Ignore the 2.5 mg dose now.",
+  "the 2.5 mg dose now"
+ ],
+ [
+  "Ignore the 2.5 mg dose, it was wrong.",
+  "the 2.5 mg dose, it was wrong"
+ ],
+ [
+  "Ignore the 2.5 mg dose please.",
+  "the 2.5 mg dose please"
+ ],
+ [
+  "Ignore the 2.5 mg dose!?.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Ignore about the tea.",
+  "about the tea"
+ ],
+ [
+  "Ignore about the tea anymore.",
+  "about the tea anymore"
+ ],
+ [
+  "Ignore about the tea now.",
+  "about the tea now"
+ ],
+ [
+  "Ignore about the tea, it was wrong.",
+  "about the tea, it was wrong"
+ ],
+ [
+  "Ignore about the tea please.",
+  "about the tea please"
+ ],
+ [
+  "Ignore about the tea!?.",
+  "about the tea"
+ ],
+ [
+  "Ignore it.",
+  ""
+ ],
+ [
+  "Ignore it anymore.",
+  ""
+ ],
+ [
+  "Ignore it now.",
+  ""
+ ],
+ [
+  "Ignore it, it was wrong.",
+  "it, it was wrong"
+ ],
+ [
+  "Ignore it please.",
+  ""
+ ],
+ [
+  "Ignore it!?.",
+  ""
+ ],
+ [
+  "Ignore that, thanks.",
+  "that, thanks"
+ ],
+ [
+  "Ignore that, thanks anymore.",
+  "that, thanks anymore"
+ ],
+ [
+  "Ignore that, thanks now.",
+  "that, thanks now"
+ ],
+ [
+  "Ignore that, thanks, it was wrong.",
+  "that, thanks, it was wrong"
+ ],
+ [
+  "Ignore that, thanks please.",
+  "that, thanks please"
+ ],
+ [
+  "Ignore that, thanks!?.",
+  "that, thanks"
+ ],
+ [
+  "Ignore the deadline, my boss said.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Ignore the deadline, my boss said anymore.",
+  "the deadline, my boss said anymore"
+ ],
+ [
+  "Ignore the deadline, my boss said now.",
+  "the deadline, my boss said now"
+ ],
+ [
+  "Ignore the deadline, my boss said, it was wrong.",
+  "the deadline, my boss said, it was wrong"
+ ],
+ [
+  "Ignore the deadline, my boss said please.",
+  "the deadline, my boss said please"
+ ],
+ [
+  "Ignore the deadline, my boss said!?.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Ignore my phone number and email.",
+  "my phone number and email"
+ ],
+ [
+  "Ignore my phone number and email anymore.",
+  "my phone number and email anymore"
+ ],
+ [
+  "Ignore my phone number and email now.",
+  "my phone number and email now"
+ ],
+ [
+  "Ignore my phone number and email, it was wrong.",
+  "my phone number and email, it was wrong"
+ ],
+ [
+  "Ignore my phone number and email please.",
+  "my phone number and email please"
+ ],
+ [
+  "Ignore my phone number and email!?.",
+  "my phone number and email"
+ ],
+ [
+  "Ignore what she told you.",
+  null
+ ],
+ [
+  "Ignore what she told you anymore.",
+  null
+ ],
+ [
+  "Ignore what she told you now.",
+  null
+ ],
+ [
+  "Ignore what she told you, it was wrong.",
+  null
+ ],
+ [
+  "Ignore what she told you please.",
+  null
+ ],
+ [
+  "Ignore what she told you!?.",
+  null
+ ],
+ [
+  "Ignore everything about the trip.",
+  "everything about the trip"
+ ],
+ [
+  "Ignore everything about the trip anymore.",
+  "everything about the trip anymore"
+ ],
+ [
+  "Ignore everything about the trip now.",
+  "everything about the trip now"
+ ],
+ [
+  "Ignore everything about the trip, it was wrong.",
+  "everything about the trip, it was wrong"
+ ],
+ [
+  "Ignore everything about the trip please.",
+  "everything about the trip please"
+ ],
+ [
+  "Ignore everything about the trip!?.",
+  "everything about the trip"
+ ],
+ [
+  "Ignore my birthday; it changed.",
+  "my birthday; it changed"
+ ],
+ [
+  "Ignore my birthday; it changed anymore.",
+  "my birthday; it changed anymore"
+ ],
+ [
+  "Ignore my birthday; it changed now.",
+  "my birthday; it changed now"
+ ],
+ [
+  "Ignore my birthday; it changed, it was wrong.",
+  "my birthday; it changed, it was wrong"
+ ],
+ [
+  "Ignore my birthday; it changed please.",
+  "my birthday; it changed please"
+ ],
+ [
+  "Ignore my birthday; it changed!?.",
+  "my birthday; it changed"
+ ],
+ [
+  "Ignore the U.S. trip.",
+  "the u.s. trip"
+ ],
+ [
+  "Ignore the U.S. trip anymore.",
+  "the u.s. trip anymore"
+ ],
+ [
+  "Ignore the U.S. trip now.",
+  "the u.s. trip now"
+ ],
+ [
+  "Ignore the U.S. trip, it was wrong.",
+  "the u.s. trip, it was wrong"
+ ],
+ [
+  "Ignore the U.S. trip please.",
+  "the u.s. trip please"
+ ],
+ [
+  "Ignore the U.S. trip!?.",
+  "the u.s. trip"
+ ],
+ [
+  "Ignore Tom and Jerry.",
+  "tom and jerry"
+ ],
+ [
+  "Ignore Tom and Jerry anymore.",
+  "tom and jerry anymore"
+ ],
+ [
+  "Ignore Tom and Jerry now.",
+  "tom and jerry now"
+ ],
+ [
+  "Ignore Tom and Jerry, it was wrong.",
+  "tom and jerry, it was wrong"
+ ],
+ [
+  "Ignore Tom and Jerry please.",
+  "tom and jerry please"
+ ],
+ [
+  "Ignore Tom and Jerry!?.",
+  "tom and jerry"
+ ],
+ [
+  "Ignore the $1,200 rent.",
+  "the $1,200 rent"
+ ],
+ [
+  "Ignore the $1,200 rent anymore.",
+  "the $1,200 rent anymore"
+ ],
+ [
+  "Ignore the $1,200 rent now.",
+  "the $1,200 rent now"
+ ],
+ [
+  "Ignore the $1,200 rent, it was wrong.",
+  "the $1,200 rent, it was wrong"
+ ],
+ [
+  "Ignore the $1,200 rent please.",
+  "the $1,200 rent please"
+ ],
+ [
+  "Ignore the $1,200 rent!?.",
+  "the $1,200 rent"
+ ],
+ [
+  "Ignore my earlier plan.",
+  "my earlier plan"
+ ],
+ [
+  "Ignore my earlier plan anymore.",
+  "my earlier plan anymore"
+ ],
+ [
+  "Ignore my earlier plan now.",
+  "my earlier plan now"
+ ],
+ [
+  "Ignore my earlier plan, it was wrong.",
+  "my earlier plan, it was wrong"
+ ],
+ [
+  "Ignore my earlier plan please.",
+  "my earlier plan please"
+ ],
+ [
+  "Ignore my earlier plan!?.",
+  "my earlier plan"
+ ],
+ [
+  "Ignore my previous job.",
+  "my previous job"
+ ],
+ [
+  "Ignore my previous job anymore.",
+  "my previous job anymore"
+ ],
+ [
+  "Ignore my previous job now.",
+  "my previous job now"
+ ],
+ [
+  "Ignore my previous job, it was wrong.",
+  "my previous job, it was wrong"
+ ],
+ [
+  "Ignore my previous job please.",
+  "my previous job please"
+ ],
+ [
+  "Ignore my previous job!?.",
+  "my previous job"
+ ],
+ [
+  "Ignore my info.",
+  "my info"
+ ],
+ [
+  "Ignore my info anymore.",
+  "my info anymore"
+ ],
+ [
+  "Ignore my info now.",
+  "my info now"
+ ],
+ [
+  "Ignore my info, it was wrong.",
+  "my info, it was wrong"
+ ],
+ [
+  "Ignore my info please.",
+  "my info please"
+ ],
+ [
+  "Ignore my info!?.",
+  "my info"
+ ],
+ [
+  "Ignore anything about cats.",
+  "anything about cats"
+ ],
+ [
+  "Ignore anything about cats anymore.",
+  "anything about cats anymore"
+ ],
+ [
+  "Ignore anything about cats now.",
+  "anything about cats now"
+ ],
+ [
+  "Ignore anything about cats, it was wrong.",
+  "anything about cats, it was wrong"
+ ],
+ [
+  "Ignore anything about cats please.",
+  "anything about cats please"
+ ],
+ [
+  "Ignore anything about cats!?.",
+  "anything about cats"
+ ],
+ [
+  "Disregard my old address.",
+  "my old address"
+ ],
+ [
+  "Disregard my old address anymore.",
+  "my old address anymore"
+ ],
+ [
+  "Disregard my old address now.",
+  "my old address now"
+ ],
+ [
+  "Disregard my old address, it was wrong.",
+  "my old address, it was wrong"
+ ],
+ [
+  "Disregard my old address please.",
+  "my old address please"
+ ],
+ [
+  "Disregard my old address!?.",
+  "my old address"
+ ],
+ [
+  "Disregard the garden shed.",
+  "the garden shed"
+ ],
+ [
+  "Disregard the garden shed anymore.",
+  "the garden shed anymore"
+ ],
+ [
+  "Disregard the garden shed now.",
+  "the garden shed now"
+ ],
+ [
+  "Disregard the garden shed, it was wrong.",
+  "the garden shed, it was wrong"
+ ],
+ [
+  "Disregard the garden shed please.",
+  "the garden shed please"
+ ],
+ [
+  "Disregard the garden shed!?.",
+  "the garden shed"
+ ],
+ [
+  "Disregard saffron tea.",
+  "saffron tea"
+ ],
+ [
+  "Disregard saffron tea anymore.",
+  "saffron tea anymore"
+ ],
+ [
+  "Disregard saffron tea now.",
+  "saffron tea now"
+ ],
+ [
+  "Disregard saffron tea, it was wrong.",
+  "saffron tea, it was wrong"
+ ],
+ [
+  "Disregard saffron tea please.",
+  "saffron tea please"
+ ],
+ [
+  "Disregard saffron tea!?.",
+  "saffron tea"
+ ],
+ [
+  "Disregard Dr. Patel.",
+  "dr. patel"
+ ],
+ [
+  "Disregard Dr. Patel anymore.",
+  "dr. patel anymore"
+ ],
+ [
+  "Disregard Dr. Patel now.",
+  "dr. patel now"
+ ],
+ [
+  "Disregard Dr. Patel, it was wrong.",
+  "dr. patel, it was wrong"
+ ],
+ [
+  "Disregard Dr. Patel please.",
+  "dr. patel please"
+ ],
+ [
+  "Disregard Dr. Patel!?.",
+  "dr. patel"
+ ],
+ [
+  "Disregard the 2.5 mg dose.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Disregard the 2.5 mg dose anymore.",
+  "the 2.5 mg dose anymore"
+ ],
+ [
+  "Disregard the 2.5 mg dose now.",
+  "the 2.5 mg dose now"
+ ],
+ [
+  "Disregard the 2.5 mg dose, it was wrong.",
+  "the 2.5 mg dose, it was wrong"
+ ],
+ [
+  "Disregard the 2.5 mg dose please.",
+  "the 2.5 mg dose please"
+ ],
+ [
+  "Disregard the 2.5 mg dose!?.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Disregard about the tea.",
+  "about the tea"
+ ],
+ [
+  "Disregard about the tea anymore.",
+  "about the tea anymore"
+ ],
+ [
+  "Disregard about the tea now.",
+  "about the tea now"
+ ],
+ [
+  "Disregard about the tea, it was wrong.",
+  "about the tea, it was wrong"
+ ],
+ [
+  "Disregard about the tea please.",
+  "about the tea please"
+ ],
+ [
+  "Disregard about the tea!?.",
+  "about the tea"
+ ],
+ [
+  "Disregard it.",
+  ""
+ ],
+ [
+  "Disregard it anymore.",
+  ""
+ ],
+ [
+  "Disregard it now.",
+  ""
+ ],
+ [
+  "Disregard it, it was wrong.",
+  "it, it was wrong"
+ ],
+ [
+  "Disregard it please.",
+  ""
+ ],
+ [
+  "Disregard it!?.",
+  ""
+ ],
+ [
+  "Disregard that, thanks.",
+  "that, thanks"
+ ],
+ [
+  "Disregard that, thanks anymore.",
+  "that, thanks anymore"
+ ],
+ [
+  "Disregard that, thanks now.",
+  "that, thanks now"
+ ],
+ [
+  "Disregard that, thanks, it was wrong.",
+  "that, thanks, it was wrong"
+ ],
+ [
+  "Disregard that, thanks please.",
+  "that, thanks please"
+ ],
+ [
+  "Disregard that, thanks!?.",
+  "that, thanks"
+ ],
+ [
+  "Disregard the deadline, my boss said.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Disregard the deadline, my boss said anymore.",
+  "the deadline, my boss said anymore"
+ ],
+ [
+  "Disregard the deadline, my boss said now.",
+  "the deadline, my boss said now"
+ ],
+ [
+  "Disregard the deadline, my boss said, it was wrong.",
+  "the deadline, my boss said, it was wrong"
+ ],
+ [
+  "Disregard the deadline, my boss said please.",
+  "the deadline, my boss said please"
+ ],
+ [
+  "Disregard the deadline, my boss said!?.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Disregard my phone number and email.",
+  "my phone number and email"
+ ],
+ [
+  "Disregard my phone number and email anymore.",
+  "my phone number and email anymore"
+ ],
+ [
+  "Disregard my phone number and email now.",
+  "my phone number and email now"
+ ],
+ [
+  "Disregard my phone number and email, it was wrong.",
+  "my phone number and email, it was wrong"
+ ],
+ [
+  "Disregard my phone number and email please.",
+  "my phone number and email please"
+ ],
+ [
+  "Disregard my phone number and email!?.",
+  "my phone number and email"
+ ],
+ [
+  "Disregard what she told you.",
+  null
+ ],
+ [
+  "Disregard what she told you anymore.",
+  null
+ ],
+ [
+  "Disregard what she told you now.",
+  null
+ ],
+ [
+  "Disregard what she told you, it was wrong.",
+  null
+ ],
+ [
+  "Disregard what she told you please.",
+  null
+ ],
+ [
+  "Disregard what she told you!?.",
+  null
+ ],
+ [
+  "Disregard everything about the trip.",
+  "everything about the trip"
+ ],
+ [
+  "Disregard everything about the trip anymore.",
+  "everything about the trip anymore"
+ ],
+ [
+  "Disregard everything about the trip now.",
+  "everything about the trip now"
+ ],
+ [
+  "Disregard everything about the trip, it was wrong.",
+  "everything about the trip, it was wrong"
+ ],
+ [
+  "Disregard everything about the trip please.",
+  "everything about the trip please"
+ ],
+ [
+  "Disregard everything about the trip!?.",
+  "everything about the trip"
+ ],
+ [
+  "Disregard my birthday; it changed.",
+  "my birthday; it changed"
+ ],
+ [
+  "Disregard my birthday; it changed anymore.",
+  "my birthday; it changed anymore"
+ ],
+ [
+  "Disregard my birthday; it changed now.",
+  "my birthday; it changed now"
+ ],
+ [
+  "Disregard my birthday; it changed, it was wrong.",
+  "my birthday; it changed, it was wrong"
+ ],
+ [
+  "Disregard my birthday; it changed please.",
+  "my birthday; it changed please"
+ ],
+ [
+  "Disregard my birthday; it changed!?.",
+  "my birthday; it changed"
+ ],
+ [
+  "Disregard the U.S. trip.",
+  "the u.s. trip"
+ ],
+ [
+  "Disregard the U.S. trip anymore.",
+  "the u.s. trip anymore"
+ ],
+ [
+  "Disregard the U.S. trip now.",
+  "the u.s. trip now"
+ ],
+ [
+  "Disregard the U.S. trip, it was wrong.",
+  "the u.s. trip, it was wrong"
+ ],
+ [
+  "Disregard the U.S. trip please.",
+  "the u.s. trip please"
+ ],
+ [
+  "Disregard the U.S. trip!?.",
+  "the u.s. trip"
+ ],
+ [
+  "Disregard Tom and Jerry.",
+  "tom and jerry"
+ ],
+ [
+  "Disregard Tom and Jerry anymore.",
+  "tom and jerry anymore"
+ ],
+ [
+  "Disregard Tom and Jerry now.",
+  "tom and jerry now"
+ ],
+ [
+  "Disregard Tom and Jerry, it was wrong.",
+  "tom and jerry, it was wrong"
+ ],
+ [
+  "Disregard Tom and Jerry please.",
+  "tom and jerry please"
+ ],
+ [
+  "Disregard Tom and Jerry!?.",
+  "tom and jerry"
+ ],
+ [
+  "Disregard the $1,200 rent.",
+  "the $1,200 rent"
+ ],
+ [
+  "Disregard the $1,200 rent anymore.",
+  "the $1,200 rent anymore"
+ ],
+ [
+  "Disregard the $1,200 rent now.",
+  "the $1,200 rent now"
+ ],
+ [
+  "Disregard the $1,200 rent, it was wrong.",
+  "the $1,200 rent, it was wrong"
+ ],
+ [
+  "Disregard the $1,200 rent please.",
+  "the $1,200 rent please"
+ ],
+ [
+  "Disregard the $1,200 rent!?.",
+  "the $1,200 rent"
+ ],
+ [
+  "Disregard my earlier plan.",
+  "my earlier plan"
+ ],
+ [
+  "Disregard my earlier plan anymore.",
+  "my earlier plan anymore"
+ ],
+ [
+  "Disregard my earlier plan now.",
+  "my earlier plan now"
+ ],
+ [
+  "Disregard my earlier plan, it was wrong.",
+  "my earlier plan, it was wrong"
+ ],
+ [
+  "Disregard my earlier plan please.",
+  "my earlier plan please"
+ ],
+ [
+  "Disregard my earlier plan!?.",
+  "my earlier plan"
+ ],
+ [
+  "Disregard my previous job.",
+  "my previous job"
+ ],
+ [
+  "Disregard my previous job anymore.",
+  "my previous job anymore"
+ ],
+ [
+  "Disregard my previous job now.",
+  "my previous job now"
+ ],
+ [
+  "Disregard my previous job, it was wrong.",
+  "my previous job, it was wrong"
+ ],
+ [
+  "Disregard my previous job please.",
+  "my previous job please"
+ ],
+ [
+  "Disregard my previous job!?.",
+  "my previous job"
+ ],
+ [
+  "Disregard my info.",
+  "my info"
+ ],
+ [
+  "Disregard my info anymore.",
+  "my info anymore"
+ ],
+ [
+  "Disregard my info now.",
+  "my info now"
+ ],
+ [
+  "Disregard my info, it was wrong.",
+  "my info, it was wrong"
+ ],
+ [
+  "Disregard my info please.",
+  "my info please"
+ ],
+ [
+  "Disregard my info!?.",
+  "my info"
+ ],
+ [
+  "Disregard anything about cats.",
+  "anything about cats"
+ ],
+ [
+  "Disregard anything about cats anymore.",
+  "anything about cats anymore"
+ ],
+ [
+  "Disregard anything about cats now.",
+  "anything about cats now"
+ ],
+ [
+  "Disregard anything about cats, it was wrong.",
+  "anything about cats, it was wrong"
+ ],
+ [
+  "Disregard anything about cats please.",
+  "anything about cats please"
+ ],
+ [
+  "Disregard anything about cats!?.",
+  "anything about cats"
+ ],
+ [
+  "Stop remembering my old address.",
+  "my old address"
+ ],
+ [
+  "Stop remembering my old address anymore.",
+  "my old address anymore"
+ ],
+ [
+  "Stop remembering my old address now.",
+  "my old address now"
+ ],
+ [
+  "Stop remembering my old address, it was wrong.",
+  "my old address, it was wrong"
+ ],
+ [
+  "Stop remembering my old address please.",
+  "my old address please"
+ ],
+ [
+  "Stop remembering my old address!?.",
+  "my old address"
+ ],
+ [
+  "Stop remembering the garden shed.",
+  "the garden shed"
+ ],
+ [
+  "Stop remembering the garden shed anymore.",
+  "the garden shed anymore"
+ ],
+ [
+  "Stop remembering the garden shed now.",
+  "the garden shed now"
+ ],
+ [
+  "Stop remembering the garden shed, it was wrong.",
+  "the garden shed, it was wrong"
+ ],
+ [
+  "Stop remembering the garden shed please.",
+  "the garden shed please"
+ ],
+ [
+  "Stop remembering the garden shed!?.",
+  "the garden shed"
+ ],
+ [
+  "Stop remembering saffron tea.",
+  "saffron tea"
+ ],
+ [
+  "Stop remembering saffron tea anymore.",
+  "saffron tea anymore"
+ ],
+ [
+  "Stop remembering saffron tea now.",
+  "saffron tea now"
+ ],
+ [
+  "Stop remembering saffron tea, it was wrong.",
+  "saffron tea, it was wrong"
+ ],
+ [
+  "Stop remembering saffron tea please.",
+  "saffron tea please"
+ ],
+ [
+  "Stop remembering saffron tea!?.",
+  "saffron tea"
+ ],
+ [
+  "Stop remembering Dr. Patel.",
+  "dr. patel"
+ ],
+ [
+  "Stop remembering Dr. Patel anymore.",
+  "dr. patel anymore"
+ ],
+ [
+  "Stop remembering Dr. Patel now.",
+  "dr. patel now"
+ ],
+ [
+  "Stop remembering Dr. Patel, it was wrong.",
+  "dr. patel, it was wrong"
+ ],
+ [
+  "Stop remembering Dr. Patel please.",
+  "dr. patel please"
+ ],
+ [
+  "Stop remembering Dr. Patel!?.",
+  "dr. patel"
+ ],
+ [
+  "Stop remembering the 2.5 mg dose.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Stop remembering the 2.5 mg dose anymore.",
+  "the 2.5 mg dose anymore"
+ ],
+ [
+  "Stop remembering the 2.5 mg dose now.",
+  "the 2.5 mg dose now"
+ ],
+ [
+  "Stop remembering the 2.5 mg dose, it was wrong.",
+  "the 2.5 mg dose, it was wrong"
+ ],
+ [
+  "Stop remembering the 2.5 mg dose please.",
+  "the 2.5 mg dose please"
+ ],
+ [
+  "Stop remembering the 2.5 mg dose!?.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Stop remembering about the tea.",
+  "about the tea"
+ ],
+ [
+  "Stop remembering about the tea anymore.",
+  "about the tea anymore"
+ ],
+ [
+  "Stop remembering about the tea now.",
+  "about the tea now"
+ ],
+ [
+  "Stop remembering about the tea, it was wrong.",
+  "about the tea, it was wrong"
+ ],
+ [
+  "Stop remembering about the tea please.",
+  "about the tea please"
+ ],
+ [
+  "Stop remembering about the tea!?.",
+  "about the tea"
+ ],
+ [
+  "Stop remembering it.",
+  ""
+ ],
+ [
+  "Stop remembering it anymore.",
+  ""
+ ],
+ [
+  "Stop remembering it now.",
+  ""
+ ],
+ [
+  "Stop remembering it, it was wrong.",
+  "it, it was wrong"
+ ],
+ [
+  "Stop remembering it please.",
+  ""
+ ],
+ [
+  "Stop remembering it!?.",
+  ""
+ ],
+ [
+  "Stop remembering that, thanks.",
+  "that, thanks"
+ ],
+ [
+  "Stop remembering that, thanks anymore.",
+  "that, thanks anymore"
+ ],
+ [
+  "Stop remembering that, thanks now.",
+  "that, thanks now"
+ ],
+ [
+  "Stop remembering that, thanks, it was wrong.",
+  "that, thanks, it was wrong"
+ ],
+ [
+  "Stop remembering that, thanks please.",
+  "that, thanks please"
+ ],
+ [
+  "Stop remembering that, thanks!?.",
+  "that, thanks"
+ ],
+ [
+  "Stop remembering the deadline, my boss said.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Stop remembering the deadline, my boss said anymore.",
+  "the deadline, my boss said anymore"
+ ],
+ [
+  "Stop remembering the deadline, my boss said now.",
+  "the deadline, my boss said now"
+ ],
+ [
+  "Stop remembering the deadline, my boss said, it was wrong.",
+  "the deadline, my boss said, it was wrong"
+ ],
+ [
+  "Stop remembering the deadline, my boss said please.",
+  "the deadline, my boss said please"
+ ],
+ [
+  "Stop remembering the deadline, my boss said!?.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Stop remembering my phone number and email.",
+  "my phone number and email"
+ ],
+ [
+  "Stop remembering my phone number and email anymore.",
+  "my phone number and email anymore"
+ ],
+ [
+  "Stop remembering my phone number and email now.",
+  "my phone number and email now"
+ ],
+ [
+  "Stop remembering my phone number and email, it was wrong.",
+  "my phone number and email, it was wrong"
+ ],
+ [
+  "Stop remembering my phone number and email please.",
+  "my phone number and email please"
+ ],
+ [
+  "Stop remembering my phone number and email!?.",
+  "my phone number and email"
+ ],
+ [
+  "Stop remembering what she told you.",
+  null
+ ],
+ [
+  "Stop remembering what she told you anymore.",
+  null
+ ],
+ [
+  "Stop remembering what she told you now.",
+  null
+ ],
+ [
+  "Stop remembering what she told you, it was wrong.",
+  null
+ ],
+ [
+  "Stop remembering what she told you please.",
+  null
+ ],
+ [
+  "Stop remembering what she told you!?.",
+  null
+ ],
+ [
+  "Stop remembering everything about the trip.",
+  "everything about the trip"
+ ],
+ [
+  "Stop remembering everything about the trip anymore.",
+  "everything about the trip anymore"
+ ],
+ [
+  "Stop remembering everything about the trip now.",
+  "everything about the trip now"
+ ],
+ [
+  "Stop remembering everything about the trip, it was wrong.",
+  "everything about the trip, it was wrong"
+ ],
+ [
+  "Stop remembering everything about the trip please.",
+  "everything about the trip please"
+ ],
+ [
+  "Stop remembering everything about the trip!?.",
+  "everything about the trip"
+ ],
+ [
+  "Stop remembering my birthday; it changed.",
+  "my birthday; it changed"
+ ],
+ [
+  "Stop remembering my birthday; it changed anymore.",
+  "my birthday; it changed anymore"
+ ],
+ [
+  "Stop remembering my birthday; it changed now.",
+  "my birthday; it changed now"
+ ],
+ [
+  "Stop remembering my birthday; it changed, it was wrong.",
+  "my birthday; it changed, it was wrong"
+ ],
+ [
+  "Stop remembering my birthday; it changed please.",
+  "my birthday; it changed please"
+ ],
+ [
+  "Stop remembering my birthday; it changed!?.",
+  "my birthday; it changed"
+ ],
+ [
+  "Stop remembering the U.S. trip.",
+  "the u.s. trip"
+ ],
+ [
+  "Stop remembering the U.S. trip anymore.",
+  "the u.s. trip anymore"
+ ],
+ [
+  "Stop remembering the U.S. trip now.",
+  "the u.s. trip now"
+ ],
+ [
+  "Stop remembering the U.S. trip, it was wrong.",
+  "the u.s. trip, it was wrong"
+ ],
+ [
+  "Stop remembering the U.S. trip please.",
+  "the u.s. trip please"
+ ],
+ [
+  "Stop remembering the U.S. trip!?.",
+  "the u.s. trip"
+ ],
+ [
+  "Stop remembering Tom and Jerry.",
+  "tom and jerry"
+ ],
+ [
+  "Stop remembering Tom and Jerry anymore.",
+  "tom and jerry anymore"
+ ],
+ [
+  "Stop remembering Tom and Jerry now.",
+  "tom and jerry now"
+ ],
+ [
+  "Stop remembering Tom and Jerry, it was wrong.",
+  "tom and jerry, it was wrong"
+ ],
+ [
+  "Stop remembering Tom and Jerry please.",
+  "tom and jerry please"
+ ],
+ [
+  "Stop remembering Tom and Jerry!?.",
+  "tom and jerry"
+ ],
+ [
+  "Stop remembering the $1,200 rent.",
+  "the $1,200 rent"
+ ],
+ [
+  "Stop remembering the $1,200 rent anymore.",
+  "the $1,200 rent anymore"
+ ],
+ [
+  "Stop remembering the $1,200 rent now.",
+  "the $1,200 rent now"
+ ],
+ [
+  "Stop remembering the $1,200 rent, it was wrong.",
+  "the $1,200 rent, it was wrong"
+ ],
+ [
+  "Stop remembering the $1,200 rent please.",
+  "the $1,200 rent please"
+ ],
+ [
+  "Stop remembering the $1,200 rent!?.",
+  "the $1,200 rent"
+ ],
+ [
+  "Stop remembering my earlier plan.",
+  "my earlier plan"
+ ],
+ [
+  "Stop remembering my earlier plan anymore.",
+  "my earlier plan anymore"
+ ],
+ [
+  "Stop remembering my earlier plan now.",
+  "my earlier plan now"
+ ],
+ [
+  "Stop remembering my earlier plan, it was wrong.",
+  "my earlier plan, it was wrong"
+ ],
+ [
+  "Stop remembering my earlier plan please.",
+  "my earlier plan please"
+ ],
+ [
+  "Stop remembering my earlier plan!?.",
+  "my earlier plan"
+ ],
+ [
+  "Stop remembering my previous job.",
+  "my previous job"
+ ],
+ [
+  "Stop remembering my previous job anymore.",
+  "my previous job anymore"
+ ],
+ [
+  "Stop remembering my previous job now.",
+  "my previous job now"
+ ],
+ [
+  "Stop remembering my previous job, it was wrong.",
+  "my previous job, it was wrong"
+ ],
+ [
+  "Stop remembering my previous job please.",
+  "my previous job please"
+ ],
+ [
+  "Stop remembering my previous job!?.",
+  "my previous job"
+ ],
+ [
+  "Stop remembering my info.",
+  "my info"
+ ],
+ [
+  "Stop remembering my info anymore.",
+  "my info anymore"
+ ],
+ [
+  "Stop remembering my info now.",
+  "my info now"
+ ],
+ [
+  "Stop remembering my info, it was wrong.",
+  "my info, it was wrong"
+ ],
+ [
+  "Stop remembering my info please.",
+  "my info please"
+ ],
+ [
+  "Stop remembering my info!?.",
+  "my info"
+ ],
+ [
+  "Stop remembering anything about cats.",
+  "anything about cats"
+ ],
+ [
+  "Stop remembering anything about cats anymore.",
+  "anything about cats anymore"
+ ],
+ [
+  "Stop remembering anything about cats now.",
+  "anything about cats now"
+ ],
+ [
+  "Stop remembering anything about cats, it was wrong.",
+  "anything about cats, it was wrong"
+ ],
+ [
+  "Stop remembering anything about cats please.",
+  "anything about cats please"
+ ],
+ [
+  "Stop remembering anything about cats!?.",
+  "anything about cats"
+ ],
+ [
+  "Could you forget my old address.",
+  "my old address"
+ ],
+ [
+  "Could you forget my old address anymore.",
+  "my old address anymore"
+ ],
+ [
+  "Could you forget my old address now.",
+  "my old address now"
+ ],
+ [
+  "Could you forget my old address, it was wrong.",
+  "my old address, it was wrong"
+ ],
+ [
+  "Could you forget my old address please.",
+  "my old address please"
+ ],
+ [
+  "Could you forget my old address!?.",
+  "my old address"
+ ],
+ [
+  "Could you forget the garden shed.",
+  "the garden shed"
+ ],
+ [
+  "Could you forget the garden shed anymore.",
+  "the garden shed anymore"
+ ],
+ [
+  "Could you forget the garden shed now.",
+  "the garden shed now"
+ ],
+ [
+  "Could you forget the garden shed, it was wrong.",
+  "the garden shed, it was wrong"
+ ],
+ [
+  "Could you forget the garden shed please.",
+  "the garden shed please"
+ ],
+ [
+  "Could you forget the garden shed!?.",
+  "the garden shed"
+ ],
+ [
+  "Could you forget saffron tea.",
+  "saffron tea"
+ ],
+ [
+  "Could you forget saffron tea anymore.",
+  "saffron tea anymore"
+ ],
+ [
+  "Could you forget saffron tea now.",
+  "saffron tea now"
+ ],
+ [
+  "Could you forget saffron tea, it was wrong.",
+  "saffron tea, it was wrong"
+ ],
+ [
+  "Could you forget saffron tea please.",
+  "saffron tea please"
+ ],
+ [
+  "Could you forget saffron tea!?.",
+  "saffron tea"
+ ],
+ [
+  "Could you forget Dr. Patel.",
+  "dr. patel"
+ ],
+ [
+  "Could you forget Dr. Patel anymore.",
+  "dr. patel anymore"
+ ],
+ [
+  "Could you forget Dr. Patel now.",
+  "dr. patel now"
+ ],
+ [
+  "Could you forget Dr. Patel, it was wrong.",
+  "dr. patel, it was wrong"
+ ],
+ [
+  "Could you forget Dr. Patel please.",
+  "dr. patel please"
+ ],
+ [
+  "Could you forget Dr. Patel!?.",
+  "dr. patel"
+ ],
+ [
+  "Could you forget the 2.5 mg dose.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Could you forget the 2.5 mg dose anymore.",
+  "the 2.5 mg dose anymore"
+ ],
+ [
+  "Could you forget the 2.5 mg dose now.",
+  "the 2.5 mg dose now"
+ ],
+ [
+  "Could you forget the 2.5 mg dose, it was wrong.",
+  "the 2.5 mg dose, it was wrong"
+ ],
+ [
+  "Could you forget the 2.5 mg dose please.",
+  "the 2.5 mg dose please"
+ ],
+ [
+  "Could you forget the 2.5 mg dose!?.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Could you forget about the tea.",
+  "about the tea"
+ ],
+ [
+  "Could you forget about the tea anymore.",
+  "about the tea anymore"
+ ],
+ [
+  "Could you forget about the tea now.",
+  "about the tea now"
+ ],
+ [
+  "Could you forget about the tea, it was wrong.",
+  "about the tea, it was wrong"
+ ],
+ [
+  "Could you forget about the tea please.",
+  "about the tea please"
+ ],
+ [
+  "Could you forget about the tea!?.",
+  "about the tea"
+ ],
+ [
+  "Could you forget it.",
+  ""
+ ],
+ [
+  "Could you forget it anymore.",
+  ""
+ ],
+ [
+  "Could you forget it now.",
+  ""
+ ],
+ [
+  "Could you forget it, it was wrong.",
+  "it, it was wrong"
+ ],
+ [
+  "Could you forget it please.",
+  ""
+ ],
+ [
+  "Could you forget it!?.",
+  ""
+ ],
+ [
+  "Could you forget that, thanks.",
+  "that, thanks"
+ ],
+ [
+  "Could you forget that, thanks anymore.",
+  "that, thanks anymore"
+ ],
+ [
+  "Could you forget that, thanks now.",
+  "that, thanks now"
+ ],
+ [
+  "Could you forget that, thanks, it was wrong.",
+  "that, thanks, it was wrong"
+ ],
+ [
+  "Could you forget that, thanks please.",
+  "that, thanks please"
+ ],
+ [
+  "Could you forget that, thanks!?.",
+  "that, thanks"
+ ],
+ [
+  "Could you forget the deadline, my boss said.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Could you forget the deadline, my boss said anymore.",
+  "the deadline, my boss said anymore"
+ ],
+ [
+  "Could you forget the deadline, my boss said now.",
+  "the deadline, my boss said now"
+ ],
+ [
+  "Could you forget the deadline, my boss said, it was wrong.",
+  "the deadline, my boss said, it was wrong"
+ ],
+ [
+  "Could you forget the deadline, my boss said please.",
+  "the deadline, my boss said please"
+ ],
+ [
+  "Could you forget the deadline, my boss said!?.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Could you forget my phone number and email.",
+  "my phone number and email"
+ ],
+ [
+  "Could you forget my phone number and email anymore.",
+  "my phone number and email anymore"
+ ],
+ [
+  "Could you forget my phone number and email now.",
+  "my phone number and email now"
+ ],
+ [
+  "Could you forget my phone number and email, it was wrong.",
+  "my phone number and email, it was wrong"
+ ],
+ [
+  "Could you forget my phone number and email please.",
+  "my phone number and email please"
+ ],
+ [
+  "Could you forget my phone number and email!?.",
+  "my phone number and email"
+ ],
+ [
+  "Could you forget what she told you.",
+  null
+ ],
+ [
+  "Could you forget what she told you anymore.",
+  null
+ ],
+ [
+  "Could you forget what she told you now.",
+  null
+ ],
+ [
+  "Could you forget what she told you, it was wrong.",
+  null
+ ],
+ [
+  "Could you forget what she told you please.",
+  null
+ ],
+ [
+  "Could you forget what she told you!?.",
+  null
+ ],
+ [
+  "Could you forget everything about the trip.",
+  "everything about the trip"
+ ],
+ [
+  "Could you forget everything about the trip anymore.",
+  "everything about the trip anymore"
+ ],
+ [
+  "Could you forget everything about the trip now.",
+  "everything about the trip now"
+ ],
+ [
+  "Could you forget everything about the trip, it was wrong.",
+  "everything about the trip, it was wrong"
+ ],
+ [
+  "Could you forget everything about the trip please.",
+  "everything about the trip please"
+ ],
+ [
+  "Could you forget everything about the trip!?.",
+  "everything about the trip"
+ ],
+ [
+  "Could you forget my birthday; it changed.",
+  "my birthday; it changed"
+ ],
+ [
+  "Could you forget my birthday; it changed anymore.",
+  "my birthday; it changed anymore"
+ ],
+ [
+  "Could you forget my birthday; it changed now.",
+  "my birthday; it changed now"
+ ],
+ [
+  "Could you forget my birthday; it changed, it was wrong.",
+  "my birthday; it changed, it was wrong"
+ ],
+ [
+  "Could you forget my birthday; it changed please.",
+  "my birthday; it changed please"
+ ],
+ [
+  "Could you forget my birthday; it changed!?.",
+  "my birthday; it changed"
+ ],
+ [
+  "Could you forget the U.S. trip.",
+  "the u.s. trip"
+ ],
+ [
+  "Could you forget the U.S. trip anymore.",
+  "the u.s. trip anymore"
+ ],
+ [
+  "Could you forget the U.S. trip now.",
+  "the u.s. trip now"
+ ],
+ [
+  "Could you forget the U.S. trip, it was wrong.",
+  "the u.s. trip, it was wrong"
+ ],
+ [
+  "Could you forget the U.S. trip please.",
+  "the u.s. trip please"
+ ],
+ [
+  "Could you forget the U.S. trip!?.",
+  "the u.s. trip"
+ ],
+ [
+  "Could you forget Tom and Jerry.",
+  "tom and jerry"
+ ],
+ [
+  "Could you forget Tom and Jerry anymore.",
+  "tom and jerry anymore"
+ ],
+ [
+  "Could you forget Tom and Jerry now.",
+  "tom and jerry now"
+ ],
+ [
+  "Could you forget Tom and Jerry, it was wrong.",
+  "tom and jerry, it was wrong"
+ ],
+ [
+  "Could you forget Tom and Jerry please.",
+  "tom and jerry please"
+ ],
+ [
+  "Could you forget Tom and Jerry!?.",
+  "tom and jerry"
+ ],
+ [
+  "Could you forget the $1,200 rent.",
+  "the $1,200 rent"
+ ],
+ [
+  "Could you forget the $1,200 rent anymore.",
+  "the $1,200 rent anymore"
+ ],
+ [
+  "Could you forget the $1,200 rent now.",
+  "the $1,200 rent now"
+ ],
+ [
+  "Could you forget the $1,200 rent, it was wrong.",
+  "the $1,200 rent, it was wrong"
+ ],
+ [
+  "Could you forget the $1,200 rent please.",
+  "the $1,200 rent please"
+ ],
+ [
+  "Could you forget the $1,200 rent!?.",
+  "the $1,200 rent"
+ ],
+ [
+  "Could you forget my earlier plan.",
+  "my earlier plan"
+ ],
+ [
+  "Could you forget my earlier plan anymore.",
+  "my earlier plan anymore"
+ ],
+ [
+  "Could you forget my earlier plan now.",
+  "my earlier plan now"
+ ],
+ [
+  "Could you forget my earlier plan, it was wrong.",
+  "my earlier plan, it was wrong"
+ ],
+ [
+  "Could you forget my earlier plan please.",
+  "my earlier plan please"
+ ],
+ [
+  "Could you forget my earlier plan!?.",
+  "my earlier plan"
+ ],
+ [
+  "Could you forget my previous job.",
+  "my previous job"
+ ],
+ [
+  "Could you forget my previous job anymore.",
+  "my previous job anymore"
+ ],
+ [
+  "Could you forget my previous job now.",
+  "my previous job now"
+ ],
+ [
+  "Could you forget my previous job, it was wrong.",
+  "my previous job, it was wrong"
+ ],
+ [
+  "Could you forget my previous job please.",
+  "my previous job please"
+ ],
+ [
+  "Could you forget my previous job!?.",
+  "my previous job"
+ ],
+ [
+  "Could you forget my info.",
+  "my info"
+ ],
+ [
+  "Could you forget my info anymore.",
+  "my info anymore"
+ ],
+ [
+  "Could you forget my info now.",
+  "my info now"
+ ],
+ [
+  "Could you forget my info, it was wrong.",
+  "my info, it was wrong"
+ ],
+ [
+  "Could you forget my info please.",
+  "my info please"
+ ],
+ [
+  "Could you forget my info!?.",
+  "my info"
+ ],
+ [
+  "Could you forget anything about cats.",
+  "anything about cats"
+ ],
+ [
+  "Could you forget anything about cats anymore.",
+  "anything about cats anymore"
+ ],
+ [
+  "Could you forget anything about cats now.",
+  "anything about cats now"
+ ],
+ [
+  "Could you forget anything about cats, it was wrong.",
+  "anything about cats, it was wrong"
+ ],
+ [
+  "Could you forget anything about cats please.",
+  "anything about cats please"
+ ],
+ [
+  "Could you forget anything about cats!?.",
+  "anything about cats"
+ ],
+ [
+  "I need you to forget my old address.",
+  "my old address"
+ ],
+ [
+  "I need you to forget my old address anymore.",
+  "my old address anymore"
+ ],
+ [
+  "I need you to forget my old address now.",
+  "my old address now"
+ ],
+ [
+  "I need you to forget my old address, it was wrong.",
+  "my old address, it was wrong"
+ ],
+ [
+  "I need you to forget my old address please.",
+  "my old address please"
+ ],
+ [
+  "I need you to forget my old address!?.",
+  "my old address"
+ ],
+ [
+  "I need you to forget the garden shed.",
+  "the garden shed"
+ ],
+ [
+  "I need you to forget the garden shed anymore.",
+  "the garden shed anymore"
+ ],
+ [
+  "I need you to forget the garden shed now.",
+  "the garden shed now"
+ ],
+ [
+  "I need you to forget the garden shed, it was wrong.",
+  "the garden shed, it was wrong"
+ ],
+ [
+  "I need you to forget the garden shed please.",
+  "the garden shed please"
+ ],
+ [
+  "I need you to forget the garden shed!?.",
+  "the garden shed"
+ ],
+ [
+  "I need you to forget saffron tea.",
+  "saffron tea"
+ ],
+ [
+  "I need you to forget saffron tea anymore.",
+  "saffron tea anymore"
+ ],
+ [
+  "I need you to forget saffron tea now.",
+  "saffron tea now"
+ ],
+ [
+  "I need you to forget saffron tea, it was wrong.",
+  "saffron tea, it was wrong"
+ ],
+ [
+  "I need you to forget saffron tea please.",
+  "saffron tea please"
+ ],
+ [
+  "I need you to forget saffron tea!?.",
+  "saffron tea"
+ ],
+ [
+  "I need you to forget Dr. Patel.",
+  "dr. patel"
+ ],
+ [
+  "I need you to forget Dr. Patel anymore.",
+  "dr. patel anymore"
+ ],
+ [
+  "I need you to forget Dr. Patel now.",
+  "dr. patel now"
+ ],
+ [
+  "I need you to forget Dr. Patel, it was wrong.",
+  "dr. patel, it was wrong"
+ ],
+ [
+  "I need you to forget Dr. Patel please.",
+  "dr. patel please"
+ ],
+ [
+  "I need you to forget Dr. Patel!?.",
+  "dr. patel"
+ ],
+ [
+  "I need you to forget the 2.5 mg dose.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "I need you to forget the 2.5 mg dose anymore.",
+  "the 2.5 mg dose anymore"
+ ],
+ [
+  "I need you to forget the 2.5 mg dose now.",
+  "the 2.5 mg dose now"
+ ],
+ [
+  "I need you to forget the 2.5 mg dose, it was wrong.",
+  "the 2.5 mg dose, it was wrong"
+ ],
+ [
+  "I need you to forget the 2.5 mg dose please.",
+  "the 2.5 mg dose please"
+ ],
+ [
+  "I need you to forget the 2.5 mg dose!?.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "I need you to forget about the tea.",
+  "about the tea"
+ ],
+ [
+  "I need you to forget about the tea anymore.",
+  "about the tea anymore"
+ ],
+ [
+  "I need you to forget about the tea now.",
+  "about the tea now"
+ ],
+ [
+  "I need you to forget about the tea, it was wrong.",
+  "about the tea, it was wrong"
+ ],
+ [
+  "I need you to forget about the tea please.",
+  "about the tea please"
+ ],
+ [
+  "I need you to forget about the tea!?.",
+  "about the tea"
+ ],
+ [
+  "I need you to forget it.",
+  ""
+ ],
+ [
+  "I need you to forget it anymore.",
+  ""
+ ],
+ [
+  "I need you to forget it now.",
+  ""
+ ],
+ [
+  "I need you to forget it, it was wrong.",
+  "it, it was wrong"
+ ],
+ [
+  "I need you to forget it please.",
+  ""
+ ],
+ [
+  "I need you to forget it!?.",
+  ""
+ ],
+ [
+  "I need you to forget that, thanks.",
+  "that, thanks"
+ ],
+ [
+  "I need you to forget that, thanks anymore.",
+  "that, thanks anymore"
+ ],
+ [
+  "I need you to forget that, thanks now.",
+  "that, thanks now"
+ ],
+ [
+  "I need you to forget that, thanks, it was wrong.",
+  "that, thanks, it was wrong"
+ ],
+ [
+  "I need you to forget that, thanks please.",
+  "that, thanks please"
+ ],
+ [
+  "I need you to forget that, thanks!?.",
+  "that, thanks"
+ ],
+ [
+  "I need you to forget the deadline, my boss said.",
+  "the deadline, my boss said"
+ ],
+ [
+  "I need you to forget the deadline, my boss said anymore.",
+  "the deadline, my boss said anymore"
+ ],
+ [
+  "I need you to forget the deadline, my boss said now.",
+  "the deadline, my boss said now"
+ ],
+ [
+  "I need you to forget the deadline, my boss said, it was wrong.",
+  "the deadline, my boss said, it was wrong"
+ ],
+ [
+  "I need you to forget the deadline, my boss said please.",
+  "the deadline, my boss said please"
+ ],
+ [
+  "I need you to forget the deadline, my boss said!?.",
+  "the deadline, my boss said"
+ ],
+ [
+  "I need you to forget my phone number and email.",
+  "my phone number and email"
+ ],
+ [
+  "I need you to forget my phone number and email anymore.",
+  "my phone number and email anymore"
+ ],
+ [
+  "I need you to forget my phone number and email now.",
+  "my phone number and email now"
+ ],
+ [
+  "I need you to forget my phone number and email, it was wrong.",
+  "my phone number and email, it was wrong"
+ ],
+ [
+  "I need you to forget my phone number and email please.",
+  "my phone number and email please"
+ ],
+ [
+  "I need you to forget my phone number and email!?.",
+  "my phone number and email"
+ ],
+ [
+  "I need you to forget what she told you.",
+  null
+ ],
+ [
+  "I need you to forget what she told you anymore.",
+  null
+ ],
+ [
+  "I need you to forget what she told you now.",
+  null
+ ],
+ [
+  "I need you to forget what she told you, it was wrong.",
+  null
+ ],
+ [
+  "I need you to forget what she told you please.",
+  null
+ ],
+ [
+  "I need you to forget what she told you!?.",
+  null
+ ],
+ [
+  "I need you to forget everything about the trip.",
+  "everything about the trip"
+ ],
+ [
+  "I need you to forget everything about the trip anymore.",
+  "everything about the trip anymore"
+ ],
+ [
+  "I need you to forget everything about the trip now.",
+  "everything about the trip now"
+ ],
+ [
+  "I need you to forget everything about the trip, it was wrong.",
+  "everything about the trip, it was wrong"
+ ],
+ [
+  "I need you to forget everything about the trip please.",
+  "everything about the trip please"
+ ],
+ [
+  "I need you to forget everything about the trip!?.",
+  "everything about the trip"
+ ],
+ [
+  "I need you to forget my birthday; it changed.",
+  "my birthday; it changed"
+ ],
+ [
+  "I need you to forget my birthday; it changed anymore.",
+  "my birthday; it changed anymore"
+ ],
+ [
+  "I need you to forget my birthday; it changed now.",
+  "my birthday; it changed now"
+ ],
+ [
+  "I need you to forget my birthday; it changed, it was wrong.",
+  "my birthday; it changed, it was wrong"
+ ],
+ [
+  "I need you to forget my birthday; it changed please.",
+  "my birthday; it changed please"
+ ],
+ [
+  "I need you to forget my birthday; it changed!?.",
+  "my birthday; it changed"
+ ],
+ [
+  "I need you to forget the U.S. trip.",
+  "the u.s. trip"
+ ],
+ [
+  "I need you to forget the U.S. trip anymore.",
+  "the u.s. trip anymore"
+ ],
+ [
+  "I need you to forget the U.S. trip now.",
+  "the u.s. trip now"
+ ],
+ [
+  "I need you to forget the U.S. trip, it was wrong.",
+  "the u.s. trip, it was wrong"
+ ],
+ [
+  "I need you to forget the U.S. trip please.",
+  "the u.s. trip please"
+ ],
+ [
+  "I need you to forget the U.S. trip!?.",
+  "the u.s. trip"
+ ],
+ [
+  "I need you to forget Tom and Jerry.",
+  "tom and jerry"
+ ],
+ [
+  "I need you to forget Tom and Jerry anymore.",
+  "tom and jerry anymore"
+ ],
+ [
+  "I need you to forget Tom and Jerry now.",
+  "tom and jerry now"
+ ],
+ [
+  "I need you to forget Tom and Jerry, it was wrong.",
+  "tom and jerry, it was wrong"
+ ],
+ [
+  "I need you to forget Tom and Jerry please.",
+  "tom and jerry please"
+ ],
+ [
+  "I need you to forget Tom and Jerry!?.",
+  "tom and jerry"
+ ],
+ [
+  "I need you to forget the $1,200 rent.",
+  "the $1,200 rent"
+ ],
+ [
+  "I need you to forget the $1,200 rent anymore.",
+  "the $1,200 rent anymore"
+ ],
+ [
+  "I need you to forget the $1,200 rent now.",
+  "the $1,200 rent now"
+ ],
+ [
+  "I need you to forget the $1,200 rent, it was wrong.",
+  "the $1,200 rent, it was wrong"
+ ],
+ [
+  "I need you to forget the $1,200 rent please.",
+  "the $1,200 rent please"
+ ],
+ [
+  "I need you to forget the $1,200 rent!?.",
+  "the $1,200 rent"
+ ],
+ [
+  "I need you to forget my earlier plan.",
+  "my earlier plan"
+ ],
+ [
+  "I need you to forget my earlier plan anymore.",
+  "my earlier plan anymore"
+ ],
+ [
+  "I need you to forget my earlier plan now.",
+  "my earlier plan now"
+ ],
+ [
+  "I need you to forget my earlier plan, it was wrong.",
+  "my earlier plan, it was wrong"
+ ],
+ [
+  "I need you to forget my earlier plan please.",
+  "my earlier plan please"
+ ],
+ [
+  "I need you to forget my earlier plan!?.",
+  "my earlier plan"
+ ],
+ [
+  "I need you to forget my previous job.",
+  "my previous job"
+ ],
+ [
+  "I need you to forget my previous job anymore.",
+  "my previous job anymore"
+ ],
+ [
+  "I need you to forget my previous job now.",
+  "my previous job now"
+ ],
+ [
+  "I need you to forget my previous job, it was wrong.",
+  "my previous job, it was wrong"
+ ],
+ [
+  "I need you to forget my previous job please.",
+  "my previous job please"
+ ],
+ [
+  "I need you to forget my previous job!?.",
+  "my previous job"
+ ],
+ [
+  "I need you to forget my info.",
+  "my info"
+ ],
+ [
+  "I need you to forget my info anymore.",
+  "my info anymore"
+ ],
+ [
+  "I need you to forget my info now.",
+  "my info now"
+ ],
+ [
+  "I need you to forget my info, it was wrong.",
+  "my info, it was wrong"
+ ],
+ [
+  "I need you to forget my info please.",
+  "my info please"
+ ],
+ [
+  "I need you to forget my info!?.",
+  "my info"
+ ],
+ [
+  "I need you to forget anything about cats.",
+  "anything about cats"
+ ],
+ [
+  "I need you to forget anything about cats anymore.",
+  "anything about cats anymore"
+ ],
+ [
+  "I need you to forget anything about cats now.",
+  "anything about cats now"
+ ],
+ [
+  "I need you to forget anything about cats, it was wrong.",
+  "anything about cats, it was wrong"
+ ],
+ [
+  "I need you to forget anything about cats please.",
+  "anything about cats please"
+ ],
+ [
+  "I need you to forget anything about cats!?.",
+  "anything about cats"
+ ],
+ [
+  "Remove from memory my old address.",
+  "my old address"
+ ],
+ [
+  "Remove from memory my old address anymore.",
+  "my old address anymore"
+ ],
+ [
+  "Remove from memory my old address now.",
+  "my old address now"
+ ],
+ [
+  "Remove from memory my old address, it was wrong.",
+  "my old address, it was wrong"
+ ],
+ [
+  "Remove from memory my old address please.",
+  "my old address please"
+ ],
+ [
+  "Remove from memory my old address!?.",
+  "my old address"
+ ],
+ [
+  "Remove from memory the garden shed.",
+  "the garden shed"
+ ],
+ [
+  "Remove from memory the garden shed anymore.",
+  "the garden shed anymore"
+ ],
+ [
+  "Remove from memory the garden shed now.",
+  "the garden shed now"
+ ],
+ [
+  "Remove from memory the garden shed, it was wrong.",
+  "the garden shed, it was wrong"
+ ],
+ [
+  "Remove from memory the garden shed please.",
+  "the garden shed please"
+ ],
+ [
+  "Remove from memory the garden shed!?.",
+  "the garden shed"
+ ],
+ [
+  "Remove from memory saffron tea.",
+  "saffron tea"
+ ],
+ [
+  "Remove from memory saffron tea anymore.",
+  "saffron tea anymore"
+ ],
+ [
+  "Remove from memory saffron tea now.",
+  "saffron tea now"
+ ],
+ [
+  "Remove from memory saffron tea, it was wrong.",
+  "saffron tea, it was wrong"
+ ],
+ [
+  "Remove from memory saffron tea please.",
+  "saffron tea please"
+ ],
+ [
+  "Remove from memory saffron tea!?.",
+  "saffron tea"
+ ],
+ [
+  "Remove from memory Dr. Patel.",
+  "dr. patel"
+ ],
+ [
+  "Remove from memory Dr. Patel anymore.",
+  "dr. patel anymore"
+ ],
+ [
+  "Remove from memory Dr. Patel now.",
+  "dr. patel now"
+ ],
+ [
+  "Remove from memory Dr. Patel, it was wrong.",
+  "dr. patel, it was wrong"
+ ],
+ [
+  "Remove from memory Dr. Patel please.",
+  "dr. patel please"
+ ],
+ [
+  "Remove from memory Dr. Patel!?.",
+  "dr. patel"
+ ],
+ [
+  "Remove from memory the 2.5 mg dose.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Remove from memory the 2.5 mg dose anymore.",
+  "the 2.5 mg dose anymore"
+ ],
+ [
+  "Remove from memory the 2.5 mg dose now.",
+  "the 2.5 mg dose now"
+ ],
+ [
+  "Remove from memory the 2.5 mg dose, it was wrong.",
+  "the 2.5 mg dose, it was wrong"
+ ],
+ [
+  "Remove from memory the 2.5 mg dose please.",
+  "the 2.5 mg dose please"
+ ],
+ [
+  "Remove from memory the 2.5 mg dose!?.",
+  "the 2.5 mg dose"
+ ],
+ [
+  "Remove from memory about the tea.",
+  "about the tea"
+ ],
+ [
+  "Remove from memory about the tea anymore.",
+  "about the tea anymore"
+ ],
+ [
+  "Remove from memory about the tea now.",
+  "about the tea now"
+ ],
+ [
+  "Remove from memory about the tea, it was wrong.",
+  "about the tea, it was wrong"
+ ],
+ [
+  "Remove from memory about the tea please.",
+  "about the tea please"
+ ],
+ [
+  "Remove from memory about the tea!?.",
+  "about the tea"
+ ],
+ [
+  "Remove from memory it.",
+  ""
+ ],
+ [
+  "Remove from memory it anymore.",
+  ""
+ ],
+ [
+  "Remove from memory it now.",
+  ""
+ ],
+ [
+  "Remove from memory it, it was wrong.",
+  "it, it was wrong"
+ ],
+ [
+  "Remove from memory it please.",
+  ""
+ ],
+ [
+  "Remove from memory it!?.",
+  ""
+ ],
+ [
+  "Remove from memory that, thanks.",
+  "that, thanks"
+ ],
+ [
+  "Remove from memory that, thanks anymore.",
+  "that, thanks anymore"
+ ],
+ [
+  "Remove from memory that, thanks now.",
+  "that, thanks now"
+ ],
+ [
+  "Remove from memory that, thanks, it was wrong.",
+  "that, thanks, it was wrong"
+ ],
+ [
+  "Remove from memory that, thanks please.",
+  "that, thanks please"
+ ],
+ [
+  "Remove from memory that, thanks!?.",
+  "that, thanks"
+ ],
+ [
+  "Remove from memory the deadline, my boss said.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Remove from memory the deadline, my boss said anymore.",
+  "the deadline, my boss said anymore"
+ ],
+ [
+  "Remove from memory the deadline, my boss said now.",
+  "the deadline, my boss said now"
+ ],
+ [
+  "Remove from memory the deadline, my boss said, it was wrong.",
+  "the deadline, my boss said, it was wrong"
+ ],
+ [
+  "Remove from memory the deadline, my boss said please.",
+  "the deadline, my boss said please"
+ ],
+ [
+  "Remove from memory the deadline, my boss said!?.",
+  "the deadline, my boss said"
+ ],
+ [
+  "Remove from memory my phone number and email.",
+  "my phone number and email"
+ ],
+ [
+  "Remove from memory my phone number and email anymore.",
+  "my phone number and email anymore"
+ ],
+ [
+  "Remove from memory my phone number and email now.",
+  "my phone number and email now"
+ ],
+ [
+  "Remove from memory my phone number and email, it was wrong.",
+  "my phone number and email, it was wrong"
+ ],
+ [
+  "Remove from memory my phone number and email please.",
+  "my phone number and email please"
+ ],
+ [
+  "Remove from memory my phone number and email!?.",
+  "my phone number and email"
+ ],
+ [
+  "Remove from memory what she told you.",
+  null
+ ],
+ [
+  "Remove from memory what she told you anymore.",
+  null
+ ],
+ [
+  "Remove from memory what she told you now.",
+  null
+ ],
+ [
+  "Remove from memory what she told you, it was wrong.",
+  null
+ ],
+ [
+  "Remove from memory what she told you please.",
+  null
+ ],
+ [
+  "Remove from memory what she told you!?.",
+  null
+ ],
+ [
+  "Remove from memory everything about the trip.",
+  "everything about the trip"
+ ],
+ [
+  "Remove from memory everything about the trip anymore.",
+  "everything about the trip anymore"
+ ],
+ [
+  "Remove from memory everything about the trip now.",
+  "everything about the trip now"
+ ],
+ [
+  "Remove from memory everything about the trip, it was wrong.",
+  "everything about the trip, it was wrong"
+ ],
+ [
+  "Remove from memory everything about the trip please.",
+  "everything about the trip please"
+ ],
+ [
+  "Remove from memory everything about the trip!?.",
+  "everything about the trip"
+ ],
+ [
+  "Remove from memory my birthday; it changed.",
+  "my birthday; it changed"
+ ],
+ [
+  "Remove from memory my birthday; it changed anymore.",
+  "my birthday; it changed anymore"
+ ],
+ [
+  "Remove from memory my birthday; it changed now.",
+  "my birthday; it changed now"
+ ],
+ [
+  "Remove from memory my birthday; it changed, it was wrong.",
+  "my birthday; it changed, it was wrong"
+ ],
+ [
+  "Remove from memory my birthday; it changed please.",
+  "my birthday; it changed please"
+ ],
+ [
+  "Remove from memory my birthday; it changed!?.",
+  "my birthday; it changed"
+ ],
+ [
+  "Remove from memory the U.S. trip.",
+  "the u.s. trip"
+ ],
+ [
+  "Remove from memory the U.S. trip anymore.",
+  "the u.s. trip anymore"
+ ],
+ [
+  "Remove from memory the U.S. trip now.",
+  "the u.s. trip now"
+ ],
+ [
+  "Remove from memory the U.S. trip, it was wrong.",
+  "the u.s. trip, it was wrong"
+ ],
+ [
+  "Remove from memory the U.S. trip please.",
+  "the u.s. trip please"
+ ],
+ [
+  "Remove from memory the U.S. trip!?.",
+  "the u.s. trip"
+ ],
+ [
+  "Remove from memory Tom and Jerry.",
+  "tom and jerry"
+ ],
+ [
+  "Remove from memory Tom and Jerry anymore.",
+  "tom and jerry anymore"
+ ],
+ [
+  "Remove from memory Tom and Jerry now.",
+  "tom and jerry now"
+ ],
+ [
+  "Remove from memory Tom and Jerry, it was wrong.",
+  "tom and jerry, it was wrong"
+ ],
+ [
+  "Remove from memory Tom and Jerry please.",
+  "tom and jerry please"
+ ],
+ [
+  "Remove from memory Tom and Jerry!?.",
+  "tom and jerry"
+ ],
+ [
+  "Remove from memory the $1,200 rent.",
+  "the $1,200 rent"
+ ],
+ [
+  "Remove from memory the $1,200 rent anymore.",
+  "the $1,200 rent anymore"
+ ],
+ [
+  "Remove from memory the $1,200 rent now.",
+  "the $1,200 rent now"
+ ],
+ [
+  "Remove from memory the $1,200 rent, it was wrong.",
+  "the $1,200 rent, it was wrong"
+ ],
+ [
+  "Remove from memory the $1,200 rent please.",
+  "the $1,200 rent please"
+ ],
+ [
+  "Remove from memory the $1,200 rent!?.",
+  "the $1,200 rent"
+ ],
+ [
+  "Remove from memory my earlier plan.",
+  "my earlier plan"
+ ],
+ [
+  "Remove from memory my earlier plan anymore.",
+  "my earlier plan anymore"
+ ],
+ [
+  "Remove from memory my earlier plan now.",
+  "my earlier plan now"
+ ],
+ [
+  "Remove from memory my earlier plan, it was wrong.",
+  "my earlier plan, it was wrong"
+ ],
+ [
+  "Remove from memory my earlier plan please.",
+  "my earlier plan please"
+ ],
+ [
+  "Remove from memory my earlier plan!?.",
+  "my earlier plan"
+ ],
+ [
+  "Remove from memory my previous job.",
+  "my previous job"
+ ],
+ [
+  "Remove from memory my previous job anymore.",
+  "my previous job anymore"
+ ],
+ [
+  "Remove from memory my previous job now.",
+  "my previous job now"
+ ],
+ [
+  "Remove from memory my previous job, it was wrong.",
+  "my previous job, it was wrong"
+ ],
+ [
+  "Remove from memory my previous job please.",
+  "my previous job please"
+ ],
+ [
+  "Remove from memory my previous job!?.",
+  "my previous job"
+ ],
+ [
+  "Remove from memory my info.",
+  "my info"
+ ],
+ [
+  "Remove from memory my info anymore.",
+  "my info anymore"
+ ],
+ [
+  "Remove from memory my info now.",
+  "my info now"
+ ],
+ [
+  "Remove from memory my info, it was wrong.",
+  "my info, it was wrong"
+ ],
+ [
+  "Remove from memory my info please.",
+  "my info please"
+ ],
+ [
+  "Remove from memory my info!?.",
+  "my info"
+ ],
+ [
+  "Remove from memory anything about cats.",
+  "anything about cats"
+ ],
+ [
+  "Remove from memory anything about cats anymore.",
+  "anything about cats anymore"
+ ],
+ [
+  "Remove from memory anything about cats now.",
+  "anything about cats now"
+ ],
+ [
+  "Remove from memory anything about cats, it was wrong.",
+  "anything about cats, it was wrong"
+ ],
+ [
+  "Remove from memory anything about cats please.",
+  "anything about cats please"
+ ],
+ [
+  "Remove from memory anything about cats!?.",
+  "anything about cats"
+ ],
+ [
+  "Don't use my old address.",
+  null
+ ],
+ [
+  "Don't use my old address anymore.",
+  null
+ ],
+ [
+  "Don't use my old address now.",
+  null
+ ],
+ [
+  "Don't use my old address, it was wrong.",
+  null
+ ],
+ [
+  "Don't use my old address please.",
+  null
+ ],
+ [
+  "Don't use my old address!?.",
+  null
+ ],
+ [
+  "Don't use the garden shed.",
+  null
+ ],
+ [
+  "Don't use the garden shed anymore.",
+  null
+ ],
+ [
+  "Don't use the garden shed now.",
+  null
+ ],
+ [
+  "Don't use the garden shed, it was wrong.",
+  null
+ ],
+ [
+  "Don't use the garden shed please.",
+  null
+ ],
+ [
+  "Don't use the garden shed!?.",
+  null
+ ],
+ [
+  "Don't use saffron tea.",
+  null
+ ],
+ [
+  "Don't use saffron tea anymore.",
+  null
+ ],
+ [
+  "Don't use saffron tea now.",
+  null
+ ],
+ [
+  "Don't use saffron tea, it was wrong.",
+  null
+ ],
+ [
+  "Don't use saffron tea please.",
+  null
+ ],
+ [
+  "Don't use saffron tea!?.",
+  null
+ ],
+ [
+  "Don't use Dr. Patel.",
+  null
+ ],
+ [
+  "Don't use Dr. Patel anymore.",
+  null
+ ],
+ [
+  "Don't use Dr. Patel now.",
+  null
+ ],
+ [
+  "Don't use Dr. Patel, it was wrong.",
+  null
+ ],
+ [
+  "Don't use Dr. Patel please.",
+  null
+ ],
+ [
+  "Don't use Dr. Patel!?.",
+  null
+ ],
+ [
+  "Don't use the 2.5 mg dose.",
+  null
+ ],
+ [
+  "Don't use the 2.5 mg dose anymore.",
+  null
+ ],
+ [
+  "Don't use the 2.5 mg dose now.",
+  null
+ ],
+ [
+  "Don't use the 2.5 mg dose, it was wrong.",
+  null
+ ],
+ [
+  "Don't use the 2.5 mg dose please.",
+  null
+ ],
+ [
+  "Don't use the 2.5 mg dose!?.",
+  null
+ ],
+ [
+  "Don't use about the tea.",
+  null
+ ],
+ [
+  "Don't use about the tea anymore.",
+  null
+ ],
+ [
+  "Don't use about the tea now.",
+  null
+ ],
+ [
+  "Don't use about the tea, it was wrong.",
+  null
+ ],
+ [
+  "Don't use about the tea please.",
+  null
+ ],
+ [
+  "Don't use about the tea!?.",
+  null
+ ],
+ [
+  "Don't use it.",
+  null
+ ],
+ [
+  "Don't use it anymore.",
+  null
+ ],
+ [
+  "Don't use it now.",
+  null
+ ],
+ [
+  "Don't use it, it was wrong.",
+  null
+ ],
+ [
+  "Don't use it please.",
+  null
+ ],
+ [
+  "Don't use it!?.",
+  null
+ ],
+ [
+  "Don't use that, thanks.",
+  null
+ ],
+ [
+  "Don't use that, thanks anymore.",
+  null
+ ],
+ [
+  "Don't use that, thanks now.",
+  null
+ ],
+ [
+  "Don't use that, thanks, it was wrong.",
+  null
+ ],
+ [
+  "Don't use that, thanks please.",
+  null
+ ],
+ [
+  "Don't use that, thanks!?.",
+  null
+ ],
+ [
+  "Don't use the deadline, my boss said.",
+  null
+ ],
+ [
+  "Don't use the deadline, my boss said anymore.",
+  null
+ ],
+ [
+  "Don't use the deadline, my boss said now.",
+  null
+ ],
+ [
+  "Don't use the deadline, my boss said, it was wrong.",
+  null
+ ],
+ [
+  "Don't use the deadline, my boss said please.",
+  null
+ ],
+ [
+  "Don't use the deadline, my boss said!?.",
+  null
+ ],
+ [
+  "Don't use my phone number and email.",
+  null
+ ],
+ [
+  "Don't use my phone number and email anymore.",
+  null
+ ],
+ [
+  "Don't use my phone number and email now.",
+  null
+ ],
+ [
+  "Don't use my phone number and email, it was wrong.",
+  null
+ ],
+ [
+  "Don't use my phone number and email please.",
+  null
+ ],
+ [
+  "Don't use my phone number and email!?.",
+  null
+ ],
+ [
+  "Don't use what she told you.",
+  null
+ ],
+ [
+  "Don't use what she told you anymore.",
+  null
+ ],
+ [
+  "Don't use what she told you now.",
+  null
+ ],
+ [
+  "Don't use what she told you, it was wrong.",
+  null
+ ],
+ [
+  "Don't use what she told you please.",
+  null
+ ],
+ [
+  "Don't use what she told you!?.",
+  null
+ ],
+ [
+  "Don't use everything about the trip.",
+  null
+ ],
+ [
+  "Don't use everything about the trip anymore.",
+  null
+ ],
+ [
+  "Don't use everything about the trip now.",
+  null
+ ],
+ [
+  "Don't use everything about the trip, it was wrong.",
+  null
+ ],
+ [
+  "Don't use everything about the trip please.",
+  null
+ ],
+ [
+  "Don't use everything about the trip!?.",
+  null
+ ],
+ [
+  "Don't use my birthday; it changed.",
+  null
+ ],
+ [
+  "Don't use my birthday; it changed anymore.",
+  null
+ ],
+ [
+  "Don't use my birthday; it changed now.",
+  null
+ ],
+ [
+  "Don't use my birthday; it changed, it was wrong.",
+  null
+ ],
+ [
+  "Don't use my birthday; it changed please.",
+  null
+ ],
+ [
+  "Don't use my birthday; it changed!?.",
+  null
+ ],
+ [
+  "Don't use the U.S. trip.",
+  null
+ ],
+ [
+  "Don't use the U.S. trip anymore.",
+  null
+ ],
+ [
+  "Don't use the U.S. trip now.",
+  null
+ ],
+ [
+  "Don't use the U.S. trip, it was wrong.",
+  null
+ ],
+ [
+  "Don't use the U.S. trip please.",
+  null
+ ],
+ [
+  "Don't use the U.S. trip!?.",
+  null
+ ],
+ [
+  "Don't use Tom and Jerry.",
+  null
+ ],
+ [
+  "Don't use Tom and Jerry anymore.",
+  null
+ ],
+ [
+  "Don't use Tom and Jerry now.",
+  null
+ ],
+ [
+  "Don't use Tom and Jerry, it was wrong.",
+  null
+ ],
+ [
+  "Don't use Tom and Jerry please.",
+  null
+ ],
+ [
+  "Don't use Tom and Jerry!?.",
+  null
+ ],
+ [
+  "Don't use the $1,200 rent.",
+  null
+ ],
+ [
+  "Don't use the $1,200 rent anymore.",
+  null
+ ],
+ [
+  "Don't use the $1,200 rent now.",
+  null
+ ],
+ [
+  "Don't use the $1,200 rent, it was wrong.",
+  null
+ ],
+ [
+  "Don't use the $1,200 rent please.",
+  null
+ ],
+ [
+  "Don't use the $1,200 rent!?.",
+  null
+ ],
+ [
+  "Don't use my earlier plan.",
+  null
+ ],
+ [
+  "Don't use my earlier plan anymore.",
+  null
+ ],
+ [
+  "Don't use my earlier plan now.",
+  null
+ ],
+ [
+  "Don't use my earlier plan, it was wrong.",
+  null
+ ],
+ [
+  "Don't use my earlier plan please.",
+  null
+ ],
+ [
+  "Don't use my earlier plan!?.",
+  null
+ ],
+ [
+  "Don't use my previous job.",
+  null
+ ],
+ [
+  "Don't use my previous job anymore.",
+  null
+ ],
+ [
+  "Don't use my previous job now.",
+  null
+ ],
+ [
+  "Don't use my previous job, it was wrong.",
+  null
+ ],
+ [
+  "Don't use my previous job please.",
+  null
+ ],
+ [
+  "Don't use my previous job!?.",
+  null
+ ],
+ [
+  "Don't use my info.",
+  null
+ ],
+ [
+  "Don't use my info anymore.",
+  null
+ ],
+ [
+  "Don't use my info now.",
+  null
+ ],
+ [
+  "Don't use my info, it was wrong.",
+  null
+ ],
+ [
+  "Don't use my info please.",
+  null
+ ],
+ [
+  "Don't use my info!?.",
+  null
+ ],
+ [
+  "Don't use anything about cats.",
+  null
+ ],
+ [
+  "Don't use anything about cats anymore.",
+  null
+ ],
+ [
+  "Don't use anything about cats now.",
+  null
+ ],
+ [
+  "Don't use anything about cats, it was wrong.",
+  null
+ ],
+ [
+  "Don't use anything about cats please.",
+  null
+ ],
+ [
+  "Don't use anything about cats!?.",
+  null
+ ]
+]
