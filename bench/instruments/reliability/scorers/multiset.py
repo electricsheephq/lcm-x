@@ -247,6 +247,7 @@ def score(expected: list[tuple[str, str]], stored_rows: list[tuple], host: dict 
           *, _key=None) -> dict:
     """``expected``: (role, text) items; ``stored_rows``: (store_id, session_id, role, content); ``host``: the
     lineage's host occurrences (key -> {"n", "ids"}), or None."""
+    stored_rows = sorted(stored_rows, key=lambda r: r[0])
     key_of = _key or (lambda role, text: (role, h(text)))
     stored, by_session = defaultdict(list), defaultdict(list)
     for sid, session, role, content in stored_rows:

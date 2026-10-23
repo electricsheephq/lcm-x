@@ -1,5 +1,7 @@
 """#1879: conservative errors become credit only with explicit occurrence witnesses."""
+from collections import Counter, defaultdict
 from itertools import permutations
+import random
 from types import SimpleNamespace
 
 import pytest
@@ -61,6 +63,95 @@ def test_span_choice_preserves_disjoint_merge_parts_fallback(witness):
             assert out["verdict"] == "PASS"
             assert out["embedded_span_credits"][0]["sha256"] == multiset.h("b\n\nc")
             assert out["held_composites_as_parts"][0]["witness"]["event_index"] == 1
+
+
+def test_unsorted_row_cannot_be_exact_match_span_host_and_merge_part():
+    k = "qq\n\npp"
+    c = k + "\n\nxx"
+    host = {"chat": {"keys": {("user", multiset.h(k)): {"n": 2, "ids": [2, 5]}}, "tags": {}}}
+    multiset.merge_witnesses(host, merge_events(("qq", "pp")) + merge_events((k, "xx")), lambda _s: "chat")
+    rows = [(5, "S0", "user", k), (2, "S0", "user", k), (7, "S0", "user", "xx")]
+    for expected in permutations([("user", k), ("user", "pp"), ("user", c)]):
+        out = multiset.score(list(expected), rows, host["chat"]["keys"])
+        assert out["deficit_rows"] == 1 and out["verdict"] == "FAIL"
+
+
+def assert_row_capacity(expected, rows, out):
+    """Whole-row reservations and disjoint spans must fit each stored key's actual rows."""
+    keys = {sid: (role, multiset.h(text)) for sid, _session, role, text in rows}
+    part_ids = [sid for comp in out["held_composites_as_parts"] for part in comp["parts"]
+                for sid in part["store_ids"]]
+    hosts = {c["store_id"] for c in out["embedded_span_credits"]}
+    assert len(part_ids) == len(set(part_ids))
+    assert not hosts.intersection(part_ids)
+    spans = defaultdict(list)
+    for credit in out["embedded_span_credits"]:
+        spans[credit["store_id"]].append((credit["byte_offset"], credit["byte_offset"] + credit["bytes"]))
+    for intervals in spans.values():
+        intervals.sort()
+        assert all(end <= start for (_a, end), (start, _b) in zip(intervals, intervals[1:]))
+    want = Counter((role, multiset.h(text)) for role, text in expected)
+    embedded = Counter((c["role"], c["sha256"]) for c in out["embedded_span_credits"])
+    missing = {(m["role"], m["sha256"]): m["expected"] - m["stored"] for m in out["missing"]}
+    # Tests generate user rows only. Parts receipts identify a composite by its exact joined bytes.
+    by_id = {sid: text for sid, _session, _role, text in rows}
+    paired = Counter()
+    for comp in out["held_composites_as_parts"]:
+        text = "\n\n".join(by_id[p["store_ids"][0]] for p in comp["parts"] for _ in range(p["uses"]))
+        paired[("user", multiset.h(text))] += comp["as_parts"]
+    demand = Counter(keys[sid] for sid in part_ids + list(hosts))
+    for key, n in want.items():
+        exact = n - embedded[key] - missing.get(key, 0) - paired[key]
+        assert exact >= 0
+        demand[key] += exact
+    supply = Counter(keys.values())
+    assert all(n <= supply[key] for key, n in demand.items())
+
+
+def test_fixed_seed_row_order_fuzz_has_no_capacity_violations():
+    rng = random.Random(1879)
+    atoms = ["aa", "bb", "cc", "dd"]
+
+    def text():
+        return "\n\n".join(rng.choice(atoms) for _ in range(rng.choice([1, 1, 2, 2, 3])))
+
+    for case in range(2000):
+        composites = sorted({text() for _ in range(rng.randint(1, 3))})
+        events = []
+        for composite in composites:
+            parts = composite.split("\n\n")
+            if len(parts) >= 2:
+                events += merge_events(tuple(parts))
+        nested = []
+        for composite in composites[:rng.randint(0, 2)]:
+            atom = rng.choice(atoms)
+            events += merge_events((composite, atom))
+            nested.append(composite + "\n\n" + atom)
+        host_keys = {("user", multiset.h(t)): {"n": rng.randint(1, 3), "ids": [0]}
+                     for t in composites + nested + [text()] if rng.random() < 0.6}
+        host = {"chat": {"keys": host_keys, "tags": {}}}
+        multiset.merge_witnesses(host, events, lambda _s: "chat")
+        vocab = composites + nested + atoms + [p for c in composites for p in c.split("\n\n")]
+        expected = [("user", rng.choice(vocab)) for _ in range(rng.randint(1, 4))]
+        pool = composites + nested + atoms
+        rows = [(sid, "S0", "user", rng.choice(pool)) for sid in rng.sample(range(1, 50), rng.randint(1, 5))]
+        if case % 4 == 0:
+            # Regularly exercise the nested exact/span/parts collision, varying ids and input order.
+            k = "qq\n\npp"
+            ids = sorted(rng.sample(range(1, 50), 3))
+            rows = [(ids[0], "S0", "user", k), (ids[1], "S0", "user", k),
+                    (ids[2], "S0", "user", "xx")]
+            expected = [("user", k), ("user", "pp"), ("user", k + "\n\nxx")]
+            rng.shuffle(expected)
+            host = {"chat": {"keys": {("user", multiset.h(k)): {"n": 2, "ids": ids[:2]}}, "tags": {}}}
+            multiset.merge_witnesses(host, merge_events(("qq", "pp")) + merge_events((k, "xx")), lambda _s: "chat")
+            host_keys = host["chat"]["keys"]
+        canonical = multiset.score(expected, sorted(rows), host_keys)
+        rng.shuffle(rows)
+        shuffled = multiset.score(expected, rows, host_keys)
+        assert (shuffled["verdict"], shuffled["deficit_rows"]) == (canonical["verdict"], canonical["deficit_rows"]), case
+        assert_row_capacity(expected, rows, canonical)
+        assert_row_capacity(expected, rows, shuffled)
 
 
 @pytest.mark.parametrize("field", ["store_id", "tokens", "head", "tail"])
