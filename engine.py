@@ -1517,8 +1517,6 @@ class LCMEngine(
         """Copy scalar frontier values while retaining the shared proof dicts."""
         clone = type(self).__new__(type(self))
         clone.__dict__.update(self.__dict__)
-        clone._diagnostic_engine_token = next(_DIAGNOSTIC_ENGINE_TOKENS)
-        clone._end_attribution = None
         if hasattr(self, "_frontier"):
             clone._frontier = copy.copy(self._frontier)
         return clone
