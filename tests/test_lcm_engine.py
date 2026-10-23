@@ -9764,7 +9764,7 @@ class TestMessageFiltering:
         finally:
             second.shutdown()
 
-    def test_preflight_ambiguous_generated_placeholder_still_requests_externalization_cleanup(self, tmp_path, monkeypatch):
+    def test_preflight_ambiguous_generated_placeholder_defers_size_only_externalization(self, tmp_path, monkeypatch):
         # #1055: force externalization for this fixture independently of the bound window.
         monkeypatch.setattr("hermes_lcm.ingest_protection._non_tool_text_over_floor", lambda text, config, **_: bool(text))
         db_path = tmp_path / "lcm_msg_ignore_preflight_placeholder_externalize_cleanup.db"
@@ -9802,7 +9802,13 @@ class TestMessageFiltering:
                 {"role": "user", "content": "oversized raw payload " + "x" * 200},
             ]
 
-            assert second.should_compress_preflight(messages) is True
+            assert second.should_compress_preflight(messages) is False
+            # Both differences are size stubs; the host's ignored placeholder
+            # and its durable provenance remain intact while adoption defers.
+            assert messages[0]["content"] == placeholder
+            assert digest in second._load_generated_ignored_placeholder_hashes()
+            assert second._last_active_replay_messages[0]["content"].startswith("[Externalized payload: kind=raw_payload;")
+            assert second._last_active_replay_messages[1]["content"].startswith("[Externalized payload: kind=raw_payload;")
         finally:
             second.shutdown()
 

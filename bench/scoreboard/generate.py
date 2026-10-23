@@ -10,10 +10,10 @@ import math
 import re
 import sys
 from datetime import date
-from html import escape as html_escape
+from html import escape as html_escape, unescape as html_unescape
 from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
-from urllib.parse import unquote, urlsplit
+from urllib.parse import quote, unquote, urlsplit
 
 
 SCOREBOARD_DIR = Path(__file__).resolve().parent
@@ -161,11 +161,17 @@ def _validate_row(row: Any, line_number: int) -> dict[str, Any]:
         if not isinstance(successor, str) or not successor.strip():
             raise _error(line_number, "field 'superseded_by' must be a non-empty string")
 
+    if "supersedes" in row and (
+        not isinstance(row["supersedes"], list)
+        or any(not isinstance(item, str) or not item.strip() for item in row["supersedes"])
+    ):
+        raise _error(line_number, "field 'supersedes' must be a list of non-empty strings")
+
     return row
 
 
 def load_rows(path: str | Path = RESULTS_PATH) -> list[dict[str, Any]]:
-    """Read and validate every non-empty JSONL row before any rendering."""
+    """Read legacy lines, then sibling results.d/*.json in filename order."""
     source = Path(path)
     rows: list[dict[str, Any]] = []
     seen_ids: dict[str, int] = {}
@@ -192,6 +198,35 @@ def load_rows(path: str | Path = RESULTS_PATH) -> list[dict[str, Any]]:
             seen_ids[row_id] = line_number
             rows.append(row)
 
+    for row_path in _row_files(source):
+        try:
+            parsed = json.loads(row_path.read_text(encoding="utf-8"))
+            row = _validate_row(parsed, 1)
+        except (OSError, UnicodeError, ValueError) as exc:
+            raise ScoreboardError(f"{row_path}: {exc}") from exc
+        row_id = row["id"]
+        if row_path.stem != row_id:
+            raise ScoreboardError(f"{row_path}: filename must match row id '{row_id}'")
+        if row_id in seen_ids:
+            raise ScoreboardError(f"{row_path}: duplicate id '{row_id}'")
+        seen_ids[row_id] = 1
+        row["_registry_file"] = f"results.d/{quote(row_path.name, safe='')}"
+        rows.append(row)
+
+    by_id = {row["id"]: row for row in rows}
+    claimed: dict[str, str] = {}
+    for row in rows:
+        for old_id in row.get("supersedes", []):
+            if old_id == row["id"]:
+                raise ScoreboardError(f"row '{old_id}' supersedes itself")
+            if old_id not in by_id:
+                raise ScoreboardError(f"row '{row['id']}' supersedes missing row '{old_id}'")
+            if old_id in claimed and claimed[old_id] != row["id"]:
+                raise ScoreboardError(f"row '{old_id}' has two successors")
+            old = by_id[old_id]
+            if old.get("superseded_by", row["id"]) != row["id"]:
+                raise ScoreboardError(f"row '{old_id}': supersedes disagrees with superseded_by")
+            claimed[old_id] = old["superseded_by"] = row["id"]
     for row in rows:
         successor = row.get("superseded_by")
         if successor is not None and successor not in seen_ids:
@@ -199,6 +234,20 @@ def load_rows(path: str | Path = RESULTS_PATH) -> list[dict[str, Any]]:
                 f"row '{row['id']}' references missing successor '{successor}'"
             )
     return rows
+
+
+def _row_files(source: Path) -> list[Path]:
+    return sorted((source.parent / "results.d").glob("*.json"))
+
+
+def sha256_sources(path: str | Path = RESULTS_PATH) -> str:
+    """Hash compact UTF-8 JSON pairs of relative filenames and raw-byte SHA256s."""
+    source = Path(path)
+    manifest = [["results.jsonl", sha256_file(source)]]
+    manifest.extend([f"results.d/{item.name}", sha256_file(item)] for item in _row_files(source))
+    return hashlib.sha256(
+        json.dumps(manifest, ensure_ascii=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def sha256_file(path: str | Path) -> str:
@@ -266,6 +315,8 @@ def _render_disclosure(row: dict[str, Any]) -> list[str]:
         else:
             lines.append(_inline(row[field]))
         lines.append("")
+    if "_registry_file" in row:
+        lines.extend([f"[registry row]({row['_registry_file']})", ""])
     return lines
 
 
@@ -277,7 +328,7 @@ def render(rows: Iterable[dict[str, Any]], source_sha256: str) -> str:
         "",
         "Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.",
         "",
-        f"Generated from `results.jsonl` (sha256: `{source_sha256}`, rows: {len(values)})",
+        f"Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `{source_sha256}`, rows: {len(values)})",
         "",
         *_render_summary(values),
         "",
@@ -295,25 +346,64 @@ def generate(
 ) -> str:
     """Validate, render, and write the complete scoreboard."""
     rows = load_rows(results_path)
-    rendered = render(rows, sha256_file(results_path))
+    rendered = render(rows, sha256_sources(results_path))
     Path(output_path).write_text(rendered, encoding="utf-8")
     return rendered
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate the disclosure-first scoreboard.")
-    parser.add_argument("--check", action="store_true", help="validate only; do not write output")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="require exact rendered page; do not write")
+    mode.add_argument("--pending", action="store_true", help="list pending/stale rows; fail only if stale")
     parser.add_argument("--results", type=Path, default=RESULTS_PATH, help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH, help=argparse.SUPPRESS)
     return parser
+
+
+def pending(rows: list[dict[str, Any]], page: str) -> int:
+    """Compare rendered disclosures and summary values, ignoring the batched header."""
+    summary, marker, disclosures = page.partition("## Row disclosures\n\n")
+    if not marker:
+        raise ScoreboardError("page has no row disclosures")
+    blocks = re.finditer(r'(?ms)^### <a id="([^"]*)"></a>.*?(?=^### <a id="|\Z)', disclosures)
+    rendered = {html_unescape(block[1]): block[0].strip() for block in blocks}
+    summary_ids = set(re.findall(r"\[details\]\(#([^)]*)\)", summary))
+    page_ids = set(rendered) | summary_ids
+    source_ids = {row["id"] for row in rows}
+    pending_ids, stale = source_ids - page_ids, page_ids - source_ids
+
+    def matches(row: dict[str, Any]) -> bool:
+        return (rendered.get(row["id"]) == "\n".join(_render_disclosure(row)).strip()
+                and summary.splitlines().count(_render_summary([row])[-1]) == 1)
+
+    for row in rows:
+        row_id = row["id"]
+        if row_id in pending_ids:
+            print(f"pending: {row_id}")
+        elif not matches(row):
+            successor = row.get("superseded_by")
+            before = {key: value for key, value in row.items() if key != "superseded_by"}
+            if successor in pending_ids and matches(before):
+                print(f"pending: {row_id} (superseded by {successor})")
+            else:
+                stale.add(row_id)
+    for row_id in sorted(stale):
+        print(f"stale: {row_id}")
+    return 2 if stale else 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         rows = load_rows(args.results)
-        if not args.check:
-            rendered = render(rows, sha256_file(args.results))
+        if args.pending:
+            return pending(rows, args.output.read_text(encoding="utf-8"))
+        rendered = render(rows, sha256_sources(args.results))
+        if args.check:
+            if args.output.read_text(encoding="utf-8") != rendered:
+                raise ScoreboardError("page is out of date; regenerate in a separate batched PR")
+        else:
             args.output.write_text(rendered, encoding="utf-8")
     except (OSError, ScoreboardError) as exc:
         print(f"scoreboard: {exc}", file=sys.stderr)

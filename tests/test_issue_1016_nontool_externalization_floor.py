@@ -323,8 +323,15 @@ def test_cjk_arrival_turn_in_a_64k_window_carries_the_stub_not_an_over_cap_notic
     engine.ingest(history)
     history.append({"role": "user", "content": big})
 
-    if engine.should_compress_preflight(history):
-        history = engine.compress(history, current_tokens=count_messages_tokens(history))
+    rough = count_messages_tokens(history)
+    requested = engine.should_compress_preflight(history)
+    assert requested is (rough >= engine.threshold_tokens)
+    if not requested:
+        # #1880: the below-threshold 40k-char arm keeps the original until a
+        # real boundary; ingest still stores the stub and direct compress adopts it.
+        assert history[-1]["content"] == big
+        assert _stored(engine)[-1]["content"].startswith("[Externalized payload: kind=raw_payload;")
+    history = engine.compress(history, current_tokens=rough)
     users = [m for m in history if m.get("role") == "user"]
     assert users[-1]["content"].startswith("[Externalized payload: kind=raw_payload; role=user;")
     assert 'preview="' + HEAD in users[-1]["content"] and "lcm_expand(externalized_ref=" in users[-1]["content"]
