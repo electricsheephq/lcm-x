@@ -1,0 +1,22 @@
+{
+  "base": "2ce2de7ff93a6d2d8b60321033fdce5c117f59c4",
+  "candidate": "59b2289558521289a71a0c959ce7a7b9854d0639",
+  "base_vector_store_sha256": "3e00030d59bf1e68867d97bd44fe4710cb6c99b64ac256d4e89f8a35fe3faab6",
+  "candidate_vector_store_sha256": "642b02396c38b356eceb5de99664d8ea836f67ec45c3577af32b79a6abde61c3",
+  "sqlite": "3.53.1",
+  "python": "3.11.15",
+  "numpy": "2.4.6",
+  "ort_threads": 2,
+  "request_deadline_s": 8,
+  "binary_prescreen": false,
+  "batch_rows": 25000,
+  "source_functions_restored_for_base": [
+    "_load_chunk_matrix",
+    "_load_chunk_vectors_for_ids",
+    "_temp_id_table"
+  ],
+  "source_synthetic_store_run": "39768769622",
+  "proof_boundary": "Local synthetic only; no 2-CPU floor, merge, release, runtime or customer claim",
+  "final_source": "cdd4c2629ebca159de3f3093227206935d4ee06b",
+  "post_measurement_delta": "Remove one whitespace character between VALUES and placeholders; same SQL tokens, bind values/count, query plan and semantics;95 affected trace tests pass"
+}

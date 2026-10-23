@@ -1,0 +1,317 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1586-chunk-load-20261023",
+  "project": "lcm-x",
+  "kind": "benchmark",
+  "status": "settled",
+  "owner_lane": "lcmx-1586-chunk-load",
+  "claim_class": null,
+  "created": "2026-10-23T04:26:27Z",
+  "settled": "2026-10-23T05:00:33Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "59b2289558521289a71a0c959ce7a7b9854d0639",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "RCA-derived repro.py --variant {base,candidate} --label {arm}-{size}; small_cost.py; pytest tests/test_chunk_vector_store.py",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "Synthetic LOCAL exact chunk recall 250k",
+      "metric": "recall_p50_s",
+      "value": 1.534937896009069,
+      "n": 10,
+      "baseline_run": "2ce2de7-250k-deadline-censored",
+      "source": "final-full/calls.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "SUMMARY.json",
+      "role": "receipt",
+      "sha256": "c52de42ef34891c065be817df6cfcd54098cae04c3bd8fc051e4bee3c8986d19",
+      "bytes": 10239
+    },
+    {
+      "path": "CODE.json",
+      "role": "receipt",
+      "sha256": "1d5386b78f59d4f030154a7865bb6d026de868264836dbf2c22aaab6590c2621",
+      "bytes": 1008
+    },
+    {
+      "path": "REVIEWS.md",
+      "role": "receipt",
+      "sha256": "63852917d406e0bb7e8f53b6c81d60a078a5d1d2b88ffb7ba5902b9d21cf5d8a",
+      "bytes": 2354
+    },
+    {
+      "path": "red.txt",
+      "role": "receipt",
+      "sha256": "68b04346ff87e066474d7c92708c48ba74d4973ea35eb02db58c79370c71a3b4",
+      "bytes": 9830
+    },
+    {
+      "path": "base-exact.txt",
+      "role": "receipt",
+      "sha256": "244db82c249f2d691f1aa01267e1f4e4a86f8497f3e8c7a89639664322937e63",
+      "bytes": 471
+    },
+    {
+      "path": "green.txt",
+      "role": "receipt",
+      "sha256": "e5932d0091efd13eec58ab7decd750ea91cc315dbb20d492fd1cce6732c411ae",
+      "bytes": 3213
+    },
+    {
+      "path": "staging-green.txt",
+      "role": "receipt",
+      "sha256": "b9440b817a3a9708ab9673e8cd8e8e6066362db50d05e3ee61b93f7352724dc6",
+      "bytes": 2812
+    },
+    {
+      "path": "load-profile.txt",
+      "role": "receipt",
+      "sha256": "c46f15d0c86fc2a824f72a8ffb2fe5a821f0e16414cf232322aa4d1174b41b61",
+      "bytes": 2173
+    },
+    {
+      "path": "query-shapes.json",
+      "role": "receipt",
+      "sha256": "b334a1eca289ff8269efe6a67c231c5db1a2ba1072f94ba8a096a7ff40783212",
+      "bytes": 2268
+    },
+    {
+      "path": "candidate-traversal.json",
+      "role": "receipt",
+      "sha256": "9d808617c808cbcf5529520d7d61a3594c5681da2f64aab320f4bb1103fd4ef9",
+      "bytes": 2290
+    },
+    {
+      "path": "callers.txt",
+      "role": "receipt",
+      "sha256": "333bf4484cf3e3367a61b0f05c2bba64c448e41e0ad8d3fa9292c00f84036826",
+      "bytes": 3787
+    },
+    {
+      "path": "candidate.patch",
+      "role": "receipt",
+      "sha256": "a4162b10891863cc878c3a75d7ef1c2eb35039a71bafd7118d79bc542fba918c",
+      "bytes": 10401
+    },
+    {
+      "path": "base-full/",
+      "role": "per-item",
+      "sha256": "d613455b68b55305db7011660e0a16e04fdb6e7129b7b70376620db2474298e5",
+      "bytes": 104547
+    },
+    {
+      "path": "candidate-full/",
+      "role": "per-item",
+      "sha256": "732694196efa001973f050e2da05fd73d62a3f42704bff797646cab1fadd00ea",
+      "bytes": 133686
+    },
+    {
+      "path": "paired-full/",
+      "role": "per-item",
+      "sha256": "021d38b6f5d650a338cdedfec54ee6af791128fd51cfda1acd6118485b4f5d82",
+      "bytes": 344969
+    },
+    {
+      "path": "final-quarter/",
+      "role": "per-item",
+      "sha256": "eff28a1a82e9f98c96cded518e2e6749378d874bcb83619ce2fa1210386c537c",
+      "bytes": 352745
+    },
+    {
+      "path": "final-half/",
+      "role": "per-item",
+      "sha256": "1607e5ffade645406eca90ed6dd7c3550a6679b3afd30ec45e0a6bac368a17e9",
+      "bytes": 269432
+    },
+    {
+      "path": "final-full/",
+      "role": "per-item",
+      "sha256": "1e6302f3257fbc7e1aacb6e184c3ecf7ad97a4bb05cbd3f4efb6512fdbc94316",
+      "bytes": 273440
+    },
+    {
+      "path": "small-cost.json",
+      "role": "per-item",
+      "sha256": "2d782522cc0970e8134d61b48a4c94496f89a11791088d1608d768a7c4287a5e",
+      "bytes": 47977
+    },
+    {
+      "path": "small-cost-final.json",
+      "role": "per-item",
+      "sha256": "44fcbc9781d27a49ffba66295059c6f3609c8c04c3fb8d5334b940eec6c484b7",
+      "bytes": 48331
+    },
+    {
+      "path": "fixed-batch-62500.json",
+      "role": "per-item",
+      "sha256": "75e5049d4a3a151a2ac2bd307de340e9fd2fcef2d050871ea578023f2c1244e3",
+      "bytes": 1506
+    },
+    {
+      "path": "fixed-batch-125000.json",
+      "role": "per-item",
+      "sha256": "92cf9c80b0c4f65103cf125f4e91282faf09ebe54b33fd5e94d37c149ae2e9f2",
+      "bytes": 1509
+    },
+    {
+      "path": "fixed-batch-250000.json",
+      "role": "per-item",
+      "sha256": "2dc2380691638f952adeef895256a8fcff136d50ebe85c80f0accbc60c4d0e10",
+      "bytes": 1502
+    },
+    {
+      "path": "analyze.py",
+      "role": "config",
+      "sha256": "8139d4db7dfe417be2c4886b8daa97a3ab8261d902c25a26d6ad8898f495b07f",
+      "bytes": 3675
+    },
+    {
+      "path": "write_result.py",
+      "role": "config",
+      "sha256": "039508b5cd9b4f8bea3182b75b164fcb90643ae42e8d7475332f8335f77b1d3f",
+      "bytes": 6150
+    },
+    {
+      "path": "repro.py",
+      "role": "config",
+      "sha256": "d094bfd417a21e0cd30dbddbd4ed1a7c29ddbe8decb60e33121700456a54da0e",
+      "bytes": 6131
+    },
+    {
+      "path": "repro-original.py",
+      "role": "config",
+      "sha256": "3209ffe625110f6b79793a355001283783bbf464723ea59a81667823e7fd824a",
+      "bytes": 4011
+    },
+    {
+      "path": "repro-pre-staging.py",
+      "role": "config",
+      "sha256": "0cb7061621fdbaf52e14b9c887db1d5fc4460608ed98adb07b382f868cbb07fb",
+      "bytes": 5813
+    },
+    {
+      "path": "scale_store.py",
+      "role": "config",
+      "sha256": "5d5811e6df0140fcd1bf9e7079e60d987a4eb56b25cca0f9311616a94e6fe39a",
+      "bytes": 1019
+    },
+    {
+      "path": "small_cost.py",
+      "role": "config",
+      "sha256": "6f835c5235510f527846ab06644b72e678e9b4504f9096faa4f763df63ef6174",
+      "bytes": 3383
+    },
+    {
+      "path": "small_cost_final.py",
+      "role": "config",
+      "sha256": "0b684553af364cc12814ad0b2ba6d58d726d4f6a327ff44487e2d4ae7e2248b7",
+      "bytes": 3412
+    },
+    {
+      "path": "fixed_batch.py",
+      "role": "config",
+      "sha256": "cdc457fa92608ca82dc1d751a7ced5470966e88d6c9d596c7bd8e7295ee49c56",
+      "bytes": 2732
+    },
+    {
+      "path": "vector_store_base.py",
+      "role": "config",
+      "sha256": "3e00030d59bf1e68867d97bd44fe4710cb6c99b64ac256d4e89f8a35fe3faab6",
+      "bytes": 128116
+    },
+    {
+      "path": "trace-green.txt",
+      "role": "receipt",
+      "sha256": "1879bcfb306720f5a7595d433450a8297f500bb3caf5997df2aff73ea0678060",
+      "bytes": 2648
+    },
+    {
+      "path": "ci-3.12-failure.log",
+      "role": "receipt",
+      "sha256": "c45679d9e819dae53d655f485e2530dfb4c8b095895882b4d2077d6cfb44fbad",
+      "bytes": 101459
+    }
+  ],
+  "rescore": {
+    "command": "python3 analyze.py && python3 write_result.py",
+    "inputs": [
+      "base-full/calls.json",
+      "final-quarter/calls.json",
+      "final-quarter/counts.json",
+      "final-half/calls.json",
+      "final-half/counts.json",
+      "final-full/calls.json",
+      "final-full/counts.json",
+      "small-cost-final.json",
+      "fixed-batch-62500.json",
+      "fixed-batch-125000.json",
+      "fixed-batch-250000.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [
+    {
+      "tier": "T1",
+      "url": "https://github.com/electricsheephq/lcm-x/blob/767ad83a9396cf2b04d8f632a4a50d30eb17ab31/bench/scoreboard/results.jsonl#L64"
+    }
+  ],
+  "links": [],
+  "keep": [
+    "CODE.json",
+    "RESULT.md",
+    "REVIEWS.md",
+    "SUMMARY.json",
+    "analyze.py",
+    "base-exact.txt",
+    "base-full/",
+    "base-full/calls.json",
+    "callers.txt",
+    "candidate-full/",
+    "candidate-traversal.json",
+    "candidate.patch",
+    "ci-3.12-failure.log",
+    "final-full/",
+    "final-full/calls.json",
+    "final-full/counts.json",
+    "final-half/",
+    "final-half/calls.json",
+    "final-half/counts.json",
+    "final-quarter/",
+    "final-quarter/calls.json",
+    "final-quarter/counts.json",
+    "fixed-batch-125000.json",
+    "fixed-batch-250000.json",
+    "fixed-batch-62500.json",
+    "fixed_batch.py",
+    "green.txt",
+    "load-profile.txt",
+    "paired-full/",
+    "query-shapes.json",
+    "red.txt",
+    "repro-original.py",
+    "repro-pre-staging.py",
+    "repro.py",
+    "scale_store.py",
+    "small-cost-final.json",
+    "small-cost.json",
+    "small_cost.py",
+    "small_cost_final.py",
+    "staging-green.txt",
+    "trace-green.txt",
+    "vector_store_base.py",
+    "write_result.py"
+  ],
+  "t2_tag": "lcm-x/lcmx-1586-chunk-load-20261023",
+  "public_receipt": "Raw evidence retained separately under the T2 tag; local raw path omitted."
+}
