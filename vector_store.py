@@ -1162,7 +1162,7 @@ class VectorStore:
                 ]
                 placeholders = ",".join("(?)" for _ in rows)
                 self._conn.execute(
-                    f"INSERT OR IGNORE INTO {table}(id) VALUES {placeholders}",
+                    f"INSERT OR IGNORE INTO {table}(id) VALUES{placeholders}",
                     rows,
                 )
             yield table
