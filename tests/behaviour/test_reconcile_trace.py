@@ -5,6 +5,7 @@ import json
 import sys
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -41,6 +42,29 @@ def test_observed_attribute_inventory_is_complete() -> None:
     source = source.replace('return f"{prefix}:', 'self._trace_inventory_probe\n        return f"{prefix}:', 1)
     assert "_trace_inventory_probe" in engine_attributes(source)
     assert "_trace_inventory_probe" not in OBSERVED_ATTRIBUTES
+
+
+def test_occurrence_fields_preserve_exact_slots_and_unknown_values(tmp_path: Path) -> None:
+    canonical = Canonical(tmp_path, [])
+    canonical.digest_sources = {"raw": {"canonical_sha256": "clean"}}
+    store, proof, emissions = object(), {}, []
+    engine = SimpleNamespace(_store=store, _compress_commit_proof=proof,
+                             _last_emission_descriptors=emissions, _last_active_replay_messages=[])
+    canonical.retain_occurrence_owners(engine)
+    context = ("S", "C", 999, id(proof), id(emissions), 12, True)
+    plan = canonical.value({"publication": (id(store), "S", "C", []),
+                            "matched": {0: ("S", 999)}, "input_digests": {0: "raw"}},
+                           "_occurrence_ingest_plan")
+    cache = canonical.value(((id(store), "S", "C", (999, 12)), [], {999: {}}, {999},
+                             {"accepted_context": context}), "_occurrence_window_cache")
+    assert plan["publication"][0] == cache[0][0] != id(store)
+    assert plan["matched"] == {"0": ["S", 999]} and plan["input_digests"] == {"0": "clean"}
+    assert cache[0][3] == [999, 12] and cache[2] == {"999": {}} and cache[3] == [999]
+    assert canonical.occurrence_objects[id(proof)][1] is proof
+    for corrupt in (999, None, [], "foreign"):
+        assert canonical.occurrence_context((*context[:3], corrupt, *context[4:]))[3] == corrupt
+        assert canonical.occurrence_value({"publication": corrupt}, "_occurrence_ingest_plan")["publication"] == corrupt
+    assert canonical.value([999, "S", 12]) == [999, "S", 12]
 
 
 def test_fixture_scenario_inventory_and_size() -> None:
