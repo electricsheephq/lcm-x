@@ -1,0 +1,65 @@
+{
+  "base": "ca98ba6aa217f5db31ec3e4c32a9eff84cf3d2d2",
+  "rows": [
+    {
+      "scope": "preflight",
+      "level": "INFO",
+      "n": 200,
+      "baseline_median_ms": 0.7759404999999999,
+      "candidate_median_ms": 0.779201,
+      "paired_median_delta_ms": 0.004043000000000074,
+      "median_delta_ms": 0.0032605000000001105,
+      "allowed_increase_ms": 0.07759405,
+      "baseline_p10_ms": 0.749691,
+      "baseline_p90_ms": 0.788674,
+      "candidate_p10_ms": 0.754991,
+      "candidate_p90_ms": 0.789386,
+      "passed": true
+    },
+    {
+      "scope": "post_llm_call_ingest",
+      "level": "INFO",
+      "n": 200,
+      "baseline_median_ms": 0.763808,
+      "candidate_median_ms": 0.7668035,
+      "paired_median_delta_ms": 0.003701999999999983,
+      "median_delta_ms": 0.0029954999999999288,
+      "allowed_increase_ms": 0.07638080000000001,
+      "baseline_p10_ms": 0.739101,
+      "baseline_p90_ms": 0.787903,
+      "candidate_p10_ms": 0.741977,
+      "candidate_p90_ms": 0.790709,
+      "passed": true
+    },
+    {
+      "scope": "preflight",
+      "level": "DEBUG",
+      "n": 200,
+      "baseline_median_ms": 0.8126184999999999,
+      "candidate_median_ms": 0.8350055000000001,
+      "paired_median_delta_ms": 0.02470599999999995,
+      "median_delta_ms": 0.022387000000000157,
+      "allowed_increase_ms": 0.08126185,
+      "baseline_p10_ms": 0.787041,
+      "baseline_p90_ms": 0.83988,
+      "candidate_p10_ms": 0.81297,
+      "candidate_p90_ms": 0.863454,
+      "passed": true
+    },
+    {
+      "scope": "post_llm_call_ingest",
+      "level": "DEBUG",
+      "n": 200,
+      "baseline_median_ms": 0.817553,
+      "candidate_median_ms": 0.8375509999999999,
+      "paired_median_delta_ms": 0.021259000000000028,
+      "median_delta_ms": 0.01999799999999996,
+      "allowed_increase_ms": 0.0817553,
+      "baseline_p10_ms": 0.795187,
+      "baseline_p90_ms": 0.828709,
+      "candidate_p10_ms": 0.815524,
+      "candidate_p90_ms": 0.848966,
+      "passed": true
+    }
+  ]
+}
