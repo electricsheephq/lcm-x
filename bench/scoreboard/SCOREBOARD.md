@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `d0feaa4e738f1d788ab962d03c06db210aacf5acb8fe4c1bcf4ea94b8a0dd977`, rows: 58)
+Generated from `results.jsonl` (sha256: `d768fc6af65479fdf646d669980d246963463c263efc9dffbed9f7ee214b9716`, rows: 61)
 
 ## Summary
 
@@ -10,6 +10,7 @@ Generated from `results.jsonl` (sha256: `d0feaa4e738f1d788ab962d03c06db210aacf5a
 |---|---|---|---|---|---|
 | AMA-Bench (open-ended, 208 episodes) | strict judged accuracy, fail-closed denominator | 1180/2496 = 47.3% (scored-only 1180/2460 = 48.0%) | F | 2026-08-02 | [details](#ama208-full-2026-08-02) |
 | BEAM-10M (200q) | nugget_score | 0.6332 ± 0.4002 (200 questions) | F | 2026-10-22 | [details](#beam-10m-v0280-20261022) |
+| Coverage marker round 3 (#1624 items 1-2, #1853) | cloud_status_after_one_pass_p50_ms | 12.578187 -> 0.585375 ms after one cloud maintenance pass | P | 2026-10-22 | [details](#coverage-marker-round3-2026-10-22) |
 | D5-A (engine-direct latency proxy) | max_lcm_owned_s | 49.1 s | P | 2026-10-16 | [details](#d5a-max-v0270-2026-10-16) |
 | D5-A (engine-direct latency proxy) | mean_wait_s_per_message | 7.9 s | P | 2026-10-16 | [details](#d5a-mean-wait-v0270-2026-10-16) |
 | D5-A (engine-direct latency proxy) | compaction_p90_s | 44.5 s | P | 2026-10-16 | [details](#d5a-p90-v0270-2026-10-16) |
@@ -47,6 +48,8 @@ Generated from `results.jsonl` (sha256: `d0feaa4e738f1d788ab962d03c06db210aacf5a
 | LongMemEval-V2 (451q, agentic) | accuracy | 298/451 (66.1%) | P | 2026-07-27 | [details](#longmemeval-v2-451-agentic-2026-07-27) |
 | LongMemEval-V2 (451q, static) | accuracy | 123/451 (27.3%) — official static protocol, fixed weak reader | P | 2026-07-31 | [details](#longmemeval-v2-451-static-2026-07-31) |
 | LongMemEval-V2 static (451q) | judged accuracy, full set | 143/451 = 31.7% (web 97/240 = 40.4%, enterprise 46/211 = 21.8%) | F | 2026-08-03 | [details](#v2-static-451-sota-luna-2026-08-03) |
+| PR #1860 fix-round acceptance | steady_status_p50_ms | 0.2709 -> 0.2622 ms certified-steady status | P | 2026-10-23 | [details](#coverage-marker-fix-r1c-2026-10-23) |
+| PR #1860 r2 initial read-only backlog acceptance | harmful_probe_differences | 0 harmful differences in 304 field comparisons; d3 initial backlog 1 (gap-fill) | P | 2026-10-23 | [details](#coverage-marker-fix-r2-2026-10-23) |
 | Phase C (four live host cells) | slowest_compaction_s | 93.0 s; bar <=145 s | P | 2026-10-16 | [details](#phase-c-max-v0270-2026-10-16) |
 | Recall row handoff (sessions) | busy_median_s | 3.297513 -> 0.112816 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-sessions) |
 | Recall row handoff (vector.chunk) | busy_median_s | 8.160382 -> 0.335681 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-vector.chunk) |
@@ -190,6 +193,193 @@ NUM_RUNS=1; ± is per-question population SD, not run-to-run variance
 - One public-text scanner match inside third-party benchmark output was reviewed by the release manager and kept unchanged.
 - Public evidence archive SHA-256: 653690d99ec53416f8ccce2a204ed33b0c25baaf96e2577f07acd5aa17c4318f. One run; no upstream acceptance or listing, multi-run variance, or customer value proven.
 - Tier F: one run with no A/A' noise floor or pre-registered gate. Reader and judge are both OpenAI models because OmniMemEval fixes that pair for every backend; the score is comparable across that board, not a cross-family score.
+
+### <a id="coverage-marker-fix-r1c-2026-10-23"></a>coverage-marker-fix-r1c-2026-10-23
+
+**id:**
+coverage-marker-fix-r1c-2026-10-23
+
+**benchmark:**
+PR #1860 fix-round acceptance
+
+**metric:**
+steady_status_p50_ms
+
+**value:**
+0.2622
+
+**display:**
+0.2709 -> 0.2622 ms certified-steady status
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+566c498c0ed8f256946e9aed2352a12ba571580b
+
+**harness_commit:**
+bba929e0aa76f57f8ddf939fff6a1854511eeaa2
+
+**judge:**
+n/a (deterministic instruments; no model judge)
+
+**reader:**
+n/a (synthetic SQLite workloads)
+
+**retrieval_config:**
+20k rows; paired/interleaved 200 samples per arm; exact base 91a039891afd969f9569897115990fe0c419e034. Unchanged r2 bounds and arrival-every-call probes; production source fixed at 566c498c.
+
+**dataset_exposure:**
+Generated fixtures only; no customer text or external provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/RESULT.md
+
+**variance:**
+One run; paired/interleaved n=200 per steady arm, raw samples retained; arrival cost n=30 per tree sequential; no absolute cross-run performance claim.
+
+**failclose:**
+All four steady-cost cells within max(base*1.10,base+0.05ms); bounds/status/liveness pass. Oracle reuses accepted r1b outputs plus RM end-state probe: no new undercount/false-coverage/false-certificate events; temporary overcounts clear.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/PROBE-TABLE.md
+
+**caveats:**
+- Advisory; exact-head remote CI pending at publication. No final-head review, merge, release, runtime or customer claim.
+- 19511 passed, 141 skipped, 63 xfailed, 29 warnings in the single full suite at 566c498c. Three post-summary synthetic-fixture shutdown import diagnostics retained; process exit 0.
+- Three accepted mid-history legacy overcounts; final remaining/oracle work counts equal base on all 1200 seed-runs. Marker serialization is not identical. Inherited false certificates remain confined to seeds 150,212,422,491.
+- NULL-parent original review probe ends at its first next(low): expected safe early return, not a passing pytest result. The committed empty/unproven regression passes in the full suite.
+- No committed r2 oracle probe exists on the PR; adding the after-convergence end-state record remains a follow-up.
+
+### <a id="coverage-marker-fix-r2-2026-10-23"></a>coverage-marker-fix-r2-2026-10-23
+
+**id:**
+coverage-marker-fix-r2-2026-10-23
+
+**benchmark:**
+PR #1860 r2 initial read-only backlog acceptance
+
+**metric:**
+harmful_probe_differences
+
+**value:**
+0
+
+**display:**
+0 harmful differences in 304 field comparisons; d3 initial backlog 1 (gap-fill)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+59d6118ee2e211a8364ff8e06ee75f29c4d396af
+
+**harness_commit:**
+e8a922553d50ec47bfcbbe1aca0938b9b770ee46
+
+**judge:**
+n/a (deterministic probe differ and brute-force oracle; no model judge)
+
+**reader:**
+n/a (synthetic SQLite stores)
+
+**retrieval_config:**
+Unchanged r1c comparative probes at base91a03989, fixed566c498c and candidate59d6118e; status/embedded/false_rows/effective_false at each emitted step, 152 fields per comparator. Original r1b 600-seed arms with/without legacy plus existing RM convergence observation.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer data or external provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/RESULT.md
+
+**variance:**
+One execution per probe/tree and original oracle arm; one convergence observation per arm; deterministic comparisons, no performance claim.
+
+**failclose:**
+Negative selfcheck detects fixed d3 initial harmful zero; candidate zero harmful against base and fixed. Zero new undercount/false-coverage/false-certificate oracle events, final policy/remaining/oracle work state equal base on all1200 seeds.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/probe-diff.json
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/oracle-comparison.json
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/SUMMARY.json
+
+**caveats:**
+- Parent review setup emits no truth: base skips; fixed/head stop before yield (expected negative). Unchanged F3 regression passes.
+- One full suite at59d6118e:19512 passed141 skipped63 xfailed29 warnings; exit0 with three inherited post-summary synthetic-fixture import diagnostics.
+- Inherited oracle limitations remain; equality is final work counts, not marker serialization. Preliminary scorer diagnostics corrected against preserved raw records without changing source, tests or thresholds.
+- Advisory merge-candidate fix only. Does not prove production backlog accuracy beyond these probes, independent final-head review, merge, release, runtime or customer behavior. Raw T2 not published; no results disposed.
+
+### <a id="coverage-marker-round3-2026-10-22"></a>coverage-marker-round3-2026-10-22
+
+**id:**
+coverage-marker-round3-2026-10-22
+
+**benchmark:**
+Coverage marker round 3 (#1624 items 1-2, #1853)
+
+**metric:**
+cloud_status_after_one_pass_p50_ms
+
+**value:**
+0.585375
+
+**display:**
+12.578187 -> 0.585375 ms after one cloud maintenance pass
+
+**tier:**
+P
+
+**date:**
+2026-10-22
+
+**system_commit:**
+c0b1f17e86868c5312e9752ac1d0594412856997 final metadata-only revision guard; stream and certified-steady measurements cef344e54167848829c22752c6a431191a763985 with explicit unchanged-path delta coverage; identity map linked
+
+**harness_commit:**
+5195676522b0a66f123e3e4c9e9e7d649f98559b public re-score; supplied r2/reviewer instruments and raw-input digests retained under T2 tag lcm-x/lcmx-1624-r3-20261022
+
+**judge:**
+n/a (deterministic instrument, no model judge)
+
+**reader:**
+n/a (synthetic SQLite workload, no answering model)
+
+**retrieval_config:**
+20k metadata-covered cloud rows; chunk revision2 and no initial coverage keys; one bounded metadata-only maintenance pass; no chunking or provider dispatch. Stream: 2000 enclosed4096-byte gap rows, batch32. Exact comparators and remaining scenarios in linked report.
+
+**dataset_exposure:**
+Generated synthetic rows only; no customer text or external provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/RESULT.md; per-measurement source map https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/MEASUREMENT-IDENTITIES.json; T2 tag lcm-x/lcmx-1624-r3-20261022
+
+**variance:**
+Cloud paired interleaved n60/arm; final after p50 .585375ms/IQR .087833ms versus fresh GA .5050835/.1077195. Stream paired n40/arm with p50/IQR; steady paired n200/arm; arrival n30 sequential pairs/tree. No cross-run absolute performance claim.
+
+**failclose:**
+0 new step mismatches in both600-seed oracle modes; false certificates only4accepted legacy seeds; same32 selected chunks; no timing samples omitted after declared warmup.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/ACCEPTANCE-SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/5195676522b0a66f123e3e4c9e9e7d649f98559b/MEASUREMENT-IDENTITIES.json
+
+**caveats:**
+- Local synthetic and unit-host evidence only; remote matrix, merge, release, runtime/customer readiness unproven.
+- One full suite at7852ad7d:1failed17460passed141skipped64xfailed. Introduced revision-promotion failure fixed; affected94+golden90 passed on content committedc0. Final full suite was not rerun.
+- Inherited legacy false-certificate seeds150/212/422/491 remain accepted; differential parity does not repair inherited baseline limitations.
+- Three golden traces explained; early cancellation preserves remaining backlog3 and zero dispatch while existing classifier changes partial to complete.
 
 ### <a id="d5a-max-v0270-2026-10-16"></a>d5a-max-v0270-2026-10-16
 

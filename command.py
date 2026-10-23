@@ -94,6 +94,7 @@ from .chunking import (
     normalize_content_policy,
 )
 from .embedding_maintenance import incremental_embedding_state as incremental_embedding_state
+from .engine_registry import live_bound_session_ids
 from .embedding_provider import (
     EmbeddedDocumentBatch,
     EmbeddingProviderError,
@@ -1594,7 +1595,8 @@ def _doctor_clean_apply_text(engine) -> str:
 
 def _doctor_clean_lifecycle_text(engine) -> str:
     count = engine._lifecycle.row_count()
-    protected = {str(getattr(engine, "_session_id", "") or "")}
+    # #753: rows bound by any live engine in this process are protected, as in apply.
+    protected = {str(getattr(engine, "_session_id", "") or "")} | live_bound_session_ids()
     protected = {s for s in protected if s}
 
     conn = engine._lifecycle.connection
@@ -1669,7 +1671,8 @@ def _doctor_clean_lifecycle_apply_text(engine) -> str:
         ])
 
     before = engine._lifecycle.row_count()
-    protected = {str(getattr(engine, "_session_id", "") or "")}
+    # #753: never delete a row another live engine in this process still has bound.
+    protected = {str(getattr(engine, "_session_id", "") or "")} | live_bound_session_ids()
     protected = {s for s in protected if s}
 
     try:
@@ -3579,17 +3582,34 @@ def _summary_backfill_estimates(
     return est_tokens, est_cost_tokens, est_batches
 
 
-def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int | bool, *, operator_retry: int = 0) -> None:
+def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int | bool, *, operator_retry: int = 0,
+                              scan_state=None) -> None:
     """Best-effort advisory state after publication; never fail embedding work."""
     try:
         conn = sqlite3.connect(db_path, timeout=5.0)
         try:
             with conn:
+                if scan_state is None:
+                    conn.execute(
+                        "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                        (f"embedding_catchup:{task}:{identity}",
+                         json.dumps({"remaining": remaining, "operator_retry": operator_retry, "updated_at": time.time()})),
+                    )
+                    return
+                state = scan_state or {}
+                value = json.dumps({"remaining": remaining, "operator_retry": operator_retry,
+                                    "updated_at": time.time(), "inflight_cursor": state.get("inflight_cursor", ""),
+                                    "inflight_actionable_seen": state.get("inflight_actionable_seen", False),
+                                    "inflight_uncertain_count": state.get("inflight_uncertain_count", 0),
+                                    "inflight_cycle_started_at": state.get("inflight_cycle_started_at", 0)})
                 conn.execute(
-                    "INSERT INTO metadata(key, value) VALUES(?, ?) "
+                    "INSERT INTO metadata(key, value) SELECT ?, CASE WHEN ? IS NOT NULL AND "
+                    "EXISTS (SELECT 1 FROM messages WHERE store_id > ?) "
+                    "THEN json_set(?, '$.remaining', json('true')) ELSE ? END "
                     "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                    (f"embedding_catchup:{task}:{identity}",
-                     json.dumps({"remaining": remaining, "operator_retry": operator_retry, "updated_at": time.time()})),
+                    (f"embedding_catchup:{task}:{identity}", state.get("max_store_id"),
+                     state.get("max_store_id"), value, value),
                 )
         finally:
             conn.close()
@@ -4459,6 +4479,8 @@ def _chunk_pending_rows(
     documents: list[tuple[str, str, int]] = []
     meta: dict[str, tuple[int, int, int, int]] = {}
     for row in rows:
+        if gap_scan_state and gap_scan_state.get("stop", lambda: False)():
+            break
         if incremental and len(documents) >= limit:
             break
         if incremental:
@@ -4636,17 +4658,41 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
     low_band = coverage and coverage[2] == policy and low < coverage[0]
     scan_key = f"chunk_gapfill_scan:{identity_hash}"
     saved = conn.execute("SELECT value FROM metadata WHERE key = ?", (scan_key,)).fetchone()
+    gap_scan_state = gap_scan_state if gap_scan_state is not None else {}
+    if low_band:
+        try:
+            parent = json.loads(saved[0]) if saved else {}
+        except ValueError:
+            parent = {}
+        parent = parent if isinstance(parent, dict) else {}
+        if record_progress and not parent.get("epoch"):
+            initial = {"scan_value": saved[0] if saved else None}
+            _record_chunk_gapfill_progress(conn, identity_hash, initial, parent)
+            saved = conn.execute("SELECT value FROM metadata WHERE key=?", (scan_key,)).fetchone()
+            parent = json.loads(saved[0]) if saved else {}
+        gap_scan_state.update(parent_value=saved[0] if saved else None,
+                              parent_epoch=parent.get("epoch"), turn=parent.get("turn", 0))
+        if record_progress and gap_scan_state["parent_value"] is None:
+            gap_scan_state["unproven"] = True
+            return  # A writable low walk needs a captured parent fence.
+        scan_key += ":low"
+        saved = conn.execute("SELECT value FROM metadata WHERE key=?", (scan_key,)).fetchone()
+    gap_scan_state["scan_key"] = scan_key
     while record_progress and saved is None:
         # Give first selection an observable token too: deletion must not turn
         # absence into absence and let a stale first walk pass its CAS.
-        initial = {"scan_value": None}
+        initial = dict(gap_scan_state, scan_value=None)
         _record_chunk_gapfill_progress(conn, identity_hash, initial, {"epoch": uuid.uuid4().hex})
+        if low_band and initial["scan_value"] is None:
+            gap_scan_state["unproven"] = True
+            return  # The parent changed; a later call must capture a fresh fence.
         saved = ((initial["scan_value"],) if initial["scan_value"] is not None else
                  conn.execute("SELECT value FROM metadata WHERE key = ?", (scan_key,)).fetchone())
-    gap_scan_state = gap_scan_state if gap_scan_state is not None else {}
     gap_scan_state["scan_value"] = saved[0] if saved else None
     try:
         scan = json.loads(saved[0]) if saved else {}
+        if low_band and (not gap_scan_state["parent_epoch"] or scan.get("epoch") != gap_scan_state["parent_epoch"]):
+            scan = {}
         valid = (
             isinstance(scan, dict)
             and type(scan.get("revision")) is int and type(scan.get("high")) is int
@@ -4679,6 +4725,7 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
     if gap_scan_state is not None:
         gap_scan_state["unproven"] = True
     candidates = []
+    metadata_only = gap_scan_state.get("metadata_only", False)
 
     def record(progress, values=()):
         if not record_progress:
@@ -4711,9 +4758,11 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
                 (max(low - 1, scan["high"]), top_ceiling, identity_hash, min(page_size, limit - reached)),
             ).fetchall()
             for row in rows:
+                if gap_scan_state.get("stop", lambda: False)():
+                    return
                 reached += 1
                 top_ceiling = row[0]
-                if any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
+                if metadata_only or any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
                     unpublished.append(row[0])
                     candidates.append(row[0])
                     yield row
@@ -4754,19 +4803,18 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             if rows:
                 page_ceiling = rows[-1][0]
         unpublished.extend(row[0] for row in rows)
+        if "pending" not in scan:
+            gap_scan_state["walk_progress"] = {
+                "revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
+                "ceiling": ceiling, "walk": {"below": page_ceiling, "pending": [*unpublished, *replay]},
+            }
         for row in rows:
+            if gap_scan_state.get("stop", lambda: False)():
+                return
             reached += 1
-            if any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
+            if metadata_only or any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
                 if not candidates:
                     record_ceiling()  # Deterministic, before the first candidate escapes.
-                if gap_scan_state is not None and "pending" not in scan:
-                    # A walk position is not coverage: retain the WHOLE fetched
-                    # page, including rows the consumer has not requested yet.
-                    gap_scan_state["walk_progress"] = {
-                        "revision": CHUNK_POLICY_REVISION, "policy": policy, "high": high,
-                        "ceiling": ceiling,
-                        "walk": {"below": page_ceiling, "pending": [*unpublished, *replay]},
-                    }
                 candidates.append(row[0])
                 yield row
             else:
@@ -4784,7 +4832,9 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             (*batch, identity_hash),
         ).fetchall()
         for row in rows:
-            if any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
+            if gap_scan_state.get("stop", lambda: False)():
+                return
+            if metadata_only or any(c.char_end > c.char_start for c in chunk_message(*row, policy=policy)):
                 if not candidates:
                     record_ceiling()
                 candidates.append(row[0])
@@ -4803,7 +4853,7 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
             values = [(f"chunk_policy_revision_through:{identity_hash}",
                        _chunk_coverage_value(conn, identity_hash, bounds[0],
                                              min(candidates, default=high + 1) - 1, policy))]
-            if not candidates:
+            if not candidates and not metadata_only:
                 values.append((f"chunk_policy_revision:{identity_hash}", str(CHUNK_POLICY_REVISION)))
             record(progress, values)
     if not range_complete:
@@ -4820,14 +4870,26 @@ def _chunk_gapfill_rows(conn, identity_hash, bounds, policy, limit, *, record_pr
 
 def _record_chunk_gapfill_progress(conn, identity_hash, state, progress, values=()):
     """CAS the exact selection proof; certificates share the same write transaction."""
-    key, value = f"chunk_gapfill_scan:{identity_hash}", json.dumps(progress)
+    parent_key = f"chunk_gapfill_scan:{identity_hash}"
+    key = state.get("scan_key", parent_key)
+    try:
+        previous = json.loads(state["scan_value"]) if state["scan_value"] else {}
+    except ValueError:
+        previous = {}
+    previous = previous if isinstance(previous, dict) else {}
+    progress = dict(progress, epoch=state.get("parent_epoch") or previous.get("epoch") or uuid.uuid4().hex,
+                    turn=state.get("turn", previous.get("turn", 0) + 1))
+    if state.get("deferred_low"):
+        progress["deferred_low"] = True
+    value = json.dumps(progress)
     conn.execute("SAVEPOINT chunk_gapfill_progress")
     try:
         written = conn.execute(
             "INSERT INTO metadata(key,value) SELECT ?,? "
             "WHERE (SELECT value FROM metadata WHERE key=?) IS ? "
+            "AND (? IS NULL OR (SELECT value FROM metadata WHERE key=?) IS ?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (key, value, key, state["scan_value"]),
+            (key, value, key, state["scan_value"], state.get("parent_value"), parent_key, state.get("parent_value")),
         ).rowcount
         if written:
             state["scan_value"] = value
@@ -4846,6 +4908,52 @@ def _record_chunk_gapfill_walk(conn, identity_hash, state):
     """Writer-only: persist selection's replay proof before any provider work."""
     if progress := state.get("walk_progress"):
         _record_chunk_gapfill_progress(conn, identity_hash, state, progress)
+
+
+def _chunk_gapfill_order(conn, identity, ranges, state, record_progress):
+    """Share the writable upper/low turn fence across frontier and cloud scans."""
+    if record_progress and len(ranges) > 1:
+        try:
+            key = f"chunk_gapfill_scan:{identity}"
+            records = dict(conn.execute("SELECT key,value FROM metadata WHERE key IN (?,?)", (key, key + ":low")))
+            upper, lower = (json.loads(records.get(k, "{}")) for k in (key, key + ":low"))
+            if upper.get("deferred_low") and upper.get("epoch") and (lower.get("epoch") != upper["epoch"] or lower.get("turn", -1) < upper.get("turn", 0)):
+                ranges = ranges[::-1]
+        except (ValueError, AttributeError):
+            pass
+    state["deferred_low"] = record_progress and len(ranges) > 1
+    return ranges
+
+
+def _validate_cloud_chunk_metadata(config, db_path):
+    """Writer-only metadata coverage; neither chunk text nor resolve a provider."""
+    store = VectorStore(db_path, config=config)
+    lease = None
+    try:
+        conn = store.connection
+        profile = _chunk_current_profile(conn)
+        if profile is None:
+            return
+        lease = _acquire_embedding_backfill_lease(
+            conn, ttl_s=_embedding_backfill_lease_ttl_s(), heartbeat_s=_embedding_backfill_heartbeat_s())
+        if lease is None:
+            return
+        identity = profile["identity_hash"]
+        policy = normalize_content_policy(getattr(config, "embedding_content_policy", ""))
+        bounds = _chunk_cursor(conn, identity)
+        coverage = _chunk_coverage(conn, identity, bounds[0]) if bounds else None
+        state = {"metadata_only": True, "coverage": coverage}
+        ranges = _chunk_gapfill_ranges(conn, identity, bounds, _chunk_policy_revision(conn, identity),
+                                       policy, coverage=coverage)
+        for band in _chunk_gapfill_order(conn, identity, ranges, state, True):
+            list(_chunk_gapfill_rows(conn, identity, band, policy, _CHUNK_HISTORY_SCAN_MESSAGES,
+                                    record_progress=True, gap_scan_state=state))
+            _record_chunk_gapfill_walk(conn, identity, state)
+            break
+    finally:
+        if lease is not None:
+            lease.release()
+        store.close()
 
 
 def _chunk_frontier_rows(
@@ -4907,6 +5015,7 @@ def _chunk_frontier_rows(
         _record_chunk_policy_revision(conn, identity_hash, bounds, policy)
     gap_scan_state = gap_scan_state if gap_scan_state is not None else {}
     unproven = False
+    gap_ranges = _chunk_gapfill_order(conn, identity_hash, gap_ranges, gap_scan_state, record_progress)
     for band in gap_ranges:
         gap_scan_state["coverage"] = coverage
         for row in _chunk_gapfill_rows(
@@ -5058,13 +5167,19 @@ def _chunk_authorized_uncertain_rows(
     return len(documents), documents, meta
 
 
+_CHUNK_INFLIGHT_SCAN_ROWS = 256
+
+
 def _chunk_backfill_remaining(
     db_path, identity_hash: str | None, policy: str, pending: int, embedded: int,
     incremental: bool = False, *, include_boundaries: bool = False, inflight_policy: str | None = None, chunk_cache=None,
+    deadline=None, scan_state=None,
 ) -> tuple[int, int, int]:
     try:
         check_conn = _embedding_read_connection(db_path)
         try:
+            scan_state = scan_state if scan_state is not None else {}
+            scan_state["max_store_id"] = check_conn.execute("SELECT COALESCE(MAX(store_id),0) FROM messages").fetchone()[0]
             gap_scan_state = {}
             remaining, _, _ = _chunk_pending_rows(
                 check_conn, identity_hash, policy, 1, incremental=incremental,
@@ -5082,11 +5197,31 @@ def _chunk_backfill_remaining(
                 try:
                     chunks_by_source = {}
                     actionable = []
+                    saved = check_conn.execute("SELECT value FROM metadata WHERE key=?",
+                                               (f"embedding_catchup:chunk:{identity_hash}",)).fetchone()
+                    try:
+                        cycle = json.loads(saved[0]) if saved else {}
+                        cursor = str(cycle.get("inflight_cursor", ""))
+                        actionable_seen = bool(cycle.get("inflight_actionable_seen", bool(cursor)))
+                        uncertain_seen = int(cycle.get("inflight_uncertain_count", 0)) if cursor else 0
+                        cycle_started = float(cycle.get("inflight_cycle_started_at", 0)) if cursor else time.time()
+                    except (TypeError, ValueError, AttributeError):
+                        cursor = ""
+                        actionable_seen = False
+                        uncertain_seen, cycle_started = 0, time.time()
+                    scanned = 0
+                    incomplete = False
+                    scan_state["inflight_cursor"] = cursor
                     for row in check_conn.execute(
                         "SELECT embedded_id, state, lease_id, generation FROM lcm_embedding_backfill_inflight "
-                        "WHERE identity_hash = ?",
-                        (identity_hash,),
+                        "WHERE +identity_hash = ? AND embedded_id > ? ORDER BY embedded_id LIMIT ?",
+                        (identity_hash, cursor, _CHUNK_INFLIGHT_SCAN_ROWS),
                     ):
+                        if deadline is not None and time.monotonic() >= deadline:
+                            incomplete = True
+                            break
+                        scanned += 1
+                        scan_state["inflight_cursor"] = row[0]
                         try:
                             store_id = int(row[0].split(":", 1)[0])
                         except ValueError:
@@ -5097,8 +5232,29 @@ def _chunk_backfill_remaining(
                                                          if c.char_end > c.char_start} if source else set()
                         if row[0] in chunks_by_source[store_id]:
                             actionable.append(row)
+                    else:
+                        if scanned < _CHUNK_INFLIGHT_SCAN_ROWS:
+                            if check_conn.execute(
+                                "SELECT 1 FROM lcm_embedding_backfill_inflight WHERE identity_hash=? "
+                                "AND state IN ('claimed','dispatched','uncertain') AND updated_at>=? "
+                                "AND embedded_id<=? LIMIT 1",
+                                (identity_hash, cycle_started, scan_state["inflight_cursor"]),
+                            ).fetchone():
+                                remaining = max(remaining, 1)  # A new row behind the cursor needs a fresh cycle.
+                            scan_state["inflight_cursor"] = ""
+                        else:
+                            incomplete = True
+                    if incomplete:
+                        remaining = True  # Unknown backlog, never a completion certificate.
+                        scan_state["inflight_incomplete"] = True
+                    elif actionable_seen:
+                        remaining = max(remaining, 1)  # Earlier pages still have actionable backlog.
+                    scan_state["inflight_actionable_seen"] = incomplete and (actionable_seen or bool(actionable))
                     in_flight, uncertain = _embedding_inflight_counts(check_conn, identity_hash,
                         (tuple(row[1:]) + (1,) for row in actionable))
+                    uncertain += uncertain_seen
+                    scan_state["inflight_uncertain_count"] = uncertain if incomplete else 0
+                    scan_state["inflight_cycle_started_at"] = cycle_started if incomplete else 0
                 except sqlite3.OperationalError:
                     in_flight = 0
                     uncertain = 0
@@ -5391,7 +5547,16 @@ def _chunk_backfill_run(
             )
             authorized_uncertain_ids = {row[0] for row in rows}
         else:
-            gap_scan_state = {}
+            def discovery_stopped():
+                nonlocal stop_reason, budget_exhausted
+                if stop_event is not None and stop_event.is_set():
+                    stop_reason = "process_exit"
+                elif budget_s > 0 and time.monotonic() - started > budget_s:
+                    budget_exhausted = True
+                    stop_reason = "op_budget_exhausted"
+                return stop_reason is not None
+
+            gap_scan_state = {"stop": discovery_stopped}
             pending, rows, chunk_meta = _chunk_pending_rows(
                 conn, identity, policy, limit, incremental=incremental,
                 record_progress=incremental, chunk_cache=chunk_cache,
@@ -5442,10 +5607,10 @@ def _chunk_backfill_run(
         )
         provider = (
             None
-            if privacy_error is not None or (privacy_withheld and not documents)
+            if stop_reason or privacy_error is not None or (privacy_withheld and not documents)
             else resolve_provider(chunk_provider_config, for_backfill=True)
         )
-        if privacy_error is not None or (privacy_withheld and not documents):
+        if stop_reason or privacy_error is not None or (privacy_withheld and not documents):
             pass
         elif provider is None:
             error = "embedding provider is not configured; run `/lcm embed warmup`"
@@ -5717,6 +5882,16 @@ def _chunk_backfill_run(
                         error = str(exc)
                         stop_reason = "privacy_refused"
                         break
+        if incremental and not retry_uncertain and pending == embedded and not (error or failed or skipped or stop_reason):
+            bounds = _chunk_cursor(conn, identity)
+            coverage = _chunk_coverage(conn, identity, bounds[0]) if bounds else None
+            if (coverage and coverage[2] == policy and coverage[0] <= bounds[0] and coverage[1] < bounds[1]
+                    and _chunk_policy_revision(conn, identity) >= CHUNK_POLICY_REVISION
+                    and not _chunk_inflight_ids(conn, identity)):
+                state = {"metadata_only": True, "coverage": coverage}
+                list(_chunk_gapfill_rows(conn, identity, (coverage[1] + 1, bounds[1]), policy,
+                                        _CHUNK_HISTORY_SCAN_MESSAGES, record_progress=True, gap_scan_state=state))
+                _record_chunk_gapfill_walk(conn, identity, state)
         if (
             not incremental and not retry_uncertain and pending == embedded
             and not error and not failed and not skipped and not stop_reason
@@ -5755,14 +5930,20 @@ def _chunk_backfill_run(
                     )
             store.close()
 
+    scan_state = {}
+    configured_policy = normalize_content_policy(getattr(config, "embedding_content_policy", "conversational"))
     remaining, in_flight_count, uncertain_count = _chunk_backfill_remaining(
-        db_path, identity, policy, pending, embedded, incremental,
-        include_boundaries=stop_reason == "process_exit", chunk_cache=chunk_cache,
-        inflight_policy=normalize_content_policy(getattr(config, "embedding_content_policy", "conversational")),
+        db_path, identity, policy if incremental else configured_policy, pending, embedded, incremental,
+        include_boundaries=stop_reason == "process_exit", chunk_cache=chunk_cache if policy == configured_policy else {},
+        inflight_policy=configured_policy,
+        deadline=started + budget_s if budget_s > 0 else None, scan_state=scan_state,
     )
     operator_retry = uncertain_count if embedding_provider_id(provider_name) != "fastembed" else 0
-    backlog = remaining + in_flight_count + uncertain_count - operator_retry
-    _record_embedding_catchup(db_path, "chunk", identity, bool(backlog) if incremental else backlog, operator_retry=operator_retry)
+    backlog = True if scan_state.get("inflight_incomplete") else remaining + in_flight_count + uncertain_count - operator_retry
+    if incremental and policy != configured_policy:
+        backlog = True  # Override coverage cannot certify configured coverage; avoid a fresh full-history walk.
+    _record_embedding_catchup(db_path, "chunk", identity, bool(backlog) if incremental else backlog,
+                              operator_retry=operator_retry, scan_state=scan_state)
     selected_embeddable = len(documents) - len(skipped)
     status = _embedding_backfill_status(
         error=error, lease_lost=lease_lost, budget_exhausted=budget_exhausted,
