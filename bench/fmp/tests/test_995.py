@@ -180,3 +180,19 @@ def test_check_arms_even_median(tmp_path):
         (path / "answers.jsonl").write_text(json.dumps(payload))
     report = run.check_arms(paths, tmp_path / "check.json")
     assert report["arms"][0]["prompt_tokens_estimate"] == {"median": 200, "p90": 300}
+
+
+def test_fix1_check_arms_storeless_hit(tmp_path):
+    paths = [make_answers(tmp_path, "A0", "role"), make_answers(tmp_path, "A1")]
+    for path in paths:
+        row = json.loads((path / "answers.jsonl").read_text())
+        row["trace"][0]["result"] = {"hits": [
+            dict(kind="retraction", snippet="[Withdrawn]", withdrawn_store_id=1, cites=[2]),
+        ]}
+        (path / "answers.jsonl").write_text(json.dumps(row))
+    report = run.check_arms(paths, tmp_path / "check.json")
+    assert report["passed"]
+    assert report["retrieval_differing_qids"] == 0
+    row["trace"][0]["result"]["hits"][0]["store_id"] = 3
+    (paths[1] / "answers.jsonl").write_text(json.dumps(row))
+    assert run.check_arms(paths, tmp_path / "different.json")["retrieval_differing_qids"] == 1

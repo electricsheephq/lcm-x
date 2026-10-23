@@ -130,6 +130,31 @@ def test_classifier_requests(text, object_text):
     assert detector().request_object(text) == object_text
 
 
+@pytest.mark.parametrize("text,object_text", [
+    ("Forget what I told you about saffron tea.", "saffron tea"),
+    ("Please forget what I told you.", ""),
+    ("Forget what I said earlier.", ""),
+    ("Forget that please.", ""),
+    ("Forget earlier.", ""),
+    ("Forget it now.", ""),
+    ("Forget all that.", ""),
+    ("Forget the deadline, my boss told me.", None),
+])
+def test_fix1_canonical_objects(text, object_text):
+    assert detector().request_object(text) == object_text
+
+
+@pytest.mark.parametrize("text", [
+    "Don't forget to book X", "I forgot my keys", "Forget the weather, tell me about Y",
+    "I no longer like X", "If I ever ask you to forget…", "She told her assistant to forget…",
+])
+def test_fix1_packet_probe10_has_no_effect(corpus, monkeypatch, text):
+    old = add(corpus, "The weather and X are important.")
+    add(corpus, text)
+    assert links(corpus, [old]) == ([], None)
+    assert deliver(corpus, monkeypatch, [old], "suppress") == deliver(corpus, monkeypatch, [old], "off")
+
+
 def test_duplicate_copy_after_request_prevents_link(corpus):
     old = add(corpus, "Saffron tea is my favorite drink.")
     add(corpus, "Please forget my favorite drink saffron tea.")
@@ -159,13 +184,16 @@ def test_observed_at_guard_and_normalized_time(corpus, monkeypatch):
 
 def test_newest_request_wins_and_three_target_limit(corpus, monkeypatch):
     hits = [add(corpus, f"Saffron tea is my favorite drink, version {i}.") for i in range(4)]
-    add(corpus, "Please forget my favorite drink saffron tea.")
+    older = add(corpus, "Please forget my favorite drink saffron tea.")
     newest = add(corpus, "Please disregard my favorite drink saffron tea.")
     found, reason = links(corpus, hits)
     assert reason is None
-    assert [(r["store_id"], indices) for r, indices in found] == [(newest["store_id"], [3, 2, 1])]
+    assert [(r["store_id"], indices) for r, indices in found] == [
+        (newest["store_id"], [3, 2, 1]), (older["store_id"], [0]),
+    ]
     payload = json.loads(deliver(corpus, monkeypatch, hits, limit=4))
     assert payload["total_results"] == 2
+    assert payload["hits"][0]["cites"] == [older["store_id"]]
     assert payload["hits"][1]["cites"] == [newest["store_id"]]
 
 

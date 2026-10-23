@@ -16,7 +16,7 @@ RETRACTION_PHRASES = (
 STOPWORDS = frozenset("""a an the i me my mine you your we our it its is are was were
 be been being to of for from in on at as and or but that this these those what
 said told mentioned earlier previous previously just about please do did with
-statement information detail details remember memory anymore""".split())
+statement information detail details remember memory anymore now""".split())
 OVERLAP_TAU = 0.75
 _REQUEST = re.compile(
     r"^(?:(?:please|kindly)\s+)?(?:(?:can|could|would|will)\s+you\s+(?:please\s+)?|"
@@ -32,14 +32,17 @@ def request_object(text):
     if forgotten:
         text = "forget " + forgotten[1]
     match = _REQUEST.match(text)
-    if not match or re.search(r"\b(?:if|hypothetically|told|says|said to|tell me|talk about)\b", text, re.I):
+    if not match:
         return None
     obj = match[1].strip(" .!?;")
     if re.match(r"(?:to\b|about\s+it\b)", obj, re.I):
         return None
     obj = re.sub(r"^(?:(?:what|everything|anything)\s+i\s+(?:just\s+)?(?:said|told you|mentioned)|"
                  r"my\s+(?:(?:earlier|previous)\s+)?(?:statement|information|details?))\s*(?:about\s+)?", "", obj, flags=re.I)
-    if obj.lower() in {"that", "this", "it", "all that", "what i just said"}:
+    if re.search(r"\b(?:if|hypothetically|told|says|said to|tell me|talk about)\b",
+                 text[:match.start(1)] + obj, re.I):
+        return None
+    if obj.lower() == "all that" or not _words(obj):
         obj = ""
     return obj.lower()
 
@@ -130,8 +133,8 @@ def find_retractions(engine, entries, *, excluded_session_ids, deadline):
                 linked.append(index)
         linked.sort(key=lambda i: max(_ids(entries[i]["hit"])), reverse=True)
         if linked:
-            assigned.update(linked)
             linked = linked[:3]
+            assigned.update(linked)
             groups.append((request, linked))
     return groups, None
 
