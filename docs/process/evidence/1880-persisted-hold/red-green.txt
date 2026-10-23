@@ -1,0 +1,29 @@
+BASE 10407e12e33c1d7b09fe0e05141153555aec5d62, before product edits
+FAILED tests/test_issue_1880_persisted_hold.py::test_red1_rebuilt_retained_noop[threshold]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red1_rebuilt_retained_noop[preflight]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red1_rebuilt_retained_noop[direct]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red2_fixed_expiry_and_turn_end
+FAILED tests/test_issue_1880_persisted_hold.py::test_red3_state_change_releases_same_turn[history]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red3_state_change_releases_same_turn[config]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red3_state_change_releases_same_turn[summary]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red3_state_change_releases_same_turn[replay]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red3_state_change_releases_same_turn[pressure]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red4_invalid_records_fail_open[None]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red4_invalid_records_fail_open[record1]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red4_invalid_records_fail_open[record2]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red4_invalid_records_fail_open[broken]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red4_invalid_records_fail_open[future]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red4_invalid_records_fail_open[expired]
+FAILED tests/test_issue_1880_persisted_hold.py::test_red4_isolation_recovery_and_no_rearm
+16 failed in 1.17s
+
+Candidate product: 1dc712b; 17 passing cells in green3, corrected recovery fixture passes alone:
+1 passed in 0.62s
+
+Candidate cd68a230: added leaf-target/cache-binding regression:
+3 passed in 0.66s
+
+Legacy invalidation/isolation expectations updated after observed 3-failure file run:
+23 passed in 2.52s
+
+Final complete focused file and full suite: remote CI required; no fourth local focused-file run.
