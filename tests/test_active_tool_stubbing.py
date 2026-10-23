@@ -390,7 +390,10 @@ def test_flag_off_size_cleanup_preflight_defers_during_boundary_cooldown(
     engine.threshold_tokens = 100_000
     engine._last_boundary_skip_time = time.monotonic()
     messages, cleanup_messages = externalized_raw_cleanup_messages()
-    monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: cleanup_messages)
+    def ingest(_messages):
+        engine._ingest_replay_redaction_changes = {0: False}
+        return cleanup_messages
+    monkeypatch.setattr(engine, "_ingest_messages", ingest)
 
     assert engine.should_compress_preflight(messages) is False
     assert engine._preflight_cleanup_only_due_to_boundary_cooldown is False
@@ -404,7 +407,10 @@ def test_flag_off_replay_cleanup_cooldown_publishes_without_summary_llm(
     engine.threshold_tokens = 100_000
     engine._last_boundary_skip_time = time.monotonic()
     messages, cleanup_messages = externalized_raw_cleanup_messages()
-    monkeypatch.setattr(engine, "_ingest_messages", lambda _messages: cleanup_messages)
+    def ingest(_messages):
+        engine._ingest_replay_redaction_changes = {0: False}
+        return cleanup_messages
+    monkeypatch.setattr(engine, "_ingest_messages", ingest)
     summary_spy = Mock(
         side_effect=AssertionError("cooldown-limited replay cleanup must not summarize")
     )

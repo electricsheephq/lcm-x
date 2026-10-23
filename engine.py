@@ -6779,6 +6779,7 @@ class LCMEngine(
         assistant loops replaced by quarantine placeholders. Existing callers may
         ignore the return value when they only need durable persistence.
         """
+        self._ingest_replay_redaction_changes = {}
         if not self._session_id:
             logger.debug("Ingest skipped: no session_id")
             return self._redact_active_replay_messages(messages)
@@ -7284,6 +7285,9 @@ class LCMEngine(
                     prefer_existing_externalized=idx < scan_start,
                 )
                 replay_messages[idx] = self._redact_active_replay_messages([message])[0]
+                self._ingest_replay_redaction_changes[idx] = any(
+                    message.get(key) != replay_messages[idx].get(key) for key in ("content", "tool_calls")
+                )
             return scan_start, ignored_original_messages, self._apply_ignored_active_replay_placeholders(
                 messages, replay_messages, scan_start=scan_start, ignored_messages=ignored_original_messages,
             )
@@ -7301,7 +7305,12 @@ class LCMEngine(
             externalize=externalize_messages,
             prefer_existing_externalized=prefer_existing_externalized,
         )
+        before_redaction = replay_messages
         replay_messages = self._redact_active_replay_messages(replay_messages)
+        self._ingest_replay_redaction_changes = {
+            idx: any(before.get(key) != after.get(key) for key in ("content", "tool_calls"))
+            for idx, (before, after) in enumerate(zip(before_redaction, replay_messages))
+        }
         replay_messages = self._apply_ignored_active_replay_placeholders(
             messages,
             replay_messages,

@@ -76,7 +76,10 @@ def test_each_size_only_class_defers(engines, monkeypatch, prefix):
     engine = engines()
     original = [{"role": "user", "content": "original payload"}]
     replay = [{"role": "user", "content": prefix + " synthetic]"}]
-    monkeypatch.setattr(engine, "_ingest_messages", lambda _: replay)
+    def ingest(_):
+        engine._ingest_replay_redaction_changes = {0: False}
+        return replay
+    monkeypatch.setattr(engine, "_ingest_messages", ingest)
     assert engine.should_compress_preflight(original) is False
 
 
@@ -132,3 +135,31 @@ def test_deferred_stub_adopted_at_next_threshold_with_identical_stored_rows(engi
     assert assembled_tool(result, "live")["content"] == assembled_tool(immediate_result, "live")["content"]
     assert stored_bytes(deferred) == stored_bytes(immediate) == before
     assert deferred._dag.get_session_node_count(deferred._session_id) == 0
+
+
+@pytest.mark.parametrize("redacted", [True, False], ids=["g-hidden-redaction", "h-plain-stub"])
+def test_pre_externalization_classification_preserves_mixed_cleanup(engines, redacted):
+    engine = engines(sensitive_patterns_enabled=True, sensitive_patterns=["api_key"])
+    view = messages()
+    if redacted:
+        view[-1]["content"] += " api_key=synthetic-dummy-value"
+    before = engine._redact_active_replay_messages(view)
+    assert (before != view) is redacted
+    for _ in range(2):  # The cached replay on the second call must preserve the class.
+        assert engine.should_compress_preflight(view) is redacted
+        assert engine._last_active_replay_messages[-1]["content"].startswith("[Externalized tool output:")
+        assert engine._ingest_replay_redaction_changes[len(view) - 1] is redacted
+
+
+@pytest.mark.parametrize("known", [None, {}], ids=["stale", "missing"])
+def test_unknown_classification_keeps_immediate_adoption(engines, monkeypatch, known):
+    engine = engines()
+    view = messages()
+    assert engine.should_compress_preflight(view) is False
+    replay = engine._last_active_replay_messages
+    def ingest(_):
+        if known is not None:
+            engine._ingest_replay_redaction_changes = known
+        return replay
+    monkeypatch.setattr(engine, "_ingest_messages", ingest)
+    assert engine.should_compress_preflight(view) is True
