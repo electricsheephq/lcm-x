@@ -102,6 +102,7 @@ NON_TURN_PATH_FILES = {
     "inspect_tools.py",  # Explicit lcm_inspect tool handler; read-only metadata.
     "level3_repair.py",  # Explicit repair or read-only doctor scan.
     "maintenance.py",  # Explicit backup, repair or rotation only.
+    "memory_tools.py",  # Default-off, read-only entity cards.
     "occurrence_time.py",  # Retrieval metadata; never durable turn occurrence.
     "preanswer_evidence.py",  # Unwired opt-in pre-answer helper.
     "presets.py",  # Status/dry-run suggestions; no live config mutation.

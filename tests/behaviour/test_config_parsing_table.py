@@ -43,6 +43,7 @@ CONFIG_ROWS = (
     ('deferred_maintenance_enabled', 'LCM_DEFERRED_MAINTENANCE_ENABLED', 'bool', False),
     ('threshold_full_sweep_enabled', 'LCM_THRESHOLD_FULL_SWEEP_ENABLED', 'bool', True),
     ('extraction_enabled', 'LCM_EXTRACTION_ENABLED', 'bool', False),
+    ('entities_enabled', 'LCM_ENTITIES_ENABLED', 'bool', False),
     ('assertions_enabled', 'LCM_ASSERTIONS_ENABLED', 'bool', False),
     ('query_views_enabled', 'LCM_QUERY_VIEWS_ENABLED', 'bool', False),
     ('adaptive_retrieval_enabled', 'LCM_ADAPTIVE_RETRIEVAL_ENABLED', 'bool', False),

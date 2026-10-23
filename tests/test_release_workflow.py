@@ -38,8 +38,8 @@ def test_release_candidate_identity_surfaces_are_synchronized():
     ).read_text(encoding="utf-8")
 
     assert f"version: {IDENTITY_VERSION}" in manifest
-    assert f"hermes-lcm-x v{IDENTITY_VERSION} (15 tools)" in readme
-    assert f"hermes-lcm-x v{IDENTITY_VERSION} (15 tools)" in operator_guide
+    assert f"hermes-lcm-x v{IDENTITY_VERSION} (16 tools)" in readme
+    assert f"hermes-lcm-x v{IDENTITY_VERSION} (16 tools)" in operator_guide
     header = next((line for line in changelog.splitlines()
                    if line.startswith(f"## v{IDENTITY_VERSION} (")), "")
     assert header

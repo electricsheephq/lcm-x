@@ -22,6 +22,7 @@ def engine(tmp_path):
     config = LCMConfig(
         database_path=str(tmp_path / "disabled_tools.db"),
         assertions_enabled=True,
+        entities_enabled=True,
         adaptive_retrieval_enabled=True,
     )
     e = LCMEngine(config=config)
@@ -35,7 +36,7 @@ def engine(tmp_path):
 def test_get_tool_schemas_full_without_env(engine, monkeypatch):
     monkeypatch.delenv("LCM_DISABLED_TOOLS", raising=False)
     names = {schema.get("name") for schema in engine.get_tool_schemas()}
-    assert len(names) == 15
+    assert len(names) == 16
     assert "lcm_compute" in names
     assert "lcm_grep" in names
 
@@ -43,7 +44,7 @@ def test_get_tool_schemas_full_without_env(engine, monkeypatch):
 def test_get_tool_schemas_excludes_disabled(engine, monkeypatch):
     monkeypatch.setenv("LCM_DISABLED_TOOLS", DISABLED)
     names = {schema.get("name") for schema in engine.get_tool_schemas()}
-    assert len(names) == 10
+    assert len(names) == 11
     assert "lcm_compute" not in names
     assert "lcm_query_state" not in names
     assert "lcm_grep" in names
@@ -83,24 +84,28 @@ def test_disabled_tool_names_parsing(monkeypatch):
 @pytest.mark.parametrize("enabled", [False, True])
 def test_schema_exposure_uses_loaded_config_not_current_env(tmp_path, monkeypatch, enabled):
     monkeypatch.delenv("LCM_DISABLED_TOOLS", raising=False)
-    # Deliberately disagree with the loaded config on both flags.
+    # Deliberately disagree with the loaded config on all flags.
+    monkeypatch.setenv("LCM_ENTITIES_ENABLED", str(not enabled).lower())
     monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", str(not enabled).lower())
     monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", str(not enabled).lower())
     engine = LCMEngine(config=LCMConfig(
         database_path=str(tmp_path / "loaded-config.db"),
         assertions_enabled=enabled,
+        entities_enabled=enabled,
         adaptive_retrieval_enabled=enabled,
     ))
     try:
         names = {schema["name"] for schema in engine.get_tool_schemas()}
         assert ("lcm_query_state" in names) is enabled
         assert ("lcm_retrieve" in names) is enabled
-        assert len(names) == (15 if enabled else 13)
+        assert ("lcm_memory" in names) is enabled
+        assert len(names) == (16 if enabled else 13)
     finally:
         engine.shutdown()
 
 
 @pytest.mark.parametrize(("name", "expected"), [
+    ("lcm_memory", {"status": "disabled", "enable_with": "LCM_ENTITIES_ENABLED=1"}),
     ("lcm_query_state", {
         "status": "disabled",
         "error": "V4 assertions are not enabled for this profile",

@@ -22,6 +22,7 @@ def _isolate_plugin_registration_storage(tmp_path, monkeypatch):
     hermes_home = tmp_path / "hermes-home"
     monkeypatch.setenv("HERMES_HOME", str(hermes_home))
     monkeypatch.delenv("LCM_DATABASE_PATH", raising=False)
+    monkeypatch.delenv("LCM_ENTITIES_ENABLED", raising=False)
     monkeypatch.delenv("LCM_ASSERTIONS_ENABLED", raising=False)
     monkeypatch.delenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", raising=False)
     monkeypatch.delenv("LCM_DISABLED_TOOLS", raising=False)
@@ -45,7 +46,7 @@ EXPECTED_LCM_TOOLS = {
 }
 
 
-ALL_LCM_TOOLS = EXPECTED_LCM_TOOLS | {"lcm_query_state", "lcm_retrieve"}
+ALL_LCM_TOOLS = EXPECTED_LCM_TOOLS | {"lcm_query_state", "lcm_retrieve", "lcm_memory"}
 
 
 def _load_plugin_entrypoint_module(module_name: str):
@@ -657,6 +658,7 @@ def test_plugin_entrypoint_registers_lcm_context_engine(_isolate_plugin_registra
 
 
 def test_plugin_entrypoint_registers_declared_lcm_tools(monkeypatch):
+    monkeypatch.setenv("LCM_ENTITIES_ENABLED", "true")
     monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", "true")
     monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", "true")
     module = _load_plugin_entrypoint_module("hermes_lcm_packaging_tool_registration")
@@ -1322,6 +1324,7 @@ def test_register_gracefully_degrades_when_register_tool_hook_raises():
 
 
 def test_registered_tool_handlers_route_through_engine_handle_tool_call(monkeypatch):
+    monkeypatch.setenv("LCM_ENTITIES_ENABLED", "true")
     monkeypatch.setenv("LCM_ASSERTIONS_ENABLED", "true")
     monkeypatch.setenv("LCM_ADAPTIVE_RETRIEVAL_ENABLED", "true")
     module = _load_plugin_entrypoint_module("hermes_lcm_packaging_tool_handler_route")
