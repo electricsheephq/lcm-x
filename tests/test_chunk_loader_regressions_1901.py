@@ -40,25 +40,29 @@ def _reference(numpy, rows, batches, dim, query):
     return scored
 
 
-def _assert_scores(numpy, actual, reference):
+def _assert_scores(numpy, actual, reference, blobs, query):
     expected = {cid: score for _, cid, score in reference}
+    # Dot-product rounding scales with vector norms, not a near-zero result.
+    # Use four float32 ulp at unit score scale, scaled by both input norms.
+    scale = 4 * float(numpy.spacing(numpy.float32(1.0))) * float(numpy.linalg.norm(query))
     for cid, score, kind in actual:
         assert kind == "chunk"
         base = numpy.float32(expected[cid])
-        ulp = abs(float(numpy.spacing(base)))
-        assert abs(float(score) - float(base)) <= 4 * ulp, (
-            cid, score, float(base), ulp
+        vector = numpy.frombuffer(blobs[cid], dtype="<f4")
+        tolerance = scale * float(numpy.linalg.norm(vector))
+        assert abs(float(score) - float(base)) <= tolerance, (
+            cid, score, float(base), tolerance
         )
 
 
-def _assert_ranked(numpy, actual, reference, blobs, k):
+def _assert_ranked(numpy, actual, reference, blobs, query, k):
     ordered = sorted(reference, key=lambda row: (-row[2], -row[0], row[1]))
     expected_ids = [cid for _, cid, _ in ordered[:k]]
     actual_ids = [cid for cid, _, _ in actual]
     assert len(actual_ids) == len(set(actual_ids)) == len(expected_ids)
     # Only byte-identical stored vectors may exchange IDs at the top-k boundary.
     assert [blobs[cid] for cid in actual_ids] == [blobs[cid] for cid in expected_ids]
-    _assert_scores(numpy, actual, reference)
+    _assert_scores(numpy, actual, reference, blobs, query)
 
 
 @pytest.mark.parametrize("dim", [384, 1024])
@@ -126,13 +130,15 @@ def test_float32_scores_match_base_order(tmp_path, dim, count, binary):
                 assert loaded[0] == [rowids[cid] for cid in ids]
                 matrix = numpy.asarray(loaded[3], dtype=numpy.float32)
                 assert [row.tobytes() for row in matrix] == [blobs[cid] for cid in ids]
-                _assert_scores(numpy, list(zip(ids, matrix @ query_array, kinds)), reference)
+                _assert_scores(
+                    numpy, list(zip(ids, matrix @ query_array, kinds)), reference, blobs, query_array
+                )
         # The default prescreen multiplier retains every odd-sized survivor
         # pool, while k still splits the byte-identical duplicate tie set.
         k = max(2, (count + vs.knn_prescreen_multiplier - 1) // vs.knn_prescreen_multiplier)
         reference = _reference(numpy, rows, [selected] if binary else batches, dim, query_array)
         result = vs.knn_chunks(query, k=k, model=MODEL, provider=PROVIDER, full_scan=True)
-        _assert_ranked(numpy, result, reference, blobs, k)
+        _assert_ranked(numpy, result, reference, blobs, query_array, k)
         assert (result.coverage, result.scanned, result.total) == (
             "full_approx" if binary else "full", None, None
         )
@@ -146,7 +152,7 @@ def test_float32_scores_match_base_order(tmp_path, dim, count, binary):
                 query, k=k, model=MODEL, provider=PROVIDER, full_scan=True, scan_max_rows=cap
             )
             reference = _reference(numpy, rows, bounded_batches, dim, query_array)
-            _assert_ranked(numpy, bounded, reference, blobs, min(k, cap))
+            _assert_ranked(numpy, bounded, reference, blobs, query_array, min(k, cap))
             assert (bounded.coverage, bounded.scanned, bounded.total) == ("bounded", cap, count)
     finally:
         vs.close()
