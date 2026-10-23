@@ -1,0 +1,86 @@
+"""Synthetic paired full-preflight cost; no real Hermes home or host compression."""
+import importlib.util
+import json
+import os
+from pathlib import Path
+import statistics
+import subprocess
+import sys
+import time
+import types
+
+root = Path(sys.argv[1]).resolve()
+sys.path.insert(0, str(root))
+import tests.conftest  # register hermes_lcm only, with the CI host stub
+from hermes_lcm.compaction import CompactionMixin
+from hermes_lcm.config import LCMConfig
+from hermes_lcm.engine import LCMEngine
+from tests.test_active_tool_stubbing import tool_pair
+
+out = Path(__file__).resolve().parent
+scratch = Path(os.environ["HERMES_HOME"]).parent
+base = "10407e12e33c1d7b09fe0e05141153555aec5d62"
+source = subprocess.check_output(["git", "-C", str(root), "show", base + ":compaction.py"], text=True)
+module = types.ModuleType("hermes_lcm.compaction_baseline")
+module.__package__ = "hermes_lcm"
+sys.modules[module.__name__] = module
+exec(compile(source, "baseline-compaction.py", "exec"), module.__dict__)
+engine_source = subprocess.check_output(["git", "-C", str(root), "show", base + ":engine.py"], text=True)
+engine_module = types.ModuleType("hermes_lcm.engine_baseline")
+engine_module.__package__ = "hermes_lcm"
+sys.modules[engine_module.__name__] = engine_module
+exec(compile(engine_source, "baseline-engine.py", "exec"), engine_module.__dict__)
+classes = {"baseline": module.CompactionMixin, "candidate": CompactionMixin}
+engine_classes = {"baseline": engine_module.LCMEngine, "candidate": LCMEngine}
+summary = []
+with (out / "pairs.jsonl").open("w") as raw:
+    for count in (10_000, 100_000):
+        config = LCMConfig(database_path=str(scratch / f"cost-{count}.db"),
+            fresh_tail_count=32, leaf_chunk_tokens=20_000,
+            large_output_externalization_enabled=True,
+            large_output_externalization_threshold_chars=1_000_000,
+            large_output_active_replay_stubbing_enabled=True,
+            large_output_active_replay_stub_threshold_tokens=5)
+        engine = LCMEngine(config=config, hermes_home=str(scratch / f"cost-home-{count}"))
+        engine.on_session_start("cost", conversation_id="cost", context_length=200_000)
+        engine.threshold_tokens = 100_000
+        conn = engine._store._conn
+        conn.executemany("INSERT INTO messages (session_id,conversation_id,role,content,timestamp,token_estimate) VALUES ('cost','cost','user',?,1700000000,5)",
+            [(f"synthetic historical row {i}",) for i in range(count - 3)])
+        conn.commit()
+        view = [{"role": "system", "content": "system"}, *tool_pair("live", "synthetic live payload " * 100)]
+        engine._ingest_messages(view)
+        actual = conn.execute("SELECT COUNT(*) FROM messages WHERE session_id='cost'").fetchone()[0]
+        assert actual == count, (actual, count)
+        values = {key: [] for key in classes}
+        for i in range(210):
+            row = {"rows": count, "pair": i - 10, "order": ["baseline", "candidate"] if i % 2 == 0 else ["candidate", "baseline"]}
+            for label in row["order"]:
+                cls = classes[label]
+                engine._should_compress_preflight_impl = cls._should_compress_preflight_impl.__get__(engine)
+                engine._replay_diff_requests_ingest_cleanup = cls._replay_diff_requests_ingest_cleanup.__get__(engine)
+                for method in ("_ingest_messages", "_build_ingest_replay"):
+                    setattr(engine, method, getattr(engine_classes[label], method).__get__(engine))
+                started = time.perf_counter_ns()
+                result = engine.should_compress_preflight(view)
+                elapsed = (time.perf_counter_ns() - started) / 1e6
+                assert result is (label == "baseline"), (label, result)
+                row[label + "_ms"] = elapsed
+                if i >= 10:
+                    values[label].append(elapsed)
+            if i >= 10:
+                raw.write(json.dumps(row) + "\n")
+                raw.flush()
+        a, b = [statistics.median(values[key]) for key in ("baseline", "candidate")]
+        limit = max(a * .1, .05)
+        delta = statistics.median([b - a for a, b in zip(values["baseline"], values["candidate"])])
+        result = dict(rows=count, n=200, baseline_median_ms=a, candidate_median_ms=b,
+            paired_median_delta_ms=delta, median_delta_ms=b-a, allowed_increase_ms=limit,
+            baseline_p10_ms=sorted(values["baseline"])[19], baseline_p90_ms=sorted(values["baseline"])[179],
+            candidate_p10_ms=sorted(values["candidate"])[19], candidate_p90_ms=sorted(values["candidate"])[179],
+            passed=b-a <= limit and delta <= limit)
+        summary.append(result)
+        engine.shutdown()
+        print(json.dumps(result), flush=True)
+(out / "summary.json").write_text(json.dumps(dict(base=base, rows=summary), indent=2) + "\n")
+assert all(row["passed"] for row in summary)
