@@ -55,6 +55,7 @@ TRACE_GUIDANCE = "Regenerate deliberately: python -m tests.behaviour.ingest_trac
 OBSERVED_ATTRIBUTES = frozenset({
     "_session_id", "_session_ignored", "_session_stateless", "_session_platform", "_conversation_id",
     "_ingest_cursor", "_ingest_cursor_needs_reconcile", "_last_compacted_store_id",
+    "_ingest_replay_redaction_changes",
     "_compress_commit_proof", "_last_emission_descriptors", "_compress_occurrences", "_compress_run",
     "_config", "_hermes_home", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
     "_host_rewrite_overrides", "_host_rewrite_watch", "_last_active_replay_messages",
