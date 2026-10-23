@@ -422,11 +422,15 @@ def test_t6_due_deep_check_behind_a_writer_does_not_stall_the_open(tmp_path, mon
     assert seeded_engine.drain_rollup_maintenance(timeout=0), "seed rollup worker is not idle"
     assert seeded_engine.drain_embedding_maintenance(timeout=0), "seed embedding worker is not idle"
     db_bootstrap.join_background_integrity_scans(timeout=10)
-    # The join helpers return no status; no public registry-idle helper exists.
+    # The join helpers return no status; no public registry-idle helper exists. The registries are
+    # process-wide and keep a finished thread when another test replaced its scan body, so a
+    # worker counts only while it is alive (as in the dispatchers themselves).
     with db_bootstrap._integrity_scan_lock:
-        assert not db_bootstrap._integrity_scan_threads, "integrity workers are not idle"
+        live = [t for t in db_bootstrap._integrity_scan_threads.values() if t.is_alive()]
+        assert not live, f"integrity workers are not idle: {live}"
     with db_bootstrap._stem_lock:
-        assert not db_bootstrap._stem_threads, "stem backfill workers are not idle"
+        live = [t for t in db_bootstrap._stem_threads.values() if t.is_alive()]
+        assert not live, f"stem backfill workers are not idle: {live}"
     aged = _age_markers(db, hours=25)
 
     release, holder = _hold_write_lock(db)
