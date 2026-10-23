@@ -188,7 +188,7 @@ def test_embedding_schema_findings_type_hints() -> None:
 
 
 def test_embedding_registry(tmp_path: Path) -> None:
-    assert tuple(COMPAT_REGISTRY) == ("embedding",)
+    assert tuple(COMPAT_REGISTRY) == ("embedding", "entity", "memory")
     family = COMPAT_REGISTRY["embedding"]
     assert family.name == "embedding" and family.prefix == "lcm_embedding"
     assert family.marker == "embeddings_v1" and family.removal_version is None
