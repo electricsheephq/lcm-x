@@ -95,6 +95,18 @@ def test_v5_optional_time_columns_leave_view_unknown(tmp_path):
     assert result["unreachable_source_ids"] is None
 
 
+def test_pre_s0_sender_columns_are_not_required_by_inspector(tmp_path):
+    messages = _messages()
+    path = _copy(tmp_path, messages)
+    with sqlite3.connect(path) as connection:
+        names = {row[1] for row in connection.execute("PRAGMA table_info(messages)")}
+        assert {"sender_id", "sender_source"} <= names
+        for column in ("sender_id", "sender_source"):
+            connection.execute(f"ALTER TABLE messages DROP COLUMN {column}")
+    result = _inspect(path, **_inputs(path, messages))
+    assert result["evidence_code"] != "source_time_unavailable"
+
+
 @pytest.mark.parametrize("owner", [None, "", " \t ", " conv ", "\tconv\t"])
 def test_copy_groups_use_normalized_conversation_ownership(tmp_path, owner):
     path = _copy(tmp_path, [{"role": "user", "content": "private payload repeated"}] * 2)

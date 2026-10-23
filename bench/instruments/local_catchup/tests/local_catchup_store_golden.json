@@ -1,5 +1,5 @@
 {
-  "digest": "84ce4dadea90fbe0fad3fb40a2512413da48f597e38017f1aa0d7633ca5d5ba0",
+  "digest": "0e699b69b3e6e61ba9d5654e2c737330c4ff04827acb0d4c5b3f97aba230335e",
   "objects": {
     "idx_lcm_chunk_meta_identity_embedded_at": {
       "digest": "c8877e89d3f3d13676f5d3f9f635d01429723b2248b05975a93868e1f107f512",
@@ -132,7 +132,7 @@
       "type": "table"
     },
     "messages": {
-      "digest": "57d9a16cdb0e4055bb5bd6121beb43d9852c21a7195cbbe58474b07a9e1d9e21",
+      "digest": "6b9086c39d0eee6aa5683e0b24dd69eca0f345badae67df26a6ad14f2c42e73a",
       "table": "messages",
       "type": "table"
     },
@@ -441,6 +441,8 @@
         "observed_at_source": "fd68fbdbe9d9ec14d4a1c7c45c9e4a01f9dcca0efd941c61984163847fd1c8f3",
         "pinned": "5b452715e8d7106aa0f1f400cec0a29c8db5e724d519ad5bdf9ba8e1d79f2a17",
         "role": "ef5ccc3d87f1342e4d45aac171b546fdd14b8ccaa0aecb3ebd05d2e5db4220be",
+        "sender_id": "13da54d0a904aabfe87abb9ca709a789eb557c65ff83acc67ed8131ebd078f96",
+        "sender_source": "13da54d0a904aabfe87abb9ca709a789eb557c65ff83acc67ed8131ebd078f96",
         "session_id": "711c7208d52f661cc2d934c55ac6f097152aa752cf7e0987325e841aea1a2171",
         "source": "9f6e528ca5a311e5165c896c8e8ea062c496b16c1f656f39beb3ba0cd4698bd8",
         "store_id": "e394adcc480a0bdfb0eec1d682e6a6d02cf2424b80149676be7bc86bc35a1d48",
@@ -450,7 +452,7 @@
         "tool_calls": "13da54d0a904aabfe87abb9ca709a789eb557c65ff83acc67ed8131ebd078f96",
         "tool_name": "13da54d0a904aabfe87abb9ca709a789eb557c65ff83acc67ed8131ebd078f96"
       },
-      "digest": "44af9add34696fea4edf8c6e2b05c953c34c00cd37ff9adbd833e651d401af9f",
+      "digest": "5ecafa23c4a6d9832265e8f4fe626e567fdf07099e545808e11be1ebebcf7e19",
       "rows": 8
     },
     "messages_fts": {

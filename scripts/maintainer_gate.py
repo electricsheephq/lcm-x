@@ -49,7 +49,7 @@ TURN_PATH_FILES = {
     "dag.py", "engine.py", "escalation.py", "externalize.py", "extraction.py", "fresh_tail.py",
     "host_uid.py", "host_uid_emit.py", "identity_anchor.py", "ingest_protection.py",
     "leaf_prep.py", "lifecycle_state.py", "message_analysis.py", "message_content.py", "placeholder_ledger.py",
-    "prefix_matching.py", "reconcile.py", "sanitize.py", "store_complete.py",
+    "prefix_matching.py", "reconcile.py", "sanitize.py", "sender_capture.py", "store_complete.py",
     "summary_attempt.py", "summary_input_clip.py", "summary_outcome.py", "survival_codec.py",
     "survival_fit.py", "tokens.py", "tool_pairs.py",
     "config.py",  # Defaults and loaders set fresh-tail cuts, filters and summary requests.

@@ -35,6 +35,7 @@ from .compaction_policy import (
 )
 from .config import LCMConfig, _disabled_tool_names, containment_base_dir, lcm_env_get, profile_bound
 from .dag import SummaryDAG, SummaryNode
+from . import sender_capture
 from .diagnostics import _enforce_state_db_containment
 from .engine_registry import (
     _ACTIVE_ENGINE_COLD_START_LOCK,
@@ -2866,6 +2867,8 @@ class LCMEngine(
             use_lcm_engine(self, ingest_stopped, timeout=None)
         except Exception as exc:
             logger.debug("LCM on_turn_complete error: %s", type(exc).__name__)
+        finally:
+            sender_capture.retire(self, meta.get("turn_id"))
 
     def ingest(self, messages: List[Dict[str, Any]]) -> None:
         """Persist messages to the durable store every turn.
@@ -4692,6 +4695,7 @@ class LCMEngine(
                     )
 
     def _on_session_start_unlocked(self, session_id: str, **kwargs) -> None:
+        sender_capture.retire(self)
         # The post-LLM hook also binds here under stable engine use, without
         # entering the public wrapper.
         self._retry_session_end_tails()
@@ -4983,6 +4987,7 @@ class LCMEngine(
 
 
     def on_session_end(self, session_id: str, messages: List[Dict[str, Any]]) -> None:
+        sender_capture.retire(self)
         with self._exclusive_lifecycle("end"):
             if self._stable_use_closed:
                 return
@@ -5412,6 +5417,7 @@ class LCMEngine(
             raise
 
     def on_session_reset(self) -> None:
+        sender_capture.retire(self)
         with self._exclusive_lifecycle("reset"):
             if self._stable_use_closed:
                 return
@@ -6821,6 +6827,7 @@ class LCMEngine(
 
         if getattr(self, "_identity_anchor_recovery", None):
             self._identity_anchor_observe_recovery()
+        sender_capture.try_update(self)
         self._capture_host_rewrites(messages)
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
@@ -7223,6 +7230,7 @@ class LCMEngine(
             self._compression_boundary_stored_placeholder_digest_counts = {}
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
             self._host_uid_shadow(host_uids)
+            sender_capture.try_update(self)
             return remember(active_replay_messages)
 
         protected_messages, active_replay_messages = self._protect_ingest_rows(
@@ -7235,9 +7243,14 @@ class LCMEngine(
         store_ids = self._store_ingest_rows(
             messages_to_store_with_index=messages_to_store_with_index,
             protected_messages=protected_messages,
+            sender_originals=[(idx, messages[idx]) for idx, _msg in messages_to_store_with_index],
+            sender_excluded=anchor_remainders,
         )
+        sender_capture.exclude(self, {sid for (idx, _m), sid in zip(messages_to_store_with_index, store_ids)
+                                      if idx in anchor_remainders and sid})
         originals = [messages[idx] for idx, _msg in messages_to_store_with_index]
         self._watch_stored_user_rows(zip(originals, protected_messages, store_ids))
+        sender_capture.try_update(self)
         if anchor_plan is not None:
             stored_at = {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)}
             try:  # #1501 provenance: read right after R is stored (R3 has a NULL stamp); a miss duplicates
@@ -7646,6 +7659,7 @@ class LCMEngine(
         self, *,
         messages_to_store_with_index: list[tuple[int, Dict[str, Any]]],
         protected_messages: List[Dict[str, Any]],
+        sender_originals=(), sender_excluded=(),
     ) -> list[int]:
         estimates = [count_message_tokens(m) for m in protected_messages]
         batch = dict(
@@ -7654,6 +7668,9 @@ class LCMEngine(
             messages=protected_messages, estimates=estimates,
             metadata_messages=[msg for _idx, msg in messages_to_store_with_index],
         )
+        pending, senders = sender_capture.batch_senders(self, sender_originals, sender_excluded)
+        if senders is not None:
+            batch["senders"] = senders
         pending_after_store_id = 0
         if self._session_end_flush_active:
             tail = self._store.get_session_tail(self._session_id, limit=1)
@@ -7667,10 +7684,14 @@ class LCMEngine(
                 pending = {**batch, "after_store_id": pending_after_store_id}
                 for key in ("messages", "estimates", "metadata_messages"):
                     pending[key] = copy.deepcopy(pending[key])
+                if "senders" in pending:
+                    pending["senders"] = copy.deepcopy(pending["senders"])
                 if not any(old == pending for old in self._pending_session_tails):
                     self._pending_session_tails.append(pending)
                 _PENDING_TAIL_ENGINES.add(self)
             raise
+        if senders is not None:
+            sender_capture.record(self, pending, store_ids, senders)
         return store_ids
 
     @staticmethod
@@ -10317,6 +10338,7 @@ class LCMEngine(
             source=batch["source"], conversation_id=batch["conversation_id"],
             metadata_factory=self._real_user_scaffold_metadata_rows,
             metadata_messages=batch["metadata_messages"],
+            **({"senders": batch["senders"]} if "senders" in batch else {}),
         )
 
     @staticmethod
@@ -10348,6 +10370,8 @@ class LCMEngine(
             tail["after_store_id"] = row["store_id"]
         for key in ("messages", "estimates", "metadata_messages"):
             tail[key] = tail[key][covered:]
+        if "senders" in tail:
+            tail["senders"] = tail["senders"][covered:]
 
     def _retry_pending_session_tails(self, *, deadline: float | None = None, exiting: bool = False) -> None:
         """Drain under the lifecycle lock, sharing one busy-wait budget."""
@@ -10446,6 +10470,7 @@ class LCMEngine(
             self._stable_use_lock.release()
 
     def shutdown(self):
+        sender_capture.retire(self)
         with self._exclusive_lifecycle("shutdown"):
             if self._stable_use_closed:
                 return
