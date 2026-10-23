@@ -317,7 +317,7 @@ def observe_occurrence_digests(patch: Any, canonical: Any) -> None:
         patch.setattr(module, "_commit_proof_identity_digest", identity_digest)
 
     original_write = store.MessageStore.write_metadata_json
-    def write(target: Any, keys: Any, serialized: str, *args: Any, **kwargs: Any) -> Any:
+    def write(self: Any, keys: Any, serialized: str, *, skip_unchanged: bool = False) -> Any:
         if any(key.startswith("compaction_commit_proof:") for key in keys):
             try:
                 raw = json.loads(serialized)
@@ -327,7 +327,7 @@ def observe_occurrence_digests(patch: Any, canonical: Any) -> None:
                 clean = canonical.value(raw)
                 register("proof", hashlib.sha256(json.dumps(raw, sort_keys=True).encode()).hexdigest(),
                          hashlib.sha256(json.dumps(clean, sort_keys=True).encode()).hexdigest(), raw, clean)
-        return original_write(target, keys, serialized, *args, **kwargs)
+        return original_write(self, keys, serialized, skip_unchanged=skip_unchanged)
     patch.setattr(store.MessageStore, "write_metadata_json", write)
 
 
