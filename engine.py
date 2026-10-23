@@ -6646,11 +6646,12 @@ class LCMEngine(
         ]
 
     def _write_compress_commit_proof_payload(self, proof, payload) -> None:
-        metadata = proof.get("output_metadata")
-        snapshot = {"output_metadata": metadata, "output_length": len(proof["output"])}
-        if not self._occurrence_snapshot_shape_valid(snapshot, payload):
-            raise ValueError("invalid occurrence snapshot")
-        snapshot["proof_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        snapshot = None
+        if "output_metadata" in proof:
+            snapshot = {"output_metadata": proof["output_metadata"], "output_length": len(proof["output"])}
+            if not self._occurrence_snapshot_shape_valid(snapshot, payload):
+                raise ValueError("invalid occurrence snapshot")
+            snapshot["proof_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
         # Helpers defer their commits to this owner; no exception is swallowed before rollback.
         with self._store.atomic(immediate=True):
             super()._write_compress_commit_proof_payload(proof, payload)
@@ -6686,15 +6687,17 @@ class LCMEngine(
             scaffold = payload.get("scaffold_sha256_v4", payload.get("scaffold_sha256"))
             if scaffold is not None:
                 return len(rows) == len(scaffold)
-            positions = {item["output_occurrence"]["index"] for item in payload.get("emissions", [])
-                         if item.get("retained_source") is None}
-            null_positions = {i for i, row in enumerate(rows) if row["identity_sha256"] is None}
-            # The leading system anchor can carry LCM's note without an emission descriptor.
-            if null_positions not in (positions, positions | {0}):
+            # Old finalizers bind every descriptor to the complete output length. Carriers may
+            # keep full identity; system notes and host todo rows may be null at any position.
+            lengths = [item["output_occurrence"]["of"] for item in payload.get("emissions", [])]
+            if any(type(n) is not int or n != len(rows) for n in lengths):
                 return False
         return True
 
     def _durable_commit_proof_payload(self, session_id=None):
+        local = self._compress_commit_proof
+        if local and local.get("durable") is False and local.get("session_id") == (session_id or self._session_id):
+            return None
         payload = super()._durable_commit_proof_payload(session_id)
         if payload is None:
             return None

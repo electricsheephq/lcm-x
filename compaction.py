@@ -1175,9 +1175,12 @@ class CompactionMixin:
             if not effective:
                 payload["scaffold_sha256_v4"] = full
             self._write_compress_commit_proof_payload(proof, payload)
+            if "durable" in proof:
+                proof["durable"] = True
         except Exception:
-            self._compress_commit_proof = None
-            logger.warning("LCM occurrence-proof publication failed; proof unavailable", exc_info=True)
+            proof.pop("output_metadata", None)
+            proof["durable"] = False
+            logger.warning("LCM occurrence-proof publication failed; proof not durable", exc_info=True)
 
     def _prepare_compress_commit_proof(self, proof, result) -> None:
         """Attach engine-specific evidence before the proof's publication point."""

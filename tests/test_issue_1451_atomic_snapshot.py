@@ -71,7 +71,7 @@ def test_one_atomic_publication_has_no_proof_only_commit(published, monkeypatch)
 
 
 @pytest.mark.parametrize("boundary", ["proof", "snapshot", "commit"])
-def test_failed_publication_rolls_back_and_drops_memory_proof(published, monkeypatch, caplog, boundary):
+def test_failed_publication_rolls_back_and_keeps_positional_proof(published, monkeypatch, caplog, boundary):
     engine, host, output = published
     before = pair(engine)
     original = engine._store.write_metadata_json
@@ -98,13 +98,15 @@ def test_failed_publication_rolls_back_and_drops_memory_proof(published, monkeyp
         with caplog.at_level(logging.WARNING):
             engine._record_compress_commit_proof(host, output)
         assert pair(engine) == before
-        assert engine._compress_commit_proof is None
+        assert engine._compress_commit_proof["durable"] is False
+        assert "output_metadata" not in engine._compress_commit_proof
+        assert engine._durable_commit_proof_payload() is None
         assert states_at_warning == [False]
     finally:
         logging.getLogger().removeHandler(watcher)
 
 
-MALFORMED = ("null", "scalar", "non-dict", "short", "long", "timestamp", "uid", "digest", "missing-field")
+MALFORMED = ("null", "scalar", "non-dict", "short", "long", "timestamp", "uid", "digest", "missing-field", "bool-timestamp", "bool-uid", "bool-digest")
 
 
 def malformed(kind, valid):
@@ -119,6 +121,10 @@ def malformed(kind, valid):
         return rows[:-1]
     if kind == "long":
         return rows + [copy.deepcopy(rows[-1])]
+    if kind.startswith("bool-"):
+        rows[-1][{"bool-timestamp": "timestamp", "bool-uid": "message_uid",
+                  "bool-digest": "identity_sha256"}[kind]] = True
+        return rows
     if kind == "missing-field":
         rows[-1].pop("timestamp")
     else:
@@ -167,7 +173,9 @@ def test_invalid_writer_snapshot_never_gets_a_matching_digest(published):
     proof["output_metadata"] = None
     engine._persist_compress_commit_proof(proof)
     assert pair(engine) == before
-    assert engine._compress_commit_proof is None
+    assert engine._compress_commit_proof["durable"] is False
+    assert "output_metadata" not in engine._compress_commit_proof
+    assert engine._durable_commit_proof_payload() is None
 
 
 @pytest.mark.parametrize("mutation", ["valid", "short", "long", "extra-scaffold", "bool-length"])
@@ -209,3 +217,19 @@ def test_legacy_snapshot_with_leading_system_anchor_attaches(tmp_path, monkeypat
         assert loaded.get("output_metadata") == rows
     finally:
         engine.shutdown()
+
+
+def test_boundary_can_republish_positional_proof_without_snapshot(published, monkeypatch):
+    engine, host, output = published
+    original = engine._store.write_metadata_json
+    def fail(*args, **kwargs):
+        raise sqlite3.OperationalError("injected failure")
+    monkeypatch.setattr(engine._store, "write_metadata_json", fail)
+    engine._record_compress_commit_proof(host, output)
+    proof = engine._compress_commit_proof
+    assert proof["durable"] is False and "output_metadata" not in proof
+    monkeypatch.setattr(engine._store, "write_metadata_json", original)
+    engine._persist_compress_commit_proof(proof)
+    assert engine._compress_commit_proof is proof and proof["durable"] is True
+    assert "output_metadata" not in engine._durable_commit_proof_payload()
+    assert pair(engine)[1] is None

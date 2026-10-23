@@ -1969,7 +1969,7 @@ def test_child_proof_write_failure_then_restart_before_first_ingest_loses_nothin
 
 def test_metadata_write_exception_is_contained(tmp_path, monkeypatch):
     """#484 round 1 item 5: a raising write_metadata_json does not fail compress()
-    and leaves the process-local proof unavailable (#1451), retaining every source row."""
+    and keeps the positional proof without claiming durability (#1451)."""
     monkeypatch.setattr(lcm_engine_module, "summarize_with_escalation", _stub_summarizer())
     engine = LCMEngine(
         config=LCMConfig(
@@ -1999,7 +1999,7 @@ def test_metadata_write_exception_is_contained(tmp_path, monkeypatch):
         monkeypatch.setattr(engine._store, "write_metadata_json", failing_write)
         compressed = engine.compress(list(host), force=True)
         assert engine._last_compression_status == "compacted"
-        assert engine._compress_commit_proof is None
+        assert engine._compress_commit_proof["durable"] is False
         before = engine._store.get_session_messages("S0")
         engine.on_session_end("S0", pre)
         engine.on_session_start("S0", boundary_reason="compression", old_session_id="S0", platform="acp")
@@ -2008,8 +2008,7 @@ def test_metadata_write_exception_is_contained(tmp_path, monkeypatch):
         assert [(r["store_id"], r["role"], r["content"]) for r in stored[:len(before)]] == [
             (r["store_id"], r["role"], r["content"]) for r in before]
         assert sum(r["content"] == _turn(13)[1]["content"] for r in stored) == 1
-        # Unavailable proof retains ambiguous replay rows rather than suppressing an occurrence.
-        assert len(stored) <= len(before) + len(pre) + len(compressed) + 1
+        assert len(stored) == len(before) + 1
     finally:
         engine.shutdown()
 
