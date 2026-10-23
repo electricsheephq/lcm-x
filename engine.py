@@ -7737,12 +7737,13 @@ class LCMEngine(
                           needs_receipt=True, warm_prefix=0)
             return result
 
-    def _occurrence_cursor_fence(self, messages, cursor):
+    def _occurrence_cursor_fence(self, messages, cursor, consumed_proof=None):
         resolution = getattr(self, "_occurrence_ingest_plan", None)
         if not resolution or resolution.get("length") != len(messages):
             return cursor
         # Valid emission provenance remains separate from occurrence evidence.
-        proof = None if resolution.get("proof_free") else (
+        proof = None if resolution.get("failed") else consumed_proof or (
+            None if resolution.get("proof_free") else
             getattr(self, "_compress_commit_proof", None) or self._durable_commit_proof_payload())
         generated = set()
         if proof:
@@ -7912,6 +7913,7 @@ class LCMEngine(
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
         accepted_compaction_prefix = 0
+        consumed_emission_proof = None
         proof = getattr(self, "_compress_commit_proof", None)
         if proof and proof.get("durable") is False:
             metadata = proof.get("output_metadata")
@@ -7993,6 +7995,13 @@ class LCMEngine(
                     self._compress_commit_proof = None
                 else:
                     self._ingest_cursor_needs_reconcile = True
+        if (proof and accepted_compaction_prefix and self._compress_commit_proof is None
+                and isinstance(proof.get("output_metadata"), list)
+                and len(proof["output_metadata"]) == len(proof.get("output") or ())
+                and all(isinstance(row, dict) for row in proof["output_metadata"])):
+            # This call accepted and retired the scoped proof above. Keep it
+            # only through its synchronous fence, never in a copied warm plan.
+            consumed_emission_proof = proof
         cached_source_identities = getattr(self, "_last_active_replay_source_identities", None)
         current_prefix_identities = (
             [self._message_replay_identity(message, strip_carrier=False) for message in messages[:cursor]]
@@ -8078,7 +8087,7 @@ class LCMEngine(
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
         # Apply independent row evidence before any residual skip or anchor
         # decision. The compaction snapshot can never outrank a newer fact.
-        cursor = self._occurrence_cursor_fence(messages, cursor)
+        cursor = self._occurrence_cursor_fence(messages, cursor, consumed_emission_proof)
         self._ingest_cursor = cursor
         new_prefix_occurrences -= occurrence["proven"]
         new_prefix_occurrences.update(occurrence["fresh"])

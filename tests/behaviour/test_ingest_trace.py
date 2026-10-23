@@ -116,6 +116,11 @@ def test_native_manual_proof_is_legacy_reader_without_extra_note(name: str, tmp_
                                 if event.startswith(label + " ")))
         assert not any(row[5] == harness.NOTE["content"] for row in state["tables"]["messages"])
         assert state["tables"]["messages"][:4] == before["tables"]["messages"]
+        assert len(state["tables"]["messages"]) == (5 if name.endswith("new-stamp") else 4)
+        if name.endswith("new-stamp"):
+            assert state["tables"]["messages"][-1][5] == before["tables"]["messages"][0][5]
+            assert state["tables"]["messages"][-1][13] == 999.
+        assert state["_compress_commit_proof"] is None
 
 
 @pytest.mark.parametrize("name", ["uid-bindings-new-occurrence", "uid-bindings-canonical-same-row"])
