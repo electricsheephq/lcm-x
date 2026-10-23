@@ -240,7 +240,7 @@ class CompactionMixin:
             return True
         if self.threshold_tokens <= 0:
             return False
-        return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens)
+        return tokens >= self.threshold_tokens and not self._sweep_budget_hold_applies(tokens, managed_scope=True)
 
     def should_compress_preflight(self, messages):
         """Pre-flight check — also ingests messages into the store."""

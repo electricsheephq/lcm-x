@@ -2463,11 +2463,13 @@ class LCMEngine(
         else:
             logger.info("LCM automatic compaction held for %.0fs: %s", _SWEEP_BUDGET_HOLD_SECONDS, reason)
 
-    def _no_progress_hold_active(self) -> bool:
+    def _no_progress_hold_active(self, *, managed_scope: bool = False) -> bool:
         """#651: never latches; it ends at its time (a stored leaf clears it in compress())."""
+        if not managed_scope and self._bypasses_lcm_context_management():
+            return False
         if self._no_progress_hold is None or (
                 self._no_progress_hold[1] == "no_progress" and getattr(self, "_no_progress_hold_persisted", False)):
-            return self._persisted_no_progress_hold_active()
+            return self._persisted_no_progress_hold_active(managed_scope=True)
         if time.monotonic() < self._no_progress_hold[0]:
             return True
         self._no_progress_hold = None
@@ -2500,12 +2502,13 @@ class LCMEngine(
         except Exception:
             self._no_progress_metadata_warning()
 
-    def _no_progress_fingerprint(self) -> Optional[str]:
+    def _no_progress_fingerprint(self, *, managed_scope: bool = False) -> Optional[str]:
         replay = getattr(self, "_no_progress_replay", None)
         observed = getattr(self, "_no_progress_observed_tokens", None)
         if (not replay or replay[:2] != (self._session_id, self._conversation_id)
                 or observed is None or observed <= 0
-                or self._consecutive_ingest_failures or self._bypasses_lcm_context_management()):
+                or self._consecutive_ingest_failures
+                or (not managed_scope and self._bypasses_lcm_context_management())):
             return None
         # Explicit non-secret settings only, never a config dump, credential, URL
         # or prompt. Changes to filtering identities are represented only by hash.
@@ -2563,8 +2566,8 @@ class LCMEngine(
             self._no_progress_metadata_warning()
             return None
 
-    def _persisted_no_progress_hold_active(self) -> bool:
-        if not self._session_id or self._bypasses_lcm_context_management():
+    def _persisted_no_progress_hold_active(self, *, managed_scope: bool = False) -> bool:
+        if not self._session_id or (not managed_scope and self._bypasses_lcm_context_management()):
             return False
         self._no_progress_hold = None
         try:
@@ -2585,7 +2588,7 @@ class LCMEngine(
             remaining = expires - time.time()
             if remaining <= 0:
                 return False
-            fingerprint = self._no_progress_fingerprint()
+            fingerprint = self._no_progress_fingerprint(managed_scope=True)
             if fingerprint is None:
                 return False
             if fingerprint != record["fingerprint"]:
@@ -2712,11 +2715,11 @@ class LCMEngine(
         if self._bypasses_lcm_context_management():
             return False
         self._no_progress_observed_tokens = int(tokens or 0)
-        if not self._no_progress_hold_active():
+        if not self._no_progress_hold_active(managed_scope=True):
             return False
         if self._should_force_overflow_recovery(observed_tokens=tokens):
             return False
-        return self._sweep_budget_hold_applies(tokens)
+        return self._sweep_budget_hold_applies(tokens, managed_scope=True)
 
     def _sweep_budget_hold_blocks(self, tokens: int) -> bool:
         """#625: the #608 hold at the host gate, with the exemptions of ``_no_progress_hold_blocks``."""
@@ -2753,11 +2756,14 @@ class LCMEngine(
             and not self._bypasses_lcm_context_management()
             and self._sweep_budget_hold_active())
 
-    def _sweep_budget_hold_applies(self, tokens: Optional[int]) -> bool:
+    def _sweep_budget_hold_applies(self, tokens: Optional[int], *, managed_scope: bool = False) -> bool:
         """#608: the hold never applies at or over the survival ceiling, whose fit only compress() runs.
         #651: the no-progress hold applies the same way."""
+        # A true flag belongs only to this synchronous invocation's completed bypass check.
+        if not managed_scope and self._bypasses_lcm_context_management():
+            return False
         self._no_progress_observed_tokens = None if tokens is None else int(tokens)
-        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
+        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active(managed_scope=True):
             return False
         ceiling = self._survival_ceiling()
         if ceiling is None or tokens is None:

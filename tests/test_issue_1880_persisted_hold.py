@@ -55,6 +55,56 @@ def arm(path):
     return view, before
 
 
+@pytest.mark.parametrize("matching", [False, True])
+def test_h3_threshold_checks_managed_scope_once(tmp_path, monkeypatch, matching):
+    view, _ = arm(tmp_path)
+    engine = rebuild(tmp_path)
+    try:
+        engine._ingest_messages(view)
+        if not matching:
+            record = engine._store.read_metadata_json(KEY)
+            assert record["fingerprint"] != "0" * 64
+            engine._store.write_metadata_json([KEY], json.dumps(dict(record, fingerprint="0" * 64)))
+        bypass = Mock(wraps=engine._bypasses_lcm_context_management)
+        read = Mock(wraps=engine._store.read_metadata_json)
+        fingerprint = Mock(wraps=engine._no_progress_fingerprint)
+        monkeypatch.setattr(engine, "_bypasses_lcm_context_management", bypass)
+        monkeypatch.setattr(engine._store, "read_metadata_json", read)
+        monkeypatch.setattr(engine, "_no_progress_fingerprint", fingerprint)
+        for _ in range(2):
+            assert engine.should_compress(10_000) is not matching
+        assert bypass.call_count == 2  # One fresh scope decision per invocation.
+        assert read.call_count == fingerprint.call_count == 2  # Current proof is never cached.
+    finally:
+        engine.shutdown()
+
+
+def test_h3_default_helpers_recheck_auxiliary_scope_without_mutation(tmp_path, monkeypatch):
+    view, _ = arm(tmp_path)
+    engine = rebuild(tmp_path)
+    try:
+        engine._ingest_messages(view)
+        assert not engine.should_compress(10_000)
+        state = (engine._no_progress_hold, engine._no_progress_deadline, engine._no_progress_observed_tokens)
+        bypass = Mock(return_value=True)
+        read = Mock(wraps=engine._store.read_metadata_json)
+        monkeypatch.setattr(engine, "_bypasses_lcm_context_management", bypass)
+        monkeypatch.setattr(engine._store, "read_metadata_json", read)
+        assert engine._no_progress_fingerprint() is None
+        assert not engine._persisted_no_progress_hold_active()
+        assert not engine._no_progress_hold_active()
+        assert not engine._sweep_budget_hold_applies(10_001)
+        assert bypass.call_count == 4
+        assert (engine._no_progress_hold, engine._no_progress_deadline, engine._no_progress_observed_tokens) == state
+        read.assert_not_called()
+        bypass.return_value = False
+        assert not engine.should_compress(10_000)  # Auxiliary verdict cannot survive the invocation.
+        assert bypass.call_count == 5
+        assert read.call_count == 1
+    finally:
+        engine.shutdown()
+
+
 @pytest.mark.parametrize("consumer", ["threshold", "preflight", "direct"])
 def test_red1_rebuilt_retained_noop(tmp_path, monkeypatch, consumer):
     view, before = arm(tmp_path)
