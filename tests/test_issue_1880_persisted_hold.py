@@ -241,3 +241,46 @@ def test_red4_unreadable_metadata_and_failed_ingest(tmp_path, monkeypatch, caplo
         assert engine._store.get_session_messages("S") == before
     finally:
         engine.shutdown()
+
+
+@pytest.mark.parametrize("setting", ["leaf_target_ratio", "leaf_target_min_tokens", "leaf_target_max_tokens"])
+def test_leaf_target_invalidation_and_bound_store_identity(tmp_path, monkeypatch, setting):
+    view, _ = arm(tmp_path)
+    engine = rebuild(tmp_path)
+    try:
+        engine._ingest_messages(view)
+        resolve = engine_module.Path.resolve
+        resolved_paths = []
+
+        def observe_resolve(path, *args, **kwargs):
+            resolved_paths.append(str(path))
+            return resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(engine_module.Path, "resolve", observe_resolve)
+        metadata_read = Mock(wraps=engine._store.read_metadata_json)
+        indexed_read = Mock(wraps=engine._store.max_store_id)
+        monkeypatch.setattr(engine._store, "read_metadata_json", metadata_read)
+        monkeypatch.setattr(engine._store, "max_store_id", indexed_read)
+        assert not engine.should_compress(10_000)
+        reads = metadata_read.call_count, indexed_read.call_count
+        assert not engine.should_compress(10_000)
+        assert metadata_read.call_count > reads[0] and indexed_read.call_count > reads[1]
+        assert len(resolved_paths) == 1  # Steady admission reuses only the bound path.
+        value = getattr(engine._config, setting)
+        setattr(engine._config, setting, value + (0.01 if setting.endswith("ratio") else 1))
+        assert engine.should_compress(10_000)  # Target-only change releases the hold.
+        assert len(resolved_paths) == 1
+        setattr(engine._config, setting, value)
+        fingerprint = engine._no_progress_fingerprint()
+        original_path = engine._store.db_path
+        engine._store.db_path = tmp_path / "another-synthetic-binding.db"
+        assert engine._no_progress_fingerprint() != fingerprint
+        assert len(resolved_paths) == 2
+        engine._store.db_path = original_path
+        assert engine._no_progress_fingerprint() == fingerprint
+        assert len(resolved_paths) == 3
+        engine._no_progress_bound_store = (object(), original_path, "synthetic-old-store")
+        assert engine._no_progress_fingerprint() == fingerprint
+        assert len(resolved_paths) == 4  # Same path on a different bound store is re-resolved.
+    finally:
+        engine.shutdown()

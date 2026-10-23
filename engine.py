@@ -2503,6 +2503,7 @@ class LCMEngine(
         names = (
             "fresh_tail_count", "fresh_tail_max_tokens", "fresh_tail_pressure_yield_enabled",
             "fresh_tail_pressure_yield_min_observations", "leaf_chunk_tokens",
+            "leaf_target_ratio", "leaf_target_min_tokens", "leaf_target_max_tokens",
             "dynamic_leaf_chunk_enabled", "dynamic_leaf_chunk_max", "incremental_max_depth",
             "condensation_fanin", "cache_friendly_condensation_enabled", "cache_friendly_min_debt_groups",
             "threshold_full_sweep_enabled", "summary_prefix_target_tokens", "l3_truncate_tokens",
@@ -2523,7 +2524,14 @@ class LCMEngine(
                         else "below")
             # MAX(primary key) and lifecycle's indexed conversation lookup are
             # bounded. Global maxima conservatively invalidate on other sessions.
-            state = [replay, str(Path(self._store.db_path).resolve()), self._store.max_store_id(),
+            # The open store's resolved path is invariant for this binding. Cache
+            # only that identity, never metadata or the current fingerprint.
+            store_path = self._store.db_path
+            bound_store = getattr(self, "_no_progress_bound_store", None)
+            if bound_store is None or bound_store[0] is not self._store or bound_store[1] != store_path:
+                bound_store = (self._store, store_path, str(Path(store_path).resolve()))
+                self._no_progress_bound_store = bound_store
+            state = [replay, bound_store[2], self._store.max_store_id(),
                      self._store_complete_frontier(),
                      self._dag._conn.execute("SELECT COALESCE(MAX(node_id), 0) FROM summary_nodes").fetchone()[0],
                      pressure, tokens // 1024, int(self.context_length or 0), self.threshold_tokens,
