@@ -1,5 +1,7 @@
 """Regression for rotation carry when the parent proof write fails."""
 
+from collections import Counter
+
 import pytest
 
 import hermes_lcm.engine as lcm_engine_module
@@ -29,6 +31,7 @@ def test_rotation_carry_after_parent_proof_write_failure(tmp_path, monkeypatch, 
         host.append(_turn(13)[0])
         engine.ingest(host)
         pre = list(host)
+        parent_rows = engine._store.get_session_messages("S0")
 
         real_write = engine._store.write_metadata_json
 
@@ -41,8 +44,12 @@ def test_rotation_carry_after_parent_proof_write_failure(tmp_path, monkeypatch, 
         compressed = engine.compress(list(host), force=True)
         engine._store.write_metadata_json = real_write
         assert engine._last_compression_status == "compacted"
-        local_ranges = list(engine._compress_commit_proof["carry_ranges"])
-        assert local_ranges
+        if fail_parent_write:
+            assert engine._compress_commit_proof is None
+            local_ranges = []
+        else:
+            local_ranges = list(engine._compress_commit_proof["carry_ranges"])
+            assert local_ranges
         assert (_durable_commit_proof(engine, "S0") is None) == fail_parent_write
 
         frontier = engine._last_compacted_store_id
@@ -58,25 +65,51 @@ def test_rotation_carry_after_parent_proof_write_failure(tmp_path, monkeypatch, 
                 (frontier,),
             )
         }
+        carried_rows = engine._store.get_batch(sorted(carried_ids))
         engine.on_session_end("S0", pre)
         engine.on_session_start("S1", boundary_reason="compression", old_session_id="S0", platform="acp")
         child_proof = _durable_commit_proof(engine, "S1")
-        assert child_proof is not None
-        assert child_proof["carry_ranges"] == [list(carry_range) for carry_range in expected_ranges]
-        assert engine._load_compression_carry_ranges() == expected_ranges
+        child_ranges = engine._load_compression_carry_ranges()
+        if fail_parent_write:
+            assert child_proof is None
+            assert engine._compress_commit_proof is None
+        else:
+            assert child_proof is not None
+            assert child_proof["carry_ranges"] == [list(carry_range) for carry_range in expected_ranges]
+            assert child_ranges == expected_ranges
 
         engine._config.fresh_tail_count = 2
         engine.protect_last_n = 2
         child = list(compressed)
         child.extend(_turn(14))
         engine.ingest(child)
-        assert engine._store.get_session_count("S1") == 2
+        child_rows = engine._store.get_session_messages("S1")
+        if fail_parent_write:
+            assert len(child_rows) <= len(compressed) + 2  # At most one copy of each adopted row.
+        else:
+            assert len(child_rows) == 2
         engine.compress(list(child), force=True)
         new_nodes = engine._dag.get_session_nodes("S1")
 
         assert engine._last_compression_status == "compacted"
-        assert carried_ids <= {
-            source_id for node in new_nodes for source_id in node.source_ids
-        }
+        covered_ids = {source_id for node in new_nodes for source_id in node.source_ids}
+        if fail_parent_write:
+            covered = engine._store.get_batch(sorted(covered_ids))
+            def identity(row):
+                return row["role"], row["content"]
+            assert Counter(map(identity, covered.values())) >= Counter(map(identity, carried_rows.values()))
+        else:
+            assert carried_ids <= covered_ids
+        originals = engine._store.get_batch([row["store_id"] for row in parent_rows])
+        assert [(row["store_id"], row["role"], row["content"]) for row in parent_rows] == [
+            (originals[row["store_id"]]["store_id"], originals[row["store_id"]]["role"],
+             originals[row["store_id"]]["content"]) for row in parent_rows]
+        final_child_rows = engine._store.get_session_messages("S1")
+        for fresh in _turn(14):
+            assert sum((row["role"], row["content"]) == (fresh["role"], fresh["content"])
+                       for row in final_child_rows) == 1
+        print("rotation evidence:", {"failed_write": fail_parent_write, "parent_rows": len(parent_rows),
+              "child_rows": len(child_rows), "carry_ranges": child_ranges, "carried_ids": len(carried_ids),
+              "covered_original_ids": len(carried_ids & covered_ids), "covered_ids": len(covered_ids)})
     finally:
         engine.shutdown()
