@@ -6980,8 +6980,13 @@ class LCMEngine(
                             for m in messages[index + 1:end]))
                         aliases = (self._store.get_message_relations([sid], "alt_stamp")
                                    + self._store.get_message_relations([sid], "carried_stamp")) if identity_anchor_enabled() else []
-                        same_uid = (current[index]["message_uid"] is not None
-                                    and current[index]["message_uid"] == old["message_uid"])
+                        same_uid = False
+                        uid = current[index]["message_uid"]
+                        if uid is not None and uid == old["message_uid"]:
+                            lineage, _problem = self._host_uid_lineage_key()
+                            if lineage is not None:
+                                bindings = self._store.host_uid_bindings_for(lineage, {uid}, ("canonical",))
+                                same_uid = (sid, "canonical") in bindings.get(uid, ())
                         if same_uid or any(_normalize_observed_at(r.get("observed_at")) == current[index]["timestamp"]
                                            for r in aliases):
                             conflict = False
@@ -7116,7 +7121,16 @@ class LCMEngine(
                             result["needs_receipt"] = True
                         # Whole-segment fence for UID changes and bounded/pruned
                         # retries. Preserve #1179's literal steady-result update.
-                        if not steady_single and (any(conflicts[pos] for pos in segment)
+                        new_call_ids = {call.get("id") for call in message.get("tool_calls", ())
+                                        if isinstance(call, dict) and call.get("id")}
+                        stored_call_ids = {call.get("id") for row in rows for call in row.get("tool_calls") or ()
+                                           if isinstance(call, dict)}
+                        exposed_call = (not self._ingest_cursor_needs_reconcile and index < self._ingest_cursor
+                                        and index < len(previous_view) and not choices[index]
+                                        and new_call_ids and not new_call_ids & stored_call_ids
+                                        and self._message_replay_identity(message, strip_carrier=False) !=
+                                        self._message_replay_identity(previous_view[index], strip_carrier=False))
+                        if exposed_call or not steady_single and (any(conflicts[pos] for pos in segment)
                                                   or borrowed and not legacy_rows or user_changed
                                                   or missing):
                             result["fresh"].update(segment)
@@ -7143,8 +7157,8 @@ class LCMEngine(
             if proof:
                 projection, identities = self._occurrence_replay_identities(messages, proof)
                 generated = {i for i, identity in enumerate(identities) if identity is None}
-                emitted_heads = generated | {i for i, entry in enumerate(projection.entries)
-                                             if entry.generated_span is not None}
+                emitted_heads = {i for i, entry in enumerate(projection.entries)
+                                 if entry.generated_span is not None and identities[i] is not None}
             # An unmatched content/alias decision still belongs to the existing
             # anchor/audit/protection path. It is not a fresh occurrence finding.
             # A missing or malformed fact for this new-writer window, however,
@@ -7154,11 +7168,10 @@ class LCMEngine(
                 result["fresh"].update(unmatched)
             else:
                 result["deferred"].update(unmatched)
-            if (proof and len(messages) < len(proof.get("output_metadata", ()))
-                    and self._load_compression_carry_ranges()
+            if (proof and self._load_compression_carry_ranges()
                     and not any(r["session_id"] == self._session_id for r in rows)):
-                # First accepted child view: store each emitted head once so
-                # its facts can witness the shortened view across restarts.
+                # Only a delivered carrier with a retained raw occurrence needs
+                # a child witness. Pure emitted scaffold is never a raw row.
                 result["fresh"].update(emitted_heads)
                 result["proven"].difference_update(emitted_heads)
                 for index in emitted_heads:
