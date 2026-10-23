@@ -951,7 +951,11 @@ def test_result_hydration_is_inside_request_deadline_latency(semantic_engine, mo
 def test_result_hydration_path_expiry_never_starts_database_connection(
     semantic_engine, monkeypatch
 ):
+    from hermes_lcm import retrieval_core
+
     semantic_engine._config.embedding_query_timeout_s = 0.02
+    now = [0.0]
+    clock = SimpleNamespace(monotonic=lambda: now[0])
 
     class OneResultStore:
         def __init__(self, *_args, **_kwargs):
@@ -964,11 +968,25 @@ def test_result_hydration_path_expiry_never_starts_database_connection(
             pass
 
     real_resolve = lcm_tools.Path.resolve
+    real_join = threading.Thread.join
     connect_calls = 0
+    resolved_paths = []
 
-    def slow_resolve(path, *args, **kwargs):
-        time.sleep(0.05)
-        return real_resolve(path, *args, **kwargs)
+    def expired_resolve(path, *args, **kwargs):
+        resolved = real_resolve(path, *args, **kwargs)
+        resolved_paths.append(resolved)
+        now[0] += 0.05
+        return resolved
+
+    def join_worker(worker, timeout=None):
+        if worker.name.startswith("lcm-"):
+            assert timeout is not None and 0 < timeout <= 0.02
+            # A real join drains the worker, while only resolve advances the
+            # request clock. Earlier stages cannot spend its logical budget.
+            real_join(worker, timeout=10)
+            assert not worker.is_alive(), "deadline worker did not finish"
+            return
+        return real_join(worker, timeout=timeout)
 
     def counted_connect(*_args, **_kwargs):
         nonlocal connect_calls
@@ -977,7 +995,10 @@ def test_result_hydration_path_expiry_never_starts_database_connection(
 
     monkeypatch.setattr(lcm_tools, "VectorStore", OneResultStore)
     monkeypatch.setattr(lcm_tools, "resolve_provider", lambda _config: MockProvider())
-    monkeypatch.setattr(lcm_tools.Path, "resolve", slow_resolve)
+    monkeypatch.setattr(lcm_tools, "time", clock)
+    monkeypatch.setattr(retrieval_core, "time", clock)
+    monkeypatch.setattr(threading.Thread, "join", join_worker)
+    monkeypatch.setattr(lcm_tools.Path, "resolve", expired_resolve)
     monkeypatch.setattr(lcm_tools.sqlite3, "connect", counted_connect)
 
     payload = json.loads(
@@ -987,9 +1008,8 @@ def test_result_hydration_path_expiry_never_starts_database_connection(
     )
     assert payload["timeout"] is True
     assert payload["timeout_stage"] == "result_resolution"
-    # The bounded worker may still be finishing Path.resolve. Wait for it to
-    # run the post-resolve deadline gate and prove connect never starts later.
-    time.sleep(0.06)
+    # The hydration worker has exited, so no connection can start later.
+    assert len(resolved_paths) == 1
     assert connect_calls == 0
 
 
