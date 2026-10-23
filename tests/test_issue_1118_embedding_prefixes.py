@@ -473,3 +473,18 @@ def test_product_knn_goes_stale(task, initial, new, tmp_path, monkeypatch):
     command._embedding_register_profiles(engine._config, engine._store.db_path, allow_download=False)
     assert backfill(engine, task)["embedded"] == 1
     assert coverage() != "none"
+
+
+@pytest.mark.parametrize("provider_name,missing", (
+    ("ollama", "embedding_model"), ("openai-compatible", "embedding_base_url"),
+))
+def test_prefix_preflight_reports_invalid_provider_config(provider_name, missing, tmp_path, monkeypatch):
+    engine, _, _, payloads = seeded_engine(tmp_path, monkeypatch, provider_name, QUERY_PREFIX)
+    setattr(engine._config, missing, "")
+    monkeypatch.setattr(command, "resolve_provider", resolve_provider)
+    requests = len(payloads)
+    result = backfill(engine, "summary")
+    assert isinstance(result, str) and "status: error" in result and "error: " in result
+    assert len(payloads) == requests
+    with sqlite3.connect(engine._store.db_path) as conn:
+        assert conn.execute("SELECT count(*) FROM lcm_summary_embedding").fetchone()[0] == 0
