@@ -354,7 +354,7 @@ Before upgrading to v0.23.1, resolve the effective database path from
 restart that runtime so `/lcm` is registered, then run `/lcm backup`.
 Otherwise stop every SQLite writer and copy that configured database with its
 WAL/SHM companions as one cold set. Check out the exact stable tag/SHA, restart
-Hermes, and verify the loaded path, version, database path, schema 5, and all 16
+Hermes, and verify the loaded path, version, database path, schema 5, and all 15
 tools. No manual core migration is required for the upgrade itself. Existing
 cloud vectors from a pre-v0.23.1 identity require privacy-policy warmup, an
 identity check from the warmup/profile output, and the finite monotonic
