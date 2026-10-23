@@ -1145,8 +1145,9 @@ class VectorStore:
         """Load ids into a unique per-call temp table in bounded chunks for JOINs.
 
         Avoids the ``WHERE id IN (?, ?, ...)`` host-parameter cap
-        (SQLITE_MAX_VARIABLE_NUMBER) that failed at ~33k ids: ``executemany``
-        binds one row at a time, so an arbitrary number of ids can be staged.
+        (SQLITE_MAX_VARIABLE_NUMBER) that failed at ~33k ids: each insert binds
+        at most 500 IDs, so an arbitrary number of IDs can be staged without
+        paying a separate SQLite statement for every row.
 
         The table name is unique per call (the store's connection is shared
         across threads, ``check_same_thread=False``); a single reused name meant
@@ -1158,11 +1159,12 @@ class VectorStore:
         try:
             for offset in range(0, len(ids), _ID_INSERT_CHUNK):
                 rows = [
-                    (str(value),)
+                    str(value)
                     for value in ids[offset:offset + _ID_INSERT_CHUNK]
                 ]
-                self._conn.executemany(
-                    f"INSERT OR IGNORE INTO {table}(id) VALUES(?)",
+                placeholders = ",".join("(?)" for _ in rows)
+                self._conn.execute(
+                    f"INSERT OR IGNORE INTO {table}(id) VALUES{placeholders}",
                     rows,
                 )
             yield table
@@ -2664,7 +2666,11 @@ class VectorStore:
         chunk_ids: Sequence[str],
         dtype: str = _VECTOR_DTYPE,
     ) -> tuple[list[int], list[str], list[str], list[list[float]]]:
-        """Decode eligible chunk BLOBs, skipping malformed SQLite storage values."""
+        """Decode eligible chunk BLOBs, skipping malformed SQLite storage values.
+
+        CROSS JOIN keeps selected IDs outermost, using the existing unique
+        (chunk_id, identity_hash) indexes instead of scanning the identity.
+        """
         rowids: list[int] = []
         out_ids: list[str] = []
         kinds: list[str] = []
@@ -2676,9 +2682,9 @@ class VectorStore:
                 f"""
                 SELECT v.rowid, v.chunk_id, v.vec
                 FROM {table} t
-                JOIN lcm_chunk_vectors v
+                CROSS JOIN lcm_chunk_vectors v
                   ON v.chunk_id = t.id AND v.identity_hash = ?
-                JOIN lcm_chunk_meta m
+                CROSS JOIN lcm_chunk_meta m
                   ON m.chunk_id = v.chunk_id AND m.identity_hash = v.identity_hash
                 WHERE m.archived = 0
                 """,
@@ -2739,6 +2745,8 @@ class VectorStore:
         Float32 vectors are stored as little-endian BLOBs. Build their
         matrix directly from those bytes instead of materializing Python floats.
         Other storage dtypes retain the established decoder path.
+        CROSS JOIN fixes candidate-first lookups through the existing unique
+        (chunk_id, identity_hash) indexes, independent of total identity size.
         """
         if dtype != _VECTOR_DTYPE:
             rowids, loaded_ids, kinds, raw_vectors = self._load_chunk_vectors_for_ids(
@@ -2762,9 +2770,9 @@ class VectorStore:
                 f"""
                 SELECT v.rowid, v.chunk_id, v.vec
                 FROM {table} t
-                JOIN lcm_chunk_vectors v
+                CROSS JOIN lcm_chunk_vectors v
                   ON v.chunk_id = t.id AND v.identity_hash = ?
-                JOIN lcm_chunk_meta m
+                CROSS JOIN lcm_chunk_meta m
                   ON m.chunk_id = v.chunk_id AND m.identity_hash = v.identity_hash
                 WHERE m.archived = 0
                 """,

@@ -6,6 +6,7 @@ include reads and transaction boundaries. Snapshot reads happen outside tracing.
 Only sandbox paths, generated clocks/nonces and process identities normalize.
 """
 from __future__ import annotations
+from tests.messages_snapshot import messages_snapshot_columns
 
 import argparse
 import ast
@@ -343,7 +344,8 @@ def snapshot(engine: Any, canonical: Canonical) -> dict[str, Any]:
     for name in sorted(OBSERVED_ATTRIBUTES):
         value = observed_attribute(engine, name)
         if name == "_store":
-            value = {table: [tuple(row) for row in engine._store._conn.execute(f"SELECT * FROM {table} ORDER BY 1")]
+            value = {table: [tuple(row) for row in engine._store._conn.execute(
+                         f'SELECT {messages_snapshot_columns(engine._store._conn) if table == "messages" else "*"} FROM {table} ORDER BY 1')]
                      for table in ("messages", "metadata")}
         elif name == "_dag":
             value = engine._dag.get_session_nodes("S", limit=10000)

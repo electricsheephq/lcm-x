@@ -20,6 +20,13 @@ from hermes_lcm.reconcile import (
 from tests.legacy_native_state import install_legacy_writer, legacy_commit_proof
 
 
+@pytest.fixture(autouse=True)
+def historical_proof_payload_writer(monkeypatch):
+    from hermes_lcm.compaction import CompactionMixin
+    monkeypatch.setattr(LCMEngine, "_write_compress_commit_proof_payload",
+                        CompactionMixin._write_compress_commit_proof_payload)
+
+
 @pytest.fixture
 def candidate(tmp_path, monkeypatch):
     cfg = LCMConfig(

@@ -102,11 +102,10 @@ def test_gapwalk_forward(tmp_path, old_tree, host_root):
     upgrade(tmp_path / "lcm.db", report["identity"])
 
 
-@pytest.mark.parametrize("reader", ["gapwalk-base", "v0.28.1", PREVIOUS_GA])
+@pytest.mark.parametrize("reader", ["gapwalk-base", "v0.28.0", PREVIOUS_GA])
 @pytest.mark.parametrize("trigger", ["normal", "abort", "noop"])
 def test_gapwalk_rollback(tmp_path, old_tree, host_root, reader, trigger):
-    old = old_tree(reader, {**READERS, "gapwalk-base": BASE,
-                            "v0.28.1": "77b2b4f795fb6a4f84c55abf6d0441da4469971e"})
+    old = old_tree(reader, {**READERS, "gapwalk-base": BASE})
     original = run_old(old, tmp_path, host_root, OLD_CHUNKS, mode="write")
     upgrade(tmp_path / "lcm.db", original["identity"])
     if trigger != "normal":

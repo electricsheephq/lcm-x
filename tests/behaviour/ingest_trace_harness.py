@@ -5,6 +5,7 @@ FTS statements use exactly the reconcile harness exclusion. Store observers
 call the real method once; failures are injected only at the SQLite boundary.
 """
 from __future__ import annotations
+from tests.messages_snapshot import messages_snapshot_columns
 
 import argparse
 import ast
@@ -331,7 +332,8 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
     # scaffold/carry/proof metadata. Searchability is observed via the store API,
     # separately from this snapshot; SQLite FTS internals stay excluded.
     tables = [r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
-    state["tables"] = {name: canonical.value([tuple(row) for row in conn.execute(f'SELECT * FROM "{name}" ORDER BY 1')])
+    state["tables"] = {name: canonical.value([tuple(row) for row in conn.execute(
+                           f'SELECT {messages_snapshot_columns(conn) if name == "messages" else "*"} FROM "{name}" ORDER BY 1')])
                        for name in tables if not name.startswith(("messages_fts", "sqlite_"))}
     return state
 

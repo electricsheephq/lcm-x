@@ -72,6 +72,12 @@ After a change or removal, restart Hermes, run `/lcm embed warmup`, then `/lcm e
 
 Optional slash commands are disabled by default with `LCM_ENABLE_SLASH_COMMAND=false`. Destructive cleanup apply is separately guarded. Do not enable mutation surfaces merely to diagnose a problem.
 
+`LCM_SENDER_CAPTURE` is a non-field, profile-aware boolean toggle (default
+`true`). Set `LCM_SENDER_CAPTURE=0` to disable pending sender associations;
+the nullable sender columns are still added and historical rows are never
+backfilled. Capture stores an unverified gateway session principal without
+changing stored or delivered text.
+
 `LCM_SQLITE_MMAP_SIZE` sets SQLite mapped-read bytes (default `268435456`,
 unchanged). Set `LCM_SQLITE_MMAP_SIZE=0` on SD-card or single-board hosts: a
 storage read error on a mapped page kills the process with SIGBUS, while `0`
@@ -288,7 +294,7 @@ comma-separated values. Keep their existing source tracking and parsing rules.
 
 ## Hand-written reference: side-channel environment readers
 
-These 11 keys are read outside `config.py`, directly or through helper
+These 12 keys are read outside `config.py`, directly or through helper
 wrappers. They are not loaded into `LCMConfig`; listing them does not
 consolidate or change their readers. Reader filenames are relative to the
 checkout root. Credential entries list only variable names, never values.
@@ -297,6 +303,7 @@ checkout root. Credential entries list only variable names, never values.
 | --- | --- | --- | --- |
 | `LCM_ABSOLUTE_THRESHOLD_TOKENS` | `engine.py` | Absolute compaction threshold override | each call — `_set_context_length()` with a positive context length, through model updates, session-start metadata, or cloning |
 | `LCM_ENABLE_SLASH_COMMAND` | `__init__.py` | Optional slash-command registration | plugin registration |
+| `LCM_SENDER_CAPTURE` | `sender_capture.py` | Profile-aware pending sender capture; default `true`, `0` disables capture without removing columns or backfilling history | each call — pending association creation through the profile-aware boolean resolver |
 | `LCM_HERMES_BASE_DIR` | `config.py` (called by `engine.py`, `externalize.py`, `diagnostics.py`) | Storage containment boundary; process-wide, never read from a routed profile | each call — storage-directory resolution or state-database containment validation; `_get_allowed_hermes_base()` also reads it when called (tests only; no production caller) |
 | `LCM_IDENTITY_ANCHOR` | `identity_anchor.py` | Identity-anchor switch | each call — `identity_anchor_enabled()` checks during ingest, replay identity handling, and compaction |
 | `LCM_FTS_INTEGRITY_CHECK_INTERVAL_HOURS` | `db_bootstrap.py` | Startup integrity-check interval | database open — startup FTS validation, after structural checks pass |

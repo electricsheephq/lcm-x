@@ -18,6 +18,7 @@ from .audit import audit, connect, preimage, progress
 from .catchup import stop
 from .common import MODEL, REQUEST, append, config, dump, foreign_files, foreground_request, guards, immutable_cache, isolated, load, parser, product, safe_paths
 from .corpus import build, pilot_rows
+from .messages_snapshot import messages_snapshot_columns
 from .cpu import Supervisor
 
 SMOKE = "functional smoke, shared host, not a bar result"
@@ -364,7 +365,7 @@ def integrity(a, manifest):
     # New trace rows are expected. Audit the immutable corpus subset and old vectors.
     with integrity_evidence(a, manifest) as (c, failure):
         c.execute("BEGIN")
-        original = list(c.execute("SELECT * FROM messages WHERE store_id<=? ORDER BY store_id", (manifest["rows"],)))
+        original = list(c.execute(f"SELECT {messages_snapshot_columns(c)} FROM messages WHERE store_id<=? ORDER BY store_id", (manifest["rows"],)))
         from .audit import digest
         if digest(original) != manifest["preimage"]["raw_digest"]:
             failure["mismatch"] = dict(kind="corpus", key="messages", status="changed",
