@@ -266,22 +266,22 @@ jobs:
           python -B -c "from benchmarking.standalone import ensure_agent_context_engine_importable; ensure_agent_context_engine_importable(); import os, pytest; rc=pytest.main(['tests/test_issue_667_level3_repair.py', 'tests/test_issue_922_no_self_defeating_leaf.py::test_next_round_compacts_earlier_tool_pair_and_preserves_objective','-q','--junitxml=h5-red.xml','--basetemp='+os.environ['TMPDIR']+'/pytest']); raise SystemExit(0 if rc == 1 else 2)"
       - name: Prepare pinned reference host
         run: python -m bench.instruments.reliability.ci prep --host ref-0.21.5 --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
-      - name: Export prepared paths
+      - name: Export prepared host paths
         run: |
-          python - <<'PYHOST'
-          import json, os
+          python - <<'PY'
+          import json
+          import os
           from pathlib import Path
-          host=json.loads((Path(os.environ['RUNNER_TEMP'])/'hosts.json').read_text())['hosts']['ref-0.21.5']
-          with open(os.environ['GITHUB_ENV'],'a') as env:
-              env.write(f"FASTEMBED_CACHE_PATH={os.environ['RUNNER_TEMP']}/fastembed-empty
-")
-              env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}
-")
-              env.write(f"LCM_REAL_HERMES_SRC={host['src']}
-")
-              env.write(f"PYTHONPATH={os.environ['GITHUB_WORKSPACE']}:{host['src']}
-")
-          PYHOST
+
+          hosts = json.loads((Path(os.environ["RUNNER_TEMP"]) / "hosts.json").read_text())
+          host = hosts["hosts"]["ref-0.21.5"]
+          with open(os.environ["GITHUB_ENV"], "a") as env:
+              env.write(f"FASTEMBED_CACHE_PATH={os.environ['RUNNER_TEMP']}/fastembed-empty\n")
+              env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}\n")
+              env.write(f"LCM_REAL_HERMES_SRC={host['src']}\n")
+              env.write(f"PYTHONPATH={os.environ['GITHUB_WORKSPACE']}:{host['src']}\n")
+          PY
+
       - name: Prove fault-specific full-prompt preservation oracle
         run: python -m pytest -p no:cacheprovider -q -ra tests/test_real_turn_loop_acp_override.py::test_rotation_child_publication_error_keeps_the_host_rotation_heal --junitxml=h4-host-oracle.xml
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
