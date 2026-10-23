@@ -39,14 +39,6 @@ def rows(conn, sql, values=()):
     return [tuple(r) for r in conn.execute(sql, values)]
 
 
-# Frozen from the original lane BASE 931ea556, with a scrubbed environment.
-BASE_MIGRATION_STEPS = (
-    'fts_stem_v1', 'messages_ingested_at_backfill_v1', 'temporal_rollups_v1',
-    'v2_external_content_fts_triggers', 'v3_lifecycle_state',
-    'v4_lifecycle_debt_columns', 'v5_message_conversation_id',
-)
-
-
 def test_flag_off(tmp_path, monkeypatch):
     trace, connect = [], sqlite3.connect
 
@@ -64,22 +56,31 @@ def test_flag_off(tmp_path, monkeypatch):
     try:
         assert not any(token in sql.lower() for sql in opening_trace
                        for token in ('lcm_entit', 'lcm_memory_', 'entity_memory_v1'))
-        assert tuple(r[0] for r in engine._store.connection.execute(
-            'SELECT step_name FROM lcm_migration_state ORDER BY step_name')) == BASE_MIGRATION_STEPS
+        flag_off_steps = {r[0] for r in engine._store.connection.execute(
+            'SELECT step_name FROM lcm_migration_state')}
+        assert db.ENTITY_MIGRATION_STEP not in flag_off_steps
         assert engine._entities is None
         assert not rows(engine._store.connection, "SELECT name FROM sqlite_master WHERE name LIKE 'lcm_entit%' OR name LIKE 'lcm_memory_%'")
         assert engine._store.connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0] == '5'
     finally:
         engine.shutdown()
+    enabled = LCMEngine(config=LCMConfig(database_path=str(tmp_path / 'enabled.db'),
+                                        entities_enabled=True),
+                        hermes_home=str(tmp_path / 'enabled-home'))
+    try:
+        flag_on_steps = {r[0] for r in enabled._store.connection.execute(
+            'SELECT step_name FROM lcm_migration_state')}
+        assert flag_on_steps == flag_off_steps | {db.ENTITY_MIGRATION_STEP}
+    finally:
+        enabled.shutdown()
 
 
 def test_lazy_marker_and_fast_path(store, api, monkeypatch):
     conn, path = store.connection, store.db_path
     cookie = conn.execute("PRAGMA schema_version").fetchone()[0]
-    completed_at = conn.execute("SELECT completed_at FROM lcm_migration_state WHERE step_name=?",
-                                (db.ENTITY_MIGRATION_STEP,)).fetchone()[0]
-    # A rewrite cannot hide behind identical wall-clock timestamps.
-    monkeypatch.setattr('time.time', lambda: completed_at + 100)
+    # SQLite stamps markers with strftime, so use a sentinel rather than a clock mock.
+    conn.execute("UPDATE lcm_migration_state SET completed_at=1 WHERE step_name=?",
+                 (db.ENTITY_MIGRATION_STEP,))
     trace, original = [], sqlite3.connect
 
     def connect(*a, **kw):
@@ -93,9 +94,10 @@ def test_lazy_marker_and_fast_path(store, api, monkeypatch):
         assert other.connection.execute("PRAGMA schema_version").fetchone()[0] == cookie
         assert other.connection.execute("SELECT count(*) FROM lcm_migration_state WHERE step_name='entity_memory_v1'").fetchone()[0] == 1
         assert other.connection.execute("SELECT completed_at FROM lcm_migration_state WHERE step_name=?",
-                                        (db.ENTITY_MIGRATION_STEP,)).fetchone()[0] == completed_at
+                                        (db.ENTITY_MIGRATION_STEP,)).fetchone()[0] == 1
     assert not any('lcm_migration_state' in sql.lower() and
-                   sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'REPLACE')) for sql in trace)
+                   re.search(r'\b(?:INSERT|UPDATE|REPLACE|DELETE)\b', sql, re.IGNORECASE)
+                   for sql in trace)
     assert not any('BEGIN IMMEDIATE' in s or s.lstrip().upper().startswith(('CREATE', 'ALTER', 'DROP'))
                    and any(name in s for name in ('lcm_entit', 'lcm_memory_')) for s in trace)
 
@@ -192,14 +194,18 @@ def test_fifty_rebinds_close_connections(tmp_path):
         last.execute('SELECT 1')
 
 
-def test_shared_database_profile_isolation(tmp_path, monkeypatch):
-    monkeypatch.setitem(sys.modules, 'hermes_constants', SimpleNamespace(
-        profile_name_for_home=lambda home: Path(home).name))
+@pytest.mark.parametrize('resolution', ['names', 'missing', 'none'])
+def test_shared_database_profile_isolation(tmp_path, monkeypatch, resolution):
+    host = SimpleNamespace() if resolution == 'missing' else SimpleNamespace(
+        profile_name_for_home=lambda home: Path(home).name if resolution == 'names' else None)
+    monkeypatch.setitem(sys.modules, 'hermes_constants', host)
     config = LCMConfig(database_path=str(tmp_path / 'lcm.db'), entities_enabled=True)
     engines = [LCMEngine(config=config, hermes_home=str(tmp_path / p)) for p in ('A', 'B')]
     try:
         stores = [engine._entities for engine in engines]
-        assert [s.scope_key for s in stores] == ['A', 'B']
+        expected = ['A', 'B'] if resolution == 'names' else [str((tmp_path / p).resolve()) for p in ('A', 'B')]
+        assert [s.scope_key for s in stores] == expected
+        assert stores[0].scope_key != stores[1].scope_key
         ids = [s.create_entity('same platform person') for s in stores]
         for s, key in zip(stores, ids):
             s.add_alias(key, 'Telegram', 'platform_id', alias_norm='telegram:AbC')
@@ -401,6 +407,32 @@ def test_entity_requires_visible_evidence(store):
     assert store.get_entity(entity, access_scope='B')
 
 
+@pytest.mark.parametrize('evidence', ['alias', 'note'])
+def test_other_profiles_evidence_cannot_expose_entity(store, api, evidence):
+    store.connection.execute("INSERT INTO messages(store_id,session_id,role,content,timestamp) VALUES(1,'S','user','fixture',1)")
+    entity = store.create_entity('no local evidence')
+    with closing(api.EntityStore(store.db_path, profile_key='profile-Q')) as other:
+        if evidence == 'alias':
+            key = other.add_alias(entity, 'foreign alias', source_store_ids=[1])
+            assert other.get_alias(key, access_scope='A')
+        else:
+            key = other.add_note('foreign note', entity_id=entity, cites=[1])
+            assert other.get_note(key, access_scope='A')
+    assert store.get_entity(entity)
+    assert store.aliases_for_entity(entity) == []
+    assert store.notes_for_entity(entity) == []
+    assert store.get_entity(entity, access_scope='A') is None
+
+
+def test_entity_visible_with_only_note_evidence(store):
+    store.connection.execute("INSERT INTO messages(store_id,session_id,role,content,timestamp) VALUES(1,'S','user','fixture',1)")
+    entity = store.create_entity('note evidence only')
+    note = store.add_note('visible fact', entity_id=entity, cites=[1])
+    assert store.aliases_for_entity(entity) == []
+    assert store.get_note(note, access_scope='A')
+    assert store.get_entity(entity, access_scope='A') == store.get_entity(entity)
+
+
 def test_empty_key_sources_hidden_even_from_owner(store):
     entity = store.create_entity('owner alias is not key evidence')
     store.add_alias(entity, 'owner alias')
@@ -435,12 +467,12 @@ def test_profile_name_survives_home_relocation(tmp_path, monkeypatch, relocate):
         engine.shutdown()
 
 
-@pytest.mark.parametrize('resolution', ['empty', 'raises', 'missing'])
+@pytest.mark.parametrize('resolution', ['empty', 'raises', 'missing', 'none'])
 def test_profile_scope_falls_back_to_resolved_home(tmp_path, monkeypatch, resolution):
     def resolve(home):
         if resolution == 'raises':
             raise RuntimeError('host helper unavailable')
-        return ''
+        return None if resolution == 'none' else ''
 
     host = SimpleNamespace() if resolution == 'missing' else SimpleNamespace(profile_name_for_home=resolve)
     monkeypatch.setitem(sys.modules, 'hermes_constants', host)

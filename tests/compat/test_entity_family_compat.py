@@ -13,7 +13,7 @@ from hermes_lcm.engine import LCMEngine
 from hermes_lcm.schema_families import COMPAT_REGISTRY
 from tests.compat.helpers import PREVIOUS_GA, READERS, config_for, run_old
 
-ENTITY_READERS = ('v0.26.2', 'v0.28.0', 'v0.28.1', 'v0.25.0-rc1')
+ENTITY_READERS = {**READERS}
 assert READERS['v0.28.1'] == '77b2b4f795fb6a4f84c55abf6d0441da4469971e'
 OLD_WRITE = r'''
 options.update(fresh_tail_count=2, leaf_chunk_tokens=100)
@@ -59,7 +59,7 @@ def family_snapshot(path):
                 for table in db._ENTITY_TABLE_COLUMNS}
 
 
-@pytest.mark.parametrize('reader', ENTITY_READERS)
+@pytest.mark.parametrize('reader', tuple(ENTITY_READERS))
 def test_entity_forward(reader, tmp_path, old_tree, host_root, monkeypatch):
     assert PREVIOUS_GA == 'v0.28.1'
     assert run_old(old_tree(reader), tmp_path, host_root, OLD_WRITE, mode='write')['compressed']
@@ -84,7 +84,7 @@ def test_entity_forward(reader, tmp_path, old_tree, host_root, monkeypatch):
         assert core_snapshot(path, before) == before
 
 
-@pytest.mark.parametrize('reader', ENTITY_READERS)
+@pytest.mark.parametrize('reader', tuple(ENTITY_READERS))
 def test_entity_rollback(reader, tmp_path, old_tree, host_root):
     api = importlib.import_module('hermes_lcm.entity_store')
     # Seed real ingest/compress data before creating all six feature tables.
@@ -118,10 +118,17 @@ def test_entity_rollback(reader, tmp_path, old_tree, host_root):
 
 
 def test_entity_registry():
+    def version(tag):
+        release, _, rc = tag.removeprefix('v').partition('-rc')
+        major, minor, patch = map(int, release.split('.'))
+        return major, minor, patch, not rc, int(rc or '0')
+
+    assert ENTITY_READERS == READERS
     for name, prefix in (('entity', 'lcm_entit'), ('memory', 'lcm_memory_')):
         family = COMPAT_REGISTRY[name]
         assert family.prefix == prefix and family.marker == 'entity_memory_v1'
-        assert family.oldest_reader == 'v0.25.0-rc1' and family.removal_version is None
+        assert family.oldest_reader == min(ENTITY_READERS, key=version)
+        assert family.removal_version is None
         assert family.tables == tuple(table for table in db._ENTITY_TABLE_COLUMNS if table.startswith(prefix))
         assert family.indexes == tuple(index for index in db._ENTITY_INDEX_SHAPES if index.startswith('idx_' + prefix))
         assert prefix in db._PRESERVED_FEATURE_FAMILIES
