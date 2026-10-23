@@ -1183,7 +1183,8 @@ def test_occurrence_receipt_basis_keeps_fact_coverage_independent(build, basis):
     rows, facts, missing = engine._stored_occurrence_metadata()
     assert not missing and set(facts) == {row["store_id"] for row in before}
     mapping = engine._validate_occurrence_receipt(rows, facts, receipt=receipt)
-    assert mapping == ({0: 3, 1: 4} if basis == "valid" else {})
+    assert mapping == ({i: (entry["store_id"], entry["input_sha256"])
+                        for i, entry in enumerate(receipt["entries"])} if basis == "valid" else {})
     assert stored(engine) == before
 
 

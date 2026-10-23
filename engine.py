@@ -7039,12 +7039,14 @@ class LCMEngine(
             if not isinstance(entry, dict) or type(entry.get("host_index")) is not int:
                 return {}
             index, source, sid = entry["host_index"], entry.get("source_session_id"), entry.get("store_id")
+            literal = entry.get("input_sha256")
             if (not previous < index < 4096 or not isinstance(source, str) or type(sid) is not int
-                    or (source, sid) not in available or (source, sid) in seen):
+                    or (source, sid) not in available or (source, sid) in seen
+                    or not isinstance(literal, str) or not re.fullmatch(r"[0-9a-f]{64}", literal)):
                 return {}
             previous = index
             seen.add((source, sid))
-            result[index] = sid
+            result[index] = (sid, literal)
         return result
 
     def _resolve_occurrence_view(self, messages):
@@ -7054,7 +7056,7 @@ class LCMEngine(
         a row must have an independent fact. Missing/corrupt evidence keeps it.
         """
         result = dict(matched={}, proven=set(), fresh=set(), legacy=set(), deferred=set(),
-                      updates={}, owners={}, witness=set(), failed=False, warm_prefix=0)
+                      updates={}, owners={}, witness=set(), input_digests={}, failed=False, warm_prefix=0)
         try:
             context = self._occurrence_context()
             switches = context[:2]
@@ -7065,7 +7067,8 @@ class LCMEngine(
                 state["accepted"] = self._validate_occurrence_receipt(rows, facts)
                 state["accepted_context"] = context
             legacy_rows = state["legacy"] and any(r["store_id"] not in facts and r["store_id"] not in missing for r in rows)
-            by_id, by_digest, accepted = state["by_id"], state["by_digest"], state["accepted"]
+            by_id, by_digest = state["by_id"], state["by_digest"]
+            accepted = {index: ref[0] for index, ref in state["accepted"].items()}
             start, current = 0, []
             warm = state.get("warm")
             previous_view = getattr(self, "_last_active_replay_messages", ())
@@ -7089,7 +7092,7 @@ class LCMEngine(
             result["has_facts"] = bool(facts)
             result["needs_receipt"] = bool(accepted)
             protected = _hermes_salvage_protected_positions(messages)
-            choices, conflicts = {}, {}
+            choices, conflicts, literal_conflicts = {}, {}, set()
             current = current or [self._occurrence_metadata(m, switches=switches) for m in messages]
             warm_plain = (not self._ingest_cursor_needs_reconcile and self._ingest_cursor > 0
                           and not getattr(self, "_compress_commit_proof", None))
@@ -7103,6 +7106,14 @@ class LCMEngine(
                     owner_segment = index
                 result["owners"][index] = (owner_user, owner_segment)
                 literal = self._message_replay_identity(message, strip_carrier=False, allow_pruned_tool_alias=False)
+                digest = _commit_proof_identity_digest(literal)
+                result["input_digests"][index] = digest
+                if index in accepted and state["accepted"][index][1] != digest:
+                    accepted.pop(index)
+                    if message.get("role") == "user":
+                        literal_conflicts.add(index)
+                if owner_user in literal_conflicts:
+                    accepted.pop(index, None)  # An old reply slot cannot bind a different raw user.
                 effective = self._message_replay_identity(message, allow_pruned_tool_alias=index not in protected)
                 if _has_lossy_redacted_identity(literal) or self._matches_ignore_message_patterns(message):
                     choices[index], conflicts[index] = [], []
@@ -7433,6 +7444,8 @@ class LCMEngine(
             return result
         except Exception:
             logger.warning("LCM occurrence resolver unavailable; retaining unproven rows", exc_info=True)
+            result["input_digests"] = {i: _commit_proof_identity_digest(self._message_replay_identity(
+                m, strip_carrier=False, allow_pruned_tool_alias=False)) for i, m in enumerate(messages[:4096])}
             result.update(matched={}, proven=set(), fresh=set(range(len(messages))), updates={}, failed=True,
                           needs_receipt=True, warm_prefix=0)
             return result
@@ -7526,7 +7539,8 @@ class LCMEngine(
                     basis = self._occurrence_receipt_basis(batch["store"], source)
                     if basis is not None:
                         receipt["basis"] = basis
-                        receipt["entries"] = [dict(host_index=index, source_session_id=ref[0], store_id=ref[1])
+                        receipt["entries"] = [dict(host_index=index, source_session_id=ref[0], store_id=ref[1],
+                                                   input_sha256=batch.get("occurrence_inputs", {}).get(index))
                                               for index, ref in sorted(ids.items())]
                 batch["_occurrence_written_receipt"] = receipt
                 if previous != receipt:
@@ -8497,6 +8511,7 @@ class LCMEngine(
             occurrence_updates=dict(getattr(self, "_occurrence_ingest_plan", {}).get("updates", {})),
             occurrence_receipt=getattr(self, "_occurrence_ingest_plan", {}).get("needs_receipt", False),
             occurrence_length=getattr(self, "_occurrence_ingest_plan", {}).get("length", 0),
+            occurrence_inputs=dict(getattr(self, "_occurrence_ingest_plan", {}).get("input_digests", {})),
         )
         pending, senders = sender_capture.batch_senders(self, sender_originals, sender_excluded)
         if senders is not None:
