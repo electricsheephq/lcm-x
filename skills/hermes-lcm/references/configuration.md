@@ -97,7 +97,11 @@ Range warnings (`LCM_CONTEXT_THRESHOLD`, `LCM_SURVIVAL_RESERVE`, `LCM_LEAF_CHUNK
 Both native context-engine schemas and plugin-registry registration advertise
 13 tools by default. `LCM_ASSERTIONS_ENABLED=true` exposes `lcm_query_state`;
 `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true` exposes `lcm_retrieve`;
-`LCM_ENTITIES_ENABLED=1` exposes read-only `lcm_memory`. Restart after
+`LCM_ENTITIES_ENABLED=1` exposes read-only `lcm_memory` and creates the
+`entity_memory_v1` family (six tables) on first flag-on open. The tables stay
+after the flag is turned off; see the [ADR rollback and forget boundary](../../../docs/entities-adr.md#d11-forget-e2).
+Entity scope follows the Hermes profile name, falling back to the resolved home
+path. Renaming a profile starts a new entity scope; rekey is a follow-up. Restart after
 changing these loaded process flags. `LCM_DISABLED_TOOLS` (comma-separated
 names) hides any tool, including a flag-enabled one, and refuses direct calls.
 Calls through a cached dormant schema retain the existing disabled response.

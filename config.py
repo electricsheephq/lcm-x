@@ -985,7 +985,8 @@ class LCMConfig:
     # Directory for daily extraction files (empty = auto: ~/.hermes/lcm-extractions/)
     extraction_output_path: str = ""
 
-    # Read-only entity cards over existing rows; no schema or recall changes.
+    # First flag-on open creates entity_memory_v1 (six tables); flag-off preserves them.
+    # Rollback/forget boundary: docs/entities-adr.md D11 (forget is not purge).
     entities_enabled: bool = False
 
     # -- V4 assertion sidecar --

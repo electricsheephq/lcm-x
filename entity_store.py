@@ -36,7 +36,7 @@ def normalize_platform_id(platform: str, identifier: str) -> str:
 class EntityStore:
     """One profile's source records, with atomic mutation/event pairs.
 
-    A callable profile_key follows an engine's existing bound-home identity on
+    A callable profile_key follows an engine's bound profile identity on
     configured-database rebinds. Access stamps are discovered on open, after
     the core store's policy setup; policy/schema transitions require reopening.
     """
@@ -217,6 +217,8 @@ class EntityStore:
                  OR ({int(empty_owner)} AND :owner))"""
 
     def _read(self, table, where="1", params=None, *, access_scope=None, principal_is_owner=False, order="rowid"):
+        if access_scope is not None and not isinstance(principal_is_owner, bool):
+            raise TypeError("principal_is_owner must be a bool in principal mode")
         visible = "1"
         if table == "lcm_entity_aliases" or table == "lcm_entity_keys":
             visible = self._visible("t.source_store_ids", empty_owner=table == "lcm_entity_aliases")
@@ -231,8 +233,8 @@ class EntityStore:
                        + self._visible("n.cites", "n.cites_file_revisions") + "))")
         with self._lock:
             return [dict(r) for r in self._conn.execute(f"SELECT t.* FROM {table} t WHERE t.scope_key=:scope "
-                f"AND ({where}) AND ({visible}) ORDER BY {order}",
-                dict(params or {}, scope=self.scope_key, principal=access_scope, owner=principal_is_owner))]
+                f"AND (:principal IS NULL OR :principal!='') AND ({where}) AND ({visible}) ORDER BY {order}",
+                dict(params or {}, scope=self.scope_key, principal=access_scope, owner=bool(principal_is_owner)))]
 
     def get_entity(self, entity_id, **access):
         return next(iter(self._read("lcm_entities", "t.entity_id=:id", {"id": entity_id}, **access)), None)
@@ -259,4 +261,7 @@ class EntityStore:
         return self._read("lcm_entity_keys", "t.entity_id=:id AND t.retired_at IS NULL", {"id": entity_id}, **access)
 
     def events_after(self, event_id=0, **access):
+        """Return scope-isolated events for trusted replay only."""
+        if 'access_scope' in access or 'principal_is_owner' in access:
+            raise ValueError("events are trusted replay only")
         return self._read("lcm_memory_events", "t.event_id>:id", {"id": event_id}, order="event_id", **access)

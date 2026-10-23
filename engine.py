@@ -1601,6 +1601,16 @@ class LCMEngine(
             return Path(hermes_home) / "lcm.db"
         return Path.home() / ".hermes" / "lcm.db"
 
+    def _entity_profile_key(self, db_path: str | Path) -> str:
+        """Use command authorization's optional host profile-name resolution."""
+        home = self._hermes_home
+        try:
+            from hermes_constants import profile_name_for_home
+            name = str(profile_name_for_home(home) or "") if home else ""
+        except Exception:
+            name = ""
+        return name or str(Path(home or Path(db_path).parent).resolve())
+
     def _bind_storage(self, db_path: str | Path, hermes_home: str = "") -> None:
         """Bind store/DAG/lifecycle helpers to one SQLite database."""
         self._assertions = None
@@ -1625,8 +1635,7 @@ class LCMEngine(
                 if bool(getattr(self._config, "assertions_enabled", False))
                 else None
             )
-            self._entities = (EntityStore(db_path, profile_key=lambda: str(
-                Path(self._hermes_home or Path(db_path).parent).resolve()))
+            self._entities = (EntityStore(db_path, profile_key=lambda: self._entity_profile_key(db_path))
                 if self._config.entities_enabled else None)
             self._query_views = (
                 QueryViewStore(db_path)

@@ -604,7 +604,7 @@ all 16 tools for manifest checks.
 
 | Variable | Default | Use |
 |----------|---------|-----|
-| `LCM_ENTITIES_ENABLED` | `false` | Expose read-only `lcm_memory lookup/list`; no new tables, writes or model calls. Restart after changing the flag. |
+| `LCM_ENTITIES_ENABLED` | `false` | Expose read-only `lcm_memory lookup/list` and create the `entity_memory_v1` family (six tables) on first flag-on open. Tables stay after the flag is turned off. Restart after changing the flag; see the [ADR rollback and forget boundary](entities-adr.md#d11-forget-e2). |
 | `LCM_ASSERTIONS_ENABLED` | `false` | Create and bind the same-DB assertion sidecar so `lcm_query_state` can return typed, source-cited state. This alone performs no extraction or backfill. |
 | `LCM_ASSERTION_EXTRACTION_ENABLED` | `false` | With assertions enabled, run bounded structured extraction over exact persisted rows before compaction. This may send source text to the configured extraction/summary model. |
 | `LCM_ASSERTION_EXTRACTION_MODEL` | empty | Extraction-model override; otherwise uses `LCM_EXTRACTION_MODEL`, then the summary model. |
@@ -616,6 +616,13 @@ all 16 tools for manifest checks.
 | `LCM_PREANSWER_EVIDENCE_MODE` | empty | When the master flag is enabled, empty selects legacy selective behavior; explicit values are `off`, `legacy_selective`, or `requirements_v1`. |
 | `LCM_SELECTIVE_COMPILER_ENABLED` | `false` | Separately opt into the semantic selector for code-derived closed operations. Disabling the selective compiler does not prevent the pre-answer hook from retrieving a baseline. |
 | `LCM_SELECTIVE_COMPILER_MODEL` | empty | Optional model override for the selective compiler. |
+
+Entity rows use the profile name resolved by Hermes; if no name resolves, they
+use the resolved profile home path. Moving or copying a home under the same
+profile name keeps its entity scope. Renaming a profile starts a new entity
+scope; a rekey path is a follow-up. Readers older than D11 do not honor forgets,
+so rollback can expose forgotten rows again: forget is not purge (see the
+[ADR boundary](entities-adr.md#d11-forget-e2)).
 
 When no caller-supplied baseline is available, routed pre-answer turns may call
 `lcm_recall` to build one. If embeddings are enabled, this retrieval inherits
