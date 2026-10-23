@@ -1,7 +1,9 @@
 """LCM configuration with defaults and env var overrides."""
 import contextvars
+import json
 import logging
 import os
+import re
 from collections import ChainMap
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -14,6 +16,12 @@ try:
     import yaml
 except Exception:  # pragma: no cover - optional fallback for minimal installs
     yaml = None
+
+
+try:
+    import ruamel.yaml as ruamel_yaml
+except Exception:  # pragma: no cover - optional fallback for minimal installs
+    ruamel_yaml = None
 
 
 logger = logging.getLogger(__name__)
@@ -329,6 +337,72 @@ def _hermes_config_path() -> Path:
     return home / "config.yaml"
 
 
+_YAML_QUOTED_SCALAR = r""""(?:\\.|[^"\\])*"|'(?:''|[^'])*'"""
+
+
+def _plain_yaml_value(value, memo=None):
+    if memo is None:
+        memo = {}
+    if id(value) in memo:
+        return memo[id(value)]
+    if isinstance(value, (dict, list, tuple)):
+        result = {} if isinstance(value, dict) else []
+        memo[id(value)] = result
+        if isinstance(value, dict):
+            result.update((_plain_yaml_value(k, memo), _plain_yaml_value(v, memo)) for k, v in value.items())
+        else:
+            result.extend(_plain_yaml_value(item, memo) for item in value)
+        return result
+    if value is None:
+        return None
+    for scalar_type in (str, bool, int, float):
+        if isinstance(value, scalar_type):
+            return scalar_type(value)
+    return str(value)
+
+
+def _parse_yaml_fallback_scalar(value: str):
+    value = value.strip()
+    quoted = re.match(_YAML_QUOTED_SCALAR, value)
+    if quoted:
+        token = quoted.group()
+        try:
+            return json.loads(token) if token[0] == '"' else token[1:-1].replace("''", "'")
+        except ValueError:
+            pass  # Unsupported escape: retain the old parser's result below.
+    if value.startswith("["):
+        items = []
+        start = 1
+        # Quoted tokens consume their own commas, hashes and escaped quotes.
+        quoted_item = r"(?:^|(?<=,))\s*(?:" + _YAML_QUOTED_SCALAR + ")"
+        for match in re.finditer(quoted_item + r"|[,\]\[]|(?<!\S)#", value[1:]):
+            token = match.group()
+            if token in {"#", "["}:
+                break  # Unsupported list shape: retain the old result.
+            if token in {",", "]"}:
+                end = match.start() + 1
+                item = value[start:end].strip()
+                if item or token == ",":
+                    items.append(_parse_yaml_fallback_scalar(item))
+                if token == "]":
+                    return items
+                start = match.end() + 1
+    for match in re.finditer(r"^(?:" + _YAML_QUOTED_SCALAR + r")|(?<!\S)#", value):
+        if match.group() == "#":
+            value = value[:match.start()]
+            break
+    value = value.rstrip().strip("'\"")
+    lowered = value.lower()
+    if lowered in {"true", "yes", "on"}:
+        return True
+    if lowered in {"false", "no", "off"}:
+        return False
+    try:
+        return float(value) if "." in value else int(value)
+    except ValueError:
+        return value
+
+
 def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
     cfg_path = _hermes_config_path() if cfg_path is None else cfg_path
     try:
@@ -342,11 +416,26 @@ def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
         except Exception:
             return {}
 
+    if ruamel_yaml is not None:
+        try:
+            loaded = _plain_yaml_value(ruamel_yaml.YAML(typ="safe", pure=True).load(text))
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+
     root: dict[str, Any] = {}
     stack: list[tuple[int, dict[str, Any]]] = [(-1, root)]
     for raw_line in text.splitlines():
-        line = raw_line.split("#", 1)[0].rstrip()
-        if not line.strip() or ":" not in line:
+        line = raw_line.rstrip()
+        content = line
+        quoted_scalar = r"(?:^\s*|^[^:#]*:\s*)(?:" + _YAML_QUOTED_SCALAR + ")"
+        if line.partition(":")[2].lstrip().startswith("["):
+            quoted_scalar = r"(?<=[\[,])\s*(?:" + _YAML_QUOTED_SCALAR + ")|" + quoted_scalar
+        for match in re.finditer(quoted_scalar + r"|(?<!\S)#", line):
+            if match.group() == "#":
+                content = line[:match.start()]
+                break
+        if ":" not in content:
             continue
         indent = len(line) - len(line.lstrip(" \t"))
         key, raw_value = line.strip().split(":", 1)
@@ -360,23 +449,12 @@ def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
             stack.pop()
         parent = stack[-1][1] if stack else root
         value = raw_value.strip()
-        if not value:
+        if not value or value.startswith("#"):
             child: dict[str, Any] = {}
             parent[key] = child
             stack.append((indent, child))
             continue
-        value = value.strip("'\"")
-        lowered = value.lower()
-        if lowered in {"true", "yes", "on"}:
-            parsed: Any = True
-        elif lowered in {"false", "no", "off"}:
-            parsed = False
-        else:
-            try:
-                parsed = float(value) if "." in value else int(value)
-            except ValueError:
-                parsed = value
-        parent[key] = parsed
+        parent[key] = _parse_yaml_fallback_scalar(value)
     return root
 
 

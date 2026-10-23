@@ -287,7 +287,7 @@ comma-separated values. Keep their existing source tracking and parsing rules.
 
 | Environment key | Format / declared default |
 | --- | --- |
-| `LCM_MODEL_THRESHOLDS` | `model:threshold` pairs; `{}`; each threshold must be > 0 and <= 1 |
+| `LCM_MODEL_THRESHOLDS` | `model:threshold` pairs; `{}`; each threshold must be > 0 and <= 1. In `lcm.model_thresholds`, values must be YAML numbers; quoted values such as `glm: "0.35"` are skipped on every loader. |
 | `LCM_SUMMARY_REASONING_EFFORT` | Empty (task/provider default); `none`, `minimal`, `low`, `medium`, `high`, `xhigh` |
 | `LCM_EXPANSION_REASONING_EFFORT` | Same reasoning choices; empty (task/provider default) |
 | `LCM_SENSITIVE_PATTERNS` | List; `api_key,bearer_token,password_assignment,private_key` |
