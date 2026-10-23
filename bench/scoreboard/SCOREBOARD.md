@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `d768fc6af65479fdf646d669980d246963463c263efc9dffbed9f7ee214b9716`, rows: 61)
+Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `52cad333b794a3f1fa2c2864aedfae91119d6e9f14e6975ce5f48a99052f1933`, rows: 63)
 
 ## Summary
 
@@ -19,6 +19,8 @@ Generated from `results.jsonl` (sha256: `d768fc6af65479fdf646d669980d246963463c2
 | D5-C (reference-agent real-use window) | max_lcm_owned_s | 116.3 | P | 2026-10-16 | [details](#d5c-max-v0270-2026-10-16) |
 | D5-C (reference-agent real-use window) | real_use_hours | 11.9 | P | 2026-10-16 | [details](#d5c-window-v0270-2026-10-16) |
 | Internal scale instrument (389×, 19,829 sessions / 199,641 messages) | p50_ms | 263.6 ms @ 19,829 sessions (24× vs pre-fix; 125 ms @ 8k) | P | 2026-07-30 | [details](#scale-curve-fastscan-2026-07-30) |
+| ~~Issue #1828 synthetic delivery acceptance (not a board score)~~ | ~~head_subset_cells~~ | ~~0 strict-subset regressions / 1502 cap cells~~ | ~~F~~ | ~~2026-10-23~~ | ~~[details](#issue-1828-refit-20261023)~~ → [successor](#issue-1828-refit-20261023-r2) |
+| Issue #1828 synthetic delivery acceptance (not a board score) | head_subset_cells | 0 strict-subset regressions / 1502 cap cells | F | 2026-10-23 | [details](#issue-1828-refit-20261023-r2) |
 | LOCAL catch-up gap discovery (#1748; synthetic 250k store) | sqlite_vm_work_amplification_240k_vs_empty | 1.744911x VM work; 2x eligible-row visits; live max 1.000263x steady | P | 2026-10-21 | [details](#issue1748-gapwalk-2026-10-21) |
 | LoCoMo (1,986q, QA, OFF) | correct_count | 1,014/1,986 vs 987/1,986 | P | 2026-10-16 | [details](#locomo-qa-off-v0270-2026-10-16) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 54.9% (1,091/1,986); OFF on the same release 49.7% | P | 2026-10-08 | [details](#locomo10-1986-qa-local-v0261-2026-10-08) |
@@ -788,6 +790,126 @@ one real-use window; volume about two compactions/day, so volume latency bars ju
 - D5-C PASS accepted at 11.9 h of declared 12 h when host changed; shortened-window decision disclosed. Bars: each LCM-owned stop <=120 s, 0 LCM-X tracebacks, 0 publication conflicts, engine bound, >=1 answered organic turn. The release asset records a 24 h post-GA re-read on Hermes 0.22.2 as continuing; it is outside this row.
 - Backfill date is the release publication date; the scorecard does not state the run completion day.
 - Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="issue-1828-refit-20261023"></a>issue-1828-refit-20261023
+
+**id:**
+issue-1828-refit-20261023
+
+**benchmark:**
+Issue #1828 synthetic delivery acceptance (not a board score)
+
+**metric:**
+head_subset_cells
+
+**value:**
+0
+
+**display:**
+0 strict-subset regressions / 1502 cap cells
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+75149e5a5ef20f1e402dcff296b6749a935909c0; base e5a239ee1d02acf2068150583b7eff2576635d09
+
+**harness_commit:**
+75149e5a5ef20f1e402dcff296b6749a935909c0 tests/test_issue_1828_refit.py
+
+**judge:**
+none; deterministic set comparison and envelope maximality
+
+**reader:**
+none; engine-direct session delivery
+
+**retrieval_config:**
+two synthetic fixtures; session delivery; delta on; fallback token count; occurrence off; caps 1500-9000 step 10
+
+**dataset_exposure:**
+fully synthetic; no benchmark dataset
+
+**breakdown:**
+tests/fixtures/issue_1828_refit/summary.json: 1496 equal, 6 strict supersets, 0 strict subsets, 0 incomparable
+
+**variance:**
+deterministic cap scan; separate 300-run interleaved timing arms in the linked receipt; single machine
+
+**failclose:**
+0 excluded cap cells; 0 maximality failures
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/e9099749528efa5c27c8e8e5037d0465bc891d1f/tests/fixtures/issue_1828_refit/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/e9099749528efa5c27c8e8e5037d0465bc891d1f/tests/fixtures/issue_1828_refit/summary.json
+
+**caveats:**
+- Delivery correctness only; no board-score, quality, runtime or customer claim
+- T2 not published; original results retained
+
+**superseded_by:**
+issue-1828-refit-20261023-r2
+
+### <a id="issue-1828-refit-20261023-r2"></a>issue-1828-refit-20261023-r2
+
+**id:**
+issue-1828-refit-20261023-r2
+
+**benchmark:**
+Issue #1828 synthetic delivery acceptance (not a board score)
+
+**metric:**
+head_subset_cells
+
+**value:**
+0
+
+**display:**
+0 strict-subset regressions / 1502 cap cells
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+07510c16558eb3acca0dec0b274a82fa20b99f8d; base e5a239ee1d02acf2068150583b7eff2576635d09
+
+**harness_commit:**
+07510c16558eb3acca0dec0b274a82fa20b99f8d tests/test_issue_1828_refit.py
+
+**judge:**
+none; deterministic set comparison and envelope maximality
+
+**reader:**
+none; engine-direct session delivery
+
+**retrieval_config:**
+two synthetic fixtures; session delivery; delta on; fallback token count; occurrence off; caps 1500-9000 step 10
+
+**dataset_exposure:**
+fully synthetic; no benchmark dataset
+
+**breakdown:**
+tests/fixtures/issue_1828_refit/summary.json: 1496 equal, 6 strict supersets, 0 strict subsets, 0 incomparable
+
+**variance:**
+deterministic cap scan; separate 300-run interleaved timing arms in the linked receipt; single machine
+
+**failclose:**
+0 excluded cap cells; 0 maximality failures
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/003da0417809f0678028232d695606854b14758b/tests/fixtures/issue_1828_refit/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/003da0417809f0678028232d695606854b14758b/tests/fixtures/issue_1828_refit/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/003da0417809f0678028232d695606854b14758b/tests/fixtures/issue_1828_refit/summary.json
+
+**caveats:**
+- Delivery correctness only; no board-score, quality, runtime or customer claim
+- T2 not published; original results retained
 
 ### <a id="issue1748-gapwalk-2026-10-21"></a>issue1748-gapwalk-2026-10-21
 
