@@ -6794,6 +6794,343 @@ class LCMEngine(
             matched += 1
         return result
 
+    def _stored_occurrence_metadata(self):
+        """At most 4096 raw witnesses, including validated carry; no session scan.
+
+        Cache by connection generation. Ingest extends this cache after commit;
+        another writer invalidates it. Facts never rehash a protected/mutable row.
+        """
+        store = self._store
+        generation = (store._conn.total_changes, store._conn.execute("PRAGMA data_version").fetchone()[0])
+        key = (id(store), self._session_id, self._conversation_id, generation)
+        cache = getattr(self, "_occurrence_window_cache", None)
+        if cache and cache[0] == key:
+            return cache[1], cache[2]
+        rows = store.get_session_tail(self._session_id, limit=4096)
+        room = 4096 - len(rows)
+        if room:
+            for source, start, end in self._load_compression_carry_ranges()[-64:]:
+                if room <= 0:
+                    break
+                parent = [r for r in store.get_session_rows_through(source, end, room)
+                          if start < r["store_id"] <= end]
+                rows = parent + rows
+                room -= len(parent)
+        rows = [r for r in rows if str(r.get("conversation_id") or "")
+                in ("", str(self._conversation_id or ""))]
+        keys = [f"host_occurrence_row:{r['session_id']}:{r['store_id']}" for r in rows]
+        values = store.read_metadata_json_many(keys)
+        facts = {}
+        for row, name in zip(rows, keys):
+            fact = values.get(name)
+            if not isinstance(fact, dict) or fact.get("occurrence_version") != 2:
+                continue
+            digest, uid = fact.get("identity_sha256"), fact.get("message_uid")
+            if (not isinstance(digest, str) or len(digest) != 64
+                    or any(c not in "0123456789abcdef" for c in digest)
+                    or uid is not None and not _valid_uid(uid)
+                    or any(fact.get(k) is not None and type(fact[k]) is not int
+                           for k in ("user_store_id", "segment_call_store_id"))):
+                continue
+            facts[row["store_id"]] = fact
+        self._occurrence_window_cache = (key, rows, facts)
+        return rows, facts
+
+    def _occurrence_metadata(self, message, *, stored=False, fact=None):
+        from .config import host_message_uid_mode
+
+        result = self._host_occurrence_metadata(message)
+        if stored:
+            result["timestamp"] = _normalize_observed_at(message.get("observed_at"))
+            result["message_uid"] = (fact or {}).get("message_uid")
+        if not identity_anchor_enabled() or host_message_uid_mode() == "off":
+            result["message_uid"] = None
+        return result
+
+    def _validate_occurrence_receipt(self, rows, facts):
+        receipt = self._store.read_metadata_json(f"host_occurrence_accepted_view:{self._session_id}")
+        if not isinstance(receipt, dict) or receipt.get("occurrence_version") != 2:
+            return {}
+        if receipt.get("scope") != {"session_id": self._session_id, "conversation_id": self._conversation_id}:
+            return {}
+        entries = receipt.get("entries")
+        if not isinstance(entries, list) or len(entries) > 4096:
+            return {}
+        available = {(r["session_id"], r["store_id"]) for r in rows if r["store_id"] in facts}
+        seen, result, previous = set(), {}, -1
+        for entry in entries:
+            if not isinstance(entry, dict) or type(entry.get("host_index")) is not int:
+                return {}
+            index, source, sid = entry["host_index"], entry.get("source_session_id"), entry.get("store_id")
+            if (not previous < index < 4096 or not isinstance(source, str) or type(sid) is not int
+                    or (source, sid) not in available or (source, sid) in seen):
+                return {}
+            previous = index
+            seen.add((source, sid))
+            result[index] = sid
+        return result
+
+    def _resolve_occurrence_view(self, messages):
+        """Resolve rows and complete segments once, before any consuming cursor.
+
+        Equal bytes only discover candidates. Known conflicts veto every source;
+        a row must have an independent fact. Missing/corrupt evidence keeps it.
+        """
+        result = dict(matched={}, proven=set(), fresh=set(), legacy=set(), updates={}, owners={}, failed=False)
+        try:
+            rows, facts = self._stored_occurrence_metadata()
+            result["has_facts"] = bool(facts)
+            by_id = {r["store_id"]: r for r in rows}
+            accepted = self._validate_occurrence_receipt(rows, facts)
+            result["needs_receipt"] = bool(accepted)
+            by_digest = {}
+            for sid, fact in facts.items():
+                by_digest.setdefault(fact["identity_sha256"], []).append(sid)
+            protected = _hermes_salvage_protected_positions(messages)
+            choices, conflicts = {}, {}
+            current = [self._occurrence_metadata(m) for m in messages]
+            owner_user, owner_segment = None, None
+            for index, message in enumerate(messages):
+                if message.get("role") == "user":
+                    owner_user, owner_segment = index, None
+                if message.get("role") == "assistant" and message.get("tool_calls"):
+                    owner_segment = index
+                result["owners"][index] = (owner_user, owner_segment)
+                literal = self._message_replay_identity(message, allow_pruned_tool_alias=False)
+                effective = self._message_replay_identity(message, allow_pruned_tool_alias=index not in protected)
+                if _has_lossy_redacted_identity(literal) or self._matches_ignore_message_patterns(message):
+                    choices[index] = []
+                    continue
+                digests = {_commit_proof_identity_digest(_proof_user_identity(i)) for i in (literal, effective)}
+                candidates = list(dict.fromkeys(sid for d in digests for sid in by_digest.get(d, ())))
+                good, bad = [], []
+                for sid in candidates:
+                    old = self._occurrence_metadata(by_id[sid], stored=True, fact=facts[sid])
+                    conflict = self._host_occurrence_changed(current[index], old)
+                    (bad if conflict else good).append(sid)
+                if current[index]["message_uid"]:
+                    equal_uid = [sid for sid in good if facts[sid].get("message_uid") == current[index]["message_uid"]]
+                    if equal_uid:
+                        good = equal_uid
+                previous = accepted.get(index)
+                if previous in good:
+                    good = [previous]
+                elif previous in bad:
+                    good, bad = [], [previous]
+                choices[index], conflicts[index] = good, bad
+
+            used, user_id, user_index = set(), None, None
+            reserved = {sid: pos for pos, options in choices.items() if current[pos]["message_uid"]
+                        for sid in options if facts[sid].get("message_uid") == current[pos]["message_uid"]}
+            for pos in choices:
+                choices[pos] = [sid for sid in choices[pos] if reserved.get(sid, pos) == pos]
+            user_groups = {}
+            for pos, row in enumerate(messages):
+                if row.get("role") == "user":
+                    user_groups.setdefault(tuple(sorted(choices[pos])), []).append(pos)
+
+            def accept(index, sid):
+                result["matched"][index] = (by_id[sid]["session_id"], sid)
+                result["proven"].add(index)
+                used.add(sid)
+                uid = current[index]["message_uid"]
+                if uid and not facts[sid].get("message_uid"):
+                    name = f"host_occurrence_row:{by_id[sid]['session_id']}:{sid}"
+                    result["updates"][name] = {**facts[sid], "message_uid": uid}
+
+            index = 0
+            while index < len(messages):
+                message = messages[index]
+                if message.get("role") == "user":
+                    user_index = index
+                    eligible = [sid for sid in choices[index] if sid not in used]
+                    user_id = eligible[0] if len(eligible) == 1 else None
+                    group = tuple(sorted(choices[index]))
+                    if len(group) > 1 and len(user_groups[group]) >= len(group):
+                        ordinal = user_groups[group].index(index)
+                        user_id = group[ordinal] if ordinal < len(group) and group[ordinal] not in used else None
+                    if not identity_anchor_enabled():
+                        proof = self._durable_commit_proof_payload() or {}
+                        if index >= len(proof.get("output_metadata", ())):
+                            user_id = None
+                    if user_id is not None:
+                        accept(index, user_id)
+                    elif conflicts[index]:
+                        result["fresh"].add(index)
+                    elif eligible and current[index]["timestamp"] is not None:
+                        # Accepted #1830 user-stamp policy: leave ambiguity to
+                        # the existing anchor, without choosing a row or binding
+                        # its pair. It cannot authorize fact adoption.
+                        result["legacy"].add(index)
+                    index += 1
+                    continue
+                if message.get("role") == "assistant" and message.get("tool_calls"):
+                    end = index + 1
+                    while end < len(messages) and messages[end].get("role") == "tool":
+                        end += 1
+                    segment = list(range(index, end))
+                    winners = []
+                    for call_id in choices[index]:
+                        if call_id in used:
+                            continue
+                        selection = {index: call_id}
+                        for pos in segment[1:]:
+                            eligible = [sid for sid in choices[pos] if sid not in used
+                                        and sid not in selection.values()
+                                        and facts[sid].get("segment_call_store_id") == call_id]
+                            if len(eligible) != 1:
+                                break
+                            selection[pos] = eligible[0]
+                        if len(selection) == len(segment):
+                            winners.append(selection)
+                    # Known pair UIDs outrank a user-only replacement. Otherwise
+                    # the accepted user relation identifies its re-stored pair.
+                    anchored = any(any(v is not None for v in current[pos].values()) for pos in segment)
+                    steady_single = (not self._ingest_cursor_needs_reconcile and self._ingest_cursor > 0
+                                     and not getattr(self, "_compress_commit_proof", None)
+                                     and not self._durable_commit_proof_payload()
+                                     and sum(bool(m.get("tool_calls")) for m in messages[
+                                         (user_index or 0) + 1:next((p for p in range(index + 1, len(messages))
+                                             if messages[p].get("role") == "user"), len(messages))]) == 1)
+                    if not anchored and user_id is not None:
+                        winners = [w for w in winners if facts[w[index]].get("user_store_id") == user_id
+                                   or accepted.get(index) == w[index]]
+                    user_changed = user_index in result["fresh"]
+                    if user_index in result["legacy"] and not anchored:
+                        winners = []
+                    if user_changed and not anchored and not steady_single:
+                        winners = []
+                    borrowed = any(messages[p].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                                   for p in segment[1:])
+                    if borrowed and not identity_anchor_enabled():
+                        winners = []
+                    if len(winners) == 1:
+                        if user_id is None and user_index is not None and not anchored:
+                            # A prefix edit can accept an unchanged pair under
+                            # a newly stored user. Facts alone cannot record this
+                            # selected cross-row relationship (named prefix-edit
+                            # replay regression); retain that accepted selection.
+                            result["needs_receipt"] = True
+                        for pos, sid in winners[0].items():
+                            accept(pos, sid)
+                    else:
+                        if len(facts) < len(rows) and any(choices[pos] for pos in segment):
+                            result["needs_receipt"] = True
+                        # Whole-segment fence for UID changes and bounded/pruned
+                        # retries. Preserve #1179's literal steady-result update.
+                        if not steady_single:
+                            result["fresh"].update(segment)
+                        else:
+                            for pos in segment:
+                                eligible = [sid for sid in choices[pos] if sid not in used]
+                                if len(eligible) == 1:
+                                    accept(pos, eligible[0])
+                    index = end
+                    continue
+                eligible = [sid for sid in choices[index] if sid not in used]
+                if user_index in result["fresh"] and not current[index]["message_uid"]:
+                    if choices[index]:
+                        # Named #1451 equal-reply checkpoint: the user stamp
+                        # accepts an unknown reply once; equal row facts alone
+                        # cannot select that copy at the next cold restart.
+                        result["needs_receipt"] = True
+                    eligible = []
+                    result["fresh"].add(index)
+                if len(eligible) == 1:
+                    accept(index, eligible[0])
+                elif conflicts[index]:
+                    result["fresh"].add(index)
+                index += 1
+            proof = getattr(self, "_compress_commit_proof", None) or self._durable_commit_proof_payload()
+            generated = set()
+            if proof:
+                _, identities = self._occurrence_replay_identities(messages, proof)
+                generated = {i for i, identity in enumerate(identities) if identity is None}
+            result["fresh"].update(set(range(len(messages))) - result["proven"] - result["legacy"] - generated)
+            return result
+        except Exception:
+            logger.warning("LCM occurrence resolver unavailable; retaining unproven rows", exc_info=True)
+            result.update(matched={}, proven=set(), fresh=set(range(len(messages))), updates={}, failed=True,
+                          needs_receipt=True)
+            return result
+
+    def _occurrence_cursor_fence(self, messages, cursor):
+        resolution = getattr(self, "_occurrence_ingest_plan", None)
+        if not resolution or resolution.get("length") != len(messages):
+            return cursor
+        # Valid emission provenance remains separate from occurrence evidence.
+        proof = getattr(self, "_compress_commit_proof", None) or self._durable_commit_proof_payload()
+        generated = set()
+        if proof:
+            _, identities = self._occurrence_replay_identities(messages, proof)
+            generated = {i for i, identity in enumerate(identities) if identity is None}
+        safe = resolution["proven"] | resolution.get("legacy", set()) | generated
+        prefix = next((i for i in range(len(messages)) if i not in safe), len(messages))
+        cursor = max(cursor, prefix)
+        unresolved = set(range(cursor)) - safe
+        resolution["fresh"].update(unresolved)
+        return min(unresolved | resolution["fresh"], default=cursor) if unresolved else min(
+            resolution["fresh"] | {cursor})
+
+    def _persist_occurrence_adoptions(self, plan):
+        if not plan.get("updates"):
+            return
+        with self._store.atomic(immediate=True):
+            for key, fact in plan["updates"].items():
+                self._store.write_metadata_json([key], json.dumps(fact, separators=(",", ":")), skip_unchanged=True)
+
+    def _occurrence_batch_factory(self, batch):
+        """Retry-local state resets on the first callback of every insert attempt."""
+        source = batch["session_id"]
+        initial = batch.get("occurrence_matched", {})
+        ids = {}
+
+        def factory(message, store_id):
+            pos = message["_occurrence_position"]
+            if pos == batch["metadata_messages"][0]["_occurrence_position"]:
+                ids.clear()
+                ids.update(initial)
+            ids[pos] = (source, store_id)
+            def owner(name):
+                reference = ids.get(message.get(name))
+                return reference[1] if reference and reference[0] == source else None
+            fact = dict(occurrence_version=2,
+                        identity_sha256=message["_occurrence_digest"],
+                        message_uid=self._occurrence_metadata(message)["message_uid"],
+                        user_store_id=owner("_occurrence_user"),
+                        segment_call_store_id=owner("_occurrence_segment"))
+            records = self._real_user_scaffold_metadata_rows(message, store_id)
+            records.append((f"host_occurrence_row:{source}:{store_id}", json.dumps(fact, separators=(",", ":"))))
+            if pos == batch["metadata_messages"][0]["_occurrence_position"]:
+                records.extend((key, json.dumps(value, separators=(",", ":")))
+                               for key, value in batch.get("occurrence_updates", {}).items())
+            if (batch.get("occurrence_receipt") and pos == batch["metadata_messages"][-1]["_occurrence_position"]
+                    and batch.get("occurrence_length", 4097) <= 4096):
+                receipt = dict(occurrence_version=2,
+                               scope=dict(session_id=source, conversation_id=batch["conversation_id"]),
+                               entries=[dict(host_index=index, source_session_id=ref[0], store_id=ref[1])
+                                        for index, ref in sorted(ids.items())])
+                key = f"host_occurrence_accepted_view:{source}"
+                if batch["store"].read_metadata_json(key) != receipt:
+                    records.append((key, json.dumps(receipt, separators=(",", ":"))))
+            return records
+        return factory
+
+    def _occurrence_batch_messages(self, rows, *, use_plan=True):
+        user, segment = None, None
+        result = []
+        for pos, message in rows:
+            if message.get("role") == "user":
+                user, segment = pos, None
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                segment = pos
+            if use_plan:
+                user, segment = getattr(self, "_occurrence_ingest_plan", {}).get("owners", {}).get(pos, (user, segment))
+            result.append({**message, "_occurrence_position": pos, "_occurrence_user": user,
+                           "_occurrence_segment": segment, "_occurrence_digest": _commit_proof_identity_digest(
+                               _proof_user_identity(self._message_replay_identity(message, allow_pruned_tool_alias=False)))})
+        return result
+
     def _ingest_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -6829,6 +7166,14 @@ class LCMEngine(
             self._identity_anchor_observe_recovery()
         sender_capture.try_update(self)
         self._capture_host_rewrites(messages)
+        try:
+            occurrence = self._resolve_occurrence_view(messages)
+        except Exception:
+            logger.warning("LCM occurrence resolution failed; retaining rows", exc_info=True)
+            occurrence = dict(matched={}, proven=set(), fresh=set(range(len(messages))),
+                              updates={}, owners={}, failed=True, needs_receipt=True)
+        occurrence["length"] = len(messages)
+        self._occurrence_ingest_plan = occurrence
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
@@ -6994,6 +7339,12 @@ class LCMEngine(
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
+        # Apply independent row evidence before any residual skip or anchor
+        # decision. The compaction snapshot can never outrank a newer fact.
+        cursor = self._occurrence_cursor_fence(messages, cursor)
+        self._ingest_cursor = cursor
+        new_prefix_occurrences = set(occurrence["fresh"])
+        unchanged_prefix_occurrences = set(occurrence["proven"])
         # A restart can preserve a genuinely new row (so the cursor stops early)
         # and still replay exact durable tool pairs AFTER it. Those pairs are
         # matched on their durable ``tool_call_id`` identity, so suppressing
@@ -7155,6 +7506,11 @@ class LCMEngine(
                 self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
             )
             result = self._remember_active_replay_messages(messages, active)
+            cache = getattr(self, "_occurrence_window_cache", None)
+            if cache and cache[0][:3] == (id(self._store), self._session_id, self._conversation_id):
+                generation = (self._store._conn.total_changes, self._store._conn.execute(
+                    "PRAGMA data_version").fetchone()[0])
+                self._occurrence_window_cache = (cache[0][:3] + (generation,), cache[1], cache[2])
             # #1353: keep paired proof for the unaudited prefix, never the newly stored tail.
             if unaudited_from is not None:
                 end = min(cursor, len(cached_source_identities), len(previous_replay),
@@ -7168,6 +7524,7 @@ class LCMEngine(
             return result
 
         if not new_messages:
+            self._persist_occurrence_adoptions(occurrence)
             cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
             self._compression_boundary_ingest_pending = False
             self._compression_boundary_active_placeholder_digest_budget = {}
@@ -7215,6 +7572,7 @@ class LCMEngine(
         )
 
         if not messages_to_store_with_index:
+            self._persist_occurrence_adoptions(occurrence)
             self._ingest_cursor = n
             self._compression_boundary_ingest_pending = False
             self._compression_boundary_active_placeholder_digest_budget = {}
@@ -7658,7 +8016,11 @@ class LCMEngine(
             store=self._store, session_id=self._session_id,
             source=self._session_platform, conversation_id=self._conversation_id,
             messages=protected_messages, estimates=estimates,
-            metadata_messages=[msg for _idx, msg in messages_to_store_with_index],
+            metadata_messages=self._occurrence_batch_messages(messages_to_store_with_index),
+            occurrence_matched=dict(getattr(self, "_occurrence_ingest_plan", {}).get("matched", {})),
+            occurrence_updates=dict(getattr(self, "_occurrence_ingest_plan", {}).get("updates", {})),
+            occurrence_receipt=getattr(self, "_occurrence_ingest_plan", {}).get("needs_receipt", False),
+            occurrence_length=getattr(self, "_occurrence_ingest_plan", {}).get("length", 0),
         )
         pending, senders = sender_capture.batch_senders(self, sender_originals, sender_excluded)
         if senders is not None:
@@ -10325,13 +10687,33 @@ class LCMEngine(
 
     def _append_ingest_batch(self, batch: dict) -> list[int]:
         """The same atomic raw-row/provenance write for ingest and end retry."""
-        return batch["store"]._append_protected_batch(
+        if batch["metadata_messages"] and "_occurrence_position" not in batch["metadata_messages"][0]:
+            batch = {**batch, "metadata_messages": self._occurrence_batch_messages(
+                enumerate(batch["metadata_messages"]), use_plan=False)}
+        store = batch["store"]
+        ids = store._append_protected_batch(
             batch["session_id"], batch["messages"], batch["estimates"],
             source=batch["source"], conversation_id=batch["conversation_id"],
-            metadata_factory=self._real_user_scaffold_metadata_rows,
+            metadata_factory=self._occurrence_batch_factory(batch),
             metadata_messages=batch["metadata_messages"],
             **({"senders": batch["senders"]} if "senders" in batch else {}),
         )
+        try:
+            cache = getattr(self, "_occurrence_window_cache", None)
+            if cache and cache[0][:3] == (id(store), batch["session_id"], batch["conversation_id"]):
+                rows = (cache[1] + list(store.get_batch(ids).values()))[-4096:]
+                names = [f"host_occurrence_row:{batch['session_id']}:{sid}" for sid in ids]
+                values = store.read_metadata_json_many(names)
+                facts = {**cache[2], **{sid: values[name] for sid, name in zip(ids, names) if name in values}}
+                facts.update({int(name.rsplit(":", 1)[1]): value
+                              for name, value in batch.get("occurrence_updates", {}).items()})
+                facts = {r["store_id"]: facts[r["store_id"]] for r in rows if r["store_id"] in facts}
+                generation = (store._conn.total_changes, store._conn.execute("PRAGMA data_version").fetchone()[0])
+                self._occurrence_window_cache = (cache[0][:3] + (generation,), rows, facts)
+        except Exception:
+            self._occurrence_window_cache = None
+            logger.debug("LCM occurrence cache refresh unavailable", exc_info=True)
+        return ids
 
     @staticmethod
     def _pending_row_identity(message: dict, *, stored: bool = False) -> tuple:
@@ -10353,13 +10735,17 @@ class LCMEngine(
             conversation_id=conversation_id, limit=len(tail["messages"]),
         )
         covered = 0
-        for message, row in zip(tail["messages"], rows):
+        for index, (message, row) in enumerate(zip(tail["messages"], rows)):
             if row["conversation_id"] != conversation_id:
                 break
             if self._pending_row_identity(message) != self._pending_row_identity(row, stored=True):
                 break
             covered += 1
             tail["after_store_id"] = row["store_id"]
+            metadata = tail["metadata_messages"][index]
+            if "_occurrence_position" in metadata:
+                tail.setdefault("occurrence_matched", {})[metadata["_occurrence_position"]] = (
+                    tail["session_id"], row["store_id"])
         for key in ("messages", "estimates", "metadata_messages"):
             tail[key] = tail[key][covered:]
         if "senders" in tail:

@@ -374,14 +374,11 @@ class PrefixMatchingMixin:
             context_window_tokens=self._store.get_context_window_tokens(session_id),
         )
         host_uids = self._host_uid_capture(kept, kept, 0, 0, None, (), session_id=session_id)  # v0.26.0 shadow
-        store_ids = self._store._append_protected_batch(
-            session_id,
-            protected_messages,
-            [count_message_tokens(msg) for msg in protected_messages],
-            source=source,
-            conversation_id=conversation_id,
-            metadata_factory=self._real_user_scaffold_metadata_rows,
-            metadata_messages=kept,
-        )
+        store_ids = self._append_ingest_batch(dict(
+            store=self._store, session_id=session_id, messages=protected_messages,
+            estimates=[count_message_tokens(msg) for msg in protected_messages],
+            source=source, conversation_id=conversation_id,
+            metadata_messages=self._occurrence_batch_messages(enumerate(kept), use_plan=False),
+        ))
         self._host_uid_shadow(host_uids, dict(enumerate(store_ids)))  # stored-new under that session's lineage
         return store_ids

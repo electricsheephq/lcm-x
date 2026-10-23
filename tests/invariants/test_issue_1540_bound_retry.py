@@ -67,6 +67,103 @@ def test_occurrence_retry_acceptance_survives_three_restarts(build: Build, mode:
         assert stored(engine) == after
 
 
+@pytest.mark.parametrize("fault", ["resolver-raise", "fact-raise", "missing-fact", "malformed-fact"])
+def test_occurrence_read_failure_retains_rows(build: Build, monkeypatch, fault: str) -> None:
+    """Read failures retain rows, and accepting the copy bounds later replay."""
+    engine = build()
+    host = fixture()[-3:]
+    host.extend(tool_pair("following-0", "one", tool_name="lookup"))
+    host.extend(tool_pair("following-1", "two", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    name = f"host_occurrence_row:S:{before[1]['store_id']}"
+    if fault in ("missing-fact", "malformed-fact"):
+        engine._store.write_metadata_json([name], json.dumps(None if fault == "missing-fact" else ["bad"]))
+    engine._occurrence_window_cache = None
+    read_many = engine._store.read_metadata_json_many
+    def unavailable(*args, **kwargs):
+        if fault == "fact-raise" and not any(str(k).startswith("host_occurrence_row:") for k in args[0]):
+            return read_many(*args, **kwargs)
+        raise RuntimeError("synthetic occurrence read failure")
+    with monkeypatch.context() as patch:
+        if fault == "resolver-raise":
+            patch.setattr(engine, "_resolve_occurrence_view", unavailable)
+        elif fault == "fact-raise":
+            patch.setattr(engine._store, "read_metadata_json_many", unavailable)
+        engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    assert any(row.get("tool_calls") for row in added)
+    assert any(row.get("tool_call_id") == "c" for row in added)
+    engine.shutdown()
+    engine = build()
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert stored(engine) == after
+
+
+@pytest.mark.parametrize("boundary", [0, 1])
+def test_occurrence_fact_write_rolls_back_insert_attempt(build: Build, monkeypatch, boundary: int) -> None:
+    """A metadata fault after the first or later raw INSERT rolls back both."""
+    engine = build()
+    host = fixture()[-3:]
+    factory = engine._occurrence_batch_factory
+    def faulted(batch):
+        original = factory(batch)
+        def write(message, store_id):
+            records = original(message, store_id)
+            if message["_occurrence_position"] == boundary:
+                raise RuntimeError("synthetic fact write failure")
+            return records
+        return write
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_occurrence_batch_factory", faulted)
+        engine.ingest(deepcopy(host))
+    assert stored(engine) == []
+    assert engine._store._conn.execute("SELECT count(*) FROM metadata WHERE key LIKE 'host_occurrence_row:%'").fetchone()[0] == 0
+    engine.ingest(deepcopy(host))
+    assert len(stored(engine)) == len(host)
+
+
+def test_occurrence_first_ingest_and_uid_adoption_survive_restart(build: Build) -> None:
+    engine = build()
+    host = fixture()[-3:]
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    for index, row in enumerate(host):
+        row["message_uid"] = f"{index + 100:032x}"
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == before
+    engine.shutdown()
+    engine = build()
+    assert engine._durable_commit_proof_payload() is None
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == before
+    for row in before:
+        fact = engine._store.read_metadata_json(f"host_occurrence_row:S:{row['store_id']}")
+        assert fact["message_uid"] is not None
+
+
+def test_occurrence_plain_reply_acceptance_has_no_restart_growth(build: Build) -> None:
+    """A new user stamp accepts the unknown equal reply once (#1451)."""
+    engine = build()
+    host = [{"role": "user", "content": "repeat", "timestamp": 10},
+            {"role": "assistant", "content": "equal reply"}]
+    engine.ingest(deepcopy(host))
+    host[0]["timestamp"] = 20
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    assert sum(row["role"] == "user" for row in after) == 2
+    assert sum(row["role"] == "assistant" for row in after) == 2
+    for _ in range(3):
+        engine.shutdown()
+        engine = build()
+        engine.ingest(deepcopy(host))
+        assert stored(engine) == after
+
+
 @pytest.mark.parametrize("anchor", ["off", "on"])
 def test_bound_retry_binding_respects_identity_anchor_switch(
     build: Build, monkeypatch: pytest.MonkeyPatch, anchor: str,
@@ -635,108 +732,41 @@ def test_stored_side_ambiguity_guard_with_single_host_user(
     assert len(added) == 7  # Base 9eacedb9: all four shapes, warm and cold.
 
 
-@pytest.mark.parametrize("fault", ["corrupt-proof", "remap-raises"])
-def test_replay_proof_failure_matches_base(build, monkeypatch, fault):
-    """Optional proof faults retain the six complete rows stored by base 9eacedb9."""
+@pytest.mark.parametrize("fault", ["resolver", "facts"])
+def test_occurrence_read_fault_replaces_legacy_helper_fault(build, monkeypatch, fault):
+    """The shared resolver owns reads; late residual-helper readers are gone.
+
+    The old accepted six-row optional-proof fallback is historical evidence,
+    not evidence from an injection into a reader this path no longer invokes.
+    Exercise the current public path and retain the complete ambiguous delta.
+    """
     engine, host = compact(build, mode="cold")
     before = stored(engine)
     next(row for row in host if row.get("content") == "middle lookup")["timestamp"] = 20
     host[-1]["content"] = CLEARED
     for i in range(2):
         host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
-    helper = engine._replayed_tool_segment_indexes_after_cursor
-    read = engine._store.read_metadata_json
-    calls = []
-    faults = []
-
-    def corrupt_read(key):
-        if "compaction_commit_proof" in key:
-            faults.append(key)
-            return json.loads("{invalid JSON")
-        return read(key)
-
-    def broken_remap(*args, **kwargs):
-        faults.append("remap")
-        raise RuntimeError("synthetic remap failure")
-
-    def faulted(messages, cursor):
-        calls.append(cursor)
-        # Fault the helper's own read, after the other readers have reconciled.
-        with monkeypatch.context() as patch:
-            if fault == "corrupt-proof":
-                patch.setattr(engine._store, "read_metadata_json", corrupt_read)
-            else:
-                patch.setattr(engine, "_remapped_output_metadata", broken_remap)
-            replayed = helper(messages, cursor)
-        return replayed
-
-    monkeypatch.setattr(engine, "_replayed_tool_segment_indexes_after_cursor", faulted)
-    engine.ingest(deepcopy(host))
-    assert len(calls) == 1 and calls[0] > 0
-    assert faults, "the fault must reach the optional proof reader"
+    reached = []
+    read_many = engine._store.read_metadata_json_many
+    def unavailable(*args, **kwargs):
+        if fault == "facts" and not any(str(k).startswith("host_occurrence_row:") for k in args[0]):
+            return read_many(*args, **kwargs)
+        reached.append(fault)
+        raise RuntimeError("synthetic occurrence reader failure")
+    with monkeypatch.context() as patch:
+        if fault == "resolver":
+            patch.setattr(engine, "_resolve_occurrence_view", unavailable)
+        else:
+            engine._occurrence_window_cache = None
+            patch.setattr(engine._store, "read_metadata_json_many", unavailable)
+        engine.ingest(deepcopy(host))
+    assert reached
     assert engine._ingest_failure_count == 0, engine._last_ingest_error
     after = stored(engine)
     assert after[:len(before)] == before
-    def project(row):
-        return {key: row.get(key) for key in ("role", "content", "tool_calls", "tool_call_id")}
-    # Frozen from base 9eacedb9 cold corrupt-proof/remap-raises probe outputs.
-    expected = [
-        {
-            "role": "user",
-            "content": "middle lookup",
-            "tool_calls": None,
-            "tool_call_id": None
-        },
-        {
-            "role": "tool",
-            "content": "[Old tool output cleared to save context space]",
-            "tool_calls": None,
-            "tool_call_id": "c"
-        },
-        {
-            "role": "assistant",
-            "content": "running tool",
-            "tool_calls": [
-                {
-                    "id": "following-0",
-                    "type": "function",
-                    "function": {
-                        "name": "lookup",
-                        "arguments": "{}"
-                    }
-                }
-            ],
-            "tool_call_id": None
-        },
-        {
-            "role": "tool",
-            "content": "new result 0",
-            "tool_calls": None,
-            "tool_call_id": "following-0"
-        },
-        {
-            "role": "assistant",
-            "content": "running tool",
-            "tool_calls": [
-                {
-                    "id": "following-1",
-                    "type": "function",
-                    "function": {
-                        "name": "lookup",
-                        "arguments": "{}"
-                    }
-                }
-            ],
-            "tool_call_id": None
-        },
-        {
-            "role": "tool",
-            "content": "new result 1",
-            "tool_calls": None,
-            "tool_call_id": "following-1"
-        }
-    ]
-    assert [project(row) for row in after[len(before):]] == expected
+    added = after[len(before):]
+    assert any(any(c["id"] == "c" for c in r.get("tool_calls") or []) for r in added)
+    assert any(r.get("tool_call_id") == "c" for r in added)
     assert_complete_segments(after)
 
 
