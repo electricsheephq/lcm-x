@@ -200,7 +200,7 @@ def test_diagnostics_show_digest_without_prefix_text(surface, tmp_path):
         assert DOCUMENT_PREFIX not in output
 
 
-@pytest.mark.parametrize("revision", ("", "binprescreen", "privacy:v3:base"))
+@pytest.mark.parametrize("revision", ("", "binprescreen", embedding_privacy_revision(configured("openai-compatible"))))
 @pytest.mark.parametrize("suffix", ("", "+prefix:0123456789ab"))
 def test_split_keeps_base(revision, suffix):
     from hermes_lcm.ingest_policy import split_prefix_revision
@@ -360,8 +360,24 @@ def test_other_provider_ignores_prefixes(provider_name, tmp_path, monkeypatch):
     finally:
         store.close()
 
+    inputs = []
+    if provider_name == "fastembed":
+        def encode(texts):
+            inputs.extend(texts)
+            return [[1.0, 0.0] for _ in texts]
+        monkeypatch.setattr(provider, "_ensure_local", lambda: SimpleNamespace(embed=encode, query_embed=encode))
+        for method in ("embed_query", "embed_documents", "embed_document_batches"):
+            invoke(provider, method, "hello")
+    else:
+        monkeypatch.setenv("VOYAGE_API_KEY", "fixture-key")
+        provider, payloads = provider_with_transport(config, monkeypatch)
+        for method in METHODS:
+            invoke(provider, method, "hello")
+        inputs = [text for payload in payloads for text in json.loads(payload)["input"]]
+    assert inputs == ["hello"] * (3 if provider_name == "fastembed" else 4)
 
-def test_provider_override_uses_own_id(monkeypatch):
+
+def test_provider_override_uses_own_id(tmp_path, monkeypatch):
     config = configured("fastembed", QUERY_PREFIX, DOCUMENT_PREFIX)
     engine = SimpleNamespace(_config=config, _embedding_provider_cache={})
     provider = tools._resolve_recall_provider(engine, provider_override="ollama")
@@ -370,6 +386,17 @@ def test_provider_override_uses_own_id(monkeypatch):
     engine = SimpleNamespace(_config=config, _embedding_provider_cache={})
     provider = tools._resolve_recall_provider(engine, provider_override="fastembed")
     assert getattr(provider, "identity_revision_suffix", "") == ""
+
+    engine, _, _, _ = seeded_engine(tmp_path, monkeypatch, prefix=QUERY_PREFIX)
+    assert backfill(engine, "summary")["embedded"] == 1
+    engine._config.embedding_provider = "fastembed"
+    override = tools._resolve_recall_provider(engine, provider_override="ollama")
+    assert override.identity_revision_suffix == "+prefix:" + digest()
+    assert len(engine._lcm_proactive_provider_cache[0]) == 2
+    assert tools._lcm_recall_has_usable_vector_corpus(
+        engine, run_summary=True, run_chunk=False, provider_name=override.provider_id,
+        model_name=override.model_id, excluded_session_ids=set(), deadline=time.monotonic() + 5,
+    )
 
 
 @pytest.mark.parametrize("task", ("summary", "chunk"))
