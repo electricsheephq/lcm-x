@@ -1628,6 +1628,7 @@ def observe(case: Scenario, root: Path, *, digest_attribution: list | None = Non
         assert not any(event.startswith("raise AssertionError") for event in events), events
     if digest_attribution is not None:
         digest_attribution.extend(canonical.digest_sources.values())
+    assert not canonical.digest_errors, canonical.digest_errors
     return events
 
 

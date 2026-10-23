@@ -171,10 +171,34 @@ def test_exact_evidence_digest_mapping_keeps_content_distinctions(
     assert all(row["raw"] != row["canonical"] for row in canonical.digest_sources.values())
     with pytest.MonkeyPatch.context() as collision:
         collision.setattr(engine_module, "_commit_proof_identity_digest", lambda identity: "0" * 64)
-        harness.observe_occurrence_digests(collision, IngestCanonical(tmp_path, []))
+        other = IngestCanonical(tmp_path, [])
+        harness.observe_occurrence_digests(collision, other)
         engine_module._commit_proof_identity_digest(identities[0])
-        with pytest.raises(AssertionError, match="inconsistent evidence digest"):
-            engine_module._commit_proof_identity_digest(identities[1])
+        assert engine_module._commit_proof_identity_digest(identities[1]) == "0" * 64
+        assert other.digest_errors  # A product catch cannot erase an observer collision.
+
+
+def test_occurrence_pointer_slots_preserve_real_ids_and_unknown_values(tmp_path: Path) -> None:
+    canonical = IngestCanonical(tmp_path, [])
+    canonical.digest_sources = {}
+    with engine_context(tmp_path, window=200000, embeddings_enabled=False) as engine:
+        proof = {"fixture": "retained owner"}
+        engine._compress_commit_proof = proof
+        canonical.retain_occurrence_owners(engine)
+        context = engine._occurrence_context()
+        publication = (id(engine._store), "S", "C", [])
+        plan = canonical.value({"publication": publication, "matched": {0: ("S", 999)}},
+                               "_occurrence_ingest_plan")
+        cache = canonical.value(((id(engine._store), "S", "C", (999, 12)), [], {999: {}}, {999},
+                                 {"accepted_context": context}), "_occurrence_window_cache")
+        assert plan["publication"][0] == cache[0][0] != id(engine._store)
+        assert cache[0][3] == [999, 12] and cache[2] == {"999": {}} and cache[3] == [999]
+        assert plan["matched"] == {"0": ["S", 999]}
+        assert canonical.occurrence_objects[id(proof)][1] is proof
+        assert canonical.occurrence_context(context)[3] != id(proof)
+        for corrupt in (999, None, [], "foreign"):
+            altered = (*context[:3], corrupt, *context[4:])
+            assert canonical.occurrence_context(altered)[3] == corrupt
 
 
 def test_occurrence_uids_and_structured_payload_bytes_stay_distinct(tmp_path: Path) -> None:

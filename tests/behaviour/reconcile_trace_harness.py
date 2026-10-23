@@ -249,12 +249,15 @@ def observe_occurrence_digests(patch: Any, canonical: Any) -> None:
     engine = importlib.import_module("hermes_lcm.engine")
     store = importlib.import_module("hermes_lcm.store")
     raw_value, raw_text = canonical.value, canonical.text
-    mappings, sources = {}, {}
+    mappings, sources, errors = {}, {}, []
     fields = {"identity_sha256", "input_sha256", "proof_sha256", "basis", "_occurrence_digest",
               "effective_sha256", "effective_sha256_v4", "scaffold_sha256_v4"}
 
     def register(kind: str, original: str, normalized: str, raw: Any, clean: Any) -> None:
-        assert original not in mappings or mappings[original] == normalized, "inconsistent evidence digest"
+        if original in mappings and mappings[original] != normalized:
+            errors.append(dict(kind=kind, raw_sha256=original, previous=mappings[original],
+                               canonical_sha256=normalized, raw=raw, canonical=clean))
+            return  # Bookkeeping cannot change the actual product's return/exception.
         mappings[original] = normalized
         sources.setdefault(original, dict(kind=kind, raw_sha256=original, canonical_sha256=normalized,
                                           raw=raw, canonical=clean))
@@ -297,6 +300,7 @@ def observe_occurrence_digests(patch: Any, canonical: Any) -> None:
 
     canonical.text, canonical.value = text, value
     canonical.digest_sources = sources
+    canonical.digest_errors = errors
     state_path = str(Path(canonical.root) / "home" / "state.db")
     # This is the exact trace host path used by lineage, not a wildcard hash.
     home_tag = hashlib.sha256(state_path.encode()).hexdigest()[:16]
@@ -745,6 +749,7 @@ def observe(case: Scenario, root: Path, *, digest_attribution: list | None = Non
             assert after_aliases == aliases, "target changed caller aliases"
     if digest_attribution is not None:
         digest_attribution.extend(canonical.digest_sources.values())
+    assert not canonical.digest_errors, canonical.digest_errors
     return events
 
 

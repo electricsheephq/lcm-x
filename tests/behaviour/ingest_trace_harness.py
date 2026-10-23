@@ -81,6 +81,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_identity_anchor_recoveries", "_identity_anchor_recovery", "_identity_anchor_user_generation",
     "_identity_anchor_versions", "_pressure_yield_tail_token_limit", "_survival_projected_fields",
     "_host_uid_lineage_cache", "_engine_uids_pending", "_engine_uids_recorded",
+    "_occurrence_ingest_plan", "_occurrence_window_cache",
 })
 Trace = list[str]
 Message = dict[str, Any]
@@ -266,6 +267,25 @@ class IngestCanonical(Canonical):
         # Labels outlive individual snapshots. Keep their objects alive too, so
         # a later placeholder cannot inherit a freed object's address/label.
         self.retained_messages = {id(row): row for row in messages}
+        self.occurrence_objects: dict[int, tuple[str, Any]] = {}
+        self.raw_occurrence_states: list[tuple[str, str]] = []
+
+    def retain_occurrence_owners(self, engine: Any) -> None:
+        for value in (engine._store, getattr(engine, "_compress_commit_proof", None),
+                      getattr(engine, "_last_emission_descriptors", None),
+                      getattr(engine, "_last_active_replay_messages", None)):
+            self.occurrence_objects.setdefault(id(value), (f"occurrence-owner-{len(self.occurrence_objects)}", value))
+
+    def occurrence_context(self, context: Any) -> Any:
+        if isinstance(context, tuple) and len(context) == 7:
+            return (*context[:3], *(self.occurrence_pointer(v) for v in context[3:5]), *context[5:])
+        return context
+
+    def occurrence_pointer(self, value: Any) -> Any:
+        return self.occurrence_objects.get(value, (value,))[0] if type(value) is int else value
+
+    def occurrence_digest(self, value: Any) -> Any:
+        return self.digest_sources.get(value, {}).get("canonical_sha256", value) if isinstance(value, str) else value
 
     def text(self, text: str, *, identity: bool = False) -> str:
         # Host occurrence UIDs are evidence, including UUID-shaped values.
@@ -278,6 +298,38 @@ class IngestCanonical(Canonical):
         return text
 
     def value(self, value: Any, path: str = "", *, in_payload: bool = False) -> Any:
+        if path == "_occurrence_ingest_plan" and isinstance(value, dict):
+            value = dict(value)
+            publication = value.get("publication")
+            if isinstance(publication, tuple) and len(publication) == 4:
+                value["publication"] = (self.occurrence_pointer(publication[0]), *publication[1:])
+            if isinstance(value.get("input_digests"), dict):
+                value["input_digests"] = {k: self.occurrence_digest(v)
+                                          for k, v in value["input_digests"].items()}
+        if path == "_occurrence_window_cache" and isinstance(value, tuple) and len(value) == 5:
+            key, rows, facts, missing, state = value
+            if isinstance(key, tuple) and len(key) == 4:
+                key = (self.occurrence_pointer(key[0]), *key[1:])
+            if isinstance(state, dict):
+                state = dict(state)
+                if "accepted_context" in state:
+                    state["accepted_context"] = self.occurrence_context(state["accepted_context"])
+                warm = state.get("warm")
+                if isinstance(warm, tuple) and len(warm) == 2:
+                    state["warm"] = (self.occurrence_context(warm[0]),
+                                     self.value(warm[1], "_occurrence_ingest_plan"))
+                for field in ("by_digest", "accepted"):
+                    if isinstance(state.get(field), dict):
+                        mapped = {}
+                        for k, v in state[field].items():
+                            if field == "by_digest":
+                                k = self.occurrence_digest(k)
+                            elif isinstance(v, tuple) and len(v) == 2:
+                                v = (v[0], self.occurrence_digest(v[1]))
+                            assert k not in mapped, "colliding occurrence digest keys"
+                            mapped[k] = v
+                        state[field] = mapped
+            value = (key, rows, facts, missing, state)
         if path == "_no_progress_replay" and isinstance(value, tuple) and len(value) == 3:
             # The digest includes sandbox paths/file generations. Preserve its
             # equality and every transition; replay bytes are observed separately.
@@ -321,6 +373,7 @@ def recovery_receipts(engine: Any, value: Any) -> Any:
 
 def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
     state: dict[str, Any] = {}
+    canonical.retain_occurrence_owners(engine)
     # Match address-keyed ledgers to the actual retained message objects before
     # serializing a set/map. These labels preserve sharing, never addresses.
     def register(value: Any) -> None:
@@ -340,6 +393,8 @@ def snapshot(engine: Any, canonical: IngestCanonical) -> dict[str, Any]:
         register(observed_attribute(engine, name))
     for name in sorted(OBSERVED_ATTRIBUTES):
         value = observed_attribute(engine, name)
+        if name in {"_occurrence_ingest_plan", "_occurrence_window_cache"}:
+            canonical.raw_occurrence_states.append((name, repr(value)))
         if name in {"_store", "_host_rewrite_store"}:
             value = {"present": value is not None}
         elif name == "_dag":
@@ -762,13 +817,18 @@ def sqlite_fault(engine: Any, fault: str, events: Trace) -> Iterator[None]:
 
 
 def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None,
-            digest_attribution: list | None = None) -> Trace:
+            digest_attribution: list | None = None, occurrence_attribution: list | None = None) -> Trace:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     events: Trace = []
     canonical = IngestCanonical(root, [])
     with pytest.MonkeyPatch.context() as patch:
         observe_occurrence_digests(patch, canonical)
+        original_resolve = engine_module.LCMEngine._resolve_occurrence_view
+        def resolve(engine: Any, messages: Any) -> Any:
+            canonical.retain_occurrence_owners(engine)
+            return original_resolve(engine, messages)
+        patch.setattr(engine_module.LCMEngine, "_resolve_occurrence_view", resolve)
         pin: Any = pin_char_counter
         context: Any = engine_context
         pin(patch)
@@ -992,6 +1052,9 @@ def observe(case: Scenario, root: Path, *, payloads: list[str] | None = None,
                 emit("payloads-cold", manifest)
     if digest_attribution is not None:
         digest_attribution.extend(canonical.digest_sources.values())
+    if occurrence_attribution is not None:
+        occurrence_attribution.extend(canonical.raw_occurrence_states)
+    assert not canonical.digest_errors, canonical.digest_errors
     return events
 
 

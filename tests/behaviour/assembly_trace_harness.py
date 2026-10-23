@@ -637,6 +637,7 @@ def observe(case: Scenario, root: Path, *, digest_attribution: list | None = Non
         importlib.import_module('hermes_lcm.retrieval_core')._reset_vector_store_pool()
     if digest_attribution is not None:
         digest_attribution.extend(canonical.digest_sources.values())
+    assert not canonical.digest_errors, canonical.digest_errors
     return events
 
 
