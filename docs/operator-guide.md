@@ -624,6 +624,10 @@ scope; a rekey path is a follow-up. Readers older than D11 do not honor forgets,
 so rollback can expose forgotten rows again: forget is not purge (see the
 [ADR boundary](entities-adr.md#d11-forget-e2)).
 
+Installs or roots whose profiles resolve to the same Hermes name and share one
+`database_path` share an entity scope; a home outside `profiles/` with no
+resolvable name falls back to its resolved path.
+
 When no caller-supplied baseline is available, routed pre-answer turns may call
 `lcm_recall` to build one. If embeddings are enabled, this retrieval inherits
 the configured embedding provider and may send the current question to that
