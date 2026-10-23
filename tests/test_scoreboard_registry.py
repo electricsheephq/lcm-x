@@ -1,4 +1,4 @@
-"""The public scoreboard registry must stay valid: every row in bench/scoreboard/results.jsonl
+"""The public scoreboard registry must stay valid: every row in legacy JSONL and bench/scoreboard/results.d/*.json
 passes the generator's schema checks (RESULTS-SCHEMA.md). The bench/scoreboard tests are outside
 `testpaths`, so without this test a malformed row merges unnoticed."""
 

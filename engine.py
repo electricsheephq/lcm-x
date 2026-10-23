@@ -45,6 +45,7 @@ from .engine_registry import (
     _remove_registry_entries_for_engine,
     ActiveEngineUseResult,
     ActiveEngineUseStatus,
+    live_bound_session_ids,
     resolve_active_lcm_engine,  # noqa: F401  (re-exported: hosts import it from .engine)
     use_lcm_engine,
 )
@@ -3157,7 +3158,10 @@ class LCMEngine(
             self._config.empty_lifecycle_gc_enabled
             and self._lifecycle.row_count() > self._config.empty_lifecycle_gc_threshold
         ):
-            protected = {str(self._session_id)} if self._session_id else None
+            # #753: also keep rows other live clones in this process have bound.
+            protected = live_bound_session_ids()
+            if self._session_id:
+                protected.add(str(self._session_id))
             max_age = self._config.empty_lifecycle_gc_max_age_hours
             try:
                 deleted = self._lifecycle.prune_empty_sessions(
@@ -6785,6 +6789,7 @@ class LCMEngine(
         assistant loops replaced by quarantine placeholders. Existing callers may
         ignore the return value when they only need durable persistence.
         """
+        self._ingest_replay_redaction_changes = {}
         if not self._session_id:
             logger.debug("Ingest skipped: no session_id")
             return self._redact_active_replay_messages(messages)
@@ -7297,6 +7302,9 @@ class LCMEngine(
                     prefer_existing_externalized=idx < scan_start,
                 )
                 replay_messages[idx] = self._redact_active_replay_messages([message])[0]
+                self._ingest_replay_redaction_changes[idx] = any(
+                    message.get(key) != replay_messages[idx].get(key) for key in ("content", "tool_calls")
+                )
             return scan_start, ignored_original_messages, self._apply_ignored_active_replay_placeholders(
                 messages, replay_messages, scan_start=scan_start, ignored_messages=ignored_original_messages,
             )
@@ -7314,7 +7322,12 @@ class LCMEngine(
             externalize=externalize_messages,
             prefer_existing_externalized=prefer_existing_externalized,
         )
+        before_redaction = replay_messages
         replay_messages = self._redact_active_replay_messages(replay_messages)
+        self._ingest_replay_redaction_changes = {
+            idx: any(before.get(key) != after.get(key) for key in ("content", "tool_calls"))
+            for idx, (before, after) in enumerate(zip(before_redaction, replay_messages))
+        }
         replay_messages = self._apply_ignored_active_replay_placeholders(
             messages,
             replay_messages,

@@ -1,6 +1,8 @@
 # Scoreboard results schema (Track F — disclosure-first public scores page)
 
-One JSON object per line in `results.jsonl` = one BANKED run. The page generator
+New BANKED runs go in `results.d/<id>.json`, one JSON object per file;
+the filename stem must equal the row's `id`. The frozen legacy `results.jsonl`
+remains readable, including appends from PRs already in flight. The page generator
 renders a summary table plus a per-row disclosure block. **A row without its
 disclosure fields does not render** — the schema IS the seven-point standard
 (F46 §5); numbers never appear bare.
@@ -33,6 +35,8 @@ disclosure fields does not render** — the schema IS the seven-point standard
   `evidence` as SHA-pinned blob URLs. Absolute paths (POSIX or Windows) and
   home-relative paths starting with `~` are rejected for every row.
 - `superseded_by`: id of the successor row.
+- `supersedes`: list of old row IDs on a new `results.d` row. The loader applies `superseded_by: <new id>` in memory; legacy JSONL stays frozen and the old row strikes through as before.
+  Unknown IDs, self-reference, two different successors for one row, or disagreement with an existing `superseded_by` are errors.
 
 ## Rules
 - Only the frozen 18 IDs in `generate.py`'s `LEGACY_ROW_IDS` (the registry at
@@ -45,8 +49,24 @@ disclosure fields does not render** — the schema IS the seven-point standard
   and dot segments (`.` or `..`, including percent-encoded forms) are rejected.
   Legacy repository references are converted to pinned blob URLs; only local raw
   artifact references move to `local_raw`. Measured values stay unchanged.
-- Rows are APPEND-ONLY; a superseding run gets a new row and the old row gains
-  `superseded_by: <id>` (history stays visible — that is the point).
+- Rows are APPEND-ONLY; a superseding run gets a new row with `supersedes`,
+  preserving the old row and its history without editing legacy JSONL.
+- Row PRs add only their row file and their own evidence; do NOT regenerate `SCOREBOARD.md`.
+  Run `python -m bench.scoreboard.generate --pending`: missing source rows and supersession-only changes from unrendered successors are pending (exit 0); the old row is listed with its successor ID.
+  Removed rows, other rendered-value changes, supersession mismatches with already-rendered successors, and mismatches not explained by supersession alone are stale (exit 2).
+  The release manager regenerates in a separate batched PR at a release/showcase step or any time, then requires strict `--check` equality.
 - Tier-F rows carry their fault-finding yield in `caveats`/`evidence` — a low
   number with its decomposition is a feature of this page, not an embarrassment.
 - No projections, no adjusted-pending-measurement numbers, ever (§6e.8).
+
+## Source order and digest
+The loader reads legacy non-empty lines in line order, then `results.d/*.json`
+in filename order. Duplicate IDs anywhere are hard errors; supersession can
+cross sources. Summary order stays benchmark ascending, date descending, id
+ascending; disclosures stay id ascending. Existing evidence links, including
+`results.jsonl#L<n>`, stay unchanged; file-based disclosures link their row file.
+
+The header's combined SHA256 is SHA256 of UTF-8 compact JSON (`ensure_ascii=True`,
+separators `(',', ':')`) containing `[relative_filename, SHA256(raw_file_bytes)]`
+pairs: `results.jsonl` first, then `results.d/*.json` sorted by filename. File
+names and exact bytes participate; a missing or empty `results.d` adds no pairs.
