@@ -40,7 +40,7 @@ _PREPARE_THREAD: threading.Thread | None = None
 _PREPARE_READY: dict[tuple[str, str, int], dict[tuple[str, object], Callable[[], None]]] = {}
 _PREPARE_RETRY: dict[tuple[str, str, int], tuple[int, float]] = {}
 # #1586 v1 CPU bars: target at most 40% maintenance duty, without a new setting.
-_LOCAL_IDLE_MULTIPLIER = 1.5
+_LOCAL_IDLE_MULTIPLIER = 0.82  # #1586 floor probe only (not for merge)
 _SUCCESS_OUTCOMES = frozenset({"complete"})
 
 
