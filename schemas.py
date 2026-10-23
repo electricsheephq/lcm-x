@@ -1260,7 +1260,7 @@ LCM_EXPAND_QUERY = {
 
 LCM_MEMORY = {
     "name": "lcm_memory",
-    "description": "Read cited entity mentions across this profile's sessions; lookup a name and aliases, optionally rank mentions for a question, or list assertion subjects. Default off; no writes or model calls. Counts and first/last times cover the bounded matching rows; facts are capped at 200. Namespace ambiguity is shown, never resolved automatically.",
+    "description": "Read cited entity mentions across this profile's sessions; lookup a name and aliases, optionally rank mentions for a question, or list assertion subjects. Default off; no writes or model calls. Counts and first/last times cover all matching rows; carried times include time_uncertain: carried; snippets and facts are capped. Namespace ambiguity is shown, never resolved automatically.",
     "parameters": {
         "type": "object",
         "properties": {

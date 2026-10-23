@@ -76,7 +76,6 @@ TURN_PATH_FILES = {
 }
 # Explicit exclusions: classify every top-level Python module, not just reachable dependencies.
 NON_TURN_PATH_FILES = {
-    "memory_tools.py",
     "adaptive_retrieval.py",  # Default-off adaptive retrieval controller.
     "answer_contract.py",  # Default-off pre-answer requirements.
     "assertion_extraction.py",  # Default-off structured extraction.
@@ -103,6 +102,7 @@ NON_TURN_PATH_FILES = {
     "inspect_tools.py",  # Explicit lcm_inspect tool handler; read-only metadata.
     "level3_repair.py",  # Explicit repair or read-only doctor scan.
     "maintenance.py",  # Explicit backup, repair or rotation only.
+    "memory_tools.py",  # Default-off, read-only entity cards.
     "occurrence_time.py",  # Retrieval metadata; never durable turn occurrence.
     "preanswer_evidence.py",  # Unwired opt-in pre-answer helper.
     "presets.py",  # Status/dry-run suggestions; no live config mutation.

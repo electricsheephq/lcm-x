@@ -293,6 +293,7 @@ Expected signals:
   `lcm_describe`, `lcm_expand`, `lcm_expand_query`, `lcm_status`, `lcm_inspect`,
   and `lcm_doctor`
 - `lcm_query_state` and `lcm_retrieve` appear only with their backing flags on;
+  `lcm_memory` appears only with `LCM_ENTITIES_ENABLED=1`;
   `LCM_DISABLED_TOOLS` can hide any of these tools
 - ordinary skill discovery includes `hermes-lcm`; plugin-qualified explicit
   loading is `hermes-lcm-x:hermes-lcm` on hosts that support plugin skills

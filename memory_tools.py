@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 
 from . import tools as _tools
 from .assertion_store import CURRENT_EXTRACTION_VERSION
+from .search_query import _ASCII_CASE_FOLD, requires_like_fallback, sanitize_fts5_query
 
 # ADR D6: event/conversation and unknown future namespaces are not bridged.
 _NAMESPACES = ('person', 'user', 'assistant', 'organization', 'project', 'place',
@@ -13,9 +14,9 @@ _NAMESPACES = ('person', 'user', 'assistant', 'organization', 'project', 'place'
 
 def _name(value):
     text = ' '.join(unicodedata.normalize('NFKC', value).casefold().split())
-    while text and unicodedata.category(text[0]).startswith('P'):
+    while text and (text[0].isspace() or unicodedata.category(text[0]).startswith('P')):
         text = text[1:]
-    while text and unicodedata.category(text[-1]).startswith('P'):
+    while text and (text[-1].isspace() or unicodedata.category(text[-1]).startswith('P')):
         text = text[:-1]
     return text.strip()
 
@@ -25,7 +26,19 @@ def _time(row):
     stamp = event if event is not None else row['timestamp']
     return {'time': datetime.fromtimestamp(stamp, timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             'time_source': 'event_time' if event is not None else 'write_timestamp',
-            'store_id': row['store_id']}
+            'store_id': row['store_id'],
+            **{k: v for k, v in _tools._lcm_recall_event_time(row).items() if k == 'time_uncertain'}}
+
+
+def _bounds(rows):
+    def key(r):
+        observed = _tools._normalize_observed_at(r.get('observed_at'))
+        return (observed if observed is not None else r['timestamp'], r['store_id'])
+    return [_time(min(rows, key=key)), _time(max(rows, key=key))] if rows else []
+
+
+def _rank(row):
+    return (row.get('_memory_like', False), row.get('search_rank') or 0, row['store_id'])
 
 
 def _mention(row):
@@ -100,33 +113,57 @@ def lcm_memory(args, **kwargs):
     if question is not None and not isinstance(question, str):
         return json.dumps({'error': 'question must be a string'})
     names = list(dict.fromkeys([name.strip(), *[a.strip() for a in aliases]]))
-    hits = {}
-    for value in names:
+    with engine._store._read_snapshot():
+        return _lookup(engine, assertions, names, question, limit)
+
+
+def _lookup(engine, assertions, names, question, limit):
+    forms = list(dict.fromkeys(f for n in names for f in (n, _name(n))))
+    hits, matches, searched = {}, {}, set()
+    for value in forms:
         # Literal phrases: caller text cannot inject FTS operators. Each search is bounded.
         query = '"' + value.replace('"', '""') + '"'
-        for row in engine._store.search(query, limit=limit + 1, sort='relevance'):
-            hits[row['store_id']] = row
-    rows = sorted(hits.values(), key=lambda r: (r.get('search_rank') or 0, r['store_id']))
-    truncated = len(rows) > limit
+        safe = sanitize_fts5_query(query)
+        # Only identical FTS streams under ASCII folding are provably redundant.
+        fold = (query,) if requires_like_fallback(query, safe) else safe.translate(_ASCII_CASE_FOLD)
+        if fold in searched:
+            continue
+        searched.add(fold)
+        metadata = {'rows': []}
+        found = engine._store.search(query, limit=limit + 1, sort='relevance', _memory=metadata)
+        form_matches = {r['store_id']: r for r in metadata['rows']}
+        if any(row['store_id'] not in form_matches for row in found):
+            return json.dumps({'error': 'Memory lookup metadata is inconsistent'})
+        for row in found:
+            row['_memory_like'] = metadata.get('like', False)
+            if row['store_id'] not in hits or _rank(row) < _rank(hits[row['store_id']]):
+                hits[row['store_id']] = row
+        matches.update(form_matches)
+    rows = sorted(hits.values(), key=_rank)
+    truncated = len(matches) > limit
     rows = rows[:limit]
+    mentions = engine._store.search(question, limit=5, sort='relevance', matching_names=forms) if question else []
+    carried = engine._store.get_carried_stamp_ids(list(matches), batched=True)
+    for row in [*matches.values(), *rows, *mentions]:
+        if row['store_id'] in carried:
+            row['time_uncertain'] = 'carried'
     groups = {}
-    for row in rows:
+    for row in matches.values():
         group = groups.setdefault(row['session_id'], [])
         group.append(row)
     sessions = []
     for session, group in groups.items():
-        times = sorted((_time(row) for row in group), key=lambda t: (t['time'], t['store_id']))
+        times = _bounds(group)
         sessions.append({'session_id': session, 'count': len(group), 'first_seen': times[0],
                          'last_seen': times[-1], 'store_id': times[0]['store_id'],
-                         'snippets': [_mention(row) for row in group[:3]]})
-    times = sorted((_time(row) for row in rows), key=lambda t: (t['time'], t['store_id']))
-    result = {'names_searched': names, 'mention_count': len(rows), 'truncated': truncated,
+                         'snippets': [_mention(row) for row in rows if row['session_id'] == session][:3]})
+    times = _bounds(matches.values())
+    result = {'names_searched': names, 'mention_count': len(matches), 'truncated': truncated,
               'first_seen': times[0] if times else None, 'last_seen': times[-1] if times else None,
               'sessions': sessions, 'facts': [], 'facts_status': 'assertions_disabled',
               'ambiguous': False}
     if assertions is not None:
         result.update(_assertions(assertions, [_name(n) for n in names], limit))
     if question:
-        mentions = engine._store.search(question, limit=5, sort='relevance', matching_names=names)
         result['mentions'] = [_mention(row) for row in mentions]
     return json.dumps(result)

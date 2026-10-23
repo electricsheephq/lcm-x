@@ -121,7 +121,7 @@ Use only over exact cited evidence validated by the compiler for supported date 
 
 ## Default-off advanced paths
 
-- `lcm_memory` is hidden until `LCM_ENTITIES_ENABLED=1`. `lookup` searches a name and up to 8 aliases across this profile, with cited sessions, event/write-labelled times and optional question-ranked mentions. Compatible assertion facts appear only with assertions on; `list` groups assertion subjects by namespace. Counts/times cover capped matching rows, not complete history; question ranking searches all entity matches independently. No writes or model calls; namespace ambiguity stays visible.
+- `lcm_memory` is hidden until `LCM_ENTITIES_ENABLED=1`. `lookup` searches a name and up to 8 aliases across this profile, with cited sessions, event/write-labelled times and optional question-ranked mentions. Compatible assertion facts appear only with assertions on; `list` groups assertion subjects by namespace. Counts/times cover all matching rows; snippets stay capped. Carried times include `time_uncertain: "carried"`; question ranking searches all entity matches independently. No writes or model calls; namespace ambiguity stays visible.
 
 - `lcm_query_state` is hidden until `LCM_ASSERTIONS_ENABLED=true`, then queries the same-database assertion sidecar.
 - `lcm_retrieve` is hidden until `LCM_ADAPTIVE_RETRIEVAL_ENABLED=true`. It is the default-off bounded adaptive controller, is not required for ordinary recall, and must not replace the stable workflow above without measured benefit.
