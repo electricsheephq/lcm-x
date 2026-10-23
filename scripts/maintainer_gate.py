@@ -76,6 +76,7 @@ TURN_PATH_FILES = {
 }
 # Explicit exclusions: classify every top-level Python module, not just reachable dependencies.
 NON_TURN_PATH_FILES = {
+    "entity_ops.py",  # Default-off entity event operations and resolved view.
     "entity_store.py",  # Default-off entity-memory persistence.
     "adaptive_retrieval.py",  # Default-off adaptive retrieval controller.
     "answer_contract.py",  # Default-off pre-answer requirements.
