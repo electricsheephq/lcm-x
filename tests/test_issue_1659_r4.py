@@ -50,6 +50,32 @@ def test_earlier_uncertainty_survives_filtered_suffix_and_completion(engine, mon
     assert state["operator_retry"] == 1, state
     assert all(result["uncertain"] == 1 for result in results), results
     assert all(result["status"] != "complete" for result in results), results
+    assert state["inflight_uncertain_count"] == 0
+    assert state["inflight_cycle_started_at"] == 0
+
+
+def test_cycle_arrival_fence_uses_existing_maintenance_index(engine, monkeypatch):
+    identity, _ = seed_filtered_inflight(engine)
+    statements = []
+    original = command._embedding_read_connection
+
+    def traced(*args):
+        conn = original(*args)
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(command, "_embedding_read_connection", traced)
+    monkeypatch.setattr(command, "_chunk_pending_rows", lambda *a, **kw: (0, [], {}))
+    for _ in range(3):
+        backfill(engine, "chunk")
+    fence = [sql for sql in statements if sql.startswith(
+        "SELECT 1 FROM lcm_embedding_backfill_inflight WHERE identity_hash=")]
+    assert len(fence) == 1
+    with sqlite3.connect(engine._store.db_path) as conn:
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + fence[0])]
+    assert any("idx_lcm_embedding_inflight_maintenance" in detail
+               and "updated_at>?" in detail for detail in plan), plan
+    assert not record(engine, "chunk")["remaining"], identity
 
 
 @pytest.mark.parametrize("configured,override,role,repetitions", [

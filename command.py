@@ -3597,7 +3597,9 @@ def _record_embedding_catchup(db_path, task: str, identity: str, remaining: int 
                 state = scan_state or {}
                 value = json.dumps({"remaining": remaining, "operator_retry": operator_retry,
                                     "updated_at": time.time(), "inflight_cursor": state.get("inflight_cursor", ""),
-                                    "inflight_actionable_seen": state.get("inflight_actionable_seen", False)})
+                                    "inflight_actionable_seen": state.get("inflight_actionable_seen", False),
+                                    "inflight_uncertain_count": state.get("inflight_uncertain_count", 0),
+                                    "inflight_cycle_started_at": state.get("inflight_cycle_started_at", 0)})
                 conn.execute(
                     "INSERT INTO metadata(key, value) SELECT ?, CASE WHEN ? IS NOT NULL AND "
                     "EXISTS (SELECT 1 FROM messages WHERE store_id > ?) "
@@ -5198,9 +5200,12 @@ def _chunk_backfill_remaining(
                         cycle = json.loads(saved[0]) if saved else {}
                         cursor = str(cycle.get("inflight_cursor", ""))
                         actionable_seen = bool(cycle.get("inflight_actionable_seen", bool(cursor)))
-                    except (ValueError, AttributeError):
+                        uncertain_seen = int(cycle.get("inflight_uncertain_count", 0)) if cursor else 0
+                        cycle_started = float(cycle.get("inflight_cycle_started_at", 0)) if cursor else time.time()
+                    except (TypeError, ValueError, AttributeError):
                         cursor = ""
                         actionable_seen = False
+                        uncertain_seen, cycle_started = 0, time.time()
                     scanned = 0
                     incomplete = False
                     scan_state["inflight_cursor"] = cursor
@@ -5226,6 +5231,13 @@ def _chunk_backfill_remaining(
                             actionable.append(row)
                     else:
                         if scanned < _CHUNK_INFLIGHT_SCAN_ROWS:
+                            if check_conn.execute(
+                                "SELECT 1 FROM lcm_embedding_backfill_inflight WHERE identity_hash=? "
+                                "AND state IN ('claimed','dispatched','uncertain') AND updated_at>=? "
+                                "AND embedded_id<=? LIMIT 1",
+                                (identity_hash, cycle_started, scan_state["inflight_cursor"]),
+                            ).fetchone():
+                                remaining = max(remaining, 1)  # A new row behind the cursor needs a fresh cycle.
                             scan_state["inflight_cursor"] = ""
                         else:
                             incomplete = True
@@ -5237,6 +5249,9 @@ def _chunk_backfill_remaining(
                     scan_state["inflight_actionable_seen"] = incomplete and (actionable_seen or bool(actionable))
                     in_flight, uncertain = _embedding_inflight_counts(check_conn, identity_hash,
                         (tuple(row[1:]) + (1,) for row in actionable))
+                    uncertain += uncertain_seen
+                    scan_state["inflight_uncertain_count"] = uncertain if incomplete else 0
+                    scan_state["inflight_cycle_started_at"] = cycle_started if incomplete else 0
                 except sqlite3.OperationalError:
                     in_flight = 0
                     uncertain = 0
@@ -5916,7 +5931,7 @@ def _chunk_backfill_run(
     configured_policy = normalize_content_policy(getattr(config, "embedding_content_policy", "conversational"))
     remaining, in_flight_count, uncertain_count = _chunk_backfill_remaining(
         db_path, identity, policy if incremental else configured_policy, pending, embedded, incremental,
-        include_boundaries=stop_reason == "process_exit", chunk_cache=chunk_cache,
+        include_boundaries=stop_reason == "process_exit", chunk_cache=chunk_cache if policy == configured_policy else {},
         inflight_policy=configured_policy,
         deadline=started + budget_s if budget_s > 0 else None, scan_state=scan_state,
     )
