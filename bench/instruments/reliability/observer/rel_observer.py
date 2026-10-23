@@ -251,6 +251,7 @@ def patch_engine(agent):
     if engine is None or getattr(etype, "_rel_patched", False):
         return
     etype._rel_patched = True
+    _r1.trace_occurrences(etype, event, lambda: {"turn": cur["turn"], "session_prefix": cur["prefix"]})
     orig_compress, orig_tool = etype.compress, etype.handle_tool_call
     cell_path = DIR / "cell.json"
     cell = json.loads(cell_path.read_text()) if cell_path.exists() else {}
@@ -375,6 +376,7 @@ def patch_run_agent(mod):
     def run_conversation(self, *a, **k):
         ensure_tap()
         tc = load_turn()
+        cur["session"] = self.session_id
         cur["agent"] = self
         try:
             from agent.turn_failure_copy import FAILED_TURN_NOTICE, PARTIAL_FAILED_TURN_NOTICE
@@ -488,6 +490,8 @@ def patch_inline_tools(mod):
 
 
 def patch_helpers(mod):
+    _r1.trace_user_merges(mod, event, lambda: {"turn": cur["turn"], "session_prefix": cur["prefix"],
+                                            "session": cur.get("session")})
     passes, drop = getattr(mod, "_SEQUENCE_REPAIR_PASSES", None), getattr(mod, "_drop_stray_tool_results", None)
     if not (passes and drop in passes):
         cur["orphan_hook"] = "unavailable at this host sha; B6 orphan count falls back to the log"
