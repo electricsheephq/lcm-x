@@ -56,6 +56,7 @@ OBSERVED_ATTRIBUTES = frozenset({
     "_no_progress_replay", "_no_progress_public_rows", "_no_progress_metadata_warned", "_no_progress_hold_persisted",
     "_session_id", "_session_ignored", "_session_stateless", "_session_platform", "_conversation_id",
     "_ingest_cursor", "_ingest_cursor_needs_reconcile", "_last_compacted_store_id",
+    "_ingest_replay_redaction_changes",
     "_compress_commit_proof", "_last_emission_descriptors", "_compress_occurrences", "_compress_run",
     "_config", "_hermes_home", "_store", "_dag", "_lifecycle", "_host_rewrite_store",
     "_host_rewrite_overrides", "_host_rewrite_watch", "_last_active_replay_messages",

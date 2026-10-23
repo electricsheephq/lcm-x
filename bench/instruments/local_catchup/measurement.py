@@ -1,4 +1,5 @@
 """I2 isolated serial cells, real host trace and shared I1 safety/CPU machinery."""
+from contextlib import closing, contextmanager
 from dataclasses import asdict, replace
 import hashlib
 import json
@@ -15,7 +16,7 @@ import time
 
 from .audit import audit, connect, preimage, progress
 from .catchup import stop
-from .common import REQUEST, append, config, dump, foreign_files, foreground_request, guards, immutable_cache, isolated, load, parser, product, safe_paths
+from .common import MODEL, REQUEST, append, config, dump, foreign_files, foreground_request, guards, immutable_cache, isolated, load, parser, product, safe_paths
 from .corpus import build, pilot_rows
 from .cpu import Supervisor
 
@@ -307,13 +308,67 @@ def trace(engine, mod, count, seed, observe, check, done=None):
     return expected
 
 
+@contextmanager
+def integrity_evidence(a, manifest):
+    """Failure-only evidence for generated instrument stores; never change the error."""
+    path = a.root/"integrity-inputs.json"
+    failure = dict(model=MODEL, identities=manifest["identities"], policy="conversational")
+    inputs = dict(trace_rows=manifest.get("trace_rows", []),
+        vectors=manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"],
+        metadata=manifest.get("observed_metadata", {}) | manifest["preimage"]["metadata"], **failure)
+    with closing(connect(a.db)) as c:
+        try:
+            dump(path, inputs)  # Freeze pins before audit() can extend the in-memory maps.
+        except Exception as error:
+            failure["inputs_error"] = f"{type(error).__name__}: {error}"
+        try:
+            yield c, failure
+        except Exception as exc:
+            failure["error"] = str(exc)
+            try:
+                failure["policy_revisions"] = dict(c.execute(
+                    "SELECT key,value FROM metadata WHERE key LIKE 'chunk_policy_revision%'").fetchall())
+            except Exception as error:
+                failure["policy_error"] = f"{type(error).__name__}: {error}"
+            target = a.root/"failed-cell.db"
+            try:
+                with closing(sqlite3.connect(target)) as dst:
+                    c.backup(dst)  # Same read transaction as the failing comparison, including WAL.
+                failure["backup"] = "sqlite-backup"
+            except Exception as error:
+                failure["backup_error"] = f"{type(error).__name__}: {error}"
+                try:
+                    # Quiesce writers while retaining the DB and both WAL companions together.
+                    with closing(sqlite3.connect(a.db, timeout=1)) as lock:
+                        lock.execute("BEGIN IMMEDIATE")
+                        for suffix in ("", "-wal", "-shm"):
+                            source = Path(str(a.db)+suffix)
+                            if source.exists():
+                                shutil.copy2(source, Path(str(target)+suffix))
+                    failure["backup"] = "locked-db-wal-shm"
+                except Exception as fallback_error:
+                    failure["fallback_error"] = f"{type(fallback_error).__name__}: {fallback_error}"
+            try:
+                dump(a.root/"integrity-failure.json", failure)
+            except Exception as error:
+                exc.add_note(f"integrity evidence write failed: {type(error).__name__}: {error}")
+            raise
+        else:
+            try:
+                path.unlink(missing_ok=True)  # Healthy cells upload no additional evidence.
+            except OSError:
+                pass
+
+
 def integrity(a, manifest):
     # New trace rows are expected. Audit the immutable corpus subset and old vectors.
-    with connect(a.db) as c:
+    with integrity_evidence(a, manifest) as (c, failure):
         c.execute("BEGIN")
         original = list(c.execute("SELECT * FROM messages WHERE store_id<=? ORDER BY store_id", (manifest["rows"],)))
         from .audit import digest
         if digest(original) != manifest["preimage"]["raw_digest"]:
+            failure["mismatch"] = dict(kind="corpus", key="messages", status="changed",
+                expected=manifest["preimage"]["raw_digest"], actual=digest(original))
             raise RuntimeError("corpus row corruption")
         expected_trace = manifest.get("trace_rows") or []
         trace_roles = {row[2] for row in expected_trace}
@@ -341,9 +396,15 @@ def integrity(a, manifest):
                     kind = "extra/duplicate"
                 else:
                     kind = "altered"
+                failure["mismatch"] = dict(kind="trace", index=i, status=kind,
+                    expected=expected_trace[i] if i < len(expected_trace) else None,
+                    actual=actual_trace[i] if i < len(actual_trace) else None)
                 raise RuntimeError(f"trace row corruption: {kind} at real-turn index {i}")
         now = preimage(c, len(manifest["expected"]["leaves"]))
         if now["provenance"] != manifest["preimage"]["provenance"]:
+            key = next(k for k, v in manifest["preimage"]["provenance"].items() if now["provenance"].get(k) != v)
+            failure["mismatch"] = dict(kind="provenance", key=key, status="changed",
+                expected=manifest["preimage"]["provenance"][key], actual=now["provenance"].get(key))
             raise RuntimeError("corpus provenance corruption")
         changed_metadata = [k for k, v in (manifest.get("observed_metadata", {}) | manifest["preimage"]["metadata"]).items() if now["metadata"].get(k) != v]
         checked = audit(a.db, manifest)
@@ -353,12 +414,24 @@ def integrity(a, manifest):
             changed_metadata=changed_metadata, other_role_rows=other_role_rows,
             vector_digest=hashlib.sha256(json.dumps(now["vectors"], sort_keys=True).encode()).hexdigest()))
         if any(now["vectors"].get(k) != v for k, v in (manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"]).items()):
+            key, expected = next((k, v) for k, v in (manifest.get("observed_vectors", {}) | manifest["preimage"]["vectors"]).items() if now["vectors"].get(k) != v)
+            failure["mismatch"] = dict(kind="vector", key=key, expected=expected,
+                actual=now["vectors"].get(key), status="changed" if key in now["vectors"] else "missing")
             raise RuntimeError("pre-existing vector corruption")
         if changed_metadata:
+            key = changed_metadata[0]
+            failure["mismatch"] = dict(kind="metadata", key=key,
+                expected=(manifest.get("observed_metadata", {}) | manifest["preimage"]["metadata"])[key],
+                actual=now["metadata"].get(key), status="changed" if key in now["metadata"] else "missing")
             raise RuntimeError("pre-existing metadata corruption")
         if checked["unpaired_rows"] or checked["residue"]:
+            failure["mismatch"] = dict(kind="pairing_or_residue", key=next(iter(checked["unpaired_rows"] or checked["residue"])),
+                status="changed", expected=dict(unpaired_rows=[], residue={}),
+                actual=dict(unpaired_rows=checked["unpaired_rows"], residue=checked["residue"]))
             raise RuntimeError("vector/metadata pairing or in-flight residue")
-        if c.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+        quick_check = c.execute("PRAGMA quick_check").fetchone()[0]
+        if quick_check != "ok":
+            failure["mismatch"] = dict(kind="database", key="quick_check", status="changed", expected="ok", actual=quick_check)
             raise RuntimeError("database corruption")
 
 
