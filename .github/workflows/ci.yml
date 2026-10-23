@@ -243,9 +243,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
-      HOME: ${{ runner.temp }}/proof-home
-      HERMES_HOME: ${{ runner.temp }}/proof-home
-      TMPDIR: ${{ runner.temp }}/proof-temp
       HERMES_DISABLE_LAZY_INSTALLS: "1"
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
@@ -256,6 +253,12 @@ jobs:
       - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
         with:
           python-version: "3.13"
+      - name: Isolate synthetic proof home
+        run: |
+          mkdir -p "$RUNNER_TEMP/proof-home" "$RUNNER_TEMP/proof-temp"
+          echo "HOME=$RUNNER_TEMP/proof-home" >> "$GITHUB_ENV"
+          echo "HERMES_HOME=$RUNNER_TEMP/proof-home" >> "$GITHUB_ENV"
+          echo "TMPDIR=$RUNNER_TEMP/proof-temp" >> "$GITHUB_ENV"
       - name: Install existing proof dependencies
         run: pip install pytest==9.1.1 numpy==2.4.2 hypothesis==6.141.1
       - name: Prove H6 rotation RED and four overlapping trace cells RED
