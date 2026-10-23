@@ -40,7 +40,8 @@ def assert_no_production_imports(root):
             elif isinstance(node, ast.Call) and (getattr(node.func, "attr", None) == "import_module"
                                                 or getattr(node.func, "id", None) == "import_module"):
                 assert not any(isinstance(arg, ast.Constant) and isinstance(arg.value, str)
-                               and "entity_ops" in arg.value.split(".") for arg in node.args), path
+                               and "entity_ops" in arg.value.split(".")
+                               for arg in node.args + [keyword.value for keyword in node.keywords]), path
 
 
 @pytest.mark.parametrize("form", [
