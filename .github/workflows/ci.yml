@@ -41,7 +41,6 @@ jobs:
         run: ruff check .
 
   test:
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
@@ -155,7 +154,7 @@ jobs:
       - name: Fetch the rollback-reader commits
         # The old-reader tests run these releases' code against a store the
         # current code wrote; under CI a missing commit fails them (#841).
-        run: git fetch --no-tags --depth=1 origin c36b46e3a7b1bff23cfa45fa117565ab8624441d f47b55e031b507b424ff5f480d8f2a80d358f1f0 6800cf45ad05280e6cf6fa9e1ad96c62b7132646 49e99a272d2d461e5c90732e7ef2bc20e96f0826 c67d7633d963a2ffd24cf90995189ee58e2f88c7 709099b3a397a7893a7abae8802ebe7bf605f79e f3cc8de918ba14c21ae246099652762a26255554 77b2b4f795fb6a4f84c55abf6d0441da4469971e
+        run: git fetch --no-tags --depth=1 origin c36b46e3a7b1bff23cfa45fa117565ab8624441d f47b55e031b507b424ff5f480d8f2a80d358f1f0 6800cf45ad05280e6cf6fa9e1ad96c62b7132646 49e99a272d2d461e5c90732e7ef2bc20e96f0826 c67d7633d963a2ffd24cf90995189ee58e2f88c7 709099b3a397a7893a7abae8802ebe7bf605f79e f3cc8de918ba14c21ae246099652762a26255554 77b2b4f795fb6a4f84c55abf6d0441da4469971e 10407e12e33c1d7b09fe0e05141153555aec5d62
 
       - name: Print linked SQLite version
         run: python -c "import sqlite3; print('sqlite', sqlite3.sqlite_version)"
@@ -183,7 +182,6 @@ jobs:
           if-no-files-found: error
 
   bench-tests:
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
@@ -217,7 +215,7 @@ jobs:
 
   tests-ran:
     needs: [test, bench-tests]
-    if: always() && github.event_name != 'workflow_dispatch'
+    if: always()
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -236,58 +234,3 @@ jobs:
           python scripts/ci/check_tests_ran.py
           --junit reports/test-{3.11,3.12,3.13,3.14}/{main,privacy}.xml
           reports/bench-{aml,fmp-tests,instruments-local_catchup-tests,instruments-compaction_probe,instruments-compaction_probe-track_s-decision-tests,instruments-compaction_probe-track_s-scorer-tests,instruments-reliability,instruments-scale389-tests,scoreboard,tools-tests}.xml
-
-
-  # Temporary named RED and pinned-host oracle proof; removed before final freeze.
-  issue-1880-proof:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    env:
-      HERMES_DISABLE_LAZY_INSTALLS: "1"
-      PYTHONDONTWRITEBYTECODE: "1"
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405
-        with:
-          python-version: "3.13"
-      - name: Install harness dependencies
-        run: pip install uv==0.11.26 pytest==9.1.1 numpy hypothesis==6.141.1
-      - name: Prove H5 repair/status RED before product edit
-        env:
-          HOME: ${{ runner.temp }}/red-home
-          HERMES_HOME: ${{ runner.temp }}/red-home
-          TMPDIR: ${{ runner.temp }}/red-temp
-        run: |
-          mkdir -p "$HOME" "$TMPDIR"
-          python -B -c "from benchmarking.standalone import ensure_agent_context_engine_importable; ensure_agent_context_engine_importable(); import os, pytest; rc=pytest.main(['tests/test_issue_667_level3_repair.py', 'tests/test_issue_922_no_self_defeating_leaf.py::test_next_round_compacts_earlier_tool_pair_and_preserves_objective','-q','--junitxml=h5-red.xml','--basetemp='+os.environ['TMPDIR']+'/pytest']); raise SystemExit(0 if rc == 1 else 2)"
-      - name: Prepare pinned reference host
-        run: python -m bench.instruments.reliability.ci prep --host ref-0.21.5 --root "$RUNNER_TEMP/hosts" --out "$RUNNER_TEMP/hosts.json"
-      - name: Export prepared host paths
-        run: |
-          python - <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          hosts = json.loads((Path(os.environ["RUNNER_TEMP"]) / "hosts.json").read_text())
-          host = hosts["hosts"]["ref-0.21.5"]
-          with open(os.environ["GITHUB_ENV"], "a") as env:
-              env.write(f"FASTEMBED_CACHE_PATH={os.environ['RUNNER_TEMP']}/fastembed-empty\n")
-              env.write(f"LCM_REAL_HERMES_PYTHON={host['python']}\n")
-              env.write(f"LCM_REAL_HERMES_SRC={host['src']}\n")
-              env.write(f"PYTHONPATH={os.environ['GITHUB_WORKSPACE']}:{host['src']}\n")
-          PY
-
-      - name: Prove fault-specific full-prompt preservation oracle
-        run: python -m pytest -p no:cacheprovider -q -ra tests/test_real_turn_loop_acp_override.py::test_rotation_child_publication_error_keeps_the_host_rotation_heal --junitxml=h4-host-oracle.xml
-      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
-        if: always()
-        with:
-          name: issue-1880-red-host-oracle
-          path: |
-            h5-red.xml
-            h4-host-oracle.xml
