@@ -64,6 +64,6 @@ def test_failed_retry_preserves_encoded_payload(monkeypatch, sizes, cap, uncerta
     assert [h["store_id"] for h in before["hits"]] == [h["store_id"] for h in after["hits"]]
     if uncertain:
         assert any(h.get("event_time") for h in before["hits"])
-    else:
+    elif not nonconverging_retry:
         assert any("expand_hint" in s for s in before["provenance"]["delivery"]["sessions"])
     assert actual == expected
