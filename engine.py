@@ -7195,7 +7195,33 @@ class LCMEngine(
                             user_id = None
                     if user_id is not None:
                         old = self._occurrence_metadata(by_id[user_id], stored=True, fact=facts[user_id], switches=switches)
-                        if (accepted.get(index) != user_id and not any(
+                        structural = False
+                        if index + 1 < len(messages) and messages[index + 1].get("tool_calls"):
+                            end = index + 2
+                            while end < len(messages) and messages[end].get("role") == "tool":
+                                end += 1
+                            for call_id in choices[index + 1]:
+                                selection = {call_id}
+                                if facts[call_id].get("user_store_id") != user_id:
+                                    continue
+                                for pos in range(index + 2, end):
+                                    linked = [sid for sid in choices[pos] if sid not in selection
+                                              and facts[sid].get("segment_call_store_id") == call_id
+                                              and facts[sid].get("user_store_id") == user_id]
+                                    if len(linked) != 1:
+                                        break
+                                    selection.add(linked[0])
+                                owned = {sid for sid, fact in facts.items()
+                                         if fact.get("segment_call_store_id") == call_id}
+                                if end > index + 2 and len(selection) == end - index - 1 and owned == selection:
+                                    structural = True
+                        previous = next((r for r in reversed(rows) if r["store_id"] < user_id
+                                         and r["session_id"] == by_id[user_id]["session_id"]), None)
+                        if previous and previous.get("role") == "tool":
+                            prior = previous["store_id"]
+                            structural |= any(pos < index and ref[1] == prior and pos in result["proven"]
+                                              for pos, ref in result["matched"].items())
+                        if (not structural and accepted.get(index) != user_id and not any(
                                 current[index][key] is not None and old[key] is not None
                                 for key in ("timestamp", "message_uid"))):
                             # A unique content candidate with missing metadata is
@@ -7319,8 +7345,13 @@ class LCMEngine(
             if (proof and len(messages) < len(proof.get("output_metadata", ()))
                     and self._load_compression_carry_ranges()
                     and not any(r["session_id"] == self._session_id for r in rows)):
-                # Only a delivered carrier with a retained raw occurrence needs
-                # a child witness. Pure emitted scaffold is never a raw row.
+                # A shortened carry view needs one actual child-row witness for
+                # its independently validated delivered head. It is never a
+                # fabricated parent row or a blanket generated-row insertion.
+                heads = {i for i, entry in enumerate(projection.entries) if entry.generated_span is not None}
+                if heads and set(range(len(messages))) - heads <= result["proven"]:
+                    emitted_heads.update(heads)
+                    result["needs_receipt"] = True
                 result["witness"].update(emitted_heads)
                 result["fresh"].update(emitted_heads)
                 result["proven"].difference_update(emitted_heads)

@@ -3444,7 +3444,7 @@ class ReconcileMixin:
         """Return whether ``message`` is the unique active durable fold."""
         return bool(self._active_folded_tail_identity_overrides([message]))
 
-    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]], occurrences=None) -> dict[int, int]:
+    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]], occurrences=None, *, current_correspondence=False) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
         Matching starts strictly after ``_last_compacted_store_id`` so repeated
@@ -3791,7 +3791,7 @@ class ReconcileMixin:
                 store_idx = match_idx + 1
 
         current = self._current_occurrence_source_ids(
-            messages, occurrences, {int(row["store_id"]) for row in candidates})
+            messages, occurrences, {int(row["store_id"]) for row in candidates}) if current_correspondence else {}
         if current:
             claimed = set(current.values())
             ids_by_message_id = {key: sid for key, sid in ids_by_message_id.items()

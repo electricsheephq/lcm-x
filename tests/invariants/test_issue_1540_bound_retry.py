@@ -1172,7 +1172,7 @@ def test_occurrence_publication_uses_current_committed_pair_rows(build):
         call["id"] in ("c", "d") for call in row.get("tool_calls") or [])]
     actual = {engine._occurrence_ingest_plan["matched"][i][1] for i in positions}
     assert len(actual) == 4 and min(actual) > before[-1]["store_id"]
-    mapped = engine._get_store_id_map_for_messages(host)
+    mapped = engine._get_store_id_map_for_messages(host, current_correspondence=True)
     assert {mapped[id(host[i])] for i in positions} == actual
     output = engine.compress(deepcopy(host), force=True)
     assert engine._last_compression_status == "compacted"
@@ -1183,3 +1183,62 @@ def test_occurrence_publication_uses_current_committed_pair_rows(build):
         call["id"] in ("c", "d") for call in row.get("tool_calls") or [])}
     assert not old & carried
     assert any(row.get("tool_call_id") == "c" for row in output)
+
+
+def test_occurrence_shortened_carry_has_one_actual_head_witness(build):
+    engine = build()
+    host = fixture()
+    host += tool_pair("d", LONG + "d", tool_name="lookup")
+    host.append({"role": "user", "content": "pending carry sentinel", "timestamp": 40.})
+    engine.ingest(deepcopy(host))
+    next(row for row in host if row.get("content") == "repeat")["timestamp"] = 20.
+    for row in host:
+        if row.get("tool_call_id") in ("c", "d"):
+            row["content"] = CLEARED
+    host[-1:-1] = [row for i in range(2) for row in tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup")]
+    engine.ingest(deepcopy(host))
+    output = engine.compress(deepcopy(host), force=True)
+    assert "repeat" not in output[0]["content"]
+    parents = engine._store.get_session_messages("S")
+    engine.on_session_end("S", deepcopy(host))
+    engine.on_session_start("C", boundary_reason="compression", old_session_id="S",
+                            conversation_id="conversation", platform="cli")
+    shortened = output[:-1]
+    assert output[-1]["content"] == "pending carry sentinel"
+    engine.ingest(deepcopy(shortened))
+    child = engine._store.get_session_messages("C")
+    assert len(child) == 1 and child[0]["content"] == shortened[0]["content"]
+    fact = engine._store.read_metadata_json(f"host_occurrence_row:C:{child[0]['store_id']}")
+    assert fact["occurrence_version"] == 2 and fact["user_store_id"] == child[0]["store_id"]
+    engine.ingest(deepcopy(shortened))
+    engine.shutdown()
+    engine = build()
+    engine.on_session_start("C", conversation_id="conversation", platform="cli")
+    engine.ingest(deepcopy(shortened))
+    assert engine._store.get_session_messages("C") == child
+    assert engine._store.get_session_messages("S") == parents
+
+
+def test_occurrence_moved_unstamped_sentinel_uses_structural_correspondence(build):
+    engine = build()
+    host = fixture()
+    host += tool_pair("d", LONG + "d", tool_name="lookup")
+    host.append({"role": "user", "content": "pending carry sentinel"})
+    for row in host:
+        row.pop("timestamp", None)
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    engine.shutdown()
+    engine = build()
+    for row in host:
+        if row.get("tool_call_id") in ("c", "d"):
+            row["content"] = CLEARED
+    following = [row for i in range(2) for row in tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup")]
+    host[-1:-1] = following
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    assert after[:len(before)] == before
+    assert len(after) == len(before) + len(following)
+    assert all(row["content"] != "pending carry sentinel" for row in after[len(before):])
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
