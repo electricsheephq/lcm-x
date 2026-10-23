@@ -7,7 +7,8 @@ import pytest
 from bench.instruments.reliability import ci
 
 
-@pytest.mark.parametrize("overrides", [[], ["Pillow==13.0.0", "spacy-curated-transformers; sys_platform == 'never'"]])
+@pytest.mark.parametrize("overrides", [None, [], ["Pillow==13.0.0", "spacy-curated-transformers; sys_platform == 'never'"]],
+                         ids=["undeclared", "empty", "declared"])
 def test_prep_preserves_host_overrides_and_pins(tmp_path, monkeypatch, overrides):
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({"hosts": {"fixture": {
@@ -18,7 +19,9 @@ def test_prep_preserves_host_overrides_and_pins(tmp_path, monkeypatch, overrides
     monkeypatch.setattr(ci, "CI_HOSTS", manifest)
     src = tmp_path / "fixture" / "src"
     src.mkdir(parents=True)
-    project = '[project]\nname = "fixture"\n[tool.uv]\noverride-dependencies = ' + json.dumps(overrides) + '\n'
+    project = '[project]\nname = "fixture"\n'
+    if overrides is not None:
+        project += '[tool.uv]\noverride-dependencies = ' + json.dumps(overrides) + '\n'
     (src / "pyproject.toml").write_text(project)
     commands = []
     monkeypatch.setattr(ci.subprocess, "run", lambda cmd, **kw: commands.append(cmd))
@@ -34,6 +37,10 @@ def test_prep_preserves_host_overrides_and_pins(tmp_path, monkeypatch, overrides
         assert forwarded.read_text().splitlines() == overrides
     else:
         assert "--overrides" not in install
+        assert not (tmp_path / "fixture" / "overrides.txt").exists()
+        assert install == ["uv", "pip", "install", "-q", "-p",
+                           str(tmp_path / "fixture" / "venv" / "bin" / "python"),
+                           "-e", f"{src}[acp]", "agent-client-protocol==0.9.0", "pip==24.0"]
     assert (src / "pyproject.toml").read_text() == project
     assert result == json.loads((tmp_path / "hosts.json").read_text())
     assert result["hosts"]["fixture"]["sha"] == "pinned"
