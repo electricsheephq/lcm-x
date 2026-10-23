@@ -15,6 +15,7 @@ SENDER_SOURCES = frozenset({"gateway_principal", "gateway"})  # gateway reserved
 _LOCK = threading.Lock()
 _PENDING = {}
 _RETIRED = OrderedDict()
+_EXCLUDED = OrderedDict()
 _TTL, _CAP, _RETIRED_CAP = 900, 256, 1024
 
 
@@ -154,6 +155,18 @@ def record(engine, pending, ids, values):
         logger.debug("sender_capture:record_error")
 
 
+def exclude(engine, store_ids):
+    try:
+        db = _key(engine)[0]
+        with _LOCK:
+            for sid in store_ids:
+                _EXCLUDED.setdefault((db, sid), None)
+            while len(_EXCLUDED) > _RETIRED_CAP:
+                _EXCLUDED.popitem(last=False)
+    except Exception:
+        logger.debug("sender_capture:exclude_error")
+
+
 def try_update(engine):
     try:
         pending = snapshot(engine)
@@ -164,6 +177,10 @@ def try_update(engine):
                       if matches(engine, pending, obj)
                       and engine._message_replay_identity(obj) == entry[0]]
         ids = {sid for sid, _obj in candidates}
+        db = _key(engine)[0]
+        with _LOCK:
+            if any((db, sid) in _EXCLUDED for sid in ids):
+                return
         if len(ids) != 1:
             return
         sid = next(iter(ids))
