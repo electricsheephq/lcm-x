@@ -325,6 +325,29 @@ def test_repair_hold_invalidation_rolls_back_with_group(engine, monkeypatch):
     assert _read_no_progress_holds(engine) == holds
 
 
+def test_session_rotation_during_summary_aborts_repair(engine, monkeypatch):
+    _build_store(engine)
+    holds = _seed_no_progress_holds(engine)
+    before, raw_before = _texts(engine), _raw_rows(engine)
+    owners = dict(engine._dag.connection.execute("SELECT node_id, session_id FROM summary_nodes"))
+    moved = []
+
+    def rotate_session(call_number):
+        if call_number == 1:
+            moved.append(engine.carry_over_new_session_context("s1", "s2"))
+
+    _fake_route(monkeypatch, on_call=rotate_session)
+    result = handle_lcm_command("doctor repair level3 apply", engine)
+
+    assert moved == [sum(owner == "s1" for owner in owners.values())] and moved[0] > 0
+    assert "rolled back — a node changed or a new parent linked in during the repair" in result
+    assert "groups_rolled_back: 1" in result and "status: partial" in result
+    assert _texts(engine) == before and _raw_rows(engine) == raw_before
+    assert dict(engine._dag.connection.execute("SELECT node_id, session_id FROM summary_nodes")) == {
+        node_id: "s2" if owner == "s1" else owner for node_id, owner in owners.items()}
+    assert _read_no_progress_holds(engine) == holds
+
+
 def test_tool_path_never_writes(engine):
     _build_store(engine)
     db_path = Path(engine._store.db_path)
