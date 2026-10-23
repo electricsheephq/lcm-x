@@ -27,3 +27,8 @@ Legacy invalidation/isolation expectations updated after observed 3-failure file
 23 passed in 2.52s
 
 Final complete focused file and full suite: remote CI required; no fourth local focused-file run.
+
+Consolidated review correction at970e47f9; RED at846a1b9b before product edits:
+6 failed in 0.87s
+Existing #608 unfinished-budget metadata assertion, required settings and same-window route-only mutations.
+9 passed in 0.87s

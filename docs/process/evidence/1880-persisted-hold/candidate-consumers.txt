@@ -5,27 +5,30 @@ compaction.py:267:        self._last_gate_tokens = rough
 compaction.py:303:                replay_messages = self._ingest_messages(messages)
 compaction.py:319:            self._last_gate_tokens = max(rough, replay_rough)
 compaction.py:710:            self._no_progress_candidate = False
-compaction.py:717:            elif (not force and self._no_progress_hold is not None
-compaction.py:718:                  and self._no_progress_hold[1] != "no_progress") and self._no_progress_hold_blocks(
-compaction.py:763:                    self._start_no_progress_hold("hidden_only")
-compaction.py:766:            pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
-compaction.py:779:                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
-compaction.py:1754:        self._last_gate_tokens = int(state.observed_prompt_tokens or 0)
-compaction.py:1788:            state.working_messages = self._ingest_messages(messages)
-compaction.py:1792:                and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-compaction.py:1793:                and self._no_progress_hold[1] == "no_progress"):
-compaction.py:1824:                or self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
-compaction.py:1895:        self._no_progress_candidate = bool(
-compaction.py:1949:        if self._no_progress_candidate and not recovery_attempt:
-compaction.py:1997:                    self._run_threshold_sweep_condensation(
-compaction.py:2321:                    self._no_progress_candidate = False  # let the next automatic pass try the fallback
-compaction.py:2328:                        self._no_progress_candidate = False
-compaction.py:2402:                # _ingest_messages() already advanced the cursor to the original
-compaction.py:2482:                        self._run_threshold_sweep_condensation(
-compaction.py:2828:    def _advance_after_leaf(
-compaction.py:2845:        self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
-compaction.py:2846:        self._clear_persisted_no_progress_hold()
-compaction.py:3365:            action, result = self._advance_after_leaf(state, leaf, sweep_step_done)
+compaction.py:711:            self._no_progress_proof_complete = False
+compaction.py:718:            elif (not force and self._no_progress_hold is not None
+compaction.py:719:                  and self._no_progress_hold[1] != "no_progress") and self._no_progress_hold_blocks(
+compaction.py:764:                    self._start_no_progress_hold("hidden_only")
+compaction.py:767:            pending_no_progress = (self._no_progress_candidate and not bypass_cooldown
+compaction.py:768:                    and (self._objective_only_noop or self._no_progress_proof_complete)
+compaction.py:781:                self._start_no_progress_hold("objective_only" if self._objective_only_noop else "no_progress")
+compaction.py:1756:        self._last_gate_tokens = int(state.observed_prompt_tokens or 0)
+compaction.py:1790:            state.working_messages = self._ingest_messages(messages)
+compaction.py:1794:                and self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
+compaction.py:1795:                and self._no_progress_hold[1] == "no_progress"):
+compaction.py:1826:                or self._no_progress_hold_blocks(state.observed_prompt_tokens or 0)
+compaction.py:1897:        self._no_progress_candidate = bool(
+compaction.py:1951:        if self._no_progress_candidate and not recovery_attempt:
+compaction.py:1999:                    self._run_threshold_sweep_condensation(
+compaction.py:2323:                    self._no_progress_candidate = False  # let the next automatic pass try the fallback
+compaction.py:2330:                        self._no_progress_candidate = False
+compaction.py:2404:                # _ingest_messages() already advanced the cursor to the original
+compaction.py:2458:            self._no_progress_proof_complete = bool(
+compaction.py:2492:                        self._run_threshold_sweep_condensation(
+compaction.py:2838:    def _advance_after_leaf(
+compaction.py:2855:        self._no_progress_hold, self._no_progress_candidate = None, False  # #651: hidden-only leaves too
+compaction.py:2856:        self._clear_persisted_no_progress_hold()
+compaction.py:3375:            action, result = self._advance_after_leaf(state, leaf, sweep_step_done)
 engine.py:1386:        self._no_progress_hold: Optional[tuple[float, str]] = None
 engine.py:1393:        self._no_progress_candidate = False  # set by _compress_impl for compress()
 engine.py:1396:        self._last_gate_tokens = 0  # the latest should_compress/preflight observation
@@ -47,62 +50,62 @@ engine.py:2492:            self._no_progress_replay = (self._session_id, self._c
 engine.py:2494:            self._no_progress_metadata_warning()
 engine.py:2496:    def _no_progress_fingerprint(self) -> Optional[str]:
 engine.py:2497:        replay = getattr(self, "_no_progress_replay", None)
-engine.py:2519:            tokens = max(int(self.last_prompt_tokens or 0), int(self._last_gate_tokens or 0))
-engine.py:2530:            bound_store = getattr(self, "_no_progress_bound_store", None)
-engine.py:2533:                self._no_progress_bound_store = bound_store
-engine.py:2542:            self._no_progress_metadata_warning()
-engine.py:2545:    def _persisted_no_progress_hold_active(self) -> bool:
-engine.py:2548:        self._no_progress_hold = None
-engine.py:2567:            fingerprint = self._no_progress_fingerprint()
-engine.py:2577:            observed = getattr(self, "_no_progress_deadline", None)
-engine.py:2581:            self._no_progress_deadline = (identity, deadline)
-engine.py:2584:            self._no_progress_hold = (deadline, "no_progress")
-engine.py:2587:            self._no_progress_metadata_warning()
-engine.py:2590:    def _persist_no_progress_hold(self) -> None:
-engine.py:2591:        fingerprint = self._no_progress_fingerprint()
-engine.py:2592:        self._no_progress_hold = None
-engine.py:2595:        if self._persisted_no_progress_hold_active():
-engine.py:2603:            self._no_progress_deadline = ((fingerprint, now, record["expires_at"]), deadline)
-engine.py:2604:            self._no_progress_hold = (deadline, "no_progress")
-engine.py:2606:            self._no_progress_metadata_warning()
-engine.py:2608:    def _clear_persisted_no_progress_hold(self) -> None:
+engine.py:2526:            tokens = max(int(self.last_prompt_tokens or 0), int(self._last_gate_tokens or 0))
+engine.py:2537:            bound_store = getattr(self, "_no_progress_bound_store", None)
+engine.py:2540:                self._no_progress_bound_store = bound_store
+engine.py:2550:            self._no_progress_metadata_warning()
+engine.py:2553:    def _persisted_no_progress_hold_active(self) -> bool:
+engine.py:2556:        self._no_progress_hold = None
+engine.py:2575:            fingerprint = self._no_progress_fingerprint()
+engine.py:2585:            observed = getattr(self, "_no_progress_deadline", None)
+engine.py:2589:            self._no_progress_deadline = (identity, deadline)
+engine.py:2592:            self._no_progress_hold = (deadline, "no_progress")
+engine.py:2595:            self._no_progress_metadata_warning()
+engine.py:2598:    def _persist_no_progress_hold(self) -> None:
+engine.py:2599:        fingerprint = self._no_progress_fingerprint()
+engine.py:2600:        self._no_progress_hold = None
+engine.py:2603:        if self._persisted_no_progress_hold_active():
+engine.py:2611:            self._no_progress_deadline = ((fingerprint, now, record["expires_at"]), deadline)
+engine.py:2612:            self._no_progress_hold = (deadline, "no_progress")
 engine.py:2614:            self._no_progress_metadata_warning()
-engine.py:2616:    def _no_progress_hold_status(self) -> Optional[dict]:
-engine.py:2617:        if not self._no_progress_hold_active():
-engine.py:2619:        until, reason = self._no_progress_hold
-engine.py:2639:        self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
-engine.py:2669:            hold = self._no_progress_hold
-engine.py:2672:                self._no_progress_hold = None
-engine.py:2684:        tokens = max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
-engine.py:2685:        return self._no_progress_hold_blocks(tokens) or self._sweep_budget_hold_blocks(tokens)
-engine.py:2687:    def _no_progress_hold_blocks(self, tokens: int) -> bool:
-engine.py:2690:        if self._bypasses_lcm_context_management() or not self._no_progress_hold_active():
-engine.py:2697:        """#625: the #608 hold at the host gate, with the exemptions of ``_no_progress_hold_blocks``."""
-engine.py:2707:        status = self._no_progress_hold_status()
-engine.py:2734:        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
-engine.py:2754:        self._no_progress_replay = None
-engine.py:3024:        Uses the same _ingest_messages cursor as compress(), so if
-engine.py:3041:                self._ingest_messages(messages)
-engine.py:4634:            self._reset_session_scoped_runtime_state()
-engine.py:5045:                    self._reset_session_scoped_runtime_state()
-engine.py:5106:            self._reset_session_scoped_runtime_state()
-engine.py:5479:                    self._ingest_messages(
-engine.py:5584:        self._reset_session_scoped_runtime_state()
-engine.py:5845:                    self._ingest_messages(messages)
-engine.py:5943:            "no_progress_hold": self._no_progress_hold_status(),
-engine.py:6348:    def _remember_active_replay_messages(
-engine.py:6370:        self._observe_no_progress_replay(original_messages, active_replay_messages)
-engine.py:6398:    def _cached_active_replay_messages(
-engine.py:6417:                self._observe_no_progress_replay(original_messages, current)
-engine.py:6912:    def _ingest_messages(
-engine.py:6930:        self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
-engine.py:7274:            result = self._remember_active_replay_messages(messages, active)
-engine.py:7288:            cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
-engine.py:8705:    def _run_threshold_sweep_condensation(
-engine.py:8750:            self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
-engine.py:8751:            self._clear_persisted_no_progress_hold()
-engine.py:9477:                overhead_source, max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
-engine.py:10083:        (output of ``_ingest_messages``), not raw messages.  ``working_messages``
+engine.py:2616:    def _clear_persisted_no_progress_hold(self) -> None:
+engine.py:2622:            self._no_progress_metadata_warning()
+engine.py:2624:    def _no_progress_hold_status(self) -> Optional[dict]:
+engine.py:2625:        if not self._no_progress_hold_active():
+engine.py:2627:        until, reason = self._no_progress_hold
+engine.py:2647:        self._start_no_progress_hold("host_rejected_progress" if progress else "host_rejected")
+engine.py:2677:            hold = self._no_progress_hold
+engine.py:2680:                self._no_progress_hold = None
+engine.py:2692:        tokens = max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
+engine.py:2693:        return self._no_progress_hold_blocks(tokens) or self._sweep_budget_hold_blocks(tokens)
+engine.py:2695:    def _no_progress_hold_blocks(self, tokens: int) -> bool:
+engine.py:2698:        if self._bypasses_lcm_context_management() or not self._no_progress_hold_active():
+engine.py:2705:        """#625: the #608 hold at the host gate, with the exemptions of ``_no_progress_hold_blocks``."""
+engine.py:2715:        status = self._no_progress_hold_status()
+engine.py:2742:        if not self._sweep_budget_hold_active() and not self._no_progress_hold_active():
+engine.py:2762:        self._no_progress_replay = None
+engine.py:3032:        Uses the same _ingest_messages cursor as compress(), so if
+engine.py:3049:                self._ingest_messages(messages)
+engine.py:4642:            self._reset_session_scoped_runtime_state()
+engine.py:5053:                    self._reset_session_scoped_runtime_state()
+engine.py:5114:            self._reset_session_scoped_runtime_state()
+engine.py:5487:                    self._ingest_messages(
+engine.py:5592:        self._reset_session_scoped_runtime_state()
+engine.py:5853:                    self._ingest_messages(messages)
+engine.py:5951:            "no_progress_hold": self._no_progress_hold_status(),
+engine.py:6356:    def _remember_active_replay_messages(
+engine.py:6378:        self._observe_no_progress_replay(original_messages, active_replay_messages)
+engine.py:6406:    def _cached_active_replay_messages(
+engine.py:6425:                self._observe_no_progress_replay(original_messages, current)
+engine.py:6920:    def _ingest_messages(
+engine.py:6938:        self._no_progress_replay = None  # A failed/unfinished ingest cannot reuse an older proof.
+engine.py:7282:            result = self._remember_active_replay_messages(messages, active)
+engine.py:7296:            cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
+engine.py:8713:    def _run_threshold_sweep_condensation(
+engine.py:8758:            self._no_progress_candidate = False  # #909/#651: a stored condensation is progress
+engine.py:8759:            self._clear_persisted_no_progress_hold()
+engine.py:9485:                overhead_source, max(int(self.last_prompt_tokens or 0), self._last_gate_tokens)
+engine.py:10091:        (output of ``_ingest_messages``), not raw messages.  ``working_messages``
 reset_state.py:22:        self._last_gate_tokens = 0  # #954: a rebind never inherits the previous binding's gate observation
 reset_state.py:49:    def _reset_session_scoped_runtime_state(self) -> None:
 reset_state.py:71:        self._no_progress_hold, self._no_progress_candidate = None, False
@@ -530,6 +533,7 @@ tests/test_issue_1880_persisted_hold.py:277:        assert engine._no_progress_f
 tests/test_issue_1880_persisted_hold.py:280:        assert engine._no_progress_fingerprint() == fingerprint
 tests/test_issue_1880_persisted_hold.py:282:        engine._no_progress_bound_store = (object(), original_path, "synthetic-old-store")
 tests/test_issue_1880_persisted_hold.py:283:        assert engine._no_progress_fingerprint() == fingerprint
+tests/test_issue_1880_persisted_hold.py:294:        engine._ingest_messages(view)
 tests/test_issue_255_post_compaction_ingest.py:204:            restarted._ingest_messages(snapshot)
 tests/test_issue_255_post_compaction_ingest.py:241:            restarted._ingest_messages(snapshot)
 tests/test_issue_255_post_compaction_ingest.py:286:            restarted._ingest_messages(snapshot)
@@ -572,9 +576,9 @@ tests/test_issue_597_progress_hold.py:146:    engine._start_no_progress_hold("ho
 tests/test_issue_597_progress_hold.py:149:    assert engine._no_progress_hold is None
 tests/test_issue_605_foreground_budget.py:356:        assert engine._no_progress_hold is None and not engine._no_progress_hold_active()
 tests/test_issue_605_foreground_budget.py:383:        assert engine._no_progress_hold is None
-tests/test_issue_608_sweep_budget_stop.py:313:            passes, reason = engine._run_threshold_sweep_condensation(
-tests/test_issue_608_sweep_budget_stop.py:408:    original = engine._ingest_messages
-tests/test_issue_608_sweep_budget_stop.py:416:    monkeypatch.setattr(engine, "_ingest_messages", ingest_with_a_diff)
+tests/test_issue_608_sweep_budget_stop.py:316:            passes, reason = engine._run_threshold_sweep_condensation(
+tests/test_issue_608_sweep_budget_stop.py:411:    original = engine._ingest_messages
+tests/test_issue_608_sweep_budget_stop.py:419:    monkeypatch.setattr(engine, "_ingest_messages", ingest_with_a_diff)
 tests/test_issue_618_625_hold_followups.py:163:        engine._reset_session_scoped_runtime_state()
 tests/test_issue_618_625_hold_followups.py:189:        assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()
 tests/test_issue_618_625_hold_followups.py:193:        assert engine._sweep_budget_hold_active() and engine._no_progress_hold_active()

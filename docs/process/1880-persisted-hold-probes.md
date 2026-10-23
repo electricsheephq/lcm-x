@@ -2,11 +2,11 @@
 
 Scope: automatic unchanged no-progress suppression across engine rebuilds using one existing metadata-table key per session. Refs #1880; #1162 is context only and remains deferred.
 
-Baseline: `10407e12e33c1d7b09fe0e05141153555aec5d62`. Product candidate: `cd68a230e5d78cf7a8ad372e338cfd89acb528c6`. Evidence files are under `docs/process/evidence/1880-persisted-hold/`.
+Baseline: `10407e12e33c1d7b09fe0e05141153555aec5d62`. Product candidate: `970e47f9b5ee33cd6cca2c71a27d777683eb412e`. Evidence files are under `docs/process/evidence/1880-persisted-hold/`.
 
-Only ordinary completed `no_progress` persists. A record hit never rewrites metadata or extends expiry. Invalid, unreadable or future-dated metadata fails open with one generic metadata-only warning. A changed fingerprint is logically invalidated in the same call without a gate write. Successful publication clears only the applicable scoped record.
+Only ordinary completed `no_progress` persists. A positive completed-terminal classification excludes unfinished budget, route, rejection, summary failure and error stops; the separate sweep hold remains process-local. A record hit never rewrites metadata or extends expiry. Invalid, unreadable or future-dated metadata fails open with one generic metadata-only warning. A changed fingerprint is logically invalidated in the same call without a gate write. Successful publication clears only the applicable scoped record.
 
-The digest is computed during existing successful ingest; admission reuses that proof and bounded indexed state. Cold threshold queries without replay proof fail open. Rebuilt preflight/direct compression ingest before the shared held decision; no repeated attribution or summary work is admitted on a matching proof. The resolved store identity is cached against exact store-object and db-path equality, while metadata and current indexed state are read on every gate. Leaf target ratio/minimum/maximum are included in the settings digest.
+The digest is computed during existing successful ingest; admission reuses that proof and bounded indexed state. Cold threshold queries without replay proof fail open. Rebuilt preflight/direct compression ingest before the shared held decision; no repeated attribution or summary work is admitted on a matching proof. The resolved store identity is cached against exact store-object and db-path equality, while metadata and current indexed state are read on every gate. Leaf target ratio/minimum/maximum, L2 budget ratio and summary prompt version are included in the settings digest. Current model/provider/API-mode scalar route identity is included; opaque or URL-shaped routes fail open without reading credentials or base URLs.
 
 Manual force, provider recovery, forced overflow, survival ceiling, replay-changing below-threshold cleanup, nonordinary no-progress reasons, and sweep holds retain their own policies. The part-A cleanup block is byte-identical to BASE.
 
@@ -85,3 +85,7 @@ Metadata-only: no table, index, DDL, migration, message/DAG format, source row, 
 Testing improved: rebuilt-engine and fingerprint-invalidation regressions for the compaction hold.
 
 Synthetic proof only. This does not establish live group latency, host prompt/tool refresh latency, a #1162 repair, merge, release, runtime safety or customer readiness.
+
+## Consolidated review correction
+
+The existing first-map #608 budget-stop fixture now asserts no durable ordinary record while its process-local sweep hold stays active. Five required settings/route-only mutations invalidate an unchanged record. These six checks were RED at846a1b9b (`6 failed in 0.87s`); the same checks plus the three rebuilt consumer cells pass after repair (`9 passed in 0.87s`). The same reviewers inspect only this relevant delta, preserving their prior unaffected coverage. The final steady cost recheck and card are in `cost-review-delta/`; the initial `cost/` remains historical.
