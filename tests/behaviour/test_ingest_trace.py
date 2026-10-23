@@ -54,7 +54,8 @@ def test_fixture_scenario_inventory_and_size() -> None:
     assert len(names) == len(set(names))
     assert set(data) == set(names), TRACE_GUIDANCE
     # Initial, next and cold ingests now each retain their full observer stream.
-    assert GOLDEN.stat().st_size <= 3_350_000
+    # #1880 adds the transient per-index classification to the observer.
+    assert GOLDEN.stat().st_size <= 3_375_000
     assert all(len(json.dumps(trace).encode()) <= 45_000 for trace in data.values())
 
 

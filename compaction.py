@@ -330,19 +330,19 @@ class CompactionMixin:
                 observed_tokens=replay_rough,
                 messages=replay_messages,
             )
+            if (
+                cleanup_requested
+                and not force_overflow_requested
+                and max(rough, replay_rough) < self.threshold_tokens
+                and not self._replay_diff_requests_ingest_cleanup(
+                    messages, replay_messages, include_size_only=False,
+                )
+            ):
+                # Ingest made the size reduction durable; independent real
+                # maintenance triggers below must still get their normal vote.
+                logger.debug("LCM preflight: deferred_size_only_cleanup")
+                cleanup_requested = False
             if cleanup_requested:
-                if (
-                    not force_overflow_requested
-                    and max(rough, replay_rough) < self.threshold_tokens
-                    and not self._replay_diff_requests_ingest_cleanup(
-                        messages, replay_messages, include_size_only=False,
-                    )
-                ):
-                    # Ingest already made this size reduction durable. Let the
-                    # host adopt it at the next real boundary instead of paying
-                    # for a prompt/tool rebuild just to carry a smaller replay.
-                    logger.debug("LCM preflight: deferred_size_only_cleanup")
-                    return False
                 if (
                     not force_overflow_requested
                     and self._compression_boundary_cooldown_active()
@@ -491,6 +491,8 @@ class CompactionMixin:
             original_text = text_content_for_pattern_matching(original_msg.get("content")) or ""
             replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
             if original_text != replay_text:
+                if replay_text.startswith("[Externalized LCM ingest payload: assistant output quarantined;"):
+                    return True
                 if replay_text.startswith(("[Externalized LCM ingest payload:",
                                            "[Externalized payload: kind=raw_payload;",
                                            "[Externalized tool output:")):

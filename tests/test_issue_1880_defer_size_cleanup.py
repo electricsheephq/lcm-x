@@ -10,6 +10,7 @@ from hermes_lcm.config import LCMConfig
 from hermes_lcm.engine import LCMEngine
 from hermes_lcm.tokens import count_messages_tokens
 from tests.test_active_tool_stubbing import assembled_tool, tool_pair
+from tests.test_issue_651_below_threshold_cleanup_only import _maintenance_engine
 
 
 @pytest.fixture
@@ -163,3 +164,20 @@ def test_unknown_classification_keeps_immediate_adoption(engines, monkeypatch, k
         return replay
     monkeypatch.setattr(engine, "_ingest_messages", ingest)
     assert engine.should_compress_preflight(view) is True
+
+
+def test_size_cleanup_preserves_independent_critical_maintenance(tmp_path):
+    engine, view, _ = _maintenance_engine(
+        tmp_path, large_output_externalization_enabled=True,
+        large_output_active_replay_stubbing_enabled=True,
+        large_output_active_replay_stub_threshold_tokens=5,
+        large_output_externalization_threshold_chars=1_000_000,
+    )
+    try:
+        view += tool_pair("critical", "synthetic padding " * 5)
+        assert count_messages_tokens(view) < engine.threshold_tokens
+        assert not engine._should_force_overflow_recovery(messages=view)
+        assert engine.should_compress_preflight(view) is True
+        assert engine._compaction_request.below_threshold_cleanup_only
+    finally:
+        engine.shutdown()
