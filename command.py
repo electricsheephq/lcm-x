@@ -94,6 +94,7 @@ from .chunking import (
     normalize_content_policy,
 )
 from .embedding_maintenance import incremental_embedding_state as incremental_embedding_state
+from .engine_registry import live_bound_session_ids
 from .embedding_provider import (
     EmbeddedDocumentBatch,
     EmbeddingProviderError,
@@ -1594,7 +1595,8 @@ def _doctor_clean_apply_text(engine) -> str:
 
 def _doctor_clean_lifecycle_text(engine) -> str:
     count = engine._lifecycle.row_count()
-    protected = {str(getattr(engine, "_session_id", "") or "")}
+    # #753: rows bound by any live engine in this process are protected, as in apply.
+    protected = {str(getattr(engine, "_session_id", "") or "")} | live_bound_session_ids()
     protected = {s for s in protected if s}
 
     conn = engine._lifecycle.connection
@@ -1669,7 +1671,8 @@ def _doctor_clean_lifecycle_apply_text(engine) -> str:
         ])
 
     before = engine._lifecycle.row_count()
-    protected = {str(getattr(engine, "_session_id", "") or "")}
+    # #753: never delete a row another live engine in this process still has bound.
+    protected = {str(getattr(engine, "_session_id", "") or "")} | live_bound_session_ids()
     protected = {s for s in protected if s}
 
     try:
