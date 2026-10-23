@@ -1,0 +1,101 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "session-end-attribution-current-main-20261023",
+  "project": "lcm-x",
+  "kind": "benchmark",
+  "status": "settled",
+  "owner_lane": "session-end-attribution",
+  "claim_class": "pr_ready",
+  "created": "2026-10-23T08:02:37Z",
+  "settled": "2026-10-23T08:02:38Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "2819b6f89861c56b6fa896821a25b27f24d84ac7",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python tests/fixtures/session_end_attribution_cost/measure.py . \"$RUNNER_TEMP/attribution-cost-results\"",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "preflight-INFO",
+      "metric": "paired_median_delta_ms",
+      "value": 0.0024834999999999996,
+      "n": 200,
+      "baseline_run": "440976dc4ca05caa8e82ccc8e7adcb167fa70bd9",
+      "source": "summary.json"
+    },
+    {
+      "benchmark": "post_llm_call_ingest-INFO",
+      "metric": "paired_median_delta_ms",
+      "value": 0.0030789999999999984,
+      "n": 200,
+      "baseline_run": "440976dc4ca05caa8e82ccc8e7adcb167fa70bd9",
+      "source": "summary.json"
+    },
+    {
+      "benchmark": "preflight-DEBUG",
+      "metric": "paired_median_delta_ms",
+      "value": 0.01256400000000002,
+      "n": 200,
+      "baseline_run": "440976dc4ca05caa8e82ccc8e7adcb167fa70bd9",
+      "source": "summary.json"
+    },
+    {
+      "benchmark": "post_llm_call_ingest-DEBUG",
+      "metric": "paired_median_delta_ms",
+      "value": 0.010075,
+      "n": 200,
+      "baseline_run": "440976dc4ca05caa8e82ccc8e7adcb167fa70bd9",
+      "source": "summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "pairs.jsonl",
+      "role": "per-item",
+      "sha256": "d2d246d91a2ac393fcf473bb35b4b4b7898e9170fa37e9780ecfd27dcbf076ce",
+      "bytes": 116184
+    },
+    {
+      "path": "summary.json",
+      "role": "per-item",
+      "sha256": "d54f140535b7f30fc41d3bfa4b9801bb3a87f8ed69882b9b86430966164b9d82",
+      "bytes": 1930
+    },
+    {
+      "path": "score.py",
+      "role": "per-item",
+      "sha256": "ade5dd2e0fb3c488d3d03f53f2375916585ae7ac21102917c47e1a837f2b4215",
+      "bytes": 946
+    },
+    {
+      "path": "measurement-source.py",
+      "role": "per-item",
+      "sha256": "c2749e42b8611c495b64c1e8949368e544585648266e11745340a53c9f0339d9",
+      "bytes": 4368
+    }
+  ],
+  "rescore": {
+    "command": "python score.py",
+    "inputs": [
+      "pairs.jsonl"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "measurement-source.py",
+    "pairs.jsonl",
+    "score.py",
+    "summary.json"
+  ],
+  "t2_tag": "lcm-x/session-end-attribution-current-main-20261023"
+}
