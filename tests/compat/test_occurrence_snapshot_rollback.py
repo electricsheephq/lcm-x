@@ -3,6 +3,7 @@
 import copy
 import json
 
+from hermes_lcm import engine as engine_module
 from tests.compat.helpers import open_engine, run_old
 from tests.test_host_uid_engine_uids import _compress, _host
 
@@ -32,12 +33,16 @@ finally:
 '''
 
 
-def test_candidate_snapshot_opens_and_ingests_on_v0281(tmp_path, old_tree, host_root):
+def test_candidate_snapshot_opens_and_ingests_on_v0281(tmp_path, old_tree, host_root, monkeypatch):
     old = old_tree("v0.28.1", {"v0.28.1": V0281})
+    monkeypatch.setattr(engine_module, "summarize_with_escalation",
+                        lambda **kwargs: ("Synthetic summary preserving the task and tool result.", 1))
     engine = open_engine(tmp_path)
     engine._config.fresh_tail_count = 4
+    engine._config.leaf_chunk_tokens = 1
     try:
         output = _compress(engine, _host())
+        assert engine._last_compression_status == "compacted"
         proof = engine._durable_commit_proof_payload()
         assert proof is not None and isinstance(proof.get("output_metadata"), list)
         snapshot = engine._store.read_metadata_json(engine._replay_snapshot_metadata_key("host_occurrence_snapshot"))
