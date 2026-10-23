@@ -1,7 +1,9 @@
 """LCM configuration with defaults and env var overrides."""
 import contextvars
+import json
 import logging
 import os
+import re
 from collections import ChainMap
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -14,6 +16,12 @@ try:
     import yaml
 except Exception:  # pragma: no cover - optional fallback for minimal installs
     yaml = None
+
+
+try:
+    import ruamel.yaml as ruamel_yaml
+except Exception:  # pragma: no cover - optional fallback for minimal installs
+    ruamel_yaml = None
 
 
 logger = logging.getLogger(__name__)
@@ -329,6 +337,59 @@ def _hermes_config_path() -> Path:
     return home / "config.yaml"
 
 
+_YAML_QUOTED_SCALAR = r""""(?:\\.|[^"\\])*"|'(?:''|[^'])*'"""
+
+
+def _plain_yaml_value(value):
+    if isinstance(value, dict):
+        return {_plain_yaml_value(k): _plain_yaml_value(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain_yaml_value(item) for item in value]
+    if value is None:
+        return None
+    for scalar_type in (str, bool, int, float):
+        if isinstance(value, scalar_type):
+            return scalar_type(value)
+    return str(value)
+
+
+def _parse_yaml_fallback_scalar(value: str):
+    value = value.strip()
+    quoted = re.match(_YAML_QUOTED_SCALAR, value)
+    if quoted:
+        token = quoted.group()
+        try:
+            return json.loads(token) if token[0] == '"' else token[1:-1].replace("''", "'")
+        except ValueError:
+            pass  # Unsupported escape: retain the old parser's result below.
+    if value.startswith("["):
+        items = []
+        start = 1
+        # Quoted tokens consume their own commas, hashes and escaped quotes.
+        for match in re.finditer(_YAML_QUOTED_SCALAR + r"|[,\]#\[]", value[1:]):
+            token = match.group()
+            if token in {"#", "["}:
+                break  # Unsupported list shape: retain the old result.
+            if token in {",", "]"}:
+                end = match.start() + 1
+                item = value[start:end].strip()
+                if item or token == ",":
+                    items.append(_parse_yaml_fallback_scalar(item))
+                if token == "]":
+                    return items
+                start = match.end() + 1
+    value = value.split("#", 1)[0].rstrip().strip("'\"")
+    lowered = value.lower()
+    if lowered in {"true", "yes", "on"}:
+        return True
+    if lowered in {"false", "no", "off"}:
+        return False
+    try:
+        return float(value) if "." in value else int(value)
+    except ValueError:
+        return value
+
+
 def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
     cfg_path = _hermes_config_path() if cfg_path is None else cfg_path
     try:
@@ -342,11 +403,18 @@ def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
         except Exception:
             return {}
 
+    if ruamel_yaml is not None:
+        try:
+            loaded = _plain_yaml_value(ruamel_yaml.YAML(typ="safe").load(text))
+            return loaded if isinstance(loaded, dict) else {}
+        except Exception:
+            return {}
+
     root: dict[str, Any] = {}
     stack: list[tuple[int, dict[str, Any]]] = [(-1, root)]
     for raw_line in text.splitlines():
-        line = raw_line.split("#", 1)[0].rstrip()
-        if not line.strip() or ":" not in line:
+        line = raw_line.rstrip()
+        if not line.strip() or line.lstrip().startswith("#") or ":" not in line:
             continue
         indent = len(line) - len(line.lstrip(" \t"))
         key, raw_value = line.strip().split(":", 1)
@@ -360,23 +428,12 @@ def _load_hermes_config_yaml(cfg_path: Path | None = None) -> dict[str, Any]:
             stack.pop()
         parent = stack[-1][1] if stack else root
         value = raw_value.strip()
-        if not value:
+        if not value or value.startswith("#"):
             child: dict[str, Any] = {}
             parent[key] = child
             stack.append((indent, child))
             continue
-        value = value.strip("'\"")
-        lowered = value.lower()
-        if lowered in {"true", "yes", "on"}:
-            parsed: Any = True
-        elif lowered in {"false", "no", "off"}:
-            parsed = False
-        else:
-            try:
-                parsed = float(value) if "." in value else int(value)
-            except ValueError:
-                parsed = value
-        parent[key] = parsed
+        parent[key] = _parse_yaml_fallback_scalar(value)
     return root
 
 
