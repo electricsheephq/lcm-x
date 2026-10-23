@@ -2,7 +2,7 @@
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
 
-Generated from `results.jsonl` (sha256: `26061ac53ab5edff1fdd46f81926bdcd9171deb1c35ed25e1e953b6bc11ff342`, rows: 59)
+Generated from `results.jsonl` + `results.d/*.json` (combined sha256: `52cad333b794a3f1fa2c2864aedfae91119d6e9f14e6975ce5f48a99052f1933`, rows: 63)
 
 ## Summary
 
@@ -19,6 +19,8 @@ Generated from `results.jsonl` (sha256: `26061ac53ab5edff1fdd46f81926bdcd9171deb
 | D5-C (reference-agent real-use window) | max_lcm_owned_s | 116.3 | P | 2026-10-16 | [details](#d5c-max-v0270-2026-10-16) |
 | D5-C (reference-agent real-use window) | real_use_hours | 11.9 | P | 2026-10-16 | [details](#d5c-window-v0270-2026-10-16) |
 | Internal scale instrument (389×, 19,829 sessions / 199,641 messages) | p50_ms | 263.6 ms @ 19,829 sessions (24× vs pre-fix; 125 ms @ 8k) | P | 2026-07-30 | [details](#scale-curve-fastscan-2026-07-30) |
+| ~~Issue #1828 synthetic delivery acceptance (not a board score)~~ | ~~head_subset_cells~~ | ~~0 strict-subset regressions / 1502 cap cells~~ | ~~F~~ | ~~2026-10-23~~ | ~~[details](#issue-1828-refit-20261023)~~ → [successor](#issue-1828-refit-20261023-r2) |
+| Issue #1828 synthetic delivery acceptance (not a board score) | head_subset_cells | 0 strict-subset regressions / 1502 cap cells | F | 2026-10-23 | [details](#issue-1828-refit-20261023-r2) |
 | LOCAL catch-up gap discovery (#1748; synthetic 250k store) | sqlite_vm_work_amplification_240k_vs_empty | 1.744911x VM work; 2x eligible-row visits; live max 1.000263x steady | P | 2026-10-21 | [details](#issue1748-gapwalk-2026-10-21) |
 | LoCoMo (1,986q, QA, OFF) | correct_count | 1,014/1,986 vs 987/1,986 | P | 2026-10-16 | [details](#locomo-qa-off-v0270-2026-10-16) |
 | LoCoMo (locomo10, 1,986q) | accuracy | 54.9% (1,091/1,986); OFF on the same release 49.7% | P | 2026-10-08 | [details](#locomo10-1986-qa-local-v0261-2026-10-08) |
@@ -48,6 +50,8 @@ Generated from `results.jsonl` (sha256: `26061ac53ab5edff1fdd46f81926bdcd9171deb
 | LongMemEval-V2 (451q, agentic) | accuracy | 298/451 (66.1%) | P | 2026-07-27 | [details](#longmemeval-v2-451-agentic-2026-07-27) |
 | LongMemEval-V2 (451q, static) | accuracy | 123/451 (27.3%) — official static protocol, fixed weak reader | P | 2026-07-31 | [details](#longmemeval-v2-451-static-2026-07-31) |
 | LongMemEval-V2 static (451q) | judged accuracy, full set | 143/451 = 31.7% (web 97/240 = 40.4%, enterprise 46/211 = 21.8%) | F | 2026-08-03 | [details](#v2-static-451-sota-luna-2026-08-03) |
+| PR #1860 fix-round acceptance | steady_status_p50_ms | 0.2709 -> 0.2622 ms certified-steady status | P | 2026-10-23 | [details](#coverage-marker-fix-r1c-2026-10-23) |
+| PR #1860 r2 initial read-only backlog acceptance | harmful_probe_differences | 0 harmful differences in 304 field comparisons; d3 initial backlog 1 (gap-fill) | P | 2026-10-23 | [details](#coverage-marker-fix-r2-2026-10-23) |
 | Phase C (four live host cells) | slowest_compaction_s | 93.0 s; bar <=145 s | P | 2026-10-16 | [details](#phase-c-max-v0270-2026-10-16) |
 | Recall row handoff (sessions) | busy_median_s | 3.297513 -> 0.112816 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-sessions) |
 | Recall row handoff (vector.chunk) | busy_median_s | 8.160382 -> 0.335681 s | P | 2026-10-21 | [details](#row-handoff-v1-1749-vector.chunk) |
@@ -191,6 +195,131 @@ NUM_RUNS=1; ± is per-question population SD, not run-to-run variance
 - One public-text scanner match inside third-party benchmark output was reviewed by the release manager and kept unchanged.
 - Public evidence archive SHA-256: 653690d99ec53416f8ccce2a204ed33b0c25baaf96e2577f07acd5aa17c4318f. One run; no upstream acceptance or listing, multi-run variance, or customer value proven.
 - Tier F: one run with no A/A' noise floor or pre-registered gate. Reader and judge are both OpenAI models because OmniMemEval fixes that pair for every backend; the score is comparable across that board, not a cross-family score.
+
+### <a id="coverage-marker-fix-r1c-2026-10-23"></a>coverage-marker-fix-r1c-2026-10-23
+
+**id:**
+coverage-marker-fix-r1c-2026-10-23
+
+**benchmark:**
+PR #1860 fix-round acceptance
+
+**metric:**
+steady_status_p50_ms
+
+**value:**
+0.2622
+
+**display:**
+0.2709 -> 0.2622 ms certified-steady status
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+566c498c0ed8f256946e9aed2352a12ba571580b
+
+**harness_commit:**
+bba929e0aa76f57f8ddf939fff6a1854511eeaa2
+
+**judge:**
+n/a (deterministic instruments; no model judge)
+
+**reader:**
+n/a (synthetic SQLite workloads)
+
+**retrieval_config:**
+20k rows; paired/interleaved 200 samples per arm; exact base 91a039891afd969f9569897115990fe0c419e034. Unchanged r2 bounds and arrival-every-call probes; production source fixed at 566c498c.
+
+**dataset_exposure:**
+Generated fixtures only; no customer text or external provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/RESULT.md
+
+**variance:**
+One run; paired/interleaved n=200 per steady arm, raw samples retained; arrival cost n=30 per tree sequential; no absolute cross-run performance claim.
+
+**failclose:**
+All four steady-cost cells within max(base*1.10,base+0.05ms); bounds/status/liveness pass. Oracle reuses accepted r1b outputs plus RM end-state probe: no new undercount/false-coverage/false-certificate events; temporary overcounts clear.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/SUMMARY.json
+- https://github.com/electricsheephq/lcm-x/blob/bba929e0aa76f57f8ddf939fff6a1854511eeaa2/PROBE-TABLE.md
+
+**caveats:**
+- Advisory; exact-head remote CI pending at publication. No final-head review, merge, release, runtime or customer claim.
+- 19511 passed, 141 skipped, 63 xfailed, 29 warnings in the single full suite at 566c498c. Three post-summary synthetic-fixture shutdown import diagnostics retained; process exit 0.
+- Three accepted mid-history legacy overcounts; final remaining/oracle work counts equal base on all 1200 seed-runs. Marker serialization is not identical. Inherited false certificates remain confined to seeds 150,212,422,491.
+- NULL-parent original review probe ends at its first next(low): expected safe early return, not a passing pytest result. The committed empty/unproven regression passes in the full suite.
+- No committed r2 oracle probe exists on the PR; adding the after-convergence end-state record remains a follow-up.
+
+### <a id="coverage-marker-fix-r2-2026-10-23"></a>coverage-marker-fix-r2-2026-10-23
+
+**id:**
+coverage-marker-fix-r2-2026-10-23
+
+**benchmark:**
+PR #1860 r2 initial read-only backlog acceptance
+
+**metric:**
+harmful_probe_differences
+
+**value:**
+0
+
+**display:**
+0 harmful differences in 304 field comparisons; d3 initial backlog 1 (gap-fill)
+
+**tier:**
+P
+
+**date:**
+2026-10-23
+
+**system_commit:**
+59d6118ee2e211a8364ff8e06ee75f29c4d396af
+
+**harness_commit:**
+e8a922553d50ec47bfcbbe1aca0938b9b770ee46
+
+**judge:**
+n/a (deterministic probe differ and brute-force oracle; no model judge)
+
+**reader:**
+n/a (synthetic SQLite stores)
+
+**retrieval_config:**
+Unchanged r1c comparative probes at base91a03989, fixed566c498c and candidate59d6118e; status/embedded/false_rows/effective_false at each emitted step, 152 fields per comparator. Original r1b 600-seed arms with/without legacy plus existing RM convergence observation.
+
+**dataset_exposure:**
+Synthetic fixtures only; no customer data or external provider traffic.
+
+**breakdown:**
+https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/RESULT.md
+
+**variance:**
+One execution per probe/tree and original oracle arm; one convergence observation per arm; deterministic comparisons, no performance claim.
+
+**failclose:**
+Negative selfcheck detects fixed d3 initial harmful zero; candidate zero harmful against base and fixed. Zero new undercount/false-coverage/false-certificate oracle events, final policy/remaining/oracle work state equal base on all1200 seeds.
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/probe-diff.json
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/oracle-comparison.json
+- https://github.com/electricsheephq/lcm-x/blob/e8a922553d50ec47bfcbbe1aca0938b9b770ee46/SUMMARY.json
+
+**caveats:**
+- Parent review setup emits no truth: base skips; fixed/head stop before yield (expected negative). Unchanged F3 regression passes.
+- One full suite at59d6118e:19512 passed141 skipped63 xfailed29 warnings; exit0 with three inherited post-summary synthetic-fixture import diagnostics.
+- Inherited oracle limitations remain; equality is final work counts, not marker serialization. Preliminary scorer diagnostics corrected against preserved raw records without changing source, tests or thresholds.
+- Advisory merge-candidate fix only. Does not prove production backlog accuracy beyond these probes, independent final-head review, merge, release, runtime or customer behavior. Raw T2 not published; no results disposed.
 
 ### <a id="coverage-marker-round3-2026-10-22"></a>coverage-marker-round3-2026-10-22
 
@@ -661,6 +790,126 @@ one real-use window; volume about two compactions/day, so volume latency bars ju
 - D5-C PASS accepted at 11.9 h of declared 12 h when host changed; shortened-window decision disclosed. Bars: each LCM-owned stop <=120 s, 0 LCM-X tracebacks, 0 publication conflicts, engine bound, >=1 answered organic turn. The release asset records a 24 h post-GA re-read on Hermes 0.22.2 as continuing; it is outside this row.
 - Backfill date is the release publication date; the scorecard does not state the run completion day.
 - Release scorecard transcription only; fields not specified there remain explicitly unknown. No customer-profile behaviour is proven.
+
+### <a id="issue-1828-refit-20261023"></a>issue-1828-refit-20261023
+
+**id:**
+issue-1828-refit-20261023
+
+**benchmark:**
+Issue #1828 synthetic delivery acceptance (not a board score)
+
+**metric:**
+head_subset_cells
+
+**value:**
+0
+
+**display:**
+0 strict-subset regressions / 1502 cap cells
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+75149e5a5ef20f1e402dcff296b6749a935909c0; base e5a239ee1d02acf2068150583b7eff2576635d09
+
+**harness_commit:**
+75149e5a5ef20f1e402dcff296b6749a935909c0 tests/test_issue_1828_refit.py
+
+**judge:**
+none; deterministic set comparison and envelope maximality
+
+**reader:**
+none; engine-direct session delivery
+
+**retrieval_config:**
+two synthetic fixtures; session delivery; delta on; fallback token count; occurrence off; caps 1500-9000 step 10
+
+**dataset_exposure:**
+fully synthetic; no benchmark dataset
+
+**breakdown:**
+tests/fixtures/issue_1828_refit/summary.json: 1496 equal, 6 strict supersets, 0 strict subsets, 0 incomparable
+
+**variance:**
+deterministic cap scan; separate 300-run interleaved timing arms in the linked receipt; single machine
+
+**failclose:**
+0 excluded cap cells; 0 maximality failures
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/e9099749528efa5c27c8e8e5037d0465bc891d1f/tests/fixtures/issue_1828_refit/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/e9099749528efa5c27c8e8e5037d0465bc891d1f/tests/fixtures/issue_1828_refit/summary.json
+
+**caveats:**
+- Delivery correctness only; no board-score, quality, runtime or customer claim
+- T2 not published; original results retained
+
+**superseded_by:**
+issue-1828-refit-20261023-r2
+
+### <a id="issue-1828-refit-20261023-r2"></a>issue-1828-refit-20261023-r2
+
+**id:**
+issue-1828-refit-20261023-r2
+
+**benchmark:**
+Issue #1828 synthetic delivery acceptance (not a board score)
+
+**metric:**
+head_subset_cells
+
+**value:**
+0
+
+**display:**
+0 strict-subset regressions / 1502 cap cells
+
+**tier:**
+F
+
+**date:**
+2026-10-23
+
+**system_commit:**
+07510c16558eb3acca0dec0b274a82fa20b99f8d; base e5a239ee1d02acf2068150583b7eff2576635d09
+
+**harness_commit:**
+07510c16558eb3acca0dec0b274a82fa20b99f8d tests/test_issue_1828_refit.py
+
+**judge:**
+none; deterministic set comparison and envelope maximality
+
+**reader:**
+none; engine-direct session delivery
+
+**retrieval_config:**
+two synthetic fixtures; session delivery; delta on; fallback token count; occurrence off; caps 1500-9000 step 10
+
+**dataset_exposure:**
+fully synthetic; no benchmark dataset
+
+**breakdown:**
+tests/fixtures/issue_1828_refit/summary.json: 1496 equal, 6 strict supersets, 0 strict subsets, 0 incomparable
+
+**variance:**
+deterministic cap scan; separate 300-run interleaved timing arms in the linked receipt; single machine
+
+**failclose:**
+0 excluded cap cells; 0 maximality failures
+
+**evidence:**
+- https://github.com/electricsheephq/lcm-x/blob/003da0417809f0678028232d695606854b14758b/tests/fixtures/issue_1828_refit/RESULT-MANIFEST.json
+- https://github.com/electricsheephq/lcm-x/blob/003da0417809f0678028232d695606854b14758b/tests/fixtures/issue_1828_refit/RESULT.md
+- https://github.com/electricsheephq/lcm-x/blob/003da0417809f0678028232d695606854b14758b/tests/fixtures/issue_1828_refit/summary.json
+
+**caveats:**
+- Delivery correctness only; no board-score, quality, runtime or customer claim
+- T2 not published; original results retained
 
 ### <a id="issue1748-gapwalk-2026-10-21"></a>issue1748-gapwalk-2026-10-21
 

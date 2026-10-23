@@ -630,7 +630,7 @@ assistant even when doing so exceeds a configured bound.
 | `LCM_SENSITIVE_PATTERNS` | `api_key,bearer_token,password_assignment,private_key` | Comma-separated named sensitive pattern catalog entries to apply when redaction is enabled |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_ENABLED` | `true` | Store oversized ingest payloads, including tool results, media blocks, and generic raw content, in plugin-managed JSON files |
 | `LCM_LARGE_OUTPUT_EXTERNALIZATION_THRESHOLD_CHARS` | `12000` | Externalization threshold for normalized payload text |
-| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `true` | Replace token-heavy textual tool results with recoverable externalized refs in active replay; current-turn ingest is immediate and historical assembly respects the protected fresh tail; requires large-output externalization |
+| `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUBBING_ENABLED` | `true` | Externalize token-heavy textual tool results at ingest; below-threshold size-only host adoption waits for a real compression boundary; historical assembly respects the protected fresh tail; requires large-output externalization |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_THRESHOLD_TOKENS` | `10000` | First-sight threshold: a new tool result over this many tokens is stubbed at ingest |
 | `LCM_LARGE_OUTPUT_ACTIVE_REPLAY_STUB_AGED_THRESHOLD_TOKENS` | `2000` | Aged tier: at a compaction, a tool result outside the fresh tail is stubbed from this many tokens (`0` = the first-sight threshold; never above it) |
 | `LCM_STUB_FIRST_EXIT_TARGET_RATIO` | `0` | Lowers the stub-first exit's target (#671) to min(built-in, int(ratio x threshold)); `0` keeps the built-in min(threshold - `LCM_LEAF_CHUNK_TOKENS`, 0.95 x threshold); `>= 0` and `<= 1`, else the built-in target with a config warning |
@@ -898,10 +898,13 @@ from summaries. They remain inspectable through
 
 Active-replay stubbing is a second replay policy, on by default. When
 both externalization and active-replay stubbing are enabled, newly ingested
-textual tool results above the first-sight token threshold (10,000) are durably externalized and
-replaced immediately in provider-visible replay, including results in the
-protected fresh tail. This lets a stub-only replay change converge even when no
-leaf is eligible for compaction. At a compaction, a historical assembly pass
+textual tool results above the first-sight token threshold (10,000) are durably externalized at ingest,
+including results in the protected fresh tail. When both original and replay token estimates
+are below the compaction threshold, size-only changes wait for the next threshold,
+overflow or independently required maintenance boundary before the host adopts the stubs.
+The host can keep carrying the original payload until then. Quarantine, ignore and
+sensitive-redaction cleanup still request immediate adoption; direct `compress()` callers
+still receive the cleaned replay. At a compaction, a historical assembly pass
 stubs older tool results from the aged threshold (2,000 tokens) before budgeting,
 while respecting the protected fresh tail. Tool-call ids and compatible structured text block types/keys are
 retained; raw SQLite rows and DAG lineage are not rewritten by the historical
