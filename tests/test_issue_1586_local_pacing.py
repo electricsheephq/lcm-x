@@ -132,7 +132,8 @@ def test_duty_wait_is_retirement_interruptible(local_store, monkeypatch, interru
     monkeypatch.setattr(engines, "run_incremental_embedding_pass", measured)
     engine.on_session_start("duty", context_length=200000)
     assert admitted.wait(2), "no paced continuation was admitted"
-    assert waits[0] >= 1.5 * 1.25
+    assert waits[0] >= maintenance._LOCAL_IDLE_MULTIPLIER * 1.25
+    assert observed[0]["delay"] == pytest.approx(maintenance._LOCAL_IDLE_MULTIPLIER * observed[0]["active_s"])
     assert observed[0]["vectors_written"] == observed[0]["rows_written"] == 1
     assert observed[0]["overrun_s"] == 0.25
     assert observed[0]["remaining"] is True
