@@ -1,7 +1,9 @@
 # RUN LOG — append-only registry of every benchmark run (owner directive 2026-08-02)
 
 **Superseded:** no entries since 2026-09-05. The scoreboard
-(`bench/scoreboard/results.jsonl`) plus per-run result cards are the record.
+(`bench/scoreboard/results.d/<id>.json` for new rows; legacy
+`bench/scoreboard/results.jsonl` stays readable) plus per-run result cards are the record.
+Row PRs add only their row file and own evidence; do not regenerate `SCOREBOARD.md`. Use `python -m bench.scoreboard.generate --pending`; the release manager aggregates in a separate batched PR at release/showcase or any time, with strict `--check`.
 
 Format: `id | date(UTC) | benchmark/tier | config (one line) | artifacts | status → result`
 Older lineage (R1→R2) is indexed by finding docs; this log is authoritative from R3 onward.
