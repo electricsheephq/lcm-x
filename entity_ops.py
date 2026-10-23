@@ -586,6 +586,8 @@ def resolve_key(store, subject_key, store_id, *, owner_entity_id=None,
                 access_scope=None, principal_is_owner=False):
     """Resolve one current source; overrides bind reviewed evidence only."""
     with _read_snapshot(store):
+        if owner_entity_id is not None:
+            EntityOps(store)._get("entities", owner_entity_id)
         if (subject_key, store_id) not in _key_sources(store, access_scope, principal_is_owner):
             return None
         view = resolved_view(store, access_scope, principal_is_owner)
