@@ -1,0 +1,88 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "20261023-revert-1637-public-proof",
+  "project": "lcm-x",
+  "kind": "eval",
+  "status": "settled",
+  "owner_lane": "lcmx-revert-1637",
+  "claim_class": "advisory",
+  "created": "2026-10-23T03:24:10Z",
+  "settled": "2026-10-23T03:24:24Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "07dd79d185b1e4968f5e3d94267e5417a4f2c26c",
+    "dirty": true,
+    "diff_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  },
+  "env": {
+    "command": "matrix.py --group revert-candidate --expected-sha 07dd79d185b1e4968f5e3d94267e5417a4f2c26c; compare-revert.py (preserved raw input snapshots)",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "occurrence-three-way",
+      "metric": "cells-worse-than-main-on-loss",
+      "value": 0.0,
+      "n": 1296,
+      "baseline_run": "lcmx-occurrence-ga-diff",
+      "source": "three-way-comparison.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "three-way-comparison.json",
+      "role": "per-item",
+      "sha256": "076c2974dc81668c00df0c65d7536cf26ffbc23d0b1253f60c02cee16d3c8fbc",
+      "bytes": 4016230
+    },
+    {
+      "path": "comparison.md",
+      "role": "per-item",
+      "sha256": "57e0e5824e10095fbdd9b18d83b853020c39908a44eb7dba4e2cebb401474c16",
+      "bytes": 90626
+    },
+    {
+      "path": "red-regression.log",
+      "role": "per-item",
+      "sha256": "5cca2317a9f7ef8d7706d6a988f0fff4fa909eb70abd2444a6d364f86a5d5b6d",
+      "bytes": 3244
+    },
+    {
+      "path": "green-regression.log",
+      "role": "per-item",
+      "sha256": "b6eb1f3b87ff3538c1bef09ab0db51094e007ef232946949582ef9d897a7d06b",
+      "bytes": 1077
+    },
+    {
+      "path": "test_steady_retry_sibling_loss.py",
+      "role": "per-item",
+      "sha256": "41383bf8af09a40141f5a074746c20f34c0df1adb2ebbdf50145b8cf461364f9",
+      "bytes": 2113
+    },
+    {
+      "path": "SUMMARY.md",
+      "role": "per-item",
+      "sha256": "dabe6c80ea9fc28422600731b26932056b80055de70b15b21a4698630279f1a3",
+      "bytes": 1720
+    }
+  ],
+  "rescore": {
+    "command": null,
+    "inputs": [],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "SUMMARY.md",
+    "comparison.md",
+    "green-regression.log",
+    "red-regression.log",
+    "test_steady_retry_sibling_loss.py",
+    "three-way-comparison.json"
+  ]
+}

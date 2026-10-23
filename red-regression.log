@@ -1,0 +1,57 @@
+F                                                                        [100%]
+=================================== FAILURES ===================================
+________________ test_steady_retry_retains_both_sibling_results ________________
+
+tmp_path = PosixPath('<fixture-path>')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x10a274b50>
+
+    def test_steady_retry_retains_both_sibling_results(tmp_path, monkeypatch):
+        monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+        with engine_context(
+            tmp_path, window=200_000, session_id="S", conversation_id="conversation",
+            fresh_tail_count=9, leaf_chunk_tokens=400,
+            large_output_externalization_enabled=False,
+            large_output_active_replay_stubbing_enabled=False,
+            temporal_rollups_enabled=False, embeddings_enabled=False,
+            deferred_maintenance_enabled=False,
+        ) as engine:
+            rows = [{"role": "user", "content": "repeat", "timestamp": 10}]
+            for call_id in ("c", "d"):
+                rows.extend(tool_pair(call_id, "synthetic long lookup output " * 20 + call_id,
+                                      tool_name="lookup"))
+            engine.ingest(deepcopy(rows))
+            before = engine._store.get_session_messages("S")
+            host = deepcopy(rows)
+            host[0]["timestamp"] = 20
+            for row in host:
+                if row["role"] == "tool":
+                    row["content"] = CLEARED
+            for i in range(2):
+                host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
+    
+            engine.ingest(host)
+            stored = engine._store.get_session_messages("S")
+            assert stored[:len(before)] == before
+            added = stored[len(before):]
+            # Pin the two real result rows restored to GA behaviour. The separate
+            # GA call-envelope deficit remains outside this targeted regression.
+>           assert [(row["tool_call_id"], row["content"]) for row in added
+                    if row["role"] == "tool"] == [
+                ("c", CLEARED), ("d", CLEARED),
+                ("following-0", "new result 0"), ("following-1", "new result 1"),
+            ]
+E           AssertionError: assert [('following-...ew result 1')] == [('c', '[Old ...ew result 1')]
+E             
+E             At index 0 diff: ('following-0', 'new result 0') != ('c', '[Old tool output cleared to save context space]')
+E             Right contains 2 more items, first extra item: ('following-0', 'new result 0')
+E             Use -v to get more diff
+
+tests/invariants/test_steady_retry_sibling_loss.py:40: AssertionError
+============================= slowest 25 durations =============================
+0.51s setup    tests/invariants/test_steady_retry_sibling_loss.py::test_steady_retry_retains_both_sibling_results
+0.01s call     tests/invariants/test_steady_retry_sibling_loss.py::test_steady_retry_retains_both_sibling_results
+
+(1 durations < 0.005s hidden.  Use -vv to show these durations.)
+=========================== short test summary info ============================
+FAILED tests/invariants/test_steady_retry_sibling_loss.py::test_steady_retry_retains_both_sibling_results
+1 failed in 0.82s

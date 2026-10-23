@@ -1,0 +1,11 @@
+.....                                                                    [100%]
+============================= slowest 25 durations =============================
+0.49s setup    tests/invariants/test_steady_retry_sibling_loss.py::test_steady_retry_retains_both_sibling_results
+0.01s call     tests/invariants/test_u1_steady_placeholder_skip.py::test_newest_placeholder_is_changed_result_after_user_restamp[second-newest-anchor-on]
+0.01s call     tests/invariants/test_u1_steady_placeholder_skip.py::test_newest_placeholder_is_changed_result_after_user_restamp[newest-anchor-on]
+0.01s call     tests/invariants/test_u1_steady_placeholder_skip.py::test_newest_placeholder_is_changed_result_after_user_restamp[second-newest-anchor-off]
+0.01s call     tests/invariants/test_u1_steady_placeholder_skip.py::test_newest_placeholder_is_changed_result_after_user_restamp[newest-anchor-off]
+0.01s call     tests/invariants/test_steady_retry_sibling_loss.py::test_steady_retry_retains_both_sibling_results
+
+(9 durations < 0.005s hidden.  Use -vv to show these durations.)
+5 passed in 1.01s
