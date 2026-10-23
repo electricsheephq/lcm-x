@@ -549,6 +549,8 @@ def test_pending_rejects_stale_rendered_rows(tmp_path, capsys, change):
     results, output = tmp_path / "results.jsonl", tmp_path / "page.md"
     row = _row("old")
     _write_jsonl(results, [row])
+    if change == "supersession":
+        _write_row_file(results, _row("new"))
     generate.generate(results, output)
     if change == "removed":
         _write_jsonl(results, [])
@@ -562,6 +564,34 @@ def test_pending_rejects_stale_rendered_rows(tmp_path, capsys, change):
     assert generate.main(["--pending", "--results", str(results), "--output", str(output)]) == 2
     assert "stale: old" in capsys.readouterr().out
     assert output.read_bytes() == frozen
+
+
+@pytest.mark.parametrize("change", [None, "summary", "disclosure", "partial-strike"])
+def test_pending_successor_defers_only_supersession_effects(tmp_path, capsys, change):
+    results, output = tmp_path / "results.jsonl", tmp_path / "page.md"
+    _write_jsonl(results, [_row("old")])
+    generate.generate(results, output)
+    legacy = results.read_bytes()
+    _write_row_file(results, _row("new") | {"supersedes": ["old"]})
+    if change == "summary":
+        output.write_text(output.read_text().replace("| 91.0% |", "| 90.0% |"))
+    elif change == "disclosure":
+        output.write_text(output.read_text().replace("**value:**\n0.91", "**value:**\n0.90"))
+    elif change == "partial-strike":
+        output.write_text(output.read_text().replace("| 91.0% |", "| ~~91.0%~~ |"))
+    frozen = output.read_bytes()
+    args = ["--results", str(results), "--output", str(output)]
+    assert generate.main(["--pending", *args]) == (0 if change is None else 2)
+    lines = capsys.readouterr().out.splitlines()
+    assert "pending: new" in lines
+    if change is None:
+        assert "pending: old (superseded by new)" in lines
+        assert len(lines) == 2
+    else:
+        assert "stale: old" in lines
+    assert generate.main(["--check", *args]) == 2
+    assert output.read_bytes() == frozen
+    assert results.read_bytes() == legacy
 
 
 def test_check_requires_exact_render_and_never_writes(tmp_path, capsys):

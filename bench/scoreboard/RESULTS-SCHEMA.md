@@ -52,7 +52,8 @@ disclosure fields does not render** — the schema IS the seven-point standard
 - Rows are APPEND-ONLY; a superseding run gets a new row with `supersedes`,
   preserving the old row and its history without editing legacy JSONL.
 - Row PRs add only their row file and their own evidence; do NOT regenerate `SCOREBOARD.md`.
-  Run `python -m bench.scoreboard.generate --pending`: missing source rows are pending (exit 0); removed or changed rendered rows are stale (exit 2).
+  Run `python -m bench.scoreboard.generate --pending`: missing source rows and supersession-only changes from unrendered successors are pending (exit 0); the old row is listed with its successor ID.
+  Removed rows, other rendered-value changes, supersession mismatches with already-rendered successors, and mismatches not explained by supersession alone are stale (exit 2).
   The release manager regenerates in a separate batched PR at a release/showcase step or any time, then requires strict `--check` equality.
 - Tier-F rows carry their fault-finding yield in `caveats`/`evidence` — a low
   number with its decomposition is a feature of this page, not an embarrassment.

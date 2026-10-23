@@ -21,7 +21,9 @@ Requirements:
      under bold labels; `evidence` as a list; `caveats` as a list.
 3. `--check`: require page == render(all sources), no write; exit 0/2.
    `--pending`: list source rows absent from the committed page as `pending: <id>` (exit 0),
-   removed or mismatched rendered rows as `stale: <id>` (exit 2). Compare disclosures and summary values, ignoring the header.
+   supersession-only changes from an unrendered successor as `pending: <id> (superseded by <successor>)` (exit 0),
+   removed or otherwise mismatched rendered rows as `stale: <id>` (exit 2). Compare disclosures and summary values, ignoring the header.
+   Supersession mismatches remain fatal if the successor is already rendered or removing supersession alone does not restore an exact match.
 4. Tests in `bench/scoreboard/test_generate.py` (pytest): golden render of a
    2-row fixture; missing-field refusal; malformed-line refusal; supersession
    strike-through; byte-stable (two runs identical output).

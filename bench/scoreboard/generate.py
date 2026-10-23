@@ -369,14 +369,25 @@ def pending(rows: list[dict[str, Any]], page: str) -> int:
     blocks = re.finditer(r'(?ms)^### <a id="([^"]*)"></a>.*?(?=^### <a id="|\Z)', disclosures)
     rendered = {html_unescape(block[1]): block[0].strip() for block in blocks}
     summary_ids = set(re.findall(r"\[details\]\(#([^)]*)\)", summary))
-    stale = (set(rendered) | summary_ids) - {row["id"] for row in rows}
+    page_ids = set(rendered) | summary_ids
+    source_ids = {row["id"] for row in rows}
+    pending_ids, stale = source_ids - page_ids, page_ids - source_ids
+
+    def matches(row: dict[str, Any]) -> bool:
+        return (rendered.get(row["id"]) == "\n".join(_render_disclosure(row)).strip()
+                and summary.splitlines().count(_render_summary([row])[-1]) == 1)
+
     for row in rows:
         row_id = row["id"]
-        if row_id not in rendered and row_id not in summary_ids:
+        if row_id in pending_ids:
             print(f"pending: {row_id}")
-        elif (rendered.get(row_id) != "\n".join(_render_disclosure(row)).strip()
-              or summary.splitlines().count(_render_summary([row])[-1]) != 1):
-            stale.add(row_id)
+        elif not matches(row):
+            successor = row.get("superseded_by")
+            before = {key: value for key, value in row.items() if key != "superseded_by"}
+            if successor in pending_ids and matches(before):
+                print(f"pending: {row_id} (superseded by {successor})")
+            else:
+                stale.add(row_id)
     for row_id in sorted(stale):
         print(f"stale: {row_id}")
     return 2 if stale else 0
