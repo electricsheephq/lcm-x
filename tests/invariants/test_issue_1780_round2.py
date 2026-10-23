@@ -69,6 +69,7 @@ def test_observational_modes_equal_base(tmp_path, monkeypatch, record_property, 
         view = prepare_writer(eng, case, monkeypatch, legacy)
         before = rows(eng)
     monkeypatch.setenv("LCM_HOST_MESSAGE_UID", mode)
+    accepted = None
     for turn in range(2):
         with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
             eng.ingest(deepcopy(view))

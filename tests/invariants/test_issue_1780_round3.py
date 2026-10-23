@@ -25,7 +25,7 @@ def seed(path, n):
         return rows(eng)
 
 
-def compare_replays(path, monkeypatch, caplog, n, view, turns=2, grow=False, initial=None):
+def compare_replays(path, monkeypatch, caplog, n, view, turns=2, grow=False, initial=None, legacy_seed=False):
     """Pair identical on-mode stores with observation disabled/enabled; compare every row/binding."""
     from hermes_lcm.identity_anchor import IdentityAnchorMixin
 
@@ -40,13 +40,25 @@ def compare_replays(path, monkeypatch, caplog, n, view, turns=2, grow=False, ini
         with monkeypatch.context() as patch:
             if not observe:
                 patch.setattr(IdentityAnchorMixin, "_observe_alias_uid_conflicts", lambda *a: None)
-            if initial is None:
-                original = seed(home, n)
-            else:
-                with context(home) as eng:
-                    eng.ingest(deepcopy(initial))
-                    eng._store.add_message_relations([[(1, "alt_stamp", None, None, 99.)]])
-                    original = rows(eng)
+            with monkeypatch.context() as writer:
+                if legacy_seed:
+                    from hermes_lcm.engine import LCMEngine
+
+                    writer.setattr(LCMEngine, "_occurrence_batch_factory",
+                                   lambda self, batch: self._real_user_scaffold_metadata_rows)
+                if initial is None:
+                    original = seed(home, n)
+                else:
+                    with context(home) as eng:
+                        eng.ingest(deepcopy(initial))
+                        eng._store.add_message_relations([[(1, "alt_stamp", None, None, 99.)]])
+                        original = rows(eng)
+                if legacy_seed:
+                    with context(home) as eng:
+                        assert eng._store._conn.execute(
+                            "SELECT count(*) FROM metadata WHERE key LIKE 'host_occurrence_row:%' "
+                            "OR key LIKE 'host_occurrence_accepted_view:%'").fetchone()[0] == 0
+                        assert any(r["observed_at"] == 99. for r in eng._store.get_message_relations([1], "alt_stamp"))
             snapshots = []
             current_view = deepcopy(view)
             caplog.clear()
@@ -55,7 +67,13 @@ def compare_replays(path, monkeypatch, caplog, n, view, turns=2, grow=False, ini
                     if grow and turn:
                         current_view.append({"role": "assistant", "content": f"Verifier later reply {turn}."})
                     with context(home) as eng:
+                        if legacy_seed:
+                            plan = eng._resolve_occurrence_view(current_view)
+                            assert 0 not in plan["proven"]
+                            assert "host_occurrence_row:parent:1" not in plan["updates"]
                         eng.ingest(deepcopy(current_view))
+                        if legacy_seed:
+                            assert eng._store.read_metadata_json("host_occurrence_row:parent:1") is None
                         current = rows(eng)
                         assert current[:len(original)] == original
                         snapshots.append((current, [bindings(eng, r["store_id"]) for r in current]))
