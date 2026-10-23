@@ -112,3 +112,20 @@ def test_deadline_cut_preserves_unconsumed_cursor_and_cycle_flag(engine, monkeyp
     persisted = record(engine, "chunk")
     assert persisted["inflight_cursor"] == saved["inflight_cursor"]
     assert json.loads(json.dumps(persisted))["inflight_actionable_seen"] is True
+
+
+def test_pre_r3_cursor_without_cycle_flag_cannot_certify_earlier_page(engine, monkeypatch):
+    identity, ordered = seed_filtered_inflight(engine, actionable=True)
+    # A resumed record written by 6dd578221 has a cursor but no cycle flag.
+    with sqlite3.connect(engine._store.db_path) as conn:
+        conn.execute("UPDATE metadata SET value=? WHERE key=?", (
+            json.dumps({"remaining": True, "operator_retry": 1,
+                        "updated_at": time.time(), "inflight_cursor": ordered[255]}),
+            f"embedding_catchup:chunk:{identity}",
+        ))
+    monkeypatch.setattr(command, "_chunk_pending_rows", lambda *a, **kw: (0, [], {}))
+    for _ in range(2):
+        backfill(engine, "chunk")
+    state = record(engine, "chunk")
+    assert state["inflight_cursor"] == ""
+    assert state["remaining"], "pre-r3 earlier-page backlog lost on resume"
