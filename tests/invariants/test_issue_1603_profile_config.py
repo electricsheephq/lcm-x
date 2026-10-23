@@ -369,6 +369,9 @@ def test_environment_read_inventory():
     integration_proof = "docs/process/evidence/1880-persisted-hold/cost-integration-delta/cost_probe.py"
     if (ROOT / integration_proof).is_file():
         allowed[(integration_proof, "main")] = "synthetic admission proof tool: isolated home and lazy-install controls only"
+    h2_proof = "docs/process/evidence/1880-persisted-hold/cost-h2/cost_probe.py"
+    if (ROOT / h2_proof).is_file():
+        allowed[(h2_proof, "main")] = "synthetic admission proof tool: isolated home and lazy-install controls only"
     seen = set()
     failures = []
     excluded = {"tests", "bench", "benchmarking", "benchmarks", "scripts"}
