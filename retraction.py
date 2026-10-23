@@ -41,15 +41,15 @@ def request_object(text):
                     r"my\s+(?:(?:earlier|previous)\s+)?(?:statement|information|details?))\b", obj, re.I)
     if lead:
         obj = obj[lead.end():].strip()
-        if "told you" in lead[0].lower() and re.search(
+        if re.search(
                 r",\s*(?:(?:[\w'-]+\s+){1,4}(?:said|wrote|replied)\b|said\s+my\s+\w+)", obj, re.I):
             return None
     if re.search(r"\b(?:if|hypothetically|told|says|said to|tell me|talk about)\b",
                  text[:match.start(1)] + obj, re.I):
         return None
     if lead:
-        clause = re.match(r"(?:about|regarding|concerning)\s+(.+)", obj, re.I)
-        obj = re.split(r"[,;.!?]|\s+and\s+", clause[1], maxsplit=1)[0].strip() if clause else ""
+        clause = re.search(r"\b(?:about|regarding|concerning)\s+(.+)", obj, re.I)
+        obj = re.split(r"[,;](?=\s|$)", clause[1], maxsplit=1)[0].strip() if clause else ""
     if obj.lower() == "all that" or not _words(obj):
         obj = ""
     return obj.lower()
