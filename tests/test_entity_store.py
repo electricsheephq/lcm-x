@@ -5,6 +5,10 @@ from contextlib import closing
 import importlib
 import re
 import sqlite3
+import shutil
+import sys
+from pathlib import Path
+from types import SimpleNamespace
 import threading
 
 import pytest
@@ -35,12 +39,33 @@ def rows(conn, sql, values=()):
     return [tuple(r) for r in conn.execute(sql, values)]
 
 
+# Frozen from the original lane BASE 931ea556, with a scrubbed environment.
+BASE_MIGRATION_STEPS = (
+    'fts_stem_v1', 'messages_ingested_at_backfill_v1', 'temporal_rollups_v1',
+    'v2_external_content_fts_triggers', 'v3_lifecycle_state',
+    'v4_lifecycle_debt_columns', 'v5_message_conversation_id',
+)
+
+
 def test_flag_off(tmp_path, monkeypatch):
+    trace, connect = [], sqlite3.connect
+
+    def traced_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.set_trace_callback(trace.append)
+        return conn
+
+    monkeypatch.setattr(sqlite3, 'connect', traced_connect)
     monkeypatch.delenv("LCM_ENTITIES_ENABLED", raising=False)
     assert not LCMConfig.from_env().entities_enabled
     engine = LCMEngine(config=LCMConfig(database_path=str(tmp_path / "lcm.db")),
                        hermes_home=str(tmp_path / "home"))
+    opening_trace = list(trace)
     try:
+        assert not any(token in sql.lower() for sql in opening_trace
+                       for token in ('lcm_entit', 'lcm_memory_', 'entity_memory_v1'))
+        assert tuple(r[0] for r in engine._store.connection.execute(
+            'SELECT step_name FROM lcm_migration_state ORDER BY step_name')) == BASE_MIGRATION_STEPS
         assert engine._entities is None
         assert not rows(engine._store.connection, "SELECT name FROM sqlite_master WHERE name LIKE 'lcm_entit%' OR name LIKE 'lcm_memory_%'")
         assert engine._store.connection.execute("SELECT value FROM metadata WHERE key='schema_version'").fetchone()[0] == '5'
@@ -51,6 +76,10 @@ def test_flag_off(tmp_path, monkeypatch):
 def test_lazy_marker_and_fast_path(store, api, monkeypatch):
     conn, path = store.connection, store.db_path
     cookie = conn.execute("PRAGMA schema_version").fetchone()[0]
+    completed_at = conn.execute("SELECT completed_at FROM lcm_migration_state WHERE step_name=?",
+                                (db.ENTITY_MIGRATION_STEP,)).fetchone()[0]
+    # A rewrite cannot hide behind identical wall-clock timestamps.
+    monkeypatch.setattr('time.time', lambda: completed_at + 100)
     trace, original = [], sqlite3.connect
 
     def connect(*a, **kw):
@@ -63,6 +92,10 @@ def test_lazy_marker_and_fast_path(store, api, monkeypatch):
         assert db.verify_entity_schema(other.connection) == []
         assert other.connection.execute("PRAGMA schema_version").fetchone()[0] == cookie
         assert other.connection.execute("SELECT count(*) FROM lcm_migration_state WHERE step_name='entity_memory_v1'").fetchone()[0] == 1
+        assert other.connection.execute("SELECT completed_at FROM lcm_migration_state WHERE step_name=?",
+                                        (db.ENTITY_MIGRATION_STEP,)).fetchone()[0] == completed_at
+    assert not any('lcm_migration_state' in sql.lower() and
+                   sql.lstrip().upper().startswith(('INSERT', 'UPDATE', 'REPLACE')) for sql in trace)
     assert not any('BEGIN IMMEDIATE' in s or s.lstrip().upper().startswith(('CREATE', 'ALTER', 'DROP'))
                    and any(name in s for name in ('lcm_entit', 'lcm_memory_')) for s in trace)
 
@@ -159,14 +192,19 @@ def test_fifty_rebinds_close_connections(tmp_path):
         last.execute('SELECT 1')
 
 
-def test_shared_database_profile_isolation(tmp_path):
+def test_shared_database_profile_isolation(tmp_path, monkeypatch):
+    monkeypatch.setitem(sys.modules, 'hermes_constants', SimpleNamespace(
+        profile_name_for_home=lambda home: Path(home).name))
     config = LCMConfig(database_path=str(tmp_path / 'lcm.db'), entities_enabled=True)
     engines = [LCMEngine(config=config, hermes_home=str(tmp_path / p)) for p in ('A', 'B')]
     try:
         stores = [engine._entities for engine in engines]
+        assert [s.scope_key for s in stores] == ['A', 'B']
         ids = [s.create_entity('same platform person') for s in stores]
         for s, key in zip(stores, ids):
             s.add_alias(key, 'Telegram', 'platform_id', alias_norm='telegram:AbC')
+            with pytest.raises(sqlite3.IntegrityError):
+                s.add_alias(key, 'duplicate', 'platform_id', alias_norm='telegram:AbC')
         for i, s in enumerate(stores):
             assert s.get_entity(ids[1-i]) is None
             assert len(s.aliases_by_norm('telegram:AbC')) == 1
@@ -292,3 +330,123 @@ def test_visibility_and_one_statement_per_read(tmp_path, api):
                 call()
                 s.connection.set_trace_callback(None)
                 assert len(trace) == 1, trace
+
+
+@pytest.mark.parametrize('access', [
+    {'access_scope': 'A'}, {'access_scope': None},
+    {'principal_is_owner': True}, {'principal_is_owner': False},
+])
+def test_events_are_trusted_replay_only(store, access):
+    store.create_entity('private replay payload')
+    assert store.events_after()
+    with pytest.raises(ValueError, match='trusted replay only'):
+        store.events_after(**access)
+
+
+@pytest.mark.parametrize('owner', [None, 0, 1, 'owner', []])
+def test_principal_owner_requires_bool(store, owner):
+    revision = store.insert_host_file_revision('/fixture/MEMORY.md', 'sha', 'hash')
+    note = store.add_note('private file fact', cites_file_revisions=[revision])
+    with pytest.raises(TypeError, match='principal_is_owner'):
+        store.get_note(note, access_scope='A', principal_is_owner=owner)
+    # A correctly typed non-owner still cannot read the file-derived fact.
+    assert store.get_note(note, access_scope='A', principal_is_owner=False) is None
+
+
+@pytest.mark.parametrize('owner', [False, True])
+def test_empty_principal_denies_all_guarded_reads(store, owner):
+    store.connection.execute("INSERT INTO messages(store_id,session_id,role,content,timestamp) VALUES(1,'S','user','fixture',1)")
+    entity = store.create_entity('private entity')
+    alias = store.add_alias(entity, 'cited alias', source_store_ids=[1])
+    store.add_alias(entity, 'owner alias')
+    revision = store.insert_host_file_revision('/fixture/MEMORY.md', 'sha', 'hash')
+    note = store.add_note('private fact', entity_id=entity, cites=[1], cites_file_revisions=[revision])
+    with store.transaction():
+        store.connection.execute("INSERT INTO lcm_entity_keys(subject_key,entity_id,method,source_store_ids,scope_key,created_at) VALUES('private',?,'alias_match','[1]',?,1)", (entity, store.scope_key))
+    access = dict(access_scope='', principal_is_owner=owner)
+    assert store.get_entity(entity, **access) is None
+    assert store.get_alias(alias, **access) is None
+    assert store.get_note(note, **access) is None
+    assert store.get_host_file_revision(revision, **access) is None
+    assert store.aliases_by_norm('cited alias', **access) == []
+    assert store.aliases_for_entity(entity, **access) == []
+    assert store.notes_for_entity(entity, **access) == []
+    assert store.keys_for_entity(entity, **access) == []
+
+
+def test_note_cannot_cite_another_profiles_revision(store, api):
+    with closing(api.EntityStore(store.db_path, profile_key='profile-Q')) as other:
+        revision = other.insert_host_file_revision('/fixture/MEMORY.md', 'sha', 'hash')
+    note = store.add_note('foreign revision', cites_file_revisions=[revision])
+    assert store.get_note(note, access_scope='A', principal_is_owner=True) is None
+    assert store.get_note(note) is None
+
+
+def test_revision_read_requires_owner(store):
+    revision = store.insert_host_file_revision('/fixture/MEMORY.md', 'sha', 'hash')
+    assert store.get_host_file_revision(revision)
+    assert store.get_host_file_revision(revision, access_scope='A', principal_is_owner=True)
+    assert store.get_host_file_revision(revision, access_scope='A') is None
+
+
+def test_entity_requires_visible_evidence(store):
+    store.connection.execute('ALTER TABLE messages ADD COLUMN access_scope TEXT')
+    store._stamp = 'm.access_scope'
+    store.connection.execute("INSERT INTO messages(store_id,session_id,role,content,timestamp,access_scope) VALUES(1,'S','user','fixture',1,'B')")
+    entity = store.create_entity('foreign evidence')
+    store.add_alias(entity, 'foreign alias', source_store_ids=[1])
+    store.add_note('foreign fact', entity_id=entity, cites=[1])
+    assert store.get_entity(entity)
+    assert store.get_entity(entity, access_scope='A') is None
+    assert store.get_entity(entity, access_scope='B')
+
+
+def test_empty_key_sources_hidden_even_from_owner(store):
+    entity = store.create_entity('owner alias is not key evidence')
+    store.add_alias(entity, 'owner alias')
+    with store.transaction():
+        store.connection.execute("INSERT INTO lcm_entity_keys(subject_key,entity_id,method,source_store_ids,scope_key,created_at) VALUES('empty',?,'alias_match','[]',?,1)", (entity, store.scope_key))
+    assert store.keys_for_entity(entity)
+    assert store.aliases_for_entity(entity, access_scope='A', principal_is_owner=True)
+    assert store.keys_for_entity(entity, access_scope='A', principal_is_owner=True) == []
+
+
+@pytest.mark.parametrize('relocate', ['move', 'copy'])
+def test_profile_name_survives_home_relocation(tmp_path, monkeypatch, relocate):
+    monkeypatch.setitem(sys.modules, 'hermes_constants', SimpleNamespace(
+        profile_name_for_home=lambda home: Path(home).name))
+    home, moved = tmp_path / 'old' / 'alpha', tmp_path / 'new' / 'alpha'
+    engine = LCMEngine(config=LCMConfig(entities_enabled=True), hermes_home=str(home))
+    try:
+        entity = engine._entities.create_entity('same named profile')
+        revision = engine._entities.insert_host_file_revision('/fixture/MEMORY.md', 'sha', 'hash')
+    finally:
+        engine.shutdown()
+    moved.parent.mkdir()
+    if relocate == 'move':
+        shutil.move(str(home), str(moved))
+    else:
+        shutil.copytree(home, moved)
+    engine = LCMEngine(config=LCMConfig(entities_enabled=True), hermes_home=str(moved))
+    try:
+        assert engine._entities.get_entity(entity)
+        assert engine._entities.get_host_file_revision(revision)['profile_key'] == 'alpha'
+    finally:
+        engine.shutdown()
+
+
+@pytest.mark.parametrize('resolution', ['empty', 'raises', 'missing'])
+def test_profile_scope_falls_back_to_resolved_home(tmp_path, monkeypatch, resolution):
+    def resolve(home):
+        if resolution == 'raises':
+            raise RuntimeError('host helper unavailable')
+        return ''
+
+    host = SimpleNamespace() if resolution == 'missing' else SimpleNamespace(profile_name_for_home=resolve)
+    monkeypatch.setitem(sys.modules, 'hermes_constants', host)
+    home = tmp_path / 'profile'
+    engine = LCMEngine(config=LCMConfig(entities_enabled=True), hermes_home=str(home))
+    try:
+        assert engine._entities.scope_key == str(home.resolve())
+    finally:
+        engine.shutdown()

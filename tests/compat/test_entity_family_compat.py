@@ -84,7 +84,7 @@ def test_entity_forward(reader, tmp_path, old_tree, host_root, monkeypatch):
         assert core_snapshot(path, before) == before
 
 
-@pytest.mark.parametrize('reader', ('v0.28.1', 'v0.28.0', 'v0.25.0-rc1'))
+@pytest.mark.parametrize('reader', ENTITY_READERS)
 def test_entity_rollback(reader, tmp_path, old_tree, host_root):
     api = importlib.import_module('hermes_lcm.entity_store')
     # Seed real ingest/compress data before creating all six feature tables.
@@ -122,6 +122,12 @@ def test_entity_registry():
         family = COMPAT_REGISTRY[name]
         assert family.prefix == prefix and family.marker == 'entity_memory_v1'
         assert family.oldest_reader == 'v0.25.0-rc1' and family.removal_version is None
+        assert family.tables == tuple(table for table in db._ENTITY_TABLE_COLUMNS if table.startswith(prefix))
+        assert family.indexes == tuple(index for index in db._ENTITY_INDEX_SHAPES if index.startswith('idx_' + prefix))
         assert prefix in db._PRESERVED_FEATURE_FAMILIES
         assert not any(f['prefix'] == prefix for f in db._INTERIM_FEATURE_FAMILIES)
         assert db._family_verifier(prefix) is db.verify_entity_schema
+
+    for test in (test_entity_forward, test_entity_rollback):
+        assert any(mark.name == 'parametrize' and mark.args[0] == 'reader'
+                   and set(mark.args[1]) == set(ENTITY_READERS) for mark in test.pytestmark)
