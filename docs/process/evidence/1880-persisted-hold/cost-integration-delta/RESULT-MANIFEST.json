@@ -1,0 +1,78 @@
+{
+  "schema": "result-manifest/1",
+  "run_id": "lcmx-1880-hold-cost-integration-delta-20261023",
+  "project": "lcm-x",
+  "kind": "benchmark",
+  "status": "settled",
+  "owner_lane": "1880-part-b",
+  "claim_class": "advisory",
+  "created": "2026-10-23T04:51:25Z",
+  "settled": "2026-10-23T04:52:42Z",
+  "code": {
+    "repo": "electricsheephq/lcm-x",
+    "sha": "8fc7b6a5eb7fc2e9415e07636c6266b50f0758af",
+    "dirty": false,
+    "diff_sha256": null
+  },
+  "env": {
+    "command": "python -B cost_probe.py --base BASE --candidate CANDIDATE --scratch SCRATCH --out RUN",
+    "models": {},
+    "dataset": {},
+    "seed": null
+  },
+  "headline": [
+    {
+      "benchmark": "#1880 synthetic admission integration delta",
+      "metric": "unheld_cells_within_cost_bar",
+      "value": 4.0,
+      "n": 4,
+      "baseline_run": "10407e12",
+      "source": "summary.json"
+    }
+  ],
+  "results": [
+    {
+      "path": "samples.jsonl",
+      "role": "per-item",
+      "sha256": "d94cdf142fab0baf39a403e404da8f832493ab1a4dc21a6e36fce3220d28c8e9",
+      "bytes": 149236
+    },
+    {
+      "path": "summary.json",
+      "role": "per-item",
+      "sha256": "2125a06db9d5b862a9953bedeeffdb1b9e9ff4fe30c10dc08c9e2bcfcd7fe995",
+      "bytes": 4757
+    },
+    {
+      "path": "cost_probe.py",
+      "role": "per-item",
+      "sha256": "902dd4cbdf72f6023f07ced478c70bbca68040bf8b8ae52e54718bc4c2e1243c",
+      "bytes": 8706
+    },
+    {
+      "path": "score_cost.py",
+      "role": "per-item",
+      "sha256": "16aba56d7991c75c7863db00c32cef57cf91fc18d63a7687d632de1918bef35d",
+      "bytes": 1610
+    }
+  ],
+  "rescore": {
+    "command": "python score_cost.py .",
+    "inputs": [
+      "samples.jsonl",
+      "summary.json"
+    ],
+    "external_inputs": []
+  },
+  "bulk": [],
+  "published": [],
+  "links": [],
+  "keep": [
+    "RESULT.md",
+    "cost_probe.py",
+    "samples.jsonl",
+    "score_cost.py",
+    "summary.json"
+  ],
+  "local_raw": "/Users/m1/Codex/session-notes/2026-10-23/lcmx-1880-persist-hold/artifacts/cost-integration-delta"
+}

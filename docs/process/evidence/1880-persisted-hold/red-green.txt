@@ -32,3 +32,14 @@ Consolidated review correction at970e47f9; RED at846a1b9b before product edits:
 6 failed in 0.87s
 Existing #608 unfinished-budget metadata assertion, required settings and same-window route-only mutations.
 9 passed in 0.87s
+
+Integration correction at8fc7b6a5:
+Named direct-ingest recovery, exact-pressure, settings, legacy pacing and public-row projection regressions BEFORE fixes: 7 failed, 5 passed in 1.34s
+Named behavior selection AFTER fixes: 49 passed in 16.47s
+Existing no-lineage durable-absence assertion BEFORE completion exclusion: 1 failed in 0.59s
+Named no-lineage/rebuilt/corrupt/new-history/environment selection AFTER exclusion: 15 passed in 2.55s
+Affected ingest trace package plus compress observer inventory, assembly compress-scaffold and environment inventory AFTER bounded harness canonicalization: 224 passed in 37.67s
+Separate prior trace run: 15 failed, 495 passed in 30.88s; all162 compress goldens passed. Failures were attributed to ingest observer canonicalization/size and two local --repo subprocess bootstrap errors; no full-suite claim.
+Commands used named pytest selections with synthetic HOME/HERMES_HOME and standalone agent bootstrap; full remote CI is the broader proof. No fourth local full1880-file run.
+Ruff0.15.13: All checks passed!
+git diff --check: exit0, no output.
