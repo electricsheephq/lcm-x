@@ -46,6 +46,7 @@ from .db_bootstrap import (
 from .extraction import sanitize_pre_compaction_content
 from .inactive_record import inactive_record_notice
 from .level3_repair import scan_level3_fragments
+from .ingest_policy import embedding_prefix_suffix, split_prefix_revision, embedding_prefix_status
 from .ingest_protection import (
     EmbeddingIdentityStaleError,
     EmbeddingPrivacyPolicyError,
@@ -1679,6 +1680,8 @@ def _lcm_grep_full_text_with_deadline(
         }
 
 
+_EMBEDDING_PREFIX_STALE_REASON = "embedding prefix settings changed; run /lcm embed warmup, then backfill"
+
 _EMBEDDING_IDENTITY_STALE_REASON = (
     "embedding_identity_stale: stored vectors use an older embedding privacy "
     "revision; run /lcm embed warmup, then /lcm embed backfill --apply"
@@ -1686,21 +1689,22 @@ _EMBEDDING_IDENTITY_STALE_REASON = (
 
 
 def _lcm_embedding_profile_revision(
-    conn: sqlite3.Connection, *, provider: str, model: str, task: str
+    conn: sqlite3.Connection, *, provider: str, model: str, task: str, revision_suffix: str | None = ""
 ) -> str | None:
     try:
-        row = conn.execute(
+        rows = conn.execute(
             "SELECT revision FROM lcm_embedding_profile "
             "WHERE active=1 AND archived_at IS NULL AND task=? "
             "AND provider=? AND model_name=? "
-            "ORDER BY registered_at DESC, identity_hash DESC LIMIT 1",
+            "ORDER BY registered_at DESC, identity_hash DESC",
             (task, provider, model),
-        ).fetchone()
+        ).fetchall()
     except sqlite3.OperationalError as exc:
         if "no such table: lcm_embedding_profile" not in str(exc):
             raise
         return None
-    return str(row[0] or "") if row is not None else None
+    return next((base for row in rows for base, suffix in [split_prefix_revision(str(row[0] or ""))]
+                 if revision_suffix is None or suffix == revision_suffix), None)
 
 
 def _lcm_active_embedding_revision(
@@ -1714,7 +1718,11 @@ def _lcm_active_embedding_revision(
             task=str(task),
             provider=str(getattr(provider, "provider_id", "") or "").strip().lower(),
             model=str(getattr(provider, "model_id", "") or "").strip(),
+            revision_suffix=getattr(provider, "identity_revision_suffix", ""),
         )
+        if revision is None and _lcm_embedding_profile_revision(conn, task=str(task),
+                provider=provider.provider_id, model=provider.model_id, revision_suffix=None) is not None:
+            raise EmbeddingIdentityStaleError(_EMBEDDING_PREFIX_STALE_REASON)
     finally:
         conn.close()
     if revision is None:
@@ -2068,8 +2076,8 @@ def _lcm_grep_semantic(
             task="summary",
             remaining_s=deadline - time.monotonic(),
         )
-    except EmbeddingIdentityStaleError:
-        return degraded(_EMBEDDING_IDENTITY_STALE_REASON)
+    except EmbeddingIdentityStaleError as exc:
+        return degraded(_EMBEDDING_PREFIX_STALE_REASON if str(exc) == _EMBEDDING_PREFIX_STALE_REASON else _EMBEDDING_IDENTITY_STALE_REASON)
     except VoyageError as exc:
         if exc.kind == "auth":
             return {
@@ -3460,14 +3468,19 @@ def _lcm_recall_catchup_reason(engine, provider, task: str) -> str | None:
         db_path = Path(engine._store.db_path).resolve()
         conn = sqlite3.connect(f"{db_path.as_uri()}?mode=ro", uri=True, timeout=0.05)
         try:
+            expected = getattr(provider, "identity_revision_suffix", "")
+            if (_lcm_embedding_profile_revision(conn, provider=provider.provider_id, model=provider.model_id, task=task, revision_suffix=None) is not None
+                    and _lcm_embedding_profile_revision(conn, provider=provider.provider_id, model=provider.model_id, task=task, revision_suffix=expected) is None):
+                return _EMBEDDING_PREFIX_STALE_REASON
             row = conn.execute(
                 "SELECT value, key FROM metadata WHERE key = ? || ("
                 "SELECT identity_hash FROM lcm_embedding_profile "
                 "WHERE model_name=? AND provider=? AND task=? "
+                "AND CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ? "
                 "ORDER BY (active=1 AND archived_at IS NULL) DESC, "
                 "registered_at DESC, identity_hash DESC LIMIT 1)",
                 (f"embedding_catchup:{task}:", str(provider.model_id).strip(),
-                 str(provider.provider_id).strip().lower(), task),
+                 str(provider.provider_id).strip().lower(), task, expected),
             ).fetchone()
             record = json.loads(row[0]) if row else {}
             if record.get("remaining") or record.get("operator_retry"):
@@ -3888,7 +3901,8 @@ def _lcm_recall_has_usable_vector_corpus(
             if time.monotonic() >= scan_deadline:
                 return False
             if privacy_revision is not None and _lcm_embedding_profile_revision(
-                conn, provider=provider_name, model=selected_model, task=task
+                conn, provider=provider_name, model=selected_model, task=task,
+                revision_suffix=embedding_prefix_suffix(engine._config, provider_name),
             ) != privacy_revision:
                 return False
             profile = conn.execute(
@@ -3896,11 +3910,12 @@ def _lcm_recall_has_usable_vector_corpus(
                 SELECT identity_hash
                 FROM lcm_embedding_profile
                 WHERE model_name = ? AND provider = ? AND task = ?
+                  AND CASE WHEN instr(revision, '+prefix:') = 0 THEN '' ELSE substr(revision, instr(revision, '+prefix:')) END = ?
                 ORDER BY (active = 1 AND archived_at IS NULL) DESC,
                          registered_at DESC, identity_hash DESC
                 LIMIT 1
                 """,
-                (selected_model, provider_name, task),
+                (selected_model, provider_name, task, embedding_prefix_suffix(engine._config, provider_name)),
             ).fetchone()
             if profile is None:
                 return False
@@ -4228,9 +4243,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     embedding_query_metrics.append(
                         _lcm_embedding_query_metric(provider)
                     )
-            except EmbeddingIdentityStaleError:
+            except EmbeddingIdentityStaleError as exc:
                 coverage["summary"] = "none"
-                degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                degraded_reasons.append(_EMBEDDING_PREFIX_STALE_REASON if str(exc) == _EMBEDDING_PREFIX_STALE_REASON else _EMBEDDING_IDENTITY_STALE_REASON)
                 summary_fts_fallback = not run_fts and run_summary
             except EmbeddingPrivacyPolicyError:
                 # Deterministic configuration error — never degrade (#367).
@@ -4284,9 +4299,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         embedding_query_metrics.append(
                             _lcm_embedding_query_metric(chunk_provider)
                         )
-                except EmbeddingIdentityStaleError:
+                except EmbeddingIdentityStaleError as exc:
                     coverage["chunk"] = "none"
-                    degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                    degraded_reasons.append(_EMBEDDING_PREFIX_STALE_REASON if str(exc) == _EMBEDDING_PREFIX_STALE_REASON else _EMBEDDING_IDENTITY_STALE_REASON)
                 except EmbeddingPrivacyPolicyError:
                     # Deterministic configuration error — never degrade (#367).
                     raise
@@ -4332,9 +4347,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                         timed_out = True
                         coverage["summary"] = "none"
                         summary_fts_fallback = not run_fts and run_summary
-                    except EmbeddingIdentityStaleError:
+                    except EmbeddingIdentityStaleError as exc:
                         coverage["summary"] = "none"
-                        degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                        degraded_reasons.append(_EMBEDDING_PREFIX_STALE_REASON if str(exc) == _EMBEDDING_PREFIX_STALE_REASON else _EMBEDDING_IDENTITY_STALE_REASON)
                         summary_fts_fallback = not run_fts and run_summary
                     except EmbeddingPrivacyPolicyError:
                         # Deterministic configuration error — never degrade (#367).
@@ -4375,9 +4390,9 @@ def lcm_recall(args: Dict[str, Any], **kwargs) -> str:
                     except TimeoutError:
                         timed_out = True
                         coverage["chunk"] = "none"
-                    except EmbeddingIdentityStaleError:
+                    except EmbeddingIdentityStaleError as exc:
                         coverage["chunk"] = "none"
-                        degraded_reasons.append(_EMBEDDING_IDENTITY_STALE_REASON)
+                        degraded_reasons.append(_EMBEDDING_PREFIX_STALE_REASON if str(exc) == _EMBEDDING_PREFIX_STALE_REASON else _EMBEDDING_IDENTITY_STALE_REASON)
                     except EmbeddingPrivacyPolicyError:
                         # Deterministic configuration error — never degrade (#367).
                         raise
@@ -4679,15 +4694,17 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
             stale_tasks = []
             if _lcm_embedding_profile_revision(
                 conn, provider=provider_id, model=model, task="summary",
+                revision_suffix=embedding_prefix_suffix(config, provider_id),
             ) != current_revision:
                 stale_tasks.append("summary")
             # The chunk corpus is opt-in, so its identity matters only once the
             # store holds live chunk vectors (#888).
             if _lcm_store_has_live_chunk_vectors(conn) and _lcm_embedding_profile_revision(
                 conn, provider=provider_id, model=default_chunk_model(provider_id, model),
-                task="chunk",
+                task="chunk", revision_suffix=embedding_prefix_suffix(config, provider_id),
             ) != current_revision:
                 stale_tasks.append("chunk")
+            prefix_stale = any(_lcm_embedding_profile_revision(conn, provider=provider_id, model=model if task == "summary" else default_chunk_model(provider_id, model), task=task, revision_suffix=None) == current_revision for task in stale_tasks)
         finally:
             conn.close()
         if stale_tasks:
@@ -4718,6 +4735,8 @@ def _embedding_provider_health_check(engine: "LCMEngine") -> dict[str, Any]:
                 "impact": "lcm_recall skips the stale semantic arm until the profile is re-registered",
                 "remedy": remedy,
             })
+            if prefix_stale:
+                detail["reason"] = _EMBEDDING_PREFIX_STALE_REASON
             return {
                 "check": "embedding_provider_health",
                 "status": "warn",
@@ -4992,6 +5011,7 @@ def lcm_status(args: Dict[str, Any], **kwargs) -> str:
     side_channel_active = engine.side_channel_active
 
     return json.dumps({
+        **embedding_prefix_status(engine._config),
         "session_id": session_id,
         "compression_count": engine.compression_count,
         "total_compactions": full_status.get("total_compactions", 0),

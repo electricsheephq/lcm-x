@@ -65,6 +65,13 @@ Use `docs/operator-guide.md` as the complete current source. Start with:
 - `LCM_IGNORE_SESSION_PATTERNS` and `LCM_STATELESS_SESSION_PATTERNS`: storage ownership boundaries;
 - summary/embedding provider settings only after confirming credentials, cost, and data handling; see `docs/embeddings-setup.md`, section "A host update can remove fastembed", for the embedding-dependency recovery note. Known cloud providers protect provider-bound copies automatically with the configured nonempty known pattern list while durable storage stays raw. `LCM_SENSITIVE_PATTERNS_ENABLED=true` is a separate irreversible durable-ingest opt-in. `LCM_EMBEDDING_PRIVACY_ENABLED=false` explicitly sends raw cloud copies under the `privacy:off` vector revision; warmup binds the chosen posture and later query/backfill calls fail closed on identity drift.
 
+`LCM_EMBEDDING_QUERY_PREFIX` / `LCM_EMBEDDING_DOCUMENT_PREFIX` default to `""` and apply
+only to Ollama and OpenAI-compatible embeddings. Environment values override `lcm.embedding_query_prefix`
+and `lcm.embedding_document_prefix` in YAML; quote values such as `"search_query: "` to keep whitespace.
+The provider announces a 12-hex SHA-256 digest of the JSON prefix pair as an identity suffix;
+status and doctor show active sides and the digest only. After a change or removal, restart Hermes,
+run `/lcm embed warmup`, then `/lcm embed backfill --apply`; include chunk corpus/consent options as needed.
+
 Optional slash commands are disabled by default with `LCM_ENABLE_SLASH_COMMAND=false`. Destructive cleanup apply is separately guarded. Do not enable mutation surfaces merely to diagnose a problem.
 
 `LCM_SQLITE_MMAP_SIZE` sets SQLite mapped-read bytes (default `268435456`,
@@ -234,6 +241,8 @@ warns without changing its behavior until removal.
 | `LCM_KNN_PRESCREEN_MULTIPLIER` | `int` | `4` | — | — |
 | `LCM_EMBEDDING_PROVIDER` | `str` | `""` | `"voyage"`, `"voyageai"`, `"ollama"`, `"fastembed"`, `"fast-embed"`, `"openai-compatible"`, `"openai"`, `"siliconflow"` | — |
 | `LCM_EMBEDDING_MODEL` | `str` | `""` | — | — |
+| `LCM_EMBEDDING_QUERY_PREFIX` | `str` | `""` | — | — |
+| `LCM_EMBEDDING_DOCUMENT_PREFIX` | `str` | `""` | — | — |
 | `LCM_EMBED_CONTENT_POLICY` | `str` | `"conversational"` | — | — |
 | `LCM_OLLAMA_BASE_URL` | `str` | `"http://localhost:11434"` | — | — |
 | `LCM_EMBEDDING_BASE_URL` | `str` | `""` | — | — |

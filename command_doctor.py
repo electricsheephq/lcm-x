@@ -730,4 +730,6 @@ def render_doctor(facts: DoctorFacts) -> str:
 
 
 def _doctor_text(engine: Any) -> str:
-    return render_doctor(collect_doctor(engine))
+    from .ingest_policy import embedding_prefix_status
+    prefix = embedding_prefix_status(engine._config)
+    return render_doctor(collect_doctor(engine)) + ("\n" + str(prefix) if prefix else "")

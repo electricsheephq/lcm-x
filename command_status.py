@@ -202,7 +202,9 @@ def render_status(facts: StatusFacts) -> str:
 
 
 def _status_text(engine: Any) -> str:
-    return render_status(collect_status(engine))
+    from .ingest_policy import embedding_prefix_status
+    prefix = embedding_prefix_status(engine._config)
+    return render_status(collect_status(engine)) + ("\n" + str(prefix) if prefix else "")
 
 
 def _embedding_maintenance_status_lines(engine: Any) -> list[str]:

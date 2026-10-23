@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from typing import Any, Sequence
 from .ingest_content import (
@@ -172,6 +173,27 @@ def embedding_privacy_revision(config: Any) -> str:
     names = sorted(set(active))
     digest = hashlib.sha256("\n".join(names).encode("utf-8")).hexdigest()
     return f"{_EMBEDDING_PRIVACY_TRANSFORM_VERSION}:{digest}"
+
+
+def embedding_prefix_suffix(config: Any, provider_id: str) -> str:
+    from .config import embedding_provider_id
+    pair = [getattr(config, "embedding_query_prefix", ""), getattr(config, "embedding_document_prefix", "")]
+    if embedding_provider_id(provider_id) not in {"ollama", "openai-compatible"} or not any(pair):
+        return ""
+    return "+prefix:" + hashlib.sha256(json.dumps(pair, ensure_ascii=False).encode()).hexdigest()[:12]
+
+
+def split_prefix_revision(revision: str) -> tuple[str, str]:
+    if "+prefix:" not in revision:
+        return revision, ""
+    base, marker, digest = revision.rpartition("+prefix:")
+    return base, marker + digest
+
+
+def embedding_prefix_status(config: Any) -> dict[str, Any]:
+    suffix = embedding_prefix_suffix(config, getattr(config, "embedding_provider", ""))
+    return {"embedding_prefix": {"query": bool(config.embedding_query_prefix),
+            "document": bool(config.embedding_document_prefix), "digest": suffix[8:]}} if suffix else {}
 
 
 def _embedding_privacy_placeholder(pattern_name: str) -> str:
