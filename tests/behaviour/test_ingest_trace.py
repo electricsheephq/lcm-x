@@ -62,13 +62,13 @@ def test_observer_completeness(tmp_path: Path) -> None:
 def test_fixture_scenario_inventory_and_size() -> None:
     data: dict[str, list[str]] = json.loads(GOLDEN.read_text())
     names = [case.name for case in SCENARIOS]
-    assert len(names) == 202
+    assert len(names) == 203
     assert len(names) == len(set(names))
     assert set(data) == set(names), TRACE_GUIDANCE
-    # Initial, next and cold ingests now each retain their full observer stream.
-    # Parts A/B both add transient ingest observations.
-    assert GOLDEN.stat().st_size <= 3_400_000
-    assert all(len(json.dumps(trace).encode()) <= 45_000 for trace in data.values())
+    # Full cache/plan/fact/receipt observations and the v2 same-row counterpart
+    # have explicit fixed bounds; uniqueness and exact scenario traces stay strict.
+    assert GOLDEN.stat().st_size <= 4_500_000
+    assert all(len(json.dumps(trace).encode()) <= 60_000 for trace in data.values())
 
 
 def test_first_divergence() -> None:
