@@ -8,6 +8,7 @@ import sqlite3
 
 import pytest
 
+from hermes_lcm import engine as engine_module
 from tests.test_host_uid_engine_uids import _compress, _host
 from tests.test_host_uid_shadow import _engine, _m, _state_db
 
@@ -185,3 +186,26 @@ def test_legacy_snapshot_validates_effective_sequence_and_scaffolds(published, m
     engine._store.write_metadata_json([snapshot_key], json.dumps(snapshot))
     loaded = engine._durable_commit_proof_payload()
     assert ("output_metadata" in loaded) == (mutation == "valid")
+
+
+def test_legacy_snapshot_with_leading_system_anchor_attaches(tmp_path, monkeypatch):
+    monkeypatch.setattr(engine_module, "summarize_with_escalation",
+                        lambda **kwargs: ("Synthetic summary preserving the task and tool result.", 1))
+    _state_db(tmp_path, [("S", None, None)])
+    engine = _engine(tmp_path)
+    engine._config.fresh_tail_count = 4
+    try:
+        output = _compress(engine, _host(system=True))
+        assert engine._last_compression_status == "compacted"
+        assert output[0]["role"] == "system"
+        proof, snapshot = pair(engine)
+        snapshot.pop("output_length")  # The only change needed to reproduce the old writer's snapshot.
+        rows = snapshot["output_metadata"]
+        assert {i for i, row in enumerate(rows) if row["identity_sha256"] is None} == {0, 1}
+        assert {item["output_occurrence"]["index"] for item in proof["emissions"]
+                if item.get("retained_source") is None} == {1}
+        engine._store.write_metadata_json([keys(engine)[1]], json.dumps(snapshot))
+        loaded = engine._durable_commit_proof_payload()
+        assert loaded.get("output_metadata") == rows
+    finally:
+        engine.shutdown()

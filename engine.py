@@ -6688,7 +6688,9 @@ class LCMEngine(
                 return len(rows) == len(scaffold)
             positions = {item["output_occurrence"]["index"] for item in payload.get("emissions", [])
                          if item.get("retained_source") is None}
-            if {i for i, row in enumerate(rows) if row["identity_sha256"] is None} != positions:
+            null_positions = {i for i, row in enumerate(rows) if row["identity_sha256"] is None}
+            # The leading system anchor can carry LCM's note without an emission descriptor.
+            if null_positions not in (positions, positions | {0}):
                 return False
         return True
 
