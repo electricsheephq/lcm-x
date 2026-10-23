@@ -966,12 +966,15 @@ def leaf_selection_probe(engine: Any, case: Scenario, provider: Any, events: Tra
     events.append("selection probes " + encoded(counts) + " rejections=" + encoded(rejections))
 
 
-def observe(case: Scenario, root: Path) -> Trace:
+def observe(case: Scenario, root: Path, *, digest_attribution: list | None = None) -> Trace:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     events: Trace = []
     clock, canonical = Clock(expiry_checkpoint=case.expiry_checkpoint), Canonical(root)
     with pytest.MonkeyPatch.context() as patch:
+        from tests.behaviour.reconcile_trace_harness import observe_occurrence_digests
+
+        observe_occurrence_digests(patch, canonical)
         # Shared harness helpers are deliberately untyped; keep the boundary Any.
         pin: Any = pin_char_counter
         pin(patch)
@@ -1623,6 +1626,9 @@ def observe(case: Scenario, root: Path) -> Trace:
                         engine._clear_thread_context_stateless("trace-child")
     if case.name.startswith("selection-"):
         assert not any(event.startswith("raise AssertionError") for event in events), events
+    if digest_attribution is not None:
+        digest_attribution.extend(canonical.digest_sources.values())
+    assert not canonical.digest_errors, canonical.digest_errors
     return events
 
 

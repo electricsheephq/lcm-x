@@ -12,7 +12,7 @@ import pytest
 
 from tests.compat.test_occurrence_snapshot_rollback import V0281
 
-BASE = "10407e12e33c1d7b09fe0e05141153555aec5d62"
+BASE = "0e9cef1e97b3248dd899903e587062cce7bc42be"
 
 
 def _save_database(source, saved):

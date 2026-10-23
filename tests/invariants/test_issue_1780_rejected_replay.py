@@ -45,17 +45,34 @@ def seed_store(path, reply=False):
 @pytest.mark.parametrize("shape,expected", [
     ("R6", [3, 3, 3, 3]), ("R5", [4, 4, 4, 4]), ("R2grow", [4, 5, 6, 7]),
 ])
-def test_conflict_is_observed_with_base_rows_and_bindings(tmp_path, monkeypatch, caplog, record_property, shape, expected):
+@pytest.mark.parametrize("legacy", [False, True], ids=["v2-writer", "base-writer"])
+def test_conflict_is_observed_with_base_rows_and_bindings(tmp_path, monkeypatch, caplog, record_property, shape, expected, legacy):
     from tests.invariants.test_issue_1780_round3 import compare_replays
 
     initial = [message("S", 1000, "uid-a"), *([REPLY] if shape != "R6" else []), message("O", 1001, "uid-o")]
     view = [message("S", 99, "uid-x"), *([REPLY] if shape != "R6" else []), message("O", 1001, "uid-o")]
     view.append(message("T", 99, None if shape == "R2grow" else "uid-t"))
     counts, count = compare_replays(tmp_path, monkeypatch, caplog, 2, view, turns=4,
-                                   grow=shape == "R2grow", initial=initial)
+                                   grow=shape == "R2grow", initial=initial, legacy_seed=legacy)
     record_property("rows_and_would_reject", {"shape": shape, "counts": counts, "would_reject": count})
-    assert counts == expected
+    assert counts == (expected if legacy else {"R6": [4] * 4, "R5": [6] * 4, "R2grow": [6, 7, 8, 9]}[shape])
     assert count > 0
+    for observe in (False, True):
+        with engine(tmp_path / str(observe)) as eng:
+            old = eng._store.read_metadata_json("host_occurrence_row:parent:1")
+            if legacy:
+                assert old is None
+                continue
+            fresh_id = 3 if shape == "R6" else 4
+            fresh = eng._store.read_metadata_json(f"host_occurrence_row:parent:{fresh_id}")
+            coverage = eng._occurrence_fact_coverage(
+                eng._store.read_metadata_json("host_occurrence_accepted_view:parent"), "parent")
+            assert old["occurrence_version"] == fresh["occurrence_version"] == 2
+            assert old["message_uid"] == "uid-a" and fresh["message_uid"] == "uid-x"
+            assert {1, fresh_id} <= coverage
+            if shape != "R6":
+                reply = eng._store.read_metadata_json("host_occurrence_row:parent:5")
+                assert reply["user_store_id"] == fresh_id and 5 in coverage
 
 
 def test_observation_preserves_positional_cursor(tmp_path):

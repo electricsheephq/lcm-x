@@ -1015,7 +1015,7 @@ class CompactionMixin:
             self._carry_prior_emissions(messages, result, emissions, emission_binding)
             # The output's rows map through THIS proof's emissions (A3), never a DAG-shaped strip (F1).
             occurrences, _v4 = self._replay_occurrences(result, {"version": 4, **emission_binding, "emissions": emissions})
-            store_ids = self._get_store_id_map_for_messages(result, occurrences)
+            store_ids = self._get_store_id_map_for_messages(result, occurrences, current_correspondence=True)
             carried_rows = self._store.get_batch(sorted({store_ids[id(m)] for m in result if id(m) in store_ids}))
             proof = {
                 "version": _COMPACTION_COMMIT_PROOF_VERSION,

@@ -38,6 +38,215 @@ def stored(engine: Any) -> list[Row]:
     return rows
 
 
+@pytest.mark.parametrize("mode", ["warm", "cold"])
+@pytest.mark.parametrize("uid_change", ["pair-only", "result-only"])
+def test_occurrence_retry_acceptance_survives_three_restarts(build: Build, mode: str, uid_change: str) -> None:
+    """I1/I2/I8: compare every row with the accepted pair, before cursor consumption."""
+    engine, host = compact(build, mode=mode, uids=True)
+    before = stored(engine)
+    changed = host[-2:] if uid_change == "pair-only" else host[-1:]
+    for index, row in enumerate(changed):
+        row["message_uid"] = f"{100 + index:032x}"
+    host[-1]["content"] = CLEARED
+    for index in range(2):
+        host.extend(tool_pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    assert sum(any(call["id"] == "c" for call in row.get("tool_calls") or []) for row in added) == 1
+    assert sum(row.get("tool_call_id") == "c" for row in added) == 1
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+    for _ in range(3):
+        engine.shutdown()
+        engine = build(restart=True)
+        engine.ingest(deepcopy(host))
+        assert engine._ingest_failure_count == 0, engine._last_ingest_error
+        assert stored(engine) == after
+
+
+@pytest.mark.parametrize("fault", ["resolver-raise", "fact-raise", "missing-fact", "malformed-fact",
+                                  "coverage-missing", "coverage-malformed", "coverage-scope", "coverage-order",
+                                  "coverage-overlap", "coverage-overlimit", "coverage-conflicting"])
+def test_occurrence_read_failure_retains_rows(build: Build, monkeypatch, fault: str) -> None:
+    """Read failures retain rows, and accepting the copy bounds later replay."""
+    engine = build()
+    host = fixture()[-3:]
+    host.extend(tool_pair("following-0", "one", tool_name="lookup"))
+    host.extend(tool_pair("following-1", "two", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    name = f"host_occurrence_row:S:{before[1]['store_id']}"
+    if fault in ("missing-fact", "malformed-fact"):
+        engine._store.write_metadata_json([name], json.dumps(None if fault == "missing-fact" else ["bad"]))
+    elif fault.startswith("coverage-"):
+        key = "host_occurrence_accepted_view:S"
+        receipt = engine._store.read_metadata_json(key)
+        if fault == "coverage-scope":
+            receipt["scope"]["conversation_id"] = "another synthetic conversation"
+        elif fault == "coverage-overlap":
+            receipt["fact_store_ranges"] = [[1, 3], [3, 4]]
+        elif fault == "coverage-overlimit":
+            receipt["fact_store_ranges"] = [[1, 4097]]
+        elif fault == "coverage-conflicting":
+            receipt["fact_store_ids"] = []
+        elif fault == "coverage-order":
+            receipt["fact_store_ranges"] = [[2, 1]]  # Malformed new coverage cannot fall back to legacy.
+        else:
+            receipt = None if fault == "coverage-missing" else {"fact_store_ids": "invalid"}
+        engine._store.write_metadata_json([key], json.dumps(receipt))
+        engine._store.write_metadata_json([name], "null")
+    engine._occurrence_window_cache = None
+    read_many = engine._store.read_metadata_json_many
+    def unavailable(*args, **kwargs):
+        if fault == "fact-raise" and not any(str(k).startswith("host_occurrence_row:") for k in args[0]):
+            return read_many(*args, **kwargs)
+        raise RuntimeError("synthetic occurrence read failure")
+    with monkeypatch.context() as patch:
+        if fault == "resolver-raise":
+            patch.setattr(engine, "_resolve_occurrence_view", unavailable)
+        elif fault == "fact-raise":
+            patch.setattr(engine._store, "read_metadata_json_many", unavailable)
+        engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert after[:len(before)] == before
+    added = after[len(before):]
+    assert any(row.get("tool_calls") for row in added)
+    assert any(row.get("tool_call_id") == "c" for row in added)
+    engine.shutdown()
+    engine = build()
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert stored(engine) == after
+
+
+@pytest.mark.parametrize("boundary", [0, 1])
+def test_occurrence_fact_write_rolls_back_insert_attempt(build: Build, monkeypatch, boundary: int) -> None:
+    """A metadata fault after the first or later raw INSERT rolls back both."""
+    engine = build()
+    host = fixture()[-3:]
+    factory = engine._occurrence_batch_factory
+    def faulted(batch):
+        original = factory(batch)
+        def write(message, store_id):
+            records = original(message, store_id)
+            if message["_occurrence_position"] == boundary:
+                raise RuntimeError("synthetic fact write failure")
+            return records
+        return write
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_occurrence_batch_factory", faulted)
+        engine.ingest(deepcopy(host))
+    assert stored(engine) == []
+    assert engine._store._conn.execute("SELECT count(*) FROM metadata WHERE key LIKE 'host_occurrence_row:%'").fetchone()[0] == 0
+    assert engine._store.read_metadata_json("host_occurrence_accepted_view:S") is None
+    engine.ingest(deepcopy(host))
+    assert len(stored(engine)) == len(host)
+
+
+def test_occurrence_first_ingest_and_uid_adoption_survive_restart(build: Build) -> None:
+    engine = build()
+    host = fixture()[-3:]
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    for index, row in enumerate(host):
+        row["message_uid"] = f"{index + 100:032x}"
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == before
+    engine.shutdown()
+    engine = build()
+    assert engine._durable_commit_proof_payload() is None
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == before
+    for row in before:
+        fact = engine._store.read_metadata_json(f"host_occurrence_row:S:{row['store_id']}")
+        assert fact["message_uid"] is not None
+
+
+def test_occurrence_writer_coverage_does_not_claim_legacy_holes(build: Build) -> None:
+    engine = build()
+    host = [{"role": "user", "content": "synthetic first"},
+            {"role": "assistant", "content": "synthetic answer"}]
+    engine.ingest(deepcopy(host))
+    old_ids = [r["store_id"] for r in stored(engine)]
+    legacy_id = engine._store.append("S", {"role": "user", "content": "synthetic legacy gap"},
+                                     conversation_id="conversation")
+    host.append({"role": "user", "content": "synthetic next"})
+    engine.ingest(deepcopy(host))
+    coverage = engine._occurrence_fact_coverage(
+        engine._store.read_metadata_json("host_occurrence_accepted_view:S"), "S")
+    assert set(old_ids) <= set(coverage) and max(coverage) > legacy_id
+    assert legacy_id not in coverage
+    assert engine._store.read_metadata_json(f"host_occurrence_row:S:{legacy_id}") is None
+
+
+def test_occurrence_plain_reply_acceptance_has_no_restart_growth(build: Build) -> None:
+    """A new user stamp accepts the unknown equal reply once (#1451)."""
+    engine = build()
+    host = [{"role": "user", "content": "repeat", "timestamp": 10},
+            {"role": "assistant", "content": "equal reply"}]
+    engine.ingest(deepcopy(host))
+    host[0]["timestamp"] = 20
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    assert sum(row["role"] == "user" for row in after) == 2
+    assert sum(row["role"] == "assistant" for row in after) == 2
+    for _ in range(3):
+        engine.shutdown()
+        engine = build()
+        engine.ingest(deepcopy(host))
+        assert stored(engine) == after
+
+
+def test_occurrence_carry_rewrite_keeps_equal_uid_segments(build: Build) -> None:
+    """The stale/user-only matrix cell binds every result in the parent scope."""
+    engine = build()
+    original = fixture(uids=True)
+    original.extend(tool_pair("d", LONG + "d", tool_name="lookup"))
+    original.append({"role": "user", "content": "pending carry sentinel", "timestamp": 40})
+    for index, row in enumerate(original):
+        row["message_uid"] = f"{index + 1:032x}"
+    engine.ingest(deepcopy(original))
+    parent = engine._store.get_session_messages("S")
+    host = engine.compress(deepcopy(original), force=True)
+    assert engine._last_compression_status == "compacted"
+    engine.on_session_end("S", deepcopy(original))
+    engine.on_session_start("C", boundary_reason="compression", old_session_id="S",
+                            conversation_id="conversation", platform="cli")
+    before = engine._store.read_metadata_json("compaction_commit_proof:C")
+    assert host[-1]["content"] == "pending carry sentinel"
+    host = host[:-1]
+    engine.ingest(deepcopy(host))
+    after = engine._store.read_metadata_json("compaction_commit_proof:C")
+    assert before["carry_ranges"] != after["carry_ranges"]
+    assert "output_metadata" in engine._durable_commit_proof_payload()
+    assert engine._store.get_session_messages("S") == parent
+    assert engine._store.get_session_messages("C"), "accepted child head needs a durable row witness"
+    next(row for row in host if row.get("content") == "repeat")["message_uid"] = "f" * 32
+    for row in host:
+        if row.get("tool_call_id") in ("c", "d"):
+            row["content"] = CLEARED
+    for index in range(2):
+        host.extend(tool_pair(f"following-{index}", f"new result {index}", tool_name="lookup"))
+    engine.ingest(deepcopy(host))
+    def all_rows(e):
+        return sorted(e._store.get_session_messages("S") + e._store.get_session_messages("C"),
+                      key=lambda row: row["store_id"])
+    accepted = all_rows(engine)
+    for call_id in ("c", "d"):
+        assert sum(row.get("tool_call_id") == call_id for row in accepted) == 1
+        assert sum(any(c["id"] == call_id for c in row.get("tool_calls") or []) for row in accepted) == 1
+    for _ in range(3):
+        engine.shutdown()
+        engine = build()
+        engine.on_session_start("C", conversation_id="conversation", platform="cli")
+        engine.ingest(deepcopy(host))
+        assert all_rows(engine) == accepted
+
+
 @pytest.mark.parametrize("anchor", ["off", "on"])
 def test_bound_retry_binding_respects_identity_anchor_switch(
     build: Build, monkeypatch: pytest.MonkeyPatch, anchor: str,
@@ -606,108 +815,41 @@ def test_stored_side_ambiguity_guard_with_single_host_user(
     assert len(added) == 7  # Base 9eacedb9: all four shapes, warm and cold.
 
 
-@pytest.mark.parametrize("fault", ["corrupt-proof", "remap-raises"])
-def test_replay_proof_failure_matches_base(build, monkeypatch, fault):
-    """Optional proof faults retain the six complete rows stored by base 9eacedb9."""
+@pytest.mark.parametrize("fault", ["resolver", "facts"])
+def test_occurrence_read_fault_replaces_legacy_helper_fault(build, monkeypatch, fault):
+    """The shared resolver owns reads; late residual-helper readers are gone.
+
+    The old accepted six-row optional-proof fallback is historical evidence,
+    not evidence from an injection into a reader this path no longer invokes.
+    Exercise the current public path and retain the complete ambiguous delta.
+    """
     engine, host = compact(build, mode="cold")
     before = stored(engine)
     next(row for row in host if row.get("content") == "middle lookup")["timestamp"] = 20
     host[-1]["content"] = CLEARED
     for i in range(2):
         host.extend(tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup"))
-    helper = engine._replayed_tool_segment_indexes_after_cursor
-    read = engine._store.read_metadata_json
-    calls = []
-    faults = []
-
-    def corrupt_read(key):
-        if "compaction_commit_proof" in key:
-            faults.append(key)
-            return json.loads("{invalid JSON")
-        return read(key)
-
-    def broken_remap(*args, **kwargs):
-        faults.append("remap")
-        raise RuntimeError("synthetic remap failure")
-
-    def faulted(messages, cursor):
-        calls.append(cursor)
-        # Fault the helper's own read, after the other readers have reconciled.
-        with monkeypatch.context() as patch:
-            if fault == "corrupt-proof":
-                patch.setattr(engine._store, "read_metadata_json", corrupt_read)
-            else:
-                patch.setattr(engine, "_remapped_output_metadata", broken_remap)
-            replayed = helper(messages, cursor)
-        return replayed
-
-    monkeypatch.setattr(engine, "_replayed_tool_segment_indexes_after_cursor", faulted)
-    engine.ingest(deepcopy(host))
-    assert len(calls) == 1 and calls[0] > 0
-    assert faults, "the fault must reach the optional proof reader"
+    reached = []
+    read_many = engine._store.read_metadata_json_many
+    def unavailable(*args, **kwargs):
+        if fault == "facts" and not any(str(k).startswith("host_occurrence_row:") for k in args[0]):
+            return read_many(*args, **kwargs)
+        reached.append(fault)
+        raise RuntimeError("synthetic occurrence reader failure")
+    with monkeypatch.context() as patch:
+        if fault == "resolver":
+            patch.setattr(engine, "_resolve_occurrence_view", unavailable)
+        else:
+            engine._occurrence_window_cache = None
+            patch.setattr(engine._store, "read_metadata_json_many", unavailable)
+        engine.ingest(deepcopy(host))
+    assert reached
     assert engine._ingest_failure_count == 0, engine._last_ingest_error
     after = stored(engine)
     assert after[:len(before)] == before
-    def project(row):
-        return {key: row.get(key) for key in ("role", "content", "tool_calls", "tool_call_id")}
-    # Frozen from base 9eacedb9 cold corrupt-proof/remap-raises probe outputs.
-    expected = [
-        {
-            "role": "user",
-            "content": "middle lookup",
-            "tool_calls": None,
-            "tool_call_id": None
-        },
-        {
-            "role": "tool",
-            "content": "[Old tool output cleared to save context space]",
-            "tool_calls": None,
-            "tool_call_id": "c"
-        },
-        {
-            "role": "assistant",
-            "content": "running tool",
-            "tool_calls": [
-                {
-                    "id": "following-0",
-                    "type": "function",
-                    "function": {
-                        "name": "lookup",
-                        "arguments": "{}"
-                    }
-                }
-            ],
-            "tool_call_id": None
-        },
-        {
-            "role": "tool",
-            "content": "new result 0",
-            "tool_calls": None,
-            "tool_call_id": "following-0"
-        },
-        {
-            "role": "assistant",
-            "content": "running tool",
-            "tool_calls": [
-                {
-                    "id": "following-1",
-                    "type": "function",
-                    "function": {
-                        "name": "lookup",
-                        "arguments": "{}"
-                    }
-                }
-            ],
-            "tool_call_id": None
-        },
-        {
-            "role": "tool",
-            "content": "new result 1",
-            "tool_calls": None,
-            "tool_call_id": "following-1"
-        }
-    ]
-    assert [project(row) for row in after[len(before):]] == expected
+    added = after[len(before):]
+    assert any(any(c["id"] == "c" for c in r.get("tool_calls") or []) for r in added)
+    assert any(r.get("tool_call_id") == "c" for r in added)
     assert_complete_segments(after)
 
 
@@ -830,3 +972,308 @@ def test_ambiguous_user_rejects_first_and_last_match(build, monkeypatch):
         replayed = engine._replayed_tool_segment_indexes_after_cursor(host, user_index + 1)
         assert user_index + 1 not in replayed, "ambiguous first/last match suppressed the call"
         assert user_index + 2 not in replayed, "ambiguous first/last match suppressed the result"
+
+
+def test_occurrence_warm_witness_cache_observes_fact_mutation(build, monkeypatch):
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    engine = build()
+    host = [{"role": "user", "content": "warm witnessed user", "timestamp": 10., "message_uid": "a" * 32},
+            {"role": "assistant", "content": "warm witnessed reply", "timestamp": 11., "message_uid": "b" * 32}]
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == before
+    assert engine._occurrence_window_cache[4].get("warm")
+    receipt = engine._store.read_metadata_json("host_occurrence_accepted_view:S")
+    coverage = engine._occurrence_fact_coverage(receipt, "S")
+    legacy = {k: v for k, v in receipt.items() if k != "fact_store_ranges"}
+    legacy["fact_store_ids"] = sorted(coverage)
+    assert engine._occurrence_fact_coverage(legacy, "S") == coverage
+    name = f"host_occurrence_row:S:{before[1]['store_id']}"
+    engine._store.write_metadata_json([name], "null")
+    engine.ingest(deepcopy(host))  # Generation change must invalidate the warm witness.
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    after = stored(engine)
+    assert engine._occurrence_ingest_plan["warm_prefix"] == 0
+    assert after[:len(before)] == before
+    assert len(after) == len(before) + 1 and after[-1]["content"] == host[-1]["content"]
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+    engine.shutdown()
+    engine = build()
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+
+
+def test_occurrence_cold_established_prefix_admits_cached_completion(build, monkeypatch):
+    """A larger-store tail can finish through cached replay without rewriting it."""
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    host = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"cold prefix row {i}",
+             "timestamp": float(i + 1), "message_uid": f"{i + 1:032x}"} for i in range(100)]
+    engine = build()
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    engine.shutdown()
+    engine = build()
+    view = host[-20:]
+    engine.ingest(deepcopy(view))
+    assert engine._occurrence_ingest_plan["warm_prefix"] == 0
+    assert stored(engine) == before
+    # The next replay takes the existing cached return, not remember(). It must
+    # publish only the actual row mappings established by the cold resolver.
+    def no_rewrite(*args, **kwargs):
+        pytest.fail("accepted cached replay unexpectedly rewrote replay state")
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_remember_active_replay_messages", no_rewrite)
+        engine.ingest(deepcopy(view))
+        state = engine._occurrence_window_cache[4]
+        assert state.get("warm")
+        assert len(state["warm"][1]["matched"]) == len(view)
+        assert all(sid in state["by_id"] for _source, sid in state["warm"][1]["matched"].values())
+        state["warm"][1]["warm_prefix"] = 9999  # A copied prior extent is never current authorization.
+        patch.setattr(engine, "_occurrence_metadata", no_rewrite)
+        engine.ingest(deepcopy(view))
+        assert engine._occurrence_ingest_plan["warm_prefix"] == len(view)
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert stored(engine) == before
+    # Append admission binds these two actual committed rows, not pre-insert IDs.
+    view += [{"role": "user", "content": "new cold-prefix user", "timestamp": 101., "message_uid": "c" * 32},
+             {"role": "assistant", "content": "new cold-prefix reply", "timestamp": 102., "message_uid": "d" * 32}]
+    engine.ingest(deepcopy(view))
+    after = stored(engine)
+    assert after[:len(before)] == before and len(after) == len(before) + 2
+    assert engine._occurrence_ingest_plan["warm_prefix"] == 20
+    state = engine._occurrence_window_cache[4]
+    assert state.get("warm")
+    assert {state["warm"][1]["matched"][i][1] for i in (20, 21)} == {r["store_id"] for r in after[-2:]}
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_occurrence_metadata", no_rewrite)
+        engine.ingest(deepcopy(view))
+    assert engine._occurrence_ingest_plan["warm_prefix"] == len(view)
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert stored(engine) == after
+
+
+@pytest.mark.parametrize("disabled", ["LCM_IDENTITY_ANCHOR", "LCM_HOST_MESSAGE_UID"])
+def test_occurrence_settings_change_invalidates_warm_admission(build, monkeypatch, disabled):
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    engine = build()
+    host = [{"role": "user", "content": "settings user", "timestamp": 10., "message_uid": "a" * 32},
+            {"role": "assistant", "content": "settings reply", "timestamp": 11., "message_uid": "b" * 32}]
+    engine.ingest(deepcopy(host))
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    assert engine._occurrence_window_cache[4].get("warm")
+    monkeypatch.setenv(disabled, "0" if disabled == "LCM_IDENTITY_ANCHOR" else "off")
+    reads = []
+    bindings = engine._store.host_uid_bindings_for
+    def observed(*args, **kwargs):
+        reads.append(True)
+        return bindings(*args, **kwargs)
+    with monkeypatch.context() as patch:
+        patch.setattr(engine._store, "host_uid_bindings_for", observed)
+        engine.ingest(deepcopy(host))
+        assert not reads, "disabled UID semantics must not query bindings"
+    state = engine._occurrence_window_cache[4]
+    assert not state.get("warm")
+    assert engine._occurrence_ingest_plan["warm_prefix"] == 0
+    assert all(meta["message_uid"] is None for meta in state["current"])
+    assert stored(engine) == before
+    monkeypatch.setenv(disabled, "1" if disabled == "LCM_IDENTITY_ANCHOR" else "on")
+    engine.ingest(deepcopy(host))
+    assert engine._occurrence_window_cache[4].get("warm")
+    assert stored(engine) == before
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+
+
+def test_occurrence_pending_tail_uses_retry_operation_settings(build, monkeypatch):
+    import sqlite3
+
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    engine = build()
+    host = [{"role": "user", "content": "queued settings user", "timestamp": 10., "message_uid": "e" * 32},
+            {"role": "assistant", "content": "queued settings reply", "timestamp": 11., "message_uid": "f" * 32}]
+    def busy(_batch):
+        raise sqlite3.OperationalError("database is locked")
+    engine._session_end_flush_active = True
+    with monkeypatch.context() as patch:
+        patch.setattr(engine, "_append_ingest_batch", busy)
+        with pytest.raises(sqlite3.OperationalError):
+            engine._ingest_messages(deepcopy(host))
+    assert engine._pending_session_tails
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "off")
+    monkeypatch.setattr(engine, "_session_id", "synthetic-other")
+    engine._retry_pending_session_tails()
+    assert not engine._pending_session_tails
+    rows = engine._store.get_session_messages("S")
+    assert engine._store.get_session_messages("synthetic-other") == []
+    assert len(rows) == 2 and [r["content"] for r in rows] == [m["content"] for m in host]
+    for row in rows:
+        fact = engine._store.read_metadata_json(f"host_occurrence_row:S:{row['store_id']}")
+        assert fact["message_uid"] is None
+
+
+@pytest.mark.parametrize("change", ["stamp", "uid", "content", "proof"])
+def test_occurrence_warm_extent_miss_uses_normal_prefix_owner(build, monkeypatch, change):
+    monkeypatch.setenv("LCM_IDENTITY_ANCHOR", "1")
+    monkeypatch.setenv("LCM_HOST_MESSAGE_UID", "on")
+    engine = build()
+    host = [{"role": "user", "content": "extent user", "timestamp": 10., "message_uid": "a" * 32},
+            {"role": "assistant", "content": "extent reply", "timestamp": 11., "message_uid": "b" * 32}]
+    if change == "proof":
+        host = [{"role": "user" if i % 2 == 0 else "assistant", "content": f"proof extent row {i}",
+                 "timestamp": float(i + 1), "message_uid": f"{i + 1:032x}"} for i in range(100)]
+    engine.ingest(deepcopy(host))
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    assert engine._occurrence_window_cache[4].get("warm")
+    engine._occurrence_window_cache[4]["warm"][1]["warm_prefix"] = 9999
+    if change == "stamp":
+        host[0]["timestamp"] = 20.
+    elif change == "uid":
+        host[0]["message_uid"] = "c" * 32
+    elif change == "content":
+        host[0]["content"] = "changed extent user"
+    else:
+        # A newly published proof must invalidate the old proof-free admission.
+        engine.compress(deepcopy(host), force=True)
+        assert engine._compress_commit_proof or engine._durable_commit_proof_payload()
+    engine.ingest(deepcopy(host))
+    assert engine._ingest_failure_count == 0, engine._last_ingest_error
+    assert engine._occurrence_ingest_plan["warm_prefix"] == 0
+    after = stored(engine)
+    assert after[:len(before)] == before
+    if change != "proof":
+        assert len(after) > len(before), "changed prefix must reach the normal owner"
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after
+
+
+@pytest.mark.parametrize("basis", ["valid", "missing", "different", "malformed"])
+def test_occurrence_receipt_basis_keeps_fact_coverage_independent(build, basis):
+    engine = build()
+    original = [{"role": "user", "content": "basis user"},
+                {"role": "assistant", "content": "basis reply"}]
+    engine.ingest(deepcopy(original))
+    engine.shutdown()
+    engine = build()
+    assert engine._durable_commit_proof_payload() is None
+    accepted = [{"role": "user", "content": " basis user\n"}, original[1]]
+    engine.ingest(deepcopy(accepted))
+    before = stored(engine)
+    assert len(before) == 4  # The fresh raw user also owns a fresh unknown reply.
+    key = "host_occurrence_accepted_view:S"
+    receipt = engine._store.read_metadata_json(key)
+    assert receipt["basis"] == engine._occurrence_receipt_basis() == "no-compaction"
+    assert [entry["store_id"] for entry in receipt["entries"]] == [3, 4]
+    engine.shutdown()
+    engine = build()
+    engine.ingest(deepcopy(accepted))
+    assert stored(engine) == before
+    if basis == "missing":
+        receipt.pop("basis")
+    elif basis != "valid":
+        receipt["basis"] = "another compaction" if basis == "different" else [None]
+    engine._store.write_metadata_json([key], json.dumps(receipt))
+    engine._occurrence_window_cache = None
+    rows, facts, missing = engine._stored_occurrence_metadata()
+    assert not missing and set(facts) == {row["store_id"] for row in before}
+    mapping = engine._validate_occurrence_receipt(rows, facts, receipt=receipt)
+    assert mapping == ({i: (entry["store_id"], entry["input_sha256"])
+                        for i, entry in enumerate(receipt["entries"])} if basis == "valid" else {})
+    assert stored(engine) == before
+
+
+def test_occurrence_publication_uses_current_committed_pair_rows(build):
+    """occ-0582: publication selects accepted retry rows, not equal older pairs."""
+    engine = build()
+    host = fixture()
+    host += tool_pair("d", LONG + "d", tool_name="lookup")
+    host.append({"role": "user", "content": "pending carry sentinel", "timestamp": 40.})
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    next(row for row in host if row.get("content") == "repeat")["timestamp"] = 20.
+    for row in host:
+        if row.get("tool_call_id") in ("c", "d"):
+            row["content"] = CLEARED
+    following = [row for i in range(2) for row in tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup")]
+    host[-1:-1] = following
+    engine.ingest(deepcopy(host))
+    positions = [i for i, row in enumerate(host) if row.get("tool_call_id") in ("c", "d") or any(
+        call["id"] in ("c", "d") for call in row.get("tool_calls") or [])]
+    actual = {engine._occurrence_ingest_plan["matched"][i][1] for i in positions}
+    assert len(actual) == 4 and min(actual) > before[-1]["store_id"]
+    mapped = engine._get_store_id_map_for_messages(host, current_correspondence=True)
+    assert {mapped[id(host[i])] for i in positions} == actual
+    output = engine.compress(deepcopy(host), force=True)
+    assert engine._last_compression_status == "compacted"
+    proof = engine._durable_commit_proof_payload()
+    carried = {sid for source, start, end in proof["carry_ranges"] for sid in range(start + 1, end + 1)}
+    assert actual <= carried
+    old = {row["store_id"] for row in before if row.get("tool_call_id") in ("c", "d") or any(
+        call["id"] in ("c", "d") for call in row.get("tool_calls") or [])}
+    assert not old & carried
+    assert any(row.get("tool_call_id") == "c" for row in output)
+
+
+def test_occurrence_shortened_carry_has_one_actual_head_witness(build):
+    engine = build()
+    host = fixture()
+    host += tool_pair("d", LONG + "d", tool_name="lookup")
+    host.append({"role": "user", "content": "pending carry sentinel", "timestamp": 40.})
+    engine.ingest(deepcopy(host))
+    next(row for row in host if row.get("content") == "repeat")["timestamp"] = 20.
+    for row in host:
+        if row.get("tool_call_id") in ("c", "d"):
+            row["content"] = CLEARED
+    host[-1:-1] = [row for i in range(2) for row in tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup")]
+    engine.ingest(deepcopy(host))
+    output = engine.compress(deepcopy(host), force=True)
+    assert "repeat" not in output[0]["content"]
+    parents = engine._store.get_session_messages("S")
+    engine.on_session_end("S", deepcopy(host))
+    engine.on_session_start("C", boundary_reason="compression", old_session_id="S",
+                            conversation_id="conversation", platform="cli")
+    shortened = output[:-1]
+    assert output[-1]["content"] == "pending carry sentinel"
+    engine.ingest(deepcopy(shortened))
+    child = engine._store.get_session_messages("C")
+    assert len(child) == 1 and child[0]["content"] == shortened[0]["content"]
+    fact = engine._store.read_metadata_json(f"host_occurrence_row:C:{child[0]['store_id']}")
+    assert fact["occurrence_version"] == 2 and fact["user_store_id"] == child[0]["store_id"]
+    engine.ingest(deepcopy(shortened))
+    engine.shutdown()
+    engine = build()
+    engine.on_session_start("C", conversation_id="conversation", platform="cli")
+    engine.ingest(deepcopy(shortened))
+    assert engine._store.get_session_messages("C") == child
+    assert engine._store.get_session_messages("S") == parents
+
+
+def test_occurrence_moved_unstamped_sentinel_uses_structural_correspondence(build):
+    engine = build()
+    host = fixture()
+    host += tool_pair("d", LONG + "d", tool_name="lookup")
+    host.append({"role": "user", "content": "pending carry sentinel"})
+    for row in host:
+        row.pop("timestamp", None)
+    engine.ingest(deepcopy(host))
+    before = stored(engine)
+    engine.shutdown()
+    engine = build()
+    for row in host:
+        if row.get("tool_call_id") in ("c", "d"):
+            row["content"] = CLEARED
+    following = [row for i in range(2) for row in tool_pair(f"following-{i}", f"new result {i}", tool_name="lookup")]
+    host[-1:-1] = following
+    engine.ingest(deepcopy(host))
+    after = stored(engine)
+    assert after[:len(before)] == before
+    assert len(after) == len(before) + len(following)
+    assert all(row["content"] != "pending carry sentinel" for row in after[len(before):])
+    engine.ingest(deepcopy(host))
+    assert stored(engine) == after

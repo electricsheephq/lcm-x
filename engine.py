@@ -148,7 +148,8 @@ from .message_patterns import compile_message_patterns, matches_message_pattern
 from .aux_session import AuxiliarySessionMixin
 from .placeholder_ledger import PlaceholderLedgerMixin
 from .reconcile import _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, ReconcileMixin, _PRESERVED_OBJECTIVE_CONTEXT_PREFIX
-from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _emission_identity
+from .reconcile import _HERMES_PRUNED_TOOL_PLACEHOLDER, _HERMES_PRUNE_MIN_CHARS, _emission_identity
+from .reconcile import _is_stored_nonstring_content
 from .reconcile import _hermes_salvage_protected_positions
 from .reconcile import _commit_proof_identity_digest, _has_lossy_redacted_identity, _merge_append_cut, _proof_user_identity
 from .compaction import CompactionMixin
@@ -6945,7 +6946,8 @@ class LCMEngine(
     def _write_compress_commit_proof_payload(self, proof, payload) -> None:
         snapshot = None
         if "output_metadata" in proof and proof.get("durable") is not False:
-            snapshot = {"output_metadata": proof["output_metadata"], "output_length": len(proof["output"])}
+            snapshot = {"occurrence_version": 2, "output_metadata": proof["output_metadata"],
+                        "compaction": {"output_length": len(proof["output"])}}
             if not self._occurrence_snapshot_shape_valid(snapshot, payload):
                 raise ValueError("invalid occurrence snapshot")
             snapshot["proof_sha256"] = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
@@ -6962,6 +6964,16 @@ class LCMEngine(
         rows = snapshot.get("output_metadata")
         if not isinstance(rows, list):
             return False
+        if "occurrence_version" in snapshot and (snapshot["occurrence_version"] != 2 or "compaction" not in snapshot):
+            return False
+        envelope = snapshot.get("compaction")
+        if "compaction" in snapshot:
+            if (snapshot.get("occurrence_version") != 2 or not isinstance(envelope, dict)
+                    or set(envelope) != {"output_length"}
+                    or type(envelope.get("output_length")) is not int or envelope["output_length"] != len(rows)):
+                return False
+            if "output_length" in snapshot and snapshot["output_length"] != envelope["output_length"]:
+                return False
         if "output_length" in snapshot and (type(snapshot["output_length"]) is not int
                                             or snapshot["output_length"] != len(rows)):
             return False
@@ -6979,7 +6991,7 @@ class LCMEngine(
         if [row["identity_sha256"] for row in rows if row["identity_sha256"] is not None] != payload.get(
                 "effective_sha256_v4", payload.get("effective_sha256", [])):
             return False
-        if "output_length" not in snapshot:
+        if "output_length" not in snapshot and "compaction" not in snapshot:
             # Old snapshots lack a count. Their effective sequence and known scaffold positions must agree.
             scaffold = payload.get("scaffold_sha256_v4", payload.get("scaffold_sha256"))
             if scaffold is not None:
@@ -7081,6 +7093,765 @@ class LCMEngine(
             matched += 1
         return result
 
+    def _stored_occurrence_metadata(self):
+        """At most 4096 raw witnesses, including validated carry; no session scan.
+
+        Cache by connection generation. Ingest extends this cache after commit;
+        another writer invalidates it. Facts never rehash a protected/mutable row.
+        """
+        store = self._store
+        generation = (store._conn.total_changes, store._conn.execute("PRAGMA data_version").fetchone()[0])
+        key = (id(store), self._session_id, self._conversation_id, generation)
+        cache = getattr(self, "_occurrence_window_cache", None)
+        if cache and cache[0] == key:
+            return cache[1], cache[2], cache[3]
+        rows = store.get_session_tail(self._session_id, limit=4096)
+        room = 4096 - len(rows)
+        if room:
+            for source, start, end in self._load_compression_carry_ranges()[-64:]:
+                if room <= 0:
+                    break
+                parent = [r for r in store.get_session_rows_through(source, end, room)
+                          if start < r["store_id"] <= end]
+                rows = parent + rows
+                room -= len(parent)
+        rows = [r for r in rows if str(r.get("conversation_id") or "")
+                in ("", str(self._conversation_id or ""))]
+        keys = [f"host_occurrence_row:{r['session_id']}:{r['store_id']}" for r in rows]
+        sources = {r["session_id"] for r in rows}
+        values = store.read_metadata_json_many(keys + [f"host_occurrence_accepted_view:{s}" for s in sorted(sources)])
+        facts = {}
+        for row, name in zip(rows, keys):
+            fact = values.get(name)
+            if not isinstance(fact, dict) or fact.get("occurrence_version") != 2:
+                continue
+            digest, uid = fact.get("identity_sha256"), fact.get("message_uid")
+            if (not isinstance(digest, str) or len(digest) != 64
+                    or any(c not in "0123456789abcdef" for c in digest)
+                    or uid is not None and not _valid_uid(uid)
+                    or any(fact.get(k) is not None and type(fact[k]) is not int
+                           for k in ("user_store_id", "segment_call_store_id"))
+                    or "absorbed_message_uids" in fact and (not isinstance(fact["absorbed_message_uids"], list)
+                        or not fact["absorbed_message_uids"] or any(not _valid_uid(v) for v in fact["absorbed_message_uids"]))):
+                continue
+            facts[row["store_id"]] = fact
+        missing = set()
+        for source in sources:
+            receipt = values.get(f"host_occurrence_accepted_view:{source}")
+            coverage = self._occurrence_fact_coverage(receipt, source)
+            own = [r["store_id"] for r in rows if r["session_id"] == source]
+            # Only positive writer coverage distinguishes a legacy row from a
+            # lost v2 fact. Unavailable coverage cannot manufacture legacy proof.
+            required = (set(own) & coverage if coverage is not None else
+                        set(own) if receipt is not None or any(sid in facts for sid in own) else set())
+            missing.update(required - facts.keys())
+        state = self._occurrence_index(rows, facts, values.get(f"host_occurrence_accepted_view:{self._session_id}"))
+        self._occurrence_window_cache = (key, rows, facts, missing, state)
+        return rows, facts, missing
+
+    def _occurrence_index(self, rows, facts, receipt=None):
+        by_digest = {}
+        for sid, fact in facts.items():
+            by_digest.setdefault(fact["identity_sha256"], []).append(sid)
+        return dict(by_id={r["store_id"]: r for r in rows}, by_digest=by_digest,
+                    accepted=self._validate_occurrence_receipt(rows, facts, receipt=receipt),
+                    accepted_context=self._occurrence_context(),
+                    legacy=any(r["store_id"] not in facts for r in rows))
+
+    def _occurrence_context(self, switches=None):
+        if switches is None:
+            from .config import host_message_uid_mode
+
+            switches = (identity_anchor_enabled(), host_message_uid_mode())
+        return (*switches, tuple(self._compiled_ignore_message_patterns),
+                id(getattr(self, "_compress_commit_proof", None)),
+                id(getattr(self, "_last_emission_descriptors", None)),
+                getattr(self, "_retired_durable_proof", None), self._last_compacted_store_id)
+
+    def _current_occurrence_source_ids(self, messages, occurrences, available):
+        """Project the last committed accepted input, not a second content-first selection."""
+        plan = getattr(self, "_occurrence_ingest_plan", {})
+        binding = plan.get("publication")
+        view = getattr(self, "_last_active_replay_messages", ())
+        identities = getattr(self, "_last_active_replay_source_identities", ())
+        if (not binding or binding[:3] != (id(self._store), self._session_id, self._conversation_id)
+                or binding[3] is not view or plan.get("failed") or len(view) > 4096
+                or len(view) != len(identities) or plan.get("switches") != self._occurrence_context()[:2]):
+            return {}
+        try:
+            rows, facts, missing = self._stored_occurrence_metadata()
+            cache = self._occurrence_window_cache
+            by_id, choices, valid = cache[4]["by_id"], {}, set()
+            for pos, (source, sid) in plan["matched"].items():
+                row, fact = by_id.get(sid), facts.get(sid)
+                if (pos not in plan["proven"] or pos in plan.get("deferred", ()) or pos >= len(view)
+                        or sid not in available or sid in missing or not row or not fact or row["session_id"] != source):
+                    continue
+                full = self._message_replay_identity(view[pos], strip_carrier=False)
+                literal = self._message_replay_identity(view[pos], strip_carrier=False, allow_pruned_tool_alias=False)
+                digest = _commit_proof_identity_digest(_proof_user_identity(literal))
+                if (full != identities[pos] or _has_lossy_redacted_identity(literal)
+                        or digest != fact["identity_sha256"] or self._host_occurrence_changed(
+                            self._occurrence_metadata(view[pos], switches=plan["switches"]),
+                            self._occurrence_metadata(row, stored=True, fact=fact, switches=plan["switches"]))):
+                    continue
+                valid.add(pos)
+                choices.setdefault(digest, []).append((pos, sid))
+            # A source mapper cannot publish only the convenient half of a segment.
+            segments = {}
+            for pos, (_user, segment) in plan["owners"].items():
+                if segment is not None:
+                    segments.setdefault(segment, set()).add(pos)
+            invalid = set().union(*(group for group in segments.values() if not group <= valid)) if segments else set()
+            result, used = {}, set()
+            counts = Counter(id(msg) for msg in messages)
+            for msg, (_entry, projected) in zip(messages, occurrences or [(None, None)] * len(messages)):
+                full = self._message_replay_identity(msg, strip_carrier=False, allow_pruned_tool_alias=False)
+                options = choices.get(_commit_proof_identity_digest(_proof_user_identity(full)), ())
+                if not options and projected is not None:
+                    options = choices.get(_commit_proof_identity_digest(_proof_user_identity(projected)), ())
+                options = [(pos, sid) for pos, sid in options if pos not in invalid and sid not in used
+                           and not self._host_occurrence_changed(
+                               self._occurrence_metadata(msg, switches=plan["switches"]),
+                               self._occurrence_metadata(view[pos], switches=plan["switches"]))]
+                if len(options) == 1 and counts[id(msg)] == 1:
+                    result[id(msg)] = options[0][1]
+                    used.add(options[0][1])
+            generation = (self._store._conn.total_changes, self._store._conn.execute("PRAGMA data_version").fetchone()[0])
+            return result if generation == cache[0][3] else {}
+        except Exception:
+            logger.debug("LCM current correspondence publication unavailable", exc_info=True)
+            return {}
+
+    def _advance_occurrence_cache(self, expected):
+        # Only called across named writes to unrelated metadata/bindings. A
+        # backfill or any unaccounted generation change invalidates raw truth.
+        cache = getattr(self, "_occurrence_window_cache", None)
+        generation = (self._store._conn.total_changes, self._store._conn.execute(
+            "PRAGMA data_version").fetchone()[0])
+        if (cache and cache[0][:3] == (id(self._store), self._session_id, self._conversation_id)
+                and cache[0][3] == expected and generation[1] == expected[1]):
+            self._occurrence_window_cache = (cache[0][:3] + (generation,), *cache[1:])
+        else:
+            self._occurrence_window_cache = None
+
+    @staticmethod
+    def _occurrence_id_ranges(ids):
+        ranges = []
+        for sid in sorted(ids):
+            if ranges and ranges[-1][1] + 1 == sid:
+                ranges[-1][1] = sid
+            else:
+                ranges.append([sid, sid])
+        return ranges
+
+    def _occurrence_fact_ranges(self, receipt, source, conversation_id=None):
+        if (not isinstance(receipt, dict) or receipt.get("occurrence_version") != 2
+                or receipt.get("scope") != {"session_id": source, "conversation_id": (
+                    self._conversation_id if conversation_id is None else conversation_id)}):
+            return None
+        if "fact_store_ranges" not in receipt:
+            covered = receipt.get("fact_store_ids")
+            if (not isinstance(covered, list) or len(covered) > 4096
+                    or any(type(sid) is not int or sid <= 0 for sid in covered)
+                    or covered != sorted(set(covered))):
+                return None
+            return self._occurrence_id_ranges(covered)
+        ranges = receipt["fact_store_ranges"]
+        if "fact_store_ids" in receipt or not isinstance(ranges, list) or len(ranges) > 4096:
+            return None
+        previous, count = 0, 0
+        for pair in ranges:
+            if (not isinstance(pair, list) or len(pair) != 2 or any(type(v) is not int for v in pair)
+                    or not previous < pair[0] <= pair[1]):
+                return None
+            previous = pair[1]
+            count += pair[1] - pair[0] + 1
+            if count > 4096:
+                return None
+        return ranges
+
+    def _occurrence_fact_coverage(self, receipt, source, conversation_id=None):
+        ranges = self._occurrence_fact_ranges(receipt, source, conversation_id)
+        return None if ranges is None else {sid for start, end in ranges for sid in range(start, end + 1)}
+
+    def _occurrence_metadata(self, message, *, stored=False, fact=None, switches=None):
+        result = self._host_occurrence_metadata(message)
+        if stored:
+            result["timestamp"] = _normalize_observed_at(message.get("observed_at"))
+            result["message_uid"] = (fact or {}).get("message_uid")
+        switches = self._occurrence_context()[:2] if switches is None else switches
+        if not switches[0] or switches[1] == "off":
+            result["message_uid"] = None
+        absorbed = (fact or {}).get("absorbed_message_uids") if stored else message.get("_absorbed_message_uids")
+        result["_absorbed_message_uids"] = absorbed if isinstance(absorbed, list) else None
+        return result
+
+    def _occurrence_receipt_basis(self, store=None, source=None):
+        """Durable emission binding, read only for positional receipt use/write."""
+        store, source = store or self._store, source or self._session_id
+        try:
+            local = getattr(self, "_compress_commit_proof", None)
+            if store is self._store and source == self._session_id and local and local.get("durable") is False:
+                return None
+            proof = store.read_metadata_json(self._replay_snapshot_metadata_key(
+                _COMPACTION_COMMIT_PROOF_METADATA_PREFIX, source))
+            snapshot = store.read_metadata_json(self._replay_snapshot_metadata_key("host_occurrence_snapshot", source))
+            if proof is None and snapshot is None:
+                return "no-compaction"
+            if (not isinstance(proof, dict) or not isinstance(snapshot, dict)
+                    or not self._occurrence_snapshot_shape_valid(snapshot, proof)):
+                return None
+            digest = hashlib.sha256(json.dumps(proof, sort_keys=True).encode()).hexdigest()
+            return digest if snapshot.get("proof_sha256") == digest else None
+        except Exception:
+            return None  # Unavailable binding cannot consume rows or block their write.
+
+    def _validate_occurrence_receipt(self, rows, facts, *, receipt=None):
+        if receipt is None:
+            receipt = self._store.read_metadata_json(f"host_occurrence_accepted_view:{self._session_id}")
+        if not isinstance(receipt, dict) or receipt.get("occurrence_version") != 2:
+            return {}
+        if receipt.get("scope") != {"session_id": self._session_id, "conversation_id": self._conversation_id}:
+            return {}
+        entries = receipt.get("entries")
+        if not isinstance(entries, list) or len(entries) > 4096:
+            return {}
+        basis = self._occurrence_receipt_basis()
+        if basis is None or receipt.get("basis") != basis:
+            return {}
+        available = {(r["session_id"], r["store_id"]) for r in rows if r["store_id"] in facts}
+        seen, result, previous = set(), {}, -1
+        for entry in entries:
+            if not isinstance(entry, dict) or type(entry.get("host_index")) is not int:
+                return {}
+            index, source, sid = entry["host_index"], entry.get("source_session_id"), entry.get("store_id")
+            literal = entry.get("input_sha256")
+            if (not previous < index < 4096 or not isinstance(source, str) or type(sid) is not int
+                    or (source, sid) not in available or (source, sid) in seen
+                    or not isinstance(literal, str) or not re.fullmatch(r"[0-9a-f]{64}", literal)):
+                return {}
+            previous = index
+            seen.add((source, sid))
+            result[index] = (sid, literal)
+        return result
+
+    def _resolve_occurrence_view(self, messages):
+        """Resolve rows and complete segments once, before any consuming cursor.
+
+        Equal bytes only discover candidates. Known conflicts veto every source;
+        a row must have an independent fact. Missing/corrupt evidence keeps it.
+        """
+        result = dict(matched={}, proven=set(), fresh=set(), legacy=set(), deferred=set(),
+                      updates={}, owners={}, witness=set(), input_digests={}, failed=False, warm_prefix=0)
+        try:
+            context = self._occurrence_context()
+            switches = context[:2]
+            result["switches"] = switches
+            rows, facts, missing = self._stored_occurrence_metadata()
+            state = self._occurrence_window_cache[4]
+            if state["accepted_context"] != context:
+                state["accepted"] = self._validate_occurrence_receipt(rows, facts)
+                state["accepted_context"] = context
+            legacy_rows = state["legacy"] and any(r["store_id"] not in facts and r["store_id"] not in missing for r in rows)
+            by_id, by_digest = state["by_id"], state["by_digest"]
+            accepted = {index: ref[0] for index, ref in state["accepted"].items()}
+            start, current = 0, []
+            warm = state.get("warm")
+            previous_view = getattr(self, "_last_active_replay_messages", ())
+            if (warm and not missing and not self._ingest_cursor_needs_reconcile
+                    and warm[0] == context and self._ingest_cursor == len(previous_view)
+                    and len(messages) >= len(previous_view) and messages[:len(previous_view)] == previous_view):
+                tail = messages[len(previous_view):]
+                metadata = [self._occurrence_metadata(m, switches=switches) for m in tail]
+                if (not tail or tail[0].get("role") == "user" and all(
+                        m.get("role") in ("user", "assistant") and m.get("tool_calls") is None
+                        and isinstance(m.get("content"), str) and meta["_absorbed_message_uids"] is None
+                        and meta["timestamp"] is not None and meta["message_uid"] is not None
+                        for m, meta in zip(tail, metadata))):
+                    result = {k: v.copy() if isinstance(v, (dict, set)) else v for k, v in warm[1].items()}
+                    # Current validation only: never inherit an old operation's extent.
+                    result["warm_prefix"] = len(previous_view)
+                    if not tail:
+                        return result
+                    start = len(previous_view)
+                    current = state["current"] + metadata
+            result["has_facts"] = bool(facts)
+            result["needs_receipt"] = bool(accepted)
+            protected = _hermes_salvage_protected_positions(messages)
+            choices, conflicts, literal_conflicts = {}, {}, set()
+            current = current or [self._occurrence_metadata(m, switches=switches) for m in messages]
+            warm_plain = (not self._ingest_cursor_needs_reconcile and self._ingest_cursor > 0
+                          and not getattr(self, "_compress_commit_proof", None))
+            previous_view = getattr(self, "_last_active_replay_messages", ())
+            owner_user, owner_segment = result["owners"].get(start - 1, (None, None))
+            for index in range(start, len(messages)):
+                message = messages[index]
+                if message.get("role") == "user":
+                    owner_user, owner_segment = index, None
+                if message.get("role") == "assistant" and message.get("tool_calls"):
+                    owner_segment = index
+                result["owners"][index] = (owner_user, owner_segment)
+                literal = self._message_replay_identity(message, strip_carrier=False, allow_pruned_tool_alias=False)
+                digest = _commit_proof_identity_digest(literal)
+                result["input_digests"][index] = digest
+                if index in accepted and state["accepted"][index][1] != digest:
+                    accepted.pop(index)
+                    if message.get("role") == "user":
+                        literal_conflicts.add(index)
+                if owner_user in literal_conflicts:
+                    accepted.pop(index, None)  # An old reply slot cannot bind a different raw user.
+                effective = self._message_replay_identity(message, allow_pruned_tool_alias=index not in protected)
+                if _has_lossy_redacted_identity(literal) or self._matches_ignore_message_patterns(message):
+                    choices[index], conflicts[index] = [], []
+                    result["deferred"].add(index)
+                    continue
+                digests = {_commit_proof_identity_digest(_proof_user_identity(i)) for i in (literal, effective)}
+                candidates = list(dict.fromkeys(sid for d in digests for sid in by_digest.get(d, ())))
+                if literal != effective and self._generated_context_carrier_remainder(message) is not None:
+                    raw = by_digest.get(_commit_proof_identity_digest(_proof_user_identity(literal)), ())
+                    if raw:
+                        candidates = list(raw)  # The actual stored carrier outranks its retained-user alias.
+                if (message.get("role") == "tool" and message.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                        and index not in protected and switches[0]):
+                    # A rotation child's alias index need not include its parent
+                    # rows. Discovery uses only the permitted carry window; the
+                    # complete segment and each row's metadata must still bind.
+                    candidates = list(dict.fromkeys(candidates + [r["store_id"] for r in rows
+                        if r["store_id"] in facts and r.get("role") == "tool"
+                        and r.get("tool_call_id") == message.get("tool_call_id")
+                        and isinstance(r.get("content"), str) and len(r["content"]) > _HERMES_PRUNE_MIN_CHARS
+                        and not _is_stored_nonstring_content(r["content"])
+                        and not _has_lossy_redacted_identity(self._message_replay_identity(
+                            r, stored_row=True, allow_pruned_tool_alias=False))]))
+                good, bad = [], []
+                for sid in candidates:
+                    old = self._occurrence_metadata(by_id[sid], stored=True, fact=facts[sid], switches=switches)
+                    absorbed, old_absorbed = current[index]["_absorbed_message_uids"], old["_absorbed_message_uids"]
+                    retained_conflict = bool(absorbed and old_absorbed and set(absorbed) != set(old_absorbed))
+                    conflict = self._host_occurrence_changed(current[index], old) or retained_conflict
+                    uid_conflict = retained_conflict or (current[index]["message_uid"] is not None and old["message_uid"] is not None
+                                    and current[index]["message_uid"] != old["message_uid"])
+                    if conflict and not uid_conflict:
+                        end = next((p for p in range(index + 1, len(messages))
+                                    if messages[p].get("role") == "user"), len(messages))
+                        pruned_turn = (message.get("role") == "user" and any(
+                            m.get("role") == "tool" and m.get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                            for m in messages[index + 1:end]))
+                        aliases = (self._store.get_message_relations([sid], "alt_stamp")
+                                   + self._store.get_message_relations([sid], "carried_stamp")) if switches[0] else []
+                        same_uid = False
+                        uid = current[index]["message_uid"]
+                        if uid is not None and uid == old["message_uid"]:
+                            lineage, _problem = self._host_uid_lineage_key()
+                            if lineage is not None:
+                                bindings = self._store.host_uid_bindings_for(lineage, {uid}, ("canonical",))
+                                same_uid = (sid, "canonical") in bindings.get(uid, ())
+                        if same_uid or any(_normalize_observed_at(r.get("observed_at")) == current[index]["timestamp"]
+                                           for r in aliases):
+                            conflict = False
+                        elif aliases or not ((pruned_turn or warm_plain and index < len(previous_view)
+                                              and self._host_occurrence_changed(message, previous_view[index])
+                                              and literal == self._message_replay_identity(
+                                                  previous_view[index], strip_carrier=False, allow_pruned_tool_alias=False))
+                                             and message.get("role") == "user"):
+                            result["deferred"].add(index)
+                            continue  # The existing stamp/recovery owner decides this partition.
+                    (bad if conflict else good).append(sid)
+                if current[index]["message_uid"]:
+                    equal_uid = [sid for sid in good if facts[sid].get("message_uid") == current[index]["message_uid"]]
+                    if equal_uid:
+                        good = equal_uid
+                previous = accepted.get(index)
+                if previous in good:
+                    good = [previous]
+                elif previous in bad:
+                    good, bad = [], [previous]
+                choices[index], conflicts[index] = good, bad
+
+            proof = None if start else (getattr(self, "_compress_commit_proof", None) or self._durable_commit_proof_payload())
+            historical = set()
+            extent = len((proof or {}).get("output_metadata", ()))
+            if switches[0] and extent:
+                for pos in choices:
+                    if (pos < extent or pos in accepted or messages[pos].get("role") != "user"
+                            or current[pos]["timestamp"] is None):
+                        continue
+                    digest = _commit_proof_identity_digest(_proof_user_identity(self._message_replay_identity(
+                        messages[pos], strip_carrier=False, allow_pruned_tool_alias=False)))
+                    users = [sid for sid in by_digest.get(digest, ()) if by_id[sid].get("role") == "user"
+                             and _normalize_observed_at(by_id[sid].get("observed_at")) == current[pos]["timestamp"]]
+                    if len(users) != 1 or sum(m.get("role") == "user" and current[i]["timestamp"] == current[pos]["timestamp"]
+                            and self._message_replay_identity(m, strip_carrier=False) == self._message_replay_identity(
+                                messages[pos], strip_carrier=False) for i, m in enumerate(messages)) != 1:
+                        continue
+                    # #1869's user owner ends at ORIGINAL output extent;
+                    # a genuinely new call is still decided as a fresh pair.
+                    historical.add(pos)
+                    choices[pos], conflicts[pos] = [], []
+                    result["deferred"].add(pos)
+            used = {ref[1] for ref in result["matched"].values()}
+            user_index = result["owners"].get(start - 1, (None, None))[0]
+            user_id = result["matched"].get(user_index, (None, None))[1]
+            reserved = {sid: pos for pos, options in choices.items() if current[pos]["message_uid"]
+                        for sid in options if facts[sid].get("message_uid") == current[pos]["message_uid"]}
+            for pos in choices:
+                choices[pos] = [sid for sid in choices[pos] if reserved.get(sid, pos) == pos]
+            user_groups = {}
+            for pos in range(start, len(messages)):
+                if messages[pos].get("role") == "user":
+                    user_groups.setdefault(tuple(sorted(choices[pos])), []).append(pos)
+
+            def accept(index, sid):
+                result["matched"][index] = (by_id[sid]["session_id"], sid)
+                result["proven"].add(index)
+                if (current[index]["_absorbed_message_uids"] and facts[sid]["identity_sha256"] !=
+                        _commit_proof_identity_digest(_proof_user_identity(self._message_replay_identity(
+                            messages[index], strip_carrier=False, allow_pruned_tool_alias=False)))):
+                    # A retained-user alias cannot prove the carrier's absorbed
+                    # occurrence. The existing remapped snapshot owner decides it.
+                    result["proven"].discard(index)
+                    result["deferred"].add(index)
+                used.add(sid)
+                uid = current[index]["message_uid"]
+                if uid and not facts[sid].get("message_uid"):
+                    name = f"host_occurrence_row:{by_id[sid]['session_id']}:{sid}"
+                    result["updates"][name] = {**facts[sid], "message_uid": uid}
+                    if (current[index]["timestamp"] is not None and by_id[sid].get("observed_at") is not None
+                            and current[index]["timestamp"] != by_id[sid]["observed_at"]):
+                        # A positive stamp alias permits adoption, while its
+                        # existing owner still records the canonical UID binding.
+                        result["proven"].discard(index)
+                        result["deferred"].add(index)
+
+            index = start
+            while index < len(messages):
+                message = messages[index]
+                if message.get("role") == "user":
+                    user_index = index
+                    eligible = [sid for sid in choices[index] if sid not in used]
+                    user_id = eligible[0] if len(eligible) == 1 else None
+                    group = tuple(sorted(choices[index]))
+                    if len(group) > 1 and len(user_groups[group]) >= len(group):
+                        ordinal = user_groups[group].index(index)
+                        user_id = group[ordinal] if ordinal < len(group) and group[ordinal] not in used else None
+                    if not switches[0]:
+                        proof = self._durable_commit_proof_payload() or {}
+                        if index >= len(proof.get("output_metadata", ())):
+                            user_id = None
+                    if user_id is not None:
+                        old = self._occurrence_metadata(by_id[user_id], stored=True, fact=facts[user_id], switches=switches)
+                        structural = False
+                        if index + 1 < len(messages) and messages[index + 1].get("tool_calls"):
+                            end = index + 2
+                            while end < len(messages) and messages[end].get("role") == "tool":
+                                end += 1
+                            for call_id in choices[index + 1]:
+                                selection = {call_id}
+                                if facts[call_id].get("user_store_id") != user_id:
+                                    continue
+                                for pos in range(index + 2, end):
+                                    linked = [sid for sid in choices[pos] if sid not in selection
+                                              and facts[sid].get("segment_call_store_id") == call_id
+                                              and facts[sid].get("user_store_id") == user_id]
+                                    if len(linked) != 1:
+                                        break
+                                    selection.add(linked[0])
+                                owned = {sid for sid, fact in facts.items()
+                                         if fact.get("segment_call_store_id") == call_id}
+                                if end > index + 2 and len(selection) == end - index - 1 and owned == selection:
+                                    structural = True
+                        previous = next((r for r in reversed(rows) if r["store_id"] < user_id
+                                         and r["session_id"] == by_id[user_id]["session_id"]), None)
+                        if previous and previous.get("role") == "tool":
+                            prior = previous["store_id"]
+                            structural |= any(pos < index and ref[1] == prior and pos in result["proven"]
+                                              for pos, ref in result["matched"].items())
+                        if (not structural and accepted.get(index) != user_id and not any(
+                                current[index][key] is not None and old[key] is not None
+                                for key in ("timestamp", "message_uid"))):
+                            # A unique content candidate with missing metadata is
+                            # not a cold occurrence witness. The existing owner
+                            # decides ambiguity; record its actual committed view.
+                            user_id = None
+                            result["needs_receipt"] = True
+                    if user_id is not None:
+                        accept(index, user_id)
+                    elif conflicts[index]:
+                        result["fresh"].add(index)
+                    elif eligible and not any(current[index][key] is not None for key in ("timestamp", "message_uid")):
+                        result["needs_receipt"] = True
+                    elif eligible and current[index]["timestamp"] is not None and switches[0]:
+                        # Accepted #1830 user-stamp policy: leave ambiguity to
+                        # the existing anchor, without choosing a row or binding
+                        # its pair. It cannot authorize fact adoption.
+                        result["legacy"].add(index)
+                    index += 1
+                    continue
+                if message.get("role") == "assistant" and message.get("tool_calls"):
+                    end = index + 1
+                    while end < len(messages) and messages[end].get("role") == "tool":
+                        end += 1
+                    segment = list(range(index, end))
+                    winners = []
+                    for call_id in choices[index]:
+                        if call_id in used:
+                            continue
+                        selection = {index: call_id}
+                        for pos in segment[1:]:
+                            eligible = [sid for sid in choices[pos] if sid not in used
+                                        and sid not in selection.values()
+                                        and facts[sid].get("segment_call_store_id") == call_id]
+                            if len(eligible) != 1:
+                                break
+                            selection[pos] = eligible[0]
+                        if len(selection) == len(segment):
+                            winners.append(selection)
+                    # Known pair UIDs outrank a user-only replacement. Otherwise
+                    # the accepted user relation identifies its re-stored pair.
+                    # A prior accepted slot selects a candidate, not independent
+                    # pair metadata over a newer owning-user conflict.
+                    anchored = any(current[pos]["message_uid"] is not None
+                                   and current[pos]["message_uid"] == facts[sid].get("message_uid")
+                                   or current[pos]["timestamp"] is not None
+                                   and current[pos]["timestamp"] == _normalize_observed_at(by_id[sid].get("observed_at"))
+                                   for winner in winners for pos, sid in winner.items())
+                    steady_single = (not self._ingest_cursor_needs_reconcile and self._ingest_cursor > 0
+                                     and not getattr(self, "_compress_commit_proof", None)
+                                     and not self._durable_commit_proof_payload()
+                                     and sum(bool(m.get("tool_calls")) for m in messages[
+                                         (user_index or 0) + 1:next((p for p in range(index + 1, len(messages))
+                                             if messages[p].get("role") == "user"), len(messages))]) == 1)
+                    if not anchored and user_id is not None:
+                        winners = [w for w in winners if facts[w[index]].get("user_store_id") == user_id
+                                   or accepted.get(index) == w[index]]
+                    if user_index in historical:
+                        winners = [w for w in winners if not any(current[pos]["message_uid"] is not None
+                                   and facts[sid].get("message_uid") is None for pos, sid in w.items())]
+                    user_changed = user_index in result["fresh"]
+                    if user_index in result["legacy"] and not anchored:
+                        winners = []
+                    if user_changed and not anchored and not steady_single:
+                        winners = []
+                    borrowed = any(messages[p].get("content") == _HERMES_PRUNED_TOOL_PLACEHOLDER
+                                   for p in segment[1:])
+                    if borrowed and not switches[0]:
+                        winners = []
+                    if len(winners) == 1:
+                        if user_id is None and user_index is not None and not anchored:
+                            # A prefix edit can accept an unchanged pair under
+                            # a newly stored user. Facts alone cannot record this
+                            # selected cross-row relationship (named prefix-edit
+                            # replay regression); retain that accepted selection.
+                            result["needs_receipt"] = True
+                        for pos, sid in winners[0].items():
+                            accept(pos, sid)
+                    else:
+                        if missing and any(choices[pos] for pos in segment):
+                            result["needs_receipt"] = True
+                        # Whole-segment fence for UID changes and bounded/pruned
+                        # retries. Preserve #1179's literal steady-result update.
+                        new_call_ids = {call.get("id") for call in message.get("tool_calls", ())
+                                        if isinstance(call, dict) and call.get("id")}
+                        stored_call_ids = {call.get("id") for row in rows for call in row.get("tool_calls") or ()
+                                           if isinstance(call, dict)}
+                        exposed_call = (not self._ingest_cursor_needs_reconcile and index < self._ingest_cursor
+                                        and index < len(previous_view) and not choices[index]
+                                        and new_call_ids and not new_call_ids & stored_call_ids
+                                        and self._message_replay_identity(message, strip_carrier=False) !=
+                                        self._message_replay_identity(previous_view[index], strip_carrier=False))
+                        if exposed_call or not steady_single and (any(conflicts[pos] for pos in segment)
+                                                  or borrowed and not legacy_rows or user_changed
+                                                  or missing):
+                            result["fresh"].update(segment)
+                    index = end
+                    continue
+                eligible = [sid for sid in choices[index] if sid not in used]
+                if (user_index in result["fresh"] and current[index]["message_uid"] is None
+                        and current[index]["timestamp"] is None):
+                    if choices[index]:
+                        # Named #1451 equal-reply checkpoint: the user stamp
+                        # accepts an unknown reply once; equal row facts alone
+                        # cannot select that copy at the next cold restart.
+                        result["needs_receipt"] = True
+                    eligible = []
+                    result["fresh"].add(index)
+                if len(eligible) == 1:
+                    sid = eligible[0]
+                    old = self._occurrence_metadata(by_id[sid], stored=True, fact=facts[sid], switches=switches)
+                    owner = result["matched"].get(user_index)
+                    bound = (accepted.get(index) == sid or any(current[index][key] is not None
+                             and old[key] is not None for key in ("timestamp", "message_uid"))
+                             or user_index in result["proven"] and owner is not None
+                             and facts[sid].get("user_store_id") == owner[1])
+                    if bound:
+                        accept(index, sid)
+                    else:
+                        result["deferred"].add(index)
+                        result["needs_receipt"] = True
+                elif conflicts[index]:
+                    result["fresh"].add(index)
+                index += 1
+            result["proof_free"] = proof is None
+            generated = set()
+            emitted_heads = set()
+            if proof:
+                projection, identities = self._occurrence_replay_identities(messages, proof)
+                generated = {i for i, identity in enumerate(identities) if identity is None}
+                emitted_heads = {i for i, entry in enumerate(projection.entries)
+                                 if entry.generated_span is not None and identities[i] is not None}
+            # An unmatched content/alias decision still belongs to the existing
+            # anchor/audit/protection path. It is not a fresh occurrence finding.
+            # A missing or malformed fact for this new-writer window, however,
+            # cannot authorize consumption and must retain the affected rows.
+            unmatched = set(range(len(messages))) - result["proven"] - result["legacy"] - generated
+            if missing:
+                result["fresh"].update(unmatched)
+            else:
+                result["deferred"].update(unmatched)
+            if (proof and len(messages) < len(proof.get("output_metadata", ()))
+                    and self._load_compression_carry_ranges()
+                    and not any(r["session_id"] == self._session_id for r in rows)):
+                # A shortened carry view needs one actual child-row witness for
+                # its independently validated delivered head. It is never a
+                # fabricated parent row or a blanket generated-row insertion.
+                heads = {i for i, entry in enumerate(projection.entries) if entry.generated_span is not None}
+                tool_carry = any(messages[pos].get("role") == "tool" and segment is not None
+                                 and pos in result["proven"] and result["matched"][pos][0] != self._session_id
+                                 for pos, (_user, segment) in result["owners"].items())
+                if heads and tool_carry and set(range(len(messages))) - heads <= result["proven"]:
+                    emitted_heads.update(heads)
+                    result["needs_receipt"] = True
+                result["witness"].update(emitted_heads)
+                result["fresh"].update(emitted_heads)
+                result["proven"].difference_update(emitted_heads)
+                for index in emitted_heads:
+                    result["matched"].pop(index, None)
+            state["current"] = current
+            return result
+        except Exception:
+            logger.warning("LCM occurrence resolver unavailable; retaining unproven rows", exc_info=True)
+            result["input_digests"] = {i: _commit_proof_identity_digest(self._message_replay_identity(
+                m, strip_carrier=False, allow_pruned_tool_alias=False)) for i, m in enumerate(messages[:4096])}
+            result.update(matched={}, proven=set(), fresh=set(range(len(messages))), updates={}, failed=True,
+                          needs_receipt=True, warm_prefix=0)
+            return result
+
+    def _occurrence_cursor_fence(self, messages, cursor, consumed_proof=None):
+        resolution = getattr(self, "_occurrence_ingest_plan", None)
+        if not resolution or resolution.get("length") != len(messages):
+            return cursor
+        # Valid emission provenance remains separate from occurrence evidence.
+        proof = None if resolution.get("failed") else consumed_proof or (
+            None if resolution.get("proof_free") else
+            getattr(self, "_compress_commit_proof", None) or self._durable_commit_proof_payload())
+        generated = set()
+        if proof:
+            _, identities = self._occurrence_replay_identities(messages, proof)
+            generated = {i for i, identity in enumerate(identities) if identity is None}
+        safe = resolution["proven"] | resolution.get("legacy", set()) | generated
+        prefix = next((i for i in range(len(messages)) if i not in safe), len(messages))
+        cursor = max(cursor, prefix)
+        unresolved = set(range(cursor)) - safe - resolution.get("deferred", set())
+        resolution["fresh"].update(unresolved)
+        return min(unresolved | resolution["fresh"], default=cursor) if unresolved else min(
+            resolution["fresh"] | {cursor})
+
+    def _persist_occurrence_adoptions(self, plan):
+        if not plan.get("updates"):
+            return
+        with self._store.atomic(immediate=True):
+            for key, fact in plan["updates"].items():
+                self._store.write_metadata_json([key], json.dumps(fact, separators=(",", ":")), skip_unchanged=True)
+        self._occurrence_window_cache = None
+
+    def _occurrence_batch_factory(self, batch):
+        """Retry-local state resets on the first callback of every insert attempt."""
+        source = batch["session_id"]
+        # Fresh for the actual append, including an off-current queued retry;
+        # never retain settings in the queued batch or across ingest calls.
+        switches = self._occurrence_context()[:2]
+        initial = batch.get("occurrence_matched", {})
+        ids, written = {}, set()
+
+        def factory(message, store_id):
+            pos = message["_occurrence_position"]
+            if pos == batch["metadata_messages"][0]["_occurrence_position"]:
+                ids.clear()
+                ids.update(initial)
+                written.clear()
+                batch["_occurrence_written_facts"] = {}
+                batch.pop("_occurrence_written_receipt", None)
+            ids[pos] = (source, store_id)
+            written.add(store_id)
+            def owner(name):
+                reference = ids.get(message.get(name))
+                return reference[1] if reference and reference[0] == source else None
+            fact = dict(occurrence_version=2,
+                        identity_sha256=message["_occurrence_digest"],
+                        message_uid=self._occurrence_metadata(message, switches=switches)["message_uid"],
+                        user_store_id=owner("_occurrence_user"),
+                        segment_call_store_id=owner("_occurrence_segment"))
+            absorbed = message.get("_absorbed_message_uids")
+            if isinstance(absorbed, list) and absorbed and all(_valid_uid(uid) for uid in absorbed):
+                fact["absorbed_message_uids"] = list(dict.fromkeys(absorbed))
+            batch["_occurrence_written_facts"][store_id] = fact
+            records = self._real_user_scaffold_metadata_rows(message, store_id)
+            records.append((f"host_occurrence_row:{source}:{store_id}", json.dumps(fact, separators=(",", ":"))))
+            if pos == batch["metadata_messages"][0]["_occurrence_position"]:
+                records.extend((key, json.dumps(value, separators=(",", ":")))
+                               for key, value in batch.get("occurrence_updates", {}).items())
+            if pos == batch["metadata_messages"][-1]["_occurrence_position"]:
+                key = f"host_occurrence_accepted_view:{source}"
+                previous = batch["store"].read_metadata_json(key)
+                coverage = self._occurrence_fact_ranges(previous, source, batch["conversation_id"]) or []
+                ranges = []
+                for start, end in sorted(coverage + self._occurrence_id_ranges(written)):
+                    if ranges and start <= ranges[-1][1] + 1:
+                        ranges[-1][1] = max(end, ranges[-1][1])
+                    else:
+                        ranges.append([start, end])
+                excess = sum(end - start + 1 for start, end in ranges) - 4096
+                while excess > 0:
+                    start, end = ranges[0]
+                    trim = min(excess, end - start + 1)
+                    if trim == end - start + 1:
+                        ranges.pop(0)
+                    else:
+                        ranges[0] = [start + trim, end]
+                    excess -= trim
+                receipt = dict(occurrence_version=2,
+                               scope=dict(session_id=source, conversation_id=batch["conversation_id"]),
+                               fact_store_ranges=ranges)
+                if batch.get("occurrence_receipt") and batch.get("occurrence_length", 4097) <= 4096:
+                    basis = self._occurrence_receipt_basis(batch["store"], source)
+                    if basis is not None:
+                        receipt["basis"] = basis
+                        receipt["entries"] = [dict(host_index=index, source_session_id=ref[0], store_id=ref[1],
+                                                   input_sha256=batch.get("occurrence_inputs", {}).get(index))
+                                              for index, ref in sorted(ids.items())]
+                batch["_occurrence_written_receipt"] = receipt
+                if previous != receipt:
+                    records.append((key, json.dumps(receipt, separators=(",", ":"))))
+            return records
+        return factory
+
+    def _occurrence_batch_messages(self, rows, *, use_plan=True):
+        user, segment = None, None
+        result = []
+        for pos, message in rows:
+            if message.get("role") == "user":
+                user, segment = pos, None
+            if message.get("role") == "assistant" and message.get("tool_calls"):
+                segment = pos
+            if use_plan:
+                user, segment = getattr(self, "_occurrence_ingest_plan", {}).get("owners", {}).get(pos, (user, segment))
+            result.append({**message, "_occurrence_position": pos, "_occurrence_user": user,
+                           "_occurrence_segment": segment, "_occurrence_digest": _commit_proof_identity_digest(
+                               _proof_user_identity(self._message_replay_identity(
+                                   message, strip_carrier=False, allow_pruned_tool_alias=False)))})
+        return result
+
     def _ingest_messages(
         self,
         messages: List[Dict[str, Any]],
@@ -7118,12 +7889,31 @@ class LCMEngine(
             self._identity_anchor_observe_recovery()
         sender_capture.try_update(self)
         self._capture_host_rewrites(messages)
+        try:
+            occurrence = self._resolve_occurrence_view(messages)
+        except Exception:
+            logger.warning("LCM occurrence resolution failed; retaining rows", exc_info=True)
+            occurrence = dict(matched={}, proven=set(), fresh=set(range(len(messages))),
+                              updates={}, owners={}, failed=True, needs_receipt=True)
+        occurrence["length"] = len(messages)
+        self._occurrence_ingest_plan = occurrence
         n = len(messages)
         cursor = min(max(self._ingest_cursor, 0), n)
         new_prefix_occurrences = set()
+        normalized_new_prefix_occurrences = set()
+
+        def prefix_occurrence_changed(index, previous):
+            changed = self._host_occurrence_changed(messages[index], previous)
+            if changed and self._host_occurrence_changed(
+                    self._occurrence_metadata(messages[index], switches=occurrence.get("switches")),
+                    self._occurrence_metadata(previous, switches=occurrence.get("switches"))):
+                normalized_new_prefix_occurrences.add(index)
+            return changed
+
         unchanged_prefix_occurrences = set()
         proven_cursor = 0  # Full matched prefix, before new occurrences rewind the cursor.
         accepted_compaction_prefix = 0
+        consumed_emission_proof = None
         proof = getattr(self, "_compress_commit_proof", None)
         if proof and proof.get("durable") is False:
             metadata = proof.get("output_metadata")
@@ -7167,7 +7957,7 @@ class LCMEngine(
                 proven_cursor = self._ingest_cursor
                 new_prefix_occurrences = {
                     idx for idx, previous in enumerate(proof.get("output_metadata", ()))
-                    if self._host_occurrence_changed(messages[idx], previous)
+                    if prefix_occurrence_changed(idx, previous)
                 }
                 if new_prefix_occurrences:
                     unchanged_prefix_occurrences = {
@@ -7194,7 +7984,7 @@ class LCMEngine(
                     metadata = self._remapped_output_metadata(messages, proof, remapped)
                     new_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
-                        if self._host_occurrence_changed(messages[idx], previous)
+                        if prefix_occurrence_changed(idx, previous)
                     }
                     unchanged_prefix_occurrences = {
                         idx for idx, previous in metadata.items()
@@ -7205,6 +7995,13 @@ class LCMEngine(
                     self._compress_commit_proof = None
                 else:
                     self._ingest_cursor_needs_reconcile = True
+        if (proof and accepted_compaction_prefix and self._compress_commit_proof is None
+                and isinstance(proof.get("output_metadata"), list)
+                and len(proof["output_metadata"]) == len(proof.get("output") or ())
+                and all(isinstance(row, dict) for row in proof["output_metadata"])):
+            # This call accepted and retired the scoped proof above. Keep it
+            # only through its synchronous fence, never in a copied warm plan.
+            consumed_emission_proof = proof
         cached_source_identities = getattr(self, "_last_active_replay_source_identities", None)
         current_prefix_identities = (
             [self._message_replay_identity(message, strip_carrier=False) for message in messages[:cursor]]
@@ -7223,7 +8020,12 @@ class LCMEngine(
             for idx, previous in enumerate(cached_active_replay_messages[:cursor]):
                 if current_prefix_identities[idx] != cached_source_identities[idx]:
                     break  # content changes retain the existing anchor audit
-                if self._host_occurrence_changed(messages[idx], previous):
+                if idx < occurrence.get("warm_prefix", 0):
+                    # The current resolver validated these exact host dictionaries
+                    # against committed witnesses; retain rewind bookkeeping too.
+                    unchanged_prefix_occurrences.add(idx)
+                    continue
+                if prefix_occurrence_changed(idx, previous):
                     new_prefix_occurrences.add(idx)
                 elif (messages[idx].get("content") == previous.get("content")
                       and self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)):
@@ -7275,7 +8077,7 @@ class LCMEngine(
                 metadata = self._remapped_output_metadata(messages, durable, min(cursor, proven_cursor))
                 new_prefix_occurrences = {
                     idx for idx, previous in metadata.items()
-                    if self._host_occurrence_changed(messages[idx], previous)
+                    if prefix_occurrence_changed(idx, previous)
                 }
                 if new_prefix_occurrences:
                     unchanged_prefix_occurrences = {
@@ -7283,6 +8085,13 @@ class LCMEngine(
                         if self._host_occurrence_metadata(messages[idx]) == self._host_occurrence_metadata(previous)
                     }
                     cursor = self._ingest_cursor = min(new_prefix_occurrences)
+        # Apply independent row evidence before any residual skip or anchor
+        # decision. The compaction snapshot can never outrank a newer fact.
+        cursor = self._occurrence_cursor_fence(messages, cursor, consumed_emission_proof)
+        self._ingest_cursor = cursor
+        new_prefix_occurrences -= occurrence["proven"]
+        new_prefix_occurrences.update(occurrence["fresh"])
+        unchanged_prefix_occurrences.update(occurrence["proven"])
         # A restart can preserve a genuinely new row (so the cursor stops early)
         # and still replay exact durable tool pairs AFTER it. Those pairs are
         # matched on their durable ``tool_call_id`` identity, so suppressing
@@ -7322,7 +8131,7 @@ class LCMEngine(
         if accepted_compaction_prefix or reconciled_existing_session:
             # #1540: unknown metadata cannot prove replay within a known-new
             # user turn. The next user starts a separate occurrence span.
-            for start in sorted(new_prefix_occurrences):
+            for start in sorted(new_prefix_occurrences - occurrence.get("witness", set())):
                 if str(messages[start].get("role") or "") != "user":
                     continue
                 segments: dict[int, list[int]] = {}
@@ -7338,6 +8147,19 @@ class LCMEngine(
                                            if isinstance(call, dict) and call.get("id"))
                     elif role == "tool" and str(messages[idx].get("tool_call_id") or "") in call_owners:
                         segments[call_owners[str(messages[idx].get("tool_call_id") or "")]].append(idx)
+                    elif (role == "assistant" and idx in occurrence["proven"]
+                          and (start in normalized_new_prefix_occurrences or start in occurrence["fresh"])
+                          and occurrence["owners"].get(idx, (None, None))[0] == start
+                          and not any(self._occurrence_metadata(messages[idx], switches=occurrence["switches"])[key]
+                                      is not None for key in ("timestamp", "message_uid"))):
+                        # A later proof/anchor owner established this fresh user;
+                        # its unknown reply cannot keep a provisional old match.
+                        occurrence["proven"].discard(idx)
+                        occurrence["matched"].pop(idx, None)
+                        occurrence["fresh"].add(idx)
+                        occurrence["needs_receipt"] = True
+                        new_prefix_occurrences.add(idx)
+                        unchanged_prefix_occurrences.discard(idx)
                     elif idx in unchanged_prefix_occurrences and not self._host_occurrence_known(messages[idx]):
                         unchanged_prefix_occurrences.discard(idx)
                 for segment in segments.values():
@@ -7362,8 +8184,10 @@ class LCMEngine(
                                    and identity != cached_source_identities[idx]), None)
             try:
                 if (reconciled_existing_session or accepted_compaction_prefix) and cursor > 0:
-                    self._store.backfill_observed_at_many(
-                        self._identity_anchor_backfill_prefix(messages, reconcile_messages, cursor))
+                    backfill = self._identity_anchor_backfill_prefix(messages, reconcile_messages, cursor)
+                    if backfill:
+                        self._occurrence_window_cache = None
+                    self._store.backfill_observed_at_many(backfill)
                 # #1403: the accepted output supersedes the stale pre-compaction cache for
                 # this ingest only. The one-shot commit proof has already retired above.
                 accepted = {"accepted_prefix": accepted_compaction_prefix} if accepted_compaction_prefix else {}
@@ -7374,6 +8198,8 @@ class LCMEngine(
                 for idx in new_prefix_occurrences:
                     anchor_plan.get("matched", {}).pop(idx, None)
                 self._identity_anchor_version_rewind(messages, anchor_plan)
+                if anchor_plan.get("backfill"):
+                    self._occurrence_window_cache = None
                 self._identity_anchor_commit(anchor_plan)
             except Exception as exc:
                 logger.warning("LCM identity-anchor pre-match failed (%s); ordered-prefix path only", type(exc).__name__)
@@ -7438,35 +8264,64 @@ class LCMEngine(
         new_messages = replay_messages[cursor:] if cursor < n else []
         original_new_messages = messages[cursor:] if cursor < n else []
 
-        def remember(active):
-            previous_replay = getattr(self, "_last_active_replay_messages", ())
-            previous_generated_ids = (
-                self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
-            )
-            result = self._remember_active_replay_messages(messages, active)
-            # #1353: keep paired proof for the unaudited prefix, never the newly stored tail.
-            if unaudited_from is not None:
-                end = min(cursor, len(cached_source_identities), len(previous_replay),
-                          len(self._last_active_replay_source_identities), len(self._last_active_replay_messages))
-                self._last_active_replay_source_identities[unaudited_from:end] = cached_source_identities[unaudited_from:end]
-                self._last_active_replay_messages[unaudited_from:end] = previous_replay[unaudited_from:end]
-                for message in self._last_active_replay_messages[unaudited_from:end]:
-                    if id(message) in previous_generated_ids:
-                        self._generated_ignored_active_replay_placeholder_message_ids.add(id(message))
-                        self._generated_ignored_active_replay_placeholder_messages[id(message)] = message
+        def complete(active, *, cached=False, stored_at=None):
+            # Every successful return publishes witnessed admission; cached replay
+            # deliberately skips the unrelated replay-cache rewrite below.
+            generation = (self._store._conn.total_changes, self._store._conn.execute(
+                "PRAGMA data_version").fetchone()[0])
+            self._host_uid_shadow(host_uids, stored_at, anchor_remainders)
+            self._advance_occurrence_cache(generation)
+            result = active
+            if not cached:
+                previous_replay = getattr(self, "_last_active_replay_messages", ())
+                previous_generated_ids = (
+                    self._generated_ignored_active_replay_placeholder_message_ids.copy() if unaudited_from is not None else ()
+                )
+                generation = (self._store._conn.total_changes, self._store._conn.execute(
+                    "PRAGMA data_version").fetchone()[0])
+                result = self._remember_active_replay_messages(messages, active)
+                self._advance_occurrence_cache(generation)
+                # #1353: keep paired proof for the unaudited prefix, never the newly stored tail.
+                if unaudited_from is not None:
+                    end = min(cursor, len(cached_source_identities), len(previous_replay),
+                              len(self._last_active_replay_source_identities), len(self._last_active_replay_messages))
+                    self._last_active_replay_source_identities[unaudited_from:end] = cached_source_identities[unaudited_from:end]
+                    self._last_active_replay_messages[unaudited_from:end] = previous_replay[unaudited_from:end]
+                    for message in self._last_active_replay_messages[unaudited_from:end]:
+                        if id(message) in previous_generated_ids:
+                            self._generated_ignored_active_replay_placeholder_message_ids.add(id(message))
+                            self._generated_ignored_active_replay_placeholder_messages[id(message)] = message
+            occurrence["publication"] = (id(self._store), self._session_id, self._conversation_id,
+                                         getattr(self, "_last_active_replay_messages", ()))
+            cache = getattr(self, "_occurrence_window_cache", None)
+            if cache:
+                state = cache[4]
+                state.pop("warm", None)
+                current = state.get("current", ())
+                if (occurrence.get("proof_free") and not occurrence.get("failed")
+                        and not self._compiled_ignore_message_patterns and not occurrence.get("updates")
+                        and len(messages) <= 4096 and len(current) == len(messages)
+                        and len(occurrence["proven"]) == len(messages)
+                        and len(occurrence["matched"]) == len(messages)
+                        and all(ref[1] in state["by_id"] for ref in occurrence["matched"].values())
+                        and all(m.get("role") in ("user", "assistant") and m.get("tool_calls") is None
+                                and isinstance(m.get("content"), str) and meta["_absorbed_message_uids"] is None
+                                and meta["timestamp"] is not None and meta["message_uid"] is not None
+                                for m, meta in zip(messages, current))):
+                    state["warm"] = (self._occurrence_context(occurrence.get("switches")), occurrence)
             return result
 
         if not new_messages:
+            self._persist_occurrence_adoptions(occurrence)
             cached_replay = self._cached_active_replay_messages(messages, fresh_replay_messages)
             self._compression_boundary_ingest_pending = False
             self._compression_boundary_active_placeholder_digest_budget = {}
             self._compression_boundary_active_placeholder_digest_ordinals = {}
             self._compression_boundary_stored_placeholder_digest_counts = {}
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
-            self._host_uid_shadow(host_uids)
             if cached_replay is not None:
-                return cached_replay
-            return remember(replay_messages)
+                return complete(cached_replay, cached=True)
+            return complete(replay_messages)
 
         active_replay_messages = replay_messages
         compression_boundary_ingest_pending = self._compression_boundary_ingest_pending
@@ -7504,15 +8359,15 @@ class LCMEngine(
         )
 
         if not messages_to_store_with_index:
+            self._persist_occurrence_adoptions(occurrence)
             self._ingest_cursor = n
             self._compression_boundary_ingest_pending = False
             self._compression_boundary_active_placeholder_digest_budget = {}
             self._compression_boundary_active_placeholder_digest_ordinals = {}
             self._compression_boundary_stored_placeholder_digest_counts = {}
             self._clear_foreground_rebind_candidate_if_bound_session_confirmed()
-            self._host_uid_shadow(host_uids)
             sender_capture.try_update(self)
-            return remember(active_replay_messages)
+            return complete(active_replay_messages)
 
         protected_messages, active_replay_messages = self._protect_ingest_rows(
             messages=messages,
@@ -7549,8 +8404,6 @@ class LCMEngine(
                 )
             except Exception as exc:
                 logger.warning("LCM identity-anchor relation write failed (%s)", type(exc).__name__)
-        self._host_uid_shadow(host_uids, {idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index,
-                                                                                         store_ids)}, anchor_remainders)
         # Rollup staleness is driven by summary-node PUBLICATION
         # (_invalidate_rollups_for_published_node at every add_node site), not by
         # raw ingest: marking a period stale before its covering summary exists
@@ -7567,7 +8420,8 @@ class LCMEngine(
         # data/base64 substrings stay provider-usable in active replay. The
         # exceptions are whole-message ``raw_payload`` externalization and the
         # separately opt-in textual tool-result interceptor above.
-        return remember(active_replay_messages)
+        return complete(active_replay_messages, stored_at={
+            idx: store_id for (idx, _msg), store_id in zip(messages_to_store_with_index, store_ids)})
 
     def _build_ingest_replay(
         self,
@@ -7721,6 +8575,9 @@ class LCMEngine(
                 absolute_idx = cursor + offset
                 if absolute_idx in replayed_tool_segment_indexes:
                     continue
+                plan = getattr(self, "_occurrence_ingest_plan", {})
+                if absolute_idx in plan.get("proven", ()) and absolute_idx not in plan.get("fresh", ()):
+                    continue  # The same actual row correspondence governs moved tail rows too.
                 if new_prefix_occurrences and absolute_idx in unchanged_prefix_occurrences:
                     continue
                 replay_text = text_content_for_pattern_matching(replay_msg.get("content")) or ""
@@ -7947,7 +8804,12 @@ class LCMEngine(
             store=self._store, session_id=self._session_id,
             source=self._session_platform, conversation_id=self._conversation_id,
             messages=protected_messages, estimates=estimates,
-            metadata_messages=[msg for _idx, msg in messages_to_store_with_index],
+            metadata_messages=self._occurrence_batch_messages(messages_to_store_with_index),
+            occurrence_matched=dict(getattr(self, "_occurrence_ingest_plan", {}).get("matched", {})),
+            occurrence_updates=dict(getattr(self, "_occurrence_ingest_plan", {}).get("updates", {})),
+            occurrence_receipt=getattr(self, "_occurrence_ingest_plan", {}).get("needs_receipt", False),
+            occurrence_length=getattr(self, "_occurrence_ingest_plan", {}).get("length", 0),
+            occurrence_inputs=dict(getattr(self, "_occurrence_ingest_plan", {}).get("input_digests", {})),
         )
         pending, senders = sender_capture.batch_senders(self, sender_originals, sender_excluded)
         if senders is not None:
@@ -10615,13 +11477,64 @@ class LCMEngine(
 
     def _append_ingest_batch(self, batch: dict) -> list[int]:
         """The same atomic raw-row/provenance write for ingest and end retry."""
-        return batch["store"]._append_protected_batch(
+        if batch["metadata_messages"] and "_occurrence_position" not in batch["metadata_messages"][0]:
+            batch = {**batch, "metadata_messages": self._occurrence_batch_messages(
+                enumerate(batch["metadata_messages"]), use_plan=False)}
+        store = batch["store"]
+        cache = getattr(self, "_occurrence_window_cache", None)
+        generation = (store._conn.total_changes, store._conn.execute("PRAGMA data_version").fetchone()[0])
+        if cache and cache[0][3] != generation:
+            self._occurrence_window_cache = None
+        ids = store._append_protected_batch(
             batch["session_id"], batch["messages"], batch["estimates"],
             source=batch["source"], conversation_id=batch["conversation_id"],
-            metadata_factory=self._real_user_scaffold_metadata_rows,
+            metadata_factory=self._occurrence_batch_factory(batch),
             metadata_messages=batch["metadata_messages"],
             **({"senders": batch["senders"]} if "senders" in batch else {}),
         )
+        try:
+            cache = getattr(self, "_occurrence_window_cache", None)
+            if cache and cache[0][:3] == (id(store), batch["session_id"], batch["conversation_id"]):
+                if store._conn.execute("PRAGMA data_version").fetchone()[0] != generation[1]:
+                    self._occurrence_window_cache = None
+                    return ids
+                added = list(store.get_batch(ids[-4096:]).values())
+                rows = (cache[1] + added)[-4096:]
+                removed = cache[1][:max(0, len(cache[1]) + len(added) - 4096)]
+                facts, state = cache[2], cache[4]
+                for row in removed:
+                    sid = row["store_id"]
+                    state["by_id"].pop(sid, None)
+                    old = facts.pop(sid, None)
+                    if old:
+                        bucket = state["by_digest"][old["identity_sha256"]]
+                        bucket.remove(sid)
+                        if not bucket:
+                            state["by_digest"].pop(old["identity_sha256"])
+                facts.update({r["store_id"]: batch["_occurrence_written_facts"][r["store_id"]] for r in added})
+                facts.update({int(name.rsplit(":", 1)[1]): value
+                              for name, value in batch.get("occurrence_updates", {}).items()})
+                for row in added:
+                    sid = row["store_id"]
+                    state["by_id"][sid] = row
+                    state["by_digest"].setdefault(facts[sid]["identity_sha256"], []).append(sid)
+                state["accepted"] = self._validate_occurrence_receipt(
+                    rows, facts, receipt=batch.get("_occurrence_written_receipt"))
+                plan = getattr(self, "_occurrence_ingest_plan", {})
+                if batch["session_id"] == self._session_id:
+                    for message, sid in zip(batch["metadata_messages"], ids):
+                        pos = message["_occurrence_position"]
+                        plan["matched"][pos] = (batch["session_id"], sid)
+                        plan["proven"].add(pos)
+                        plan["fresh"].discard(pos)
+                        plan.get("deferred", set()).discard(pos)
+                generation = (store._conn.total_changes, store._conn.execute("PRAGMA data_version").fetchone()[0])
+                self._occurrence_window_cache = (cache[0][:3] + (generation,), rows, facts,
+                                                cache[3] - {r["store_id"] for r in removed}, state)
+        except Exception:
+            self._occurrence_window_cache = None
+            logger.debug("LCM occurrence cache refresh unavailable", exc_info=True)
+        return ids
 
     @staticmethod
     def _pending_row_identity(message: dict, *, stored: bool = False) -> tuple:
@@ -10643,13 +11556,17 @@ class LCMEngine(
             conversation_id=conversation_id, limit=len(tail["messages"]),
         )
         covered = 0
-        for message, row in zip(tail["messages"], rows):
+        for index, (message, row) in enumerate(zip(tail["messages"], rows)):
             if row["conversation_id"] != conversation_id:
                 break
             if self._pending_row_identity(message) != self._pending_row_identity(row, stored=True):
                 break
             covered += 1
             tail["after_store_id"] = row["store_id"]
+            metadata = tail["metadata_messages"][index]
+            if "_occurrence_position" in metadata:
+                tail.setdefault("occurrence_matched", {})[metadata["_occurrence_position"]] = (
+                    tail["session_id"], row["store_id"])
         for key in ("messages", "estimates", "metadata_messages"):
             tail[key] = tail[key][covered:]
         if "senders" in tail:

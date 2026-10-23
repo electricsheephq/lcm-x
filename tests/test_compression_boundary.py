@@ -1818,6 +1818,50 @@ def test_unbound_store_reconciliation_keeps_exact_user_identity(tmp_path, stored
         resumed.shutdown()
 
 
+@pytest.mark.parametrize("binding", ["valid", "missing", "malformed", "different"])
+def test_unbound_accepted_receipt_keeps_third_literal_exchange(tmp_path, binding):
+    import hashlib
+    import sys
+    from pathlib import Path
+
+    module_path = Path(sys.modules[LCMEngine.__module__].__file__).resolve()
+    assert module_path == Path(lcm_engine_module.__file__).resolve()
+    assert module_path == Path(__file__).resolve().parents[1] / "engine.py"
+    print("ACTUAL_ENGINE", module_path, hashlib.sha256(module_path.read_bytes()).hexdigest())
+    users = ["retry", " retry\n", "\tretry \n"]
+    key = "host_occurrence_accepted_view:S0"
+    for turn, user in enumerate(users):
+        engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+        try:
+            engine.on_session_start("S0", platform="acp", context_length=200_000)
+            if turn == 2 and binding != "valid":
+                receipt = engine._store.read_metadata_json(key)
+                if binding == "missing":
+                    receipt["entries"][0].pop("input_sha256")
+                else:
+                    receipt["entries"][0]["input_sha256"] = [] if binding == "malformed" else "0" * 64
+                engine._store.write_metadata_json([key], json.dumps(receipt))
+            exchange = [{"role": "user", "content": user}, {"role": "assistant", "content": "OK"}]
+            engine.ingest(exchange)
+            assert _row_count(engine) == 2 * (turn + 1)
+            if turn == 2:
+                before = engine._store.get_session_messages("S0")
+                assert [row["content"] for row in before if row["role"] == "user"] == users
+                fact = engine._store.read_metadata_json("host_occurrence_row:S0:6")
+                assert fact["user_store_id"] == 5
+                engine.ingest(exchange)
+                assert engine._store.get_session_messages("S0") == before
+        finally:
+            engine.shutdown()
+    engine = LCMEngine(config=_config(tmp_path), hermes_home=str(tmp_path / "home"))
+    try:
+        engine.on_session_start("S0", platform="acp", context_length=200_000)
+        engine.ingest(exchange)
+        assert engine._store.get_session_messages("S0") == before
+    finally:
+        engine.shutdown()
+
+
 def test_host_trim_of_the_compacted_user_row_after_commit_stores_no_duplicates(tmp_path, monkeypatch):
     """Hermes ACP persists prompt.strip(): at turn end it rewrites the adopted user
     dict in place, after the same-turn compaction stored and proved the raw row.

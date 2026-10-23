@@ -2689,7 +2689,7 @@ class ReconcileMixin:
                         return None
                     index += 1
                 after_store_id = int(page[-1]["store_id"])
-            return index
+            return self._occurrence_cursor_fence(messages, index)
         except Exception:
             logger.debug("LCM durable compaction-commit proof load failed", exc_info=True)
             return None
@@ -2714,13 +2714,27 @@ class ReconcileMixin:
         the record as it was (today's carry)."""
         key = self._replay_snapshot_metadata_key(_COMPACTION_COMMIT_PROOF_METADATA_PREFIX)
         try:
-            payload = self._store.read_metadata_json(key)
-            if isinstance(payload, dict):
+            with self._store.atomic(immediate=True):
+                payload = self._store.read_metadata_json(key)
+                if not isinstance(payload, dict):
+                    return
+                snapshot_key = self._replay_snapshot_metadata_key("host_occurrence_snapshot")
+                snapshot = self._store.read_metadata_json(snapshot_key)
+                digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+                valid = (isinstance(snapshot, dict) and snapshot.get("proof_sha256") == digest
+                         and self._occurrence_snapshot_shape_valid(snapshot, payload))
                 payload["carry_ranges"] = [list(item) for item in self._coalesce_compression_carry_ranges(carry_ranges)]
                 self._store.write_metadata_json([key], json.dumps(payload, sort_keys=True))
-                logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
+                if valid:
+                    snapshot = {**snapshot, "proof_sha256": hashlib.sha256(
+                        json.dumps(payload, sort_keys=True).encode()).hexdigest()}
+                    self._store.write_metadata_json([snapshot_key], json.dumps(snapshot, sort_keys=True))
+            # A trimmed range changes which parent rows may witness replay.
+            # Invalidate only after commit; rollback retains the old generation.
+            self._occurrence_window_cache = None
+            logger.info("LCM rewrote the rotation child's carry ranges (%s): store ids %s", reason, store_ids)
         except Exception:
-            logger.debug("LCM carry-range rewrite failed", exc_info=True)
+            logger.warning("LCM carry-range rewrite rolled back", exc_info=True)
 
     def _cursor_from_host_rewrite_head(self, messages, session_count: int) -> Optional[int]:
         """Head-anchored replay (#498): stored row i vs incoming i from the session start,
@@ -2947,8 +2961,13 @@ class ReconcileMixin:
                 )
                 return cursor
         stale = self._load_compression_carry_ranges(with_anchor=False)
-        if stale:  # #519 R2: the re-stored copies are the child's only rows; publication owns them alone
-            self._rewrite_own_carry_ranges([], "empty child re-stores its list", [(a + 1, b) for _s, a, b in stale])
+        if stale:  # Preserve positively selected parents before the consuming fallback.
+            plan = getattr(self, "_occurrence_ingest_plan", {})
+            selected = [(source, sid - 1, sid) for pos, (source, sid) in plan.get("matched", {}).items()
+                        if pos in plan.get("proven", ()) and source != self._session_id
+                        and any(source == s and a < sid <= b for s, a, b in stale)]
+            self._rewrite_own_carry_ranges(selected, "empty child accepts current parent witnesses",
+                                          [(a + 1, b) for _s, a, b in stale])
         return 0
 
     def _reconcile_unmatched_store_history(self, run: _StoreCursorRun) -> int:
@@ -3195,152 +3214,27 @@ class ReconcileMixin:
         messages: List[Dict[str, Any]],
         cursor: int,
     ) -> set[int]:
-        """Find exact durable tool pairs replayed after a preserved new delta.
-
-        This runs on the residual messages once ``_reconcile_ingest_cursor_``
-        ``from_store`` has advanced over an earlier durable prefix, and it
-        matches durable identities on its own -- it never consults that
-        function's guards. So it carries its own copy of the lossy-redaction
-        rule: redacted-normalized equality is NOT identity for replay proof.
-        Without it, a fresh same-id result of ``password=ghijkl`` matches the
-        stored placeholder of ``password=abcdef`` and this helper removes both
-        the new invocation and its issuing assistant. Excluded at both ends --
-        the durable set and the candidate rows -- so neither side can supply
-        the collapsed half of a match. Pinned by ``test_lossy_redacted_pair_``
-        ``after_reconciled_prefix_is_persisted_not_replayed``.
-
-        The durable side is a MULTISET, not a set, and every marked segment
-        CONSUMES the identities it matched. A reused ``tool_call_id`` is
-        permitted (see ``stored_tool_identities``), so N identical candidate
-        invocations -- a side-effecting tool called twice, both returning "ok"
-        -- are not all proven by the K<N copies the store actually holds. Set
-        membership dropped every copy; the counter drops exactly K and lets the
-        surplus persist (#259: visible duplication beats silent loss; the #203
-        out-of-band fix bounds the same way). Consumption is atomic per
-        segment: the assistant and all of its matched results are debited
-        together, and a segment that cannot fully cover its needs debits
-        nothing. Pinned by ``test_repeated_identical_tool_invocation_is_``
-        ``persisted_not_replayed``.
-
-        #1385: a Hermes salvage placeholder that took a stored row's identity
-        matches by construction, not by occurrence. It cannot prove segment
-        replay: a fresh same-id call can genuinely return the placeholder text.
-        Prefer a duplicate ambiguous salvage pair over losing a fresh pair.
-        #1540 exception: a borrowed pair bound to a unique stamped user occurrence,
-        with proven UIDs, can be suppressed.
-        """
-        if not self._session_id or cursor >= len(messages):
+        """Suppress only complete segments selected by the shared row resolver."""
+        plan = getattr(self, "_occurrence_ingest_plan", None)
+        if not plan or plan.get("length") != len(messages) or plan.get("failed"):
             return set()
-        session_count = self._store.get_session_count(self._session_id)
-        if session_count <= 0:
-            return set()
-        tail_limit = min(max(len(messages) * 4, 64), session_count)
-        stored_rows = self._store.get_session_tail(self._session_id, limit=tail_limit)
-        stored_identity_counts = Counter(
-            identity
-            for identity in (
-                self._message_replay_identity(row, stored_row=True)
-                for row in stored_rows
-                if not self._matches_ignore_message_patterns(row, stored_row=True)
-            )
-            if not _has_lossy_redacted_identity(identity)
-        )
-        replayed: set[int] = set()
-        metadata = None  # Loaded once, only when a borrowed pair binds.
-        users = None  # Lazily index both views once per replay scan.
-        protected = set()
-        stored_uids: set[str] = set()
+        result = set()
         index = max(0, cursor)
         while index < len(messages):
-            assistant = messages[index]
-            if str(assistant.get("role") or "") != "assistant" or not assistant.get("tool_calls"):
+            row = messages[index]
+            if row.get("role") != "assistant" or not row.get("tool_calls"):
                 index += 1
                 continue
-            assistant_identity = self._message_replay_identity(assistant)
-            if _has_lossy_redacted_identity(assistant_identity):
-                index += 1
-                continue
-            call_ids = {
-                str(call.get("id") or "")
-                for call in assistant.get("tool_calls") or []
-                if isinstance(call, dict) and str(call.get("id") or "")
-            }
-            bound_replays: set[int] = set()
-            result_indexes: dict[str, int] = {}
-            # What this segment would consume from the durable multiset: its
-            # assistant plus one occurrence per matched result.
-            segment_needs: Counter[tuple[str, str, str, str, str]] = Counter()
-            segment_needs[assistant_identity] += 1
-            probe = index + 1
-            while probe < len(messages) and str(messages[probe].get("role") or "") == "tool":
-                result = messages[probe]
-                tool_call_id = str(result.get("tool_call_id") or "")
-                content = normalize_content_value(result.get("content")) or ""
-                result_identity = self._message_replay_identity(result)
-                borrows = (content == _HERMES_PRUNED_TOOL_PLACEHOLDER
-                           and result_identity[1] != _HERMES_PRUNED_TOOL_PLACEHOLDER)
-                if borrows and users is None:
-                    users = ({}, {})
-                    for rows, stored, positions in ((stored_rows, True, users[0]), (messages, False, users[1])):
-                        for pos, row in enumerate(rows):
-                            if str(row.get("role") or "") == "user":
-                                key = (_normalize_observed_at(row.get("observed_at" if stored else "timestamp")),
-                                       self._message_replay_identity(row, stored_row=stored, allow_pruned_tool_alias=False))
-                                positions.setdefault(key, []).append(pos)
-                    protected = _hermes_salvage_protected_positions(messages)
-                if borrows and self._bound_retry_placeholder_replay(messages, index, probe, stored_rows, users, protected):
-                    if metadata is None:
-                        try:
-                            proof = self._durable_commit_proof_payload()
-                            metadata = self._remapped_output_metadata(messages, proof, len(messages)) if proof else False
-                            # A prefix edit can end the forward remap before this
-                            # occurrence. Resolve its UID by membership, not position.
-                            stored_uids = {row["message_uid"] for row in (proof or {}).get("output_metadata", ())
-                                           if row.get("message_uid")}
-                        except Exception:
-                            logger.debug("LCM replayed tool-segment proof load failed", exc_info=True)
-                            metadata = False  # Unprovable: borrowed pairs stay unbound (base behaviour).
-                    user_uid = self._host_occurrence_metadata(messages[index - 1])["message_uid"]
-                    stored_uid = (metadata or {}).get(index - 1, {}).get("message_uid")
-                    # Pair UIDs, when known, outrank the user's: the row-level check below governs them.
-                    pair_uid = any(self._host_occurrence_metadata(messages[i])["message_uid"] for i in (index, probe))
-                    new_user_uid = metadata is not False and user_uid and (
-                        user_uid != stored_uid if stored_uid is not None else (
-                            index - 1 < len((proof or {}).get("output_metadata", ()))
-                            and user_uid not in stored_uids
-                        )
-                    )
-                    if metadata is not False and not (new_user_uid and not pair_uid):
-                        bound_replays.update((index, probe))
-                if (
-                    tool_call_id in call_ids
-                    and not _is_hermes_persisted_output_marker(content)
-                    and not _has_lossy_redacted_identity(result_identity)
-                    and result_identity in stored_identity_counts
-                    and (not borrows or probe in bound_replays)
-                ):
-                    result_indexes[tool_call_id] = probe
-                    segment_needs[result_identity] += 1
-                probe += 1
-            if (
-                call_ids
-                and call_ids.issubset(result_indexes)
-                and (not bound_replays or all(
-                    (uid := self._host_occurrence_metadata(messages[idx])["message_uid"]) is None
-                    or uid == ((metadata or {}).get(idx, {}).get("message_uid")
-                               or (uid if uid in stored_uids else None))
-                    for idx in (index, *result_indexes.values())
-                ))
-                and all(
-                    stored_identity_counts[identity] >= needed
-                    for identity, needed in segment_needs.items()
-                )
-            ):
-                stored_identity_counts.subtract(segment_needs)
-                replayed.add(index)
-                replayed.update(result_indexes.values())
-            index = max(index + 1, probe)
-        return replayed
+            end = index + 1
+            while end < len(messages) and messages[end].get("role") == "tool":
+                end += 1
+            call_ids = {str(c.get("id") or "") for c in row["tool_calls"] if isinstance(c, dict)}
+            result_ids = {str(m.get("tool_call_id") or "") for m in messages[index + 1:end]}
+            if call_ids and call_ids <= result_ids and all(
+                    pos in plan["proven"] and pos not in plan["fresh"] for pos in range(index, end)):
+                result.update(range(index, end))
+            index = end
+        return result
 
     def _bound_retry_placeholder_replay(self, messages, call_index, result_index, stored_rows, users, protected) -> bool:
         """Bind a borrowed pair to the durable occurrence of its stamped user."""
@@ -3550,7 +3444,7 @@ class ReconcileMixin:
         """Return whether ``message`` is the unique active durable fold."""
         return bool(self._active_folded_tail_identity_overrides([message]))
 
-    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]], occurrences=None) -> dict[int, int]:
+    def _get_store_id_map_for_messages(self, messages: List[Dict[str, Any]], occurrences=None, *, current_correspondence=False) -> dict[int, int]:
         """Map current raw message objects back to store_ids in stable order.
 
         Matching starts strictly after ``_last_compacted_store_id`` so repeated
@@ -3896,4 +3790,11 @@ class ReconcileMixin:
                 ids_by_message_id[id(msg)] = candidates[match_idx]["store_id"]
                 store_idx = match_idx + 1
 
+        current = self._current_occurrence_source_ids(
+            messages, occurrences, {int(row["store_id"]) for row in candidates}) if current_correspondence else {}
+        if current:
+            claimed = set(current.values())
+            ids_by_message_id = {key: sid for key, sid in ids_by_message_id.items()
+                                 if key in current or sid not in claimed}
+            ids_by_message_id.update(current)
         return ids_by_message_id

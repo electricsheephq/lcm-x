@@ -24,9 +24,13 @@ def test_non_alias_view_order(tmp_path, uids):
     """Adapt Claude m16/m20 and its 24 deterministic random-UID trials."""
     old, other, _fresh = uids
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
-        prepare(eng, "same_known_key")
-        eng._store._conn.execute("UPDATE host_uid_bindings SET uid=? WHERE uid='host-old'", (old,))
-        eng._store._conn.commit()
+        prepare(eng, "same_known_key", seed_uid=old)
+        sid = targets(eng)[0]["store_id"]
+        fact = eng._store.read_metadata_json(f"host_occurrence_row:parent:{sid}")
+        coverage = eng._occurrence_fact_coverage(
+            eng._store.read_metadata_json("host_occurrence_accepted_view:parent"), "parent")
+        assert fact["message_uid"] == old and sid in coverage
+        assert [binding[0] for binding in bindings(eng, sid)] == [old]
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
         eng.ingest([message(TEXT, 30., message_uid=u) for u in (old, other)])
         prior = [r["store_id"] for r in targets(eng)]
@@ -91,9 +95,13 @@ def test_lookup_metadata_is_ephemeral(tmp_path, transport):
         assert b"canonical_stamps" not in pickle.dumps(value)
 
 
-def test_plain_list_lookup_skips_observation_without_provenance(tmp_path, monkeypatch, caplog):
+@pytest.mark.parametrize("legacy", [False, True], ids=["v2-writer", "base-writer"])
+def test_plain_list_lookup_skips_observation_without_provenance(tmp_path, monkeypatch, caplog, legacy):
+    from tests.invariants.test_issue_1780_round2 import prepare_writer
+
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
-        prepare(eng, "same_known_key")
+        prepare_writer(eng, "same_known_key", monkeypatch, legacy)
+        before = eng._store.get_session_messages("parent")
     with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
         lookup = eng._store.find_rows_by_observed_at
         monkeypatch.setattr(eng._store, "find_rows_by_observed_at", lambda *a, **k: list(lookup(*a, **k)))
@@ -110,5 +118,21 @@ def test_plain_list_lookup_skips_observation_without_provenance(tmp_path, monkey
         monkeypatch.setattr(eng, "_observe_alias_uid_conflicts", without_diagnostic_reread)
         with caplog.at_level("DEBUG", logger="hermes_lcm.identity_anchor"):
             eng.ingest([message(TEXT, 30., message_uid="host-new")])
-        assert len(targets(eng)) == 1
+        assert len(targets(eng)) == (1 if legacy else 2)
+        assert eng._store.get_session_messages("parent")[:len(before)] == before
+        old, *fresh = targets(eng)
+        fact = eng._store.read_metadata_json(f"host_occurrence_row:parent:{old['store_id']}")
+        if legacy:
+            assert fact is None
+        else:
+            new = eng._store.read_metadata_json(f"host_occurrence_row:parent:{fresh[0]['store_id']}")
+            coverage = eng._occurrence_fact_coverage(
+                eng._store.read_metadata_json("host_occurrence_accepted_view:parent"), "parent")
+            assert {old["store_id"], fresh[0]["store_id"]} <= coverage
+            assert fact["occurrence_version"] == new["occurrence_version"] == 2
+            assert fact["message_uid"] == "host-old" and new["message_uid"] == "host-new"
         assert not any("would reject" in r.message for r in caplog.records)
+        accepted = eng._store.get_session_messages("parent")
+    with engine_context(tmp_path, window=128000, session_id="parent", conversation_id="conv") as eng:
+        eng.ingest([message(TEXT, 30., message_uid="host-new")])
+        assert eng._store.get_session_messages("parent") == accepted

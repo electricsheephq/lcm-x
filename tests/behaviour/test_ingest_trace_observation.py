@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import importlib
-import json
 import logging
 from pathlib import Path
 from typing import Any
@@ -18,8 +17,9 @@ def trace(name: str, root: Path) -> list[str]:
 
 
 def baseline(name: str, root: Path) -> list[str]:
-    expected: list[str] = json.loads(harness.GOLDEN.read_text())[name]
-    actual = trace(name, root)
+    # Observer sensitivity is independent of the separately enforced golden.
+    expected = trace(name, root / "reference")
+    actual = trace(name, root / "actual")
     assert actual == expected, harness.first_difference(expected, actual)
     return actual
 

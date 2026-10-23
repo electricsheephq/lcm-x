@@ -441,7 +441,7 @@ def snapshot(engine: Any, canonical: Canonical, result: Any = None) -> dict[str,
     return state
 
 
-def observe(case: Scenario, root: Path) -> Trace:
+def observe(case: Scenario, root: Path, *, digest_attribution: list | None = None) -> Trace:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
     canonical, events = Canonical(root), []
@@ -463,6 +463,9 @@ def observe(case: Scenario, root: Path) -> Trace:
         return cast(sqlite3.Connection, conn)
 
     with pytest.MonkeyPatch.context() as patch:
+        from tests.behaviour.reconcile_trace_harness import observe_occurrence_digests
+
+        observe_occurrence_digests(patch, canonical)
         pin: Any = pin_char_counter
         context: Any = engine_context
         pin(patch)
@@ -554,7 +557,10 @@ def observe(case: Scenario, root: Path) -> Trace:
                 if label is None:
                     return
                 if event == 'call':
-                    arguments = {k: v for k, v in frame.f_locals.items() if k not in {'self', 'cls'}}
+                    declared = inspect.getargvalues(frame)
+                    argument_names = [*declared.args, declared.varargs, declared.keywords]
+                    arguments = {name: declared.locals[name] for name in argument_names
+                                 if name is not None and name not in {'self', 'cls'}}
                     calls[id(frame)] = label
                     events.append(label + ' call ' + canonical.compact(arguments))
                 elif event == 'return' and id(frame) in calls:
@@ -612,6 +618,7 @@ def observe(case: Scenario, root: Path) -> Trace:
                     result = engine._assemble_context(system, tail, assembly_cap_override=case.cap,
                         include_lcm_note=case.note, retained_user_message=retained,
                         stub_over_cap_tool_results=case.forced, persist=case.persist)
+                assert sys.getprofile() is profile, 'Assembly profile callback was disabled'
             finally:
                 sys.setprofile(old_profile)
                 threading.setprofile(old_thread_profile)
@@ -632,6 +639,9 @@ def observe(case: Scenario, root: Path) -> Trace:
                     events.append('payload ' + str(path.relative_to(root)) + ' sha256=' + hashlib.sha256(path.read_bytes()).hexdigest())
         engine_module._model_only_display_metadata_key.cache_clear()
         importlib.import_module('hermes_lcm.retrieval_core')._reset_vector_store_pool()
+    if digest_attribution is not None:
+        digest_attribution.extend(canonical.digest_sources.values())
+    assert not canonical.digest_errors, canonical.digest_errors
     return events
 
 

@@ -49,21 +49,36 @@ def test_r4_1_replaced_user_behind_unchanged_scaffold(machine, anchor, fresh):
     assert_occurrences(expected, machine.rows(), engine=machine.engine)
     machine.engine.ingest(deepcopy(host))
     assert_occurrences(expected, machine.rows(), engine=machine.engine)
+    if fresh:
+        second = deepcopy(host)
+        second[-2]["_absorbed_message_uids"] = ["second-replacement-user"]
+        expected = [*expected, second[-2]]
+        machine.engine.ingest(second)
+        assert_occurrences(expected, machine.rows(), engine=machine.engine)
+        machine.engine.shutdown()
+        machine.engine = machine.start_engine()
+        machine.engine.ingest(deepcopy(second))
+        assert_occurrences(expected, machine.rows(), engine=machine.engine)
 
 
 @pytest.mark.parametrize("anchor", [False, True])
 @pytest.mark.parametrize("compacted", [False, True])
-def test_r4_2_uid_only_replacement_keeps_unchanged_suffix(machine, anchor, compacted):
+@pytest.mark.parametrize("known_stamp", [False, True])
+def test_r4_2_uid_only_replacement_keeps_unchanged_suffix(machine, anchor, compacted, known_stamp):
     machine.patch.setenv("LCM_IDENTITY_ANCHOR", str(int(anchor)))
     machine.patch.setattr(machine, "stamp", lambda row: dict(
-        row, message_uid=f"uid-{len(machine.occurrences)}-{row['role']}"))
+        row, message_uid=f"uid-{len(machine.occurrences)}-{row['role']}",
+        **({"timestamp": 10.} if known_stamp else {})))
     for text in ("alpha", "same text"):
         machine.new_turn(text, False, 0, False, "lookup")
     if compacted:
         machine.compress()
         assert machine.engine._last_compression_status == "compacted"
     host = deepcopy(machine.host)
-    assert all("timestamp" not in row for row in host)
+    if known_stamp:
+        assert host[-2]["timestamp"] == host[-1]["timestamp"] == 10.
+    else:
+        assert all("timestamp" not in row for row in host)
     replacement = dict(host[-2], message_uid="replacement-user")
     host[-2] = replacement
     # Isolate suffix duplication from main's known #1179 replacement loss.
