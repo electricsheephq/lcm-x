@@ -7119,7 +7119,7 @@ class LCMEngine(
                 in ("", str(self._conversation_id or ""))]
         keys = [f"host_occurrence_row:{r['session_id']}:{r['store_id']}" for r in rows]
         sources = {r["session_id"] for r in rows}
-        values = store.read_metadata_json_many(keys + [f"host_occurrence_accepted_view:{s}" for s in sources])
+        values = store.read_metadata_json_many(keys + [f"host_occurrence_accepted_view:{s}" for s in sorted(sources)])
         facts = {}
         for row, name in zip(rows, keys):
             fact = values.get(name)
