@@ -35,6 +35,8 @@ disclosure fields does not render** — the schema IS the seven-point standard
   `evidence` as SHA-pinned blob URLs. Absolute paths (POSIX or Windows) and
   home-relative paths starting with `~` are rejected for every row.
 - `superseded_by`: id of the successor row.
+- `supersedes`: list of old row IDs on a new `results.d` row. The loader applies `superseded_by: <new id>` in memory; legacy JSONL stays frozen and the old row strikes through as before.
+  Unknown IDs, self-reference, two different successors for one row, or disagreement with an existing `superseded_by` are errors.
 
 ## Rules
 - Only the frozen 18 IDs in `generate.py`'s `LEGACY_ROW_IDS` (the registry at
@@ -47,8 +49,11 @@ disclosure fields does not render** — the schema IS the seven-point standard
   and dot segments (`.` or `..`, including percent-encoded forms) are rejected.
   Legacy repository references are converted to pinned blob URLs; only local raw
   artifact references move to `local_raw`. Measured values stay unchanged.
-- Rows are APPEND-ONLY; a superseding run gets a new row and the old row gains
-  `superseded_by: <id>` (history stays visible — that is the point).
+- Rows are APPEND-ONLY; a superseding run gets a new row with `supersedes`,
+  preserving the old row and its history without editing legacy JSONL.
+- Row PRs add only their row file and their own evidence; do NOT regenerate `SCOREBOARD.md`.
+  Run `python -m bench.scoreboard.generate --pending`: missing source rows are pending (exit 0); removed or changed rendered rows are stale (exit 2).
+  The release manager regenerates in a separate batched PR at a release/showcase step or any time, then requires strict `--check` equality.
 - Tier-F rows carry their fault-finding yield in `caveats`/`evidence` — a low
   number with its decomposition is a feature of this page, not an embarrassment.
 - No projections, no adjusted-pending-measurement numbers, ever (§6e.8).

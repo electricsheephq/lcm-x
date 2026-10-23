@@ -19,18 +19,25 @@ Requirements:
      (~~...~~) with link to successor.
    - Per-row disclosure sections (anchor = row id): every schema field rendered
      under bold labels; `evidence` as a list; `caveats` as a list.
-3. `--check` flag: validate only, no write; exit 0/2.
+3. `--check`: require page == render(all sources), no write; exit 0/2.
+   `--pending`: list source rows absent from the committed page as `pending: <id>` (exit 0),
+   removed or mismatched rendered rows as `stale: <id>` (exit 2). Compare disclosures and summary values, ignoring the header.
 4. Tests in `bench/scoreboard/test_generate.py` (pytest): golden render of a
    2-row fixture; missing-field refusal; malformed-line refusal; supersession
    strike-through; byte-stable (two runs identical output).
 5. Keep legacy results.jsonl unchanged; new runs use results.d/<id>.json.
    Validate filename/id equality and reject duplicate IDs across both sources.
    Existing row sections stay byte-identical; new rows link their own file.
+6. Row PRs add only their `results.d/<id>.json` and their own evidence files; do NOT regenerate `SCOREBOARD.md`. Validate with `--pending`.
+   The release manager regenerates the page in a separate batched PR at a release/showcase step or any time; that PR must pass strict `--check`.
 
 Acceptance (from the repository root):
 ```
 uv run --with pytest python3 -m pytest bench/scoreboard/test_generate.py -q -p no:xdist
-python3 bench/scoreboard/generate.py --check && python3 bench/scoreboard/generate.py
+python -m bench.scoreboard.generate --pending
+# Separate batched aggregation PR only:
+python -m bench.scoreboard.generate
+python -m bench.scoreboard.generate --check
 ```
 Bounded report: files + LOC, tests green, one rendered-row excerpt.
 Scratch → local run `2026-07-30/hermes-scoreboard` (raw data kept locally; not published).

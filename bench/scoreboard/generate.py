@@ -10,7 +10,7 @@ import math
 import re
 import sys
 from datetime import date
-from html import escape as html_escape
+from html import escape as html_escape, unescape as html_unescape
 from pathlib import Path, PureWindowsPath
 from typing import Any, Iterable
 from urllib.parse import quote, unquote, urlsplit
@@ -161,6 +161,12 @@ def _validate_row(row: Any, line_number: int) -> dict[str, Any]:
         if not isinstance(successor, str) or not successor.strip():
             raise _error(line_number, "field 'superseded_by' must be a non-empty string")
 
+    if "supersedes" in row and (
+        not isinstance(row["supersedes"], list)
+        or any(not isinstance(item, str) or not item.strip() for item in row["supersedes"])
+    ):
+        raise _error(line_number, "field 'supersedes' must be a list of non-empty strings")
+
     return row
 
 
@@ -207,6 +213,20 @@ def load_rows(path: str | Path = RESULTS_PATH) -> list[dict[str, Any]]:
         row["_registry_file"] = f"results.d/{quote(row_path.name, safe='')}"
         rows.append(row)
 
+    by_id = {row["id"]: row for row in rows}
+    claimed: dict[str, str] = {}
+    for row in rows:
+        for old_id in row.get("supersedes", []):
+            if old_id == row["id"]:
+                raise ScoreboardError(f"row '{old_id}' supersedes itself")
+            if old_id not in by_id:
+                raise ScoreboardError(f"row '{row['id']}' supersedes missing row '{old_id}'")
+            if old_id in claimed and claimed[old_id] != row["id"]:
+                raise ScoreboardError(f"row '{old_id}' has two successors")
+            old = by_id[old_id]
+            if old.get("superseded_by", row["id"]) != row["id"]:
+                raise ScoreboardError(f"row '{old_id}': supersedes disagrees with superseded_by")
+            claimed[old_id] = old["superseded_by"] = row["id"]
     for row in rows:
         successor = row.get("superseded_by")
         if successor is not None and successor not in seen_ids:
@@ -333,18 +353,46 @@ def generate(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate the disclosure-first scoreboard.")
-    parser.add_argument("--check", action="store_true", help="validate only; do not write output")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true", help="require exact rendered page; do not write")
+    mode.add_argument("--pending", action="store_true", help="list pending/stale rows; fail only if stale")
     parser.add_argument("--results", type=Path, default=RESULTS_PATH, help=argparse.SUPPRESS)
     parser.add_argument("--output", type=Path, default=OUTPUT_PATH, help=argparse.SUPPRESS)
     return parser
+
+
+def pending(rows: list[dict[str, Any]], page: str) -> int:
+    """Compare rendered disclosures and summary values, ignoring the batched header."""
+    summary, marker, disclosures = page.partition("## Row disclosures\n\n")
+    if not marker:
+        raise ScoreboardError("page has no row disclosures")
+    blocks = re.finditer(r'(?ms)^### <a id="([^"]*)"></a>.*?(?=^### <a id="|\Z)', disclosures)
+    rendered = {html_unescape(block[1]): block[0].strip() for block in blocks}
+    summary_ids = set(re.findall(r"\[details\]\(#([^)]*)\)", summary))
+    stale = (set(rendered) | summary_ids) - {row["id"] for row in rows}
+    for row in rows:
+        row_id = row["id"]
+        if row_id not in rendered and row_id not in summary_ids:
+            print(f"pending: {row_id}")
+        elif (rendered.get(row_id) != "\n".join(_render_disclosure(row)).strip()
+              or summary.splitlines().count(_render_summary([row])[-1]) != 1):
+            stale.add(row_id)
+    for row_id in sorted(stale):
+        print(f"stale: {row_id}")
+    return 2 if stale else 0
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         rows = load_rows(args.results)
-        if not args.check:
-            rendered = render(rows, sha256_sources(args.results))
+        if args.pending:
+            return pending(rows, args.output.read_text(encoding="utf-8"))
+        rendered = render(rows, sha256_sources(args.results))
+        if args.check:
+            if args.output.read_text(encoding="utf-8") != rendered:
+                raise ScoreboardError("page is out of date; regenerate in a separate batched PR")
+        else:
             args.output.write_text(rendered, encoding="utf-8")
     except (OSError, ScoreboardError) as exc:
         print(f"scoreboard: {exc}", file=sys.stderr)

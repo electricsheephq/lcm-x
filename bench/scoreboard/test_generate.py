@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -38,15 +41,20 @@ def _write_jsonl(path, rows, malformed: str | None = None):
     path.write_text(body, encoding="utf-8")
 
 
-def test_golden_render_two_rows(tmp_path):
+@pytest.mark.parametrize("row_directory", [False, True], ids=["absent", "empty"])
+def test_golden_render_two_rows(tmp_path, row_directory):
     results = tmp_path / "results.jsonl"
     first = _row("bench-old-2026-07-29", date="2026-07-29")
     second = _row("bench-new-2026-07-30", date="2026-07-30")
     _write_jsonl(results, [first, second])
+    if row_directory:
+        (tmp_path / "results.d").mkdir()
 
-    rendered = generate.render(generate.load_rows(results), generate.sha256_file(results))
+    rendered = generate.render(generate.load_rows(results), generate.sha256_sources(results))
 
-    expected_hash = hashlib.sha256(results.read_bytes()).hexdigest()
+    manifest = [["results.jsonl", hashlib.sha256(results.read_bytes()).hexdigest()]]
+    expected_hash = hashlib.sha256(json.dumps(manifest, separators=(",", ":")).encode()).hexdigest()
+    assert generate.sha256_sources(results) == expected_hash
     assert rendered == f"""# Scoreboard
 
 Every number ships with its full run config, variance, fail-close accounting, and known dataset defects — rows that cannot meet the standard do not render.
@@ -229,9 +237,11 @@ def test_check_does_not_write(tmp_path):
     results = tmp_path / "results.jsonl"
     _write_jsonl(results, [_row("check-only")])
     output = tmp_path / "SCOREBOARD.md"
+    generate.generate(results, output)
+    frozen = output.read_bytes()
 
     assert generate.main(["--check", "--results", str(results), "--output", str(output)]) == 0
-    assert not output.exists()
+    assert output.read_bytes() == frozen
 
 
 def test_new_row_rejects_local_evidence(tmp_path, capsys):
@@ -249,7 +259,9 @@ def _assert_durable_row_with_raw(tmp_path, evidence):
     row["local_raw"] = ["raw/run.jsonl"]
     results = tmp_path / "results.jsonl"
     _write_jsonl(results, [row])
-    assert generate.main(["--check", "--results", str(results)]) == 0
+    output = tmp_path / "page.md"
+    generate.generate(results, output)
+    assert generate.main(["--check", "--results", str(results), "--output", str(output)]) == 0
     rendered = generate.render(generate.load_rows(results), "source-hash")
     assert f"**evidence:**\n- {evidence}" in rendered
     assert "**local_raw:**\n- raw/run.jsonl" in rendered
@@ -284,7 +296,9 @@ def test_legacy_row_preserves_local_raw(tmp_path):
     row["local_raw"] = ["raw/legacy.jsonl"]
     results = tmp_path / "results.jsonl"
     _write_jsonl(results, [row])
-    assert generate.main(["--check", "--results", str(results)]) == 0
+    output = tmp_path / "page.md"
+    generate.generate(results, output)
+    assert generate.main(["--check", "--results", str(results), "--output", str(output)]) == 0
     rendered = generate.render(generate.load_rows(results), "source-hash")
     assert "**local_raw:**\n- raw/legacy.jsonl" in rendered
 
@@ -304,7 +318,9 @@ def test_only_frozen_legacy_ids_are_grandfathered(tmp_path):
     row["evidence"] = ["legacy-reference"]
     results = tmp_path / "results.jsonl"
     _write_jsonl(results, [row])
-    assert generate.main(["--check", "--results", str(results)]) == 0
+    output = tmp_path / "page.md"
+    generate.generate(results, output)
+    assert generate.main(["--check", "--results", str(results), "--output", str(output)]) == 0
     row["id"] = "new-row-same-date-and-evidence"
     _write_jsonl(results, [row])
     assert generate.main(["--check", "--results", str(results)]) == 2
@@ -457,3 +473,143 @@ def test_supersession_can_cross_sources(tmp_path):
     _write_jsonl(results, [old])
     _write_row_file(results, _row("new"))
     assert len(generate.load_rows(results)) == 2
+
+
+def test_successor_supersedes_frozen_legacy_rows(tmp_path):
+    results = tmp_path / "results.jsonl"
+    old = _row("old")
+    _write_jsonl(results, [old, _row("other")])
+    frozen = results.read_bytes()
+    new = _row("new") | {"supersedes": ["old", "other"]}
+    _write_row_file(results, new)
+    rows = generate.load_rows(results)
+    assert results.read_bytes() == frozen
+    assert [row.get("superseded_by") for row in rows] == ["new", "new", None]
+    expected_old = old | {"superseded_by": "new"}
+    assert generate._render_disclosure(rows[0]) == generate._render_disclosure(expected_old)
+    assert generate._render_summary(rows) == generate._render_summary([
+        expected_old, _row("other") | {"superseded_by": "new"}, new,
+    ])
+
+
+@pytest.mark.parametrize("case,message", [
+    ("unknown", "missing"), ("self", "itself"),
+    ("two-successors", "two successors"), ("disagrees", "disagrees"),
+])
+def test_supersedes_errors(tmp_path, case, message):
+    results = tmp_path / "results.jsonl"
+    old, new = _row("old"), _row("new") | {"supersedes": ["old"]}
+    if case == "unknown":
+        new["supersedes"] = ["missing"]
+    elif case == "self":
+        new["supersedes"] = ["new"]
+    elif case == "two-successors":
+        _write_row_file(results, _row("other") | {"supersedes": ["old"]})
+    else:
+        old["superseded_by"] = "other"
+        _write_row_file(results, _row("other"))
+    _write_jsonl(results, [old])
+    _write_row_file(results, new)
+    with pytest.raises(generate.ScoreboardError, match=message):
+        generate.load_rows(results)
+
+
+def test_supersedes_agrees_with_existing_forward_link(tmp_path):
+    results = tmp_path / "results.jsonl"
+    _write_jsonl(results, [_row("old") | {"superseded_by": "new"}])
+    _write_row_file(results, _row("new") | {"supersedes": ["old"]})
+    assert generate.load_rows(results)[0]["superseded_by"] == "new"
+
+
+@pytest.mark.parametrize("value", [None, "old", [1], [""]])
+def test_supersedes_requires_list_of_nonempty_ids(tmp_path, value):
+    results = tmp_path / "results.jsonl"
+    _write_jsonl(results, [_row("old")])
+    _write_row_file(results, _row("new") | {"supersedes": value})
+    with pytest.raises(generate.ScoreboardError, match="supersedes"):
+        generate.load_rows(results)
+
+
+def test_pending_lists_both_sources_without_writing(tmp_path, capsys):
+    results, output = tmp_path / "results.jsonl", tmp_path / "page.md"
+    _write_jsonl(results, [_row("rendered")])
+    generate.generate(results, output)
+    frozen = output.read_bytes()
+    _write_jsonl(results, [_row("rendered"), _row("legacy-pending")])
+    _write_row_file(results, _row("file-pending"))
+    assert generate.main(["--pending", "--results", str(results), "--output", str(output)]) == 0
+    assert capsys.readouterr().out.splitlines() == [
+        "pending: legacy-pending", "pending: file-pending",
+    ]
+    assert output.read_bytes() == frozen
+
+
+@pytest.mark.parametrize("change", ["removed", "summary", "disclosure", "supersession"])
+def test_pending_rejects_stale_rendered_rows(tmp_path, capsys, change):
+    results, output = tmp_path / "results.jsonl", tmp_path / "page.md"
+    row = _row("old")
+    _write_jsonl(results, [row])
+    generate.generate(results, output)
+    if change == "removed":
+        _write_jsonl(results, [])
+    elif change == "summary":
+        output.write_text(output.read_text().replace("| 91.0% |", "| 90.0% |"))
+    elif change == "disclosure":
+        output.write_text(output.read_text().replace("**value:**\n0.91", "**value:**\n0.90"))
+    else:
+        _write_row_file(results, _row("new") | {"supersedes": ["old"]})
+    frozen = output.read_bytes()
+    assert generate.main(["--pending", "--results", str(results), "--output", str(output)]) == 2
+    assert "stale: old" in capsys.readouterr().out
+    assert output.read_bytes() == frozen
+
+
+def test_check_requires_exact_render_and_never_writes(tmp_path, capsys):
+    results, output = tmp_path / "results.jsonl", tmp_path / "page.md"
+    _write_jsonl(results, [_row("old")])
+    assert generate.main(["--check", "--results", str(results), "--output", str(output)]) == 2
+    generate.generate(results, output)
+    assert generate.main(["--check", "--results", str(results), "--output", str(output)]) == 0
+    frozen = output.read_bytes()
+    _write_row_file(results, _row("pending"))
+    assert generate.main(["--check", "--results", str(results), "--output", str(output)]) == 2
+    assert "out of date" in capsys.readouterr().err
+    assert output.read_bytes() == frozen
+
+
+def test_two_row_prs_merge_without_page_conflict(tmp_path):
+    transcript = []
+
+    def git(*args):
+        result = subprocess.run(
+            ["git", "-c", "user.name=Scoreboard test", "-c", "user.email=test@example.invalid", *args],
+            cwd=tmp_path, capture_output=True, text=True, check=True,
+        )
+        transcript.append(f"git {' '.join(args)}\n{result.stdout}{result.stderr}")
+        return result.stdout.strip()
+
+    git("init", "-b", "main")
+    results, output = tmp_path / "results.jsonl", tmp_path / "SCOREBOARD.md"
+    _write_jsonl(results, [_row("legacy")])
+    generate.generate(results, output)
+    frozen = output.read_bytes()
+    git("add", ".")
+    git("commit", "-m", "base")
+    for branch in ("row-a", "row-b"):
+        git("checkout", "-b", branch, "main")
+        _write_row_file(results, _row(branch))
+        git("add", f"results.d/{branch}.json")
+        git("commit", "-m", branch)
+        assert git("diff", "--name-only", "main") == f"results.d/{branch}.json"
+    git("checkout", "main")
+    git("merge", "--no-edit", "row-a")
+    git("merge", "--no-edit", "row-b")
+    pending = subprocess.run(
+        [sys.executable, str(Path(generate.__file__)), "--pending", "--results", str(results),
+         "--output", str(output)], capture_output=True, text=True, check=True,
+    )
+    transcript.append(f"generate --pending\n{pending.stdout}{pending.stderr}")
+    print("\n".join(transcript))
+    assert pending.stdout.splitlines() == ["pending: row-a", "pending: row-b"]
+    assert output.read_bytes() == frozen
+    assert not git("status", "--porcelain")
