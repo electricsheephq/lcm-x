@@ -7194,6 +7194,16 @@ class LCMEngine(
                         if index >= len(proof.get("output_metadata", ())):
                             user_id = None
                     if user_id is not None:
+                        old = self._occurrence_metadata(by_id[user_id], stored=True, fact=facts[user_id], switches=switches)
+                        if (accepted.get(index) != user_id and not any(
+                                current[index][key] is not None and old[key] is not None
+                                for key in ("timestamp", "message_uid"))):
+                            # A unique content candidate with missing metadata is
+                            # not a cold occurrence witness. The existing owner
+                            # decides ambiguity; record its actual committed view.
+                            user_id = None
+                            result["needs_receipt"] = True
+                    if user_id is not None:
                         accept(index, user_id)
                     elif conflicts[index]:
                         result["fresh"].add(index)
